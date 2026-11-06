@@ -68,7 +68,7 @@ impl Candidate {
         let url = GitService::repository_url(url).ok()?;
         Some(Self::Repository {
             origin: Origin::parse(url.as_str())?,
-            clone: Some((url, token.map(|stored| key.open_lenient(stored)))),
+            clone: Some((url, token.and_then(|stored| project_token(key, stored)))),
         })
     }
 
@@ -147,6 +147,12 @@ fn text<'a>(config: &'a Value, keys: &[&str]) -> Option<&'a str> {
 
 /// The token a source's repository is cloned with. A credential that cannot be opened is not
 /// presented, and the clone then fails or succeeds on what the repository allows anyone.
+fn project_token(key: &MasterKey, stored: &str) -> Option<SecretValue> {
+    key.open_lenient(stored)
+        .inspect_err(|error| tracing::warn!(%error, "Could not open the project's token"))
+        .ok()
+}
+
 fn credential(key: &MasterKey, source: &SourceRow) -> Option<SecretValue> {
     let encrypted = source.credentials_encrypted.as_deref()?;
     match key.open_strict(encrypted) {

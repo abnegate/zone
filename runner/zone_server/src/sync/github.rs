@@ -18,6 +18,8 @@ use crate::db::tasks::TaskRow;
 use crate::secret::Unseal;
 
 const SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
+const TOKEN_UNOPENABLE: &str =
+    "the GitHub token is sealed under a key this deployment does not hold";
 const EVENT_HEADER: &str = "X-GitHub-Event";
 const DELIVERY_HEADER: &str = "X-GitHub-Delivery";
 const ISSUES_EVENT: &str = "issues";
@@ -172,6 +174,7 @@ impl GitHubSyncProvider {
         parsed.token = self
             .master_key
             .open_lenient(&parsed.token)
+            .map_err(|_| SyncError::InvalidConfig(TOKEN_UNOPENABLE.to_string()))?
             .expose()
             .to_string();
         Ok(parsed)
@@ -500,6 +503,17 @@ mod tests {
             let parsed = provider.parse_config(&sync_config(&stored)).unwrap();
             assert_eq!(parsed.token, TOKEN, "{stored} did not parse to the token");
         }
+    }
+
+    #[test]
+    fn a_token_sealed_under_another_key_is_refused_before_any_request() {
+        let provider = GitHubSyncProvider::new(key());
+        let foreign = fixture::seal(TOKEN, &MasterKey::generate().expect("a key"));
+
+        assert!(matches!(
+            provider.parse_config(&sync_config(&foreign)),
+            Err(SyncError::InvalidConfig(_))
+        ));
     }
 
     #[tokio::test]

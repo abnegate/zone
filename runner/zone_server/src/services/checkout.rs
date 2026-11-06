@@ -46,6 +46,9 @@ use crate::secret::Unseal;
 
 const ROOT: &str = "zone-checkouts-v1";
 
+const PROJECT_TOKEN_UNOPENABLE: &str =
+    "The project's GitHub token is sealed under a key this deployment does not hold";
+
 const AUTHOR_NAME: &str = "Zone";
 
 const AUTHOR_EMAIL: &str = "zone@localhost";
@@ -131,7 +134,9 @@ impl Repository {
                     url,
                     token: project
                         .github_access_token
-                        .map(|stored| key.open_lenient(&stored)),
+                        .map(|stored| key.open_lenient(&stored))
+                        .transpose()
+                        .map_err(|_| PROJECT_TOKEN_UNOPENABLE.to_string())?,
                 });
             }
         }

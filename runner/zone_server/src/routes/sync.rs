@@ -261,7 +261,9 @@ async fn converge(
         else {
             return Ok((current, None));
         };
-        let secret = state.master_key().open_lenient(&kept);
+        let Ok(secret) = state.master_key().open_lenient(&kept) else {
+            return refused(state, current, Some(&kept), HookError::Unopenable).await;
+        };
         if let Err(error) = hook
             .sign_with(state, current.clone(), secret.expose())
             .await

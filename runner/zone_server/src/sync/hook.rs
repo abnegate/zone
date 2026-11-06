@@ -35,6 +35,9 @@ pub enum HookError {
     #[error("the project holds no GitHub token to update the webhook with")]
     Tokenless,
 
+    #[error("a credential is sealed under a key this deployment does not hold")]
+    Unopenable,
+
     #[error("the GitHub origin is misconfigured: {0}")]
     Origin(PullRequestError),
 
@@ -98,7 +101,10 @@ impl Hook {
         Ok(Some(Self {
             service,
             repository,
-            token: state.master_key().open_lenient(&stored),
+            token: state
+                .master_key()
+                .open_lenient(&stored)
+                .map_err(|_| HookError::Unopenable)?,
             url,
         }))
     }

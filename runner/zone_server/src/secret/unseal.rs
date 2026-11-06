@@ -10,8 +10,11 @@ pub trait Unseal {
     /// existed. Anything else, plaintext included, is an error.
     fn open_strict(&self, stored: &str) -> Result<SecretValue, Error>;
 
-    /// The credential `stored` seals, or `stored` itself when it opens as neither.
-    fn open_lenient(&self, stored: &str) -> SecretValue;
+    /// The credential `stored` seals, or `stored` itself when it is not an envelope and does
+    /// not open as a value sealed before envelopes existed. An envelope that does not open is
+    /// an error: no credential is ever written in that shape, so handing it on as one only
+    /// moves the failure somewhere it is harder to read.
+    fn open_lenient(&self, stored: &str) -> Result<SecretValue, Error>;
 }
 
 impl Unseal for MasterKey {
@@ -19,19 +22,22 @@ impl Unseal for MasterKey {
         decrypt_legacy_value(stored, self)
     }
 
-    fn open_lenient(&self, stored: &str) -> SecretValue {
-        self.open_strict(stored).unwrap_or_else(|error| {
-            if is_encrypted(stored) {
+    fn open_lenient(&self, stored: &str) -> Result<SecretValue, Error> {
+        match self.open_strict(stored) {
+            Ok(opened) => Ok(opened),
+            Err(error) if is_encrypted(stored) => {
                 tracing::warn!(%error, "A sealed credential did not open under this deployment's key");
+                Err(error)
             }
-            SecretValue::new(stored)
-        })
+            Err(_) => Ok(SecretValue::new(stored)),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret::derive;
     use crate::secret::fixture;
 
     const CREDENTIAL: &str = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
@@ -95,13 +101,33 @@ mod tests {
             (PLAINTEXT.to_string(), PLAINTEXT),
             (BASE64_PLAINTEXT.to_string(), BASE64_PLAINTEXT),
         ] {
-            assert_eq!(key.open_lenient(&stored).expose(), expected, "{stored}");
+            assert_eq!(
+                key.open_lenient(&stored).unwrap().expose(),
+                expected,
+                "{stored}"
+            );
         }
     }
 
     #[test]
-    fn lenient_hands_back_what_the_wrong_key_cannot_open() {
+    fn lenient_refuses_an_envelope_the_key_cannot_open() {
         let sealed = fixture::seal(CREDENTIAL, &key());
-        assert_eq!(key().open_lenient(&sealed).expose(), sealed);
+        assert!(matches!(
+            key().open_lenient(&sealed),
+            Err(Error::Decryption)
+        ));
+    }
+
+    #[test]
+    fn lenient_hands_back_a_legacy_body_the_key_cannot_open() {
+        let sealed = fixture::seal_legacy(CREDENTIAL, &key());
+        assert_eq!(key().open_lenient(&sealed).unwrap().expose(), sealed);
+    }
+
+    #[test]
+    fn strict_opens_what_the_previous_writer_sealed() {
+        let key = derive(fixture::PREVIOUS_WRITER_PASSPHRASE).unwrap();
+        let opened = key.open_strict(fixture::PREVIOUS_WRITER_SEALED).unwrap();
+        assert_eq!(opened.expose(), fixture::PREVIOUS_WRITER_CREDENTIAL);
     }
 }
