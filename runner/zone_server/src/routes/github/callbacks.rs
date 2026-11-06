@@ -1,1 +1,439 @@
+//! The two public pages GitHub sends an admin's browser back to: after it
+//! registers an App from Zone's manifest, and after the App is installed.
+//! Neither is behind a session; the single-use state each carries names the
+//! organization and admin that started it.
 
+mod failure;
+
+use abnegate_vcs::pull_request::{AccountType, InstallationId, RegisteredApplication};
+use axum::extract::{Query, State};
+use axum::http::header::{ALLOW, CACHE_CONTROL, LOCATION, REFERRER_POLICY};
+use axum::http::{HeaderValue, StatusCode, Uri};
+use axum::response::{IntoResponse, Response};
+use reqwest::Url;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use uuid::Uuid;
+
+use super::outcome::{Outcome, location};
+use crate::db::audit::{actions, resources};
+use crate::db::github_apps::{self, AppRow, NewApp, OwnerType};
+use crate::db::github_connection_states::{self, ConsumedState, Purpose};
+use crate::db::organization_members::{self, OrgRole};
+use crate::db::users;
+use crate::routes::common::{AuditEvent, audit};
+use crate::services::github_app::error::Error as GitHubError;
+use crate::services::github_app::installations;
+use crate::services::github_app::manifest;
+use crate::state::AppState;
+use failure::Failure;
+
+const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
+const NO_REFERRER: HeaderValue = HeaderValue::from_static("no-referrer");
+const GET: HeaderValue = HeaderValue::from_static("GET");
+const SCHEMES: [&str; 2] = ["http", "https"];
+
+#[derive(Debug, Default, Deserialize)]
+struct ManifestParameters {
+    code: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SetupParameters {
+    installation_id: Option<String>,
+    setup_action: Option<SetupAction>,
+    state: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SetupAction {
+    Install,
+    Update,
+    Request,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Serialize)]
+struct RegisteredApp<'a> {
+    owner_login: &'a str,
+    slug: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct ConnectedInstallation<'a> {
+    account_login: &'a str,
+    installation_id: i64,
+}
+
+/// A `HEAD` would otherwise run the `GET` handler and spend the state without
+/// the browser ever following the redirect.
+pub async fn refuse() -> Response {
+    let mut response = uncached(StatusCode::METHOD_NOT_ALLOWED);
+    response.headers_mut().insert(ALLOW, GET);
+    response
+}
+
+pub async fn manifest(State(state): State<AppState>, uri: Uri) -> Response {
+    let parameters: ManifestParameters = received(&uri);
+    let base = &state.config().app_base_url;
+    let consumed = match consume(&state, parameters.state.as_deref(), Purpose::Registration).await {
+        Ok(Some(consumed)) => consumed,
+        Ok(None) => return redirect(&location(base, Outcome::Expired, None)),
+        Err(error) => {
+            tracing::error!(%error, "The GitHub manifest callback could not read its state");
+            return redirect(&location(base, Outcome::Failed, None));
+        }
+    };
+
+    match register(&state, &consumed, parameters.code.as_deref()).await {
+        Ok(installation) => redirect(&installation),
+        Err(failure) => {
+            tracing::warn!(
+                organization = %consumed.organization_id,
+                error = %failure,
+                "The GitHub App Zone registered from its manifest could not be connected"
+            );
+            redirect(&location(
+                base,
+                Outcome::Failed,
+                Some(consumed.organization_id),
+            ))
+        }
+    }
+}
+
+pub async fn setup(State(state): State<AppState>, uri: Uri) -> Response {
+    let parameters: SetupParameters = received(&uri);
+    let base = &state.config().app_base_url;
+    let consumed = match consume(&state, parameters.state.as_deref(), Purpose::Installation).await {
+        Ok(consumed) => consumed,
+        Err(error) => {
+            tracing::error!(%error, "The GitHub setup callback could not read its state");
+            return redirect(&location(base, Outcome::Failed, None));
+        }
+    };
+    let organization = consumed.as_ref().map(|consumed| consumed.organization_id);
+
+    if parameters.setup_action == Some(SetupAction::Request) {
+        return redirect(&location(base, Outcome::Requested, organization));
+    }
+    let Some(consumed) = consumed else {
+        return redirect(&location(base, Outcome::Sync, None));
+    };
+
+    let outcome = match install(&state, &consumed, parameters.installation_id.as_deref()).await {
+        Ok(()) => Outcome::Installed,
+        Err(failure) => {
+            tracing::warn!(
+                organization = %consumed.organization_id,
+                error = %failure,
+                "The GitHub App installation could not be connected"
+            );
+            Outcome::Failed
+        }
+    };
+    redirect(&location(base, outcome, organization))
+}
+
+/// What the callback was sent, or nothing at all when the query cannot be
+/// read, so a malformed redirect lands like a missing state.
+fn received<T: DeserializeOwned + Default>(uri: &Uri) -> T {
+    Query::<T>::try_from_uri(uri)
+        .map(|Query(parameters)| parameters)
+        .unwrap_or_default()
+}
+
+async fn consume(
+    state: &AppState,
+    value: Option<&str>,
+    purpose: Purpose,
+) -> Result<Option<ConsumedState>, sqlx::Error> {
+    match value.filter(|value| !value.is_empty()) {
+        Some(value) => github_connection_states::consume(state.db(), value, purpose).await,
+        None => Ok(None),
+    }
+}
+
+/// Converts the manifest code into an App, stores it with its secrets sealed,
+/// and returns the App's installation page carrying a fresh installation state.
+async fn register(
+    state: &AppState,
+    consumed: &ConsumedState,
+    code: Option<&str>,
+) -> Result<String, Failure> {
+    let code = code
+        .filter(|code| !code.is_empty())
+        .ok_or(Failure::MissingCode)?;
+    administering(state, consumed).await?;
+
+    let provider = state.github();
+    let application = provider
+        .applications()?
+        .convert_manifest(code)
+        .await
+        .map_err(GitHubError::from)?;
+    let app = store(state, consumed, &application).await?;
+    recorded(
+        state,
+        consumed,
+        actions::GITHUB_APP_REGISTERED,
+        resources::GITHUB_APP,
+        app.id,
+        serde_json::to_value(RegisteredApp {
+            owner_login: &app.owner_login,
+            slug: &app.slug,
+        })
+        .ok(),
+    )
+    .await;
+
+    let issued = github_connection_states::issue(
+        state.db(),
+        consumed.organization_id,
+        consumed.user_id,
+        Purpose::Installation,
+        Some(app.id),
+    )
+    .await?;
+    Ok(manifest::installation_url(
+        &app.html_url,
+        issued.state.expose(),
+    ))
+}
+
+async fn store(
+    state: &AppState,
+    consumed: &ConsumedState,
+    application: &RegisteredApplication,
+) -> Result<AppRow, Failure> {
+    let owner_type = match application.owner.kind {
+        AccountType::User => OwnerType::User,
+        AccountType::Organization => OwnerType::Organization,
+        _ => return Err(Failure::UnknownOwnerType),
+    };
+    let html_url = addressable(&application.html_url).ok_or(Failure::Unaddressable)?;
+    let app_id = i64::try_from(application.id.get()).map_err(|_| Failure::OutOfRange)?;
+    let provider = state.github();
+    let client_secret = provider.seal(&application.client_secret)?;
+    let private_key = provider.seal(&application.private_key)?;
+    let webhook_secret = application
+        .webhook_secret
+        .as_ref()
+        .map(|secret| provider.seal(secret))
+        .transpose()?;
+
+    Ok(github_apps::insert(
+        state.db(),
+        &NewApp {
+            organization_id: consumed.organization_id,
+            app_id,
+            slug: &application.slug,
+            name: &application.name,
+            owner_login: &application.owner.login,
+            owner_type,
+            html_url: &html_url,
+            client_id: &application.client_id,
+            client_secret: &client_secret,
+            private_key: &private_key,
+            webhook_secret: webhook_secret.as_deref(),
+            created_by: Some(consumed.user_id),
+        },
+    )
+    .await?)
+}
+
+/// Fetches the installation GitHub named with the App's JWT and files it under
+/// the App the state was issued for.
+async fn install(
+    state: &AppState,
+    consumed: &ConsumedState,
+    installation_id: Option<&str>,
+) -> Result<(), Failure> {
+    let app_id = consumed.github_app_id.ok_or(Failure::Unbound)?;
+    let app = github_apps::get(state.db(), consumed.organization_id, app_id)
+        .await?
+        .ok_or(Failure::MissingApp)?;
+    let number = installation_id
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|number| *number > 0)
+        .map(InstallationId::new)
+        .ok_or(Failure::MissingInstallation)?;
+    administering(state, consumed).await?;
+
+    let provider = state.github();
+    let jwt = provider.application_jwt_for(&app)?;
+    let installation = provider
+        .applications()?
+        .fetch_installation(&jwt, number)
+        .await
+        .map_err(GitHubError::from)?;
+    let row =
+        installations::record(state.db(), &app, &installation, Some(consumed.user_id)).await?;
+    provider.invalidate(number);
+    provider.catalog().forget(row.id);
+
+    recorded(
+        state,
+        consumed,
+        actions::GITHUB_INSTALLATION_CONNECTED,
+        resources::GITHUB_INSTALLATION,
+        row.id,
+        serde_json::to_value(ConnectedInstallation {
+            account_login: &row.account_login,
+            installation_id: row.installation_id,
+        })
+        .ok(),
+    )
+    .await;
+    Ok(())
+}
+
+/// The state outlives a change of role, so the admin who started the
+/// connection must still be one when GitHub sends the browser back.
+async fn administering(state: &AppState, consumed: &ConsumedState) -> Result<(), Failure> {
+    organization_members::get_member(state.db(), consumed.organization_id, consumed.user_id)
+        .await?
+        .filter(|member| member.is_active && member.role >= OrgRole::Admin)
+        .map(|_| ())
+        .ok_or(Failure::NotAdmin)
+}
+
+/// Audits as the user who started the connection, skipping the entry when
+/// that user is gone, since an entry must name its actor.
+async fn recorded(
+    state: &AppState,
+    consumed: &ConsumedState,
+    action: &str,
+    resource_type: &str,
+    resource_id: Uuid,
+    new_values: Option<Value>,
+) {
+    let user = match users::get_user_by_id(state.db(), consumed.user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!(%error, action, "The GitHub connection's actor could not be read for its audit log");
+            return;
+        }
+    };
+    audit(
+        state.db(),
+        AuditEvent {
+            organization_id: Some(consumed.organization_id),
+            workspace_id: None,
+            actor_id: consumed.user_id,
+            actor_email: &user.email,
+            action,
+            resource_type,
+            resource_id: Some(resource_id),
+            old_values: None,
+            new_values,
+        },
+    )
+    .await;
+}
+
+/// The address normalized to its serialized form, which is always a valid
+/// header value, when it is an absolute http(s) URL.
+fn addressable(html_url: &str) -> Option<String> {
+    Url::parse(html_url)
+        .ok()
+        .filter(|url| SCHEMES.contains(&url.scheme()))
+        .map(String::from)
+}
+
+fn redirect(target: &str) -> Response {
+    let Ok(target) = HeaderValue::try_from(target) else {
+        tracing::error!("A GitHub callback built a redirect that is not a valid header value");
+        return uncached(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    let mut response = uncached(StatusCode::SEE_OTHER);
+    response.headers_mut().insert(LOCATION, target);
+    response
+}
+
+fn uncached(status: StatusCode) -> Response {
+    let mut response = status.into_response();
+    let headers = response.headers_mut();
+    headers.insert(CACHE_CONTROL, NO_STORE);
+    headers.insert(REFERRER_POLICY, NO_REFERRER);
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn uri(query: &str) -> Uri {
+        format!("{}?{query}", manifest::SETUP_CALLBACK_PATH)
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn setup_parameters_read_what_github_sends() {
+        let parameters: SetupParameters =
+            received(&uri("installation_id=42&setup_action=install&state=a%2Bb"));
+        assert_eq!(parameters.installation_id.as_deref(), Some("42"));
+        assert_eq!(parameters.setup_action, Some(SetupAction::Install));
+        assert_eq!(parameters.state.as_deref(), Some("a+b"));
+
+        let requested: SetupParameters = received(&uri("setup_action=request"));
+        assert_eq!(requested.setup_action, Some(SetupAction::Request));
+        assert_eq!(requested.state, None);
+
+        let unknown: SetupParameters = received(&uri("setup_action=uninstall"));
+        assert_eq!(unknown.setup_action, Some(SetupAction::Unknown));
+    }
+
+    #[test]
+    fn an_unreadable_query_reads_as_nothing_sent() {
+        let parameters: ManifestParameters = received(&uri("state=one&state=two&code=x"));
+        assert_eq!(parameters.state, None);
+        assert_eq!(parameters.code, None);
+    }
+
+    #[test]
+    fn only_an_absolute_web_address_is_addressable() {
+        assert_eq!(
+            addressable("https://github.com/apps/zone-acme").as_deref(),
+            Some("https://github.com/apps/zone-acme")
+        );
+        assert_eq!(
+            addressable("http://192.168.1.5:8080/apps/zone").as_deref(),
+            Some("http://192.168.1.5:8080/apps/zone")
+        );
+        for refused in [
+            "/apps/zone-acme",
+            "javascript:alert(1)",
+            "ftp://github.com/apps/x",
+            "",
+        ] {
+            assert_eq!(addressable(refused), None, "{refused}");
+        }
+    }
+
+    #[test]
+    fn every_response_is_uncached_and_sends_no_referrer() {
+        for response in [
+            redirect(&location("https://zone.example.com", Outcome::Sync, None)),
+            redirect("https://zone.example.com/\n"),
+            uncached(StatusCode::METHOD_NOT_ALLOWED),
+        ] {
+            assert_eq!(response.headers().get(CACHE_CONTROL), Some(&NO_STORE));
+            assert_eq!(response.headers().get(REFERRER_POLICY), Some(&NO_REFERRER));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_head_names_the_method_allowed() {
+        let response = refuse().await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(response.headers().get(ALLOW), Some(&GET));
+        assert!(response.headers().get(LOCATION).is_none());
+    }
+}
