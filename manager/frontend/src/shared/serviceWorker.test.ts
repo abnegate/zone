@@ -116,7 +116,7 @@ describe('SERVICE_WORKER_NAVIGATION_DENYLIST', () => {
   });
 
   it('keeps serving app routes from the cached shell', () => {
-    expect(denied('/org-settings?tab=github')).toBe(false);
+    expect(denied('/settings/organization/github?github=installed')).toBe(false);
     expect(denied('/sources')).toBe(false);
   });
 

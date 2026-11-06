@@ -22,6 +22,7 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
   { group: SettingsGroup.Organization, section: SettingsSection.Billing, label: 'Billing' },
   { group: SettingsGroup.Organization, section: SettingsSection.Audit, label: 'Audit log' },
+  { group: SettingsGroup.Organization, section: SettingsSection.GitHub, label: 'GitHub' },
   { group: SettingsGroup.Server, section: SettingsSection.Features, label: 'Features' },
   { group: SettingsGroup.Server, section: SettingsSection.Connect, label: 'Connect a device' },
   { group: SettingsGroup.You, section: SettingsSection.Sessions, label: 'Sessions' },
@@ -36,6 +37,7 @@ const pathsOf = (...groups: SettingsGroup[]): string[] =>
   );
 
 const ORGANIZATION_MEMBERS = settingsPath(SettingsGroup.Organization, SettingsSection.Members);
+const ORGANIZATION_GITHUB = settingsPath(SettingsGroup.Organization, SettingsSection.GitHub);
 const FEATURES = settingsPath(SettingsGroup.Server, SettingsSection.Features);
 const CONNECT = settingsPath(SettingsGroup.Server, SettingsSection.Connect);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
@@ -61,6 +63,7 @@ describe('settings constants', () => {
       Devices: 'devices',
       Billing: 'billing',
       Audit: 'audit',
+      GitHub: 'github',
       Features: 'features',
       Connect: 'connect',
       Sessions: 'sessions',
@@ -112,6 +115,11 @@ describe('findSection', () => {
       section: SettingsSection.Ai,
       label: 'AI defaults',
     });
+    expect(findSection('organization', 'github')).toMatchObject({
+      group: SettingsGroup.Organization,
+      section: SettingsSection.GitHub,
+      label: 'GitHub',
+    });
     expect(findSection('you', 'sessions')).toMatchObject({
       group: SettingsGroup.You,
       section: SettingsSection.Sessions,
@@ -136,7 +144,7 @@ describe('findSection', () => {
 });
 
 describe('visibleSections', () => {
-  it('shows an organization member in a workspace as a viewer only the organization members list', () => {
+  it('shows an organization member in a workspace as a viewer only the organization members list and GitHub', () => {
     expect(
       paths({
         organization: true,
@@ -145,7 +153,13 @@ describe('visibleSections', () => {
         workspaceRole: 'viewer',
         installsModels: false,
       })
-    ).toEqual([...pathsOf(SettingsGroup.Workspace), ORGANIZATION_MEMBERS, CONNECT, SESSIONS]);
+    ).toEqual([
+      ...pathsOf(SettingsGroup.Workspace),
+      ORGANIZATION_MEMBERS,
+      ORGANIZATION_GITHUB,
+      CONNECT,
+      SESSIONS,
+    ]);
   });
 
   it('hides the workspace group from an organization admin who belongs to no workspace', () => {
@@ -160,7 +174,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all twelve sections to an organization owner who administers the workspace', () => {
+  it('shows all thirteen sections to an organization owner who administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -169,7 +183,7 @@ describe('visibleSections', () => {
       installsModels: true,
     });
 
-    expect(visible).toHaveLength(12);
+    expect(visible).toHaveLength(13);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 

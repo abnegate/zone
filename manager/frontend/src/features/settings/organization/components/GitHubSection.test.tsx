@@ -35,7 +35,7 @@ afterAll(() => {
 });
 
 const ORGANIZATION_ID = 'org-1';
-const SETTINGS_ENTRY = '/org-settings?tab=github';
+const SETTINGS_ENTRY = '/settings/organization/github';
 const REMOVED_NOTICE = 'acme was removed from Zone. Delete the app on GitHub to finish.';
 
 function app(id: string, login: string, ownerType: GitHubApp['owner_type']): GitHubApp {
@@ -836,7 +836,7 @@ describe('GitHubSection', () => {
 
     for (const [outcome, text] of outcomes) {
       it(`says "${text}" for github=${outcome} and drops that parameter`, async () => {
-        renderSection({ entry: `${SETTINGS_ENTRY}&github=${outcome}` });
+        renderSection({ entry: `${SETTINGS_ENTRY}?github=${outcome}` });
 
         await findByRoleContaining('status', text);
         await waitFor(() => {
@@ -847,7 +847,7 @@ describe('GitHubSection', () => {
     }
 
     it('refreshes GitHub accounts once for an admin returning with github=sync', async () => {
-      renderSection({ entry: `${SETTINGS_ENTRY}&github=sync` });
+      renderSection({ entry: `${SETTINGS_ENTRY}?github=sync` });
 
       await findByRoleContaining('status', 'GitHub accounts refreshed.');
       expect(githubApi.syncInstallations).toHaveBeenCalledTimes(1);
@@ -861,7 +861,7 @@ describe('GitHubSection', () => {
       githubApi.syncInstallations.mockRejectedValue(
         new Error('Failed to refresh GitHub accounts: 502')
       );
-      renderSection({ entry: `${SETTINGS_ENTRY}&github=sync` });
+      renderSection({ entry: `${SETTINGS_ENTRY}?github=sync` });
 
       const alert = await findByRoleContaining('alert', 'Failed to refresh GitHub accounts: 502');
       expect(alert).toHaveTextContent(/^Failed to refresh GitHub accounts: 502$/);
@@ -873,7 +873,7 @@ describe('GitHubSection', () => {
         apps: [acme],
         installations: [installation('inst-acme', acme.id, '2026-10-02T00:00:00Z')],
       };
-      renderSection({ entry: `${SETTINGS_ENTRY}&github=sync`, canManage: false });
+      renderSection({ entry: `${SETTINGS_ENTRY}?github=sync`, canManage: false });
 
       await findRow('acme');
       await waitFor(() => {
@@ -883,12 +883,12 @@ describe('GitHubSection', () => {
       expect(screen.queryByText('GitHub accounts refreshed.')).toBeNull();
     });
 
-    it('keeps the tab and other parameters when it drops the outcome', async () => {
-      renderSection({ entry: '/org-settings?tab=github&github=installed&view=compact' });
+    it('keeps the other parameters when it drops the outcome', async () => {
+      renderSection({ entry: '/settings/organization/github?github=installed&view=compact' });
 
       await findByRoleContaining('status', 'GitHub account connected.');
       await waitFor(() => {
-        expect(location()).toBe('/org-settings?tab=github&view=compact');
+        expect(location()).toBe('/settings/organization/github?view=compact');
       });
     });
   });

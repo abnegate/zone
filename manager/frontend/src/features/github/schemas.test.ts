@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'bun:test';
+import serializedBranches from '../../../../../runner/zone_server/tests/fixtures/github-branches.json';
+import serializedConnection from '../../../../../runner/zone_server/tests/fixtures/github-connection.json';
+import serializedRepositories from '../../../../../runner/zone_server/tests/fixtures/github-repositories.json';
 import {
   GitHubAccountTypeSchema,
   GitHubAppOwnerTypeSchema,
@@ -160,7 +163,7 @@ describe('GitHubInstallationSchema', () => {
 describe('GitHubConnectionSchema', () => {
   it('parses the apps and installations of an organization', () => {
     const connection = { apps: [app], installations: [installation] };
-    expect(GitHubConnectionSchema.parse(connection)).toEqual(connection);
+    expect(GitHubConnectionSchema.parse(serializedConnection)).toEqual(serializedConnection);
   });
 
   it('parses an organization with nothing connected', () => {
@@ -269,7 +272,9 @@ describe('GitHubRepositoryInstallationSchema', () => {
 
 describe('GitHubRepositoriesResponseSchema', () => {
   it('parses a page of repositories with the next page', () => {
-    expect(GitHubRepositoriesResponseSchema.parse(repositories)).toEqual(repositories);
+    expect(GitHubRepositoriesResponseSchema.parse(serializedRepositories)).toEqual(
+      serializedRepositories
+    );
   });
 
   it('accepts the last page', () => {
@@ -292,7 +297,7 @@ describe('GitHubRepositoriesResponseSchema', () => {
 
 describe('GitHubBranchesResponseSchema', () => {
   it('parses a page of branches with the next page', () => {
-    expect(GitHubBranchesResponseSchema.parse(branches)).toEqual(branches);
+    expect(GitHubBranchesResponseSchema.parse(serializedBranches)).toEqual(serializedBranches);
   });
 
   it('accepts the last page', () => {
@@ -308,5 +313,21 @@ describe('GitHubBranchesResponseSchema', () => {
 
   it('refuses a branch without its protection flag', () => {
     expect(GitHubBranchSchema.safeParse({ name: 'main' }).success).toBe(false);
+  });
+});
+
+describe('server GitHub response contract', () => {
+  it('accepts the connection the server serializes', () => {
+    expect(GitHubConnectionSchema.parse(serializedConnection)).toEqual(serializedConnection);
+  });
+
+  it('accepts the repository listing the server serializes', () => {
+    expect(GitHubRepositoriesResponseSchema.parse(serializedRepositories)).toEqual(
+      serializedRepositories
+    );
+  });
+
+  it('accepts the branches the server serializes', () => {
+    expect(GitHubBranchesResponseSchema.parse(serializedBranches)).toEqual(serializedBranches);
   });
 });

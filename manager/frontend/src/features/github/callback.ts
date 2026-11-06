@@ -1,12 +1,14 @@
-export const GITHUB_TAB = 'github';
+import { SettingsGroup, SettingsSection, settingsPath } from '../settings/navigation/sections';
 
 export const GitHubSearchParameter = {
-  Tab: 'tab',
   Outcome: 'github',
   Organization: 'organization',
 } as const;
 
-export const GITHUB_SETTINGS_PATH = `/org-settings?${GitHubSearchParameter.Tab}=${GITHUB_TAB}`;
+export const GITHUB_SETTINGS_PATH = settingsPath(
+  SettingsGroup.Organization,
+  SettingsSection.GitHub
+);
 
 export const GitHubOutcome = {
   Installed: 'installed',

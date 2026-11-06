@@ -405,7 +405,7 @@ describe('SourceDetail when no connected account reaches the repository', () => 
 
     const status = await unreachableStatus();
     const link = within(status).getByRole('link', { name: 'Connect GitHub' });
-    expect(link.getAttribute('href')).toBe('/org-settings?tab=github');
+    expect(link.getAttribute('href')).toBe('/settings/organization/github');
     expect(within(status).queryByText('Ask an organization admin to connect GitHub.')).toBeNull();
     expectSearchFor('acme/api');
     expect(updateSource).not.toHaveBeenCalled();

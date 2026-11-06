@@ -641,7 +641,7 @@ describe('RepositoryPicker empty and error states', () => {
     renderPicker({ canManage: true });
 
     const link = await screen.findByRole('link', { name: 'Connect GitHub' });
-    expect(link).toHaveAttribute('href', '/org-settings?tab=github');
+    expect(link).toHaveAttribute('href', '/settings/organization/github');
     expect(
       screen.queryByText('Ask an organization admin to connect GitHub.')
     ).not.toBeInTheDocument();

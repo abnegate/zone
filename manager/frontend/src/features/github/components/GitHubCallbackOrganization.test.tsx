@@ -65,11 +65,11 @@ describe('GitHubCallbackOrganization', () => {
   it('renders the children untouched without an organization parameter', () => {
     const switched: Organization[] = [];
     const state = workspace({ setCurrentOrganization: (match) => switched.push(match) });
-    renderAt('/org-settings?tab=github&github=installed', <p>Settings</p>, () => state);
+    renderAt('/settings/organization/github?github=installed', <p>Settings</p>, () => state);
 
     expect(screen.getByText('Settings')).toBeTruthy();
     expect(screen.queryByRole('status')).toBeNull();
-    expect(location()).toBe('/org-settings?tab=github&github=installed');
+    expect(location()).toBe('/settings/organization/github?github=installed');
     expect(switched).toEqual([]);
   });
 
@@ -77,12 +77,12 @@ describe('GitHubCallbackOrganization', () => {
     const switched: Organization[] = [];
     const state = workspace({ setCurrentOrganization: (match) => switched.push(match) });
     renderAt(
-      `/org-settings?tab=github&github=installed&organization=${other.id}`,
+      `/settings/organization/github?github=installed&organization=${other.id}`,
       <p>Settings</p>,
       () => state
     );
 
-    await waitFor(() => expect(location()).toBe('/org-settings?tab=github&github=installed'));
+    await waitFor(() => expect(location()).toBe('/settings/organization/github?github=installed'));
     expect(switched).toEqual([other]);
     expect(screen.getByText('Settings')).toBeTruthy();
   });
@@ -91,12 +91,12 @@ describe('GitHubCallbackOrganization', () => {
     const switched: Organization[] = [];
     const state = workspace({ setCurrentOrganization: (match) => switched.push(match) });
     renderAt(
-      `/org-settings?tab=github&github=sync&organization=${current.id}`,
+      `/settings/organization/github?github=sync&organization=${current.id}`,
       <p>Settings</p>,
       () => state
     );
 
-    await waitFor(() => expect(location()).toBe('/org-settings?tab=github&github=sync'));
+    await waitFor(() => expect(location()).toBe('/settings/organization/github?github=sync'));
     expect(switched).toEqual([]);
     expect(screen.getByText('Settings')).toBeTruthy();
   });
@@ -105,12 +105,12 @@ describe('GitHubCallbackOrganization', () => {
     const switched: Organization[] = [];
     const state = workspace({ setCurrentOrganization: (match) => switched.push(match) });
     renderAt(
-      '/org-settings?tab=github&github=installed&organization=org-unknown',
+      '/settings/organization/github?github=installed&organization=org-unknown',
       <p>Settings</p>,
       () => state
     );
 
-    await waitFor(() => expect(location()).toBe('/org-settings?tab=github'));
+    await waitFor(() => expect(location()).toBe('/settings/organization/github'));
     expect(switched).toEqual([]);
     expect(screen.getByText('Settings')).toBeTruthy();
   });
@@ -123,7 +123,7 @@ describe('GitHubCallbackOrganization', () => {
       currentOrganization: null,
       setCurrentOrganization: (match) => switched.push(match),
     });
-    const entry = `/org-settings?tab=github&github=installed&organization=${other.id}`;
+    const entry = `/settings/organization/github?github=installed&organization=${other.id}`;
     const view = renderAt(entry, <p>Settings</p>, () => state);
 
     expect(screen.getByRole('status').textContent).toBe('Switching organization…');
@@ -141,7 +141,7 @@ describe('GitHubCallbackOrganization', () => {
       </MemoryRouter>
     );
 
-    await waitFor(() => expect(location()).toBe('/org-settings?tab=github&github=installed'));
+    await waitFor(() => expect(location()).toBe('/settings/organization/github?github=installed'));
     expect(switched).toEqual([other]);
     expect(screen.getByText('Settings')).toBeTruthy();
     expect(screen.queryByRole('status')).toBeNull();
@@ -169,14 +169,14 @@ describe('GitHubCallbackOrganization', () => {
     }
 
     render(
-      <MemoryRouter initialEntries={[`/org-settings?tab=github&organization=${other.id}`]}>
+      <MemoryRouter initialEntries={[`/settings/organization/github?organization=${other.id}`]}>
         <Harness />
         <LocationProbe />
       </MemoryRouter>
     );
 
     await waitFor(() => expect(screen.getByText('Settings')).toBeTruthy());
-    expect(location()).toBe('/org-settings?tab=github');
+    expect(location()).toBe('/settings/organization/github');
     expect(seen.length).toBeGreaterThan(0);
     expect(new Set(seen)).toEqual(new Set([other.id]));
   });
