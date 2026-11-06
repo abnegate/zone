@@ -106,7 +106,7 @@ abnegate-index = { workspace = true }
 abnegate-llm = { workspace = true }
 abnegate-notify = { workspace = true, features = ["smtp"] }
 abnegate-search = { workspace = true }
-abnegate-secret = { workspace = true, features = ["sqlx"] }
+abnegate-secret = { workspace = true, features = ["derivation", "sqlx"] }
 abnegate-vcs = { workspace = true, features = ["github"] }
 zone_chat = { path = "../zone_chat" }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
