@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+use std::time::Instant;
 
 use crate::common::github_app::{self, APP_ID, ApplicationJwt, Seeded, TEST_PRIVATE_KEY};
 use crate::common::{self, TestClient, TestResponse, test_email, test_password};
@@ -21,6 +22,7 @@ use zone_server::db::github_installations::{
     self, AccountType, InstallationRow, InstallationUpsert, RepositorySelection,
 };
 use zone_server::db::organization_members::{self, OrgRole};
+use zone_server::services::github_app::catalog::MINIMUM_REFRESH_AGE;
 use zone_server::services::github_app::manifest::{MANIFEST_CALLBACK_PATH, SETUP_CALLBACK_PATH};
 use zone_server::state::AppState;
 
@@ -645,6 +647,17 @@ impl Harness {
         github_connection_states::consume(self.pool(), state, purpose)
             .await
             .expect("the state is readable")
+    }
+
+    fn age_catalog(&self, tenant: &Tenant, seeded: &Seeded) {
+        let catalog = self.state().github().catalog();
+        let listing = catalog
+            .get(tenant.organization, seeded.installation, Instant::now())
+            .expect("the listing is cached");
+        let listed_at = Instant::now()
+            .checked_sub(MINIMUM_REFRESH_AGE)
+            .expect("the clock has run longer than the minimum refresh age");
+        catalog.insert(tenant.organization, seeded.installation, listing, listed_at);
     }
 
     async fn github_requests(&self) -> usize {
@@ -2473,10 +2486,17 @@ async fn repositories_are_cached_until_refreshed() {
 
     let fetched = harness.catalog(&tenant, "").await;
     let cached = harness.catalog(&tenant, "?query=wid").await;
+    let early = harness.catalog(&tenant, "?refresh=true").await;
     assert_eq!(fetched.full_names(), ["acme/widgets"]);
     assert_eq!(cached.full_names(), ["acme/widgets"]);
+    assert_eq!(
+        early.full_names(),
+        ["acme/widgets"],
+        "a refresh of a listing younger than the minimum age is served from the cache"
+    );
     harness.github.verify().await;
     harness.github.reset().await;
+    harness.age_catalog(&tenant, &seeded);
 
     routes_minting(&harness.github, APP_ID, seeded.installation_id, 0..).await;
     routes_listing_repositories(

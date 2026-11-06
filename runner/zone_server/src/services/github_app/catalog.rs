@@ -24,6 +24,8 @@ use super::tenant::Tenant;
 
 pub const TTL: Duration = Duration::from_secs(60);
 
+pub const MINIMUM_REFRESH_AGE: Duration = Duration::from_secs(10);
+
 #[derive(Default)]
 pub struct Catalog {
     entries: Mutex<HashMap<Uuid, Entry>>,
@@ -41,9 +43,20 @@ impl Catalog {
         installation: Uuid,
         now: Instant,
     ) -> Option<Arc<[InstalledRepository]>> {
+        self.served(organization, installation, false, now)
+    }
+
+    fn served(
+        &self,
+        organization: Uuid,
+        installation: Uuid,
+        refresh: bool,
+        now: Instant,
+    ) -> Option<Arc<[InstalledRepository]>> {
         self.lock()
             .get(&installation)
             .filter(|entry| entry.serves(organization, now))
+            .filter(|entry| !refresh || !entry.refreshable(now))
             .map(|entry| Arc::clone(&entry.repositories))
     }
 
@@ -61,7 +74,7 @@ impl Catalog {
             Entry {
                 organization,
                 repositories,
-                expires_at: now + TTL,
+                listed_at: now,
             },
         );
     }
@@ -81,7 +94,7 @@ impl Catalog {
         F: FnOnce() -> Listing,
         Listing: Future<Output = Result<Vec<InstalledRepository>, Error>>,
     {
-        if !refresh && let Some(cached) = self.get(organization, installation, Instant::now()) {
+        if let Some(cached) = self.served(organization, installation, refresh, Instant::now()) {
             return Ok(cached);
         }
 
@@ -92,8 +105,8 @@ impl Catalog {
         self.flights
             .board(scope)
             .fetched(|| async move {
-                if !refresh
-                    && let Some(cached) = self.get(organization, installation, Instant::now())
+                if let Some(cached) =
+                    self.served(organization, installation, refresh, Instant::now())
                 {
                     return Ok(cached);
                 }
@@ -249,6 +262,31 @@ mod tests {
             .expect("the entry is still fresh");
 
         assert_eq!(names(&served), ["widgets", "gadgets"]);
+    }
+
+    #[test]
+    fn a_refresh_is_honoured_only_once_the_entry_reaches_the_minimum_age() {
+        let catalog = Catalog::default();
+        let installation = Uuid::new_v4();
+        let now = Instant::now();
+        catalog.insert(ORGANIZATION, installation, repositories(&["widgets"]), now);
+
+        let young = now + MINIMUM_REFRESH_AGE - Duration::from_millis(1);
+        let old = now + MINIMUM_REFRESH_AGE;
+
+        assert!(
+            catalog
+                .served(ORGANIZATION, installation, true, young)
+                .is_some(),
+            "a refresh of a listing younger than the minimum age is served from the cache"
+        );
+        assert!(
+            catalog
+                .served(ORGANIZATION, installation, true, old)
+                .is_none(),
+            "a refresh of a listing at the minimum age lists again"
+        );
+        assert!(catalog.get(ORGANIZATION, installation, old).is_some());
     }
 
     #[test]
@@ -462,6 +500,16 @@ mod tests {
         fn flights(&self) -> usize {
             self.provider.catalog().flights.len()
         }
+
+        fn age(&self) {
+            let cached = self.cached().expect("a cached listing to age");
+            let listed_at = Instant::now()
+                .checked_sub(MINIMUM_REFRESH_AGE)
+                .expect("the clock has run longer than the minimum refresh age");
+            self.provider
+                .catalog()
+                .insert(self.organization, self.installation, cached, listed_at);
+        }
     }
 
     #[tokio::test]
@@ -485,11 +533,26 @@ mod tests {
         listing(&fetching.server, 1, page_of(&[listed(1, "widgets")]), 2).await;
 
         let fetched = fetching.fetch(false).await.expect("listed");
+        fetching.age();
         let refreshed = fetching.fetch(true).await.expect("listed again");
 
         assert!(!Arc::ptr_eq(&fetched, &refreshed));
         let cached = fetching.cached().expect("the refreshed listing is cached");
         assert!(Arc::ptr_eq(&refreshed, &cached));
+    }
+
+    #[tokio::test]
+    async fn a_refresh_of_a_listing_younger_than_the_minimum_age_is_served_from_the_cache() {
+        let fetching = Fetching::new(1).await;
+        listing(&fetching.server, 1, page_of(&[listed(1, "widgets")]), 1).await;
+
+        let fetched = fetching.fetch(false).await.expect("listed");
+        let refreshed = fetching.fetch(true).await.expect("served from the cache");
+
+        assert!(
+            Arc::ptr_eq(&fetched, &refreshed),
+            "a refresh this soon must not walk GitHub's pages again"
+        );
     }
 
     #[tokio::test]
@@ -615,6 +678,7 @@ mod tests {
         )
         .await;
         let cached = fetching.fetch(false).await.expect("listed");
+        fetching.age();
 
         let refreshed = join_all((0..8).map(|_| fetching.fetch(true))).await;
 
