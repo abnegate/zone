@@ -9,7 +9,6 @@ pub mod agent;
 pub mod auth;
 pub mod cache;
 pub mod config;
-pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod host_mounts;

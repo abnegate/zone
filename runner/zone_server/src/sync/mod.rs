@@ -49,9 +49,6 @@ pub enum SyncError {
 
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
-
-    #[error("Cryptography error: {0}")]
-    CryptoError(String),
 }
 
 pub type SyncResult<T> = Result<T, SyncError>;

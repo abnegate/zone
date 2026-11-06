@@ -9592,7 +9592,6 @@ dependencies = [
  "abnegate-search",
  "abnegate-secret",
  "abnegate-vcs",
- "aes-gcm",
  "aiusg",
  "argon2",
  "async-stream",

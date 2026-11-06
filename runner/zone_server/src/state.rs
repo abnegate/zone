@@ -97,8 +97,6 @@ struct AppStateInner {
     pub pull_registry: PullRegistry,
     /// The one LoRA training run. Survives the HTTP request that started it.
     pub train_jobs: TrainRegistry,
-    /// Derived encryption key (32 bytes) for AES-256-GCM
-    pub encryption_key: [u8; 32],
     /// The key stored credentials are sealed with
     pub master_key: Arc<MasterKey>,
     /// Semaphore for limiting concurrent indexing operations
@@ -199,10 +197,6 @@ impl AppState {
     ) -> Self {
         let master_key = crate::secret::derive(config.encryption_key())
             .expect("Encryption key should be valid (validated in Config::from_env)");
-        let encryption_key: [u8; 32] = hex::decode(master_key.to_hexadecimal().as_str())
-            .expect("a master key is hexadecimal")
-            .try_into()
-            .expect("a master key is 32 bytes");
 
         let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
         let cleaned = Arc::clone(&rate_limiter);
@@ -228,7 +222,6 @@ impl AppState {
                 sync_registry: SyncRegistry::new(Arc::clone(&master_key)),
                 pull_registry: PullRegistry::new(),
                 train_jobs: TrainRegistry::new(),
-                encryption_key,
                 master_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
@@ -274,11 +267,6 @@ impl AppState {
     /// Get the context service (if available)
     pub fn context_service(&self) -> Option<&Arc<ContextService>> {
         self.inner.context_service.as_ref()
-    }
-
-    /// Get the encryption key for source credentials
-    pub fn encryption_key(&self) -> &[u8; 32] {
-        &self.inner.encryption_key
     }
 
     /// The key stored credentials are sealed with
