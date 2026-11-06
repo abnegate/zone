@@ -23,6 +23,8 @@ use zone_server::services::mail;
 use zone_server::services::mail::AccountMail;
 use zone_server::state::{AppState, default_adapter_registry};
 
+const DIMENSION_LEARNED_ON_FIRST_EMBED: &str = "learned on the first embed";
+
 #[tokio::main]
 async fn main() {
     // Initialize tracing
@@ -99,7 +101,6 @@ async fn main() {
     };
 
     // Try to initialize embedding service from config
-    // In production, this would fetch from organization AI settings
     let embedding_service = {
         use zone_context::embeddings::providers::{EMBEDDING_ENGINE_OLLAMA, PROVIDER_SELF_HOSTED};
         use zone_server::db::ai_settings::EffectiveAiSettings;
@@ -135,13 +136,13 @@ async fn main() {
                     "Initialized embedding service: engine={}, model={}, dimension={}",
                     engine.as_deref().unwrap_or(EMBEDDING_ENGINE_OLLAMA),
                     service.model(),
-                    service.dimension()
+                    dimension_label(service.dimension())
                 );
                 Some(service)
             }
             Err(e) => {
-                // SECURITY: Error messages are sanitized by ContextError Display impl
-                // to prevent leaking API keys or other sensitive configuration data
+                // ContextError's Display leaves API keys out, but an invalid base URL
+                // error names the configured URL.
                 tracing::warn!("Failed to initialize embedding service: {}", e);
                 tracing::warn!("Context features will be unavailable");
                 None
@@ -253,6 +254,15 @@ async fn main() {
     result.expect("Server error");
 }
 
+/// An embedding width for the startup log; a width of 0 is one the service
+/// learns from its first embedding.
+fn dimension_label(width: usize) -> String {
+    match width {
+        0 => DIMENSION_LEARNED_ON_FIRST_EMBED.to_string(),
+        width => width.to_string(),
+    }
+}
+
 fn migration_mode(arguments: &[String]) -> Result<bool, &'static str> {
     match arguments {
         [] => Ok(false),
@@ -276,7 +286,13 @@ fn forbid_dumping() {
 
 #[cfg(test)]
 mod tests {
-    use super::migration_mode;
+    use super::{DIMENSION_LEARNED_ON_FIRST_EMBED, dimension_label, migration_mode};
+
+    #[test]
+    fn an_unknown_embedding_width_is_logged_as_learned_on_the_first_embed() {
+        assert_eq!(dimension_label(0), DIMENSION_LEARNED_ON_FIRST_EMBED);
+        assert_eq!(dimension_label(1024), "1024");
+    }
 
     #[test]
     fn migration_arguments_are_exact() {

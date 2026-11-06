@@ -71,7 +71,7 @@ pub struct HuggingFaceModelInfo {
 /// Query parameters for listing models
 #[derive(Debug, Deserialize)]
 pub struct ListModelsQuery {
-    /// Source to list from (ollama, huggingface, modelscope)
+    /// Source to list from (ollama, comfy, huggingface, gpt4all, openrouter)
     pub source: Option<String>,
     /// Search query for browsing
     #[serde(alias = "q")]
