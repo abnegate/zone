@@ -3,9 +3,12 @@
 //! Executes agentic tasks in the background using the same streaming agent
 //! loop as chat, with a task budget and a sandboxed tool context.
 
-use abnegate_http::{Backoff, RetryAfter, contains_standalone_status};
+use abnegate_http::Backoff;
+use abnegate_http::RetryAfter;
+use abnegate_http::contains_standalone_status;
 use abnegate_llm::{Limit, Message as LlmMessage};
 use futures::StreamExt;
+use reqwest::StatusCode;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::future::Future;
@@ -419,6 +422,10 @@ impl Decision {
     }
 }
 
+const DOUBLING: u32 = 2;
+
+const JITTER: f64 = 0.25;
+
 /// Bounded exponential backoff for a background task run.
 ///
 /// `attempts` counts the initial attempt, so three retries follow the first
@@ -437,15 +444,15 @@ impl Default for RetryPolicy {
             attempts: 4,
             transient: Backoff::new(
                 Duration::from_secs(2),
-                2,
+                DOUBLING,
                 Duration::from_secs(60),
-                Backoff::DEFAULT_JITTER,
+                JITTER,
             ),
             rate_limit: Backoff::new(
                 Duration::from_secs(15),
-                2,
+                DOUBLING,
                 Duration::from_secs(300),
-                Backoff::DEFAULT_JITTER,
+                JITTER,
             ),
         }
     }
@@ -623,9 +630,15 @@ const TERMINAL_MARKERS: &[&str] = &[
     "unsupported",
 ];
 
-const TERMINAL_STATUSES: &[u16] = &[400, 401, 403, 404, 422];
+const TERMINAL_STATUSES: &[u16] = &[
+    StatusCode::BAD_REQUEST.as_u16(),
+    StatusCode::UNAUTHORIZED.as_u16(),
+    StatusCode::FORBIDDEN.as_u16(),
+    StatusCode::NOT_FOUND.as_u16(),
+    StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+];
 
-const TOO_MANY_REQUESTS: u16 = reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16();
+const TOO_MANY_REQUESTS: u16 = StatusCode::TOO_MANY_REQUESTS.as_u16();
 
 /// Rate limits are matched first: a throttled request is recoverable even when
 /// the provider dresses it up in the same vocabulary as a rejected one.
@@ -4704,9 +4717,9 @@ mod retry_tests {
             }
         );
         assert_eq!(
-            classify("rate limit hit, retry-after: 42."),
+            classify("rate limit hit, retry-after: 0.5."),
             Failure::RateLimited {
-                retry_after: Some(Duration::from_secs(42)),
+                retry_after: Some(Duration::from_millis(500)),
             }
         );
     }
