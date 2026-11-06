@@ -7,6 +7,9 @@ use abnegate_llm::catalog::{
     BrowseQuery, CatalogError, ModelMediumFilter, ModelPage, ModelProvider, ModelSort,
     OllamaProvider,
 };
+use reqwest::Client;
+
+pub(super) use manifest_size::client as size_client;
 
 const PROBE_LIMIT: usize = 1;
 
@@ -15,15 +18,15 @@ const PROBE_LIMIT: usize = 1;
 /// leaves Browse with models to offer rather than an empty Ollama half.
 pub(super) async fn search(
     provider: &OllamaProvider,
+    sizes: &Client,
     registry_url: &str,
-    proxy_url: Option<&str>,
     options: BrowseQuery<'_>,
 ) -> Result<ModelPage, CatalogError> {
     let page = provider.search(options).await?;
     if !page.models.is_empty() || !library_is_empty(provider, &options).await {
         return Ok(page);
     }
-    fallback(registry_url, proxy_url, &options).await
+    fallback(sizes, registry_url, &options).await
 }
 
 /// Whether the search page `options` fetched lists no models before any
@@ -84,22 +87,21 @@ fn searched_category(medium: ModelMediumFilter) -> ModelMediumFilter {
 /// are looked up only for the models that survive the filters: every one of
 /// them when the order is by size, otherwise just the page.
 async fn fallback(
+    sizes: &Client,
     registry_url: &str,
-    proxy_url: Option<&str>,
     options: &BrowseQuery<'_>,
 ) -> Result<ModelPage, CatalogError> {
     let page_size = options.page_size();
     let offset = refine::cursor_offset(options.cursor, page_size)?;
-    let client = manifest_size::client(proxy_url)?;
     let mut models = refine::filter(entries::popular_models(), options);
     if is_size_order(options.sort) {
-        models = manifest_size::attach(models, &client, registry_url).await;
+        models = manifest_size::attach(models, sizes, registry_url).await;
         refine::sort(&mut models, options.sort);
         return Ok(refine::paginate(models, offset, page_size));
     }
     refine::sort(&mut models, options.sort);
     let mut page = refine::paginate(models, offset, page_size);
-    page.models = manifest_size::attach(page.models, &client, registry_url).await;
+    page.models = manifest_size::attach(page.models, sizes, registry_url).await;
     Ok(page)
 }
 
@@ -197,7 +199,8 @@ mod tests {
         let registry = format!("{origin}/v2");
         let provider = OllamaProvider::with_catalog(format!("{origin}/search"), &registry, None)
             .expect("a provider");
-        let page = super::search(&provider, &registry, None, options)
+        let sizes = size_client(None).expect("a size client");
+        let page = super::search(&provider, &sizes, &registry, options)
             .await
             .expect("a page");
         let requests = search.requests.lock().expect("requests").clone();

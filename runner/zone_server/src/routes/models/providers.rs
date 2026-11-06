@@ -3,13 +3,12 @@
 
 use abnegate_comfy::recipe::RecipeCatalog;
 use abnegate_llm::catalog::{
-    BrowseQuery, CatalogError, DEFAULT_PAGE_SIZE, Gpt4AllProvider, HuggingFaceProvider,
-    MAXIMUM_PAGE_SIZE, ModelMediumFilter, ModelPage, ModelProvider, OllamaProvider,
-    OpenRouterProvider, huggingface_repository_downloads, huggingface_repository_id,
+    BrowseQuery, CatalogError, DEFAULT_PAGE_SIZE, MAXIMUM_PAGE_SIZE, ModelMediumFilter, ModelPage,
+    ModelProvider, huggingface_repository_downloads, huggingface_repository_id,
 };
 
-use super::catalog_endpoints;
 use super::catalog_failure::CatalogFailure;
+use super::catalog_providers::CatalogProviders;
 use super::catalog_source::CatalogSource;
 use super::popular;
 use super::recipe_catalog;
@@ -39,39 +38,26 @@ async fn search(
     source: CatalogSource,
     options: BrowseQuery<'_>,
 ) -> Result<ModelPage, CatalogError> {
-    let config = state.config();
-    let proxy = config.model_search_proxy_url.as_deref();
-    let endpoints = catalog_endpoints::current();
+    let providers = CatalogProviders::current(state.config())?;
     match source {
         CatalogSource::Ollama => {
-            let provider = OllamaProvider::with_catalog(
-                endpoints.ollama_search,
-                endpoints.ollama_registry.as_str(),
-                proxy,
-            )?;
-            popular::search(&provider, &endpoints.ollama_registry, proxy, options).await
+            popular::search(
+                &providers.ollama,
+                &providers.sizes,
+                providers.registry_url(),
+                options,
+            )
+            .await
         }
-        CatalogSource::HuggingFace => {
-            let provider =
-                HuggingFaceProvider::with_proxy(config.huggingface_models_url.as_str(), proxy)?;
-            if lists_adapters(&options) {
-                provider
-                    .search_with_adapters(options, &adapter_bases(state))
-                    .await
-            } else {
-                provider.search(options).await
-            }
-        }
-        CatalogSource::Gpt4All => {
-            Gpt4AllProvider::with_proxy(config.gpt4all_models_url.as_str(), proxy)?
-                .search(options)
+        CatalogSource::HuggingFace if lists_adapters(&options) => {
+            providers
+                .huggingface
+                .search_with_adapters(options, &adapter_bases(state))
                 .await
         }
-        CatalogSource::OpenRouter => {
-            OpenRouterProvider::with_proxy(endpoints.openrouter, proxy)?
-                .search(options)
-                .await
-        }
+        CatalogSource::HuggingFace => providers.huggingface.search(options).await,
+        CatalogSource::Gpt4All => providers.gpt4all.search(options).await,
+        CatalogSource::OpenRouter => providers.openrouter.search(options).await,
     }
 }
 

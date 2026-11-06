@@ -15,7 +15,7 @@ const OFFICIAL_NAMESPACE: &str = "library";
 const DEFAULT_TAG: &str = "latest";
 
 /// The client Zone has always looked popular models' sizes up with.
-pub(super) fn client(proxy_url: Option<&str>) -> Result<Client, CatalogError> {
+pub(in crate::routes::models) fn client(proxy_url: Option<&str>) -> Result<Client, CatalogError> {
     let mut builder = Client::builder()
         .timeout(TIMEOUT)
         .connect_timeout(CONNECT_TIMEOUT)
