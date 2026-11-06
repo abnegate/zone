@@ -6,11 +6,13 @@ use crate::common::github_app::{self, Seeded};
 use crate::common::{self, TestClient, TestResponse, test_email, test_password};
 use abnegate_vcs::pull_request::ApplicationId;
 use axum::http::StatusCode;
+use chrono::{Duration, SecondsFormat, Utc};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
-use wiremock::MockServer;
+use wiremock::matchers::{header, header_exists, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_server::db::github_apps;
 use zone_server::db::github_installations::{self, InstallationStatus};
 use zone_server::db::projects::{self, NewProject, ProjectRow};
@@ -23,6 +25,10 @@ const STORED_TOKEN: &str = "ghp_throwaway_stored";
 const SENT_TOKEN: &str = "ghp_throwaway_sent";
 const REPOSITORY_URL: &str = "https://github.com/acme/widgets";
 const DISCONNECTED: &str = "This GitHub account isn't connected to this organization, or it was disconnected. Reconnect GitHub.";
+const UNREACHABLE: &str = "Zone can't reach this repository through that GitHub connection.";
+const GITHUB_UNAVAILABLE: &str = "GitHub could not be reached.";
+const MINTED_TOKEN: &str = "ghs_throwaway_minted";
+const REPOSITORY_PATH: &str = "/repos/acme/widgets";
 
 /// Source names are unique per source type across every workspace.
 fn source_name(prefix: &str) -> String {
@@ -127,6 +133,53 @@ fn assert_disconnected(response: &TestResponse) {
     );
 }
 
+fn assert_unreachable(response: &TestResponse) {
+    response.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json_value()["error"].as_str(),
+        Some(UNREACHABLE),
+        "a repository the installation cannot read is refused with the reachability message"
+    );
+}
+
+/// GitHub mints `MINTED_TOKEN` for the installation `calls` times.
+async fn issuing(server: &MockServer, installation_id: i64, calls: u64) {
+    let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/app/installations/{installation_id}/access_tokens"
+        )))
+        .and(header_exists("authorization"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "token": MINTED_TOKEN,
+            "expires_at": expires_at,
+        })))
+        .expect(calls)
+        .mount(server)
+        .await;
+}
+
+/// GitHub answers one read of the repository, made with the minted token,
+/// with `answer`.
+async fn reading_repository(server: &MockServer, answer: ResponseTemplate) {
+    Mock::given(method("GET"))
+        .and(path(REPOSITORY_PATH))
+        .and(header("authorization", format!("Bearer {MINTED_TOKEN}")))
+        .respond_with(answer)
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+async fn reachable(server: &MockServer) {
+    issuing(server, INSTALLATION_ID, 1).await;
+    reading_repository(
+        server,
+        ResponseTemplate::new(200).set_body_json(json!({ "default_branch": "main" })),
+    )
+    .await;
+}
+
 fn installation_source_body(installation: Uuid) -> Value {
     json!({
         "name": source_name("Widgets"),
@@ -143,8 +196,9 @@ struct Tenant {
     workspace: Uuid,
 }
 
-/// One client whose GitHub is a mock server nothing is mounted on, so a test
-/// that reached GitHub would fail loudly instead of reaching the real one.
+/// One client whose GitHub, installation tokens included, is a mock server
+/// that answers only what a test mounts, so a test that reached GitHub
+/// unexpectedly would fail loudly instead of reaching the real one.
 struct Harness {
     client: TestClient,
     github: MockServer,
@@ -154,6 +208,9 @@ impl Harness {
     async fn new() -> Self {
         let github = MockServer::start().await;
         let client = TestClient::with_config(github_app::config_for(&github)).await;
+        client
+            .state()
+            .install_github(github_app::issuer_provider(&github, client.state()));
         Self::without_indexing(client.state());
         Self { client, github }
     }
@@ -584,6 +641,7 @@ async fn attaching_an_installation_to_a_token_source_clears_the_token() {
     let tenant = harness.tenant().await;
     let seeded = harness.installation(&tenant).await;
     let source = harness.token_source(&tenant).await;
+    reachable(&harness.github).await;
 
     let attached = harness
         .update_source(
@@ -616,6 +674,7 @@ async fn attaching_an_installation_alongside_a_rename_returns_the_final_row() {
     let source = harness.token_source(&tenant).await;
 
     let renamed = source_name("Renamed widgets");
+    reachable(&harness.github).await;
 
     let attached = harness
         .update_source(
@@ -635,6 +694,149 @@ async fn attaching_an_installation_alongside_a_rename_returns_the_final_row() {
         SourceConnection::installed(&seeded),
         "the response is the row after the attach, not the row the rename returned"
     );
+
+    harness.discard(&[&tenant]).await;
+}
+
+#[tokio::test]
+async fn attaching_an_installation_reads_the_repository_the_request_names() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let seeded = harness.installation(&tenant).await;
+    let source = harness.token_source(&tenant).await;
+    issuing(&harness.github, INSTALLATION_ID, 1).await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/gadgets"))
+        .and(header("authorization", format!("Bearer {MINTED_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "default_branch": "main" })))
+        .expect(1)
+        .mount(&harness.github)
+        .await;
+    let gadgets = json!({ "owner": "acme", "repo": "gadgets", "branch": "main" });
+
+    let attached = harness
+        .update_source(
+            &tenant,
+            source,
+            json!({ "config": gadgets, "github_installation_id": seeded.installation }),
+        )
+        .await;
+
+    attached.assert_status(StatusCode::OK);
+    let stored = harness.stored_source(&tenant, source).await;
+    assert_eq!(stored.github_installation_id, Some(seeded.installation));
+    assert_eq!(stored.config, gadgets);
+
+    harness.discard(&[&tenant]).await;
+}
+
+#[tokio::test]
+async fn attaching_an_unreachable_repository_is_refused() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let seeded = harness.installation(&tenant).await;
+    let source = harness.token_source(&tenant).await;
+    let before = harness.stored_source(&tenant, source).await;
+    issuing(&harness.github, INSTALLATION_ID, 1).await;
+    reading_repository(
+        &harness.github,
+        ResponseTemplate::new(404).set_body_json(json!({ "message": "Not Found" })),
+    )
+    .await;
+
+    let refused = harness
+        .update_source(
+            &tenant,
+            source,
+            json!({ "github_installation_id": seeded.installation }),
+        )
+        .await;
+
+    assert_unreachable(&refused);
+    assert!(
+        !refused.text().contains(MINTED_TOKEN),
+        "the refusal never carries the token"
+    );
+    let after = harness.stored_source(&tenant, source).await;
+    assert_eq!(after.github_installation_id, None, "nothing is attached");
+    assert_eq!(
+        after.credentials_encrypted, before.credentials_encrypted,
+        "the stored token is untouched"
+    );
+
+    harness.discard(&[&tenant]).await;
+}
+
+#[tokio::test]
+async fn attaching_while_github_fails_is_a_bad_gateway() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let seeded = harness.installation(&tenant).await;
+    let source = harness.token_source(&tenant).await;
+    let before = harness.stored_source(&tenant, source).await;
+    issuing(&harness.github, INSTALLATION_ID, 1).await;
+    reading_repository(&harness.github, ResponseTemplate::new(503)).await;
+
+    let failed = harness
+        .update_source(
+            &tenant,
+            source,
+            json!({ "github_installation_id": seeded.installation }),
+        )
+        .await;
+
+    failed.assert_status(StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        failed.json_value()["error"].as_str(),
+        Some(GITHUB_UNAVAILABLE)
+    );
+    let after = harness.stored_source(&tenant, source).await;
+    assert_eq!(after.github_installation_id, None, "nothing is attached");
+    assert_eq!(
+        after.credentials_encrypted, before.credentials_encrypted,
+        "the stored token is untouched"
+    );
+
+    harness.discard(&[&tenant]).await;
+}
+
+#[tokio::test]
+async fn attaching_an_installation_github_uninstalled_is_refused_and_marks_it_revoked() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let seeded = harness.installation(&tenant).await;
+    let source = harness.token_source(&tenant).await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/app/installations/{INSTALLATION_ID}/access_tokens"
+        )))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&harness.github)
+        .await;
+
+    let refused = harness
+        .update_source(
+            &tenant,
+            source,
+            json!({ "github_installation_id": seeded.installation }),
+        )
+        .await;
+
+    assert_disconnected(&refused);
+    assert_eq!(
+        harness
+            .stored_source(&tenant, source)
+            .await
+            .github_installation_id,
+        None,
+        "nothing is attached"
+    );
+    let credential = github_installations::credential(harness.pool(), seeded.installation)
+        .await
+        .expect("the installation is readable")
+        .expect("the installation is kept");
+    assert_eq!(credential.status(), InstallationStatus::Revoked);
 
     harness.discard(&[&tenant]).await;
 }
