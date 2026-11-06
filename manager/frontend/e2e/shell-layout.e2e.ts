@@ -1,6 +1,10 @@
 import type { Page, TestInfo } from '@playwright/test';
 import { expect, test } from './fixtures';
-import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
+import {
+  aiSettingsResponse,
+  setupAdminAuth,
+  setupCommonRoutes,
+} from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const timestamp = '2026-09-05T00:00:00Z';
@@ -46,8 +50,9 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
     },
   );
   await routeApi(page, /\/settings\/ai/, async (route) => {
+    const path = new URL(route.request().url()).pathname;
     await route.fulfill({
-      json: {
+      json: aiSettingsResponse(path, {
         provider: 'self_hosted',
         has_litellm_key: false,
         litellm_host: null,
@@ -57,7 +62,7 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
         anthropic_base_url: null,
         has_runpod_api_key: false,
         bedrock_region: null,
-        bedrock_use_iam_role: null,
+        bedrock_use_iam_role: false,
         has_bedrock_credentials: false,
         model_fast: 'llama3.1:8b',
         model_reasoning: 'deepseek-r1:7b',
@@ -66,10 +71,7 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
         model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
         model_audio: 'ace_step_v1_3.5b.safetensors',
         completions_routed: true,
-        overrides: false,
-        inherits_provider: true,
-        organization_keys: { litellm: false, openai: false, anthropic: false },
-      },
+      }),
     });
   });
   await routeApi(
