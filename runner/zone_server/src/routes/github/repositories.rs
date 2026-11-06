@@ -10,7 +10,6 @@ use axum::Json;
 use axum::extract::rejection::{PathRejection, QueryRejection};
 use axum::extract::{Path, Query, State};
 use futures::future::join_all;
-use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -25,8 +24,6 @@ const DEFAULT_PER_PAGE: u32 = 50;
 const MAX_PER_PAGE: u8 = 100;
 
 const BRANCH_PAGE_SIZE: NonZeroU8 = NonZeroU8::new(100).unwrap();
-
-const SCHEMES: [&str; 2] = ["http", "https"];
 
 const INVALID_PAGE: &str = "page must be 1 or more.";
 
@@ -89,20 +86,8 @@ pub struct Repository {
 }
 
 impl Repository {
-    /// `repository` as the picker shows it, or `None` when GitHub gave it no
-    /// absolute web address to link to.
-    fn addressable(installation_id: Uuid, repository: &InstalledRepository) -> Option<Self> {
-        let html_url = repository.html_url();
-        if !Url::parse(html_url).is_ok_and(|url| SCHEMES.contains(&url.scheme())) {
-            tracing::warn!(
-                installation = %installation_id,
-                repository = repository.id(),
-                "GitHub listed a repository without an absolute web address; it is left out"
-            );
-            return None;
-        }
-
-        Some(Self {
+    fn of(installation_id: Uuid, repository: &InstalledRepository) -> Self {
+        Self {
             installation_id,
             id: repository.id(),
             owner: repository.owner().to_string(),
@@ -111,8 +96,8 @@ impl Repository {
             private: repository.private(),
             archived: repository.archived(),
             default_branch: repository.default_branch().as_str().to_string(),
-            html_url: html_url.to_string(),
-        })
+            html_url: repository.html_url().to_string(),
+        }
     }
 }
 
@@ -265,16 +250,17 @@ pub async fn list(
     let mut rows = Vec::new();
     let mut listed_installations = Vec::with_capacity(installations.len());
     for (installation, outcome) in installations.into_iter().zip(outcomes) {
-        let error =
-            match outcome {
-                Ok(repositories) => {
-                    rows.extend(repositories.iter().filter_map(|repository| {
-                        Repository::addressable(installation.id, repository)
-                    }));
-                    None
-                }
-                Err(unlisted) => Some(unlisted),
-            };
+        let error = match outcome {
+            Ok(repositories) => {
+                rows.extend(
+                    repositories
+                        .iter()
+                        .map(|repository| Repository::of(installation.id, repository)),
+                );
+                None
+            }
+            Err(unlisted) => Some(unlisted),
+        };
         listed_installations.push(ListedInstallation {
             id: installation.id,
             account_login: installation.account_login,
@@ -304,16 +290,9 @@ async fn listed(
         InstallationStatus::Suspended => return Err(Unlisted::Suspended),
     }
 
-    let provider = state.github();
-    provider
-        .catalog()
-        .repositories(
-            provider,
-            state.db(),
-            organization_id,
-            installation.id,
-            refresh,
-        )
+    state
+        .github()
+        .repositories(state.db(), organization_id, installation.id, refresh)
         .await
         .map_err(|error| Unlisted::of(installation.id, &error))
 }
@@ -442,12 +421,12 @@ mod tests {
         ]
     }
 
-    fn installed(html_url: &str) -> InstalledRepository {
+    fn installed() -> InstalledRepository {
         InstalledRepository::new(
             42,
             pull_request::Repository::new("acme", "widgets").expect("repository"),
             RemoteBranchName::parse("trunk").expect("branch"),
-            html_url.to_string(),
+            "https://github.com/acme/widgets",
         )
         .with_private(true)
     }
@@ -544,10 +523,8 @@ mod tests {
     }
 
     #[test]
-    fn an_addressable_repository_carries_every_field() {
-        let repository =
-            Repository::addressable(INSTALLATION, &installed("https://github.com/acme/widgets"))
-                .expect("an absolute web address");
+    fn a_repository_carries_every_field() {
+        let repository = Repository::of(INSTALLATION, &installed());
 
         assert_eq!(
             repository,
@@ -563,33 +540,6 @@ mod tests {
                 html_url: "https://github.com/acme/widgets".to_string(),
             }
         );
-    }
-
-    #[test]
-    fn a_private_host_over_plain_http_is_addressable() {
-        assert!(
-            Repository::addressable(
-                INSTALLATION,
-                &installed("http://10.0.0.5:8080/acme/widgets")
-            )
-            .is_some()
-        );
-    }
-
-    #[test]
-    fn a_repository_without_an_absolute_web_address_is_left_out() {
-        for html_url in [
-            "",
-            "acme/widgets",
-            "/acme/widgets",
-            "ftp://github.com/acme/widgets",
-            "javascript:alert(1)",
-        ] {
-            assert!(
-                Repository::addressable(INSTALLATION, &installed(html_url)).is_none(),
-                "{html_url}"
-            );
-        }
     }
 
     #[test]
