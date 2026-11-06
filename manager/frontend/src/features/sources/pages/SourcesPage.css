@@ -270,7 +270,6 @@
 .source-github-connection {
   display: flex;
   flex-direction: column;
-  gap: var(--ui-space-2);
   margin-bottom: var(--ui-space-4);
   padding: var(--ui-space-3);
   background: var(--ui-bg-surface);
@@ -291,8 +290,25 @@
   min-width: 0;
 }
 
+.source-github-connection-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--ui-space-1);
+  flex-shrink: 0;
+}
+
+.source-github-connection-hint {
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
 .source-github-connection-unreachable {
   color: var(--ui-text-secondary);
+}
+
+.source-github-connection-unreachable:not(:empty) {
+  margin-top: var(--ui-space-2);
 }
 
 .skeleton-card {

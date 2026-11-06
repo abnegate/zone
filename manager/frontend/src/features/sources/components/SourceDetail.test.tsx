@@ -135,6 +135,19 @@ function connectionRegion() {
   return screen.getByRole('region', { name: 'GitHub connection' });
 }
 
+const UNREACHABLE_MESSAGE = 'No connected GitHub account can reach acme/api.';
+const TOKEN_REMOVAL_HINT = 'Your access token will be removed.';
+
+function connectionStatus() {
+  return within(connectionRegion()).getByRole('status');
+}
+
+async function unreachableStatus() {
+  const status = connectionStatus();
+  await waitFor(() => expect(status.textContent).toContain(UNREACHABLE_MESSAGE));
+  return status;
+}
+
 function accessTokenField() {
   return screen.queryByLabelText(/^Access Token/);
 }
@@ -225,6 +238,40 @@ describe('SourceDetail GitHub connection states', () => {
     expect(within(region).queryByRole('button', { name: 'Reconnect' })).toBeNull();
   });
 
+  it('warns that switching to the GitHub App removes the access token', () => {
+    renderDetail(gitHubSource({ github_installation_id: null, has_credentials: true }));
+
+    const button = within(connectionRegion()).getByRole('button', {
+      name: 'Switch to GitHub App',
+    });
+    const hintId = button.getAttribute('aria-describedby');
+    expect(hintId).toBeTruthy();
+    expect(document.getElementById(hintId ?? '')?.textContent).toBe(TOKEN_REMOVAL_HINT);
+    expect(within(connectionRegion()).getByText(TOKEN_REMOVAL_HINT)).toBeTruthy();
+  });
+
+  it('gives Reconnect no token removal hint', () => {
+    const sources = [
+      appSource({ github_installation_status: 'revoked' }),
+      appSource({ github_installation_status: 'suspended' }),
+      gitHubSource({ github_installation_id: null, has_credentials: false }),
+    ];
+    for (const source of sources) {
+      const { unmount } = renderDetail(source);
+
+      const button = within(connectionRegion()).getByRole('button', { name: 'Reconnect' });
+      expect(button.getAttribute('aria-describedby')).toBeNull();
+      expect(screen.queryByText(TOKEN_REMOVAL_HINT)).toBeNull();
+      unmount();
+    }
+  });
+
+  it('gives an app-backed source no token removal hint', () => {
+    renderDetail(appSource());
+
+    expect(screen.queryByText(TOKEN_REMOVAL_HINT)).toBeNull();
+  });
+
   it('treats a source without the credential field as token-backed, as older backends send', () => {
     renderDetail(gitHubSource());
 
@@ -281,7 +328,7 @@ describe('SourceDetail switching to the GitHub App', () => {
     expect(updateSource.mock.invocationCallOrder[0]).toBeLessThan(
       onSaved.mock.invocationCallOrder[0]
     );
-    expect(screen.queryByRole('status')).toBeNull();
+    expect(connectionStatus().textContent).toBe('');
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
@@ -356,14 +403,25 @@ describe('SourceDetail when no connected account reaches the repository', () => 
 
     fireEvent.click(screen.getByRole('button', { name: 'Switch to GitHub App' }));
 
-    const status = await screen.findByRole('status');
-    expect(status.textContent).toContain('No connected GitHub account can reach acme/api.');
+    const status = await unreachableStatus();
     const link = within(status).getByRole('link', { name: 'Connect GitHub' });
     expect(link.getAttribute('href')).toBe('/org-settings?tab=github');
     expect(within(status).queryByText('Ask an organization admin to connect GitHub.')).toBeNull();
     expectSearchFor('acme/api');
     expect(updateSource).not.toHaveBeenCalled();
     expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it('announces the message in a status region that was already rendered empty', async () => {
+    listRepositories.mockResolvedValue(unreachableResponse());
+    renderDetail(gitHubSource({ has_credentials: true }));
+    const initialStatus = connectionStatus();
+    expect(initialStatus.textContent).toBe('');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to GitHub App' }));
+
+    const status = await unreachableStatus();
+    expect(status).toBe(initialStatus);
   });
 
   it('links an owner to the GitHub settings', async () => {
@@ -373,7 +431,7 @@ describe('SourceDetail when no connected account reaches the repository', () => 
 
     fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
 
-    const status = await screen.findByRole('status');
+    const status = await unreachableStatus();
     expect(within(status).getByRole('link', { name: 'Connect GitHub' })).toBeTruthy();
     expect(updateSource).not.toHaveBeenCalled();
   });
@@ -386,8 +444,7 @@ describe('SourceDetail when no connected account reaches the repository', () => 
 
       fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
 
-      const status = await screen.findByRole('status');
-      expect(status.textContent).toContain('No connected GitHub account can reach acme/api.');
+      const status = await unreachableStatus();
       expect(within(status).getByText('Ask an organization admin to connect GitHub.')).toBeTruthy();
       expect(within(status).queryByRole('link')).toBeNull();
       expect(updateSource).not.toHaveBeenCalled();
@@ -400,8 +457,7 @@ describe('SourceDetail when no connected account reaches the repository', () => 
 
     fireEvent.click(screen.getByRole('button', { name: 'Reconnect' }));
 
-    const status = await screen.findByRole('status');
-    expect(status.textContent).toContain('No connected GitHub account can reach acme/api.');
+    const status = await unreachableStatus();
     expect(updateSource).not.toHaveBeenCalled();
   });
 
@@ -411,8 +467,7 @@ describe('SourceDetail when no connected account reaches the repository', () => 
 
     fireEvent.click(screen.getByRole('button', { name: 'Switch to GitHub App' }));
 
-    const status = await screen.findByRole('status');
-    expect(status.textContent).toContain('No connected GitHub account can reach acme/api.');
+    const status = await unreachableStatus();
     expect(within(status).getByText('Ask an organization admin to connect GitHub.')).toBeTruthy();
     expect(listRepositories).not.toHaveBeenCalled();
     expect(updateSource).not.toHaveBeenCalled();
@@ -429,7 +484,7 @@ describe('SourceDetail connection request errors', () => {
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toBe('Failed to load repositories');
     expect(updateSource).not.toHaveBeenCalled();
-    expect(screen.queryByRole('status')).toBeNull();
+    expect(connectionStatus().textContent).toBe('');
   });
 
   it('shows a failed update in the alert without calling onSaved', async () => {
