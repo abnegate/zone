@@ -31,10 +31,19 @@ macro_rules! columns {
     };
 }
 
+/// Matches the subagents that are still running. Spelled out rather than bound
+/// so the planner can match it to `chat_subagents_running_idx`'s predicate,
+/// which a parameter never proves.
+macro_rules! running {
+    () => {
+        "status = 'running'"
+    };
+}
+
 /// Stops the running subagents `$1`'s turns matching `$condition` left, fails
 /// their running steps with them, and selects each as a [`Stopped`], oldest
-/// first. `$3` to `$6` are the stopped and running subagent statuses and the
-/// failed and running step statuses.
+/// first. `$3` is the stopped subagent status, and `$4` and `$5` the failed and
+/// running step statuses.
 macro_rules! stop_running {
     ($condition:literal) => {
         concat!(
@@ -46,14 +55,16 @@ macro_rules! stop_running {
                         updated_at = clock_timestamp()
                   WHERE chat_id = $1 AND ",
             $condition,
-            " AND status = $4::text
+            " AND ",
+            running!(),
+            "
                  RETURNING *
              ),
              failed AS (
                  UPDATE chat_subagent_steps p
-                    SET status = $5::text
+                    SET status = $4::text
                    FROM stopped
-                  WHERE p.subagent_id = stopped.id AND p.status = $6::text
+                  WHERE p.subagent_id = stopped.id AND p.status = $5::text
                  RETURNING p.*
              )
              SELECT ",
@@ -70,6 +81,34 @@ macro_rules! stop_running {
         )
     };
 }
+
+const STOP: &str = stop_running!("message_id = $2");
+
+const STOP_OTHERS: &str = stop_running!("message_id IS DISTINCT FROM $2");
+
+const ABANDON: &str = concat!(
+    "WITH stopped AS (
+         UPDATE chat_subagents s
+            SET status = $1::text,
+                finished_at = COALESCE(s.finished_at, clock_timestamp()),
+                revision = s.revision + 1,
+                updated_at = clock_timestamp()
+          WHERE s.",
+    running!(),
+    "
+            AND NOT EXISTS (
+                SELECT 1 FROM chat_turns t
+                 WHERE t.chat_id = s.chat_id AND t.id = s.message_id AND t.status = $2::text)
+         RETURNING s.id
+     ),
+     failed AS (
+         UPDATE chat_subagent_steps p
+            SET status = $3::text
+           FROM stopped
+          WHERE p.subagent_id = stopped.id AND p.status = $4::text
+     )
+     SELECT count(*) FROM stopped"
+);
 
 /// Records what `change` says about one subagent, creating its row the first
 /// time the chat hears of it. Its steps are [`record_steps`]'s to write.
@@ -273,13 +312,7 @@ pub async fn stop<'e, E>(executor: E, chat_id: Uuid, message_id: Uuid) -> DbResu
 where
     E: Executor<'e, Database = Postgres>,
 {
-    stop_matching(
-        executor,
-        stop_running!("message_id = $2"),
-        chat_id,
-        message_id,
-    )
-    .await
+    stop_matching(executor, STOP, chat_id, message_id).await
 }
 
 /// Stops the subagents any turn of `chat_id` other than `message_id` left
@@ -302,13 +335,7 @@ pub async fn stop_others<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
-    stop_matching(
-        executor,
-        stop_running!("message_id IS DISTINCT FROM $2"),
-        chat_id,
-        message_id,
-    )
-    .await
+    stop_matching(executor, STOP_OTHERS, chat_id, message_id).await
 }
 
 async fn stop_matching<'e, E>(
@@ -324,7 +351,6 @@ where
         .bind(chat_id)
         .bind(message_id)
         .bind(SubagentStatus::Stopped.as_str())
-        .bind(SubagentStatus::Running.as_str())
         .bind(StepStatus::Failed.as_str())
         .bind(StepStatus::Running.as_str())
         .fetch_all(executor)
@@ -339,34 +365,13 @@ pub async fn abandon<'e, E>(executor: E) -> DbResult<i64>
 where
     E: Executor<'e, Database = Postgres>,
 {
-    sqlx::query_scalar(
-        "WITH stopped AS (
-             UPDATE chat_subagents s
-                SET status = $1::text,
-                    finished_at = COALESCE(s.finished_at, clock_timestamp()),
-                    revision = s.revision + 1,
-                    updated_at = clock_timestamp()
-              WHERE s.status = $2::text
-                AND NOT EXISTS (
-                    SELECT 1 FROM chat_turns t
-                     WHERE t.chat_id = s.chat_id AND t.id = s.message_id AND t.status = $3::text)
-             RETURNING s.id
-         ),
-         failed AS (
-             UPDATE chat_subagent_steps p
-                SET status = $4::text
-               FROM stopped
-              WHERE p.subagent_id = stopped.id AND p.status = $5::text
-         )
-         SELECT count(*) FROM stopped",
-    )
-    .bind(SubagentStatus::Stopped.as_str())
-    .bind(SubagentStatus::Running.as_str())
-    .bind(TURN_RUNNING)
-    .bind(StepStatus::Failed.as_str())
-    .bind(StepStatus::Running.as_str())
-    .fetch_one(executor)
-    .await
+    sqlx::query_scalar(ABANDON)
+        .bind(SubagentStatus::Stopped.as_str())
+        .bind(TURN_RUNNING)
+        .bind(StepStatus::Failed.as_str())
+        .bind(StepStatus::Running.as_str())
+        .fetch_one(executor)
+        .await
 }
 
 /// Removes the subagents message `message_id` of `chat_id` started, with

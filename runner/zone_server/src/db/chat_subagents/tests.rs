@@ -1,4 +1,4 @@
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use super::*;
 use crate::db::chats::create_chat;
@@ -674,4 +674,32 @@ async fn removing_a_messages_subagents_takes_their_steps_and_leaves_the_rest() {
             .await
             .expect("the count");
     assert_eq!(orphans, 0);
+}
+
+async fn generic_plan(pool: &PgPool, statement: &str) -> String {
+    let mut transaction = pool.begin().await.expect("a transaction");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *transaction)
+        .await
+        .expect("sequential scans off");
+    let rows = sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (GENERIC_PLAN) {statement}"
+    )))
+    .fetch_all(&mut *transaction)
+    .await
+    .expect("the plan");
+    let lines: Vec<String> = rows.iter().map(|row| row.get(0)).collect();
+    lines.join("\n")
+}
+
+#[tokio::test]
+async fn the_running_sweeps_can_use_the_running_index_whatever_they_are_bound_to() {
+    let pool = pool().await;
+    for statement in [STOP, STOP_OTHERS, ABANDON] {
+        let plan = generic_plan(&pool, statement).await;
+        assert!(
+            plan.contains("chat_subagents_running_idx"),
+            "a sweep's generic plan should reach the running index:\n{plan}"
+        );
+    }
 }
