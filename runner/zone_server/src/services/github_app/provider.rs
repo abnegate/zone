@@ -1,7 +1,7 @@
 use std::fmt;
 use std::future::Future;
 use std::num::{NonZeroU8, NonZeroU32};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
 use abnegate_secret::{MasterKey, SecretValue, decrypt_value, encrypt_value, is_encrypted};
@@ -63,6 +63,7 @@ enum Standing {
 pub struct Provider {
     github: Result<GitHub, ApplicationError>,
     cache: TokenCache,
+    exchange: Mutex<()>,
     flights: Flights<InstallationId, Mint>,
     catalog: Catalog,
     master_key: Arc<MasterKey>,
@@ -81,6 +82,7 @@ impl Provider {
         Self {
             github,
             cache: TokenCache::new(),
+            exchange: Mutex::default(),
             flights: Flights::default(),
             catalog: Catalog::default(),
             master_key,
@@ -173,9 +175,24 @@ impl Provider {
         let jwt = self.application_jwt(application, sealed_key)?;
         let token = issuer.issue(&jwt, installation).await?;
         let secret = token.secret().clone();
+        let _exchange = self.exchange();
         self.cache.insert(installation, token);
 
         Ok(secret)
+    }
+
+    fn exchange(&self) -> MutexGuard<'_, ()> {
+        self.exchange.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn discard(&self, installation: InstallationId, refused: &SecretValue) {
+        let _exchange = self.exchange();
+        if self
+            .cached(installation)
+            .is_some_and(|held| held == *refused)
+        {
+            self.cache.forget(installation);
+        }
     }
 
     fn cached(&self, installation: InstallationId) -> Option<SecretValue> {
@@ -299,12 +316,13 @@ impl Provider {
         let Some(scope) = credential.scope() else {
             return call(credential.into_secret()).await;
         };
-        let refused = match call(credential.into_secret()).await {
+        let presented = credential.into_secret();
+        let refused = match call(presented.clone()).await {
             Err(error) if error.unauthenticated() => error,
             answered => return answered,
         };
 
-        match self.refreshed(db, scope).await {
+        match self.refreshed(db, scope, &presented).await {
             Ok(fresh) => call(fresh.into_secret()).await,
             Err(error) if error.disconnects() => Err(E::from(error)),
             Err(error) => {
@@ -318,9 +336,14 @@ impl Provider {
         }
     }
 
-    async fn refreshed(&self, db: &PgPool, scope: Scope) -> Result<Credential, Error> {
+    async fn refreshed(
+        &self,
+        db: &PgPool,
+        scope: Scope,
+        refused: &SecretValue,
+    ) -> Result<Credential, Error> {
         let row = Self::connected(db, scope).await?;
-        self.invalidate(Self::installation_of(&row)?);
+        self.discard(Self::installation_of(&row)?, refused);
         self.minted(db, scope, &row).await
     }
 
@@ -483,6 +506,7 @@ mod tests {
     use abnegate_vcs::{BranchName, PullRequestError, PullRequestService, Repository};
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use futures::future::join_all;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{LazyLock, Mutex};
@@ -1640,6 +1664,37 @@ mod tests {
             matches!(error, Failure::Connection(Error::NotConnected)),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_refusals_of_one_token_remint_once() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        issuing_once(&server, connected.number, "ghs_first").await;
+        issuing(&server, connected.number, "ghs_second", 1).await;
+        let credential = connected.resolve().await.expect("mint");
+
+        let retried = join_all((0..4u64).map(|position| {
+            let credential = credential.clone();
+            let connected = &connected;
+            async move {
+                connected
+                    .provider
+                    .retrying(&connected.pool, credential, move |token| async move {
+                        if token.expose() == "ghs_first" {
+                            tokio::time::sleep(Duration::from_millis(100 * position)).await;
+                            return Err(Error::Application(ApplicationError::Status(401)));
+                        }
+                        Ok(token)
+                    })
+                    .await
+            }
+        }))
+        .await;
+
+        for outcome in retried {
+            assert_eq!(outcome.expect("retried").expose(), "ghs_second");
+        }
     }
 
     fn app_row(provider: &Provider, app_id: i64) -> AppRow {
