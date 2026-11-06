@@ -15,6 +15,10 @@ export interface Project {
   auto_paused_reason?: string | null;
   /** When every agentic task was merged, when it was. */
   auto_completed_at?: string | null;
+  /** Where the workspace placed the project in its own order, lowest first. */
+  position: number;
+  /** When a member last typed in the project's chats or added it a task. */
+  last_used_at?: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -13,6 +13,9 @@ export const ProjectSchema = z.object({
   auto: z.boolean().default(false),
   auto_paused_reason: z.string().nullish(),
   auto_completed_at: z.string().nullish(),
+  // Servers predating custom order list newest first and omit these.
+  position: z.number().int().default(0),
+  last_used_at: z.string().nullish(),
   created_at: z.string(),
   updated_at: z.string(),
 });

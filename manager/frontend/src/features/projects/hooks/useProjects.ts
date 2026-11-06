@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { projectsApi } from '../../../api/projects';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import type { CreateProjectRequest, ProjectStatus, UpdateProjectRequest } from '../types';
+import type { CreateProjectRequest, Project, ProjectStatus, UpdateProjectRequest } from '../types';
+import { applyOrder } from '../utils/order';
 
 export function useProjects(statusFilter?: ProjectStatus | 'all') {
   const queryClient = useQueryClient();
@@ -44,6 +45,32 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
     },
   });
 
+  const reorderProjectsMutation = useMutation({
+    mutationFn: (order: readonly string[]) => {
+      if (!workspaceId) {
+        return Promise.reject(new Error('No workspace selected'));
+      }
+      return projectsApi.reorderProjects(workspaceId, order);
+    },
+    onMutate: async (order) => {
+      const listed = { queryKey: ['projects', workspaceId] };
+      await queryClient.cancelQueries(listed);
+      const previous = queryClient.getQueriesData<Project[]>(listed);
+      queryClient.setQueriesData<Project[]>(listed, (current) =>
+        current ? applyOrder(current, order) : current
+      );
+      return { previous };
+    },
+    onError: (_error, _order, context) => {
+      for (const [key, data] of context?.previous ?? []) {
+        queryClient.setQueryData(key, data);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+    },
+  });
+
   const deleteProjectMutation = useMutation({
     mutationFn: (id: string) => projectsApi.deleteProject(id),
     onSuccess: () => {
@@ -59,6 +86,7 @@ export function useProjects(statusFilter?: ProjectStatus | 'all') {
     updateProject: (id: string, request: UpdateProjectRequest) =>
       updateProjectMutation.mutateAsync({ id, request }),
     deleteProject: deleteProjectMutation.mutateAsync,
+    reorderProjects: reorderProjectsMutation.mutateAsync,
     refetch,
   };
 }
