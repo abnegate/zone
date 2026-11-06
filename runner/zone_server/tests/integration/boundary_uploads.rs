@@ -1,25 +1,11 @@
 //! Upload boundaries: the name a client attaches to a clip is a label, not a
 //! destination, and the bytes are what decide whether it is media at all.
 
-use crate::common::{TestClient, test_config, test_email, test_password};
+use crate::common::{TestClient, test_config};
 use axum::http::StatusCode;
 use base64::Engine;
 use serde_json::json;
 use uuid::Uuid;
-
-async fn registered(client: &TestClient) -> String {
-    let registered = client
-        .post_json(
-            "/api/auth/register",
-            &json!({"email": test_email(), "password": test_password()}),
-        )
-        .await
-        .json_value();
-    registered["access_token"]
-        .as_str()
-        .unwrap_or_else(|| panic!("registration failed: {registered}"))
-        .to_string()
-}
 
 fn ffmpeg_installed() -> bool {
     std::process::Command::new("ffmpeg")
@@ -74,7 +60,7 @@ async fn a_submitted_clip_name_cannot_choose_where_the_clip_lands() {
     let mut config = test_config();
     config.comfyui.models_directory = root.clone();
     let client = TestClient::with_config(config).await;
-    let token = registered(&client).await;
+    let token = client.sign_in_with_role("admin").await;
 
     if !ffmpeg_installed() {
         eprintln!("skipping: ffmpeg is not installed");
@@ -152,7 +138,7 @@ async fn a_submitted_clip_name_cannot_choose_where_the_clip_lands() {
 #[tokio::test]
 async fn a_clip_that_is_not_media_is_refused() {
     let client = TestClient::with_db().await;
-    let token = registered(&client).await;
+    let token = client.sign_in_with_role("admin").await;
 
     for body in [
         json!({"filename": "clip.mp4", "bytes_base64": ""}),
@@ -167,6 +153,11 @@ async fn a_clip_that_is_not_media_is_refused() {
             StatusCode::OK,
             "{body} was accepted as a clip: {}",
             response.text()
+        );
+        assert_ne!(
+            response.status,
+            StatusCode::FORBIDDEN,
+            "{body} must reach the clip checks, not stop at authorization"
         );
     }
 }

@@ -17,6 +17,7 @@ import '../features/models/components/TrainDock.css';
 import '../features/models/components/Capabilities.css';
 import '../features/models/components/VirtualBrowseList.css';
 import '../features/models/components/FeaturesPanel.css';
+import '../features/models/components/ModelAccessNotice.css';
 import '../features/models/components/DropZone.css';
 import '../features/models/components/TrainPanel.css';
 import '../features/models/pages/ModelsPage.css';

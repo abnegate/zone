@@ -34,18 +34,7 @@ async fn encoded_model_names_reach_ollama_unchanged() {
         common::test_config_with_ollama_host(&provider.uri()),
         common::create_test_pool().await,
     ));
-    let registration = Request::builder()
-        .method("POST")
-        .uri("/api/auth/register")
-        .header("Content-Type", "application/json")
-        .body(Body::from(
-            json!({"email": common::test_email(), "password": common::test_password()}).to_string(),
-        ))
-        .unwrap();
-    let response = router.clone().oneshot(registration).await.unwrap();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let registration: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    let token = registration["access_token"].as_str().unwrap();
+    let token = common::sign_in_with_role(&router, "admin").await;
 
     for (operation, endpoint, expected) in [
         (
