@@ -267,6 +267,50 @@
   border-top: 1px solid var(--ui-border);
 }
 
+.source-github-connection {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: var(--ui-space-4);
+  padding: var(--ui-space-3);
+  background: var(--ui-bg-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-md);
+  font-size: var(--ui-text-sm);
+}
+
+.source-github-connection-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--ui-space-3);
+}
+
+.source-github-connection-summary p {
+  margin: 0;
+  min-width: 0;
+}
+
+.source-github-connection-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--ui-space-1);
+  flex-shrink: 0;
+}
+
+.source-github-connection-hint {
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-xs);
+}
+
+.source-github-connection-unreachable {
+  color: var(--ui-text-secondary);
+}
+
+.source-github-connection-unreachable:not(:empty) {
+  margin-top: var(--ui-space-2);
+}
+
 .skeleton-card {
   pointer-events: none;
 }

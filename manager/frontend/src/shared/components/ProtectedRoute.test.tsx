@@ -22,9 +22,10 @@ mock.module('react-router-dom', () => ({
 }));
 
 let ProtectedRoute: typeof import('./ProtectedRoute').default;
+let canManageOrganization: typeof import('./ProtectedRoute').canManageOrganization;
 
 beforeAll(async () => {
-  ProtectedRoute = (await import('./ProtectedRoute')).default;
+  ({ default: ProtectedRoute, canManageOrganization } = await import('./ProtectedRoute'));
 });
 
 afterAll(() => {
@@ -394,5 +395,17 @@ describe('ProtectedRoute', () => {
 
       expect(screen.getByTestId('protected-content')).toBeInTheDocument();
     });
+  });
+});
+
+describe('canManageOrganization', () => {
+  it('lets owners and admins manage the organization', () => {
+    expect(canManageOrganization('owner')).toBe(true);
+    expect(canManageOrganization('admin')).toBe(true);
+  });
+
+  it('keeps members and an unresolved role from managing it', () => {
+    expect(canManageOrganization('member')).toBe(false);
+    expect(canManageOrganization(undefined)).toBe(false);
   });
 });
