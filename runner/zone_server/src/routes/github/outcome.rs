@@ -108,6 +108,12 @@ mod tests {
             location(BASE, Outcome::Installed, Some(organization)),
             format!("{BASE}{SETTINGS_PATH}?github=installed&organization={organization}")
         );
-        assert!(!location(BASE, Outcome::Expired, None).contains("organization"));
+        let unnamed = Url::parse(&location(BASE, Outcome::Expired, None)).unwrap();
+        assert!(
+            unnamed
+                .query_pairs()
+                .all(|(name, _)| name != ORGANIZATION_PARAMETER),
+            "{unnamed}"
+        );
     }
 }
