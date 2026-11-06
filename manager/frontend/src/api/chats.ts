@@ -19,7 +19,7 @@ import {
   SUBAGENTS_LOAD_FAILED,
   SubagentStepsResponseSchema,
 } from '../features/chats/subagentSchemas';
-import type { ChatSubagent, SubagentStep } from '../features/chats/subagentTypes';
+import type { SubagentList, SubagentStep } from '../features/chats/subagentTypes';
 import type {
   Chat,
   ChatProviders,
@@ -263,14 +263,14 @@ class ChatsApi {
     return parse(ChatTasksResponseSchema, await response.json()).tasks;
   }
 
-  async getChatSubagents(chatId: string): Promise<ChatSubagent[]> {
+  async getChatSubagents(chatId: string): Promise<SubagentList> {
     const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/subagents`, {
       headers: this.getHeaders(),
     });
     if (!response.ok) {
       throw await ApiError.from(response, SUBAGENTS_LOAD_FAILED);
     }
-    return parse(ChatSubagentsResponseSchema, await response.json()).subagents;
+    return parse(ChatSubagentsResponseSchema, await response.json());
   }
 
   async getChatSubagentSteps(chatId: string, subagentId: string): Promise<SubagentStep[]> {

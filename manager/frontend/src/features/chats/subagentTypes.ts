@@ -39,6 +39,15 @@ export interface ChatSubagent {
   updated_at: string;
 }
 
+/**
+ * A chat's agents as one read listed them. A list read only in part adds and
+ * updates agents, but is no proof that any it lacks are gone.
+ */
+export interface SubagentList {
+  subagents: ChatSubagent[];
+  complete: boolean;
+}
+
 /** Asks the panel to reveal one subagent; a new nonce asks again for the same one. */
 export interface SubagentRequest {
   id: string;
