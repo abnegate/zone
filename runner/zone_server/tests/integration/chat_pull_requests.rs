@@ -1493,10 +1493,10 @@ async fn a_revoked_installation_never_falls_back_to_a_personal_access_token() {
         .expect(0)
         .mount(&github)
         .await;
+    let revoked = workspace.connect_installation(seeded.installation).await;
     github_installations::mark_revoked(workspace.state.db(), seeded.installation)
         .await
         .expect("the installation is revoked");
-    let revoked = workspace.connect_installation(seeded.installation).await;
     workspace.connect_github().await;
     let id = workspace
         .record_through(&link(&github, 12), Some(revoked))
@@ -1571,10 +1571,10 @@ async fn a_disconnected_installation_lists_its_pull_request_as_needing_github_ag
         .expect(0)
         .mount(&github)
         .await;
+    let revoked = workspace.connect_installation(seeded.installation).await;
     github_installations::mark_revoked(workspace.state.db(), seeded.installation)
         .await
         .expect("the installation is revoked");
-    let revoked = workspace.connect_installation(seeded.installation).await;
     workspace.connect_github().await;
     let id = workspace
         .record_through(&link(&github, 12), Some(revoked))

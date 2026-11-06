@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::auth::AuthUser;
 use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
-use crate::db::projects::{self, NewProject, ProjectRow, Reorder};
+use crate::db::projects::{self, LinkError, NewProject, ProjectRow, Reorder};
 use crate::db::{auto_projects, chats, sources, sync_config, workspace_members};
 use crate::error::ServerError;
 use crate::services::model::Model;
@@ -111,7 +111,11 @@ async fn attachable_installation(
     github_installations::attachable(state.db(), workspace_id, installation_id)
         .await?
         .map(|installation| installation.id)
-        .ok_or_else(|| ServerError::BadRequest(github_installations::UNATTACHABLE.to_string()))
+        .ok_or_else(unattachable)
+}
+
+fn unattachable() -> ServerError {
+    ServerError::BadRequest(github_installations::UNATTACHABLE.to_string())
 }
 
 /// The installations `ids` name, keyed by id, in one query.
@@ -668,18 +672,23 @@ pub async fn link_github(
             tracing::error!(%error, "Could not encrypt the repository token");
             ServerError::Internal(INTERNAL_ERROR.to_string())
         })?;
-    respond(
-        &state,
-        projects::link_github(
-            state.db(),
-            id,
-            &request.repo_url,
-            sealed.as_deref(),
-            installation,
-        )
-        .await?,
+    let linked = projects::link_github(
+        state.db(),
+        id,
+        &request.repo_url,
+        sealed.as_deref(),
+        installation,
     )
     .await
+    .map_err(link_refusal)?;
+    respond(&state, linked).await
+}
+
+fn link_refusal(error: LinkError) -> ServerError {
+    match error {
+        LinkError::Unattachable => unattachable(),
+        LinkError::Database(error) => ServerError::from(error),
+    }
 }
 
 /// DELETE /api/projects/:id/github
@@ -840,6 +849,18 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    #[test]
+    fn an_installation_refused_at_the_write_is_a_bad_request() {
+        assert!(matches!(
+            link_refusal(LinkError::Unattachable),
+            ServerError::BadRequest(message) if message == github_installations::UNATTACHABLE
+        ));
+        assert!(!matches!(
+            link_refusal(LinkError::Database(sqlx::Error::PoolTimedOut)),
+            ServerError::BadRequest(_)
+        ));
+    }
 
     fn row(github_installation_id: Option<Uuid>) -> ProjectRow {
         ProjectRow {

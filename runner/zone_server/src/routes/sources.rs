@@ -61,6 +61,10 @@ fn not_found() -> ServerError {
     ServerError::NotFound(SOURCE_NOT_FOUND.to_string())
 }
 
+fn unattachable() -> ServerError {
+    ServerError::BadRequest(github_installations::UNATTACHABLE.to_string())
+}
+
 fn encrypt_credentials(state: &AppState, credentials: &str) -> Result<String, ServerError> {
     encrypt_value(&SecretValue::new(credentials), state.master_key()).map_err(|error| {
         tracing::error!("Encryption failed: {}", error);
@@ -88,9 +92,7 @@ async fn validate_installation(
     }
     match github_installations::attachable(state.db(), workspace_id, installation).await {
         Ok(Some(_)) => Ok(()),
-        Ok(None) => Err(ServerError::BadRequest(
-            github_installations::UNATTACHABLE.to_string(),
-        )),
+        Ok(None) => Err(unattachable()),
         Err(error) => {
             tracing::error!(workspace_id = %workspace_id, installation = %installation, error = %error, "Database error checking GitHub installation");
             Err(internal())
@@ -192,9 +194,7 @@ impl CredentialFailure {
 
 fn installation_refusal(installation: Uuid, error: github_app::Error) -> ServerError {
     match CredentialFailure::of(&error) {
-        CredentialFailure::Disconnected => {
-            ServerError::BadRequest(github_installations::UNATTACHABLE.to_string())
-        }
+        CredentialFailure::Disconnected => unattachable(),
         CredentialFailure::AppRejected => {
             tracing::warn!(installation = %installation, error = %error, "GitHub refused the GitHub App's credentials");
             ServerError::BadRequest(APP_REJECTED.to_string())
@@ -705,9 +705,12 @@ pub async fn create(
         },
     )
     .await
-    .map_err(|error| {
-        tracing::error!(workspace_id = %workspace_id, name = %request.name, source_type = %request.source_type, error = %error, "Database error creating source");
-        internal()
+    .map_err(|error| match error {
+        UpdateError::Unattachable => unattachable(),
+        UpdateError::NotFound | UpdateError::Database(_) => {
+            tracing::error!(workspace_id = %workspace_id, name = %request.name, source_type = %request.source_type, error = %error, "Database error creating source");
+            internal()
+        }
     })?;
 
     if source.is_active.unwrap_or(true) {
@@ -805,9 +808,7 @@ pub async fn update(
     .await
     .map_err(|error| match error {
         UpdateError::NotFound => not_found(),
-        UpdateError::Unattachable => {
-            ServerError::BadRequest(github_installations::UNATTACHABLE.to_string())
-        }
+        UpdateError::Unattachable => unattachable(),
         UpdateError::Database(error) => {
             tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
             internal()

@@ -8,9 +8,11 @@ use std::fmt;
 use abnegate_secret::REDACTED;
 use chrono::NaiveDateTime;
 use sqlx::{PgConnection, PgPool};
+use thiserror::Error;
 use uuid::Uuid;
 
 use super::DbResult;
+use super::github_installations::UNATTACHABLE;
 
 pub use order::Reorder;
 
@@ -296,15 +298,35 @@ pub async fn delete_project(pool: &PgPool, id: Uuid) -> DbResult<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-/// Link a GitHub repository to a project
+#[derive(Debug, Error)]
+pub enum LinkError {
+    #[error("{UNATTACHABLE}")]
+    Unattachable,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+impl LinkError {
+    fn refused(error: sqlx::Error) -> Self {
+        match &error {
+            sqlx::Error::Database(database) if database.is_foreign_key_violation() => {
+                Self::Unattachable
+            }
+            _ => Self::Database(error),
+        }
+    }
+}
+
+/// Link a GitHub repository to a project. An installation outside the
+/// project's organization, revoked or suspended, links nothing.
 pub async fn link_github(
     pool: &PgPool,
     id: Uuid,
     repo_url: &str,
     access_token: Option<&str>,
     github_installation_id: Option<Uuid>,
-) -> DbResult<Option<ProjectRow>> {
-    sqlx::query_as!(
+) -> Result<Option<ProjectRow>, LinkError> {
+    let linked = sqlx::query_as!(
         ProjectRow,
         r#"
         UPDATE projects
@@ -313,6 +335,12 @@ pub async fn link_github(
             github_installation_id = $4,
             updated_at = NOW()
         WHERE id = $1
+          AND ($4::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM github_installations gi
+              JOIN workspaces w ON w.organization_id = gi.organization_id
+              WHERE gi.id = $4 AND w.id = projects.workspace_id
+                AND gi.revoked_at IS NULL AND gi.suspended_at IS NULL
+          ))
         RETURNING id, workspace_id, source_id, name, description, status,
                   github_repo_url, github_access_token, created_at, updated_at,
                   github_installation_id, "position"
@@ -324,6 +352,14 @@ pub async fn link_github(
     )
     .fetch_optional(pool)
     .await
+    .map_err(LinkError::refused)?;
+    if linked.is_some() || github_installation_id.is_none() {
+        return Ok(linked);
+    }
+    match get_project(pool, id).await? {
+        Some(_) => Err(LinkError::Unattachable),
+        None => Ok(None),
+    }
 }
 
 /// Unlink GitHub repository from a project

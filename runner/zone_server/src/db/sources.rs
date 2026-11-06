@@ -229,13 +229,20 @@ pub struct NewSource<'a> {
     pub github_installation_id: Option<Uuid>,
 }
 
-/// Create a new source
-pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> DbResult<SourceRow> {
+/// Create a new source. An installation outside the workspace's
+/// organization, revoked or suspended, creates nothing.
+pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<SourceRow, UpdateError> {
     sqlx::query_as::<_, SourceRow>(
         r#"
         INSERT INTO sources (workspace_id, name, source_type, config, description, url,
                              credentials_encrypted, github_installation_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        SELECT $1, $2, $3, $4, $5, $6, $7, $8
+        WHERE $8::uuid IS NULL OR EXISTS (
+            SELECT 1 FROM github_installations gi
+            JOIN workspaces w ON w.organization_id = gi.organization_id
+            WHERE gi.id = $8 AND w.id = $1
+              AND gi.revoked_at IS NULL AND gi.suspended_at IS NULL
+        )
         RETURNING id, name, source_type, config, credentials_encrypted, description, url,
                   is_active, last_verified_at, last_error, created_at, updated_at, workspace_id,
                   github_installation_id
@@ -249,8 +256,10 @@ pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> DbResult<Sou
     .bind(source.url)
     .bind(source.credentials_encrypted)
     .bind(source.github_installation_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
+    .map_err(refused_installation)?
+    .ok_or(UpdateError::Unattachable)
 }
 
 /// What an update changes; a field left `None` keeps its stored value.
@@ -711,6 +720,7 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::github_installations;
     use crate::db::organizations;
     use crate::db::users;
     use crate::db::workspaces;
@@ -927,6 +937,57 @@ mod tests {
                 .expect("the update");
             assert!(attached.is_none(), "{reason} installation was attached");
             assert_eq!(stored(&pool, &source).await.github_installation_id, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_installation_lost_after_the_check_creates_no_source() {
+        let pool = testing::pool().await;
+        let revoked = testing::installation(&pool).await;
+        let deleted = testing::installation(&pool).await;
+        for installation in [&revoked, &deleted] {
+            assert!(
+                github_installations::attachable(&pool, installation.workspace, installation.id)
+                    .await
+                    .expect("the check")
+                    .is_some()
+            );
+        }
+        revoke(&pool, revoked.id).await;
+        sqlx::query("DELETE FROM github_installations WHERE id = $1")
+            .bind(deleted.id)
+            .execute(&pool)
+            .await
+            .expect("the installation is deleted");
+
+        for (installation, reason) in [(&revoked, "a revoked"), (&deleted, "a deleted")] {
+            let name = format!("widgets-{}", Uuid::new_v4());
+            let created = create_source(
+                &pool,
+                NewSource {
+                    workspace_id: installation.workspace,
+                    name: &name,
+                    source_type: GITHUB,
+                    config: serde_json::json!({"owner": "acme", "repo": "widgets"}),
+                    description: None,
+                    url: None,
+                    credentials_encrypted: None,
+                    github_installation_id: Some(installation.id),
+                },
+            )
+            .await;
+
+            assert!(
+                matches!(created, Err(UpdateError::Unattachable)),
+                "{reason} installation must be refused, got {created:?}"
+            );
+            assert!(
+                list_sources(&pool, installation.workspace, None, None, 100, 0)
+                    .await
+                    .expect("the list")
+                    .is_empty(),
+                "{reason} installation created a source"
+            );
         }
     }
 

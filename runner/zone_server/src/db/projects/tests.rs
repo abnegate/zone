@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::db::actions::{self, StartTask};
+use crate::db::github_installations;
 use crate::db::sources::testing;
 use crate::db::tasks::Origin;
 use crate::db::workspace_members::{self, WorkspaceRole};
@@ -480,6 +481,77 @@ async fn linking_with_an_installation_stores_it_and_unlinking_clears_it() {
         .expect("the project");
     assert_eq!(unlinked.github_installation_id, None);
     assert_eq!(unlinked.github_repo_url, None);
+}
+
+#[tokio::test]
+async fn an_installation_lost_after_the_check_links_nothing() {
+    let pool = testing::pool().await;
+    let revoked = testing::installation(&pool).await;
+    let deleted = testing::installation(&pool).await;
+    let projects = [
+        widgets(&pool, revoked.workspace).await,
+        widgets(&pool, deleted.workspace).await,
+    ];
+    for installation in [&revoked, &deleted] {
+        assert!(
+            github_installations::attachable(&pool, installation.workspace, installation.id)
+                .await
+                .expect("the check")
+                .is_some()
+        );
+    }
+    sqlx::query("UPDATE github_installations SET revoked_at = NOW() WHERE id = $1")
+        .bind(revoked.id)
+        .execute(&pool)
+        .await
+        .expect("the installation is revoked");
+    sqlx::query("DELETE FROM github_installations WHERE id = $1")
+        .bind(deleted.id)
+        .execute(&pool)
+        .await
+        .expect("the installation is deleted");
+
+    for (project, installation, reason) in [
+        (&projects[0], &revoked, "a revoked"),
+        (&projects[1], &deleted, "a deleted"),
+    ] {
+        let linked = link_github(
+            &pool,
+            project.id,
+            "https://github.com/acme/widgets",
+            None,
+            Some(installation.id),
+        )
+        .await;
+
+        assert!(
+            matches!(linked, Err(LinkError::Unattachable)),
+            "{reason} installation must be refused, got {linked:?}"
+        );
+        let unchanged = get_project(&pool, project.id)
+            .await
+            .expect("the read")
+            .expect("the project");
+        assert_eq!(unchanged.github_installation_id, None, "{reason}");
+        assert_eq!(unchanged.github_repo_url, None, "{reason}");
+    }
+}
+
+#[tokio::test]
+async fn linking_a_missing_project_finds_nothing_rather_than_refusing() {
+    let pool = testing::pool().await;
+    let installation = testing::installation(&pool).await;
+
+    let linked = link_github(
+        &pool,
+        Uuid::new_v4(),
+        "https://github.com/acme/widgets",
+        None,
+        Some(installation.id),
+    )
+    .await;
+
+    assert!(matches!(linked, Ok(None)), "{linked:?}");
 }
 
 #[tokio::test]
