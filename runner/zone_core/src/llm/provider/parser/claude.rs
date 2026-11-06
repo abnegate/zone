@@ -1,10 +1,12 @@
 //! Reading `claude --output-format stream-json`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 use super::lenient;
 use crate::llm::provider::event::{AgentEvent, subject};
@@ -84,8 +86,16 @@ const AGENT_TASKS: [&str; 2] = ["local_agent", "remote_agent"];
 const COMPLETED: &str = "completed";
 
 /// The statuses of a call that only launched its subagent, which then runs on
-/// in the background or remotely and reports through task events instead.
-const LAUNCHED: [&str; 2] = ["async_launched", "remote_launched"];
+/// in the background, remotely or as a teammate and reports through task
+/// events instead.
+const LAUNCHED: [&str; 3] = ["async_launched", "remote_launched", "teammate_spawned"];
+
+/// What a report's JSON opens with. serde reads a struct from an array too,
+/// field by field in order, which would take a list's items for a report's.
+const OBJECT: char = '{';
+
+/// The `spawn_depth` of a subagent the main agent started itself.
+const TOP_LEVEL_DEPTH: u64 = 1;
 
 /// claude's words for where a task stands, as Zone's. A paused task is still
 /// the reader's to wait on, and a killed one was stopped.
@@ -166,53 +176,95 @@ impl ApiError {
     }
 }
 
+/// The kinds of line claude streams that Zone reads, by the `type` each
+/// names itself with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    System,
+    Assistant,
+    User,
+    Result,
+    RateLimit,
+}
+
+impl Kind {
+    const ALL: [Self; 5] = [
+        Self::System,
+        Self::Assistant,
+        Self::User,
+        Self::Result,
+        Self::RateLimit,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Assistant => "assistant",
+            Self::User => "user",
+            Self::Result => "result",
+            Self::RateLimit => "rate_limit_event",
+        }
+    }
+
+    fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == name)
+    }
+}
+
+/// A line's `type` alone, read before the rest so each kind is read straight
+/// into its own shape. serde reads an enum tagged inside the line by copying
+/// the whole line first, which would parse every tool's account of its call
+/// for nothing.
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum Event {
-    #[serde(rename = "system")]
-    System(Box<System>),
-    #[serde(rename = "assistant")]
-    Assistant {
-        #[serde(default)]
-        message: Option<AssistantMessage>,
-        #[serde(default)]
-        parent_tool_use_id: Option<String>,
-        #[serde(default)]
-        is_api_error_message: bool,
-        #[serde(default)]
-        api_error: Option<String>,
-    },
-    #[serde(rename = "user")]
-    User {
-        #[serde(default)]
-        message: Option<UserMessage>,
-        /// The tool's own account of the call the line returns, whose shape
-        /// is the tool's.
-        #[serde(default, alias = "toolUseResult")]
-        tool_use_result: Option<Value>,
-    },
-    #[serde(rename = "result")]
-    Result {
-        #[serde(default)]
-        subtype: Option<String>,
-        #[serde(default)]
-        is_error: bool,
-        #[serde(default)]
-        result: Option<String>,
-        #[serde(default)]
-        usage: Option<TokenCounts>,
-        #[serde(default, deserialize_with = "lenient")]
-        api_error_status: Option<u16>,
-        #[serde(default, rename = "modelUsage", deserialize_with = "lenient")]
-        model_usage: Option<BTreeMap<String, ModelUsage>>,
-    },
-    #[serde(rename = "rate_limit_event")]
-    RateLimit {
-        #[serde(default)]
-        rate_limit_info: Option<Info>,
-    },
-    #[serde(other)]
-    Ignored,
+struct Tagged<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Cow<'a, str>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Assistant {
+    #[serde(default)]
+    message: Option<AssistantMessage>,
+    #[serde(default)]
+    parent_tool_use_id: Option<String>,
+    #[serde(default)]
+    is_api_error_message: bool,
+    #[serde(default)]
+    api_error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct User {
+    #[serde(default)]
+    message: Option<UserMessage>,
+    /// The tool's own account of the call the line returns, whose shape is
+    /// the tool's. Only a subagent's report is ever read from it, so it is
+    /// left unparsed until it is one.
+    #[serde(default, alias = "toolUseResult")]
+    tool_use_result: Option<Box<RawValue>>,
+}
+
+/// The line that ends a turn.
+#[derive(Debug, Deserialize)]
+struct Outcome {
+    #[serde(default)]
+    subtype: Option<String>,
+    #[serde(default)]
+    is_error: bool,
+    #[serde(default)]
+    result: Option<String>,
+    #[serde(default)]
+    usage: Option<TokenCounts>,
+    #[serde(default, deserialize_with = "lenient")]
+    api_error_status: Option<u16>,
+    #[serde(default, rename = "modelUsage", deserialize_with = "lenient")]
+    model_usage: Option<BTreeMap<String, ModelUsage>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RateLimit {
+    #[serde(default)]
+    rate_limit_info: Option<Info>,
 }
 
 /// A system line: the one that opens the turn, or news of a task claude runs
@@ -248,6 +300,24 @@ struct System {
     status: Option<String>,
     #[serde(deserialize_with = "lenient")]
     patch: Option<Patch>,
+    /// Whether a subagent, rather than the main agent, started the task.
+    #[serde(deserialize_with = "lenient")]
+    owned_by_subagent: Option<bool>,
+    /// How deep a subagent's task is nested: [`TOP_LEVEL_DEPTH`] for one the
+    /// main agent started, one more for each subagent between them.
+    #[serde(deserialize_with = "lenient")]
+    spawn_depth: Option<u64>,
+}
+
+impl System {
+    /// Whether the task belongs to an agent a subagent started, which the
+    /// main agent never did.
+    fn nested(&self) -> bool {
+        self.owned_by_subagent == Some(true)
+            || self
+                .spawn_depth
+                .is_some_and(|depth| depth > TOP_LEVEL_DEPTH)
+    }
 }
 
 /// What a task has spent so far.
@@ -571,49 +641,75 @@ pub struct Reader {
     /// The call that started each subagent's task, by task id: claude names
     /// only the task on some of its news of one.
     tasks: HashMap<String, String>,
+    /// The subagent the main agent started that each agent a subagent
+    /// started descends from, by the id of the call that started it. A
+    /// nested agent's calls are steps of that subagent's run.
+    nested: HashMap<String, String>,
+    /// The subagents whose call returned their full report, which the
+    /// shorter summary of a later task event must not replace.
+    concluded: HashSet<String>,
 }
 
 impl Reader {
     pub fn interpret(&mut self, line: &str, events: &mut Vec<AgentEvent>) {
-        let Ok(event) = serde_json::from_str::<Event>(line.trim()) else {
+        let line = line.trim();
+        let Some(kind) = serde_json::from_str::<Tagged>(line)
+            .ok()
+            .and_then(|tagged| Kind::named(&tagged.kind))
+        else {
             return;
         };
 
-        match event {
-            Event::System(system) => self.system(*system, events),
-            Event::Assistant {
-                message,
-                parent_tool_use_id: Some(parent),
-                ..
-            } => self.subagent(&parent, message, events),
-            Event::Assistant {
-                message,
-                parent_tool_use_id: None,
-                is_api_error_message,
-                api_error,
-            } => self.assistant(message, is_api_error_message, api_error.as_deref(), events),
-            Event::User {
-                message,
-                tool_use_result,
-            } => self.returned(message, tool_use_result.as_ref(), events),
-            Event::Result {
-                subtype,
-                is_error,
-                result,
-                usage,
-                api_error_status,
-                model_usage,
-            } => {
-                events.extend(self.occupancy(model_usage).map(AgentEvent::Occupancy));
-                self.result(subtype, is_error, result, usage, api_error_status, events);
+        match kind {
+            Kind::System => {
+                if let Ok(system) = serde_json::from_str::<System>(line) {
+                    self.system(system, events);
+                }
             }
-            Event::RateLimit {
-                rate_limit_info: Some(info),
-            } => self.observe(&info, events),
-            Event::RateLimit {
-                rate_limit_info: None,
+            Kind::Assistant => {
+                let Ok(assistant) = serde_json::from_str::<Assistant>(line) else {
+                    return;
+                };
+                match assistant.parent_tool_use_id {
+                    Some(parent) => self.subagent(&parent, assistant.message, events),
+                    None => self.assistant(
+                        assistant.message,
+                        assistant.is_api_error_message,
+                        assistant.api_error.as_deref(),
+                        events,
+                    ),
+                }
             }
-            | Event::Ignored => {}
+            Kind::User => {
+                if let Ok(user) = serde_json::from_str::<User>(line) {
+                    self.returned(user.message, user.tool_use_result.as_deref(), events);
+                }
+            }
+            Kind::Result => {
+                let Ok(outcome) = serde_json::from_str::<Outcome>(line) else {
+                    return;
+                };
+                events.extend(
+                    self.occupancy(outcome.model_usage)
+                        .map(AgentEvent::Occupancy),
+                );
+                self.result(
+                    outcome.subtype,
+                    outcome.is_error,
+                    outcome.result,
+                    outcome.usage,
+                    outcome.api_error_status,
+                    events,
+                );
+            }
+            Kind::RateLimit => {
+                if let Ok(RateLimit {
+                    rate_limit_info: Some(info),
+                }) = serde_json::from_str::<RateLimit>(line)
+                {
+                    self.observe(&info, events);
+                }
+            }
         }
     }
 
@@ -641,9 +737,16 @@ impl Reader {
     }
 
     /// A task claude started, a subagent when it is of an agent's kind, or
-    /// of no kind and started by a call already known to start one.
+    /// of no kind and started by a call already known to start one. An agent
+    /// a subagent started is none: its calls are its root subagent's steps.
     fn begun(&mut self, task: System) -> Option<Subagent> {
+        if task.nested() {
+            return None;
+        }
         let id = task.tool_use_id.filter(|id| !id.is_empty())?;
+        if self.nested.contains_key(&id) {
+            return None;
+        }
         let agent = match task.task_type.as_deref() {
             Some(kind) => AGENT_TASKS.contains(&kind),
             None => self.subagents.contains_key(&id),
@@ -676,7 +779,7 @@ impl Reader {
             duration_ms: usage.duration_ms,
             tokens: usage.total_tokens,
             last_tool: shown(task.last_tool_name),
-            summary: shown(task.summary),
+            summary: self.summary(&id, task.summary),
             ..Subagent::new(id)
         })
     }
@@ -704,9 +807,19 @@ impl Reader {
             tool_uses: usage.tool_uses,
             duration_ms: usage.duration_ms,
             tokens: usage.total_tokens,
-            summary: shown(task.summary),
+            summary: self.summary(&id, task.summary),
             ..Subagent::new(id)
         })
+    }
+
+    /// A task event's `summary` of subagent `id`, unless its call already
+    /// returned the full report: claude falls back to the task's description
+    /// for a summary it has none of.
+    fn summary(&self, id: &str, summary: Option<String>) -> Option<String> {
+        if self.concluded.contains(id) {
+            return None;
+        }
+        shown(summary)
     }
 
     /// The subagent news of a task is about: the call that started it, named
@@ -818,32 +931,49 @@ impl Reader {
     /// API errors stay there: claude hands a failure to the main agent as the
     /// result of the call that started the subagent. What it reaches for is
     /// a step of its own run, and still the turn's work for whoever observes
-    /// the turn's tools.
+    /// the turn's tools. An agent nested inside it is a step too, and its
+    /// own calls steps of the same run. A call by an agent no known subagent
+    /// descends from is no step of any.
     fn subagent(
         &mut self,
         parent: &str,
         message: Option<AssistantMessage>,
         events: &mut Vec<AgentEvent>,
     ) {
+        let root = self.root(parent);
         let calls = message
             .into_iter()
             .flat_map(|message| message.content)
             .filter_map(Block::call);
         for call in calls {
-            self.steps.insert(call.id.clone(), parent.to_string());
-            events.push(AgentEvent::Subagent(stepped(
-                parent,
-                &call,
-                StepStatus::Running,
-            )));
+            if let Some(root) = &root {
+                if AGENT_TOOLS.contains(&call.function.name.as_str()) {
+                    self.nested.insert(call.id.clone(), root.clone());
+                }
+                self.steps.insert(call.id.clone(), root.clone());
+                events.push(AgentEvent::Subagent(stepped(
+                    root,
+                    &call,
+                    StepStatus::Running,
+                )));
+            }
             self.calls.insert(call.id.clone(), call);
         }
+    }
+
+    /// The subagent the main agent started that the agent `parent` names is,
+    /// or descends from.
+    fn root(&self, parent: &str) -> Option<String> {
+        if self.subagents.contains_key(parent) {
+            return Some(parent.to_string());
+        }
+        self.nested.get(parent).cloned()
     }
 
     fn returned(
         &mut self,
         message: Option<UserMessage>,
-        report: Option<&Value>,
+        report: Option<&RawValue>,
         events: &mut Vec<AgentEvent>,
     ) {
         let results = message
@@ -887,11 +1017,13 @@ impl Reader {
         id: &str,
         text: &str,
         is_error: bool,
-        report: Option<&Value>,
+        report: Option<&RawValue>,
     ) -> Option<Subagent> {
         let background = *self.subagents.get(id)?;
-        let report = report
-            .and_then(|report| Report::deserialize(report).ok())
+        let report: Report = report
+            .map(|report| report.get().trim_start())
+            .filter(|report| report.starts_with(OBJECT))
+            .and_then(|report| serde_json::from_str(report).ok())
             .unwrap_or_default();
         let mut update = Subagent {
             model: shown(report.model),
@@ -908,6 +1040,7 @@ impl Reader {
                 update.background = Some(true);
             }
             Some(COMPLETED) => {
+                self.concluded.insert(id.to_string());
                 update.status = Some(SubagentStatus::Completed);
                 update.tool_uses = report.tool_uses;
                 update.duration_ms = report.duration_ms;
@@ -915,6 +1048,7 @@ impl Reader {
                 update.summary = shown(Some(text));
             }
             None if !background => {
+                self.concluded.insert(id.to_string());
                 update.status = Some(SubagentStatus::Completed);
                 update.summary = shown(Some(text));
             }
@@ -2886,5 +3020,311 @@ mod tests {
             }]
         );
         assert!(updates(&events, "elsewhere").is_empty());
+    }
+
+    #[test]
+    fn a_call_that_spawned_a_teammate_only_launched_its_subagent() {
+        let events = interpret_all(&stream(&[
+            delegated("sonnet").to_string(),
+            returned_to(
+                AGENT_CALL,
+                "Spawned successfully.",
+                false,
+                json!({"status": "teammate_spawned", "agentId": "a1"}),
+            ),
+        ]));
+
+        assert_eq!(
+            last_update(&events, AGENT_CALL),
+            Some(&Subagent {
+                background: Some(true),
+                ..Subagent::new(AGENT_CALL)
+            })
+        );
+    }
+
+    /// claude's notification falls back to the task's description for its
+    /// summary, which must not replace the report the call returned.
+    #[test]
+    fn a_task_event_never_replaces_the_report_its_subagents_call_returned() {
+        let events = interpret_all(&stream(&[
+            delegated("sonnet").to_string(),
+            begun(),
+            task(
+                "task_progress",
+                json!({"task_id": TASK, "summary": "Reading the diff", "usage": {"tool_uses": 1}}),
+            ),
+            returned_to(
+                AGENT_CALL,
+                "The change is sound.",
+                false,
+                json!({"status": "completed", "totalToolUseCount": 3}),
+            ),
+            task(
+                "task_progress",
+                json!({"task_id": TASK, "summary": "Wrapping up", "usage": {"tool_uses": 3}}),
+            ),
+            task(
+                "task_notification",
+                json!({
+                    "task_id": TASK,
+                    "status": "completed",
+                    "summary": "Ask for a review",
+                    "usage": {"total_tokens": 500, "tool_uses": 3, "duration_ms": 9000},
+                }),
+            ),
+        ]));
+
+        let summaries: Vec<&str> = updates(&events, AGENT_CALL)
+            .into_iter()
+            .filter_map(|update| update.summary.as_deref())
+            .collect();
+        assert_eq!(summaries, ["Reading the diff", "The change is sound."]);
+        assert_eq!(
+            last_update(&events, AGENT_CALL),
+            Some(&Subagent {
+                status: Some(SubagentStatus::Completed),
+                tool_uses: Some(3),
+                duration_ms: Some(9000),
+                tokens: Some(500),
+                ..Subagent::new(AGENT_CALL)
+            })
+        );
+    }
+
+    const NESTED_CALL: &str = "toolu_10Nested";
+    const NESTED_TASK: &str = "n1";
+
+    /// `line` as claude writes it for the agent `parent` names.
+    fn within(parent: &str, mut line: Value) -> Value {
+        line["parent_tool_use_id"] = parent.into();
+        line
+    }
+
+    fn steps(events: &[AgentEvent]) -> Vec<(&str, &str, StepStatus)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Subagent(Subagent {
+                    id,
+                    step: Some(step),
+                    ..
+                }) => Some((id.as_str(), step.id.as_str(), step.status)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn subagent_ids(events: &[AgentEvent]) -> std::collections::BTreeSet<&str> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Subagent(subagent) => Some(subagent.id.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// An agent a subagent started is a step of that subagent's run, as is
+    /// everything it reaches for, and its own task news is none of the
+    /// reader's: the main agent never started it.
+    #[test]
+    fn an_agent_a_subagent_started_rolls_up_into_the_subagent_the_main_agent_started() {
+        let events = interpret_all(&stream(&[
+            delegated("sonnet").to_string(),
+            begun(),
+            within(
+                AGENT_CALL,
+                called(
+                    NESTED_CALL,
+                    "Agent",
+                    json!({"description": "Dig deeper", "subagent_type": "Explore"}),
+                ),
+            )
+            .to_string(),
+            task(
+                "task_started",
+                json!({
+                    "task_id": NESTED_TASK,
+                    "tool_use_id": NESTED_CALL,
+                    "description": "Dig deeper",
+                    "task_type": "local_agent",
+                    "owned_by_subagent": true,
+                    "spawn_depth": 2,
+                }),
+            ),
+            within(
+                NESTED_CALL,
+                called("toolu_11Grep", "Grep", json!({"pattern": "fn main"})),
+            )
+            .to_string(),
+            task(
+                "task_progress",
+                json!({"task_id": NESTED_TASK, "tool_use_id": NESTED_CALL, "summary": "Digging"}),
+            ),
+            returned_to("toolu_11Grep", "src/main.rs", false, json!(null)),
+            task(
+                "task_notification",
+                json!({"task_id": NESTED_TASK, "tool_use_id": NESTED_CALL, "status": "completed", "summary": "Dug"}),
+            ),
+            returned_to(
+                NESTED_CALL,
+                "Found it.",
+                false,
+                json!({"status": "completed", "totalToolUseCount": 1}),
+            ),
+        ]));
+
+        assert_eq!(
+            subagent_ids(&events),
+            std::collections::BTreeSet::from([AGENT_CALL])
+        );
+        assert_eq!(
+            steps(&events),
+            [
+                (AGENT_CALL, NESTED_CALL, StepStatus::Running),
+                (AGENT_CALL, "toolu_11Grep", StepStatus::Running),
+                (AGENT_CALL, "toolu_11Grep", StepStatus::Succeeded),
+                (AGENT_CALL, NESTED_CALL, StepStatus::Succeeded),
+            ]
+        );
+        assert!(
+            updates(&events, AGENT_CALL)
+                .iter()
+                .all(|update| update.summary.is_none()
+                    && update.status != Some(SubagentStatus::Completed)),
+            "{events:?}"
+        );
+    }
+
+    /// claude marks an agent a subagent started either way, and either is
+    /// enough, even for a call the reader never saw made.
+    #[test]
+    fn a_task_claude_says_is_nested_is_never_a_subagent_of_the_main_agent() {
+        for nested in [
+            json!({"owned_by_subagent": true}),
+            json!({"spawn_depth": 2}),
+            json!({"owned_by_subagent": true, "spawn_depth": 3}),
+        ] {
+            let mut started = json!({
+                "task_id": NESTED_TASK,
+                "tool_use_id": NESTED_CALL,
+                "description": "Dig deeper",
+                "task_type": "local_agent",
+            });
+            for (field, value) in nested.as_object().expect("the nested fields") {
+                started[field] = value.clone();
+            }
+
+            let events = interpret_all(&stream(&[
+                task("task_started", started),
+                task(
+                    "task_notification",
+                    json!({"task_id": NESTED_TASK, "status": "completed", "summary": "Dug"}),
+                ),
+            ]));
+
+            assert!(subagent_ids(&events).is_empty(), "{nested}: {events:?}");
+        }
+
+        let events = interpret_all(&stream(&[
+            delegated("sonnet").to_string(),
+            task(
+                "task_started",
+                json!({
+                    "task_id": TASK,
+                    "tool_use_id": AGENT_CALL,
+                    "task_type": "local_agent",
+                    "owned_by_subagent": false,
+                    "spawn_depth": TOP_LEVEL_DEPTH,
+                }),
+            ),
+        ]));
+        assert_eq!(
+            updates(&events, AGENT_CALL).len(),
+            2,
+            "a task the main agent started is still news of its subagent: {events:?}"
+        );
+    }
+
+    /// A task claude names no depth for is still nested when the reader saw
+    /// a subagent make the call that started it.
+    #[test]
+    fn a_task_started_by_a_subagents_agent_call_is_nested_without_saying_so() {
+        let events = interpret_all(&stream(&[
+            delegated("sonnet").to_string(),
+            within(
+                AGENT_CALL,
+                called(NESTED_CALL, "Task", json!({"description": "Dig deeper"})),
+            )
+            .to_string(),
+            task(
+                "task_started",
+                json!({"task_id": NESTED_TASK, "tool_use_id": NESTED_CALL, "task_type": "local_agent"}),
+            ),
+        ]));
+
+        assert_eq!(
+            subagent_ids(&events),
+            std::collections::BTreeSet::from([AGENT_CALL])
+        );
+    }
+
+    #[test]
+    fn a_call_by_an_agent_no_known_subagent_descends_from_is_no_step() {
+        let events = interpret_all(&stream(&[
+            delegated("sonnet").to_string(),
+            within(
+                "toolu_99Unknown",
+                called("toolu_12Stray", "Read", json!({"file_path": "/w/x.rs"})),
+            )
+            .to_string(),
+            returned_to("toolu_12Stray", "fn x() {}", false, json!(null)),
+        ]));
+
+        assert_eq!(
+            subagent_ids(&events),
+            std::collections::BTreeSet::from([AGENT_CALL])
+        );
+        assert!(steps(&events).is_empty(), "{events:?}");
+        let observed: Vec<&str> = outputs(&events)
+            .iter()
+            .map(|output| output.call.function.name.as_str())
+            .collect();
+        assert_eq!(
+            observed,
+            ["Read"],
+            "the stray call is still the turn's work"
+        );
+    }
+
+    /// A subagent's report is read from the tool's account of its call only
+    /// when the call started one; any other account, of any shape, is left
+    /// unread.
+    #[test]
+    fn a_tools_account_of_its_call_is_read_only_for_a_subagent() {
+        let events = interpret_all(&stream(&[
+            called("toolu_20Read", "Read", json!({"file_path": "/w/a.rs"})).to_string(),
+            returned_to(
+                "toolu_20Read",
+                "fn a() {}",
+                false,
+                json!({"status": "completed", "file": {"content": "fn a() {}"}}),
+            ),
+            delegated("sonnet").to_string(),
+            returned_to(AGENT_CALL, "Done.", false, json!([1, "two", {"three": 3}])),
+        ]));
+
+        assert!(updates(&events, "toolu_20Read").is_empty(), "{events:?}");
+        assert_eq!(
+            last_update(&events, AGENT_CALL),
+            Some(&Subagent {
+                status: Some(SubagentStatus::Completed),
+                summary: Some("Done.".to_string()),
+                ..Subagent::new(AGENT_CALL)
+            }),
+            "an account in no report's shape reads as none"
+        );
+        assert_eq!(outputs(&events).len(), 2);
     }
 }
