@@ -305,10 +305,13 @@ fn threads_read() -> wiremock::MockBuilder {
         .and(path("/graphql"))
         .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
         .and(body_string_contains("reviewThreads"))
+        .and(|request: &wiremock::Request| {
+            !String::from_utf8_lossy(&request.body).contains("comments")
+        })
 }
 
 /// GitHub's page of pull request 12's review threads, one resolved for each
-/// `true` in `resolved`.
+/// `true` in `resolved`, read without their comments.
 fn threads_answer(resolved: &[bool]) -> ResponseTemplate {
     let nodes: Vec<Value> = resolved
         .iter()
@@ -317,10 +320,6 @@ fn threads_answer(resolved: &[bool]) -> ResponseTemplate {
             json!({
                 "id": format!("PRRT_{index}"),
                 "isResolved": resolved,
-                "isOutdated": false,
-                "path": "src/widgets.rs",
-                "line": 1,
-                "comments": {"nodes": []},
             })
         })
         .collect();
