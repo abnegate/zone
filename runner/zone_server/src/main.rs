@@ -6,14 +6,18 @@
 //! - Authentication via JWT
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use zone_context::context::ContextService;
 use zone_server::cache::Cache;
 use zone_server::config::Config;
+use zone_server::db::sealing::Options;
+use zone_server::db::sealing::Sealer;
 use zone_server::routes;
 use zone_server::services::embedding::{
     create_embedding_service, default_embedding_model, embedding_engine_from_env,
@@ -39,20 +43,23 @@ async fn main() {
     forbid_dumping();
 
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let migrate = migration_mode(&arguments).expect("Usage: zone-server [--migrate-only]");
-    if migrate {
-        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&url)
-            .await
-            .expect("Failed to connect to database");
-        zone_server::db::migrations::run(&pool)
-            .await
-            .expect("Failed to run migrations");
-        pool.close().await;
-        tracing::info!("Migrations complete");
-        return;
+    match mode(&arguments).expect(USAGE) {
+        Mode::Serve => {}
+        Mode::MigrateOnly => {
+            let url = std::env::var(DATABASE_URL).expect("DATABASE_URL is required");
+            let pool = PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await
+                .expect("Failed to connect to database");
+            zone_server::db::migrations::run(&pool)
+                .await
+                .expect("Failed to run migrations");
+            pool.close().await;
+            tracing::info!("Migrations complete");
+            return;
+        }
+        Mode::SealSecrets(options) => std::process::exit(seal_secrets(options).await),
     }
 
     tracing::info!("Starting Zone server...");
@@ -259,11 +266,109 @@ async fn main() {
     result.expect("Server error");
 }
 
-fn migration_mode(arguments: &[String]) -> Result<bool, &'static str> {
+const USAGE: &str =
+    "Usage: zone-server [--migrate-only | --seal-secrets [--dry-run] --backup <path>]";
+const DATABASE_URL: &str = "DATABASE_URL";
+const MIGRATE_ONLY: &str = "--migrate-only";
+const SEAL_SECRETS: &str = "--seal-secrets";
+const DRY_RUN: &str = "--dry-run";
+const BACKUP: &str = "--backup";
+const FLAG_PREFIX: &str = "--";
+const UNKNOWN_ARGUMENTS: &str = "Unknown server arguments";
+const SEALING_CONNECTIONS: u32 = 2;
+const FAILURE: i32 = 1;
+const SUCCESS: i32 = 0;
+
+/// What the server was started to do.
+#[derive(Debug, PartialEq)]
+enum Mode {
+    Serve,
+    MigrateOnly,
+    SealSecrets(Options),
+}
+
+fn mode(arguments: &[String]) -> Result<Mode, &'static str> {
     match arguments {
-        [] => Ok(false),
-        [argument] if argument == "--migrate-only" => Ok(true),
-        _ => Err("Unknown server arguments"),
+        [] => Ok(Mode::Serve),
+        [argument] if argument == MIGRATE_ONLY => Ok(Mode::MigrateOnly),
+        [first, rest @ ..] if first == SEAL_SECRETS => sealing(rest).map(Mode::SealSecrets),
+        _ => Err(UNKNOWN_ARGUMENTS),
+    }
+}
+
+fn sealing(arguments: &[String]) -> Result<Options, &'static str> {
+    let mut dry_run = false;
+    let mut backup: Option<PathBuf> = None;
+    let mut remaining = arguments.iter();
+    while let Some(argument) = remaining.next() {
+        match argument.as_str() {
+            DRY_RUN if !dry_run => dry_run = true,
+            BACKUP if backup.is_none() => {
+                let path = remaining
+                    .next()
+                    .filter(|path| !path.is_empty() && !path.starts_with(FLAG_PREFIX))
+                    .ok_or(UNKNOWN_ARGUMENTS)?;
+                backup = Some(PathBuf::from(path));
+            }
+            _ => return Err(UNKNOWN_ARGUMENTS),
+        }
+    }
+    backup
+        .map(|backup| Options::new(dry_run, backup))
+        .ok_or(UNKNOWN_ARGUMENTS)
+}
+
+/// Seal stored credentials behind a verified backup, printing the report. The exit status
+/// is non-zero when the run could not start or finish, or an envelope failed to reopen.
+async fn seal_secrets(options: Options) -> i32 {
+    let Ok(url) = std::env::var(DATABASE_URL) else {
+        eprintln!("DATABASE_URL is required");
+        return FAILURE;
+    };
+    let passphrase = match Config::encryption_key_from_env() {
+        Ok(passphrase) => passphrase,
+        Err(error) => {
+            eprintln!("{error}");
+            return FAILURE;
+        }
+    };
+    let key = match zone_server::secret::derive(&passphrase) {
+        Ok(key) => key,
+        Err(error) => {
+            eprintln!("ENCRYPTION_KEY does not derive a key: {error}");
+            return FAILURE;
+        }
+    };
+    let pool = match PgPoolOptions::new()
+        .max_connections(SEALING_CONNECTIONS)
+        .connect(&url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(error) => {
+            eprintln!("Failed to connect to database: {error}");
+            return FAILURE;
+        }
+    };
+
+    let result = Sealer::new(pool.clone(), key, options).run().await;
+    pool.close().await;
+    match result {
+        Ok(report) => {
+            println!("{report}");
+            if report.is_clean() {
+                SUCCESS
+            } else {
+                eprintln!(
+                    "Some envelopes did not reopen as their credential; those rows are unchanged"
+                );
+                FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            FAILURE
+        }
     }
 }
 
@@ -282,14 +387,83 @@ fn forbid_dumping() {
 
 #[cfg(test)]
 mod tests {
-    use super::migration_mode;
+    use std::path::PathBuf;
+
+    use zone_server::db::sealing::Options;
+
+    use super::Mode;
+    use super::mode;
+
+    fn arguments(arguments: &[&str]) -> Vec<String> {
+        arguments
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect()
+    }
+
+    fn sealing(dry_run: bool) -> Mode {
+        Mode::SealSecrets(Options::new(dry_run, PathBuf::from("/backups/zone.dump")))
+    }
 
     #[test]
     fn migration_arguments_are_exact() {
-        assert_eq!(migration_mode(&[]), Ok(false));
-        assert_eq!(migration_mode(&["--migrate-only".into()]), Ok(true));
-        assert!(migration_mode(&["--migrate-only".into(), "extra".into()]).is_err());
-        assert!(migration_mode(&["--migrate".into()]).is_err());
+        assert_eq!(mode(&[]), Ok(Mode::Serve));
+        assert_eq!(mode(&arguments(&["--migrate-only"])), Ok(Mode::MigrateOnly));
+        assert!(mode(&arguments(&["--migrate-only", "extra"])).is_err());
+        assert!(mode(&arguments(&["--migrate"])).is_err());
+
+        assert_eq!(
+            mode(&arguments(&[
+                "--seal-secrets",
+                "--backup",
+                "/backups/zone.dump"
+            ])),
+            Ok(sealing(false))
+        );
+        assert_eq!(
+            mode(&arguments(&[
+                "--seal-secrets",
+                "--dry-run",
+                "--backup",
+                "/backups/zone.dump"
+            ])),
+            Ok(sealing(true))
+        );
+        assert_eq!(
+            mode(&arguments(&[
+                "--seal-secrets",
+                "--backup",
+                "/backups/zone.dump",
+                "--dry-run"
+            ])),
+            Ok(sealing(true))
+        );
+    }
+
+    #[test]
+    fn migration_arguments_refuse_a_seal_without_exactly_one_backup() {
+        for refused in [
+            &["--seal-secrets"][..],
+            &["--seal-secrets", "--dry-run"],
+            &["--seal-secrets", "--backup"],
+            &["--seal-secrets", "--backup", ""],
+            &["--seal-secrets", "--backup", "--dry-run"],
+            &[
+                "--seal-secrets",
+                "--dry-run",
+                "--dry-run",
+                "--backup",
+                "a.dump",
+            ],
+            &["--seal-secrets", "--backup", "a.dump", "--backup", "b.dump"],
+            &["--seal-secrets", "--seal-secrets", "--backup", "a.dump"],
+            &["--seal-secrets", "--backup", "a.dump", "--force"],
+            &["--seal-secrets", "--backup", "a.dump", "extra"],
+            &["--dry-run", "--seal-secrets", "--backup", "a.dump"],
+            &["--migrate-only", "--seal-secrets", "--backup", "a.dump"],
+        ] {
+            assert!(mode(&arguments(refused)).is_err(), "{refused:?}");
+        }
     }
 
     #[cfg(target_os = "linux")]
