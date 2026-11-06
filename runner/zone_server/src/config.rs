@@ -35,6 +35,9 @@ pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 /// The fewest bytes an `ENCRYPTION_KEY` may hold.
 pub const MINIMUM_ENCRYPTION_KEY_BYTES: usize = 32;
 
+/// The fewest bytes a `JWT_SECRET` may hold.
+pub const MINIMUM_JWT_SECRET_BYTES: usize = 32;
+
 /// The path GitHub Enterprise serves its REST API under.
 const GITHUB_VERSIONED_REST: [&str; 2] = ["api", "v3"];
 
@@ -75,7 +78,7 @@ pub struct Config {
     pub database_url: String,
     /// Redis URL
     pub redis_url: String,
-    /// JWT secret (must be at least 32 characters)
+    /// JWT secret, at least [`MINIMUM_JWT_SECRET_BYTES`] long
     pub jwt_secret: String,
     /// JWT access token lifetime in seconds (default: 900 = 15 minutes)
     pub jwt_access_lifetime: u64,
@@ -101,7 +104,7 @@ pub struct Config {
     pub huggingface_models_url: String,
     /// Optional HTTP proxy for remote model catalog searches.
     pub model_search_proxy_url: Option<String>,
-    /// Encryption key for source credentials (must be at least 32 characters)
+    /// Encryption key for source credentials, at least [`MINIMUM_ENCRYPTION_KEY_BYTES`] long
     pub encryption_key: String,
     /// Browser origins allowed to call the API, comma-separated. Entries may be
     /// full origins or bare hosts; a host also covers its subdomains.
@@ -1140,9 +1143,10 @@ impl Config {
         let encryption_key =
             env::var("ENCRYPTION_KEY").map_err(|_| ConfigError::Missing("ENCRYPTION_KEY"))?;
         if encryption_key.len() < MINIMUM_ENCRYPTION_KEY_BYTES {
-            return Err(ConfigError::Invalid(
-                "ENCRYPTION_KEY must be at least 32 characters",
-            ));
+            return Err(ConfigError::TooShort {
+                name: "ENCRYPTION_KEY",
+                minimum: MINIMUM_ENCRYPTION_KEY_BYTES,
+            });
         }
         Ok(encryption_key)
     }
@@ -1150,10 +1154,11 @@ impl Config {
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
         let jwt_secret = env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
-        if jwt_secret.len() < 32 {
-            return Err(ConfigError::Invalid(
-                "JWT_SECRET must be at least 32 characters",
-            ));
+        if jwt_secret.len() < MINIMUM_JWT_SECRET_BYTES {
+            return Err(ConfigError::TooShort {
+                name: "JWT_SECRET",
+                minimum: MINIMUM_JWT_SECRET_BYTES,
+            });
         }
 
         let encryption_key = Self::encryption_key_from_env()?;
@@ -1339,6 +1344,8 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("Invalid configuration: {0}")]
     Invalid(&'static str),
+    #[error("Invalid configuration: {name} must be at least {minimum} bytes")]
+    TooShort { name: &'static str, minimum: usize },
     #[error("Invalid configuration: GITHUB_API_URL is not a GitHub origin: {0}")]
     GitHubOrigin(PullRequestError),
 }
@@ -2094,24 +2101,24 @@ mod tests {
             Err(ConfigError::Missing("JWT_SECRET"))
         ));
         environment.set("JWT_SECRET", "short");
-        assert!(matches!(
-            Config::from_env(),
-            Err(ConfigError::Invalid(
-                "JWT_SECRET must be at least 32 characters"
-            ))
-        ));
+        assert_eq!(
+            Config::from_env()
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Err("Invalid configuration: JWT_SECRET must be at least 32 bytes".to_string())
+        );
         environment.set("JWT_SECRET", "12345678901234567890123456789012");
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Missing("ENCRYPTION_KEY"))
         ));
         environment.set("ENCRYPTION_KEY", "short");
-        assert!(matches!(
-            Config::from_env(),
-            Err(ConfigError::Invalid(
-                "ENCRYPTION_KEY must be at least 32 characters"
-            ))
-        ));
+        assert_eq!(
+            Config::from_env()
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Err("Invalid configuration: ENCRYPTION_KEY must be at least 32 bytes".to_string())
+        );
 
         environment.set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
         environment.set("DATABASE_URL", "postgres://database/zone");
