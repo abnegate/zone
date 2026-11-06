@@ -303,6 +303,14 @@ function boxOrder(container: Locator): Promise<string[]> {
     .evaluateAll((slots) => slots.map((slot) => (slot as HTMLElement).dataset.box ?? ''));
 }
 
+/**
+ * dnd-kit's keyboard sensor starts listening for arrow keys one task after the
+ * pick-up, so an arrow pressed sooner is lost. A task queued now runs after it.
+ */
+function keyboardSensorListening(page: Page): Promise<void> {
+  return page.evaluate(() => new Promise<void>((resolve) => setTimeout(resolve)));
+}
+
 async function openChat(page: Page) {
   await page.click('a[href="/chats"]');
   await page.click('.chat-item');
@@ -557,6 +565,7 @@ test.describe('Chat changes and gallery panel', () => {
     await grip.focus();
     await page.keyboard.press('Space');
     await expect(sheet.getByText('Picked up Changes, at position 1 of 3.')).toBeAttached();
+    await keyboardSensorListening(page);
     await page.keyboard.press('ArrowDown');
     await expect(sheet.getByText('Changes would move to position 2 of 3.')).toBeAttached();
     await page.keyboard.press('Escape');
@@ -569,6 +578,7 @@ test.describe('Chat changes and gallery panel', () => {
     await grip.focus();
     await page.keyboard.press('Space');
     await expect(sheet.getByText('Picked up Changes, at position 1 of 3.')).toBeAttached();
+    await keyboardSensorListening(page);
     await page.keyboard.press('ArrowDown');
     await expect(sheet.getByText('Changes would move to position 2 of 3.')).toBeAttached();
     await page.keyboard.press('ArrowDown');
