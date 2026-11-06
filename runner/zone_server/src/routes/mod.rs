@@ -430,6 +430,18 @@ pub fn create_router(state: AppState) -> Router {
             "/api/organizations/{org_id}/agents/{agent}/logins/{login_id}",
             delete(agents::sign_out_login),
         )
+        .route(
+            "/api/organizations/{org_id}/github/apps/{app_id}/installations",
+            post(github::installations::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/installations/sync",
+            post(github::installations::sync),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/installations/{id}",
+            delete(github::installations::delete),
+        )
         // Billing routes
         .route(
             "/api/organizations/{org_id}/subscription",
