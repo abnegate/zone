@@ -13,6 +13,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { BrowserRouter } from 'react-router-dom';
 import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
+import { RESPONDING } from '../components/Generation';
 import type {
   Chat,
   ChatProviderOffer,
@@ -25,7 +26,6 @@ import type {
   ReasoningEffort,
   UpdateChatRequest,
 } from '../types';
-import { RESPONDING } from '../components/Generation';
 import { CHAT_GROUP_STORAGE_KEY, CHAT_SORT_STORAGE_KEY } from '../utils/arrange';
 
 // Create mock functions
