@@ -402,6 +402,7 @@ impl WorkspaceAction {
                     scope.workspace_id,
                     scope.user_id,
                     scope.chat_id,
+                    scope.origin,
                     decode(params)?,
                 )
                 .await?;
@@ -462,6 +463,7 @@ impl WorkspaceAction {
                     scope.workspace_id,
                     scope.user_id,
                     scope.chat_id,
+                    scope.origin,
                     decode(params)?,
                 )
                 .await?;
@@ -528,6 +530,7 @@ mod tests {
                 chat_id: Some(Uuid::new_v4()),
                 user_id: Uuid::new_v4(),
                 offline: false,
+                origin: crate::db::tasks::Origin::Member,
             },
             action,
             wait_for: WaitFor::Offered,

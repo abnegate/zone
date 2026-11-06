@@ -23,6 +23,7 @@ use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
 use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
+use crate::db::tasks::Origin;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::backend;
 use crate::services::chat::driver::Driver;
@@ -358,6 +359,10 @@ pub async fn build(
         chat_id: Some(chat.id),
         user_id: user,
         offline: chat.offline,
+        origin: match &mode {
+            Mode::Generation(generation) => generation.origin,
+            Mode::Preview => Origin::Member,
+        },
     };
     let directory = match &mode {
         Mode::Generation(generation) => generation.directory.clone(),
