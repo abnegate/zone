@@ -18,6 +18,7 @@ use super::{Provider, webhook_path};
 use crate::db::projects;
 use crate::db::sync_config::{self, SyncConfigRow};
 use crate::secret::Unseal;
+use crate::services::github::Refusal;
 use crate::state::AppState;
 use uuid::Uuid;
 
@@ -47,7 +48,7 @@ pub enum HookError {
     #[error("the console URL {0} cannot receive webhooks")]
     Address(String),
 
-    #[error("GitHub refused: {0}")]
+    #[error("GitHub refused: {}", Refusal(.0))]
     GitHub(#[from] PullRequestError),
 
     #[error("the sync was removed while its webhook was being registered")]
@@ -303,5 +304,22 @@ async fn record(
     match sync_config::get_sync_config(state.db(), row.id).await? {
         Some(_) => Err(HookError::Changed),
         None => Err(HookError::Deleted),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_github_refusal_of_the_webhook_is_said_once_with_its_status() {
+        let error = HookError::from(PullRequestError::refused(
+            422,
+            "Validation Failed: Hook already exists on this repository",
+        ));
+        assert_eq!(
+            error.to_string(),
+            "GitHub refused: 422 Unprocessable Entity: Validation Failed: Hook already exists on this repository"
+        );
     }
 }
