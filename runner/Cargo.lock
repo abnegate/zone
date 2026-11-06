@@ -68,12 +68,13 @@ dependencies = [
 
 [[package]]
 name = "abnegate-http"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4d6865595b212641758029d3dd971b7752a279ddd48984cffbd4fd90d188cbb"
+checksum = "528c5a149eda5cc0c9b410db3ebf405d73822a6e4cba746838c5f3188f18d65d"
 dependencies = [
  "async-trait",
  "dashmap",
+ "httpdate",
  "rand 0.10.2",
  "reqwest 0.13.5",
  "serde",
@@ -95,9 +96,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-llm"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b196ea095b027c2af9c85c00f8020d8be75d607ac3cce7b1dad6e0ce1cbd897"
+checksum = "3e60c26567c35b3463de321053406660b77c25fdcf4a3d2132da25030ab14540"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
@@ -106,7 +107,9 @@ dependencies = [
  "chrono",
  "futures",
  "rand 0.10.2",
+ "regex",
  "reqwest 0.13.5",
+ "scraper",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -152,9 +155,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-secret"
-version = "0.1.6"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb5c48f1f7916c8dec8b4dfc5bd64ec04f84c9607fd07f9c020f9544f31b94c0"
+checksum = "e0f63949a638c023acdc8721e61f232bd97b900a69df163dd085eaea28414aea"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",

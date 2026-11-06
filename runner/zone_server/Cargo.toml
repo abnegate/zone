@@ -103,7 +103,7 @@ abnegate-comfy = { workspace = true }
 abnegate-exec = { workspace = true }
 abnegate-http = { workspace = true }
 abnegate-index = { workspace = true }
-abnegate-llm = { workspace = true }
+abnegate-llm = { workspace = true, features = ["catalog", "download"] }
 abnegate-notify = { workspace = true, features = ["smtp"] }
 abnegate-search = { workspace = true }
 abnegate-secret = { workspace = true, features = ["sqlx"] }
