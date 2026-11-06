@@ -120,6 +120,32 @@ describe('splitTurn with tool calls', () => {
       'calls:new',
     ]);
   });
+
+  it('keeps what the login being left thought above the divider', () => {
+    const moved = handover({ at: 5, calls: 0, reasoning: 'Out of room.' });
+
+    const parts = splitTurn('Hello there', [], [moved], { text: 'Fresh start.', at: 5 });
+
+    expect(describeParts(parts)).toEqual([
+      'text:Hello',
+      'calls:|Out of room.',
+      'handover:b@example.com',
+      'calls:|Fresh start.',
+      'text: there',
+    ]);
+  });
+
+  it('pairs what the login being left thought with the call it made last', () => {
+    const moved = handover({ at: 5, calls: 1, reasoning: 'Out of room.' });
+
+    const parts = splitTurn('Hello', [call('old', 5)], [moved]);
+
+    expect(describeParts(parts)).toEqual([
+      'text:Hello',
+      'calls:old|Out of room.',
+      'handover:b@example.com',
+    ]);
+  });
 });
 
 describe('splitTurn with thinking', () => {

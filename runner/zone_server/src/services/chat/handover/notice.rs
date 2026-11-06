@@ -29,6 +29,9 @@ pub struct Notice {
     /// call at the same offset on the right side of the divider.
     #[serde(default)]
     pub calls: usize,
+    /// What the login being left thought after its last call, which belongs above the divider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 fn named<S: Serializer>(agent: &AgentKind, serializer: S) -> Result<S::Ok, S::Error> {

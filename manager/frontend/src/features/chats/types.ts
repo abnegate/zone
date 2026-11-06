@@ -268,6 +268,7 @@ export interface Handover {
   carried: boolean;
   at: number;
   calls?: number;
+  reasoning?: string;
 }
 
 export interface MessageMetadata {

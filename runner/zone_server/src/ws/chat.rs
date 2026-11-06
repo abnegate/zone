@@ -920,9 +920,9 @@ struct Thought {
 }
 
 impl Thinking {
-    fn push(&mut self, content: &str, at: usize) {
+    fn push(&mut self, content: &str, at: impl FnOnce() -> usize) {
         if self.text.is_empty() {
-            self.at = at;
+            self.at = at();
         }
         self.text.push_str(content);
     }
@@ -3558,7 +3558,7 @@ async fn handle_chat_generation(
                         }
                         Some(AgentEvent::Finalizing(message)) => { publish(stream,ServerMessage::Status {message}).await; }
                         Some(AgentEvent::Reasoning(content)) => {
-                            round_reasoning.push(&content, full_content.chars().count());
+                            round_reasoning.push(&content, || full_content.chars().count());
                             publish(stream, ServerMessage::Reasoning { content }).await;
                             persist = true;
                         }
@@ -3878,7 +3878,11 @@ async fn handle_chat_generation(
                 }
             }
             tracing::info!(%chat_id, from = %switch.from.id, to = %switch.to.id, carried = switch.carried, "Handing the turn over to another login");
-            let notice = switch.notice(full_content.chars().count(), tool_calls.len());
+            let notice = switch.notice(
+                full_content.chars().count(),
+                tool_calls.len(),
+                round_reasoning.take().map(|thought| thought.text),
+            );
             publish(
                 stream,
                 ServerMessage::Status {
@@ -6303,15 +6307,15 @@ cat 'DIR/reply.jsonl'
     #[test]
     fn thinking_remembers_where_it_began_and_hands_that_to_its_call() {
         let mut thinking = Thinking::default();
-        thinking.push("Look at ", 13);
-        thinking.push("the file.", 20);
+        thinking.push("Look at ", || 13);
+        thinking.push("the file.", || 20);
 
         let thought = thinking.take().expect("thinking was written");
         assert_eq!(thought.at, 13, "the offset is where the thinking began");
         assert_eq!(thought.text, "Look at the file.");
         assert!(thinking.take().is_none(), "the call took it");
 
-        thinking.push("Next.", 30);
+        thinking.push("Next.", || 30);
         assert_eq!(thinking.at, 30, "the next thought starts its own offset");
     }
 
@@ -6510,6 +6514,7 @@ cat 'DIR/reply.jsonl'
             carried: false,
             at,
             calls: 0,
+            reasoning: None,
         }
     }
 

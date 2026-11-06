@@ -62,6 +62,9 @@ export function splitTurn(
   handovers: readonly Handover[],
   thinking?: Thinking
 ): TurnPart[] {
+  if (!calls.length && !handovers.length && !thinking?.text.trim()) {
+    return content.trim() ? [{ kind: 'text', text: content, offset: 0 }] : [];
+  }
   const characters = Array.from(content);
   const parts: TurnPart[] = [];
   let start = 0;
@@ -71,19 +74,25 @@ export function splitTurn(
     start = end;
   };
 
+  const think = (text: string): void => {
+    const previous = parts.at(-1);
+    if (previous?.kind === 'calls' && previous.reasoning === undefined) previous.reasoning = text;
+    else parts.push({ kind: 'calls', calls: [], reasoning: text });
+  };
+
   for (const mark of marksOf(characters, calls, handovers, thinking)) {
     pushText(Math.min(Math.max(mark.at, start), characters.length));
     const previous = parts.at(-1);
     const open = previous?.kind === 'calls' && previous.reasoning === undefined ? previous : null;
     if (mark.kind === 'handover') {
+      if (mark.handover.reasoning?.trim()) think(mark.handover.reasoning);
       parts.push({
         kind: 'handover',
         handover: mark.handover,
         agentChanged: agentChanged(mark.handover),
       });
     } else if (mark.kind === 'thinking') {
-      if (open) open.reasoning = mark.text;
-      else parts.push({ kind: 'calls', calls: [], reasoning: mark.text });
+      think(mark.text);
     } else if (open) {
       open.calls.push(mark.call);
     } else {

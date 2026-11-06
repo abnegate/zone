@@ -31,7 +31,7 @@ impl Switch {
     }
 
     /// The notice of this switch, made once `at` scalar values of the answer were written.
-    pub fn notice(&self, at: usize, calls: usize) -> Notice {
+    pub fn notice(&self, at: usize, calls: usize, reasoning: Option<String>) -> Notice {
         Notice {
             from: self.from.label.clone(),
             to: self.to.label.clone(),
@@ -42,6 +42,7 @@ impl Switch {
             carried: self.carried,
             at,
             calls,
+            reasoning,
         }
     }
 }

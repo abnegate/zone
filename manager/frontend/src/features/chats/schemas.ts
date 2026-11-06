@@ -232,6 +232,7 @@ export const HandoverSchema = z.object({
   carried: z.boolean(),
   at: z.number().int().nonnegative(),
   calls: z.number().int().nonnegative().optional().catch(undefined),
+  reasoning: z.string().optional().catch(undefined),
 });
 
 export const HandoversSchema = tolerantArray(HandoverSchema);

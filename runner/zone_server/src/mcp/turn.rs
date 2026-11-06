@@ -233,6 +233,12 @@ pub fn merged<'a>(
                 // The agent writes before it calls, so what it wrote is counted ahead of the call.
                 biased;
                 event = events.next() => match event {
+                    Some(ended @ (AgentEvent::Limited(_) | AgentEvent::Failed(_))) => {
+                        while let Ok(call) = calls.try_recv() {
+                            yield call;
+                        }
+                        yield ended;
+                    }
                     Some(event) => yield event,
                     None => break,
                 },
@@ -295,6 +301,34 @@ mod tests {
             order,
             ["text", "call"],
             "a call placed ahead of the text before it is drawn above that text"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_that_arrived_before_the_round_failed_is_yielded_before_the_failure() {
+        let (sender, mut calls) = unbounded_channel();
+        sender
+            .send(AgentEvent::ToolCallStarted {
+                id: "call_1".to_string(),
+                name: "list_chats".to_string(),
+                arguments: "{}".to_string(),
+            })
+            .unwrap();
+        let failed = futures::stream::iter(vec![AgentEvent::Failed("signed out".to_string())]);
+
+        let order: Vec<&str> = merged(failed, &mut calls)
+            .map(|event| match event {
+                AgentEvent::Failed(_) => "failed",
+                AgentEvent::ToolCallStarted { .. } => "call",
+                _ => "other",
+            })
+            .collect()
+            .await;
+
+        assert_eq!(
+            order,
+            ["call", "failed"],
+            "a turn stops reading at a failure, so a call queued behind it lands in the next login's round"
         );
     }
 

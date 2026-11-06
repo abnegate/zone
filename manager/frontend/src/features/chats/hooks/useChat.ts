@@ -184,6 +184,8 @@ type ServerMessage =
       resets_at: string | null;
       carried: boolean;
       at: number;
+      calls?: number;
+      reasoning?: string;
     }
   | {
       type: 'tool_result';
@@ -700,12 +702,21 @@ export function useChat(
             const handovers = replaced
               ? message.metadata?.handovers?.map((handover) => ({ ...handover, at: 0 }))
               : message.metadata?.handovers;
+            const reasoningAt =
+              replaced && message.metadata?.reasoning_at !== undefined
+                ? 0
+                : message.metadata?.reasoning_at;
             return {
               ...message,
               content,
               metadata:
-                calls || handovers
-                  ? { ...message.metadata, tool_calls: calls, handovers }
+                calls || handovers || reasoningAt !== undefined
+                  ? {
+                      ...message.metadata,
+                      tool_calls: calls,
+                      handovers,
+                      reasoning_at: reasoningAt,
+                    }
                   : message.metadata,
             };
           }),
@@ -908,6 +919,8 @@ export function useChat(
           if (!handover.success) break;
           assistantMetadata = {
             ...assistantMetadata,
+            reasoning: handover.data.reasoning ? undefined : assistantMetadata?.reasoning,
+            reasoning_at: handover.data.reasoning ? undefined : assistantMetadata?.reasoning_at,
             handovers: appendHandover(assistantMetadata?.handovers ?? [], handover.data),
           };
           upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);

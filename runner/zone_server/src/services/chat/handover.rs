@@ -271,6 +271,7 @@ pub async fn opening(
         carried,
         at: 0,
         calls: 0,
+        reasoning: None,
     })
 }
 
@@ -871,7 +872,8 @@ mod tests {
         );
         assert_eq!(handover.login(), codex.id);
         assert_eq!(
-            serde_json::to_value(switch.notice(12, 3)).expect("a notice"),
+            serde_json::to_value(switch.notice(12, 3, Some("Out of room.".to_string())))
+                .expect("a notice"),
             serde_json::json!({
                 "from": "a@example.com",
                 "to": "c@example.com",
@@ -882,6 +884,7 @@ mod tests {
                 "carried": false,
                 "at": 12,
                 "calls": 3,
+                "reasoning": "Out of room.",
             })
         );
     }
@@ -1244,6 +1247,7 @@ mod tests {
                 carried: true,
                 at: 0,
                 calls: 0,
+                reasoning: None,
             })
         );
         assert!(landed, "the session file moved with the chat");
@@ -1319,6 +1323,7 @@ mod tests {
                 carried: false,
                 at: 0,
                 calls: 0,
+                reasoning: None,
             })
         );
     }
