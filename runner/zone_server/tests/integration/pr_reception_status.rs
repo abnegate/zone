@@ -52,7 +52,7 @@ async fn a_merged_pull_request_is_read_back_as_merged_on_its_task() {
     projects::link_github(
         &pool,
         project.id,
-        "https://github.com/acme/project",
+        "http://127.0.0.1/acme/project",
         Some("ghp_reception"),
         None,
     )
