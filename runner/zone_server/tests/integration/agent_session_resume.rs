@@ -1,5 +1,5 @@
 //! Whether a CLI session started under one login's home resumes under another once
-//! `sessions::carry` has copied its file there. `sessions::portable` is set from these.
+//! `Session::carry` has copied its file there. `sessions::portable` is set from these.
 //!
 //! Ignored because each spends real turns of a subscription and needs a sign-in Zone cannot make
 //! for itself. Run by hand, from `runner/`:
@@ -19,11 +19,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use abnegate_agent_cli::Session;
 use serde_json::Value;
 use tempfile::TempDir;
 use uuid::Uuid;
 use zone_core::llm::AgentKind;
-use zone_server::services::agent::sessions;
 
 const HOMES: &str = "ZONE_SPIKE_CODEX_HOMES";
 const HOME_SEPARATOR: char = ':';
@@ -82,14 +82,22 @@ fn listing(directory: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// `agent` as abnegate-agent-cli names it.
+fn bridged(agent: AgentKind) -> abnegate_agent_cli::AgentKind {
+    abnegate_agent_cli::AgentKind::named(agent.as_str())
+        .unwrap_or_else(|| panic!("abnegate-agent-cli runs no {agent}"))
+}
+
 fn carry(from: &Path, to: &Path, agent: AgentKind, work: &Path, id: &str) {
-    let carried = sessions::carry(from, to, agent, work, id).unwrap_or_else(|error| {
-        panic!(
-            "{agent} kept session {id} nowhere sessions::locate looks ({error}); {} holds {:#?}",
-            from.display(),
-            listing(from)
-        )
-    });
+    let carried = Session::resumed(id)
+        .carry(bridged(agent), from, to, work)
+        .unwrap_or_else(|error| {
+            panic!(
+                "{agent} kept session {id} nowhere Session::locate looks ({error}); {} holds {:#?}",
+                from.display(),
+                listing(from)
+            )
+        });
     assert!(carried.bytes > 0, "{agent}'s session file is empty");
 }
 
@@ -209,7 +217,7 @@ fn claude_session_resume_across_homes() {
     );
 }
 
-/// A chat whose directory changes moves its session's file with `sessions::relocate`. Run by hand
+/// A chat whose directory changes moves its session's file with `Session::relocate`. Run by hand
 /// as the test above is, with `claude_session_resume_across_directories` in place of its name.
 #[test]
 #[ignore = "spends two turns of a real Claude subscription"]
@@ -231,13 +239,15 @@ fn claude_session_resume_across_directories() {
         ["--session-id", &id],
         &format!("Remember the word {word}. Reply with only OK."),
     );
-    sessions::relocate(home.path(), AgentKind::Claude, second.path(), &id).unwrap_or_else(|error| {
-        panic!(
-            "claude kept session {id} nowhere sessions::relocate looks ({error}); {} holds {:#?}",
-            home.path().display(),
-            listing(home.path())
-        )
-    });
+    Session::resumed(id.as_str())
+        .relocate(bridged(AgentKind::Claude), home.path(), second.path())
+        .unwrap_or_else(|error| {
+            panic!(
+                "claude kept session {id} nowhere Session::relocate looks ({error}); {} holds {:#?}",
+                home.path().display(),
+                listing(home.path())
+            )
+        });
     let answer = claude(
         home.path(),
         second.path(),

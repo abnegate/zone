@@ -19,6 +19,7 @@ use crate::common::{
     test_email, test_password,
 };
 
+use abnegate_agent_cli::Session;
 use abnegate_secret::SecretValue;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -39,7 +40,6 @@ use zone_server::config::{AgentConfig, Config, ModelBackend};
 use zone_server::db::agent_logins::{self, AgentLoginRow, Insert};
 use zone_server::db::ai_settings;
 use zone_server::db::chats::{self, ChatSession};
-use zone_server::services::agent::sessions;
 use zone_server::services::backend;
 use zone_server::services::login::claude::Tokens;
 use zone_server::services::login::router::unfunded;
@@ -782,16 +782,16 @@ impl Harness {
 
     /// Whether session `id`'s file is in `login`'s home, where Claude resumes it from.
     fn holds(&self, login: Uuid, id: &str) -> bool {
-        sessions::locate(
-            &self.home(AgentKind::Claude, login),
-            AgentKind::Claude,
-            &self
-                .config
-                .agents
-                .work(self.organization, AgentKind::Claude),
-            id,
-        )
-        .is_some()
+        Session::resumed(id)
+            .locate(
+                abnegate_agent_cli::AgentKind::Claude,
+                &self.home(AgentKind::Claude, login),
+                &self
+                    .config
+                    .agents
+                    .work(self.organization, AgentKind::Claude),
+            )
+            .is_some()
     }
 }
 
