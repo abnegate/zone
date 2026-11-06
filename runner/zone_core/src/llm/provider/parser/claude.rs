@@ -374,6 +374,9 @@ struct Report {
     duration_ms: Option<u64>,
     #[serde(rename = "totalTokens", deserialize_with = "lenient")]
     tokens: Option<u64>,
+    /// The id of the task claude runs the subagent as.
+    #[serde(rename = "agentId", deserialize_with = "lenient")]
+    task: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -933,7 +936,7 @@ impl Reader {
     /// a step of its own run, and still the turn's work for whoever observes
     /// the turn's tools. An agent nested inside it is a step too, and its
     /// own calls steps of the same run. A call by an agent no known subagent
-    /// descends from is no step of any.
+    /// descends from, such as a forked skill's, is listed as the main agent's.
     fn subagent(
         &mut self,
         parent: &str,
@@ -956,8 +959,10 @@ impl Reader {
                     &call,
                     StepStatus::Running,
                 )));
+                self.calls.insert(call.id.clone(), call);
+            } else {
+                events.push(self.called(call));
             }
-            self.calls.insert(call.id.clone(), call);
         }
     }
 
@@ -1025,6 +1030,9 @@ impl Reader {
             .filter(|report| report.starts_with(OBJECT))
             .and_then(|report| serde_json::from_str(report).ok())
             .unwrap_or_default();
+        if let Some(task) = report.task.filter(|task| !task.is_empty()) {
+            self.tasks.entry(task).or_insert_with(|| id.to_string());
+        }
         let mut update = Subagent {
             model: shown(report.model),
             ..Subagent::new(id)
@@ -1040,7 +1048,6 @@ impl Reader {
                 update.background = Some(true);
             }
             Some(COMPLETED) => {
-                self.concluded.insert(id.to_string());
                 update.status = Some(SubagentStatus::Completed);
                 update.tool_uses = report.tool_uses;
                 update.duration_ms = report.duration_ms;
@@ -1048,11 +1055,13 @@ impl Reader {
                 update.summary = shown(Some(text));
             }
             None if !background => {
-                self.concluded.insert(id.to_string());
                 update.status = Some(SubagentStatus::Completed);
                 update.summary = shown(Some(text));
             }
             Some(_) | None => {}
+        }
+        if update.summary.is_some() {
+            self.concluded.insert(id.to_string());
         }
         Some(update)
     }
@@ -3092,6 +3101,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_report_without_words_leaves_the_task_to_say_how_the_subagent_ended() {
+        let events = interpret_all(&stream(&[
+            delegated("sonnet").to_string(),
+            begun(),
+            task(
+                "task_progress",
+                json!({"task_id": TASK, "summary": "Reading the diff", "usage": {"tool_uses": 1}}),
+            ),
+            returned_to(
+                AGENT_CALL,
+                " ",
+                false,
+                json!({"status": "completed", "totalToolUseCount": 3}),
+            ),
+            task(
+                "task_notification",
+                json!({"task_id": TASK, "status": "completed", "summary": "The change is sound."}),
+            ),
+        ]));
+
+        let summaries: Vec<&str> = updates(&events, AGENT_CALL)
+            .into_iter()
+            .filter_map(|update| update.summary.as_deref())
+            .collect();
+        assert_eq!(summaries, ["Reading the diff", "The change is sound."]);
+    }
+
+    /// claude names only the task on some of its news, and the launch report
+    /// names the task too, so news of it still arrives when the line that
+    /// started the task never did.
+    #[test]
+    fn a_launched_subagents_task_is_known_from_its_report_alone() {
+        let mut background = delegated("sonnet");
+        background["message"]["content"][0]["input"]["run_in_background"] = true.into();
+        let events = interpret_all(&stream(&[
+            background.to_string(),
+            returned_to(
+                AGENT_CALL,
+                "Launched.",
+                false,
+                json!({"status": "async_launched", "agentId": TASK}),
+            ),
+            task(
+                "task_updated",
+                json!({"task_id": TASK, "patch": {"status": "completed"}}),
+            ),
+        ]));
+
+        assert_eq!(
+            last_update(&events, AGENT_CALL),
+            Some(&Subagent {
+                status: Some(SubagentStatus::Completed),
+                ..Subagent::new(AGENT_CALL)
+            })
+        );
+    }
+
     const NESTED_CALL: &str = "toolu_10Nested";
     const NESTED_TASK: &str = "n1";
 
@@ -3270,8 +3337,10 @@ mod tests {
         );
     }
 
+    /// A skill claude forks runs as an agent whose parent is the Skill call,
+    /// which started no subagent.
     #[test]
-    fn a_call_by_an_agent_no_known_subagent_descends_from_is_no_step() {
+    fn a_call_by_an_agent_no_known_subagent_descends_from_is_listed_as_the_main_agents() {
         let events = interpret_all(&stream(&[
             delegated("sonnet").to_string(),
             within(
@@ -3287,6 +3356,7 @@ mod tests {
             std::collections::BTreeSet::from([AGENT_CALL])
         );
         assert!(steps(&events).is_empty(), "{events:?}");
+        assert_eq!(tools(&events), ["Agent", "Read"]);
         let observed: Vec<&str> = outputs(&events)
             .iter()
             .map(|output| output.call.function.name.as_str())
