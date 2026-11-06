@@ -5,7 +5,6 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use abnegate_agent_cli::AgentKind;
-use abnegate_agent_cli::login::LoginError;
 use abnegate_agent_cli::login::claude::Client;
 use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::SecretValue;
@@ -13,7 +12,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
 
-use super::claude::{self, Sealed};
+use super::claude::{self, Sealed, Unbuilt};
 use super::homes;
 use super::locks::{Guard, Locks};
 use crate::config::Config;
@@ -85,7 +84,7 @@ pub async fn resolve(state: &AppState, login: &AgentLoginRow) -> Result<Login, E
 pub(crate) async fn resolve_claude(
     state: &AppState,
     login: &AgentLoginRow,
-    client: impl FnOnce() -> Result<Client, LoginError>,
+    client: impl FnOnce() -> Result<Client, Unbuilt>,
 ) -> Result<Login, Error> {
     let margin = margin(state.config());
     let tokens = open(state, login)?;
@@ -104,8 +103,11 @@ pub(crate) async fn resolve_claude(
     }
     let organization = login.organization_id;
     let renewal = match client() {
-        Ok(client) => client.refresh(&tokens).await,
-        Err(error) => Err(error),
+        Ok(client) => client
+            .refresh(&tokens)
+            .await
+            .map_err(|error| claude::described(&error)),
+        Err(error) => Err(error.to_string()),
     };
     match renewal {
         Ok(renewed) => {
@@ -114,8 +116,7 @@ pub(crate) async fn resolve_claude(
                 token: renewed.access,
             })
         }
-        Err(error) => {
-            let reason = claude::described(&error);
+        Err(reason) => {
             tracing::warn!(
                 %organization,
                 login = %login.id,
@@ -211,10 +212,12 @@ mod tests {
     use std::str::FromStr;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use abnegate_agent_cli::login::LoginError;
     use abnegate_agent_cli::login::claude::Refusal;
     use abnegate_agent_cli::login::codex::CREDENTIALS;
     use chrono::TimeDelta;
     use futures::future::{join_all, try_join_all};
+    use hyper_util::client::proxy::matcher::Matcher;
     use serde_json::json;
     use sqlx::PgPool;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -252,6 +255,7 @@ mod tests {
     const ATTEMPTS: usize = 100;
     const LEGACY: &str = r#"{"tokens":"legacy"}"#;
     const UNBUILT: &str = "no TLS backend could start";
+    const PROXY_PASSWORD: &str = "hunter2-proxy-password";
 
     struct Fixture {
         state: AppState,
@@ -981,12 +985,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_renewal_through_a_credentialed_proxy_fails_in_zones_words() {
+        let fixture = Fixture::new(UNREACHABLE.to_string()).await;
+        let lapsed = fixture
+            .sign_in(&tokens(Utc::now() - TimeDelta::minutes(1), Some(REFRESH)))
+            .await;
+        let proxies = Matcher::builder()
+            .http(format!("http://zone:{PROXY_PASSWORD}@proxy.internal:3128"))
+            .build();
+        let agents = fixture.state.config().agents.clone();
+
+        let failed = resolve_claude(&fixture.state, &lapsed, || {
+            claude::client_through(&agents, &proxies)
+        })
+        .await;
+        fixture.remove().await;
+
+        let Err(Error::Renewal(message)) = failed else {
+            panic!("expected a failed renewal, got {failed:?}");
+        };
+        assert_eq!(message, Unbuilt::CredentialedProxy.to_string());
+        assert!(!message.contains(PROXY_PASSWORD), "{message}");
+    }
+
+    #[tokio::test]
     async fn a_client_that_cannot_be_built_keeps_the_current_token_until_it_expires() {
         let fixture = Fixture::new(UNREACHABLE.to_string()).await;
         let expiring = fixture
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
             .await;
-        let unbuilt = || Err(LoginError::Transport(UNBUILT.to_string()));
+        let unbuilt = || Err(Unbuilt::Login(LoginError::Transport(UNBUILT.to_string())));
 
         let kept = resolve_claude(&fixture.state, &expiring, unbuilt).await;
         fixture.remove().await;

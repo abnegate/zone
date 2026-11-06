@@ -835,11 +835,23 @@ the token response names one. It shows an expiry date only for a sign-in Zone
 cannot renew, one whose token came without a refresh token.
 
 Zone reaches `ZONE_CLAUDE_TOKEN_URL`, to exchange a code and to renew a token,
-through the first of `HTTPS_PROXY`, `https_proxy`, `ALL_PROXY` and `all_proxy`
-the server has set, and directly when none is. `HTTP_PROXY` is not read, and
-`NO_PROXY` does not exempt the endpoint. A proxy URL that carries credentials,
-or that names a link-local or cloud metadata address, fails the sign-in or the
-renewal. Zone follows no redirect from the endpoint, and its requests name
+through the proxy the server's environment names for it, chosen as the
+server's other HTTP clients choose one. An `https` token URL goes through
+`HTTPS_PROXY` (or `https_proxy`), an `http` one through `HTTP_PROXY` (or
+`http_proxy`), and either falls back to `ALL_PROXY` (or `all_proxy`). A token
+host that `NO_PROXY` (or `no_proxy`) lists goes direct: a comma-separated list
+of `*`, domains, which also cover their subdomains with or without a leading
+dot, and IP addresses or ranges such as `10.0.0.0/8`. Zone builds the token
+client once, and again only when the token URL or its proxy changes.
+
+The chosen proxy must be an `http` or `https` URL with no username or
+password, and must not name a link-local or cloud metadata address. Otherwise
+the sign-in fails, and so does every renewal, with *Claude's sign-in cannot go
+through the server's proxy: HTTPS_PROXY, HTTP_PROXY and ALL_PROXY must be http
+or https URLs with no username or password, or NO_PROXY must list Claude's
+token host*. The message never repeats the proxy's credentials; let the proxy
+admit the server by its address, or list the token host in `NO_PROXY`. Zone
+follows no redirect from the endpoint, and its requests name
 `abnegate-agent-cli/<version>` as their user agent.
 
 The callback request carries no Zone session, so the listener never exchanges

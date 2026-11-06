@@ -75,8 +75,8 @@ mod tests {
         }
         for (error, shown) in [
             (
-                Error::Refused("Claude refused the sign-in (HTTP 502). Start again.".to_string()),
-                "Claude refused the sign-in (HTTP 502). Start again.",
+                Error::Refused("Claude refused the sign-in (HTTP 401). Start again.".to_string()),
+                "Claude refused the sign-in (HTTP 401). Start again.",
             ),
             (
                 Error::Unreachable(

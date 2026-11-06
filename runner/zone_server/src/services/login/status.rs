@@ -397,7 +397,7 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
     use crate::db::agent_logins::Insert;
-    use crate::services::login::codex::testing::{capture, environment, fake, fixture, recorded};
+    use crate::services::login::testing::{capture, environment, fake, fixture, recorded};
 
     const STATUSES: usize = 5;
     const CLAUDE_SIGNED_IN: &[u8] = fixture!("claude-auth-status-signed-in.json");
