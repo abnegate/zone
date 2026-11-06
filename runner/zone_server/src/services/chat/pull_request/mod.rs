@@ -203,7 +203,11 @@ async fn observed(
 ) -> Result<Status, Error> {
     let service = state.config().pull_requests()?;
     let reference = service.pull_request(&row.url)?;
-    Ok(observe(&service, &reference, token, row).await?.status)
+    let mut status = observe(&service, &reference, token, row).await?.status;
+    if status.open() {
+        status.threads = threads(&service, &reference, token, row).await;
+    }
+    Ok(status)
 }
 
 async fn observe(
@@ -219,21 +223,16 @@ async fn observe(
         (false, _) => State::Open,
     };
     let mergeable = Mergeable::from(detail.mergeable_state);
-    let ((checks, (auto_merge, methods)), threads) = tokio::join!(
-        async {
-            match lifecycle {
-                State::Open => tokio::join!(
-                    checks(service, reference, token, &detail.head_sha, row),
-                    automation(service, reference, token, mergeable, row),
-                ),
-                State::Closed | State::Merged => (
-                    Checks::None,
-                    (AutoMerge::unavailable(AutoMerge::SETTLED), Vec::new()),
-                ),
-            }
-        },
-        threads(service, reference, token, row),
-    );
+    let (checks, (auto_merge, methods)) = match lifecycle {
+        State::Open => tokio::join!(
+            checks(service, reference, token, &detail.head_sha, row),
+            automation(service, reference, token, mergeable, row),
+        ),
+        State::Closed | State::Merged => (
+            Checks::None,
+            (AutoMerge::unavailable(AutoMerge::SETTLED), Vec::new()),
+        ),
+    };
     let draft_unavailable = match lifecycle {
         State::Open => None,
         State::Closed | State::Merged => Some(AutoMerge::SETTLED.to_string()),
@@ -250,7 +249,7 @@ async fn observe(
             mergeable,
             auto_merge,
             draft_unavailable,
-            threads,
+            threads: None,
             observed_at: chrono::Utc::now(),
         },
         node_id: detail.node_id,

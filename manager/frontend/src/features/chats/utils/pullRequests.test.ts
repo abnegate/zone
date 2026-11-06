@@ -72,10 +72,14 @@ describe('pull request kinds', () => {
 
 describe('threadsLabel', () => {
   it('names open and resolved review threads apart', () => {
-    expect(threadsLabel({ open: 2, resolved: 3 })).toBe('2 open and 3 resolved review threads');
+    expect(threadsLabel({ open: 2, resolved: 3 })).toBe('2 open review threads, 3 resolved');
   });
 
-  it('names a lone review thread in the singular', () => {
-    expect(threadsLabel({ open: 1, resolved: 0 })).toBe('1 open and 0 resolved review thread');
+  it('names a lone open review thread in the singular', () => {
+    expect(threadsLabel({ open: 1, resolved: 4 })).toBe('1 open review thread, 4 resolved');
+  });
+
+  it('names no open review threads in the plural', () => {
+    expect(threadsLabel({ open: 0, resolved: 1 })).toBe('0 open review threads, 1 resolved');
   });
 });

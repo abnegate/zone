@@ -307,9 +307,9 @@ fn threads_read() -> wiremock::MockBuilder {
         .and(body_string_contains("reviewThreads"))
 }
 
-/// GitHub listing pull request 12's review threads, one resolved for each
+/// GitHub's page of pull request 12's review threads, one resolved for each
 /// `true` in `resolved`.
-async fn discuss(github: &MockServer, resolved: &[bool]) {
+fn threads_answer(resolved: &[bool]) -> ResponseTemplate {
     let nodes: Vec<Value> = resolved
         .iter()
         .enumerate()
@@ -324,15 +324,17 @@ async fn discuss(github: &MockServer, resolved: &[bool]) {
             })
         })
         .collect();
+    ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
+        "pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": false, "endCursor": null},
+            "nodes": nodes,
+        }},
+    }}}))
+}
+
+async fn discuss(github: &MockServer, resolved: &[bool]) {
     threads_read()
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
-                "pullRequest": {"reviewThreads": {
-                    "pageInfo": {"hasNextPage": false, "endCursor": null},
-                    "nodes": nodes,
-                }},
-            }}})),
-        )
+        .respond_with(threads_answer(resolved))
         .mount(github)
         .await;
 }
@@ -907,6 +909,11 @@ async fn merge_when_ready_sets_auto_merge_on_github_and_lists_it_as_enabled() {
         json!({"input": {"pullRequestId": NODE, "mergeMethod": "SQUASH", "expectedHeadOid": HEAD}}),
     )
     .await;
+    threads_read()
+        .respond_with(threads_answer(&[true]))
+        .expect(1)
+        .mount(&github)
+        .await;
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
@@ -924,6 +931,11 @@ async fn merge_when_ready_sets_auto_merge_on_github_and_lists_it_as_enabled() {
     let listed = workspace.listed(&workspace.token).await;
     assert_eq!(
         listed[0]["status"]["auto_merge"]["enabled"], true,
+        "{listed}"
+    );
+    assert_eq!(
+        listed[0]["status"]["threads"],
+        json!({"open": 0, "resolved": 1}),
         "{listed}"
     );
 }
@@ -1147,6 +1159,47 @@ async fn review_threads_read_as_unknown_when_github_will_not_list_them() {
     let listed = workspace.listed(&workspace.token).await;
 
     assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+    assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
+}
+
+#[tokio::test]
+async fn a_merged_pull_request_is_listed_without_reading_its_review_threads() {
+    let github = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/12"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "node_id": NODE,
+            "number": 12,
+            "title": TITLE,
+            "state": "closed",
+            "draft": false,
+            "merged": true,
+            "mergeable": null,
+            "mergeable_state": "unknown",
+            "head": {"ref": "feature", "sha": HEAD},
+            "base": {"ref": "main", "sha": HEAD},
+            "html_url": link(&github, 12),
+            "additions": 40,
+            "deletions": 3,
+            "changed_files": 2,
+            "commits": 1,
+        })))
+        .mount(&github)
+        .await;
+    threads_read()
+        .respond_with(threads_answer(&[false]))
+        .expect(0)
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, 12)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["status"]["state"], "merged", "{listed}");
     assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
 }
 

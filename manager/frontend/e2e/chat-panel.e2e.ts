@@ -345,10 +345,10 @@ test.describe('Chat changes and gallery panel', () => {
     await expect(panel.getByRole('img', { name: 'Checks failing' })).toBeVisible();
     await expect(panel.getByRole('img', { name: 'Merged' })).toBeVisible();
     await expect(
-      panel.getByRole('img', { name: '2 open and 3 resolved review threads' })
+      panel.getByRole('img', { name: '2 open review threads, 3 resolved' })
     ).toBeVisible();
     await expect(
-      panel.getByRole('img', { name: '0 open and 4 resolved review threads' })
+      panel.getByRole('img', { name: '0 open review threads, 4 resolved' })
     ).toBeVisible();
 
     const transcript = await page.locator('.messages-container').boundingBox();

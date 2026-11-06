@@ -64,8 +64,8 @@ export function mergeReading(status: PullRequestStatus | null): MergeReading | n
 }
 
 export function threadsLabel({ open, resolved }: PullRequestThreads): string {
-  const noun = open + resolved === 1 ? 'review thread' : 'review threads';
-  return `${open} open and ${resolved} resolved ${noun}`;
+  const noun = open === 1 ? 'review thread' : 'review threads';
+  return `${open} open ${noun}, ${resolved} resolved`;
 }
 
 export function pullRequestTitle(pullRequest: ChatPullRequest): string {

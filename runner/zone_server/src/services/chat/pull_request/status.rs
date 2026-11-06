@@ -21,7 +21,7 @@ pub struct Status {
     pub auto_merge: AutoMerge,
     /// Why it cannot be moved between draft and ready for review, if it cannot.
     pub draft_unavailable: Option<String>,
-    /// Its review threads, unless GitHub would not list them.
+    /// Its review threads while it is open, unless GitHub would not list them.
     pub threads: Option<Threads>,
     pub observed_at: DateTime<Utc>,
 }
