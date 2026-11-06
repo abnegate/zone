@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::attempts::{self, Attempt};
 use super::caller::Caller;
-use super::claude::{self, Explained, Sealed};
+use super::claude::{self, Explained, Sealed, Unbuilt};
 use super::console::Console;
 use super::error::Error;
 use super::pending::{self, Pending, WINDOW};
@@ -291,7 +291,7 @@ async fn grant(state: &AppState, pending: &Pending, code: &Code) -> Result<Token
     authorize(state, &mut connection, pending).await?;
     drop(connection);
     claude::client(&state.config().agents)
-        .map_err(ungranted)?
+        .map_err(unbuilt)?
         .exchange(code, &pending.verifier, pending.scope, pending.redirect)
         .await
         .map_err(ungranted)
@@ -460,11 +460,24 @@ fn report(organization: Uuid, error: &Error) {
     }
 }
 
+/// Why Zone could not reach claude.com's token endpoint, as the admin is told it: a proxy the
+/// server names for it that cannot be used is the operator's to fix, not Zone's own failure.
+fn unbuilt(error: Unbuilt) -> Error {
+    match error {
+        Unbuilt::CredentialedProxy => Error::Unreachable(error.to_string()),
+        Unbuilt::Login(error) => ungranted(error),
+    }
+}
+
 /// Why claude.com's token endpoint granted no tokens, as the admin is told it.
 fn ungranted(error: LoginError) -> Error {
     let described = claude::described(&error);
     match error {
-        LoginError::Transport(_) => Error::Unreachable(described),
+        LoginError::Transport(_)
+        | LoginError::Endpoint {
+            name: claude::PROXY_ENDPOINT,
+            ..
+        } => Error::Unreachable(described),
         LoginError::Malformed(_) | LoginError::Rejected { .. } => Error::Refused(described),
         _ => Error::Internal(described),
     }
@@ -492,6 +505,7 @@ mod tests {
     use aiusg::provider::claude::{ProfileAccount, ProfileOrganization};
     use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use hyper_util::client::proxy::matcher::Matcher;
     use reqwest::Url;
     use sha2::{Digest, Sha256};
 
@@ -502,6 +516,8 @@ mod tests {
 
     const EMAIL: &str = "admin@example.com";
     const METADATA_TOKEN_URL: &str = "http://169.254.169.254/v1/oauth/token";
+    const PROXY_PASSWORD: &str = "hunter2-proxy-password";
+    const SOCKS_PROXY: &str = "socks5://socks.internal:1080";
     const PORT: u16 = 54_545;
     const CONSOLE: &str = "http://localhost:3000";
     /// A console the operator listed that runs on another machine.
@@ -750,6 +766,30 @@ mod tests {
 
         assert!(error.internal(), "{error:?}");
         assert_eq!(error.shown(), UNSAVED);
+    }
+
+    #[test]
+    fn a_proxy_the_sign_in_cannot_use_is_shown_as_the_operators_to_fix() {
+        let credentialed = format!("http://zone:{PROXY_PASSWORD}@proxy.internal:3128");
+        for (proxy, shown) in [
+            (
+                credentialed.as_str(),
+                Unbuilt::CredentialedProxy.to_string(),
+            ),
+            (SOCKS_PROXY, String::new()),
+        ] {
+            let proxies = Matcher::builder().https(proxy).build();
+
+            let error = claude::client_through(&crate::state::test_agents(), &proxies)
+                .map_err(unbuilt)
+                .expect_err("a proxy the sign-in cannot use");
+
+            assert!(matches!(error, Error::Unreachable(_)), "{proxy}: {error:?}");
+            assert_ne!(error.shown(), UNSAVED, "{proxy}");
+            assert!(error.shown().contains("NO_PROXY"), "{proxy}: {error}");
+            assert!(error.shown().starts_with(&shown), "{proxy}: {error}");
+            assert!(!format!("{error:?}").contains(PROXY_PASSWORD), "{error:?}");
+        }
     }
 
     #[test]
