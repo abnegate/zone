@@ -11,7 +11,10 @@ use std::sync::Arc;
 
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use zone_context::context::ContextService;
 use zone_server::cache::Cache;
@@ -19,31 +22,29 @@ use zone_server::config::Config;
 use zone_server::db::sealing::Options;
 use zone_server::db::sealing::Sealer;
 use zone_server::routes;
-use zone_server::services::embedding::{
-    create_embedding_service, default_embedding_model, embedding_engine_from_env,
-};
+use zone_server::services::embedding::create_embedding_service;
+use zone_server::services::embedding::default_embedding_model;
+use zone_server::services::embedding::embedding_engine_from_env;
 use zone_server::services::login;
 use zone_server::services::mail;
 use zone_server::services::mail::AccountMail;
-use zone_server::state::{AppState, default_adapter_registry};
+use zone_server::state::AppState;
+use zone_server::state::default_adapter_registry;
 
 #[tokio::main]
 async fn main() {
-    // Initialize tracing
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mode = mode(&arguments).expect(USAGE);
+
     tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                "zone_server=debug,zone_chat=debug,zone_core=debug,zone_context=debug,tower_http=debug".into()
-            }),
-        )
-        .with(tracing_subscriber::fmt::layer())
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| DEFAULT_FILTER.into()))
+        .with(tracing_subscriber::fmt::layer().with_writer(mode.log_writer()))
         .init();
 
     #[cfg(target_os = "linux")]
     forbid_dumping();
 
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
-    match mode(&arguments).expect(USAGE) {
+    match mode {
         Mode::Serve => {}
         Mode::MigrateOnly => {
             let url = std::env::var(DATABASE_URL).expect("DATABASE_URL is required");
@@ -268,6 +269,8 @@ async fn main() {
 
 const USAGE: &str =
     "Usage: zone-server [--migrate-only | --seal-secrets [--dry-run] --backup <path>]";
+const DEFAULT_FILTER: &str =
+    "zone_server=debug,zone_chat=debug,zone_core=debug,zone_context=debug,tower_http=debug";
 const DATABASE_URL: &str = "DATABASE_URL";
 const MIGRATE_ONLY: &str = "--migrate-only";
 const SEAL_SECRETS: &str = "--seal-secrets";
@@ -285,6 +288,16 @@ enum Mode {
     Serve,
     MigrateOnly,
     SealSecrets(Options),
+}
+
+impl Mode {
+    /// Where the mode's logs go: stderr when stdout carries the sealing report.
+    fn log_writer(&self) -> BoxMakeWriter {
+        match self {
+            Self::SealSecrets(_) => BoxMakeWriter::new(std::io::stderr),
+            Self::Serve | Self::MigrateOnly => BoxMakeWriter::new(std::io::stdout),
+        }
+    }
 }
 
 fn mode(arguments: &[String]) -> Result<Mode, &'static str> {
