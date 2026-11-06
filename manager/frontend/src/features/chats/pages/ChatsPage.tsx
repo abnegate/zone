@@ -44,6 +44,7 @@ import {
   ProviderPicker,
   QueueItem,
   SourcesButton,
+  SubagentChips,
 } from '../components';
 import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
@@ -53,10 +54,12 @@ import {
   useChatPullRequests,
   useChatSearch,
   useChatSources,
+  useChatSubagents,
   useChats,
   useChatTasks,
   useWorkspaceChatProviders,
 } from '../hooks';
+import type { SubagentRequest } from '../subagentTypes';
 import {
   type Chat,
   type ChatProviderOffer,
@@ -303,11 +306,19 @@ export default function ChatsPage() {
   const chatOpen = displayedChat !== null;
   const changes = useChatPullRequests(chatOpen ? selectedChatId : null, streaming);
   const tasks = useChatTasks(chatOpen ? selectedChatId : null, streaming);
+  const subagents = useChatSubagents(chatOpen ? selectedChatId : null, streaming);
   const displayedMessages = displayedChat?.messages;
   const media = useMemo(() => galleryItems(displayedMessages ?? []), [displayedMessages]);
   const sources = useMemo(() => chatSources(displayedMessages ?? []), [displayedMessages]);
   const [shownSources, setShownSources] = useState<SourceRequest | null>(null);
   const clearShownSources = useCallback(() => setShownSources(null), []);
+  const [shownSubagent, setShownSubagent] = useState<SubagentRequest | null>(null);
+  const subagentNonce = useRef(0);
+  const showSubagent = useCallback((id: string) => {
+    subagentNonce.current += 1;
+    setShownSubagent({ id, nonce: subagentNonce.current });
+  }, []);
+  const clearShownSubagent = useCallback(() => setShownSubagent(null), []);
   const wasStreaming = useRef(streaming);
   const latestSelectedChatId = useRef(selectedChatId);
 
@@ -321,6 +332,7 @@ export default function ChatsPage() {
   useEffect(() => {
     latestSelectedChatId.current = selectedChatId;
     setShownSources(null);
+    setShownSubagent(null);
     setChatOperationError(null);
     setOperationError(null);
   }, [selectedChatId]);
@@ -1281,7 +1293,7 @@ export default function ChatsPage() {
             variant="ghost"
             size="sm"
             className="chat-back chat-back-state"
-            onClick={() => setSelectedChatId(null)}
+            onClick={clearSelectedChat}
           >
             Back to chats
           </Button>
@@ -1289,12 +1301,7 @@ export default function ChatsPage() {
         {displayedChat ? (
           <>
             <div className="chat-header">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="chat-back"
-                onClick={() => setSelectedChatId(null)}
-              >
+              <Button variant="ghost" size="sm" className="chat-back" onClick={clearSelectedChat}>
                 Back to chats
               </Button>
               <div className="chat-header-info">
@@ -1715,6 +1722,10 @@ export default function ChatsPage() {
                               })}
                             </div>
                           ) : null}
+                          <SubagentChips
+                            subagents={subagents.byMessage.get(message.id) ?? []}
+                            onShow={showSubagent}
+                          />
                           {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                           {cited && (
                             <SourcesButton
@@ -1957,6 +1968,9 @@ export default function ChatsPage() {
                 sources={sources}
                 shownSources={shownSources}
                 onSourcesShown={clearShownSources}
+                subagents={subagents}
+                shownSubagent={shownSubagent}
+                onSubagentShown={clearShownSubagent}
                 onShowMessage={(messageId) => selectChat(displayedChat.id, messageId)}
               />
             </div>

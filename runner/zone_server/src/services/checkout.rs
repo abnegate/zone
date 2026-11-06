@@ -41,9 +41,12 @@ use crate::db::{
     projects,
     tasks::{self, TaskRow},
 };
-use crate::services::github_app::{Credential, Provider};
+use crate::services::github_app::{Credential, Error as GitHubError, Provider};
 
 const ROOT: &str = "zone-checkouts-v1";
+
+const PROJECT_TOKEN_UNOPENABLE: &str =
+    "The project's GitHub token is sealed under a key this deployment does not hold";
 
 const AUTHOR_NAME: &str = "Zone";
 
@@ -140,7 +143,10 @@ impl Repository {
             Some(project) => github
                 .project(pool, &project)
                 .await
-                .map_err(|error| error.to_string())?
+                .map_err(|error| match error {
+                    GitHubError::Credential => PROJECT_TOKEN_UNOPENABLE.to_string(),
+                    error => error.to_string(),
+                })?
                 .map(Credential::into_secret),
             None => None,
         };
@@ -1663,7 +1669,7 @@ mod tests {
         let run = tasks::create_task_run(&pool, task.id).await.unwrap();
         let owner = Uuid::new_v4();
         assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
-        let key: [u8; 32] = rand::random();
+        let key = std::sync::Arc::new(abnegate_secret::MasterKey::generate().unwrap());
         let checkout = Checkout::prepare(
             &pool,
             &Provider::new(&crate::state::test_config(), key),
@@ -1859,7 +1865,10 @@ mod tests {
         let number = installation_number();
         issuing(&server, number, token, mints).await;
         let pool = pool().await;
-        let github = provider(&server, rand::random());
+        let github = provider(
+            &server,
+            std::sync::Arc::new(abnegate_secret::MasterKey::generate().unwrap()),
+        );
         let organization = seed_organization(&pool).await;
         let workspace = seed_workspace(&pool, organization).await;
         let installation = installed(&pool, &github, organization, number).await;

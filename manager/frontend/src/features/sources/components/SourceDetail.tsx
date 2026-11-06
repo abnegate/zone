@@ -1,7 +1,7 @@
 import { Button } from '@zone/ui';
 import { useCallback, useMemo, useState } from 'react';
-import { canManageOrganization } from '../../../shared/components/ProtectedRoute';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import { canManageOrganization } from '../../../shared/roles';
 import { getErrors } from '../../../validation';
 import { formStateFromConfig, getSourceById, getSourceLabel } from '../config';
 import { type SourceVerifyResponse, UpdateSourceRequestSchema } from '../schemas';

@@ -825,6 +825,35 @@ test.describe('Chat regressions', () => {
     });
   });
 
+  test('going back before the address catches up keeps the chat closed', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockChatRoutes(page);
+    await page.reload();
+    await expect(page.locator('.chat-item')).toHaveCount(1);
+
+    // The router commits the chat's address in a transition, a task after the
+    // click itself, so going back in between is what a quick tap on a busy
+    // phone does.
+    const closed = await page.evaluate(async () => {
+      const settle = async () => {
+        for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+      };
+      document.querySelector<HTMLElement>('.chat-item')?.click();
+      await settle();
+      const back = document.querySelector<HTMLElement>('.chat-back');
+      back?.click();
+      await settle();
+      return back !== null && !document.querySelector('.chats-page.has-chat');
+    });
+    expect(closed).toBe(true);
+
+    await expect(page).toHaveURL('/chats');
+    await expect(page.locator('.chat-item')).toBeVisible();
+    await page.waitForTimeout(500);
+    await expect(page.locator('.chats-page')).not.toHaveClass(/has-chat/);
+    await expect(page.locator('.chat-item')).not.toHaveClass(/active/);
+  });
+
   test('shows a replay that arrived before the chat had loaded', async ({ page }, testInfo) => {
     let release: () => void = () => {};
     const holdChat = new Promise<void>((resolve) => {

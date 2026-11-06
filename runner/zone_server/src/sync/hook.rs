@@ -38,6 +38,9 @@ pub enum HookError {
     #[error("the project's GitHub credential could not be resolved: {0}")]
     Credential(github_app::Error),
 
+    #[error("a credential is sealed under a key this deployment does not hold")]
+    Unopenable,
+
     #[error("the GitHub origin is misconfigured: {0}")]
     Origin(PullRequestError),
 
@@ -344,7 +347,7 @@ mod tests {
             pool.clone(),
             None,
         );
-        state.install_github(provider(&github, *state.encryption_key()));
+        state.install_github(provider(&github, std::sync::Arc::clone(state.master_key())));
         let organization = seed_organization(&pool).await;
         let workspace = seed_workspace(&pool, organization).await;
         let installation = installed(&pool, state.github(), organization, number).await;

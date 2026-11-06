@@ -4,9 +4,10 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { agentsApi } from '../../../api/agents';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { AuthCard, AuthStatus, CheckIcon } from '../../auth/components';
+import { SettingsGroup, SettingsSection, settingsPath } from '../navigation/sections';
 import type { AgentStatus } from './schemas';
 
-const SETTINGS = '/org-settings';
+const SETTINGS = settingsPath(SettingsGroup.Organization, SettingsSection.Ai);
 const RECEIPT = 'receipt';
 const ORGANIZATION = 'organization';
 const TITLE = 'Claude Code sign-in';

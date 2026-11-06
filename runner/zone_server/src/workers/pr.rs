@@ -35,6 +35,11 @@ use zone_core::llm::LlmBackend;
 /// restores it, and tries again before the publication fails.
 const SANITIZE_ATTEMPTS: usize = 3;
 
+/// Why a task's pull request work stops when its project's token is an envelope the
+/// deployment's key does not open.
+const PROJECT_TOKEN_UNOPENABLE: &str =
+    "The project's GitHub token is sealed under a key this deployment does not hold";
+
 /// Temperature for a repair: a merge resolution is a mechanical edit, not a draft.
 const REPAIR_TEMPERATURE: f32 = 0.0;
 
@@ -543,6 +548,9 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
         Err(GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected) => {
             return ReceptionSyncResult::Error(DISCONNECTED.to_string());
         }
+        Err(GitHubError::Credential) => {
+            return ReceptionSyncResult::Error(PROJECT_TOKEN_UNOPENABLE.to_string());
+        }
         Err(error) => {
             return ReceptionSyncResult::Error(format!(
                 "Failed to resolve the project's GitHub credential: {error}"
@@ -604,6 +612,9 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         Ok(None) => return RepairOutcome::Failed(NO_REPOSITORY.to_string()),
         Err(GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected) => {
             return RepairOutcome::Failed(DISCONNECTED.to_string());
+        }
+        Err(GitHubError::Credential) => {
+            return RepairOutcome::Failed(PROJECT_TOKEN_UNOPENABLE.to_string());
         }
         Err(error) => {
             return RepairOutcome::Failed(format!(
@@ -1157,6 +1168,7 @@ mod tests {
     }
 
     use crate::db::{organizations, projects, users, workspace_members, workspaces};
+    use abnegate_secret::MasterKey;
     use sqlx::PgPool;
     use std::path::PathBuf;
     use std::sync::{
@@ -1258,7 +1270,7 @@ mod tests {
             sandbox.project_ids.clear();
             let github = crate::services::github_app::Provider::new(
                 &crate::state::test_config(),
-                rand::random(),
+                Arc::new(MasterKey::generate().unwrap()),
             );
             let checkout =
                 crate::services::checkout::Checkout::prepare(&pool, &github, &sandbox, execution)
@@ -1928,9 +1940,10 @@ mod publication_tests {
 
         let number = installation_number();
         issuing(server, number, token, mints).await;
-        fixture
-            .state
-            .install_github(provider(server, *fixture.state.encryption_key()));
+        fixture.state.install_github(provider(
+            server,
+            std::sync::Arc::clone(fixture.state.master_key()),
+        ));
         let installation = installed(
             fixture.state.db(),
             fixture.state.github(),
@@ -2028,7 +2041,7 @@ mod publication_tests {
             ..crate::state::test_config()
         };
         let state = AppState::new(config, fixture.state.db().clone(), None);
-        state.install_github(provider(server, *state.encryption_key()));
+        state.install_github(provider(server, std::sync::Arc::clone(state.master_key())));
         sqlx::query("UPDATE projects SET github_repo_url=$2 WHERE workspace_id=$1")
             .bind(fixture.workspace)
             .bind(format!("{}/owner/repository.git", server.uri()))

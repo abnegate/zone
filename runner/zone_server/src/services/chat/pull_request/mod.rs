@@ -2,6 +2,7 @@
 //! reading and changing them on GitHub through abnegate-vcs with the
 //! workspace's own source.
 
+mod auto_fix;
 mod auto_merge;
 mod cache;
 mod changes;
@@ -73,7 +74,11 @@ pub async fn list(state: &AppState, workspace_id: Uuid, chat_id: Uuid) -> DbResu
 /// `row` with what GitHub last said of it, asking again once that is stale.
 /// A fresh status was read with a credential, so only a stale one costs a
 /// credential lookup.
-pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) -> DbResult<Tracked> {
+pub async fn track(
+    state: &AppState,
+    workspace_id: Uuid,
+    mut row: PullRequestRow,
+) -> DbResult<Tracked> {
     if let Some(cached) = state.pull_request_statuses().get(row.id) {
         return Ok(Tracked {
             row,
@@ -92,8 +97,14 @@ pub async fn track(state: &AppState, workspace_id: Uuid, row: PullRequestRow) ->
         }
     };
     let status = match observed(state, &row, credential).await {
-        Ok(status) => {
+        Ok(Observation {
+            status,
+            branch,
+            head,
+            ..
+        }) => {
             remember(state, &row, &status).await;
+            auto_fix::consider(state, workspace_id, &mut row, &status, &branch, &head).await;
             Some(status)
         }
         Err(error) => {
@@ -138,6 +149,30 @@ pub async fn set_auto_merge(
     Ok(())
 }
 
+/// Turns auto-fix on, acting as `user`, or off. Unlike draft and auto-merge
+/// this is zone's own preference rather than something GitHub holds, so it
+/// only touches the row; what acts on it is the next status read that finds
+/// something to fix, which turning it on makes the very next one.
+pub async fn set_auto_fix(
+    state: &AppState,
+    chat_id: Uuid,
+    row: &PullRequestRow,
+    enabled: bool,
+    user: Uuid,
+) -> Result<PullRequestRow, Error> {
+    let updated = chat_pull_requests::set_auto_fix(state.db(), chat_id, row.id, enabled, user)
+        .await
+        .map_err(|error| {
+            tracing::error!(pull_request = %row.id, %error, "could not change auto-fix");
+            Error::Unsaved
+        })?
+        .ok_or(Error::Unsaved)?;
+    if enabled {
+        state.pull_request_statuses().forget(row.id);
+    }
+    Ok(updated)
+}
+
 /// The start of the pull request's unified diff.
 pub async fn diff(
     state: &AppState,
@@ -166,6 +201,7 @@ async fn open(state: &AppState, workspace_id: Uuid, row: &PullRequestRow) -> Res
             node_id,
             head,
             methods,
+            ..
         },
         token,
     ) = {
@@ -248,16 +284,14 @@ async fn observed(
     state: &AppState,
     row: &PullRequestRow,
     credential: Credential,
-) -> Result<Status, Error> {
+) -> Result<Observation, Error> {
     let service = state.config().pull_requests()?;
     let reference = service.pull_request(&row.url)?;
     let (service, reference) = (&service, &reference);
     state
         .github()
         .retrying(state.db(), credential, |token| async move {
-            Ok(observe(service, reference, &token, row, Reading::Listing)
-                .await?
-                .status)
+            Ok(observe(service, reference, &token, row, Reading::Listing).await?)
         })
         .await
 }
@@ -309,6 +343,7 @@ async fn observe(
         },
         node_id: detail.node_id,
         head: detail.head_sha,
+        branch: detail.head,
         methods,
     })
 }
@@ -342,8 +377,8 @@ async fn threads(
     if reading == Reading::Change {
         return None;
     }
-    match service.fetch_review_threads(reference, token).await {
-        Ok(records) => Some(Threads::from(records.as_slice())),
+    match service.fetch_review_thread_counts(reference, token).await {
+        Ok(count) => Threads::counted(count),
         Err(error) => {
             tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's review threads");
             None

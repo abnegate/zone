@@ -10,6 +10,8 @@ use crate::common::{
     test_password,
 };
 
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use axum::http::StatusCode;
 use chrono::{Duration as Interval, SecondsFormat, Utc};
 use serde_json::{Value, json};
@@ -146,7 +148,7 @@ impl Workspace {
     }
 
     async fn connect_github(&self) -> Uuid {
-        let encrypted = zone_server::crypto::encrypt(self.state.encryption_key(), GITHUB_TOKEN)
+        let encrypted = encrypt_value(&SecretValue::new(GITHUB_TOKEN), self.state.master_key())
             .expect("an encrypted token");
         sources::create_source(
             self.state.db(),
@@ -386,10 +388,13 @@ fn threads_read() -> wiremock::MockBuilder {
         .and(path("/graphql"))
         .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
         .and(body_string_contains("reviewThreads"))
+        .and(|request: &wiremock::Request| {
+            !String::from_utf8_lossy(&request.body).contains("comments")
+        })
 }
 
 /// GitHub's page of pull request 12's review threads, one resolved for each
-/// `true` in `resolved`.
+/// `true` in `resolved`, read without their comments.
 fn threads_answer(resolved: &[bool]) -> ResponseTemplate {
     let nodes: Vec<Value> = resolved
         .iter()
@@ -398,10 +403,6 @@ fn threads_answer(resolved: &[bool]) -> ResponseTemplate {
             json!({
                 "id": format!("PRRT_{index}"),
                 "isResolved": resolved,
-                "isOutdated": false,
-                "path": "src/widgets.rs",
-                "line": 1,
-                "comments": {"nodes": []},
             })
         })
         .collect();
@@ -1250,6 +1251,36 @@ async fn review_threads_read_as_unknown_when_github_will_not_list_them() {
     automate(&github, Automation::default()).await;
     threads_read()
         .respond_with(ResponseTemplate::new(502))
+        .expect(1..)
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    workspace.connect_github().await;
+    workspace.record(&link(&github, 12)).await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+    assert_eq!(listed[0]["status"]["threads"], Value::Null, "{listed}");
+}
+
+#[tokio::test]
+async fn review_threads_read_as_unknown_when_github_stops_short_of_every_thread() {
+    let github = MockServer::start().await;
+    describe(&github, false).await;
+    automate(&github, Automation::default()).await;
+    threads_read()
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"repository": {
+                "pullRequest": {"reviewThreads": {
+                    "pageInfo": {"hasNextPage": true, "endCursor": null},
+                    "nodes": [{"id": "PRRT_0", "isResolved": true}],
+                }},
+            }}})),
+        )
+        .expect(1..)
         .mount(&github)
         .await;
     let database = context_database_url();

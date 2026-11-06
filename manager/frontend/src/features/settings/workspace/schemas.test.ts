@@ -4,6 +4,7 @@ import {
   AiSettingsSchema,
   ConnectResponseSchema,
   UpdateAiSettingsRequestSchema,
+  WorkspaceAiSettingsResponseSchema,
   WorkspaceMemberSchema,
   WorkspaceMembersResponseSchema,
 } from './schemas';
@@ -43,6 +44,25 @@ describe('workspace AI settings schemas', () => {
     const parsed = AiSettingsResponseSchema.parse({ ...inherited, has_runpod_api_key: true });
     expect(parsed.has_runpod_api_key).toBe(true);
     expect(parsed).not.toHaveProperty('runpod_api_key');
+  });
+
+  it('reads a null workspace IAM role as not set, and only on the workspace payload', () => {
+    const workspace = {
+      ...inherited,
+      bedrock_use_iam_role: null,
+      overrides: false,
+      inherits_provider: true,
+      organization_keys: { litellm: false, openai: false, anthropic: false },
+    };
+
+    expect(WorkspaceAiSettingsResponseSchema.parse(workspace).bedrock_use_iam_role).toBeNull();
+    expect(
+      WorkspaceAiSettingsResponseSchema.parse({ ...workspace, bedrock_use_iam_role: false })
+        .bedrock_use_iam_role
+    ).toBe(false);
+    expect(() =>
+      AiSettingsResponseSchema.parse({ ...inherited, bedrock_use_iam_role: null })
+    ).toThrow();
   });
 });
 

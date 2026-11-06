@@ -15,6 +15,7 @@ import LoginPage from './features/auth/pages/LoginPage';
 import RegisterPage from './features/auth/pages/RegisterPage';
 import ResetPasswordPage from './features/auth/pages/ResetPasswordPage';
 import GitHubCallbackOrganization from './features/github/components/GitHubCallbackOrganization';
+import SettingsRedirect, { LegacySettings } from './features/settings/navigation/SettingsRedirect';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { loaders } from './routes';
 import ProtectedRoute from './shared/components/ProtectedRoute';
@@ -31,15 +32,13 @@ const AgentSignInPage = lazyRoute(loaders.agentSignIn);
 const ChatsPage = lazyRoute(loaders.chats);
 const Layout = lazyRoute(loaders.layout);
 const ModelsPage = lazyRoute(loaders.models);
-const OrgSettingsPage = lazyRoute(loaders.orgSettings);
 const ProjectsPage = lazyRoute(loaders.projects);
-const SessionsPage = lazyRoute(loaders.sessions);
+const SettingsPage = lazyRoute(loaders.settings);
 const SetupGate = lazyRoute(loaders.setupGate);
 const SetupPage = lazyRoute(loaders.setup);
 const SourcesPage = lazyRoute(loaders.sources);
 const TasksPage = lazyRoute(loaders.tasks);
 const WikiPage = lazyRoute(loaders.wiki);
-const WorkspaceSettingsPage = lazyRoute(loaders.workspaceSettings);
 
 function LocationSync() {
   const { pathname, search, hash } = useLocation();
@@ -196,33 +195,22 @@ function App({
                           }
                         />
                         <Route
-                          path="org-settings"
+                          path="settings/*"
                           element={
                             <GitHubCallbackOrganization>
-                              <ProtectedRoute
-                                requiredPermission={PERMISSIONS.ORGANIZATIONS.UPDATE}
-                                requiredOrganizationRole="admin"
-                              >
-                                <OrgSettingsPage />
+                              <ProtectedRoute>
+                                <SettingsPage />
                               </ProtectedRoute>
                             </GitHubCallbackOrganization>
                           }
                         />
                         <Route
-                          path="settings"
-                          element={
-                            <ProtectedRoute requiredPermission={PERMISSIONS.WORKSPACES.UPDATE}>
-                              <WorkspaceSettingsPage />
-                            </ProtectedRoute>
-                          }
+                          path="org-settings"
+                          element={<SettingsRedirect from={LegacySettings.Organization} />}
                         />
                         <Route
                           path="sessions"
-                          element={
-                            <ProtectedRoute>
-                              <SessionsPage />
-                            </ProtectedRoute>
-                          }
+                          element={<SettingsRedirect from={LegacySettings.Sessions} />}
                         />
                       </Route>
                     </Route>

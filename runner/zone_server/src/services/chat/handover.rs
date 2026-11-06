@@ -569,6 +569,7 @@ mod tests {
                 prompt: Some("a".repeat(64)),
             }),
             directory: None,
+            origin: crate::db::tasks::Origin::Member,
         };
         let mut pinned = Pinned::of(&generation).expect("a session on a login");
         pinned.sees("b".repeat(64), 6);
@@ -631,6 +632,7 @@ mod tests {
             },
             session: None,
             directory: None,
+            origin: crate::db::tasks::Origin::Member,
         };
         let mut pinned = Pinned::of(&generation).expect("a session on a login");
         pinned.keep(whole());
@@ -702,7 +704,7 @@ mod tests {
                 subscription: None,
             };
             let sealed = tokens
-                .seal(self.state.encryption_key())
+                .seal(self.state.master_key())
                 .expect("tokens to seal");
             self.store(AgentKind::Claude, Some(&sealed), label).await
         }

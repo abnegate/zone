@@ -52,11 +52,28 @@ const mockAiSettings: AiSettings = {
   completions_routed: true,
 };
 
-const mockWorkspaceAiSettings: WorkspaceAiSettings = {
-  ...mockAiSettings,
-  overrides: false,
-  organization_keys: { litellm: false, openai: false, anthropic: false },
-};
+const workspaceAiSettingsPath = /\/workspaces\/[^/]+\/settings\/ai$/;
+
+export function workspaceAiSettingsResponse(
+  settings: AiSettings = mockAiSettings,
+): WorkspaceAiSettings {
+  return {
+    ...settings,
+    bedrock_use_iam_role: null,
+    overrides: false,
+    inherits_provider: true,
+    organization_keys: { litellm: false, openai: false, anthropic: false },
+  };
+}
+
+export function aiSettingsResponse(
+  path: string,
+  settings: AiSettings = mockAiSettings,
+): AiSettings | WorkspaceAiSettings {
+  return workspaceAiSettingsPath.test(path)
+    ? workspaceAiSettingsResponse(settings)
+    : settings;
+}
 
 const mockMembers = [
   {
@@ -386,16 +403,8 @@ export async function setupCommonRoutes(
       body = { members: populated ? mockMembers : [] };
     else if (path.endsWith('/devices')) body = { devices: [] };
     else if (path.endsWith('/device-policy')) body = { mode: 'open' };
-    else if (/\/organizations\/[^/]+\/settings\/ai$/.test(path))
-      body = mockAiSettings;
-    else if (
-      /\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/ai$/.test(path)
-    )
-      body = mockWorkspaceAiSettings;
-    else if (
-      /\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/ai\/effective$/.test(path)
-    )
-      body = mockAiSettings;
+    else if (/\/settings\/ai(?:\/effective)?$/.test(path))
+      body = aiSettingsResponse(path);
     else if (path === '/api/organizations')
       body = { organizations: [mockOrganization] };
     else if (/\/organizations\/[^/]+\/workspaces$/.test(path))

@@ -166,6 +166,7 @@ impl fmt::Debug for Catalog {
 mod tests {
     use std::sync::LazyLock;
 
+    use abnegate_secret::MasterKey;
     use abnegate_vcs::{RemoteBranchName, Repository};
     use futures::future::join_all;
     use serde_json::{Value, json};
@@ -373,9 +374,10 @@ mod tests {
         assert!(!rendered.contains("widgets"), "{rendered}");
     }
 
-    fn key() -> [u8; 32] {
-        static KEY: LazyLock<[u8; 32]> = LazyLock::new(rand::random);
-        *KEY
+    fn key() -> Arc<MasterKey> {
+        static KEY: LazyLock<Arc<MasterKey>> =
+            LazyLock::new(|| Arc::new(MasterKey::generate().expect("a key")));
+        Arc::clone(&KEY)
     }
 
     fn listed(id: u64, name: &str) -> Value {

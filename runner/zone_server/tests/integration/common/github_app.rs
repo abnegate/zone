@@ -4,7 +4,9 @@
 
 pub use zone_server::services::github_app::testing::TEST_PRIVATE_KEY;
 
-use abnegate_secret::{MasterKey, SecretValue, encrypt_value};
+use std::sync::Arc;
+
+use abnegate_secret::{SecretValue, encrypt_value};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, SecondsFormat, Utc};
@@ -68,9 +70,8 @@ pub async fn seed_app(
     app_id: i64,
     owner_login: &str,
 ) -> AppRow {
-    let master_key = MasterKey::new(*state.encryption_key());
     let seal = |secret: &str| {
-        encrypt_value(&SecretValue::new(secret), &master_key).expect("a test secret seals")
+        encrypt_value(&SecretValue::new(secret), state.master_key()).expect("a test secret seals")
     };
     let private_key = seal(TEST_PRIVATE_KEY);
     let client_secret = seal("throwaway-client-secret");
@@ -155,7 +156,7 @@ pub async fn uninstalled(server: &MockServer, installation_id: i64) {
 
 /// A provider that mints installation tokens from `server` instead of GitHub.
 pub fn issuer_provider(server: &MockServer, state: &AppState) -> Provider {
-    Provider::new(&config_for(server), *state.encryption_key())
+    Provider::new(&config_for(server), Arc::clone(state.master_key()))
 }
 
 /// The test config with every GitHub API call sent to `server`.

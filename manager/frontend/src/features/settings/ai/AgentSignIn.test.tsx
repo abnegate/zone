@@ -125,14 +125,24 @@ type Props = ComponentProps<typeof import('./AgentSignIn').AgentSignIn>;
 function Harness({
   initial,
   onChange,
+  level = 'organization',
+  saveLabel = 'Save Changes',
   ...props
 }: Omit<
   Props,
-  'status' | 'attempt' | 'onStatusChange' | 'onAttemptChange' | 'organizationId' | 'loadError'
-> & {
-  initial: AgentStatus | undefined;
-  onChange: (status: AgentStatus) => void;
-}) {
+  | 'status'
+  | 'attempt'
+  | 'onStatusChange'
+  | 'onAttemptChange'
+  | 'organizationId'
+  | 'loadError'
+  | 'level'
+  | 'saveLabel'
+> &
+  Partial<Pick<Props, 'level' | 'saveLabel'>> & {
+    initial: AgentStatus | undefined;
+    onChange: (status: AgentStatus) => void;
+  }) {
   const [status, setStatus] = useState(initial);
   const [attempts, setAttempts] = useState<Partial<Record<Agent, Attempt>>>({});
   const report = useCallback(
@@ -148,6 +158,8 @@ function Harness({
   return (
     <AgentSignIn
       {...props}
+      level={level}
+      saveLabel={saveLabel}
       organizationId={organization}
       loadError={null}
       status={status}
@@ -806,7 +818,7 @@ describe('AgentSignIn', () => {
 
   describe('from a console on another machine', () => {
     beforeEach(() => {
-      openAt('https://zone.example.com/org-settings');
+      openAt('https://zone.example.com/settings/organization/ai');
     });
 
     afterEach(() => {
@@ -930,7 +942,9 @@ describe('AgentSignIn', () => {
           organizationId={organization}
           agent="codex"
           access="manage"
+          level="organization"
           unsaved={false}
+          saveLabel="Save Changes"
           heading="h4"
           status={codexPending}
           attempt={undefined}
@@ -1288,6 +1302,53 @@ describe('AgentSignIn', () => {
       expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
     });
 
+    it('names the save button it is given', () => {
+      render(
+        <Harness
+          agent="claude"
+          access="manage"
+          level="workspace"
+          unsaved
+          saveLabel="Save"
+          heading="h3"
+          initial={claudeSignedIn}
+          onChange={mock()}
+        />
+      );
+
+      expect(screen.getByText('Save to use this provider.')).toBeInTheDocument();
+      expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
+    });
+
+    it('tells a workspace its sign-in covers the whole organization', () => {
+      render(
+        <Harness
+          agent="claude"
+          access="manage"
+          level="workspace"
+          unsaved={false}
+          saveLabel="Save"
+          heading="h3"
+          initial={claudeSignedOut}
+          onChange={mock()}
+        />
+      );
+      expect(
+        screen.getByText(
+          'Sign in with a Claude subscription to use Claude Code. Signing in here signs in for every workspace in this organization.'
+        )
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/in this workspace/)).toBeNull();
+      cleanup();
+
+      renderPanel('claude', claudeSignedOut);
+      expect(
+        screen.getByText(
+          'Sign in with a Claude subscription to use Claude Code in this organization.'
+        )
+      ).toBeInTheDocument();
+    });
+
     it('asks to save right after a sign-in succeeds', async () => {
       agentsApi.start.mockResolvedValue(claudeLogin(authorize));
       agentsApi.submitCode.mockResolvedValue(claudeSignedIn);
@@ -1317,7 +1378,9 @@ describe('AgentSignIn', () => {
           organizationId={organizationId}
           agent="claude"
           access="manage"
+          level="organization"
           unsaved={false}
+          saveLabel="Save Changes"
           heading="h4"
           status={claudeSignedOut}
           attempt={undefined}
@@ -1350,7 +1413,9 @@ describe('AgentSignIn', () => {
           organizationId={organization}
           agent="claude"
           access="manage"
+          level="organization"
           unsaved={false}
+          saveLabel="Save Changes"
           heading="h4"
           status={claudeSignedIn}
           attempt={undefined}
@@ -1679,7 +1744,9 @@ describe('AgentSignIn', () => {
           organizationId={organization}
           agent="claude"
           access="manage"
+          level="organization"
           unsaved={false}
+          saveLabel="Save Changes"
           heading="h4"
           status={undefined}
           attempt={undefined}

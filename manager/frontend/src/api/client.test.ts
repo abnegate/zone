@@ -1590,6 +1590,7 @@ describe('Client', () => {
     const mockWorkspaceAiSettings = {
       ...mockAiSettings,
       overrides: true,
+      inherits_provider: false,
       organization_keys: { litellm: false, openai: false, anthropic: false },
     };
 

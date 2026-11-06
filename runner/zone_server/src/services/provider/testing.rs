@@ -63,7 +63,7 @@ impl Fixture {
             subscription: None,
         };
         let sealed = tokens
-            .seal(self.state.encryption_key())
+            .seal(self.state.master_key())
             .expect("tokens to seal");
         agent_logins::insert(
             &self.pool,

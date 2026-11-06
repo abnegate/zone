@@ -127,7 +127,7 @@ async fn keep(
     id: Uuid,
     renewed: &claude::Tokens,
 ) {
-    let sealed = match renewed.seal(state.encryption_key()) {
+    let sealed = match renewed.seal(state.master_key()) {
         Ok(sealed) => sealed,
         Err(error) => {
             tracing::error!(%organization, %error, "Could not seal the renewed Claude sign-in");
@@ -195,7 +195,7 @@ fn open(state: &AppState, login: &AgentLoginRow) -> Result<claude::Tokens, Error
         .credential
         .as_ref()
         .ok_or_else(|| Error::Unreadable(UNOPENED.to_string()))?;
-    claude::Tokens::open(state.encryption_key(), sealed.expose())
+    claude::Tokens::open(state.master_key(), sealed.expose())
         .map_err(|_| Error::Unreadable(UNOPENED.to_string()))
 }
 
@@ -360,7 +360,7 @@ mod tests {
 
         async fn sign_in(&self, tokens: &claude::Tokens) -> AgentLoginRow {
             let sealed = tokens
-                .seal(self.state.encryption_key())
+                .seal(self.state.master_key())
                 .expect("tokens to seal");
             self.store(AgentKind::Claude, Some(&sealed), Some(tokens.expires_at))
                 .await
@@ -404,7 +404,7 @@ mod tests {
         async fn stored(&self) -> (claude::Tokens, Option<DateTime<Utc>>) {
             let login = self.first().await;
             let sealed = login.credential.expect("a sealed credential");
-            let tokens = claude::Tokens::open(self.state.encryption_key(), sealed.expose())
+            let tokens = claude::Tokens::open(self.state.master_key(), sealed.expose())
                 .expect("tokens Zone sealed");
             (tokens, login.expires_at)
         }
@@ -894,7 +894,7 @@ mod tests {
         let fixture = Fixture::answered_by(&server).await;
         let expiring = tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH));
         let sealed = expiring
-            .seal(fixture.state.encryption_key())
+            .seal(fixture.state.master_key())
             .expect("tokens to seal");
         let first = fixture
             .add(AgentKind::Claude, Some(&sealed), Some(expiring.expires_at))

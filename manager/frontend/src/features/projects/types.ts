@@ -20,6 +20,8 @@ export interface Project {
   github_installation_id?: string | null;
   github_installation_status?: GitHubInstallationStatus | null;
   github_account_login?: string | null;
+  position: number;
+  last_used_at?: string | null;
   created_at: string;
   updated_at: string;
 }

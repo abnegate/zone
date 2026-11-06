@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use abnegate_secret::REDACTED;
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -15,7 +17,7 @@ use uuid::Uuid;
 
 use crate::auth::AuthUser;
 use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
-use crate::db::projects::{self, NewProject, ProjectRow};
+use crate::db::projects::{self, NewProject, ProjectRow, Reorder};
 use crate::db::{auto_projects, chats, sources, sync_config, workspace_members};
 use crate::error::ServerError;
 use crate::services::model::Model;
@@ -201,6 +203,10 @@ pub struct ProjectData {
     github_installation_id: Option<Uuid>,
     github_installation_status: Option<InstallationStatus>,
     github_account_login: Option<String>,
+    position: i32,
+    /// Listed only, and only once a member has typed in or added to the project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<String>,
     /// Whether the project runs itself, and why it stopped or when it finished.
     auto: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -258,6 +264,8 @@ impl From<ProjectRow> for ProjectData {
             github_installation_id: row.github_installation_id,
             github_installation_status: None,
             github_account_login: None,
+            position: row.position,
+            last_used_at: None,
             auto: false,
             auto_paused_reason: None,
             auto_completed_at: None,
@@ -292,6 +300,11 @@ pub struct UpdateProjectRequest {
     /// Turn automation on or off: on, every agentic task of the project is
     /// run, reviewed and merged without anyone in the loop.
     auto: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderProjectsRequest {
+    project_ids: Vec<Uuid>,
 }
 
 /// Link source request
@@ -426,11 +439,13 @@ pub async fn list(
         return Err(ServerError::NotFound("Workspace not found".to_string()));
     }
 
-    let (rows, automation) = tokio::join!(
+    let (rows, automation, used) = tokio::join!(
         projects::list_projects(state.db(), query.workspace_id, query.status.as_deref()),
         auto_projects::automation_for_workspace(state.db(), query.workspace_id),
+        projects::last_used(state.db(), query.workspace_id),
     );
     let rows = rows?;
+    let used = used?;
     let automation: HashMap<Uuid, auto_projects::ProjectAutomation> = automation
         .unwrap_or_default()
         .into_iter()
@@ -451,13 +466,41 @@ pub async fn list(
                 let installation = row
                     .github_installation_id
                     .and_then(|id| installations.get(&id));
-                ProjectData::from(row)
-                    .with_automation(known)
-                    .with_installation(installation)
+                let last_used_at = used.get(&row.id).map(|at| at.and_utc().to_rfc3339());
+                ProjectData {
+                    last_used_at,
+                    ..ProjectData::from(row)
+                        .with_automation(known)
+                        .with_installation(installation)
+                }
             })
             .collect(),
     })
     .into_response())
+}
+
+/// PUT /api/workspaces/{workspace_id}/projects/order
+pub async fn reorder(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
+    Json(request): Json<ReorderProjectsRequest>,
+) -> Result<Response, ServerError> {
+    let user_id = user_id(&auth)?;
+    if !workspace_members::is_member(state.db(), user_id, workspace_id).await? {
+        return Err(ServerError::NotFound("Workspace not found".to_string()));
+    }
+    if !workspace_members::can_write(state.db(), workspace_id, user_id).await? {
+        return Err(ServerError::Forbidden(
+            "Workspace write access required".to_string(),
+        ));
+    }
+    match projects::reorder(state.db(), workspace_id, &request.project_ids).await? {
+        Reorder::Reordered => Ok(StatusCode::NO_CONTENT.into_response()),
+        Reorder::Duplicated => Err(ServerError::BadRequest(
+            "The order must name each project at most once".to_string(),
+        )),
+    }
 }
 
 /// POST /api/projects
@@ -619,7 +662,7 @@ pub async fn link_github(
     let sealed = request
         .access_token
         .as_deref()
-        .map(|token| crate::crypto::encrypt(state.encryption_key(), token))
+        .map(|token| encrypt_value(&SecretValue::new(token), state.master_key()))
         .transpose()
         .map_err(|error| {
             tracing::error!(%error, "Could not encrypt the repository token");
@@ -811,6 +854,7 @@ mod tests {
             created_at: None,
             updated_at: None,
             github_installation_id,
+            position: 0,
         }
     }
 

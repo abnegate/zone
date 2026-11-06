@@ -13,11 +13,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::crypto;
 use crate::db::github_apps::AppRow;
 use crate::db::github_installations::{self, InstallationCredential, InstallationStatus};
 use crate::db::projects::ProjectRow;
 use crate::db::sources::SourceRow;
+use crate::secret::Unseal;
 
 use super::catalog::Catalog;
 use super::credential::Credential;
@@ -65,12 +65,11 @@ pub struct Provider {
     cache: TokenCache,
     flights: Flights<InstallationId, Mint>,
     catalog: Catalog,
-    master_key: MasterKey,
-    encryption_key: [u8; 32],
+    master_key: Arc<MasterKey>,
 }
 
 impl Provider {
-    pub fn new(config: &Config, encryption_key: [u8; 32]) -> Self {
+    pub fn new(config: &Config, master_key: Arc<MasterKey>) -> Self {
         let github = GitHub::configured(&config.github_api_url, config.github_api_allows_http)
             .inspect_err(|error| {
                 tracing::warn!(
@@ -84,8 +83,7 @@ impl Provider {
             cache: TokenCache::new(),
             flights: Flights::default(),
             catalog: Catalog::default(),
-            master_key: MasterKey::new(encryption_key),
-            encryption_key,
+            master_key,
         }
     }
 
@@ -211,17 +209,23 @@ impl Provider {
     pub fn stored_source(&self, encrypted: Option<&str>) -> Result<Option<Credential>, Error> {
         encrypted
             .map(|encrypted| {
-                crypto::decrypt(&self.encryption_key, encrypted)
-                    .map(|token| Credential::stored(SecretValue::new(token)))
+                self.master_key
+                    .open_strict(encrypted)
+                    .map(Credential::stored)
                     .map_err(|_| Error::Credential)
             })
             .transpose()
     }
 
-    pub fn stored_project(&self, stored: Option<&str>) -> Option<Credential> {
-        stored.map(|stored| {
-            Credential::stored(SecretValue::new(crypto::open(&self.encryption_key, stored)))
-        })
+    pub fn stored_project(&self, stored: Option<&str>) -> Result<Option<Credential>, Error> {
+        stored
+            .map(|stored| {
+                self.master_key
+                    .open_lenient(stored)
+                    .map(Credential::stored)
+                    .map_err(|_| Error::Credential)
+            })
+            .transpose()
     }
 
     pub async fn source(
@@ -248,7 +252,7 @@ impl Provider {
                 .within(db, project.workspace_id, installation)
                 .await
                 .map(Some),
-            None => Ok(self.stored_project(project.github_access_token.as_deref())),
+            None => self.stored_project(project.github_access_token.as_deref()),
         }
     }
 
@@ -505,6 +509,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
+    use crate::secret::fixture::seal;
+    use crate::secret::fixture::seal_legacy;
     use crate::services::github_app::testing::{
         TEST_PRIVATE_KEY, installation_number, installed, issuing, provider, uninstalled,
     };
@@ -512,9 +518,14 @@ mod tests {
     const APPLICATION: ApplicationId = ApplicationId::new(12345);
     const INSTALLATION: InstallationId = InstallationId::new(67890);
 
-    fn key() -> [u8; 32] {
-        static KEY: LazyLock<[u8; 32]> = LazyLock::new(rand::random);
-        *KEY
+    fn key() -> Arc<MasterKey> {
+        static KEY: LazyLock<Arc<MasterKey>> =
+            LazyLock::new(|| Arc::new(MasterKey::generate().expect("a key")));
+        Arc::clone(&KEY)
+    }
+
+    fn other_key() -> Arc<MasterKey> {
+        Arc::new(MasterKey::new([9u8; 32]))
     }
 
     fn sealed_key(provider: &Provider) -> String {
@@ -688,7 +699,7 @@ mod tests {
 
     #[test]
     fn opening_refuses_a_secret_sealed_under_another_key() {
-        let other = Provider::new(&crate::state::test_config(), [9u8; 32]);
+        let other = Provider::new(&crate::state::test_config(), other_key());
         let provider = Provider::new(&crate::state::test_config(), key());
 
         assert!(matches!(
@@ -700,7 +711,7 @@ mod tests {
     #[test]
     fn a_stored_source_token_is_decrypted() {
         let provider = Provider::new(&crate::state::test_config(), key());
-        let encrypted = crypto::encrypt(&key(), "ghp_personalaccesstoken").expect("encrypt");
+        let encrypted = seal("ghp_personalaccesstoken", &key());
 
         let credential = provider
             .stored_source(Some(&encrypted))
@@ -725,7 +736,7 @@ mod tests {
     #[test]
     fn a_source_token_sealed_under_another_key_fails_closed() {
         let provider = Provider::new(&crate::state::test_config(), key());
-        let encrypted = crypto::encrypt(&[9u8; 32], "ghp_personalaccesstoken").expect("encrypt");
+        let encrypted = seal("ghp_personalaccesstoken", &other_key());
 
         let error = provider
             .stored_source(Some(&encrypted))
@@ -748,18 +759,44 @@ mod tests {
     #[test]
     fn a_project_token_opens_whether_encrypted_or_legacy_plaintext() {
         let provider = Provider::new(&crate::state::test_config(), key());
-        let encrypted = crypto::encrypt(&key(), "ghp_encrypted").expect("encrypt");
+        let encrypted = seal("ghp_encrypted", &key());
 
         let opened = provider
             .stored_project(Some(&encrypted))
+            .expect("open")
             .expect("credential");
         let legacy = provider
             .stored_project(Some("ghp_legacyplaintext"))
+            .expect("open")
             .expect("credential");
 
         assert_eq!(opened.secret().expose(), "ghp_encrypted");
         assert_eq!(legacy.secret().expose(), "ghp_legacyplaintext");
-        assert!(provider.stored_project(None).is_none());
+        assert!(provider.stored_project(None).expect("open").is_none());
+    }
+
+    #[test]
+    fn a_project_token_sealed_under_another_key_fails_closed() {
+        let provider = Provider::new(&crate::state::test_config(), key());
+        let encrypted = seal("ghp_encrypted", &other_key());
+
+        assert!(matches!(
+            provider.stored_project(Some(&encrypted)),
+            Err(Error::Credential)
+        ));
+    }
+
+    #[test]
+    fn a_source_token_sealed_before_the_envelope_existed_is_decrypted() {
+        let provider = Provider::new(&crate::state::test_config(), key());
+        let sealed = seal_legacy("ghp_personalaccesstoken", &key());
+
+        let credential = provider
+            .stored_source(Some(&sealed))
+            .expect("decrypt")
+            .expect("a stored token yields a credential");
+
+        assert_eq!(credential.secret().expose(), "ghp_personalaccesstoken");
     }
 
     #[tokio::test]
@@ -775,6 +812,7 @@ mod tests {
             .expect("mint");
         let credential = provider
             .stored_project(Some("ghp_legacyplaintext"))
+            .expect("open")
             .expect("credential");
 
         for rendered in [
@@ -840,6 +878,7 @@ mod tests {
             created_at: None,
             updated_at: None,
             github_installation_id: installation,
+            position: 0,
         }
     }
 
@@ -1125,7 +1164,7 @@ mod tests {
         let server = MockServer::start().await;
         let pool = pool().await;
         let provider = provider(&server, key());
-        let encrypted = crypto::encrypt(&key(), "ghp_personalaccesstoken").expect("encrypt");
+        let encrypted = seal("ghp_personalaccesstoken", &key());
 
         let credential = provider
             .source(&pool, &source_row(None, None, Some(encrypted)))
@@ -1243,7 +1282,7 @@ mod tests {
         github_installations::mark_revoked(&connected.pool, connected.installation)
             .await
             .expect("revoke");
-        let encrypted = crypto::encrypt(&key(), "ghp_fallback").expect("encrypt");
+        let encrypted = seal("ghp_fallback", &key());
 
         let error = connected
             .provider
@@ -1482,6 +1521,7 @@ mod tests {
         let provider = provider(&server, key());
         let credential = provider
             .stored_project(Some("ghp_personalaccesstoken"))
+            .expect("open")
             .expect("credential");
         let calls = AtomicUsize::new(0);
 

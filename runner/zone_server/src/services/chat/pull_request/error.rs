@@ -21,6 +21,8 @@ pub enum Error {
     Unreachable,
     #[error("The pull request's source could not be read.")]
     Storage,
+    #[error("The pull request's auto-fix setting could not be saved.")]
+    Unsaved,
 }
 
 impl From<PullRequestError> for Error {

@@ -1,13 +1,18 @@
 //! Project database queries
 
+mod order;
+
+use std::collections::HashMap;
 use std::fmt;
 
 use abnegate_secret::REDACTED;
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
+
+pub use order::Reorder;
 
 /// Project row from database
 #[derive(Clone, sqlx::FromRow)]
@@ -23,6 +28,7 @@ pub struct ProjectRow {
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
     pub github_installation_id: Option<Uuid>,
+    pub position: i32,
 }
 
 impl fmt::Debug for ProjectRow {
@@ -43,48 +49,82 @@ impl fmt::Debug for ProjectRow {
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .field("github_installation_id", &self.github_installation_id)
+            .field("position", &self.position)
             .finish()
     }
 }
 
-/// List projects with workspace and optional status filter
+/// A workspace's projects in the workspace's own order, optionally of one status
 pub async fn list_projects(
     pool: &PgPool,
     workspace_id: Uuid,
     status: Option<&str>,
 ) -> DbResult<Vec<ProjectRow>> {
-    if let Some(status) = status {
-        sqlx::query_as!(
-            ProjectRow,
-            r#"
-            SELECT id, workspace_id, source_id, name, description, status,
-                   github_repo_url, github_access_token, created_at, updated_at,
-                   github_installation_id
-            FROM projects
-            WHERE workspace_id = $1 AND status = $2
-            ORDER BY created_at DESC
-            "#,
-            workspace_id,
-            status
-        )
-        .fetch_all(pool)
-        .await
-    } else {
-        sqlx::query_as!(
-            ProjectRow,
-            r#"
-            SELECT id, workspace_id, source_id, name, description, status,
-                   github_repo_url, github_access_token, created_at, updated_at,
-                   github_installation_id
-            FROM projects
-            WHERE workspace_id = $1
-            ORDER BY created_at DESC
-            "#,
-            workspace_id
-        )
-        .fetch_all(pool)
-        .await
-    }
+    sqlx::query_as!(
+        ProjectRow,
+        r#"
+        SELECT id, workspace_id, source_id, name, description, status,
+               github_repo_url, github_access_token, created_at, updated_at,
+               github_installation_id, "position"
+        FROM projects
+        WHERE workspace_id = $1 AND ($2::text IS NULL OR status = $2)
+        ORDER BY "position", created_at DESC, id
+        "#,
+        workspace_id,
+        status
+    )
+    .fetch_all(pool)
+    .await
+}
+
+/// When a member last worked in each of a workspace's projects: the latest
+/// message one typed into a project chat, or the latest task one added.
+///
+/// Reminder, tool and automation posts carry a `source`, and only a task whose
+/// origin is a member counts. A project nobody worked in is left out.
+pub async fn last_used(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<HashMap<Uuid, NaiveDateTime>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT project.id, GREATEST(typed.used_at, added.used_at) AS used_at
+        FROM projects project
+        LEFT JOIN LATERAL (
+            SELECT MAX(latest.created_at) AS used_at
+            FROM chats chat
+            CROSS JOIN LATERAL (
+                SELECT message.created_at
+                FROM messages message
+                WHERE message.chat_id = chat.id
+                  AND message.role = 'user'
+                  AND NOT COALESCE(
+                      jsonb_typeof(message.metadata) = 'object' AND message.metadata ? 'source',
+                      FALSE
+                  )
+                ORDER BY message.created_at DESC
+                LIMIT 1
+            ) latest
+            WHERE chat.project_id = project.id
+        ) typed ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT MAX(task.created_at) AS used_at
+            FROM task_projects link
+            JOIN tasks task ON task.id = link.task_id
+            WHERE link.project_id = project.id
+              AND task.origin = 'member'
+        ) added ON TRUE
+        WHERE project.workspace_id = $1
+        "#,
+        workspace_id
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.used_at.map(|used_at| (row.id, used_at)))
+        .collect())
 }
 
 /// Get project by ID
@@ -94,7 +134,7 @@ pub async fn get_project(pool: &PgPool, id: Uuid) -> DbResult<Option<ProjectRow>
         r#"
         SELECT id, workspace_id, source_id, name, description, status,
                github_repo_url, github_access_token, created_at, updated_at,
-               github_installation_id
+               github_installation_id, "position"
         FROM projects
         WHERE id = $1
         "#,
@@ -110,17 +150,18 @@ pub async fn get_project_in_workspace(
     id: Uuid,
     workspace_id: Uuid,
 ) -> DbResult<Option<ProjectRow>> {
-    sqlx::query_as::<_, ProjectRow>(
+    sqlx::query_as!(
+        ProjectRow,
         r#"
         SELECT id, workspace_id, source_id, name, description, status,
                github_repo_url, github_access_token, created_at, updated_at,
-               github_installation_id
+               github_installation_id, "position"
         FROM projects
         WHERE id = $1 AND workspace_id = $2
         "#,
+        id,
+        workspace_id
     )
-    .bind(id)
-    .bind(workspace_id)
     .fetch_optional(pool)
     .await
 }
@@ -135,24 +176,42 @@ pub struct NewProject<'a> {
     pub status: Option<&'a str>,
 }
 
-/// Create a new project
+/// Hold a workspace's project order until the transaction ends, so a create
+/// or reorder reads positions no other one is about to change.
+pub(crate) async fn lock_order(connection: &mut PgConnection, workspace_id: Uuid) -> DbResult<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('project-order:' || $1::text, 0))")
+        .bind(workspace_id)
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
+/// Create a new project, first in its workspace's order
 pub async fn create(pool: &PgPool, project: NewProject<'_>) -> DbResult<ProjectRow> {
-    sqlx::query_as::<_, ProjectRow>(
+    let mut transaction = pool.begin().await?;
+    if let Some(workspace_id) = project.workspace_id {
+        lock_order(&mut transaction, workspace_id).await?;
+    }
+    let row = sqlx::query_as!(
+        ProjectRow,
         r#"
-        INSERT INTO projects (name, description, workspace_id, source_id, status)
-        VALUES ($1, $2, $3, $4, COALESCE($5, 'active'))
+        INSERT INTO projects (name, description, workspace_id, source_id, status, "position")
+        VALUES ($1, $2, $3, $4, COALESCE($5, 'active'),
+                COALESCE((SELECT MIN("position") FROM projects WHERE workspace_id = $3), 1) - 1)
         RETURNING id, workspace_id, source_id, name, description, status,
                   github_repo_url, github_access_token, created_at, updated_at,
-                  github_installation_id
+                  github_installation_id, "position"
         "#,
+        project.name,
+        project.description,
+        project.workspace_id,
+        project.source_id,
+        project.status
     )
-    .bind(project.name)
-    .bind(project.description)
-    .bind(project.workspace_id)
-    .bind(project.source_id)
-    .bind(project.status)
-    .fetch_one(pool)
-    .await
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(row)
 }
 
 /// Create a new active project with no source
@@ -181,18 +240,19 @@ pub async fn set_source(
     id: Uuid,
     source_id: Option<Uuid>,
 ) -> DbResult<Option<ProjectRow>> {
-    sqlx::query_as::<_, ProjectRow>(
+    sqlx::query_as!(
+        ProjectRow,
         r#"
         UPDATE projects
         SET source_id = $2, updated_at = NOW()
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
                   github_repo_url, github_access_token, created_at, updated_at,
-                  github_installation_id
+                  github_installation_id, "position"
         "#,
+        id,
+        source_id
     )
-    .bind(id)
-    .bind(source_id)
     .fetch_optional(pool)
     .await
 }
@@ -216,7 +276,7 @@ pub async fn update_project(
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
                   github_repo_url, github_access_token, created_at, updated_at,
-                  github_installation_id
+                  github_installation_id, "position"
         "#,
         id,
         name,
@@ -255,7 +315,7 @@ pub async fn link_github(
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
                   github_repo_url, github_access_token, created_at, updated_at,
-                  github_installation_id
+                  github_installation_id, "position"
         "#,
         id,
         repo_url,
@@ -279,7 +339,7 @@ pub async fn unlink_github(pool: &PgPool, id: Uuid) -> DbResult<Option<ProjectRo
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
                   github_repo_url, github_access_token, created_at, updated_at,
-                  github_installation_id
+                  github_installation_id, "position"
         "#,
         id
     )
@@ -287,119 +347,45 @@ pub async fn unlink_github(pool: &PgPool, id: Uuid) -> DbResult<Option<ProjectRo
     .await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::db::sources::testing;
+/// Put the given projects of a workspace in the given order, in one transaction.
+///
+/// The projects named take, in the order given, the places they held between
+/// them; every other project keeps its place, so a list filtered by status or
+/// search can be reordered without moving what it hides. A project no longer
+/// in the workspace, such as one deleted since the list was drawn, is skipped.
+pub async fn reorder(pool: &PgPool, workspace_id: Uuid, ids: &[Uuid]) -> DbResult<Reorder> {
+    let mut transaction = pool.begin().await?;
+    lock_order(&mut transaction, workspace_id).await?;
+    let current = sqlx::query_scalar!(
+        r#"
+        SELECT id FROM projects
+        WHERE workspace_id = $1
+        ORDER BY "position", created_at DESC, id
+        "#,
+        workspace_id
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
 
-    async fn widgets(pool: &PgPool, workspace_id: Uuid) -> ProjectRow {
-        create(
-            pool,
-            NewProject {
-                name: "Widgets",
-                description: None,
-                workspace_id: Some(workspace_id),
-                source_id: None,
-                status: None,
-            },
-        )
-        .await
-        .expect("a project")
-    }
-
-    #[tokio::test]
-    async fn linking_with_an_installation_stores_it_and_unlinking_clears_it() {
-        let pool = testing::pool().await;
-        let installation = testing::installation(&pool).await;
-        let project = widgets(&pool, installation.workspace).await;
-        assert_eq!(project.github_installation_id, None);
-
-        let linked = link_github(
-            &pool,
-            project.id,
-            "https://github.com/acme/widgets",
-            None,
-            Some(installation.id),
-        )
-        .await
-        .expect("the link")
-        .expect("the project");
-        assert_eq!(linked.github_installation_id, Some(installation.id));
-        assert_eq!(linked.github_access_token, None);
-
-        let unlinked = unlink_github(&pool, project.id)
-            .await
-            .expect("the unlink")
-            .expect("the project");
-        assert_eq!(unlinked.github_installation_id, None);
-        assert_eq!(unlinked.github_repo_url, None);
-    }
-
-    #[tokio::test]
-    async fn every_project_read_and_write_returns_the_installation() {
-        let pool = testing::pool().await;
-        let installation = testing::installation(&pool).await;
-        let project = widgets(&pool, installation.workspace).await;
-        link_github(
-            &pool,
-            project.id,
-            "https://github.com/acme/widgets",
-            None,
-            Some(installation.id),
-        )
-        .await
-        .expect("the link");
-        let expected = Some(installation.id);
-
-        let in_workspace = get_project_in_workspace(&pool, project.id, installation.workspace)
-            .await
-            .expect("the read")
-            .expect("the project");
-        assert_eq!(in_workspace.github_installation_id, expected);
-        let by_id = get_project(&pool, project.id)
-            .await
-            .expect("the read")
-            .expect("the project");
-        assert_eq!(by_id.github_installation_id, expected);
-        for status in [None, Some("active")] {
-            let listed = list_projects(&pool, installation.workspace, status)
-                .await
-                .expect("the listing");
-            assert_eq!(listed.len(), 1);
-            assert_eq!(listed[0].github_installation_id, expected);
-        }
-        let renamed = update_project(&pool, project.id, Some("Gadgets"), None, None)
-            .await
-            .expect("the update")
-            .expect("the project");
-        assert_eq!(renamed.github_installation_id, expected);
-        let unsourced = set_source(&pool, project.id, None)
-            .await
-            .expect("the update")
-            .expect("the project");
-        assert_eq!(unsourced.github_installation_id, expected);
-    }
-
-    #[test]
-    fn debug_redacts_the_access_token() {
-        let row = ProjectRow {
-            id: Uuid::new_v4(),
-            workspace_id: None,
-            source_id: None,
-            name: "Widgets".to_string(),
-            description: None,
-            status: "active".to_string(),
-            github_repo_url: Some("https://github.com/acme/widgets".to_string()),
-            github_access_token: Some("ghp_legacy_plaintext".to_string()),
-            created_at: None,
-            updated_at: None,
-            github_installation_id: None,
-        };
-
-        let rendered = format!("{row:?}");
-
-        assert!(!rendered.contains("ghp_legacy_plaintext"), "{rendered}");
-        assert!(rendered.contains(REDACTED), "{rendered}");
-        assert!(rendered.contains("acme/widgets"), "{rendered}");
-    }
+    let Some(arranged) = order::arrange(&current, ids) else {
+        return Ok(Reorder::Duplicated);
+    };
+    let positions: Vec<i32> = (1..).take(arranged.len()).collect();
+    sqlx::query!(
+        r#"
+        UPDATE projects
+        SET "position" = placed."position"
+        FROM UNNEST($1::uuid[], $2::integer[]) AS placed(id, "position")
+        WHERE projects.id = placed.id
+        "#,
+        &arranged,
+        &positions
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(Reorder::Reordered)
 }
+
+#[cfg(test)]
+mod tests;

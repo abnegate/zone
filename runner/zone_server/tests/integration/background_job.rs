@@ -52,21 +52,33 @@ fn environment() -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-/// Where a chat tool set's jobs would land, resolved the way the tool set
-/// resolves it. Nothing in these tests spawns a chat job there, and the
-/// assertions at the end of each test are what keep it that way.
-fn chat_root() -> PathBuf {
+/// Every directory a chat tool set's jobs could land in, resolved the way the
+/// tool set resolves it: the override if one is set, the process's own
+/// directory otherwise.
+///
+/// Both are shared. `chat_agent` sets the override for the whole binary and
+/// starts chat jobs of its own there, and the checkout it points at sits under
+/// `CARGO_TARGET_TMPDIR`, which every run on the same build directory shares.
+/// A `.zone/` in either may be somebody else's job, so a test here can only
+/// speak for the jobs it started itself.
+fn chat_roots() -> Vec<PathBuf> {
     std::env::var_os("ZONE_CHAT_AGENT_CWD")
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .into_iter()
+        .chain(std::env::current_dir().ok())
+        .collect()
 }
 
-/// Whether job `id` wrote its log under [`chat_root`]. Asked per job because
-/// the chat agent suite shares this binary and legitimately runs jobs in that
-/// root, so a log tree standing there proves nothing about these tests.
-fn strayed(id: &str) -> bool {
-    job::log_path(&chat_root(), id).exists()
+fn assert_none_logged_in_chat_roots(jobs: &[&str]) {
+    for root in chat_roots() {
+        for job in jobs {
+            let stray = job::log_path(&root, job);
+            assert!(
+                !stray.exists(),
+                "a job wrote its log into the server's own working directory: {stray:?}"
+            );
+        }
+    }
 }
 
 fn directory() -> TempDir {
@@ -253,6 +265,7 @@ async fn chat_tools(state: &AppState, workspace: Uuid, user: Uuid, chat: Uuid) -
         chat_id: Some(chat),
         user_id: user,
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await
 }
@@ -393,10 +406,7 @@ async fn a_job_is_readable_through_tail_job_only_from_the_session_that_started_i
         .await
         .expect("the working directory is removable");
     assert!(!log.exists(), "a job log outlived its test");
-    assert!(
-        !strayed(&started.id),
-        "a job wrote its log into the server's own working directory"
-    );
+    assert_none_logged_in_chat_roots(&[&started.id]);
 }
 
 /// A chat works in a checkout it does not own — in a linked worktree its
@@ -477,12 +487,7 @@ async fn a_chat_spawn_leaves_the_exclude_file_alone_and_a_task_spawn_writes_it_o
     for log in &logs {
         assert!(!log.exists(), "a job log outlived its test: {log:?}");
     }
-    for id in [&by_chat.id, &first.id, &second.id] {
-        assert!(
-            !strayed(id),
-            "a job wrote its log into the server's own working directory"
-        );
-    }
+    assert_none_logged_in_chat_roots(&[&by_chat.id, &first.id, &second.id]);
 }
 
 /// Whatever directory a call names, a spawn writes into the session's own
@@ -550,10 +555,7 @@ async fn a_task_spawn_naming_another_checkout_writes_only_into_its_own() {
         !checkout.path().join(EXCLUDED).exists(),
         "the emptied log directory is still in the checkout"
     );
-    assert!(
-        !strayed(&started.id),
-        "a job wrote its log into the server's own working directory"
-    );
+    assert_none_logged_in_chat_roots(&[&started.id]);
 }
 
 /// A background job outlives the tool call that started it and nothing drops a
@@ -619,10 +621,7 @@ async fn a_job_a_run_started_is_dead_once_the_run_reaches_a_terminal_status() {
         .await
         .expect("the working directory is removable");
     assert!(!log.exists(), "a job log outlived its run");
-    assert!(
-        !strayed(&started.id),
-        "a job wrote its log into the server's own working directory"
-    );
+    assert_none_logged_in_chat_roots(&[&started.id]);
 }
 
 /// The same debt on the other surface, settled at the one exit every chat turn
@@ -720,10 +719,7 @@ async fn a_job_a_chat_turn_started_is_dead_once_the_turn_ends() {
         .await
         .expect("the working directory is removable");
     assert!(!log.exists(), "a job log outlived its turn");
-    assert!(
-        !strayed(&started.id),
-        "a job wrote its log into the server's own working directory"
-    );
+    assert_none_logged_in_chat_roots(&[&started.id]);
 }
 
 /// One streamed completion carrying `content` and nothing else.

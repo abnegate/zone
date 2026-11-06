@@ -1,0 +1,872 @@
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setSystemTime,
+} from 'bun:test';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import fixture from '../../../../../../../runner/zone_server/tests/fixtures/agents.json';
+import { ApiError } from '../../../../api/ApiError';
+import { clientModule } from '../../../../test/client';
+import { chooseSelect, selectOptionValues } from '../../../../test/select';
+import type { AiSettings, OrgRole } from '../types';
+
+const mockClient = {
+  getOrgAiSettings: mock(),
+  updateOrgAiSettings: mock(),
+  resetOrgAiSettings: mock(),
+  getWorkspaces: mock(),
+};
+
+mock.module('../../../../api/client', () => clientModule(mockClient));
+
+const agentsApi = {
+  list: mock(),
+  get: mock(),
+  start: mock(),
+  submitCode: mock(),
+  cancel: mock(),
+  signOut: mock(),
+};
+
+mock.module('../../../../api/agents', () => ({ agentsApi }));
+
+const mockUseAuth = mock(() => ({
+  isAuthenticated: true,
+  user: { id: '1', email: 'test@test.com' },
+}));
+
+mock.module('../../../auth', () => ({
+  useAuth: mockUseAuth,
+}));
+
+let installedModels: unknown[] = [];
+
+mock.module('../../../models', () => ({
+  useModels: () => ({
+    models: installedModels,
+    loading: false,
+    error: null,
+    refresh: mock(),
+    deleteModel: mock(),
+  }),
+}));
+
+const mockSetCurrentOrganization = mock();
+const mockSetCurrentWorkspace = mock();
+const mockRefreshOrganizations = mock();
+const mockRefreshWorkspaces = mock();
+
+const mockCurrentOrganization = {
+  id: '00000000-0000-0000-0000-000000000001',
+  name: 'Test Org',
+  slug: 'test-org',
+  description: null,
+  is_active: true,
+  created_at: '2024-01-01T00:00:00Z',
+  updated_at: '2024-01-01T00:00:00Z',
+};
+
+const mockWorkspaceContext: {
+  currentOrganization: (typeof mockCurrentOrganization & { role?: OrgRole }) | null;
+  [key: string]: unknown;
+} = {
+  currentOrganization: mockCurrentOrganization,
+  organizations: [],
+  currentWorkspace: null,
+  workspaces: [],
+  loading: false,
+  error: null,
+  setCurrentOrganization: mockSetCurrentOrganization,
+  setCurrentWorkspace: mockSetCurrentWorkspace,
+  refreshOrganizations: mockRefreshOrganizations,
+  refreshWorkspaces: mockRefreshWorkspaces,
+};
+
+mock.module('../../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => mockWorkspaceContext,
+}));
+
+let OrganizationAiSection: typeof import('./OrganizationAiSection').OrganizationAiSection;
+
+beforeAll(async () => {
+  OrganizationAiSection = (await import('./OrganizationAiSection')).OrganizationAiSection;
+});
+
+afterAll(() => {
+  mock.restore();
+});
+
+const mockAiSettings: AiSettings = {
+  provider: 'self_hosted',
+  has_litellm_key: false,
+  litellm_host: 'http://localhost:4000',
+  has_openai_api_key: false,
+  openai_base_url: null,
+  has_anthropic_api_key: false,
+  anthropic_base_url: null,
+  has_runpod_api_key: false,
+  bedrock_region: null,
+  bedrock_use_iam_role: false,
+  has_bedrock_credentials: false,
+  model_fast: 'llama3.1:8b',
+  model_reasoning: 'deepseek-r1:7b',
+  model_embedding: 'nomic-embed-text',
+  model_image: 'flux1-schnell-fp8.safetensors',
+  model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
+  model_audio: 'ace_step_v1_3.5b.safetensors',
+  completions_routed: true,
+};
+
+describe('OrganizationAiSection', () => {
+  beforeEach(() => {
+    mock.clearAllMocks();
+    installedModels = [];
+    mockWorkspaceContext.currentOrganization = mockCurrentOrganization;
+    mockClient.getOrgAiSettings.mockResolvedValue(mockAiSettings);
+    agentsApi.list.mockResolvedValue(fixture.agents);
+  });
+
+  describe('Loading State', () => {
+    it('shows loading state initially', () => {
+      mockClient.getOrgAiSettings.mockImplementation(() => new Promise(() => {}));
+      render(<OrganizationAiSection />);
+      expect(screen.getByText('Loading settings...')).toBeInTheDocument();
+    });
+
+    it('shows error when loading fails', async () => {
+      mockClient.getOrgAiSettings.mockRejectedValueOnce(new Error('Failed to load'));
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByText('Failed to load')).toBeInTheDocument();
+      });
+    });
+
+    it('loads only the AI settings, leaving workspaces to the members section', async () => {
+      render(<OrganizationAiSection />);
+      await screen.findByLabelText('AI Provider');
+      expect(mockClient.getOrgAiSettings).toHaveBeenCalledWith(mockCurrentOrganization.id);
+      expect(mockClient.getWorkspaces).not.toHaveBeenCalled();
+    });
+
+    it('asks for an organization when none is selected', () => {
+      mockWorkspaceContext.currentOrganization = null;
+      render(<OrganizationAiSection />);
+      expect(screen.getByText('Please select an organization')).toBeInTheDocument();
+      expect(mockClient.getOrgAiSettings).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Page Structure', () => {
+    it('renders AI Provider Configuration section', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByText('AI Provider Configuration')).toBeInTheDocument();
+      });
+    });
+
+    it('renders save and reset buttons', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe('Provider Selection', () => {
+    it('renders provider dropdown with current value', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        const select = screen.getByLabelText('AI Provider');
+        expect(select).toHaveTextContent('Self-Hosted (Ollama via LiteLLM)');
+      });
+    });
+
+    it('changes provider when dropdown changes', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
+      });
+
+      chooseSelect('AI Provider', 'OpenAI');
+      expect(screen.getByLabelText('AI Provider')).toHaveTextContent('OpenAI');
+    });
+
+    it('shows all provider options', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('AI Provider')).toBeInTheDocument();
+      });
+
+      expect(selectOptionValues('AI Provider')).toEqual([
+        'self_hosted',
+        'openai',
+        'anthropic',
+        'bedrock',
+        'claude_code',
+        'codex',
+      ]);
+    });
+  });
+
+  describe('Coding Agent Providers', () => {
+    const agentSettings: AiSettings = {
+      ...mockAiSettings,
+      provider: 'claude_code',
+      model_fast: null,
+      model_reasoning: 'opus',
+      model_embedding: null,
+    };
+
+    beforeEach(() => {
+      setSystemTime(new Date('2026-09-23T04:00:00Z'));
+    });
+
+    afterEach(() => {
+      setSystemTime();
+    });
+
+    it('asks for sign-in status only once a coding agent is chosen', async () => {
+      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
+      render(<OrganizationAiSection />);
+      await screen.findByLabelText('AI Provider');
+      expect(agentsApi.list).not.toHaveBeenCalled();
+      expect(screen.queryByText('Claude Code sign-in')).toBeNull();
+
+      chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
+
+      expect(
+        await screen.findByRole('heading', { name: 'Claude Code sign-in', level: 4 })
+      ).toBeInTheDocument();
+      expect(agentsApi.list).toHaveBeenCalledWith(mockCurrentOrganization.id);
+      expect(screen.queryByLabelText(/LiteLLM Host/i)).toBeNull();
+      expect(within(screen.getByRole('status')).getByText('Signed in')).toBeInTheDocument();
+      expect(screen.getByText('jake@example.com')).toBeInTheDocument();
+
+      chooseSelect('AI Provider', 'Codex (ChatGPT subscription)');
+
+      expect(await screen.findByText('Codex sign-in')).toBeInTheDocument();
+      expect(screen.getByText('ABCD-EFGHI')).toBeInTheDocument();
+      expect(agentsApi.list).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists the models the agent offers instead of the installed ones', async () => {
+      installedModels = [
+        { name: 'llama3.2:3b', size: 1, modified_at: '2024-01-01T00:00:00Z' },
+        {
+          name: 'nomic-embed-text:latest',
+          size: 1,
+          modified_at: '2024-01-01T00:00:00Z',
+          capabilities: ['embeddings'],
+        },
+      ];
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrganizationAiSection />);
+
+      await waitFor(() =>
+        expect(selectOptionValues('Fast Model')).toEqual(['', 'sonnet', 'opus', 'haiku'])
+      );
+      expect(selectOptionValues('Reasoning Model')).toEqual(['', 'sonnet', 'opus', 'haiku']);
+      expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('opus');
+      expect(screen.getByText(/this server's own embedding engine/)).toBeInTheDocument();
+    });
+
+    it('names no other provider as the embedding default when none are installed', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrganizationAiSection />);
+
+      const embedding = await screen.findByLabelText('Embedding Model');
+      expect(embedding).toHaveAttribute('placeholder', 'Server default');
+      expect(screen.getByText(/this server's own embedding engine/)).toBeInTheDocument();
+    });
+
+    it('keeps a saved model the agent does not list so the form shows what is stored', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue({
+        ...agentSettings,
+        model_fast: 'claude-sonnet-4-5',
+      });
+      render(<OrganizationAiSection />);
+
+      await waitFor(() =>
+        expect(screen.getByLabelText('Fast Model')).toHaveTextContent('claude-sonnet-4-5')
+      );
+    });
+
+    it('saves a coding agent provider without any credentials, its models back on Automatic', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrganizationAiSection />);
+      await screen.findByLabelText('AI Provider');
+      expect(screen.getByLabelText('Fast Model')).toHaveTextContent('llama3.1:8b');
+      chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
+
+      await waitFor(() =>
+        expect(screen.getByLabelText('Fast Model')).toHaveTextContent('Automatic')
+      );
+      expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('Automatic');
+      expect(selectOptionValues('Fast Model')).toEqual(['', 'sonnet', 'opus', 'haiku']);
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
+      const [organizationId, request] = mockClient.updateOrgAiSettings.mock.calls[0];
+      expect(organizationId).toBe(mockCurrentOrganization.id);
+      expect(request).toEqual({
+        provider: 'claude_code',
+        model_fast: '',
+        model_reasoning: '',
+        model_embedding: 'nomic-embed-text',
+        model_image: 'flux1-schnell-fp8.safetensors',
+        model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
+        model_audio: 'ace_step_v1_3.5b.safetensors',
+      });
+    });
+
+    it('sends an empty host to clear the one saved, so the next save cannot bring it back', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValue({ ...mockAiSettings, litellm_host: null });
+      render(<OrganizationAiSection />);
+
+      const host = await screen.findByLabelText(/LiteLLM Host/);
+      await waitFor(() => expect(host).toHaveValue('http://localhost:4000'));
+      fireEvent.change(host, { target: { value: '' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
+      const [, request] = mockClient.updateOrgAiSettings.mock.calls[0];
+      expect(request.litellm_host).toBe('');
+      await waitFor(() => expect(host).toHaveValue(''));
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalledTimes(2));
+      expect(mockClient.updateOrgAiSettings.mock.calls[1][1].litellm_host).toBeUndefined();
+    });
+
+    it('sends an empty model to clear one saved before Automatic was picked', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      mockClient.updateOrgAiSettings.mockResolvedValue({ ...agentSettings, model_reasoning: null });
+      render(<OrganizationAiSection />);
+
+      await screen.findByLabelText('Reasoning Model');
+      await waitFor(() =>
+        expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('opus')
+      );
+      chooseSelect('Reasoning Model', 'Automatic');
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => expect(mockClient.updateOrgAiSettings).toHaveBeenCalled());
+      const [, request] = mockClient.updateOrgAiSettings.mock.calls[0];
+      expect(request.model_fast).toBe('');
+      expect(request.model_reasoning).toBe('');
+      expect(request.model_embedding).toBe('');
+    });
+
+    it('says Automatic lets the agent choose, titles and summaries included', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrganizationAiSection />);
+
+      const fast = await screen.findByLabelText('Fast Model');
+      expect(fast.closest('.form-group')?.querySelector('.ui-select-help-text')?.textContent).toBe(
+        'Automatic lets the agent choose; titles, PR subjects and summaries use it too.'
+      );
+      const reasoning = screen.getByLabelText('Reasoning Model');
+      expect(
+        reasoning.closest('.form-group')?.querySelector('.ui-select-help-text')?.textContent
+      ).toBe('Harder questions; empty lets the agent choose.');
+    });
+
+    describe('after the provider changes', () => {
+      const [claudeStatus, codexStatus] = fixture.agents;
+      const signedOut = [
+        {
+          ...claudeStatus,
+          state: 'signed_out',
+          source: null,
+          label: null,
+          expires_at: null,
+          logins: [],
+        },
+        { ...codexStatus, state: 'signed_out', pending: null },
+      ];
+      const later = () => new Date(Date.now() + 10 * 60_000).toISOString();
+
+      beforeEach(() => {
+        mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
+        agentsApi.list.mockResolvedValue(signedOut);
+      });
+
+      it("shows Claude none of Codex's sign-in", async () => {
+        mockClient.getOrgAiSettings.mockResolvedValue({ ...agentSettings, provider: 'codex' });
+        agentsApi.start.mockResolvedValue({
+          agent: 'codex',
+          verification_url: 'https://auth.openai.com/codex/device',
+          user_code: 'ABCD-EFGHI',
+          expires_at: later(),
+        });
+        agentsApi.cancel.mockRejectedValue(new Error('Failed to cancel the codex sign-in: 500'));
+        render(<OrganizationAiSection />);
+
+        fireEvent.click(await screen.findByRole('button', { name: 'Sign in with ChatGPT' }));
+        expect(await screen.findByText('ABCD-EFGHI')).toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        expect(await screen.findByRole('alert')).toHaveTextContent(
+          'Failed to cancel the codex sign-in: 500'
+        );
+
+        chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
+
+        const panel = screen.getByRole('region', { name: 'Claude Code sign-in' });
+        expect(within(panel).getByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+        expect(within(panel).getByText('Not signed in')).toBeInTheDocument();
+        expect(screen.queryByText('ABCD-EFGHI')).toBeNull();
+        expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
+        expect(screen.queryByRole('alert')).toBeNull();
+      });
+
+      it("shows Codex none of Claude's sign-in", async () => {
+        mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+        agentsApi.start.mockResolvedValue({
+          agent: 'claude',
+          authorize_url: 'https://claude.com/cai/oauth/authorize?code=true&state=fake-state',
+          expires_at: later(),
+          flow: 'paste',
+        });
+        agentsApi.submitCode.mockRejectedValue(
+          new Error('Claude rejected the code: Invalid authorization code')
+        );
+        render(<OrganizationAiSection />);
+
+        fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Claude' }));
+        fireEvent.change(await screen.findByLabelText('Code from claude.com'), {
+          target: { value: 'fake-code#fake-state' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Submit code' }));
+        expect(await screen.findByRole('alert')).toHaveTextContent('Claude rejected the code');
+
+        chooseSelect('AI Provider', 'Codex (ChatGPT subscription)');
+
+        const panel = screen.getByRole('region', { name: 'Codex sign-in' });
+        expect(within(panel).getByRole('button', { name: 'Sign in with ChatGPT' })).toBeEnabled();
+        expect(screen.queryByRole('link', { name: 'Open claude.com' })).toBeNull();
+        expect(screen.queryByLabelText('Code from claude.com')).toBeNull();
+        expect(screen.queryByRole('alert')).toBeNull();
+      });
+    });
+
+    it('asks to save a provider the organization is signed in to but has not chosen yet', async () => {
+      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
+      mockClient.updateOrgAiSettings.mockResolvedValue(agentSettings);
+      render(<OrganizationAiSection />);
+
+      await screen.findByLabelText('AI Provider');
+      chooseSelect('AI Provider', 'Claude Code (Claude subscription)');
+      expect(await screen.findByText('Save Changes to use this provider.')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText('Settings saved successfully')).toBeInTheDocument();
+      expect(screen.queryByText('Save Changes to use this provider.')).toBeNull();
+    });
+
+    it('lets an owner sign in and shows a member whom to ask', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValue(agentSettings);
+      agentsApi.list.mockResolvedValue([
+        {
+          ...fixture.agents[0],
+          state: 'signed_out',
+          source: null,
+          label: null,
+          expires_at: null,
+          logins: [],
+        },
+        fixture.agents[1],
+      ]);
+      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'owner' };
+      const { unmount } = render(<OrganizationAiSection />);
+      expect(await screen.findByRole('button', { name: 'Sign in with Claude' })).toBeEnabled();
+      unmount();
+
+      mockWorkspaceContext.currentOrganization = { ...mockCurrentOrganization, role: 'member' };
+      render(<OrganizationAiSection />);
+      expect(await screen.findByText('Ask an organization admin to sign in.')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Sign in with Claude' })).toBeNull();
+    });
+  });
+
+  describe('Self-Hosted Provider', () => {
+    it('shows LiteLLM configuration for self_hosted provider', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText(/LiteLLM Host/i)).toBeInTheDocument();
+      });
+    });
+
+    it('displays LiteLLM host value from settings', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText(/LiteLLM Host/i)).toHaveValue('http://localhost:4000');
+      });
+    });
+
+    it('shows the Runpod train key beside the provider credentials', async () => {
+      render(<OrganizationAiSection />);
+      expect(await screen.findByLabelText(/^Runpod/)).toHaveAttribute(
+        'placeholder',
+        'Enter API key'
+      );
+    });
+
+    it('marks the Runpod key configured when one is saved', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        has_runpod_api_key: true,
+      });
+      render(<OrganizationAiSection />);
+      expect(await screen.findByLabelText(/^Runpod/)).toHaveAttribute('placeholder', '••••••••');
+      expect(screen.getByText(/\(configured\)/i)).toBeInTheDocument();
+    });
+  });
+
+  describe('OpenAI Provider', () => {
+    it('shows OpenAI configuration when openai provider selected', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        provider: 'openai',
+        has_openai_api_key: true,
+      });
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText(/OpenAI API Key/i)).toBeInTheDocument();
+      });
+    });
+
+    it('shows configured indicator when API key is set', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        provider: 'openai',
+        has_openai_api_key: true,
+      });
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByText(/\(configured\)/i)).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe('Anthropic Provider', () => {
+    it('shows Anthropic configuration when anthropic provider selected', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        provider: 'anthropic',
+      });
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText(/Anthropic API Key/i)).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe('AWS Bedrock Provider', () => {
+    it('shows Bedrock configuration when bedrock provider selected', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        provider: 'bedrock',
+        bedrock_region: 'us-east-1',
+      });
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText(/AWS Region/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/Use IAM Role/i)).toBeInTheDocument();
+      });
+    });
+
+    it('shows credential fields when IAM role is not used', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        provider: 'bedrock',
+        bedrock_region: 'us-east-1',
+        bedrock_use_iam_role: false,
+      });
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText(/Access Key ID/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/Secret Access Key/i)).toBeInTheDocument();
+      });
+    });
+
+    it('hides credential fields when IAM role is used', async () => {
+      mockClient.getOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        provider: 'bedrock',
+        bedrock_region: 'us-east-1',
+        bedrock_use_iam_role: true,
+      });
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.queryByLabelText(/Access Key ID/i)).not.toBeInTheDocument();
+        expect(screen.queryByLabelText(/Secret Access Key/i)).not.toBeInTheDocument();
+      });
+    });
+  });
+
+  describe('Model Selection', () => {
+    it('shows model selection section', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByText('Default Models')).toBeInTheDocument();
+      });
+    });
+
+    it('shows fast model dropdown', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Fast Model')).toBeInTheDocument();
+      });
+    });
+
+    it('shows reasoning model dropdown', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Reasoning Model')).toBeInTheDocument();
+      });
+    });
+
+    it('shows embedding model dropdown', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Embedding Model')).toBeInTheDocument();
+      });
+    });
+
+    it('displays current model values', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Fast Model')).toHaveTextContent('llama3.1:8b');
+        expect(screen.getByLabelText('Reasoning Model')).toHaveTextContent('deepseek-r1:7b');
+        expect(screen.getByLabelText('Embedding Model')).toHaveTextContent('nomic-embed-text');
+      });
+    });
+  });
+
+  describe('Save Functionality', () => {
+    it('saves settings on form submit', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => {
+        expect(mockClient.updateOrgAiSettings).toHaveBeenCalled();
+      });
+    });
+
+    it('sends an empty video model to clear the server-default override', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        model_video: null,
+        model_audio: null,
+      });
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Video Model')).toHaveTextContent(
+          'wan2.2_ti2v_5B_fp16.safetensors'
+        );
+      });
+
+      chooseSelect('Video Model', 'Use server default');
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => {
+        expect(mockClient.updateOrgAiSettings).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({ model_video: '' })
+        );
+      });
+    });
+
+    it('sends an empty audio model to clear the server-default override', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({
+        ...mockAiSettings,
+        model_audio: null,
+      });
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByLabelText('Audio Model')).toHaveTextContent(
+          'ace_step_v1_3.5b.safetensors'
+        );
+      });
+
+      chooseSelect('Audio Model', 'Use server default');
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => {
+        expect(mockClient.updateOrgAiSettings).toHaveBeenCalledWith(
+          expect.any(String),
+          expect.objectContaining({ model_audio: '' })
+        );
+      });
+    });
+
+    it('shows success message after save', async () => {
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Settings saved successfully')).toBeInTheDocument();
+      });
+    });
+
+    it('keeps the notice a save leaves about workspaces waiting on their admins', async () => {
+      const notice = '2 workspace keys wait for their admins to save again.';
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
+
+      render(<OrganizationAiSection />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText(notice)).toBeInTheDocument();
+      expect(screen.getByText(notice)).toHaveClass('alert-warning');
+    });
+
+    it('shows error when save fails', async () => {
+      mockClient.updateOrgAiSettings.mockRejectedValueOnce(new Error('Save failed'));
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Save failed')).toBeInTheDocument();
+      });
+    });
+
+    it('shows the reason the server refused the save', async () => {
+      const message =
+        "Failed to update org AI settings: litellm_host: The URL's host is not one this instance allows endpoints on.";
+      mockClient.updateOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 400));
+
+      render(<OrganizationAiSection />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+
+      expect(await screen.findByText(message)).toHaveClass('alert-error');
+    });
+  });
+
+  describe('Reset Functionality', () => {
+    it('resets settings on reset button click', async () => {
+      mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
+
+      await waitFor(() => {
+        expect(mockClient.resetOrgAiSettings).toHaveBeenCalled();
+      });
+    });
+
+    it('shows success message after reset', async () => {
+      mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Settings reset to defaults')).toBeInTheDocument();
+      });
+    });
+
+    it('keeps the notice a reset leaves about workspaces waiting on their admins', async () => {
+      const notice = '1 workspace key waits for its admin to save again.';
+      mockClient.resetOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
+
+      render(<OrganizationAiSection />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText(notice)).toBeInTheDocument();
+      expect(screen.getByText(notice)).toHaveClass('alert-warning');
+      expect(screen.getByText('Settings reset to defaults')).toBeInTheDocument();
+    });
+
+    it('drops an earlier save notice when a reset leaves none', async () => {
+      const notice = '2 workspace keys wait for their admins to save again.';
+      mockClient.updateOrgAiSettings.mockResolvedValueOnce({ ...mockAiSettings, notice });
+      mockClient.resetOrgAiSettings.mockResolvedValueOnce(mockAiSettings);
+
+      render(<OrganizationAiSection />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Save Changes' }));
+      expect(await screen.findByText(notice)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText('Settings reset to defaults')).toBeInTheDocument();
+      expect(screen.queryByText(notice)).not.toBeInTheDocument();
+    });
+
+    it('shows error when reset fails', async () => {
+      mockClient.resetOrgAiSettings.mockRejectedValueOnce(new Error('Reset failed'));
+
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Reset to Defaults' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Reset failed')).toBeInTheDocument();
+      });
+    });
+
+    it('shows the reason the server refused the reset', async () => {
+      const message =
+        'Failed to reset org AI settings: Only organization admins can manage AI settings';
+      mockClient.resetOrgAiSettings.mockRejectedValueOnce(new ApiError(message, 403));
+
+      render(<OrganizationAiSection />);
+      fireEvent.click(await screen.findByRole('button', { name: 'Reset to Defaults' }));
+
+      expect(await screen.findByText(message)).toHaveClass('alert-error');
+    });
+  });
+
+  describe('Button States', () => {
+    it('buttons are initially enabled', async () => {
+      render(<OrganizationAiSection />);
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Save Changes' })).toBeInTheDocument();
+      });
+
+      expect(screen.getByRole('button', { name: 'Save Changes' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Reset to Defaults' })).toBeEnabled();
+    });
+  });
+});

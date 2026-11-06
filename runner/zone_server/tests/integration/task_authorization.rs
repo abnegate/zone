@@ -1,7 +1,9 @@
 use crate::common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_secret::MasterKey;
 use axum::http::StatusCode;
 use serde_json::json;
 use tokio::time::timeout;
@@ -321,6 +323,7 @@ async fn agentic_task_creation_rejects_foreign_projects_atomically() {
         owner.workspace,
         owner.user,
         None,
+        zone_server::db::tasks::Origin::Member,
         StartTask {
             title: Some("Foreign agentic task".to_owned()),
             description: "Must not be created".to_owned(),
@@ -380,7 +383,7 @@ async fn pr_worker_rejects_legacy_foreign_project_associations() {
         .expect("task is readable")
         .expect("task exists");
     // Any key does: the refusal comes before a credential is resolved.
-    let github = Provider::new(&test_config(), rand::random());
+    let github = Provider::new(&test_config(), Arc::new(MasterKey::generate().unwrap()));
     let error = match Repository::resolve(&pool, &github, &row).await {
         Err(error) => error,
         Ok(_) => panic!("a foreign project must not resolve to a repository"),

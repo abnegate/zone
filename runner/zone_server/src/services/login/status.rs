@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use abnegate_secret::MasterKey;
 use abnegate_secret::redact;
 use chrono::{DateTime, SubsecRound, Utc};
 use futures::future::join_all;
@@ -216,7 +217,7 @@ fn read(
 ) -> Reading {
     let (state, expires_at, plan) = match AgentKind::named(&login.agent) {
         Some(AgentKind::Claude) => {
-            let tokens = opened(state.encryption_key(), login);
+            let tokens = opened(state.master_key(), login);
             let (judged, expires_at) = judged(tokens.as_ref(), now);
             (judged, expires_at, tokens.and_then(|tokens| tokens.label()))
         }
@@ -257,7 +258,7 @@ fn availability(
         .max(exhausted_until.map_or(Availability::Now, Availability::At))
 }
 
-fn opened(key: &[u8; 32], login: &AgentLoginRow) -> Option<Tokens> {
+fn opened(key: &MasterKey, login: &AgentLoginRow) -> Option<Tokens> {
     login
         .credential
         .as_ref()
@@ -360,6 +361,8 @@ mod name {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use abnegate_secret::SecretValue;
     use chrono::TimeDelta;
     use futures::future::join_all;
@@ -390,13 +393,11 @@ mod tests {
         DateTime::from_timestamp(seconds, 0).expect("a valid timestamp")
     }
 
-    fn key() -> [u8; 32] {
-        let mut key = [0u8; 32];
-        rand::fill(&mut key);
-        key
+    fn key() -> MasterKey {
+        MasterKey::generate().expect("a key")
     }
 
-    fn seal(key: &[u8; 32], expires_at: DateTime<Utc>, refresh: Option<&str>) -> SecretValue {
+    fn seal(key: &MasterKey, expires_at: DateTime<Utc>, refresh: Option<&str>) -> SecretValue {
         let tokens = Tokens {
             access: SecretValue::new("fake-access-token"),
             refresh: refresh.map(SecretValue::new),
@@ -431,7 +432,7 @@ mod tests {
         }
     }
 
-    fn subscribed(key: &[u8; 32], expires_at: DateTime<Utc>, refresh: Option<&str>) -> String {
+    fn subscribed(key: &MasterKey, expires_at: DateTime<Utc>, refresh: Option<&str>) -> String {
         let tokens = Tokens {
             access: SecretValue::new("fake-access-token"),
             refresh: refresh.map(SecretValue::new),
@@ -460,7 +461,7 @@ mod tests {
     }
 
     fn sealed(
-        key: &[u8; 32],
+        key: &MasterKey,
         login: &AgentLoginRow,
         now: DateTime<Utc>,
     ) -> (State, Option<DateTime<Utc>>) {
@@ -689,7 +690,7 @@ mod tests {
             .expect("an organization to sign in");
         let directory = TempDir::new().expect("a state root");
         let state = AppState::new(config(&directory), pool.clone(), None);
-        let key = *state.encryption_key();
+        let key = Arc::clone(state.master_key());
         let now = Utc::now();
         let lasting = now + TimeDelta::days(365);
         let lapsed = now - TimeDelta::days(1);
@@ -917,7 +918,7 @@ mod tests {
         let state = AppState::new(config(&directory), pool.clone(), None);
         let now = Utc::now();
         let lasting = now + TimeDelta::days(365);
-        let credential = subscribed(state.encryption_key(), lasting, Some("fake-refresh"));
+        let credential = subscribed(state.master_key(), lasting, Some("fake-refresh"));
         let login = agent_logins::insert(
             &pool,
             &Insert {
@@ -985,7 +986,7 @@ mod tests {
         config.agents.codex_api_url = usage.uri();
         let state = AppState::new(config, pool.clone(), None);
         let lasting = Utc::now() + TimeDelta::days(365);
-        let credential = subscribed(state.encryption_key(), lasting, Some("fake-refresh"));
+        let credential = subscribed(state.master_key(), lasting, Some("fake-refresh"));
         agent_logins::insert(
             &pool,
             &Insert {
@@ -1061,7 +1062,7 @@ mod tests {
         config.agents.host_login = false;
         let state = AppState::new(config, pool.clone(), None);
         let lapsed = Utc::now() - TimeDelta::days(1);
-        let credential = subscribed(state.encryption_key(), lapsed, None);
+        let credential = subscribed(state.master_key(), lapsed, None);
         agent_logins::insert(
             &pool,
             &Insert {

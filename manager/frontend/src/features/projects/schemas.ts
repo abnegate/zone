@@ -17,6 +17,9 @@ export const ProjectSchema = z.object({
   github_installation_id: z.string().nullish(),
   github_installation_status: GitHubInstallationStatusSchema.nullish(),
   github_account_login: z.string().nullish(),
+  // Servers predating custom order list newest first and omit these.
+  position: z.number().int().default(0),
+  last_used_at: z.string().nullish(),
   created_at: z.string(),
   updated_at: z.string(),
 });

@@ -21,4 +21,5 @@ export { QuestionCard } from './QuestionCard';
 export { QueueItem } from './QueueItem';
 export { Reasoning } from './Reasoning';
 export { SourcesButton } from './SourcesButton';
+export { SubagentChips } from './SubagentChips';
 export { ToolTrace } from './ToolTrace';

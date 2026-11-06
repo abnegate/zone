@@ -229,3 +229,131 @@ describe('chatsApi.getWorkspaceChatProviders', () => {
     );
   });
 });
+
+const SUBAGENT = {
+  id: 'subagent-1',
+  chat_id: 'chat 1',
+  message_id: 'message-1',
+  external_id: 'toolu_01Agent',
+  description: 'Ask for a review',
+  kind: 'general-purpose',
+  model: 'sonnet',
+  background: true,
+  status: 'running',
+  tool_uses: 12,
+  duration_ms: 53_000,
+  tokens: 18_000,
+  last_tool: 'Bash',
+  summary: null,
+  error: null,
+  step_count: 1,
+  revision: 4,
+  started_at: '2026-11-05T10:00:00Z',
+  finished_at: null,
+  updated_at: '2026-11-05T10:00:53Z',
+};
+
+describe('chatsApi.getChatSubagents', () => {
+  it("reads the chat's agents", async () => {
+    const request = mock(async () => Response.json({ subagents: [SUBAGENT] }));
+    globalThis.fetch = request as unknown as typeof globalThis.fetch;
+
+    const list = await chatsApi.getChatSubagents('chat 1');
+
+    expect(sent(request)).toEqual({
+      url: '/api/chats/chat%201/subagents',
+      method: 'GET',
+      body: undefined,
+    });
+    expect(list).toEqual({ subagents: [SUBAGENT], complete: true });
+  });
+
+  it('drops an unreadable agent, keeps the rest, and says the list is incomplete', async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ subagents: [{ id: 'broken' }, SUBAGENT] })
+    ) as unknown as typeof globalThis.fetch;
+
+    expect(await chatsApi.getChatSubagents('chat 1')).toEqual({
+      subagents: [SUBAGENT],
+      complete: false,
+    });
+  });
+
+  it('reads an unknown status as settled, and an unreadable count as none', async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({
+        subagents: [{ ...SUBAGENT, status: 'paused', tokens: 'many', step_count: -1 }],
+      })
+    ) as unknown as typeof globalThis.fetch;
+
+    const { subagents, complete } = await chatsApi.getChatSubagents('chat 1');
+    const [subagent] = subagents;
+
+    expect(complete).toBe(true);
+
+    expect(subagent.status).toBe('stopped');
+    expect(subagent.tokens).toBeNull();
+    expect(subagent.step_count).toBe(0);
+    expect(subagent.revision).toBe(4);
+  });
+
+  it('reads an answer without a list as an incomplete one', async () => {
+    globalThis.fetch = mock(async () => Response.json({})) as unknown as typeof globalThis.fetch;
+
+    expect(await chatsApi.getChatSubagents('chat 1')).toEqual({ subagents: [], complete: false });
+  });
+
+  it('names the reason a load is refused', async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ error: 'Chat not found' }, { status: 404 })
+    ) as unknown as typeof globalThis.fetch;
+
+    await expect(chatsApi.getChatSubagents('chat 1')).rejects.toThrow(
+      'Failed to load agents: Chat not found'
+    );
+  });
+});
+
+const STEP = { id: 'toolu_x', name: 'Bash', subject: 'cargo test', status: 'succeeded' };
+
+describe('chatsApi.getChatSubagentSteps', () => {
+  it("reads one agent's steps", async () => {
+    const request = mock(async () => Response.json({ steps: [STEP] }));
+    globalThis.fetch = request as unknown as typeof globalThis.fetch;
+
+    const steps = await chatsApi.getChatSubagentSteps('chat 1', 'agent/1');
+
+    expect(sent(request)).toEqual({
+      url: '/api/chats/chat%201/subagents/agent%2F1/steps',
+      method: 'GET',
+      body: undefined,
+    });
+    expect(steps).toEqual([STEP]);
+  });
+
+  it('reads an unknown step status as running and drops an unreadable step', async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ steps: [{ ...STEP, status: 'retrying' }, { name: 'no id' }] })
+    ) as unknown as typeof globalThis.fetch;
+
+    expect(await chatsApi.getChatSubagentSteps('chat 1', 'agent-1')).toEqual([
+      { ...STEP, status: 'running' },
+    ]);
+  });
+
+  it('reads no steps from an answer without a list', async () => {
+    globalThis.fetch = mock(async () => Response.json({})) as unknown as typeof globalThis.fetch;
+
+    expect(await chatsApi.getChatSubagentSteps('chat 1', 'agent-1')).toEqual([]);
+  });
+
+  it('names the reason a load is refused', async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ error: 'Subagent not found' }, { status: 404 })
+    ) as unknown as typeof globalThis.fetch;
+
+    await expect(chatsApi.getChatSubagentSteps('chat 1', 'agent-1')).rejects.toThrow(
+      'Failed to load steps: Subagent not found'
+    );
+  });
+});

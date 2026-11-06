@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use super::DbResult;
 use super::actions::invalid;
-use super::tasks::{self, Create, MutationError};
+use super::tasks::{self, Create, MutationError, Origin};
 
 /// The project-level switch and everything the driver needs to run it.
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -997,6 +997,7 @@ pub async fn finalize(
     workspace_id: Uuid,
     actor: Uuid,
     chat_id: Option<Uuid>,
+    origin: Origin,
     plan: &ProjectPlan<'_>,
 ) -> DbResult<Finalized> {
     for (index, task) in plan.tasks.iter().enumerate() {
@@ -1024,10 +1025,13 @@ pub async fn finalize(
             Some(None) => {}
         }
     }
+    super::projects::lock_order(&mut transaction, workspace_id).await?;
     let project_id: Uuid = sqlx::query_scalar(
         "INSERT INTO projects (name, description, workspace_id, status, auto, auto_actor_id, brief, \
-           github_repo_url, github_access_token, github_installation_id) \
-         VALUES ($1, $2, $3, 'active', TRUE, $4, $5, $6, $7, $8) RETURNING id",
+           github_repo_url, github_access_token, github_installation_id, \"position\") \
+         VALUES ($1, $2, $3, 'active', TRUE, $4, $5, $6, $7, $8, \
+           COALESCE((SELECT MIN(\"position\") FROM projects WHERE workspace_id = $3), 1) - 1) \
+         RETURNING id",
     )
     .bind(plan.name)
     .bind(plan.description)
@@ -1060,6 +1064,7 @@ pub async fn finalize(
                 source_id: None,
                 created_by: Some(actor),
                 chat_id: None,
+                origin,
             },
         )
         .await
@@ -1127,6 +1132,7 @@ pub async fn insert_auto_task(
             source_id: None,
             created_by: Some(actor),
             chat_id: None,
+            origin: Origin::Automation,
         },
     )
     .await
@@ -1322,6 +1328,7 @@ mod tests {
             installation.workspace,
             actor,
             None,
+            Origin::Member,
             &ProjectPlan {
                 name: "Widgets",
                 description: None,

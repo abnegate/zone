@@ -43,7 +43,7 @@ impl Connected {
         config.github_api_url = github.uri();
         config.github_api_allows_http = true;
         let state = AppState::new(config, pool.clone(), None);
-        state.install_github(provider(&github, *state.encryption_key()));
+        state.install_github(provider(&github, std::sync::Arc::clone(state.master_key())));
         Self {
             pool,
             github,
@@ -61,6 +61,7 @@ impl Connected {
             chat_id: None,
             user_id: self.user,
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         }
     }
 
@@ -85,9 +86,8 @@ impl Connected {
         installation: Option<Uuid>,
         token: Option<&str>,
     ) -> SourceRow {
-        let sealed = token.map(|token| {
-            crate::crypto::encrypt(self.state.encryption_key(), token).expect("seal the token")
-        });
+        let sealed =
+            token.map(|token| crate::secret::fixture::seal(token, self.state.master_key()));
         let name = format!("GitHub {}", Uuid::new_v4());
         sources::create_source(
             &self.pool,

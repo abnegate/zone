@@ -1,5 +1,7 @@
 //! Source endpoints
 
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use abnegate_vcs::pull_request::{ApplicationError, PullRequestError, Repository};
 use axum::{
     Json,
@@ -60,7 +62,7 @@ fn not_found() -> ServerError {
 }
 
 fn encrypt_credentials(state: &AppState, credentials: &str) -> Result<String, ServerError> {
-    crate::crypto::encrypt(state.encryption_key(), credentials).map_err(|error| {
+    encrypt_value(&SecretValue::new(credentials), state.master_key()).map_err(|error| {
         tracing::error!("Encryption failed: {}", error);
         internal()
     })

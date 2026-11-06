@@ -54,6 +54,7 @@ async fn deferring_the_schemas_is_most_of_the_tool_block_on_a_32k_window() {
         chat_id: Some(harness.chat),
         user_id: user,
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await;
 
@@ -148,6 +149,7 @@ async fn every_deferred_tool_is_still_reachable_by_name() {
         chat_id: Some(harness.chat),
         user_id: user,
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await;
 

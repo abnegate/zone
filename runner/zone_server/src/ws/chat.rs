@@ -33,7 +33,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_core::llm::{BuiltinTools, LlmBackend, Observer};
+use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer, SubagentStep};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -46,13 +46,16 @@ use crate::auth::validate_access_token;
 use crate::db::{
     self, chat_attached_sources, chat_sources, chats, knowledge, sessions, workspace_members,
 };
+use crate::mcp::AgentTools;
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
 use crate::services::chat::driver::Driver;
 use crate::services::chat::handover::{self, Cause, Handover, Notice};
+use crate::services::chat::observers::Observers;
 use crate::services::chat::pull_request::Recorder;
 use crate::services::chat::session::{self, Session};
+use crate::services::chat::subagent::{Announcer, ChatSubagent, Tracker};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::router;
@@ -240,6 +243,7 @@ struct LiveTurn {
 impl LiveTurn {
     fn record(&mut self, message: &ServerMessage) {
         match message {
+            ServerMessage::Subagent { .. } | ServerMessage::SubagentsRemoved { .. } => {}
             ServerMessage::MessageStart { .. } => {
                 self.status = None;
                 self.frames.clear();
@@ -343,6 +347,52 @@ async fn publish(stream: &ChatStream, message: ServerMessage) {
     let mut live = stream.live.lock().await;
     live.record(&message);
     let _ = stream.events.send(message);
+}
+
+/// Publishes each change a turn's tracker stores to a chat's subagents.
+struct SubagentFrames {
+    stream: Arc<ChatStream>,
+}
+
+#[async_trait::async_trait]
+impl Announcer for SubagentFrames {
+    async fn announce(&self, subagent: ChatSubagent, steps: Vec<SubagentStep>) {
+        let chat_id = self.stream.chat_id;
+        publish(
+            &self.stream,
+            ServerMessage::Subagent {
+                chat_id,
+                subagent,
+                steps,
+            },
+        )
+        .await;
+    }
+}
+
+/// Tells every connection to each subagent's chat that a sweep stopped it.
+pub(crate) async fn announce_stopped_subagents(stopped: Vec<db::chat_subagents::Stopped>) {
+    for db::chat_subagents::Stopped { subagent, failed } in stopped {
+        let frames = SubagentFrames {
+            stream: ChatStream::of(subagent.chat_id),
+        };
+        frames
+            .announce(ChatSubagent::from(subagent), failed.0)
+            .await;
+    }
+}
+
+/// Tells every connection to `chat_id` that deleting a message removed these
+/// subagents.
+pub(crate) async fn announce_removed_subagents(chat_id: Uuid, ids: Vec<Uuid>) {
+    if ids.is_empty() {
+        return;
+    }
+    publish(
+        &ChatStream::of(chat_id),
+        ServerMessage::SubagentsRemoved { chat_id, ids },
+    )
+    .await;
 }
 
 /// Broadcast the queue as it is now. Read under the lock a joining connection
@@ -730,6 +780,15 @@ pub enum ServerMessage {
         #[serde(flatten)]
         notice: Notice,
     },
+    /// One of the chat's subagents changed. `steps` holds only the steps this
+    /// change touched. Never replayed: a joining client reads them over REST.
+    Subagent {
+        chat_id: Uuid,
+        subagent: ChatSubagent,
+        steps: Vec<SubagentStep>,
+    },
+    /// Deleting a message removed the subagents it started. Never replayed.
+    SubagentsRemoved { chat_id: Uuid, ids: Vec<Uuid> },
 }
 
 fn is_not_resumed(resumed: &bool) -> bool {
@@ -3275,6 +3334,7 @@ async fn prepare_chat(
             resolved,
             session: previous.clone(),
             directory: directory.clone(),
+            origin: db::tasks::Origin::of_turn(metadata),
         }),
         endpoint,
         driver,
@@ -3495,6 +3555,22 @@ fn builtin_tools(sandboxed: bool) -> BuiltinTools {
     }
 }
 
+/// A turn's coding agent reaches the turn's tools only when it is served them,
+/// but is watched either way. Both belong to the backend they were attached
+/// to, so a turn that moves to another backend equips it again.
+fn equipped(
+    client: LlmClient,
+    served: Option<&AgentTools>,
+    observer: &Arc<dyn Observer>,
+    sandboxed: bool,
+) -> LlmClient {
+    let client = match served {
+        Some(served) => client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed)),
+        None => client,
+    };
+    client.with_observer(observer.clone())
+}
+
 /// `jobs` collects the background jobs this turn started and has not yet
 /// reported as exited, so the teardown that kills them can say each one is gone.
 async fn handle_chat_generation(
@@ -3530,6 +3606,7 @@ async fn handle_chat_generation(
         driver,
     } = preparation;
     let offline = tools.offline();
+    let origin = tools.origin();
     let directory = tools.working_directory().to_path_buf();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
@@ -3538,7 +3615,7 @@ async fn handle_chat_generation(
     // returned.
     let mut agent_tools = agentic
         .then(|| {
-            crate::mcp::AgentTools::serve(
+            AgentTools::serve(
                 llm_client.backend(),
                 &mut tools,
                 crate::mcp::Scope {
@@ -3553,13 +3630,6 @@ async fn handle_chat_generation(
             )
         })
         .flatten();
-    let recorder: Arc<dyn Observer> = Arc::new(Recorder::new(state.clone(), chat_id, workspace_id));
-    let mut llm_client = match &agent_tools {
-        Some(served) => llm_client
-            .with_toolset(served.lease.toolset(), builtin_tools(sandboxed))
-            .with_observer(recorder.clone()),
-        None => llm_client,
-    };
     let mut token_filter = TokenFilter::new(stop);
     let assistant_message_id = generation.message_id;
     let stream_deadline = generation_deadline(timeout)?;
@@ -3568,6 +3638,19 @@ async fn handle_chat_generation(
         generation.cancelled(stream).await;
         return Ok(());
     }
+    let tracker = Tracker::new(
+        state.clone(),
+        chat_id,
+        assistant_message_id,
+        Arc::new(SubagentFrames {
+            stream: ChatStream::of(chat_id),
+        }),
+    );
+    let observer: Arc<dyn Observer> = Arc::new(Observers::new(
+        Recorder::new(state.clone(), chat_id, workspace_id),
+        tracker,
+    ));
+    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
 
     publish(
         stream,
@@ -4102,11 +4185,7 @@ async fn handle_chat_generation(
                 switch.backend.clone(),
                 effort,
             ));
-            if let Some(served) = &agent_tools {
-                llm_client = llm_client
-                    .with_toolset(served.lease.toolset(), builtin_tools(sandboxed))
-                    .with_observer(recorder.clone());
-            }
+            llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
             tools = ChatTools::empty();
             continuing = wrote;
             context = match (wrote, switch.carried) {
@@ -4230,6 +4309,7 @@ async fn handle_chat_generation(
             chat_id: Some(chat_id),
             user_id,
             offline,
+            origin,
         })
         .await
         .starting_in(Some(directory.clone()))
@@ -4656,6 +4736,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         })
         .await;
         let character = ChatCharacter {
@@ -5372,7 +5453,7 @@ mod tests {
                 scope: "user:inference".to_string(),
                 subscription: None,
             }
-            .seal(state.encryption_key())
+            .seal(state.master_key())
             .expect("tokens to seal");
             let login = db::agent_logins::insert(
                 &organization.pool,
@@ -6368,6 +6449,142 @@ cat 'DIR/reply.jsonl'
                 assert_eq!(second.id, fresh);
                 assert_eq!(second.prompt, first.prompt);
             }
+
+            /// Claude's subagents fixture up to the turn's first result, which
+            /// leaves its background review still running when the turn ends.
+            fn subagents_until_the_first_result() -> String {
+                const FIXTURE: &str = include_str!(
+                    "../../../zone_core/src/llm/provider/parser/fixtures/claude/subagents.jsonl"
+                );
+                let mut reply = String::new();
+                for line in FIXTURE
+                    .lines()
+                    .filter(|line| !line.contains(r#""subtype":"init""#))
+                {
+                    reply.push_str(line);
+                    reply.push('\n');
+                    if line.starts_with(r#"{"type":"result""#) {
+                        return reply;
+                    }
+                }
+                panic!("the fixture has no result");
+            }
+
+            #[tokio::test]
+            async fn a_turns_subagents_reach_its_readers_and_its_store_and_are_swept_when_it_ends()
+            {
+                use zone_core::llm::{StepStatus, SubagentStatus};
+
+                const SURVEY: &str = "toolu_01Survey";
+                const REVIEW: &str = "toolu_04Review";
+                let chat = Chat::on_claude().await;
+                std::fs::write(
+                    chat.agent.directory.path().join("reply.jsonl"),
+                    subagents_until_the_first_result(),
+                )
+                .expect("the stand-in's reply");
+                let stream = ChatStream::of(chat.organization.chat);
+                let (_, mut frames) = stream.join().await;
+
+                chat.ask(FIRST).await;
+                let mut started = None;
+                let mut announced = Vec::new();
+                let mut replayed = Vec::new();
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        match frames.recv().await.expect("the chat's frames") {
+                            ServerMessage::MessageStart { message_id, .. } => {
+                                started = Some(message_id);
+                            }
+                            ServerMessage::Subagent {
+                                subagent, steps, ..
+                            } => {
+                                replayed.extend(stream.join().await.0);
+                                let swept = subagent.external_id == REVIEW
+                                    && subagent.status == SubagentStatus::Stopped;
+                                announced.push((subagent, steps));
+                                if swept {
+                                    return;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("the review is swept once the turn ends");
+                let answer: Uuid = sqlx::query_scalar(
+                    "SELECT id FROM messages WHERE chat_id = $1 AND role = 'assistant'",
+                )
+                .bind(chat.organization.chat)
+                .fetch_one(&chat.organization.pool)
+                .await
+                .expect("the chat's answer");
+                let stored =
+                    db::chat_subagents::list(&chat.organization.pool, chat.organization.chat)
+                        .await
+                        .expect("the chat's subagents");
+                let survey = stored
+                    .iter()
+                    .find(|row| row.external_id == SURVEY)
+                    .expect("the survey")
+                    .clone();
+                let steps = db::chat_subagents::steps(
+                    &chat.organization.pool,
+                    chat.organization.chat,
+                    survey.id,
+                )
+                .await
+                .expect("the survey's steps")
+                .expect("the survey");
+                chat.remove().await;
+
+                assert_eq!(
+                    started,
+                    Some(answer),
+                    "the console's answer is the stored one"
+                );
+                assert!(
+                    announced
+                        .iter()
+                        .all(|(subagent, _)| subagent.message_id == Some(answer)),
+                    "{announced:?}"
+                );
+                let named: std::collections::BTreeSet<&str> = announced
+                    .iter()
+                    .map(|(subagent, _)| subagent.external_id.as_str())
+                    .collect();
+                assert_eq!(named, std::collections::BTreeSet::from([SURVEY, REVIEW]));
+                assert!(
+                    !replayed
+                        .iter()
+                        .any(|frame| matches!(frame, ServerMessage::Subagent { .. })),
+                    "a joining client reads subagents over REST: {replayed:?}"
+                );
+                let statuses: Vec<(&str, &str)> = stored
+                    .iter()
+                    .map(|row| (row.external_id.as_str(), row.status.as_str()))
+                    .collect();
+                assert_eq!(
+                    statuses,
+                    [
+                        (SURVEY, SubagentStatus::Completed.as_str()),
+                        (REVIEW, SubagentStatus::Stopped.as_str()),
+                    ]
+                );
+                let taken: Vec<(&str, Option<&str>, StepStatus)> = steps
+                    .iter()
+                    .map(|step| (step.name.as_str(), step.subject.as_deref(), step.status))
+                    .collect();
+                assert_eq!(
+                    taken,
+                    [
+                        ("Grep", Some("pub mod"), StepStatus::Succeeded),
+                        ("Read", Some("/w/src/missing.rs"), StepStatus::Failed),
+                    ]
+                );
+                assert_eq!(survey.step_count, 2);
+            }
         }
 
         #[tokio::test]
@@ -6937,6 +7154,148 @@ cat 'DIR/reply.jsonl'
             !CHAT_STREAMS.contains_key(&chat_id),
             "the last holder leaving frees the chat's frames"
         );
+    }
+
+    fn subagent(chat_id: Uuid) -> ChatSubagent {
+        let now = chrono::Utc::now();
+        ChatSubagent {
+            id: Uuid::new_v4(),
+            chat_id,
+            message_id: Some(Uuid::new_v4()),
+            external_id: "toolu_01Agent".to_string(),
+            description: "Ask for a review".to_string(),
+            kind: None,
+            model: None,
+            background: true,
+            status: zone_core::llm::SubagentStatus::Running,
+            tool_uses: None,
+            duration_ms: None,
+            tokens: None,
+            last_tool: None,
+            summary: None,
+            error: None,
+            step_count: 1,
+            revision: 2,
+            started_at: now,
+            finished_at: None,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subagent_reaches_every_connection_but_is_never_replayed() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        publish(&stream, started(Uuid::new_v4())).await;
+        let (_, mut connection) = stream.join().await;
+        let frames = SubagentFrames {
+            stream: stream.clone(),
+        };
+        let changed = subagent(chat_id);
+        let step = SubagentStep {
+            id: "toolu_x".to_string(),
+            name: "Bash".to_string(),
+            subject: None,
+            status: zone_core::llm::StepStatus::Running,
+        };
+
+        frames.announce(changed.clone(), vec![step]).await;
+
+        let frame = connection.recv().await.expect("the subagent frame");
+        assert_eq!(
+            serde_json::to_value(&frame).expect("a frame"),
+            serde_json::json!({
+                "type": "subagent",
+                "chat_id": chat_id,
+                "subagent": serde_json::to_value(&changed).expect("a subagent"),
+                "steps": [{"id": "toolu_x", "name": "Bash", "subject": null, "status": "running"}],
+            })
+        );
+        assert_eq!(
+            frame_kinds(&stream.join().await.0),
+            ["message_start"],
+            "a joining client reads subagents over REST"
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_subagents_reach_every_connection_but_are_never_replayed() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        publish(&stream, started(Uuid::new_v4())).await;
+        let (_, mut connection) = stream.join().await;
+        let removed = vec![Uuid::new_v4(), Uuid::new_v4()];
+
+        announce_removed_subagents(chat_id, Vec::new()).await;
+        announce_removed_subagents(chat_id, removed.clone()).await;
+
+        let frame = connection.recv().await.expect("the removal frame");
+        assert_eq!(
+            serde_json::to_value(&frame).expect("a frame"),
+            serde_json::json!({
+                "type": "subagents_removed",
+                "chat_id": chat_id,
+                "ids": removed,
+            }),
+            "a removal of nothing is not sent"
+        );
+        assert_eq!(
+            frame_kinds(&stream.join().await.0),
+            ["message_start"],
+            "a joining client reads subagents over REST"
+        );
+    }
+
+    #[derive(Debug)]
+    struct Watching;
+
+    impl Observer for Watching {
+        fn observe(&self, _output: &zone_core::llm::Output) {}
+    }
+
+    fn observed(client: &LlmClient) -> Option<Arc<dyn Observer>> {
+        match client.backend() {
+            LlmBackend::Cli { settings, .. } => settings.observer.clone(),
+            LlmBackend::Http => None,
+        }
+    }
+
+    fn cli() -> LlmBackend {
+        LlmBackend::cli(
+            zone_core::llm::AgentKind::Claude,
+            zone_core::llm::CliSettings::default(),
+        )
+    }
+
+    #[test]
+    fn a_coding_agent_is_watched_whether_or_not_it_is_served_tools() {
+        let observer: Arc<dyn Observer> = Arc::new(Watching);
+        let client = LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli());
+
+        let client = equipped(client, None, &observer, true);
+        assert!(
+            observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
+            "a turn the agent tools are off for is still watched"
+        );
+
+        let client = client.with_backend(cli());
+        assert!(
+            observed(&client).is_none(),
+            "a new backend starts unwatched"
+        );
+        let client = equipped(client, None, &observer, true);
+        assert!(
+            observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
+            "a turn handed over to another login is watched again"
+        );
+
+        let endpoint = equipped(
+            LlmClient::new(abnegate_llm::LlmConfig::default()),
+            None,
+            &observer,
+            true,
+        );
+        assert!(matches!(endpoint.backend(), LlmBackend::Http));
     }
 
     #[tokio::test]

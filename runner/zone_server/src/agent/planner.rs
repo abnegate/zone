@@ -14,6 +14,7 @@
 mod grant;
 
 use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use abnegate_vcs::{GitService, PullRequestError, RepositoryUrl};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -488,7 +489,7 @@ impl Tool for CreateRepositoryTool {
                 ))
                 .map(|repository| {
                     Grant::new(
-                        self.0.state.encryption_key(),
+                        self.0.state.master_key(),
                         self.0.workspace_id,
                         arguments.source_id,
                     )
@@ -534,12 +535,8 @@ impl FinalizeProjectTool {
         }
         source.github_installation_id.is_none()
             && grant.is_some_and(|grant| {
-                Grant::new(
-                    self.0.state.encryption_key(),
-                    self.0.workspace_id,
-                    source.id,
-                )
-                .admits(&requested, grant)
+                Grant::new(self.0.state.master_key(), self.0.workspace_id, source.id)
+                    .admits(&requested, grant)
             })
     }
 }
@@ -652,10 +649,7 @@ impl Tool for FinalizeProjectTool {
                 if let Some(installation) = credential.installation {
                     (Some(url), None, Some(installation))
                 } else {
-                    match crate::crypto::encrypt(
-                        self.0.state.encryption_key(),
-                        credential.token.expose(),
-                    ) {
+                    match encrypt_value(&credential.token, self.0.state.master_key()) {
                         Ok(sealed) => (Some(url), Some(sealed), None),
                         Err(_) => {
                             return Ok(ToolResult::error(
@@ -689,6 +683,7 @@ impl Tool for FinalizeProjectTool {
             self.0.workspace_id,
             self.0.user_id,
             self.0.chat_id,
+            self.0.origin,
             &plan,
         )
         .await
@@ -724,6 +719,7 @@ mod tests {
     use super::*;
     use crate::agent::integrations::SOURCE_DISCONNECTED;
     use crate::agent::testing::{Connected, MINTED_TOKEN, OWNER, REPOSITORY, STORED_TOKEN, number};
+    use crate::secret::Unseal;
     use crate::services::github_app::testing::issuing;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, ResponseTemplate};
@@ -973,7 +969,12 @@ mod tests {
         assert_eq!(installation, None);
         assert_ne!(token, STORED_TOKEN, "the token is sealed at rest");
         assert_eq!(
-            crate::crypto::open(connected.state.encryption_key(), &token),
+            connected
+                .state
+                .master_key()
+                .open_strict(&token)
+                .expect("the token opens")
+                .expose(),
             STORED_TOKEN
         );
     }
@@ -1103,12 +1104,8 @@ mod tests {
         issuing(&connected.github, number, MINTED_TOKEN, 0).await;
         let installation = connected.installation(number).await;
         let source = connected.source(Some(installation), None).await;
-        let grant = Grant::new(
-            connected.state.encryption_key(),
-            connected.workspace,
-            source.id,
-        )
-        .issue("https://github.com/elsewhere/secrets.git");
+        let grant = Grant::new(connected.state.master_key(), connected.workspace, source.id)
+            .issue("https://github.com/elsewhere/secrets.git");
 
         let result = FinalizeProjectTool(connected.scope())
             .execute(
@@ -1144,10 +1141,12 @@ mod tests {
 
         assert_eq!(installation, None);
         assert_eq!(
-            crate::crypto::open(
-                connected.state.encryption_key(),
-                &token.expect("the project holds the source's token")
-            ),
+            connected
+                .state
+                .master_key()
+                .open_strict(&token.expect("the project holds the source's token"))
+                .expect("the token opens")
+                .expose(),
             STORED_TOKEN
         );
     }
@@ -1196,10 +1195,12 @@ mod tests {
         let (_, token) = stored(&connected, &created(result)).await;
 
         assert_eq!(
-            crate::crypto::open(
-                connected.state.encryption_key(),
-                &token.expect("the project holds the source's token")
-            ),
+            connected
+                .state
+                .master_key()
+                .open_strict(&token.expect("the project holds the source's token"))
+                .expect("the token opens")
+                .expose(),
             STORED_TOKEN
         );
     }
@@ -1209,7 +1210,7 @@ mod tests {
         let connected = Connected::new().await;
         let source = connected.source(None, Some(STORED_TOKEN)).await;
         let grant = Grant::new(
-            connected.state.encryption_key(),
+            connected.state.master_key(),
             connected.workspace,
             Uuid::new_v4(),
         )

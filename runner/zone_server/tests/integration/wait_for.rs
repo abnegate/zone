@@ -464,6 +464,7 @@ async fn chat_tools(state: &AppState, workspace: Uuid, user: Uuid, chat: Uuid) -
         chat_id: Some(chat),
         user_id: user,
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await
 }

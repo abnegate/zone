@@ -90,6 +90,13 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
 
+      # The seal-secrets tests dump the pg17 service; the runner's stock client is 16.
+      - name: Install the PostgreSQL 17 client
+        run: |
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+
       # Without bubblewrap the confinement probe reports the backend unusable
       # and every test that asks the real sandbox to refuse something returns
       # early, reporting ok. The bubblewrap backend has never executed in CI.

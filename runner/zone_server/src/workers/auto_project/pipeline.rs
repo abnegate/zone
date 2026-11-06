@@ -57,6 +57,7 @@ pub const CI_TASK_CRITERIA: &str = "A pull_request workflow exists and passes on
 
 const REPOSITORY_TOKEN_MISSING: &str =
     "repository_token_missing: link the repository with a token on the project";
+const REPOSITORY_TOKEN_UNOPENABLE: &str = "repository_token_unopenable: the project's token is sealed under a key this deployment does not hold; link the repository with a token again";
 const REPOSITORY_DISCONNECTED: &str = "repository_disconnected: the project's GitHub connection was removed or suspended; reconnect GitHub";
 
 const NO_BOT_REVIEW_PREFIX: &str = "no review from: ";
@@ -150,6 +151,9 @@ pub async fn advance(drive: &Drive<'_>, task: &TaskAutomation) -> Result<(), Str
         Ok(None) => return pause(drive, task, REPOSITORY_TOKEN_MISSING).await,
         Err(GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected) => {
             return pause(drive, task, REPOSITORY_DISCONNECTED).await;
+        }
+        Err(GitHubError::Credential) => {
+            return pause(drive, task, REPOSITORY_TOKEN_UNOPENABLE).await;
         }
         Err(error) => return Err(error.to_string()),
     };
@@ -2191,6 +2195,7 @@ mod tests {
                 workspace.id,
                 user.id,
                 None,
+                crate::db::tasks::Origin::Member,
                 &ProjectPlan {
                     name: "Shop",
                     description: None,
@@ -2530,9 +2535,10 @@ mod tests {
         refusing(&server, "fallback-token").await;
         let merged = Merged::new(&server).await;
         let pool = merged.state.db();
-        merged
-            .state
-            .install_github(provider(&server, *merged.state.encryption_key()));
+        merged.state.install_github(provider(
+            &server,
+            std::sync::Arc::clone(merged.state.master_key()),
+        ));
         let installation = installed(
             pool,
             merged.state.github(),

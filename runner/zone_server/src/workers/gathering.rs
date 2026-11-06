@@ -486,7 +486,7 @@ mod tests {
             let workspace = seed_workspace(&pool, organization).await;
             let github = MockServer::start().await;
             let state = AppState::new(test_config(), pool, None);
-            state.install_github(provider(&github, *state.encryption_key()));
+            state.install_github(provider(&github, std::sync::Arc::clone(state.master_key())));
             Self {
                 state,
                 github,
@@ -507,9 +507,8 @@ mod tests {
         }
 
         async fn source(&self, credentials: Option<&str>, installation: Option<Uuid>) -> SourceRow {
-            let sealed = credentials.map(|token| {
-                crate::crypto::encrypt(self.state.encryption_key(), token).expect("seal the token")
-            });
+            let sealed = credentials
+                .map(|token| crate::secret::fixture::seal(token, self.state.master_key()));
             sources::create_source(
                 self.state.db(),
                 NewSource {

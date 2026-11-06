@@ -83,7 +83,7 @@ export function computeHelp(input: {
   provider: TrainProviderKind;
   hasKey: boolean;
 }): string | null {
-  if (!input.hasKey) return 'Save a Runpod API key in Workspace Settings.';
+  if (!input.hasKey) return 'Save a Runpod API key in Settings → AI.';
   if (input.provider !== 'runpod') return null;
   if (input.method === 'finetune') {
     return 'Auto-picks a 48 GB GPU (A40 class). Twenty looks per still; hours, a few dollars.';

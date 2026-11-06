@@ -1,7 +1,7 @@
 import { Button } from '@zone/ui';
 import { type ReactNode, useId } from 'react';
-import { canManageOrganization } from '../../../shared/components/ProtectedRoute';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import { canManageOrganization } from '../../../shared/roles';
 import { BranchSelect, type GitHubRepository, RepositoryPicker } from '../../github';
 import { GitHubConnectionMode } from './GitHubConnectionMode';
 

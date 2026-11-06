@@ -4,6 +4,8 @@
 
 use crate::common::github_app::{self, Seeded};
 use crate::common::{self, TestClient, TestResponse, test_email, test_password};
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use abnegate_vcs::pull_request::ApplicationId;
 use axum::http::StatusCode;
 use chrono::{Duration, SecondsFormat, Utc};
@@ -321,7 +323,7 @@ impl Harness {
         installation: Option<Uuid>,
     ) -> Uuid {
         let sealed = credentials.map(|token| {
-            zone_server::crypto::encrypt(self.state().encryption_key(), token)
+            encrypt_value(&SecretValue::new(token), self.state().master_key())
                 .expect("the token seals")
         });
         sources::create_source(

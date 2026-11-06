@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use abnegate_secret::MasterKey;
 use abnegate_secret::SecretValue;
 use chrono::{Duration, SecondsFormat, Utc};
 use serde_json::json;
@@ -15,14 +18,14 @@ use crate::state::test_config;
 
 use super::TEST_PRIVATE_KEY;
 
-pub(crate) fn provider(server: &MockServer, encryption_key: [u8; 32]) -> Provider {
+pub(crate) fn provider(server: &MockServer, master_key: Arc<MasterKey>) -> Provider {
     Provider::new(
         &Config {
             github_api_url: server.uri(),
             github_api_allows_http: true,
             ..test_config()
         },
-        encryption_key,
+        master_key,
     )
 }
 

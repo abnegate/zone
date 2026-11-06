@@ -165,6 +165,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         }
     }
 
@@ -326,6 +327,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         };
         assert_ne!(
             scope.state.config().comfyui.audio_checkpoint,

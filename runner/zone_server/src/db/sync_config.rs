@@ -592,6 +592,7 @@ pub async fn create_synced_task(
             source_id: None,
             created_by: None,
             chat_id: None,
+            origin: tasks::Origin::Automation,
         },
     )
     .await?;

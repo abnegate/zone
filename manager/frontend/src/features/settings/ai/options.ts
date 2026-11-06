@@ -5,6 +5,7 @@ import { AiProviderSchema } from '../workspace/schemas';
 import type {
   AiProvider,
   AiSettings,
+  CommonAiSettings,
   OrganizationKeys,
   UpdateAiSettingsRequest,
 } from '../workspace/types';
@@ -137,6 +138,27 @@ export function comfyImageOptions(installed: InstalledModelOption[], current: st
   return Array.from(new Set([...IMAGE_MODEL_OPTIONS, ...fromDisk, current].filter(Boolean)));
 }
 
+export interface ModelOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+export function imageModelOptions(
+  installed: InstalledModelOption[],
+  current: string
+): ModelOption[] {
+  return comfyImageOptions(installed, current).map((name) => {
+    const row = installed.find((item) => item.name === name);
+    const missing = row?.ready === false;
+    return {
+      value: name,
+      disabled: missing,
+      label: missing ? `${name} (requires ${row?.required_files?.[0] || 'base'})` : name,
+    };
+  });
+}
+
 export function withCurrent(options: string[], current: string): string[] {
   return Array.from(new Set([...options, current].filter(Boolean)));
 }
@@ -214,7 +236,7 @@ export function credentialsFromSettings(settings: AiSettings): ProviderCredentia
   };
 }
 
-export function configuredFromSettings(settings: AiSettings): ProviderConfigured {
+export function configuredFromSettings(settings: CommonAiSettings): ProviderConfigured {
   return {
     litellm: settings.has_litellm_key,
     openai: settings.has_openai_api_key,
@@ -262,14 +284,14 @@ export function isEndpointProvider(provider: AiProvider): provider is EndpointPr
   return provider in endpointFields;
 }
 
-function savesEndpoint(settings: AiSettings, provider: EndpointProvider): boolean {
+function savesEndpoint(settings: CommonAiSettings, provider: EndpointProvider): boolean {
   const fields = endpointFields[provider];
   return Boolean(settings[fields.savedUrl]?.trim()) || settings[fields.savedKey];
 }
 
 export type Routing = 'none' | 'pending' | 'routed';
 
-export function routingOf(settings: AiSettings | null, provider: AiProvider): Routing {
+export function routingOf(settings: CommonAiSettings | null, provider: AiProvider): Routing {
   if (!settings || !isEndpointProvider(provider) || !savesEndpoint(settings, provider)) {
     return 'none';
   }
@@ -296,7 +318,7 @@ export function needsKeyAgain(
   provider: AiProvider,
   credentials: ProviderCredentials,
   configured: ProviderConfigured,
-  saved: AiSettings | null
+  saved: CommonAiSettings | null
 ): boolean {
   if (!isEndpointProvider(provider)) return false;
   const fields = endpointFields[provider];
@@ -320,21 +342,12 @@ function endpointUrl(entered: string, saved: string | null): string | undefined 
   return saved?.trim() ? '' : undefined;
 }
 
-export function buildAiSettingsRequest(
+export function credentialFields(
   provider: AiProvider,
   credentials: ProviderCredentials,
-  models: ModelSelection,
-  saved: AiSettings | null = null
+  saved: CommonAiSettings | null = null
 ): UpdateAiSettingsRequest {
-  const request: UpdateAiSettingsRequest = {
-    provider,
-    model_fast: models.fast,
-    model_reasoning: models.reasoning,
-    model_embedding: models.embedding,
-    model_image: models.image,
-    model_video: models.video,
-    model_audio: models.audio,
-  };
+  const request: UpdateAiSettingsRequest = {};
   if (credentials.runpodApiKey) request.runpod_api_key = credentials.runpodApiKey;
   if (isAgentProvider(provider)) {
     return request;
@@ -363,4 +376,22 @@ export function buildAiSettingsRequest(
     }
   }
   return request;
+}
+
+export function buildAiSettingsRequest(
+  provider: AiProvider,
+  credentials: ProviderCredentials,
+  models: ModelSelection,
+  saved: AiSettings | null = null
+): UpdateAiSettingsRequest {
+  return {
+    provider,
+    model_fast: models.fast,
+    model_reasoning: models.reasoning,
+    model_embedding: models.embedding,
+    model_image: models.image,
+    model_video: models.video,
+    model_audio: models.audio,
+    ...credentialFields(provider, credentials, saved),
+  };
 }

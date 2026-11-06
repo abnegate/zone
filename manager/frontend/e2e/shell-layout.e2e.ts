@@ -1,14 +1,14 @@
 import type { Page, TestInfo } from '@playwright/test';
 import { expect, test } from './fixtures';
-import { setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
+import {
+  aiSettingsResponse,
+  setupAdminAuth,
+  setupCommonRoutes,
+} from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
 const timestamp = '2026-09-05T00:00:00Z';
 const narrowLayoutWidth = 768;
-const settingsTabs = (width: number) => ({
-  height: 32,
-  gap: width <= narrowLayoutWidth ? 25 : 24.5,
-});
 const scenarios = [
   { name: 'desktop-light', width: 1440, height: 1000, mode: 'light' },
   { name: 'mobile-light', width: 390, height: 844, mode: 'light' },
@@ -50,8 +50,9 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
     },
   );
   await routeApi(page, /\/settings\/ai/, async (route) => {
+    const path = new URL(route.request().url()).pathname;
     await route.fulfill({
-      json: {
+      json: aiSettingsResponse(path, {
         provider: 'self_hosted',
         has_litellm_key: false,
         litellm_host: null,
@@ -70,9 +71,7 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
         model_video: 'wan2.2_ti2v_5B_fp16.safetensors',
         model_audio: 'ace_step_v1_3.5b.safetensors',
         completions_routed: true,
-        overrides: false,
-        organization_keys: { litellm: false, openai: false, anthropic: false },
-      },
+      }),
     });
   });
   await routeApi(
@@ -128,20 +127,57 @@ async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
   );
 }
 
-async function tabs(page: Page): Promise<{ height: number; gap: number }> {
-  return page.locator('.settings-page').evaluate((element) => {
-    const list = element
-      .querySelector('[role="tablist"]')
-      ?.getBoundingClientRect();
-    const panel = element
-      .querySelector('[role="tabpanel"]:not([hidden])')
-      ?.getBoundingClientRect();
-    if (!list || !panel) throw new Error('Settings tabs must be visible');
+interface ShellLayout {
+  columns: number;
+  navigation: boolean;
+  back: boolean;
+}
+
+function expectedShell(width: number): ShellLayout {
+  const compact = width <= narrowLayoutWidth;
+  return { columns: compact ? 0 : 2, navigation: !compact, back: compact };
+}
+
+async function shell(page: Page): Promise<ShellLayout> {
+  return page.locator('.settings-shell').evaluate((element) => {
+    const layout = element.querySelector('.settings-layout');
+    const visible = (selector: string): boolean => {
+      const target = element.querySelector(selector);
+      return target !== null && target.getBoundingClientRect().height > 0;
+    };
     return {
-      height: Math.round(list.height),
-      gap: Math.round((panel.y - list.y - list.height) * 2) / 2,
+      columns: layout
+        ? getComputedStyle(layout).gridTemplateColumns.split(' ').length
+        : 0,
+      navigation: visible('.settings-nav'),
+      back: visible('.settings-back'),
     };
   });
+}
+
+async function openSection(
+  page: Page,
+  width: number,
+  group: string,
+  label: string,
+): Promise<void> {
+  const compact = width <= narrowLayoutWidth;
+  if (compact) {
+    await page.getByRole('link', { name: 'Back to settings', exact: true }).click();
+    await expect(page).toHaveURL(/\/settings$/);
+  }
+  const link = page
+    .getByRole('navigation', { name: 'Settings', exact: true })
+    .getByRole('group', { name: group, exact: true })
+    .getByRole('link', { name: label, exact: true });
+  await link.click();
+  await expect(page.getByRole('region', { name: label, exact: true })).toBeVisible();
+  if (compact) {
+    await expect(page.locator('.settings-page .page-bar-title')).toHaveText(label);
+  } else {
+    await expect(link).toHaveAttribute('aria-current', 'page');
+  }
+  await expect.poll(() => shell(page)).toEqual(expectedShell(width));
 }
 
 async function capture(
@@ -228,9 +264,9 @@ for (const scenario of scenarios) {
   test(`workspace settings layouts ${scenario.name}`, async ({
     page,
   }, information) => {
-    await signIn(page, scenario, '/settings');
+    await signIn(page, scenario, '/settings/workspace/general');
     await expect(page.locator('#font-family')).toBeVisible();
-    await expect.poll(() => tabs(page)).toEqual(settingsTabs(scenario.width));
+    await expect.poll(() => shell(page)).toEqual(expectedShell(scenario.width));
     const workspaceTitle = page.locator('.settings-page .page-bar-title');
     const rhythm = await page
       .locator('.settings-form')
@@ -251,15 +287,11 @@ for (const scenario of scenarios) {
     expect(rhythm.every((gap) => Math.abs(gap - 16) < 1)).toBe(true);
 
     await expect(workspaceTitle).toHaveCSS('font-size', '18px');
-    for (const tab of ['Theme', 'AI Settings', 'Members']) {
-      await page.getByRole('tab', { name: tab, exact: true }).click();
-      await expect(page.getByRole('tabpanel')).toBeVisible();
-      await capture(
-        page,
-        information,
-        `workspace-${tab.toLowerCase().replaceAll(' ', '-')}`,
-      );
-      if (tab === 'Members') {
+    await capture(page, information, 'workspace-general');
+    for (const section of ['AI', 'Folders', 'Members']) {
+      await openSection(page, scenario.width, 'Workspace', section);
+      await capture(page, information, `workspace-${section.toLowerCase()}`);
+      if (section === 'Members') {
         await page
           .getByRole('button', { name: 'Add Member', exact: true })
           .click();
@@ -289,27 +321,20 @@ for (const scenario of scenarios) {
   test(`organization settings layouts ${scenario.name}`, async ({
     page,
   }, information) => {
-    await signIn(page, scenario, '/org-settings');
-    for (const tab of [
-      'AI Settings',
-      'Members',
-      'Devices',
-      'Invitations',
-      'Billing',
-      'Audit Logs',
-    ]) {
-      await page.getByRole('tab', { name: tab, exact: true }).click();
-      await expect(page.getByRole('tabpanel')).toBeVisible();
-      await expect(
-        page.getByRole('tab', { name: tab, exact: true }),
-      ).toHaveAttribute('aria-selected', 'true');
-      await expect.poll(() => tabs(page)).toEqual(settingsTabs(scenario.width));
+    await signIn(page, scenario, '/settings/organization/ai');
+    await expect(
+      page.getByRole('region', { name: 'AI defaults', exact: true }),
+    ).toBeVisible();
+    await expect.poll(() => shell(page)).toEqual(expectedShell(scenario.width));
+    await capture(page, information, 'organization-ai-defaults');
+    for (const section of ['Members', 'Devices', 'Billing', 'Audit log']) {
+      await openSection(page, scenario.width, 'Organization', section);
       await capture(
         page,
         information,
-        `organization-${tab.toLowerCase().replaceAll(' ', '-')}`,
+        `organization-${section.toLowerCase().replaceAll(' ', '-')}`,
       );
-      if (tab === 'Invitations') {
+      if (section === 'Members') {
         await page
           .getByRole('button', { name: 'Invite Member', exact: true })
           .click();
@@ -337,10 +362,15 @@ for (const scenario of scenarios) {
   test(`sessions and navigation layouts ${scenario.name}`, async ({
     page,
   }, information) => {
-    await signIn(page, scenario, '/sessions');
+    await signIn(page, scenario, '/settings/you/sessions');
+    await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS(
+      'font-size',
+      '18px',
+    );
     await expect(
       page.getByRole('heading', { name: 'Active Sessions' }),
-    ).toHaveCSS('font-size', '18px');
+    ).toBeVisible();
+    await expect.poll(() => shell(page)).toEqual(expectedShell(scenario.width));
     await expect(
       page.getByRole('table', { name: 'Active sessions' }),
     ).toBeVisible();
@@ -386,7 +416,7 @@ for (const scenario of scenarios) {
       expect(header.logoLeft - header.menuRight).toBeGreaterThanOrEqual(8);
       expect(header.themeLeft - header.logoRight).toBeGreaterThanOrEqual(8);
     }
-    await expect(page.getByRole('navigation')).toBeVisible();
+    await expect(page.locator('.sidebar-nav')).toBeVisible();
     await expect(page.getByRole('button', { name: /Logout/i })).toBeVisible();
     await capture(page, information, 'navigation');
   });
@@ -417,7 +447,7 @@ test('workspace custom typography preserves shared proportions', async ({
   });
   await page.goto('/login', { waitUntil: 'domcontentloaded' });
   await setupAdminAuth(page);
-  await page.goto('/settings', { waitUntil: 'domcontentloaded' });
+  await page.goto('/settings/workspace/general', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('combobox', { name: 'Font Family' })).toHaveText('Roboto');
   await expect(page.locator('.settings-page .page-bar-title')).toHaveCSS(
     'font-size',
