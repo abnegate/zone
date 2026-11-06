@@ -546,7 +546,7 @@ describe('RepositoryPicker empty and error states', () => {
     await waitFor(() => expect(listRepositories).toHaveBeenCalled());
 
     expect(screen.queryByText('No GitHub account is connected.')).not.toBeInTheDocument();
-    await openPopup(user);
+    await user.click(combobox());
 
     const loading = await screen.findByText('Loading repositories…');
     expect(loading.closest('[role="status"]')).not.toBeNull();
@@ -559,7 +559,7 @@ describe('RepositoryPicker empty and error states', () => {
     });
     const { user } = renderPicker();
     await waitFor(() => expect(listRepositories).toHaveBeenCalledTimes(1));
-    await openPopup(user);
+    await user.click(combobox());
 
     expect(await screen.findByText(/^Couldn['’]t load repositories\./)).toBeInTheDocument();
     expect(screen.queryByText('No GitHub account is connected.')).not.toBeInTheDocument();
