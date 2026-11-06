@@ -503,6 +503,11 @@ export interface PullRequestAutoMerge {
   unavailable: string | null;
 }
 
+export interface PullRequestThreads {
+  open: number;
+  resolved: number;
+}
+
 export interface PullRequestStatus {
   title: string;
   state: PullRequestState;
@@ -514,6 +519,7 @@ export interface PullRequestStatus {
   mergeable: PullRequestMergeability;
   auto_merge: PullRequestAutoMerge;
   draft_unavailable: string | null;
+  threads: PullRequestThreads | null;
   observed_at: string;
 }
 

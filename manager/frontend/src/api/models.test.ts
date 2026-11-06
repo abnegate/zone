@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { installFakeXhr } from '../test/xhr';
 import { ApiError } from './ApiError';
 import { modelsApi } from './models';
 
@@ -329,12 +330,6 @@ describe('Namespaced model requests', () => {
           screening: null,
         });
       }
-      if (url.includes('/train/frames')) {
-        const form = init?.body;
-        expect(form).toBeInstanceOf(FormData);
-        expect((form as FormData).get('video')).toBeInstanceOf(Blob);
-        return Response.json({ sampled: 1, sampled_fps: 8, frames: [] });
-      }
       throw new Error(`unexpected ${init?.method} ${url}`);
     });
     global.fetch = request as typeof fetch;
@@ -345,12 +340,10 @@ describe('Namespaced model requests', () => {
       base: 'flux-schnell',
       images: [{ filename: 'shot.png', caption: 'a person', blob }],
     });
-    await modelsApi.frames({ filename: 'walk.mp4', blob: new Blob(['clip']), mirror: true });
     expect(request.mock.calls.map((call) => [call[1]?.method ?? 'GET', String(call[0])])).toEqual([
       ['POST', '/api/models/train/uploads'],
       ['POST', '/api/models/train/uploads/upload-1'],
       ['POST', '/api/models/train'],
-      ['POST', '/api/models/train/frames'],
     ]);
   });
 
@@ -479,5 +472,62 @@ describe('Namespaced model requests', () => {
     global.fetch = mock(async () => new Response('', { status: 500 })) as unknown as typeof fetch;
 
     await expect(modelsApi.getModels()).rejects.toThrow('Failed to fetch models: 500');
+  });
+});
+
+describe('Training clip uploads', () => {
+  let xhr: ReturnType<typeof installFakeXhr>;
+
+  beforeEach(() => {
+    xhr = installFakeXhr();
+  });
+
+  afterEach(() => {
+    xhr.restore();
+  });
+
+  it('posts the clip as a form and reports how much of it has been sent', async () => {
+    const progress: number[] = [];
+    const clip = modelsApi.frames({
+      filename: 'walk.mp4',
+      blob: new Blob(['clip']),
+      mirror: true,
+      onProgress: ({ loaded, total }) => progress.push(loaded / total),
+    });
+
+    const [request] = xhr.requests;
+    expect(request.method).toBe('POST');
+    expect(request.url).toBe('/api/models/train/frames');
+    expect(request.headers['content-type']).toBeUndefined();
+    const form = request.body as FormData;
+    expect(form.get('video')).toBeInstanceOf(Blob);
+    expect(form.get('mirror')).toBe('true');
+
+    request.progress(25, 100);
+    request.progress(100, 100);
+    request.respond(200, { sampled: 1, sampled_fps: 8, frames: [] });
+
+    expect(await clip).toEqual({ sampled: 1, sampled_fps: 8, frames: [] });
+    expect(progress).toEqual([0.25, 1]);
+  });
+
+  it('surfaces the server error for a refused clip', async () => {
+    const clip = modelsApi.frames({ filename: 'walk.mp4', blob: new Blob(['clip']) });
+    xhr.requests[0].respond(503, { error: 'ffmpeg is not installed on this server' });
+
+    await expect(clip).rejects.toThrow('ffmpeg is not installed on this server');
+  });
+
+  it('aborts the request when the upload is cancelled', async () => {
+    const controller = new AbortController();
+    const clip = modelsApi.frames({
+      filename: 'walk.mp4',
+      blob: new Blob(['clip']),
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(clip).rejects.toMatchObject({ name: 'AbortError' });
+    expect(xhr.requests[0].aborted).toBe(true);
   });
 });
