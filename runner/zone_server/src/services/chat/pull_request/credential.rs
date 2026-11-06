@@ -1,11 +1,11 @@
 //! Which of a workspace's sources may act on a pull request, and with what.
 
-use abnegate_secret::SecretValue;
 use uuid::Uuid;
 
 use crate::db::DbResult;
 use crate::db::chat_pull_requests::{GITHUB, PullRequestRow};
 use crate::db::sources::{self, SourceRow};
+use crate::services::github_app::{self, Credential};
 use crate::state::AppState;
 
 /// The source the pull request was opened through, or else the workspace's
@@ -18,7 +18,7 @@ pub async fn source(
     if let Some(id) = pull_request.source_id
         && let Some(source) = sources::get_source(state.db(), id, workspace_id).await?
         && usable(&source)
-        && source.credentials_encrypted.is_some()
+        && connected(&source)
     {
         return Ok(Some(source));
     }
@@ -34,19 +34,20 @@ pub async fn repository_source(
     sources::get_repository_source(state.db(), workspace_id, GITHUB, owner, repo).await
 }
 
-/// The token `source` authenticates with. A source without one, or one whose
-/// stored credential cannot be opened, cannot act.
-pub fn token(state: &AppState, source: &SourceRow) -> Option<SecretValue> {
-    let encrypted = source.credentials_encrypted.as_deref()?;
-    match crate::crypto::decrypt(state.encryption_key(), encrypted) {
-        Ok(token) => Some(SecretValue::new(token)),
-        Err(_) => {
-            tracing::warn!(source = %source.id, "a GitHub source's credential could not be decrypted");
-            None
-        }
-    }
+/// What `source` authenticates with: a token minted for its GitHub App
+/// installation, or else its stored personal access token. A source whose
+/// installation was removed or suspended fails rather than falling back.
+pub async fn credential(
+    state: &AppState,
+    source: &SourceRow,
+) -> Result<Option<Credential>, github_app::Error> {
+    state.github().source(state.db(), source).await
 }
 
 fn usable(source: &SourceRow) -> bool {
     source.source_type == GITHUB && source.is_active.unwrap_or(true)
+}
+
+fn connected(source: &SourceRow) -> bool {
+    source.credentials_encrypted.is_some() || source.github_installation_id.is_some()
 }
