@@ -4,6 +4,7 @@ import '../features/auth/components/ResendVerificationButton.css';
 import '../features/auth/components/VerificationPendingBanner.css';
 import '../features/auth/pages/InvitationAcceptPage.css';
 import '../features/auth/pages/SessionsPage.css';
+import '../features/auth/components/SessionsSection.css';
 import '../features/chats/components/ActionReceipts.css';
 import '../features/chats/components/JobCard.css';
 import '../features/chats/components/QuestionCard.css';
