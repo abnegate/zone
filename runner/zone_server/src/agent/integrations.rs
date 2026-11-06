@@ -2209,7 +2209,8 @@ fn revision(sha: &str) -> Result<Revision, String> {
 }
 
 /// What a crate error says in Zone's words. GitHub's own words in
-/// `GitHubApi` can quote the request, so they are never repeated.
+/// `GitHubApi` and `Refused` can quote the request, so they are never
+/// repeated.
 fn described(error: PullRequestError) -> String {
     match error {
         PullRequestError::QuotaExhausted { .. } => RATE_LIMIT_EXHAUSTED.to_string(),
@@ -2222,6 +2223,7 @@ fn described(error: PullRequestError) -> String {
         | PullRequestError::PullRequestNotFound => status_error(NOT_FOUND),
         PullRequestError::RateLimited => status_error(TOO_MANY_REQUESTS),
         PullRequestError::PullRequestAlreadyExists(_) => status_error(UNPROCESSABLE_ENTITY),
+        PullRequestError::Refused { status, .. } => status_error(status),
         PullRequestError::Http(_) => REQUEST_FAILED.to_string(),
         PullRequestError::JobLog(failure) => match failure {
             JobLogError::Undirected => LOG_UNDIRECTED.to_string(),
@@ -3293,7 +3295,8 @@ mod tests {
             .mount(&server)
             .await;
         let error = unbranched(&server).resolve(None).await.unwrap_err();
-        assert_eq!(error, UNEXPECTED_RESPONSE);
+        assert_eq!(error, status_error(302));
+        assert!(error.contains("302"));
         assert!(!error.contains("test-secret"));
         assert!(external.received_requests().await.unwrap().is_empty());
         server.reset().await;
@@ -3304,6 +3307,24 @@ mod tests {
         let error = unbranched(&server).resolve(None).await.unwrap_err();
         assert_eq!(error, status_error(FORBIDDEN));
         assert!(!error.contains("test-secret"));
+    }
+
+    #[tokio::test]
+    async fn an_unclassified_status_names_itself_and_never_github_s_words() {
+        for status in [400, 409, 410, UNPROCESSABLE_ENTITY, 500, 503] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/repos/owner/repository/commits/main"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(json!({"message": "test-secret"})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let error = github(&server).resolve(None).await.unwrap_err();
+            assert_eq!(error, status_error(status), "HTTP {status}");
+            assert!(!error.contains("test-secret"), "HTTP {status}: {error}");
+        }
     }
 
     #[tokio::test]
@@ -3444,6 +3465,27 @@ mod tests {
                 PullRequestError::GitHubApi("GitHub API returned 302 Found".into()),
                 UNEXPECTED_RESPONSE.to_string(),
             ),
+            (PullRequestError::refused(302, ""), status_error(302)),
+            (
+                PullRequestError::refused(400, "Problems parsing JSON"),
+                status_error(400),
+            ),
+            (
+                PullRequestError::refused(409, "Git Repository is empty."),
+                status_error(409),
+            ),
+            (
+                PullRequestError::refused(
+                    UNPROCESSABLE_ENTITY,
+                    "Validation Failed; No commits between main and test-secret",
+                ),
+                status_error(UNPROCESSABLE_ENTITY),
+            ),
+            (
+                PullRequestError::refused(500, "test-secret"),
+                status_error(500),
+            ),
+            (PullRequestError::refused(503, ""), status_error(503)),
             (
                 PullRequestError::RepositoryExists("test-secret".into()),
                 UNEXPECTED_RESPONSE.to_string(),
@@ -3978,7 +4020,8 @@ mod tests {
             .open_pull(&github(&server), &pull_args("feature", Some("main"), None))
             .await
             .expect_err("a refusal that is not a duplicate is an error");
-        assert_eq!(refused, UNEXPECTED_RESPONSE);
+        assert_eq!(refused, status_error(UNPROCESSABLE_ENTITY));
+        assert!(!refused.contains("No commits"), "{refused}");
         assert!(
             server
                 .received_requests()
@@ -5489,6 +5532,31 @@ mod tests {
             "the log's first hop must have been sent"
         );
         assert_sent_without_authorization(&server).await;
+    }
+
+    #[tokio::test]
+    async fn a_refused_job_log_request_names_its_status() {
+        for status in [500, 502] {
+            let server = MockServer::start().await;
+            mock(&server, "commits/main", json!({"sha": COMMIT})).await;
+            mock(&server, &format!("actions/jobs/{JOB_ID}"), job(COMMIT)).await;
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/repos/owner/repository/actions/jobs/{JOB_ID}/logs"
+                )))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(json!({"message": "test-secret"})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let error = github(&server)
+                .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
+                .await
+                .unwrap_err();
+            assert_eq!(error, status_error(status), "HTTP {status}");
+            assert!(!error.contains("test-secret"), "HTTP {status}: {error}");
+        }
     }
 
     #[tokio::test]
