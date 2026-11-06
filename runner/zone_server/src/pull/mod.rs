@@ -428,7 +428,7 @@ fn parse_comfy_ref(model: &str) -> Result<ComfyReference, String> {
         || repository.contains("..")
         || repository.contains('\\')
         || !filename.ends_with(".safetensors")
-        || !filename.chars().all(is_hub_character)
+        || filename.chars().any(char::is_control)
     {
         return Err("Invalid image weight filename".to_string());
     }
@@ -929,17 +929,11 @@ mod tests {
     }
 
     #[test]
-    fn a_reference_outside_huggingface_id_characters_is_refused() {
-        const FILENAME: &str = "Invalid image weight filename";
+    fn an_owner_or_repository_outside_huggingface_id_characters_is_refused() {
         const REPOSITORY: &str = "Image weights need an owner/repo HuggingFace id";
         for character in [
             '?', '#', '%', ' ', '\t', '\n', '&', '=', '+', ';', '@', '~', 'é',
         ] {
-            assert_eq!(
-                super::parse_comfy_ref(&format!("owner/repo:evil{character}.safetensors")),
-                Err(FILENAME.to_string()),
-                "{character:?} in the filename"
-            );
             assert_eq!(
                 super::parse_comfy_ref(&format!("own{character}er/repo:style.safetensors")),
                 Err(REPOSITORY.to_string()),
@@ -952,10 +946,6 @@ mod tests {
             );
         }
         assert_eq!(
-            super::parse_comfy_ref("owner/repo:evil#.safetensors"),
-            Err(FILENAME.to_string())
-        );
-        assert_eq!(
             super::parse_comfy_ref("own:er/repo:style.safetensors"),
             Err(REPOSITORY.to_string())
         );
@@ -967,6 +957,41 @@ mod tests {
             super::parse_comfy_ref("./repo:style.safetensors"),
             Err(REPOSITORY.to_string())
         );
+    }
+
+    #[test]
+    fn a_filename_with_a_control_character_is_refused() {
+        const FILENAME: &str = "Invalid image weight filename";
+        for character in ['\n', '\t', '\r', '\0', '\u{7f}', '\u{85}'] {
+            assert_eq!(
+                super::parse_comfy_ref(&format!("owner/repo:evil{character}.safetensors")),
+                Err(FILENAME.to_string()),
+                "{character:?} in the filename"
+            );
+        }
+    }
+
+    #[test]
+    fn a_printable_filename_is_kept_and_percent_encoded_in_its_url() {
+        const ORIGIN: &str = "https://huggingface.co/";
+        const PREFIX: &str = "https://huggingface.co/owner/repo/resolve/main/";
+        for (filename, encoded) in [
+            ("evil#.safetensors", "evil%23.safetensors"),
+            ("evil?.safetensors", "evil%3F.safetensors"),
+            ("100%.safetensors", "100%25.safetensors"),
+            ("My Lora (v2).safetensors", "My%20Lora%20(v2).safetensors"),
+            ("style+detail.safetensors", "style+detail.safetensors"),
+            ("estilo-é.safetensors", "estilo-%C3%A9.safetensors"),
+        ] {
+            let reference = super::parse_comfy_ref(&format!("owner/repo:{filename}"))
+                .unwrap_or_else(|message| panic!("{filename:?} was refused: {message}"));
+            assert_eq!(reference.filename(), filename);
+            assert_eq!(
+                reference.url(ORIGIN).unwrap().as_str(),
+                format!("{PREFIX}{encoded}"),
+                "{filename:?}"
+            );
+        }
     }
 
     #[test]
@@ -1109,6 +1134,46 @@ mod tests {
         .unwrap();
         assert_eq!(sidecar["recipe_id"], "flux-lora");
         assert_eq!(sidecar["hf_base"], "black-forest-labs/FLUX.1-schnell");
+    }
+
+    #[tokio::test]
+    async fn saves_a_lora_filename_with_spaces_under_its_own_name() {
+        const MODEL: &str = "owner/style:My Lora (v2).safetensors";
+        const FILENAME: &str = "My Lora (v2).safetensors";
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/owner/style/resolve/main/My%20Lora%20(v2).safetensors",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(BODY))
+            .mount(&server)
+            .await;
+        let directory = tempfile::tempdir().unwrap();
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(PullStart {
+            model: MODEL.into(),
+            ollama_host: String::new(),
+            comfy: Some(ComfyPull {
+                models_directory: directory.path().to_path_buf(),
+                recipe_id: Some("flux-lora".into()),
+                hf_base: None,
+                hub_origin: format!("{}/", server.uri()),
+                manifest: None,
+            }),
+        });
+        assert_complete(&registry, MODEL).await;
+        let loras = directory.path().join("loras");
+        assert_eq!(std::fs::read(loras.join(FILENAME)).unwrap(), BODY);
+        assert!(loras.join(format!("{FILENAME}.zone.json")).is_file());
+        let mut saved: Vec<String> = std::fs::read_dir(&loras)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        saved.sort();
+        assert_eq!(
+            saved,
+            [FILENAME.to_string(), format!("{FILENAME}.zone.json")]
+        );
     }
 
     #[tokio::test]

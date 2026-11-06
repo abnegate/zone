@@ -3,8 +3,9 @@ use reqwest::Url;
 const RESOLVE: &str = "resolve";
 const REVISION: &str = "main";
 
-/// An `owner/repository:filename.safetensors` weight reference whose parts are
-/// safe to put in a HuggingFace URL and to name a file under `loras/`.
+/// An `owner/repository:filename.safetensors` weight reference whose owner and
+/// repository are HuggingFace id segments and whose filename is a single
+/// printable path segment, safe to name a file under `loras/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComfyReference {
     repository: String,
@@ -36,8 +37,8 @@ impl ComfyReference {
     }
 }
 
-/// Whether `character` may appear in a HuggingFace owner, repository or file
-/// name segment.
+/// Whether `character` may appear in a HuggingFace owner or repository
+/// segment.
 pub(super) fn is_hub_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
 }
