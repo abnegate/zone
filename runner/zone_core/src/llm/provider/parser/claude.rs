@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use chrono::{DateTime, Utc};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
+use super::lenient;
 use crate::llm::provider::event::{AgentEvent, subject};
 use crate::llm::provider::occupancy::Occupancy;
 use crate::llm::provider::output::Output;
@@ -469,17 +469,6 @@ fn read_as(streamed: &str) -> &str {
         .iter()
         .find(|(name, _)| *name == streamed)
         .map_or(streamed, |(_, read)| read)
-}
-
-/// A field claude may one day send in another shape, read as absent rather
-/// than losing the whole line, and with it a refusal, to a parse error.
-fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: DeserializeOwned,
-{
-    let value = Option::<Value>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 fn reset<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>

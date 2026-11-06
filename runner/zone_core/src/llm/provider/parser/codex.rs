@@ -3,10 +3,10 @@
 use std::collections::BTreeMap;
 
 use abnegate_secret::sanitize;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serde_json::Value;
 
+use super::lenient;
 use crate::llm::provider::event::{AgentEvent, subject};
 use crate::llm::provider::output::Output;
 use crate::llm::provider::settings::Toolset;
@@ -232,17 +232,6 @@ fn worded(message: &str) -> Option<String> {
         return None;
     }
     Some(sanitize(message).into_owned())
-}
-
-/// A field codex may one day send in another shape, read as absent rather
-/// than losing the whole line to a parse error.
-fn lenient<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: DeserializeOwned,
-{
-    let value = Option::<Value>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
 }
 
 #[derive(Debug, Deserialize)]
