@@ -164,6 +164,7 @@ mod tests {
     use abnegate_agent_cli::{AgentKind, CliSettings};
     use abnegate_llm::Message;
     use uuid::Uuid;
+    use zone_core::llm::SignIn;
 
     use super::*;
     use crate::services::backend::Resolved;
@@ -306,6 +307,52 @@ mod tests {
             assert!(!pinned.refused(refusal), "{agent} restarted a second time");
             assert!(pinned.restart(LlmBackend::Http).is_none());
         }
+    }
+
+    #[test]
+    fn renewing_a_pinned_session_keeps_its_sign_in() {
+        const DIRECTORY: &str = "/work/acme";
+        for agent in [AgentKind::Claude, AgentKind::Codex] {
+            for sign_in in [SignIn::Instance, SignIn::Organization, SignIn::Host] {
+                let mut pinned = resuming(&login(agent));
+                let backend = LlmBackend::cli(
+                    agent,
+                    CliSettings::default()
+                        .with_session(Session::resumed("previous"))
+                        .with_working_directory(DIRECTORY),
+                )
+                .with_sign_in(sign_in);
+
+                let renewed = pinned.renew(backend);
+
+                assert_eq!(renewed.sign_in(), Some(sign_in), "{agent}");
+                let LlmBackend::Cli {
+                    agent: kind,
+                    settings,
+                    ..
+                } = &renewed
+                else {
+                    panic!("{agent} renewed off its CLI");
+                };
+                assert_eq!(*kind, agent);
+                assert_eq!(
+                    settings.working_directory.as_deref(),
+                    Some(std::path::Path::new(DIRECTORY)),
+                    "{agent}"
+                );
+                assert_ne!(
+                    settings.session.as_ref().map(|session| session.id.as_str()),
+                    Some("previous"),
+                    "{agent} kept the session it renewed"
+                );
+            }
+        }
+        assert_eq!(
+            resuming(&login(AgentKind::Claude))
+                .renew(LlmBackend::Http)
+                .sign_in(),
+            None
+        );
     }
 
     #[test]
