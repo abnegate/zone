@@ -28,6 +28,7 @@ const CONNECTION_LOST: &str = "The GitHub connection was removed or suspended. R
 const DISCONNECTED: &str = "This GitHub account isn't connected to this organization, or it was disconnected. Reconnect GitHub.";
 const UNREACHABLE: &str = "Zone can't reach this repository through that GitHub connection.";
 const GITHUB_UNAVAILABLE: &str = "GitHub could not be reached.";
+const APP_REJECTED: &str = "The GitHub App connection is broken. Reconnect GitHub.";
 const MINTED_TOKEN: &str = "ghs_throwaway_minted";
 const REPOSITORY_PATH: &str = "/repos/acme/widgets";
 
@@ -842,6 +843,105 @@ async fn attaching_an_installation_github_uninstalled_is_refused_and_marks_it_re
     harness.discard(&[&tenant]).await;
 }
 
+/// Whether GitHub has been asked to read the repository.
+async fn read_repository(server: &MockServer) -> bool {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .any(|request| request.url.path() == REPOSITORY_PATH)
+}
+
+#[tokio::test]
+async fn attaching_an_installation_revoked_during_the_reachability_check_is_refused() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let seeded = harness.installation(&tenant).await;
+    let source = harness.token_source(&tenant).await;
+    let before = harness.stored_source(&tenant, source).await;
+    issuing(&harness.github, INSTALLATION_ID, 1).await;
+    reading_repository(
+        &harness.github,
+        ResponseTemplate::new(200)
+            .set_body_json(json!({ "default_branch": "main" }))
+            .set_delay(std::time::Duration::from_secs(2)),
+    )
+    .await;
+
+    let update = harness.update_source(
+        &tenant,
+        source,
+        json!({
+            "name": source_name("Renamed widgets"),
+            "github_installation_id": seeded.installation,
+        }),
+    );
+    let revoke = async {
+        while !read_repository(&harness.github).await {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            github_installations::mark_revoked(harness.pool(), seeded.installation)
+                .await
+                .expect("the installation is marked revoked"),
+            "the seeded installation exists"
+        );
+    };
+    let (refused, ()) = tokio::join!(update, revoke);
+
+    assert_disconnected(&refused);
+    let stored = harness.stored_source(&tenant, source).await;
+    assert_eq!(stored.name, before.name, "the rename is rolled back");
+    assert_eq!(stored.github_installation_id, None, "nothing is attached");
+    assert_eq!(
+        stored.credentials_encrypted, before.credentials_encrypted,
+        "the stored token is kept"
+    );
+
+    harness.discard(&[&tenant]).await;
+}
+
+#[tokio::test]
+async fn attaching_when_github_refuses_the_apps_credentials_asks_to_reconnect() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let seeded = harness.installation(&tenant).await;
+    let source = harness.token_source(&tenant).await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/app/installations/{INSTALLATION_ID}/access_tokens"
+        )))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&harness.github)
+        .await;
+
+    let refused = harness
+        .update_source(
+            &tenant,
+            source,
+            json!({ "github_installation_id": seeded.installation }),
+        )
+        .await;
+
+    refused.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(
+        refused.json_value()["error"].as_str(),
+        Some(APP_REJECTED),
+        "a refused App JWT is the broken-connection message, not the unreachable repository"
+    );
+    assert_eq!(
+        harness
+            .stored_source(&tenant, source)
+            .await
+            .github_installation_id,
+        None,
+        "nothing is attached"
+    );
+
+    harness.discard(&[&tenant]).await;
+}
+
 #[tokio::test]
 async fn detaching_with_null_clears_the_installation() {
     let harness = Harness::new().await;
@@ -1106,6 +1206,53 @@ async fn verifying_a_source_on_a_revoked_installation_asks_to_reconnect() {
             .as_deref(),
         Some(CONNECTION_LOST),
         "the refusal is recorded as the source's verification error"
+    );
+
+    harness.discard(&[&tenant]).await;
+}
+
+#[tokio::test]
+async fn verifying_while_github_fails_is_a_bad_gateway_and_recorded_as_such() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let seeded = harness.installation(&tenant).await;
+    let source = harness
+        .installation_source(&tenant, seeded.installation)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/app/installations/{INSTALLATION_ID}/access_tokens"
+        )))
+        .respond_with(ResponseTemplate::new(502))
+        .mount(&harness.github)
+        .await;
+
+    let failed = harness
+        .client
+        .post_json_auth(
+            &format!(
+                "/api/workspaces/{}/sources/{source}/verify",
+                tenant.workspace
+            ),
+            &json!({}),
+            &tenant.token,
+        )
+        .await;
+
+    failed.assert_status(StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        failed.json_value()["error"].as_str(),
+        Some(GITHUB_UNAVAILABLE),
+        "GitHub failing is not reported as an unreadable credential"
+    );
+    assert_eq!(
+        harness
+            .stored_source(&tenant, source)
+            .await
+            .last_error
+            .as_deref(),
+        Some(GITHUB_UNAVAILABLE),
+        "the failure is recorded as GitHub being unreachable"
     );
 
     harness.discard(&[&tenant]).await;

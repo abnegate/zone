@@ -1,16 +1,21 @@
 //! Source database queries
 
+use std::fmt;
+
+use abnegate_secret::REDACTED;
 use chrono::NaiveDateTime;
 use serde::Serialize;
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
+use thiserror::Error;
 use uuid::Uuid;
 
 use super::DbResult;
+use super::github_installations::UNATTACHABLE;
 
 pub const GITHUB: &str = "github";
 
 /// Source row from database
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub struct SourceRow {
     pub id: Uuid,
     pub name: String,
@@ -26,6 +31,31 @@ pub struct SourceRow {
     pub updated_at: Option<NaiveDateTime>,
     pub workspace_id: Option<Uuid>,
     pub github_installation_id: Option<Uuid>,
+}
+
+impl fmt::Debug for SourceRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SourceRow")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("source_type", &self.source_type)
+            .field("config", &self.config)
+            .field(
+                "credentials_encrypted",
+                &self.credentials_encrypted.as_ref().map(|_| REDACTED),
+            )
+            .field("description", &self.description)
+            .field("url", &self.url)
+            .field("is_active", &self.is_active)
+            .field("last_verified_at", &self.last_verified_at)
+            .field("last_error", &self.last_error)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("workspace_id", &self.workspace_id)
+            .field("github_installation_id", &self.github_installation_id)
+            .finish()
+    }
 }
 
 /// List sources with optional filters
@@ -223,16 +253,74 @@ pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> DbResult<Sou
     .await
 }
 
-/// Update a source
+/// What an update changes; a field left `None` keeps its stored value.
+/// `github_installation_id` is `Some(None)` to detach the installation.
+#[derive(Default)]
+pub struct SourceChanges<'a> {
+    pub name: Option<&'a str>,
+    pub config: Option<serde_json::Value>,
+    pub description: Option<&'a str>,
+    pub url: Option<&'a str>,
+    pub is_active: Option<bool>,
+    pub github_installation_id: Option<Option<Uuid>>,
+    pub credentials_encrypted: Option<&'a str>,
+}
+
+#[derive(Debug, Error)]
+pub enum UpdateError {
+    #[error("The source does not exist in this workspace.")]
+    NotFound,
+    #[error("{UNATTACHABLE}")]
+    Unattachable,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+fn refused_installation(error: sqlx::Error) -> UpdateError {
+    match &error {
+        sqlx::Error::Database(database) if database.is_foreign_key_violation() => {
+            UpdateError::Unattachable
+        }
+        _ => UpdateError::Database(error),
+    }
+}
+
+/// Apply every change to a source or none of them.
 pub async fn update_source(
     pool: &PgPool,
     id: Uuid,
     workspace_id: Uuid,
-    name: Option<&str>,
-    config: Option<serde_json::Value>,
-    description: Option<&str>,
-    url: Option<&str>,
-    is_active: Option<bool>,
+    changes: SourceChanges<'_>,
+) -> Result<SourceRow, UpdateError> {
+    let mut transaction = pool.begin().await?;
+
+    let mut current = update_fields(&mut *transaction, id, workspace_id, &changes)
+        .await?
+        .ok_or(UpdateError::NotFound)?;
+
+    if let Some(installation) = changes.github_installation_id {
+        // update_fields holds the row's lock, so no row here means the installation was refused.
+        current = set_github_installation(&mut *transaction, id, workspace_id, installation)
+            .await
+            .map_err(refused_installation)?
+            .ok_or(UpdateError::Unattachable)?;
+    }
+
+    if let Some(sealed) = changes.credentials_encrypted {
+        current = update_credentials(&mut *transaction, id, workspace_id, sealed)
+            .await?
+            .ok_or(UpdateError::NotFound)?;
+    }
+
+    transaction.commit().await?;
+    Ok(current)
+}
+
+async fn update_fields<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+    workspace_id: Uuid,
+    changes: &SourceChanges<'_>,
 ) -> DbResult<Option<SourceRow>> {
     sqlx::query_as::<_, SourceRow>(
         r#"
@@ -251,12 +339,12 @@ pub async fn update_source(
     )
     .bind(id)
     .bind(workspace_id)
-    .bind(name)
-    .bind(config)
-    .bind(description)
-    .bind(url)
-    .bind(is_active)
-    .fetch_optional(pool)
+    .bind(changes.name)
+    .bind(changes.config.as_ref())
+    .bind(changes.description)
+    .bind(changes.url)
+    .bind(changes.is_active)
+    .fetch_optional(executor)
     .await
 }
 
@@ -297,8 +385,8 @@ pub async fn update_verification(
 }
 
 /// Store a personal access token, detaching any GitHub installation
-pub async fn update_credentials(
-    pool: &PgPool,
+pub async fn update_credentials<'e>(
+    executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
     credentials_encrypted: &str,
@@ -318,13 +406,15 @@ pub async fn update_credentials(
     .bind(id)
     .bind(workspace_id)
     .bind(credentials_encrypted)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
 }
 
-/// Attach a GitHub installation, dropping any stored token, or detach one
-pub async fn set_github_installation(
-    pool: &PgPool,
+/// Attach a GitHub installation, dropping any stored token, or detach one.
+/// An installation outside the workspace's organization, revoked or
+/// suspended, attaches nothing and returns no row.
+pub async fn set_github_installation<'e>(
+    executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
     github_installation_id: Option<Uuid>,
@@ -336,6 +426,12 @@ pub async fn set_github_installation(
             credentials_encrypted = CASE WHEN $3::uuid IS NULL THEN credentials_encrypted END,
             updated_at = NOW()
         WHERE id = $1 AND workspace_id = $2
+          AND ($3::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM github_installations gi
+              JOIN workspaces w ON w.organization_id = gi.organization_id
+              WHERE gi.id = $3 AND w.id = $2
+                AND gi.revoked_at IS NULL AND gi.suspended_at IS NULL
+          ))
         RETURNING id, name, source_type, config, credentials_encrypted, description, url,
                   is_active, last_verified_at, last_error, created_at, updated_at, workspace_id,
                   github_installation_id
@@ -344,7 +440,7 @@ pub async fn set_github_installation(
     .bind(id)
     .bind(workspace_id)
     .bind(github_installation_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
 }
 
@@ -756,6 +852,135 @@ mod tests {
         assert_eq!(unchanged.github_installation_id, None);
     }
 
+    async fn revoke(pool: &PgPool, installation: Uuid) {
+        sqlx::query("UPDATE github_installations SET revoked_at = NOW() WHERE id = $1")
+            .bind(installation)
+            .execute(pool)
+            .await
+            .expect("the installation is revoked");
+    }
+
+    async fn stored(pool: &PgPool, source: &SourceRow) -> SourceRow {
+        get_source(pool, source.id, source.workspace_id.expect("a workspace"))
+            .await
+            .expect("the read")
+            .expect("the source")
+    }
+
+    #[tokio::test]
+    async fn an_installation_revoked_before_the_write_rolls_back_the_rename() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let source = widgets(&pool, installation.workspace, Some("ENC[v1:token]"), None).await;
+        revoke(&pool, installation.id).await;
+        let renamed = format!("renamed-{}", Uuid::new_v4());
+
+        let refused = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                name: Some(&renamed),
+                github_installation_id: Some(Some(installation.id)),
+                ..SourceChanges::default()
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(refused, Err(UpdateError::Unattachable)),
+            "a revoked installation must be refused, got {refused:?}"
+        );
+        let unchanged = stored(&pool, &source).await;
+        assert_eq!(unchanged.name, source.name, "the rename was rolled back");
+        assert_eq!(unchanged.github_installation_id, None);
+        assert_eq!(
+            unchanged.credentials_encrypted.as_deref(),
+            Some("ENC[v1:token]")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_installation_zone_may_not_use_attaches_nothing() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let foreign = testing::installation(&pool).await;
+        let suspended = testing::installation(&pool).await;
+        sqlx::query("UPDATE github_installations SET suspended_at = NOW() WHERE id = $1")
+            .bind(suspended.id)
+            .execute(&pool)
+            .await
+            .expect("the installation is suspended");
+        let revoked = testing::installation(&pool).await;
+        revoke(&pool, revoked.id).await;
+
+        for (workspace, refused, reason) in [
+            (installation.workspace, foreign.id, "another organization's"),
+            (installation.workspace, Uuid::new_v4(), "a deleted"),
+            (suspended.workspace, suspended.id, "a suspended"),
+            (revoked.workspace, revoked.id, "a revoked"),
+        ] {
+            let source = widgets(&pool, workspace, None, None).await;
+            let attached = set_github_installation(&pool, source.id, workspace, Some(refused))
+                .await
+                .expect("the update");
+            assert!(attached.is_none(), "{reason} installation was attached");
+            assert_eq!(stored(&pool, &source).await.github_installation_id, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rename_and_an_attach_land_together() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let source = widgets(&pool, installation.workspace, Some("ENC[v1:token]"), None).await;
+        let renamed = format!("renamed-{}", Uuid::new_v4());
+
+        let updated = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                name: Some(&renamed),
+                github_installation_id: Some(Some(installation.id)),
+                ..SourceChanges::default()
+            },
+        )
+        .await
+        .expect("the update");
+
+        assert_eq!(updated.name, renamed);
+        assert_eq!(updated.github_installation_id, Some(installation.id));
+        assert_eq!(updated.credentials_encrypted, None);
+        assert_eq!(stored(&pool, &source).await.name, renamed);
+    }
+
+    #[test]
+    fn debug_redacts_the_sealed_credentials() {
+        let row = SourceRow {
+            id: Uuid::new_v4(),
+            name: "widgets".to_string(),
+            source_type: GITHUB.to_string(),
+            config: serde_json::json!({"owner": "acme", "repo": "widgets"}),
+            credentials_encrypted: Some("ENC[v1:sealed-token]".to_string()),
+            description: None,
+            url: None,
+            is_active: Some(true),
+            last_verified_at: None,
+            last_error: None,
+            created_at: None,
+            updated_at: None,
+            workspace_id: None,
+            github_installation_id: None,
+        };
+
+        let rendered = format!("{row:?}");
+
+        assert!(!rendered.contains("sealed-token"), "{rendered}");
+        assert!(rendered.contains(REDACTED), "{rendered}");
+        assert!(rendered.contains("widgets"), "{rendered}");
+    }
+
     #[tokio::test]
     async fn a_new_token_detaches_the_installation_and_returns_the_row() {
         let pool = testing::pool().await;
@@ -1036,16 +1261,14 @@ mod tests {
             &pool,
             source.id,
             workspace_id2,
-            Some(&updated_name),
-            None,
-            None,
-            None,
-            None,
+            SourceChanges {
+                name: Some(&updated_name),
+                ..SourceChanges::default()
+            },
         )
-        .await
-        .expect("Failed to execute update");
+        .await;
         assert!(
-            result1.is_none(),
+            matches!(result1, Err(UpdateError::NotFound)),
             "Should not update source with incorrect workspace_id"
         );
 
@@ -1054,19 +1277,14 @@ mod tests {
             &pool,
             source.id,
             workspace_id1,
-            Some(&updated_name),
-            None,
-            None,
-            None,
-            None,
+            SourceChanges {
+                name: Some(&updated_name),
+                ..SourceChanges::default()
+            },
         )
         .await
-        .expect("Failed to execute update");
-        assert!(
-            result2.is_some(),
-            "Should update source with correct workspace_id"
-        );
-        assert_eq!(result2.unwrap().name, updated_name);
+        .expect("Should update source with correct workspace_id");
+        assert_eq!(result2.name, updated_name);
     }
 
     #[tokio::test]
