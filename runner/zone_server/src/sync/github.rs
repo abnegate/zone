@@ -422,6 +422,8 @@ mod tests {
     const TOKEN: &str = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
     const OWNER: &str = "test-owner";
     const REPOSITORY: &str = "test-repo";
+    const INVALID_OWNER: &str = "test owner";
+    const INVALID_REPOSITORY: &str = "..";
     const ISSUE: &str = "42";
     const ISSUE_URL: &str = "https://github.com/test-owner/test-repo/issues/42";
     const TITLE: &str = "Add a cart";
@@ -1008,25 +1010,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_invalid_owner_or_repository_is_refused_before_any_request() {
-        let server = MockServer::start().await;
-        Mock::given(any())
-            .respond_with(ResponseTemplate::new(201).set_body_json(created_issue()))
-            .expect(0)
-            .mount(&server)
-            .await;
-        let mut config = sync_config(TOKEN);
-        config.config = json!({ "owner": "test owner", "repo": "..", "token": TOKEN });
+    async fn an_invalid_owner_or_repository_on_its_own_is_refused_before_any_request() {
+        for (owner, repository) in [(INVALID_OWNER, REPOSITORY), (OWNER, INVALID_REPOSITORY)] {
+            let server = MockServer::start().await;
+            Mock::given(any())
+                .respond_with(ResponseTemplate::new(201).set_body_json(created_issue()))
+                .expect(0)
+                .mount(&server)
+                .await;
+            let mut config = sync_config(TOKEN);
+            config.config = json!({ "owner": owner, "repo": repository, "token": TOKEN });
 
-        let result = stand_in(&server)
-            .create_issue(&config, &task(None, "created"))
-            .await;
+            let result = stand_in(&server)
+                .create_issue(&config, &task(None, "created"))
+                .await;
 
-        assert!(
-            matches!(result, Err(SyncError::InvalidConfig(_))),
-            "{result:?}"
-        );
-        server.verify().await;
+            assert!(
+                matches!(result, Err(SyncError::InvalidConfig(_))),
+                "{owner}/{repository}: {result:?}"
+            );
+            server.verify().await;
+        }
     }
 
     #[tokio::test]
