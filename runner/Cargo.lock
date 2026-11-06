@@ -95,9 +95,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-llm"
-version = "0.1.8"
+version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70dc6b5b7286ae8997423ed7b5042d9b8bad569094c06d565cb5c6a69cc804f0"
+checksum = "3b196ea095b027c2af9c85c00f8020d8be75d607ac3cce7b1dad6e0ce1cbd897"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
@@ -152,9 +152,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-secret"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b56e97816885319628656ff867c261ea9d59f372f0c28fd13388769355e40bb"
+checksum = "eb5c48f1f7916c8dec8b4dfc5bd64ec04f84c9607fd07f9c020f9544f31b94c0"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -171,9 +171,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-vcs"
-version = "0.1.7"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cd457947da3eba1b8094dd5053931183002275f3090a210bb665bf688e5e099"
+checksum = "81233f9d124be1adb793bea351fae470914ec1c57fc9ef88e629d2e2ae3d8761"
 dependencies = [
  "abnegate-secret",
  "base64 0.23.1",

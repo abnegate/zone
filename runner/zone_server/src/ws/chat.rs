@@ -3248,8 +3248,8 @@ async fn pin(
 
 /// A sandboxed chat (`chats.agent_sandboxed`) gives the agent zone's tools and
 /// nothing else. An unsandboxed one leaves it the file and shell tools it
-/// ships with, which run outside zone, which zone never sees, and which no
-/// approval card can reach.
+/// ships with, which run outside zone. Claude asks zone before running one,
+/// under the chat's approval policy; codex's are confined by its sandbox alone.
 fn builtin_tools(sandboxed: bool) -> BuiltinTools {
     match sandboxed {
         true => BuiltinTools::Withheld,
