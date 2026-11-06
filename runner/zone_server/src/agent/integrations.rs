@@ -710,6 +710,7 @@ impl Github {
             client,
             origin: Url::parse(ORIGIN).expect("constant GitHub origin"),
             service: service
+                .with_anonymous_reads()
                 .with_retry_after(MAX_RETRY_AFTER)
                 .with_api_version(API_VERSION),
             repository,
@@ -2473,7 +2474,9 @@ fn revision(sha: &str) -> Result<Revision, String> {
 fn described(error: PullRequestError) -> String {
     match error {
         PullRequestError::QuotaExhausted { .. } => RATE_LIMIT_EXHAUSTED.to_string(),
-        PullRequestError::AuthenticationFailed => status_error(StatusCode::UNAUTHORIZED),
+        PullRequestError::AuthenticationFailed | PullRequestError::AuthenticationRequired => {
+            status_error(StatusCode::UNAUTHORIZED)
+        }
         PullRequestError::Forbidden => status_error(StatusCode::FORBIDDEN),
         PullRequestError::NotFound => status_error(StatusCode::NOT_FOUND),
         PullRequestError::RateLimited => status_error(StatusCode::TOO_MANY_REQUESTS),
@@ -3014,8 +3017,12 @@ mod tests {
     }
 
     fn github_named(server: &MockServer, owner: &str, repo: &str) -> Github {
+        github_serving(server, configured(owner, repo))
+    }
+
+    fn github_serving(server: &MockServer, configuration: Configuration) -> Github {
         let mut github = Github::serving(
-            configured(owner, repo),
+            configuration,
             PullRequestService::standing_in_for("github.com", &server.uri()).unwrap(),
         )
         .unwrap();
@@ -3023,13 +3030,51 @@ mod tests {
         github
     }
 
+    fn github_with_token(server: &MockServer, token: Option<&str>) -> Github {
+        github_serving(
+            server,
+            Configuration {
+                token: token.map(str::to_string),
+                ..configured("owner", "repository")
+            },
+        )
+    }
+
+    const BEARER: &str = "Bearer test-secret";
+
     async fn mock(server: &MockServer, endpoint: &str, response: Value) {
-        Mock::given(method("GET"))
-            .and(path(format!("/repos/owner/repository/{endpoint}")))
-            .and(header("Authorization", "Bearer test-secret"))
+        mock_answering(server, endpoint, response, Some(BEARER)).await;
+    }
+
+    async fn mock_answering(
+        server: &MockServer,
+        endpoint: &str,
+        response: Value,
+        authorization: Option<&str>,
+    ) {
+        let request =
+            Mock::given(method("GET")).and(path(format!("/repos/owner/repository/{endpoint}")));
+        let request = match authorization {
+            Some(value) => request.and(header("Authorization", value)),
+            None => request,
+        };
+        request
             .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .mount(server)
             .await;
+    }
+
+    async fn assert_sent_without_authorization(server: &MockServer) {
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests.is_empty(), "the source must have been read");
+        for request in requests {
+            assert!(
+                !request.headers.contains_key("authorization"),
+                "{} {} carried an Authorization header",
+                request.method,
+                request.url.path()
+            );
+        }
     }
 
     #[tokio::test]
@@ -3578,6 +3623,10 @@ mod tests {
             ),
             (
                 PullRequestError::AuthenticationFailed,
+                status_error(StatusCode::UNAUTHORIZED),
+            ),
+            (
+                PullRequestError::AuthenticationRequired,
                 status_error(StatusCode::UNAUTHORIZED),
             ),
             (
@@ -4488,6 +4537,7 @@ mod tests {
 
     fn thread_counts(resolved: bool, more_threads: bool) -> Value {
         json!({"data": {"repository": {"pullRequest": {
+            "number": 7,
             "reviewThreads": {
                 "pageInfo": {"hasNextPage": more_threads, "endCursor": null},
                 "nodes": [{"id": "PRRT_1", "isResolved": resolved}]
@@ -5363,7 +5413,11 @@ mod tests {
     }
 
     async fn mock_green_ci(server: &MockServer) {
-        mock(
+        mock_green_ci_answering(server, Some(BEARER)).await;
+    }
+
+    async fn mock_green_ci_answering(server: &MockServer, authorization: Option<&str>) {
+        mock_answering(
             server,
             "actions/runs",
             json!({"workflow_runs": [{"id": 11, "workflow_id": 1, "name": "CI",
@@ -5372,21 +5426,122 @@ mod tests {
                    "created_at": "2026-09-05T00:00:00Z", "updated_at": "2026-09-05T00:05:00Z",
                    "html_url": "https://github.com/owner/repository/actions/runs/11",
                    "repository": {"full_name": "owner/repository"}}], "total_count": 1}),
+            authorization,
         )
         .await;
-        mock(
+        mock_answering(
             server,
             &format!("commits/{COMMIT}/check-runs"),
             json!({"check_runs": [{"id": 21, "name": "test", "head_sha": COMMIT, "status": "completed", "conclusion": "success"}]}),
+            authorization,
         )
         .await;
-        mock(server, &format!("commits/{COMMIT}/statuses"), json!([])).await;
-        mock(
+        mock_answering(
+            server,
+            &format!("commits/{COMMIT}/statuses"),
+            json!([]),
+            authorization,
+        )
+        .await;
+        mock_answering(
             server,
             &format!("commits/{COMMIT}/status"),
             json!({"statuses": [], "total_count": 0}),
+            authorization,
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn a_source_without_a_credential_reads_without_an_authorization_header() {
+        let server = MockServer::start().await;
+        mock_answering(&server, "commits/main", json!({"sha": COMMIT}), None).await;
+        mock_green_ci_answering(&server, None).await;
+        let github = github_with_token(&server, None);
+        assert_eq!(
+            github.resolve(None).await.unwrap(),
+            ("main".to_string(), COMMIT.to_string())
+        );
+        assert_eq!(
+            github.settled(None).await.unwrap(),
+            ("main".to_string(), COMMIT.to_string(), SUCCESS_ASSESSMENT)
+        );
+        assert_sent_without_authorization(&server).await;
+    }
+
+    #[tokio::test]
+    async fn a_source_with_an_empty_token_reads_anonymously() {
+        let server = MockServer::start().await;
+        mock_answering(&server, "commits/main", json!({"sha": COMMIT}), None).await;
+        mock_green_ci_answering(&server, None).await;
+        let (reference, sha, state) = github_with_token(&server, Some(""))
+            .settled(None)
+            .await
+            .unwrap();
+        assert_eq!((reference.as_str(), sha.as_str()), ("main", COMMIT));
+        assert_eq!(state, SUCCESS_ASSESSMENT);
+        assert_sent_without_authorization(&server).await;
+    }
+
+    #[tokio::test]
+    async fn a_tokenless_graphql_read_is_refused_unsent_as_unauthorized() {
+        let server = MockServer::start().await;
+        mock_answering(&server, "pulls/7", pull_detail(COMMIT), None).await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(thread_counts(true, false)))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let error = github_with_token(&server, None)
+            .observe(Operation::PullRequests, &readiness_args(Some(7)))
+            .await
+            .unwrap_err();
+        assert_eq!(error, status_error(StatusCode::UNAUTHORIZED));
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.url.path() != "/graphql"),
+            "GitHub answers no GraphQL call without a token, so none may be sent"
+        );
+        assert_sent_without_authorization(&server).await;
+    }
+
+    #[tokio::test]
+    async fn a_tokenless_job_log_is_fetched_without_an_authorization_header() {
+        let server = MockServer::start().await;
+        mock_answering(&server, "commits/main", json!({"sha": COMMIT}), None).await;
+        mock_answering(
+            &server,
+            &format!("actions/jobs/{JOB_ID}"),
+            job(COMMIT),
+            None,
+        )
+        .await;
+        mock_log(&server, noisy_log(40, 10)).await;
+        let result = github_with_token(&server, None)
+            .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
+            .await
+            .unwrap();
+        assert!(
+            result["log"]["excerpt"]
+                .as_str()
+                .is_some_and(|text| text.contains("##[error]")),
+            "{result}"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path().ends_with("/logs")),
+            "the log's first hop must have been sent"
+        );
+        assert_sent_without_authorization(&server).await;
     }
 
     #[tokio::test]
