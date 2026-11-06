@@ -31,9 +31,10 @@ impl ErrorResponse {
     }
 }
 
-/// AI settings response (credentials redacted)
+/// AI settings response (credentials redacted). `IamRole` is `bool` where a
+/// value always applies and `Option<bool>` where an unset one is inherited.
 #[derive(Debug, Serialize)]
-pub struct AiSettingsResponse {
+pub struct AiSettingsResponse<IamRole = bool> {
     pub provider: String,
     pub has_litellm_key: bool,
     pub litellm_host: Option<String>,
@@ -43,7 +44,7 @@ pub struct AiSettingsResponse {
     pub anthropic_base_url: Option<String>,
     pub has_runpod_api_key: bool,
     pub bedrock_region: Option<String>,
-    pub bedrock_use_iam_role: bool,
+    pub bedrock_use_iam_role: IamRole,
     pub has_bedrock_credentials: bool,
     pub model_fast: Option<String>,
     pub model_reasoning: Option<String>,
@@ -54,7 +55,7 @@ pub struct AiSettingsResponse {
     pub completions_routed: bool,
 }
 
-impl AiSettingsResponse {
+impl<IamRole: Default> AiSettingsResponse<IamRole> {
     fn unsaved() -> Self {
         Self {
             provider: PROVIDER_SELF_HOSTED.to_string(),
@@ -66,7 +67,7 @@ impl AiSettingsResponse {
             anthropic_base_url: None,
             has_runpod_api_key: false,
             bedrock_region: None,
-            bedrock_use_iam_role: false,
+            bedrock_use_iam_role: IamRole::default(),
             has_bedrock_credentials: false,
             model_fast: None,
             model_reasoning: None,
@@ -130,7 +131,7 @@ impl From<ai_settings::OrganizationKeys> for OrganizationKeysResponse {
 #[derive(Debug, Serialize)]
 pub struct WorkspaceAiSettingsResponse {
     #[serde(flatten)]
-    pub settings: AiSettingsResponse,
+    pub settings: AiSettingsResponse<Option<bool>>,
     pub overrides: bool,
     pub inherits_provider: bool,
     pub organization_keys: OrganizationKeysResponse,
@@ -145,6 +146,21 @@ fn workspace_response(
         inherits_provider: settings.as_ref().is_none_or(|row| row.provider.is_none()),
         settings: settings.map_or_else(AiSettingsResponse::unsaved, AiSettingsResponse::from),
         organization_keys: keys.into(),
+    }
+}
+
+/// How a workspace save is audited: one that left nothing set removed the row,
+/// so it is recorded as the reset a DELETE records.
+fn workspace_save_audit(
+    response: &WorkspaceAiSettingsResponse,
+) -> (&'static str, Option<serde_json::Value>) {
+    if response.overrides {
+        (
+            actions::SETTINGS_UPDATED,
+            serde_json::to_value(&response.settings).ok(),
+        )
+    } else {
+        (actions::SETTINGS_RESET, None)
     }
 }
 
@@ -174,7 +190,7 @@ impl From<ai_settings::OrgAiSettingsRow> for AiSettingsResponse {
     }
 }
 
-impl From<ai_settings::WorkspaceAiSettingsRow> for AiSettingsResponse {
+impl From<ai_settings::WorkspaceAiSettingsRow> for AiSettingsResponse<Option<bool>> {
     fn from(row: ai_settings::WorkspaceAiSettingsRow) -> Self {
         Self {
             provider: row
@@ -188,7 +204,7 @@ impl From<ai_settings::WorkspaceAiSettingsRow> for AiSettingsResponse {
             anthropic_base_url: row.anthropic_base_url.map(without_credentials),
             has_runpod_api_key: row.runpod_api_key.is_some(),
             bedrock_region: row.bedrock_region,
-            bedrock_use_iam_role: row.bedrock_use_iam_role.unwrap_or(false),
+            bedrock_use_iam_role: row.bedrock_use_iam_role,
             has_bedrock_credentials: row.bedrock_access_key.is_some()
                 && row.bedrock_secret_key.is_some(),
             model_fast: row.model_fast,
@@ -493,7 +509,8 @@ pub async fn upsert_workspace(
     .await
     {
         Ok(saved) => {
-            let response = workspace_response(Some(saved.settings), saved.organization_keys);
+            let response = workspace_response(saved.settings, saved.organization_keys);
+            let (action, new_values) = workspace_save_audit(&response);
             audit(
                 state.db(),
                 AuditEvent {
@@ -501,11 +518,11 @@ pub async fn upsert_workspace(
                     workspace_id: Some(path.ws_id),
                     actor_id: user_id,
                     actor_email: &auth.0.email,
-                    action: actions::SETTINGS_UPDATED,
+                    action,
                     resource_type: resources::AI_SETTINGS,
                     resource_id: Some(path.ws_id),
                     old_values: None,
-                    new_values: serde_json::to_value(&response.settings).ok(),
+                    new_values,
                 },
             )
             .await;
@@ -648,6 +665,53 @@ mod tests {
         assert_eq!(body["inherits_provider"], true);
         assert_eq!(body["overrides"], false);
         assert_eq!(body["provider"], PROVIDER_SELF_HOSTED);
+    }
+
+    #[test]
+    fn a_workspace_iam_role_it_does_not_set_serialises_as_null() {
+        for settings in [None, Some(workspace_row(None))] {
+            let body = serde_json::to_value(workspace_response(settings, organization_keys()))
+                .expect("the response serialises");
+            assert_eq!(body["bedrock_use_iam_role"], serde_json::Value::Null);
+        }
+    }
+
+    #[test]
+    fn a_workspace_iam_role_it_sets_serialises_as_saved() {
+        for value in [false, true] {
+            let row = ai_settings::WorkspaceAiSettingsRow {
+                bedrock_use_iam_role: Some(value),
+                ..workspace_row(None)
+            };
+            let body = serde_json::to_value(workspace_response(Some(row), organization_keys()))
+                .expect("the response serialises");
+            assert_eq!(body["bedrock_use_iam_role"], value, "{value}");
+        }
+    }
+
+    #[test]
+    fn an_organization_iam_role_it_does_not_set_serialises_as_false() {
+        let body = serde_json::to_value(AiSettingsResponse::<bool>::unsaved())
+            .expect("the response serialises");
+        assert_eq!(body["bedrock_use_iam_role"], false);
+    }
+
+    #[test]
+    fn a_workspace_save_that_kept_settings_is_audited_as_an_update() {
+        let response = workspace_response(Some(workspace_row(None)), organization_keys());
+        let (action, new_values) = workspace_save_audit(&response);
+        assert_eq!(action, actions::SETTINGS_UPDATED);
+        let new_values = new_values.expect("an update records what was saved");
+        assert_eq!(new_values["model_fast"], "workspace-fast");
+    }
+
+    #[test]
+    fn a_workspace_save_that_left_nothing_set_is_audited_as_a_reset() {
+        let response = workspace_response(None, organization_keys());
+        assert_eq!(
+            workspace_save_audit(&response),
+            (actions::SETTINGS_RESET, None)
+        );
     }
 
     #[test]

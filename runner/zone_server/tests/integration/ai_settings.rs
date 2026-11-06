@@ -1576,6 +1576,14 @@ async fn test_workspace_bedrock_settings_clear_back_to_the_organization() {
         .await
         .assert_status(StatusCode::OK);
 
+    let own = client.get_auth(&workspace, &token).await;
+    own.assert_status(StatusCode::OK);
+    assert_eq!(
+        own.json_value()["bedrock_use_iam_role"],
+        false,
+        "a saved false reads back as the workspace's own"
+    );
+
     let overridden = client.get_auth(&effective, &token).await;
     overridden.assert_status(StatusCode::OK);
     assert_eq!(overridden.json_value()["bedrock_region"], "us-east-1");
@@ -1609,7 +1617,10 @@ async fn test_workspace_bedrock_settings_clear_back_to_the_organization() {
         "a blank region clears the workspace's own"
     );
     assert_eq!(body["has_bedrock_credentials"], false);
-    assert_eq!(body["bedrock_use_iam_role"], false);
+    assert!(
+        body["bedrock_use_iam_role"].is_null(),
+        "a cleared IAM role reads as unset, not as a saved false"
+    );
     assert_eq!(body["overrides"], true);
     assert_eq!(body["inherits_provider"], false);
 
@@ -1621,6 +1632,235 @@ async fn test_workspace_bedrock_settings_clear_back_to_the_organization() {
         true,
         "a null clears the saved false so the organization's IAM role applies again"
     );
+}
+
+async fn ai_settings_audit_actions(client: &TestClient, workspace: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT action FROM audit_logs \
+         WHERE workspace_id = $1 AND resource_type = 'ai_settings' \
+         ORDER BY created_at, id",
+    )
+    .bind(workspace)
+    .fetch_all(client.state().db())
+    .await
+    .expect("the audit log is readable")
+}
+
+#[tokio::test]
+async fn test_a_workspace_save_that_leaves_nothing_set_removes_its_row() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace_id = Uuid::parse_str(&ws_id).expect("a workspace id");
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    client
+        .put_json_auth(&organization, &json!({ "provider": "anthropic" }), &token)
+        .await
+        .assert_status(StatusCode::OK);
+
+    let saved = client
+        .put_json_auth(&workspace, &json!({ "model_fast": "x" }), &token)
+        .await;
+    saved.assert_status(StatusCode::OK);
+    assert_eq!(saved.json_value()["overrides"], true);
+
+    let cleared = client
+        .put_json_auth(&workspace, &json!({ "model_fast": "" }), &token)
+        .await;
+    cleared.assert_status(StatusCode::OK);
+    let body = cleared.json_value();
+    assert_eq!(body["overrides"], false, "{body}");
+    assert_eq!(body["inherits_provider"], true, "{body}");
+
+    let stored = client.get_auth(&workspace, &token).await;
+    stored.assert_status(StatusCode::OK);
+    assert_eq!(stored.json_value()["overrides"], false);
+    assert_eq!(stored.json_value()["inherits_provider"], true);
+    assert_eq!(
+        body,
+        stored.json_value(),
+        "the save answers as a reset and a read would"
+    );
+    assert!(
+        ai_settings::get_workspace_ai_settings(client.state().db(), workspace_id)
+            .await
+            .expect("the workspace settings are readable")
+            .is_none(),
+        "a save that leaves nothing set removes the workspace's row"
+    );
+    client
+        .delete_auth(&workspace, &token)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+
+    assert_eq!(
+        ai_settings_audit_actions(&client, workspace_id).await,
+        ["settings.updated", "settings.reset"],
+        "the save that removed the row is audited as the reset a DELETE records"
+    );
+}
+
+#[tokio::test]
+async fn test_a_workspace_save_that_still_sets_something_keeps_its_row() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace_id = Uuid::parse_str(&ws_id).expect("a workspace id");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    client
+        .put_json_auth(
+            &workspace,
+            &json!({ "model_fast": "x", "bedrock_use_iam_role": false }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let cleared = client
+        .put_json_auth(&workspace, &json!({ "model_fast": "" }), &token)
+        .await;
+    cleared.assert_status(StatusCode::OK);
+    assert_eq!(
+        cleared.json_value()["overrides"],
+        true,
+        "a saved false IAM role is still an override"
+    );
+    assert_eq!(cleared.json_value()["bedrock_use_iam_role"], false);
+    assert!(
+        ai_settings::get_workspace_ai_settings(client.state().db(), workspace_id)
+            .await
+            .expect("the workspace settings are readable")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn test_a_workspace_first_save_stores_a_null_iam_role_as_unset() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let workspace_id = Uuid::parse_str(&ws_id).expect("a workspace id");
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let workspace = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai");
+
+    client
+        .put_json_auth(
+            &organization,
+            &json!({ "provider": "bedrock", "bedrock_use_iam_role": true }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let saved = client
+        .put_json_auth(
+            &workspace,
+            &json!({ "model_fast": "x", "bedrock_use_iam_role": null }),
+            &token,
+        )
+        .await;
+    saved.assert_status(StatusCode::OK);
+    assert_eq!(saved.json_value()["overrides"], true);
+    assert!(saved.json_value()["bedrock_use_iam_role"].is_null());
+
+    let row = ai_settings::get_workspace_ai_settings(client.state().db(), workspace_id)
+        .await
+        .expect("the workspace settings are readable")
+        .expect("the first save inserts the workspace's row");
+    assert_eq!(row.bedrock_use_iam_role, None);
+    assert_eq!(row.model_fast.as_deref(), Some("x"));
+
+    let effective = client
+        .get_auth(&format!("{workspace}/effective"), &token)
+        .await;
+    effective.assert_status(StatusCode::OK);
+    assert_eq!(
+        effective.json_value()["bedrock_use_iam_role"],
+        true,
+        "a workspace that never set the IAM role inherits the organization's"
+    );
+}
+
+#[tokio::test]
+async fn test_a_null_organization_iam_role_clears_it_back_to_the_default() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let organization_id = Uuid::parse_str(&org_id).expect("an organization id");
+    let ws_id = create_workspace(&client, &token, &org_id).await;
+    let organization = format!("/api/organizations/{org_id}/settings/ai");
+    let effective = format!("/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai/effective");
+
+    client
+        .put_json_auth(
+            &organization,
+            &json!({ "provider": "bedrock", "bedrock_use_iam_role": true }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let omitted = client
+        .put_json_auth(&organization, &json!({ "provider": "bedrock" }), &token)
+        .await;
+    omitted.assert_status(StatusCode::OK);
+    assert_eq!(
+        omitted.json_value()["bedrock_use_iam_role"],
+        true,
+        "leaving the IAM role out keeps it"
+    );
+
+    let cleared = client
+        .put_json_auth(
+            &organization,
+            &json!({ "provider": "bedrock", "bedrock_use_iam_role": null }),
+            &token,
+        )
+        .await;
+    cleared.assert_status(StatusCode::OK);
+    assert_eq!(cleared.json_value()["bedrock_use_iam_role"], false);
+
+    let row = ai_settings::get_org_ai_settings(client.state().db(), organization_id)
+        .await
+        .expect("the organization settings are readable")
+        .expect("the organization row stays");
+    assert_eq!(
+        row.bedrock_use_iam_role, None,
+        "a null IAM role clears the organization's saved one"
+    );
+
+    let inherited = client.get_auth(&effective, &token).await;
+    inherited.assert_status(StatusCode::OK);
+    assert_eq!(inherited.json_value()["bedrock_use_iam_role"], false);
+}
+
+#[tokio::test]
+async fn test_an_organization_first_save_stores_a_null_iam_role_as_unset() {
+    let client = TestClient::with_db().await;
+    let token = get_auth_token(&client).await;
+    let org_id = create_org(&client, &token).await;
+    let organization_id = Uuid::parse_str(&org_id).expect("an organization id");
+
+    client
+        .put_json_auth(
+            &format!("/api/organizations/{org_id}/settings/ai"),
+            &json!({ "provider": "bedrock", "bedrock_use_iam_role": null }),
+            &token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let row = ai_settings::get_org_ai_settings(client.state().db(), organization_id)
+        .await
+        .expect("the organization settings are readable")
+        .expect("the first save inserts the organization's row");
+    assert_eq!(row.bedrock_use_iam_role, None);
 }
 
 #[tokio::test]
