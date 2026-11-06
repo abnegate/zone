@@ -393,6 +393,7 @@ pub(crate) async fn announce_removed_subagents(chat_id: Uuid, ids: Vec<Uuid>) {
         ServerMessage::SubagentsRemoved { chat_id, ids },
     )
     .await;
+}
 
 /// Broadcast the queue as it is now. Read under the lock a joining connection
 /// reads it under, so the last queue frame every connection sees is current.
@@ -7288,6 +7289,7 @@ cat 'DIR/reply.jsonl'
             true,
         );
         assert!(matches!(endpoint.backend(), LlmBackend::Http));
+    }
 
     #[tokio::test]
     async fn a_joining_connection_sees_the_queue_and_later_changes() {
