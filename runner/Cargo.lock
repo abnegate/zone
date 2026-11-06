@@ -158,11 +158,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0f63949a638c023acdc8721e61f232bd97b900a69df163dd085eaea28414aea"
 dependencies = [
  "aes-gcm",
+ "argon2",
  "base64 0.23.1",
  "dirs 7.0.0",
  "getrandom 0.4.3",
  "hex",
  "serde",
+ "sha2 0.11.0",
  "sqlx",
  "subtle",
  "thiserror 2.0.20",
@@ -439,6 +441,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.1",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -923,6 +926,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
 dependencies = [
  "hybrid-array",
+ "zeroize",
 ]
 
 [[package]]
@@ -1930,6 +1934,7 @@ dependencies = [
  "const-oid",
  "crypto-common 0.2.2",
  "ctutils",
+ "zeroize",
 ]
 
 [[package]]
@@ -9593,7 +9598,6 @@ dependencies = [
  "abnegate-search",
  "abnegate-secret",
  "abnegate-vcs",
- "aes-gcm",
  "aiusg",
  "argon2",
  "async-stream",

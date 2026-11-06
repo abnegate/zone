@@ -12,6 +12,7 @@
 //! without a way to ship is refused with the reason, and the model plans again.
 
 use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use abnegate_vcs::{GitService, PullRequestError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,7 @@ use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolRes
 use super::WorkspaceScope;
 use crate::db::auto_projects::{self, Kind, PlannedRepository, PlannedTask, ProjectPlan};
 use crate::db::{sources, workspace_members};
+use crate::secret::Unseal;
 
 pub const CREATE_REPOSITORY: &str = "create_repository";
 pub const FINALIZE_PROJECT: &str = "finalize_project";
@@ -304,10 +306,13 @@ async fn source_credential(
     let encrypted = source
         .credentials_encrypted
         .ok_or("The GitHub source has no credential stored; add a token to it first.")?;
-    let token = crate::crypto::decrypt(scope.state.encryption_key(), &encrypted)
+    let token = scope
+        .state
+        .master_key()
+        .open_strict(&encrypted)
         .map_err(|_| "The source credentials could not be decrypted.".to_string())?;
     Ok(SourceCredential {
-        token: SecretValue::new(token),
+        token,
         owner: source.config["owner"].as_str().map(str::to_string),
         repo: source.config["repo"].as_str().map(str::to_string),
     })
@@ -557,10 +562,7 @@ impl Tool for FinalizeProjectTool {
                 };
                 // Stored the way the source keeps it: encrypted at rest, opened
                 // by the checkout and pull request code that uses it.
-                let sealed = match crate::crypto::encrypt(
-                    self.0.state.encryption_key(),
-                    credential.token.expose(),
-                ) {
+                let sealed = match encrypt_value(&credential.token, self.0.state.master_key()) {
                     Ok(sealed) => sealed,
                     Err(_) => {
                         return Ok(ToolResult::error(

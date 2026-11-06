@@ -352,7 +352,7 @@ async fn record(
     profile: Option<&Profile>,
 ) -> Result<AgentLoginRow, Error> {
     let sealed = tokens
-        .seal(state.encryption_key())
+        .seal(state.master_key())
         .map_err(|error| Error::Internal(error.to_string()))?;
     let account = profile.and_then(account);
     let label = label(tokens, profile);

@@ -85,9 +85,9 @@
       "id": "derive_encryption_key",
       "query": "Where is the AES-256-GCM encryption key derived with Argon2id?",
       "expect_identifiers": [],
-      "expect_uri_contains": ["crypto/mod.rs"],
+      "expect_uri_contains": ["secret/derivation.rs"],
       "judgments": [
-        {"uri_contains": "crypto/mod.rs", "grade": 3, "must_contain": ["derive_key"]},
+        {"uri_contains": "secret/derivation.rs", "grade": 3, "must_contain": ["derive", "MasterKey"]},
         {"uri_contains": "state.rs", "grade": 2}
       ]
     },

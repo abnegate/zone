@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::db::{projects, tasks};
+use crate::secret::Unseal;
 use crate::services::backend;
 use crate::services::checkout::{self, Baseline, Repository};
 use crate::services::endpoint::{Endpoint, Error as EndpointError};
@@ -33,6 +34,11 @@ use zone_core::llm::LlmBackend;
 /// Times a publication step meets a repository configuration a run wrote,
 /// restores it, and tries again before the publication fails.
 const SANITIZE_ATTEMPTS: usize = 3;
+
+/// Why a task's pull request work stops when its project's token is an envelope the
+/// deployment's key does not open.
+const PROJECT_TOKEN_UNOPENABLE: &str =
+    "The project's GitHub token is sealed under a key this deployment does not hold";
 
 /// Temperature for a repair: a merge resolution is a mechanical edit, not a draft.
 const REPAIR_TEMPERATURE: f32 = 0.0;
@@ -205,7 +211,7 @@ impl Publication<'_> {
             .await
             .map_err(|_| "Cannot verify publication identity")?
             .ok_or("Task not found")?;
-        let repository = Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+        let repository = Repository::resolve(self.state.db(), self.state.master_key(), &task)
             .await?
             .ok_or("Task repository changed during execution")?;
         if repository.url != baseline.repository
@@ -265,7 +271,7 @@ impl Publication<'_> {
             return Ok(PrCreationResult::Sandbox);
         }
         if self.baseline.is_none()
-            && Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+            && Repository::resolve(self.state.db(), self.state.master_key(), &task)
                 .await?
                 .is_none()
         {
@@ -297,7 +303,7 @@ impl Publication<'_> {
             self.identity(baseline).await?;
             return Ok(PrCreationResult::NoChanges);
         }
-        let repository = Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+        let repository = Repository::resolve(self.state.db(), self.state.master_key(), &task)
             .await?
             .ok_or("Task repository changed during execution")?;
         let token = repository
@@ -531,8 +537,10 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
         }
     };
 
-    let Some(access_token) = access_token(state, &task).await else {
-        return ReceptionSyncResult::NoCredentials;
+    let access_token = match access_token(state, &task).await {
+        Ok(Some(access_token)) => access_token,
+        Ok(None) => return ReceptionSyncResult::NoCredentials,
+        Err(_) => return ReceptionSyncResult::Error(PROJECT_TOKEN_UNOPENABLE.to_string()),
     };
 
     let reception = match service.fetch_reception(&reference, &access_token).await {
@@ -586,7 +594,9 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
     else {
         return RepairOutcome::Failed("No GitHub repository configured".to_string());
     };
-    let access_token = SecretValue::new(crate::crypto::open(state.encryption_key(), stored_token));
+    let Ok(access_token) = state.master_key().open_lenient(stored_token) else {
+        return RepairOutcome::Failed(PROJECT_TOKEN_UNOPENABLE.to_string());
+    };
 
     let pull_requests = match state.config().pull_requests() {
         Ok(service) => service,
@@ -812,19 +822,20 @@ async fn repair_model(
     Ok(model)
 }
 
-/// The first linked project's repository token, opened from how it is stored.
-pub(crate) async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Option<SecretValue> {
+/// The first linked project's repository token, opened from how it is stored. An envelope the
+/// deployment's key does not open is an error rather than a token.
+pub(crate) async fn access_token(
+    state: &AppState,
+    task: &tasks::TaskRow,
+) -> Result<Option<SecretValue>, abnegate_secret::Error> {
     for project_id in &task.project_ids {
         if let Ok(Some(project)) = projects::get_project(state.db(), *project_id).await
             && let Some(token) = project.github_access_token
         {
-            return Some(SecretValue::new(crate::crypto::open(
-                state.encryption_key(),
-                &token,
-            )));
+            return state.master_key().open_lenient(&token).map(Some);
         }
     }
-    None
+    Ok(None)
 }
 
 /// The commit a checkout is on, as a remote double reports having received it.
@@ -1092,6 +1103,7 @@ mod tests {
     }
 
     use crate::db::{organizations, projects, users, workspace_members, workspaces};
+    use abnegate_secret::MasterKey;
     use sqlx::PgPool;
     use std::path::PathBuf;
     use std::sync::{
@@ -1190,7 +1202,7 @@ mod tests {
             };
             let mut sandbox = task.clone();
             sandbox.project_ids.clear();
-            let key: [u8; 32] = rand::random();
+            let key = MasterKey::generate().unwrap();
             let checkout =
                 crate::services::checkout::Checkout::prepare(&pool, &key, &sandbox, execution)
                     .await
@@ -2272,7 +2284,7 @@ mod publication_tests {
             std::fs::remove_dir_all(&fixture.path).unwrap();
             let checkout = crate::services::checkout::Checkout::prepare(
                 fixture.state.db(),
-                fixture.state.encryption_key(),
+                fixture.state.master_key(),
                 &task,
                 fixture.execution,
             )

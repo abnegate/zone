@@ -43,7 +43,7 @@ abnegate-index = "0.1"
 abnegate-llm = "0.1.9"
 abnegate-notify = "0.1.6"
 abnegate-search = "0.1.5"
-abnegate-secret = "0.1.6"
+abnegate-secret = "0.1.7"
 abnegate-vcs = "0.1.9"
 
 # Server dependencies

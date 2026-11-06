@@ -89,6 +89,7 @@ mod reminder_time_zone;
 mod reminder_turn;
 mod role_demotion;
 mod role_demotion_race;
+mod seal_secrets;
 mod sessions;
 mod skills_store;
 mod subscriptions;

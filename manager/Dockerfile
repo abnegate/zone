@@ -302,7 +302,7 @@ FROM runtime-base AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config openssh-client gh jq ripgrep fd-find less file \
         procps unzip zip xz-utils bzip2 wget cmake ninja-build \
-        python3 python3-pip python3-venv pipx nodejs npm \
+        python3 python3-pip python3-venv pipx nodejs npm postgresql-client \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 

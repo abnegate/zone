@@ -1,12 +1,13 @@
 //! One place to ask for a source's credentials, however that source is wired.
 
 use std::fmt;
+use std::sync::Arc;
 
-use abnegate_secret::{MasterKey, SecretValue};
+use abnegate_secret::MasterKey;
 use chrono::Utc;
 
-use crate::crypto;
 use crate::db::sources::SourceCredentialRow;
+use crate::secret::Unseal;
 
 use super::cache::TokenCache;
 use super::configuration::StoredConfiguration;
@@ -24,22 +25,20 @@ use super::jwt;
 pub struct Provider {
     issuer: Issuer,
     cache: TokenCache,
-    master_key: MasterKey,
-    stored_credential_key: [u8; 32],
+    master_key: Arc<MasterKey>,
 }
 
 impl Provider {
-    pub fn new(encryption_key: [u8; 32]) -> Result<Self, GithubAppError> {
-        Ok(Self::with_issuer(encryption_key, Issuer::new()?))
+    pub fn new(master_key: Arc<MasterKey>) -> Result<Self, GithubAppError> {
+        Ok(Self::with_issuer(master_key, Issuer::new()?))
     }
 
     /// A provider talking to `issuer`, for GitHub Enterprise and for tests.
-    pub fn with_issuer(encryption_key: [u8; 32], issuer: Issuer) -> Self {
+    pub fn with_issuer(master_key: Arc<MasterKey>, issuer: Issuer) -> Self {
         Self {
             issuer,
             cache: TokenCache::new(),
-            master_key: MasterKey::new(encryption_key),
-            stored_credential_key: encryption_key,
+            master_key,
         }
     }
 
@@ -88,17 +87,12 @@ impl Provider {
     fn stored(&self, encrypted: Option<&str>) -> Result<Option<Credential>, GithubAppError> {
         encrypted
             .map(|encrypted| {
-                crypto::decrypt(&self.stored_credential_key, encrypted)
-                    .map(|token| Credential::new(SecretValue::new(token)))
+                self.master_key
+                    .open_strict(encrypted)
+                    .map(Credential::new)
                     .map_err(|_| GithubAppError::Credential)
             })
             .transpose()
-    }
-}
-
-impl Drop for Provider {
-    fn drop(&mut self) {
-        self.stored_credential_key.fill(0);
     }
 }
 
@@ -113,29 +107,38 @@ impl fmt::Debug for Provider {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
+    use abnegate_secret::SecretValue;
+
     use super::*;
     use chrono::{Duration, SecondsFormat};
     use serde_json::json;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    use crate::secret::fixture::seal;
+    use crate::secret::fixture::seal_legacy;
     use crate::services::github_app::identifier::{ApplicationId, InstallationId};
     use crate::services::github_app::testing::TEST_PRIVATE_KEY;
+
+    const PERSONAL_TOKEN: &str = "ghp_personalaccesstoken";
 
     /// One arbitrary key per run. Seal and open must agree; the value itself
     /// is irrelevant, and a test that passes with any key proves more than one
     /// pinned to a constant.
-    fn key() -> [u8; 32] {
-        static KEY: std::sync::LazyLock<[u8; 32]> = std::sync::LazyLock::new(rand::random);
-        *KEY
+    fn key() -> Arc<MasterKey> {
+        static KEY: LazyLock<Arc<MasterKey>> =
+            LazyLock::new(|| Arc::new(MasterKey::generate().expect("a key")));
+        Arc::clone(&KEY)
     }
 
-    fn app_source(encryption_key: [u8; 32]) -> SourceCredentialRow {
+    fn app_source(master_key: &MasterKey) -> SourceCredentialRow {
         let stored = StoredConfiguration::seal(
             ApplicationId::new(12345),
             InstallationId::new(67890),
             &SecretValue::new(TEST_PRIVATE_KEY),
-            &MasterKey::new(encryption_key),
+            master_key,
         )
         .expect("seal");
 
@@ -148,10 +151,14 @@ mod tests {
         }
     }
 
-    fn personal_source(encryption_key: [u8; 32], token: &str) -> SourceCredentialRow {
+    fn personal_source(master_key: &MasterKey, token: &str) -> SourceCredentialRow {
+        stored_source(seal(token, master_key))
+    }
+
+    fn stored_source(credentials_encrypted: String) -> SourceCredentialRow {
         SourceCredentialRow {
             config: json!({ "owner": "zone-dev", "repo": "zone" }),
-            credentials_encrypted: Some(crypto::encrypt(&encryption_key, token).expect("encrypt")),
+            credentials_encrypted: Some(credentials_encrypted),
         }
     }
 
@@ -180,7 +187,7 @@ mod tests {
         issuing(&server, "ghs_installationtokenvalue", 1).await;
 
         let credential = provider(&server)
-            .credential(&app_source(key()))
+            .credential(&app_source(&key()))
             .await
             .expect("resolve")
             .expect("a configured source has a credential");
@@ -193,12 +200,38 @@ mod tests {
         let server = MockServer::start().await;
 
         let credential = provider(&server)
-            .credential(&personal_source(key(), "ghp_personalaccesstoken"))
+            .credential(&personal_source(&key(), PERSONAL_TOKEN))
             .await
             .expect("resolve")
             .expect("a configured source has a credential");
 
-        assert_eq!(credential.expose(), "ghp_personalaccesstoken");
+        assert_eq!(credential.expose(), PERSONAL_TOKEN);
+    }
+
+    #[tokio::test]
+    async fn a_personal_access_token_sealed_before_the_envelope_existed_resolves() {
+        let server = MockServer::start().await;
+
+        let credential = provider(&server)
+            .credential(&stored_source(seal_legacy(PERSONAL_TOKEN, &key())))
+            .await
+            .expect("resolve")
+            .expect("a configured source has a credential");
+
+        assert_eq!(credential.expose(), PERSONAL_TOKEN);
+    }
+
+    #[tokio::test]
+    async fn a_personal_access_token_stored_as_plaintext_fails_closed() {
+        let server = MockServer::start().await;
+
+        let error = provider(&server)
+            .credential(&stored_source(PERSONAL_TOKEN.to_string()))
+            .await
+            .expect_err("a credential that was never sealed must not resolve");
+
+        assert!(matches!(error, GithubAppError::Credential));
+        assert!(!error.to_string().contains(PERSONAL_TOKEN));
     }
 
     #[tokio::test]
@@ -208,12 +241,12 @@ mod tests {
         let provider = provider(&server);
 
         let installation = provider
-            .credential(&app_source(key()))
+            .credential(&app_source(&key()))
             .await
             .expect("resolve")
             .expect("credential");
         let personal = provider
-            .credential(&personal_source(key(), "ghp_personalaccesstoken"))
+            .credential(&personal_source(&key(), PERSONAL_TOKEN))
             .await
             .expect("resolve")
             .expect("credential");
@@ -231,7 +264,7 @@ mod tests {
         issuing(&server, "ghs_installationtokenvalue", 1).await;
 
         let provider = provider(&server);
-        let source = app_source(key());
+        let source = app_source(&key());
 
         for _ in 0..5 {
             assert_eq!(
@@ -252,7 +285,7 @@ mod tests {
         issuing(&server, "ghs_installationtokenvalue", 2).await;
 
         let provider = provider(&server);
-        let source = app_source(key());
+        let source = app_source(&key());
 
         provider.credential(&source).await.expect("resolve");
         provider.invalidate(&source).expect("invalidate");
@@ -279,7 +312,7 @@ mod tests {
     #[tokio::test]
     async fn a_credential_sealed_with_another_key_fails_closed() {
         let server = MockServer::start().await;
-        let source = personal_source([9u8; 32], "ghp_personalaccesstoken");
+        let source = personal_source(&MasterKey::new([9u8; 32]), PERSONAL_TOKEN);
 
         let error = provider(&server)
             .credential(&source)
@@ -287,7 +320,7 @@ mod tests {
             .expect_err("a credential from another deployment must not resolve");
 
         assert!(matches!(error, GithubAppError::Credential));
-        assert!(!error.to_string().contains("ghp_personalaccesstoken"));
+        assert!(!error.to_string().contains(PERSONAL_TOKEN));
     }
 
     #[tokio::test]
@@ -299,7 +332,7 @@ mod tests {
             .await;
 
         let error = provider(&server)
-            .credential(&app_source(key()))
+            .credential(&app_source(&key()))
             .await
             .expect_err("a 403 is a failure");
 
@@ -316,13 +349,13 @@ mod tests {
 
         let provider = provider(&server);
         provider
-            .credential(&app_source(key()))
+            .credential(&app_source(&key()))
             .await
             .expect("resolve");
 
         let rendered = format!("{provider:?}");
         assert!(!rendered.contains("ghs_installationtokenvalue"));
-        assert!(!rendered.contains("BEGIN RSA PRIVATE key()"));
+        assert!(!rendered.contains("BEGIN RSA PRIVATE KEY"));
         assert!(rendered.contains("[REDACTED]"));
     }
 }

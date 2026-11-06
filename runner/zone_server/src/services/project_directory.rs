@@ -90,7 +90,7 @@ async fn candidates(state: &AppState, project: &ProjectRow, workspace: Uuid) -> 
     if let Some(id) = project.source_id {
         match sources::get_source(state.db(), id, workspace).await {
             Ok(Some(source)) if source.is_active.unwrap_or(true) => {
-                candidates.extend(Candidate::of_source(state.encryption_key(), &source));
+                candidates.extend(Candidate::of_source(state.master_key(), &source));
             }
             Ok(_) => {}
             Err(error) => {
@@ -100,7 +100,7 @@ async fn candidates(state: &AppState, project: &ProjectRow, workspace: Uuid) -> 
     }
     if let Some(url) = &project.github_repo_url {
         candidates.extend(Candidate::of_project(
-            state.encryption_key(),
+            state.master_key(),
             url,
             project.github_access_token.as_deref(),
         ));

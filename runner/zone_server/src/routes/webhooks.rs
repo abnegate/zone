@@ -12,12 +12,12 @@ use serde::Serialize;
 use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::crypto;
 use crate::db::sync_config::{
     self, NewSyncedTask, SyncConfigRow, SyncDirection, SyncEventDirection, SyncEventType,
     SyncedItemRow,
 };
 use crate::db::{projects, tasks};
+use crate::secret::Unseal;
 use crate::state::AppState;
 use crate::sync::{
     Delivery, IssueState, Provider, Settings, SyncError, WebhookEvent, WebhookPayload,
@@ -241,7 +241,7 @@ async fn verify(
     let Some(encrypted) = config.webhook_secret_encrypted.as_deref() else {
         return Err(unverified("the sync has no webhook secret"));
     };
-    let secret = crypto::decrypt(state.encryption_key(), encrypted).map_err(|error| {
+    let secret = state.master_key().open_strict(encrypted).map_err(|error| {
         tracing::error!("Failed to decrypt webhook secret for {sync_config_id}: {error}");
         Rejection::Internal
     })?;
@@ -253,7 +253,7 @@ async fn verify(
             Rejection::Internal
         })?;
 
-    match tracker.parse_webhook(headers, body, &secret) {
+    match tracker.parse_webhook(headers, body, secret.expose()) {
         Ok(delivery) => Ok((config, delivery)),
         Err(SyncError::WebhookVerificationFailed(reason)) => Err(unverified(&reason)),
         Err(error) => {
