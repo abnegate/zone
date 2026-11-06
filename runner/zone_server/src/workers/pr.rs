@@ -2062,13 +2062,13 @@ mod publication_tests {
         repository: &str,
         server: &MockServer,
     ) -> (uuid::Uuid, uuid::Uuid) {
-        use crate::services::github_app::testing::installed;
+        use crate::services::github_app::testing::{installation_number, installed};
 
         let installation = installed(
             state.db(),
             state.github(),
             fixture.organization,
-            GITHUB_INSTALLATION,
+            installation_number(),
         )
         .await;
         crate::db::github_installations::mark_revoked(state.db(), installation)

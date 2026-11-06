@@ -1286,11 +1286,6 @@ async fn a_source_connected_only_through_an_installation_reads_with_a_minted_tok
 #[tokio::test]
 async fn a_revoked_installation_never_falls_back_to_a_personal_access_token() {
     let github = MockServer::start().await;
-    access_tokens(81_002)
-        .respond_with(minted(MINTED_TOKEN))
-        .expect(0)
-        .mount(&github)
-        .await;
     Mock::given(method("GET"))
         .and(path("/repos/acme/widgets/pulls/12"))
         .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
@@ -1302,6 +1297,11 @@ async fn a_revoked_installation_never_falls_back_to_a_personal_access_token() {
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
     let seeded = workspace.install(&github).await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted(MINTED_TOKEN))
+        .expect(0)
+        .mount(&github)
+        .await;
     github_installations::mark_revoked(workspace.state.db(), seeded.installation)
         .await
         .expect("the installation is revoked");
@@ -1365,11 +1365,6 @@ async fn an_installation_token_github_refuses_is_minted_again_once() {
 #[tokio::test]
 async fn a_disconnected_installation_lists_its_pull_request_as_needing_github_again() {
     let github = MockServer::start().await;
-    access_tokens(81_004)
-        .respond_with(minted(MINTED_TOKEN))
-        .expect(0)
-        .mount(&github)
-        .await;
     Mock::given(method("GET"))
         .and(path("/repos/acme/widgets/pulls/12"))
         .respond_with(ResponseTemplate::new(500))
@@ -1379,7 +1374,12 @@ async fn a_disconnected_installation_lists_its_pull_request_as_needing_github_ag
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
-    let seeded = workspace.install(&github, 81_004).await;
+    let seeded = workspace.install(&github).await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted(MINTED_TOKEN))
+        .expect(0)
+        .mount(&github)
+        .await;
     github_installations::mark_revoked(workspace.state.db(), seeded.installation)
         .await
         .expect("the installation is revoked");
@@ -1407,7 +1407,7 @@ async fn a_pull_request_opened_through_an_installation_is_listed_with_a_minted_t
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
-    let seeded = workspace.install(&github, 81_005).await;
+    let seeded = workspace.install(&github).await;
     access_tokens(seeded.installation_id)
         .respond_with(minted(MINTED_TOKEN))
         .expect(1)
@@ -1438,7 +1438,7 @@ async fn an_installation_token_github_refuses_while_changing_a_pull_request_is_m
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
-    let seeded = workspace.install(&github, 81_006).await;
+    let seeded = workspace.install(&github).await;
     access_tokens(seeded.installation_id)
         .respond_with(minted("ghs_stale"))
         .up_to_n_times(1)
@@ -1487,7 +1487,7 @@ async fn github_failing_to_mint_an_installation_token_is_a_bad_gateway() {
     let database = context_database_url();
     let pool = PgPool::connect(&database).await.expect("the test database");
     let workspace = Workspace::new(config(&github, database), pool).await;
-    let seeded = workspace.install(&github, 81_007).await;
+    let seeded = workspace.install(&github).await;
     access_tokens(seeded.installation_id)
         .respond_with(ResponseTemplate::new(503))
         .expect(1)

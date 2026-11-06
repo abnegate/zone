@@ -868,7 +868,7 @@ async fn attaching_an_installation_revoked_during_the_reachability_check_is_refu
     let seeded = harness.installation(&tenant).await;
     let source = harness.token_source(&tenant).await;
     let before = harness.stored_source(&tenant, source).await;
-    issuing(&harness.github, INSTALLATION_ID, 1).await;
+    issuing(&harness.github, seeded.installation_id, 1).await;
     reading_repository(
         &harness.github,
         ResponseTemplate::new(200)
@@ -918,7 +918,8 @@ async fn attaching_when_github_refuses_the_apps_credentials_asks_to_reconnect() 
     let source = harness.token_source(&tenant).await;
     Mock::given(method("POST"))
         .and(path(format!(
-            "/app/installations/{INSTALLATION_ID}/access_tokens"
+            "/app/installations/{}/access_tokens",
+            seeded.installation_id
         )))
         .respond_with(ResponseTemplate::new(401))
         .mount(&harness.github)
@@ -1229,7 +1230,8 @@ async fn verifying_while_github_fails_is_a_bad_gateway_and_recorded_as_such() {
         .await;
     Mock::given(method("POST"))
         .and(path(format!(
-            "/app/installations/{INSTALLATION_ID}/access_tokens"
+            "/app/installations/{}/access_tokens",
+            seeded.installation_id
         )))
         .respond_with(ResponseTemplate::new(502))
         .mount(&harness.github)

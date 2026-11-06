@@ -2482,8 +2482,6 @@ mod tests {
         assert_eq!(asked, 0, "nothing is asked of GitHub about no commit");
     }
 
-    const GITHUB_INSTALLATION: u64 = 27_182_818;
-
     /// The project the merged task was opened on.
     async fn linked_project(merged: &Merged) -> Uuid {
         sqlx::query_scalar("SELECT project_id FROM task_projects WHERE task_id = $1")
@@ -2526,7 +2524,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoked_installation_pauses_the_task_to_reconnect_github_and_lends_no_token() {
-        use crate::services::github_app::testing::{installed, provider};
+        use crate::services::github_app::testing::{installation_number, installed, provider};
 
         let server = wiremock::MockServer::start().await;
         refusing(&server, "fallback-token").await;
@@ -2539,7 +2537,7 @@ mod tests {
             pool,
             merged.state.github(),
             merged.organization,
-            GITHUB_INSTALLATION,
+            installation_number(),
         )
         .await;
         crate::db::github_installations::mark_revoked(pool, installation)
