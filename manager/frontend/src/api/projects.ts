@@ -156,6 +156,21 @@ class ProjectsApi {
     return data.project;
   }
 
+  async reorderProjects(workspaceId: string, projectIds: readonly string[]): Promise<void> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/projects/order`,
+      {
+        method: 'PUT',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ project_ids: projectIds }),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await this.parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to reorder projects: ${response.status}`);
+    }
+  }
+
   async deleteProject(id: string): Promise<void> {
     const response = await fetch(`${API_BASE}/api/projects/${encodeURIComponent(id)}`, {
       method: 'DELETE',
