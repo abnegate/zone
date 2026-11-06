@@ -8,6 +8,7 @@ import '../features/chats/components/ActionReceipts.css';
 import '../features/chats/components/JobCard.css';
 import '../features/chats/components/QuestionCard.css';
 import '../shared/components/SubNav/SubNav.css';
+import '../shared/components/TransferChip/TransferChip.css';
 import '../features/models/components/PullJobs.css';
 import '../features/models/components/DownloadDock.css';
 import '../features/models/components/DownloadOptions.css';

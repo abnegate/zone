@@ -46,7 +46,18 @@ pub async fn workspace(
     let (organization, settings) = saved(&state, id).await?;
     let offers = provider::offers(&state, organization, &settings).await?;
     let (default, providers) = split(offers, &settings);
-    Ok(Json(WorkspaceProvidersResponse { default, providers }))
+    let recent = chats::recent::get(state.db(), id)
+        .await
+        .inspect_err(|error| {
+            tracing::error!(workspace = %id, %error, "Could not read the workspace's recent chat");
+        })
+        .ok()
+        .flatten();
+    Ok(Json(WorkspaceProvidersResponse {
+        default,
+        providers,
+        recent,
+    }))
 }
 
 /// GET /api/chats/{id}/providers

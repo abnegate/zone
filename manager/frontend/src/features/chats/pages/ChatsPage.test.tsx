@@ -13,6 +13,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { BrowserRouter } from 'react-router-dom';
 import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
+import { RESPONDING } from '../components/Generation';
 import type {
   Chat,
   ChatProviderOffer,
@@ -1772,7 +1773,7 @@ describe('ChatsPage', () => {
 
     it('keeps pending feedback and blocks another send until the response ends', async () => {
       const input = await sendPrompt();
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
       fireEvent.change(input, { target: { value: 'another prompt' } });
@@ -1783,7 +1784,7 @@ describe('ChatsPage', () => {
       act(() => socket.emit({ type: 'status', message: 'Generating image…' }));
       expect(screen.getByRole('status')).toHaveTextContent('Generating image…');
       act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
@@ -1803,7 +1804,7 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       await waitFor(() => expect(mockWsSend).toHaveBeenCalledTimes(2));
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
     });
 
     it('shows a terminal stream failure and keeps the interrupted reply visible after retry', async () => {
@@ -1987,6 +1988,125 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Send failed')).toBeInTheDocument();
       });
+    });
+  });
+
+  describe('attaching files', () => {
+    class HeldReader {
+      static readers: HeldReader[] = [];
+      onprogress:
+        | ((event: { lengthComputable: boolean; loaded: number; total: number }) => void)
+        | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      result: string | null = null;
+      error: Error | null = null;
+
+      readAsText() {
+        HeldReader.readers.push(this);
+      }
+
+      readAsDataURL() {
+        HeldReader.readers.push(this);
+      }
+
+      abort() {
+        this.onabort?.();
+      }
+
+      progress(loaded: number, total: number) {
+        this.onprogress?.({ lengthComputable: true, loaded, total });
+      }
+
+      finish(result: string) {
+        this.result = result;
+        this.onload?.();
+      }
+    }
+
+    const original = globalThis.FileReader;
+
+    beforeEach(() => {
+      HeldReader.readers = [];
+      globalThis.FileReader = HeldReader as unknown as typeof FileReader;
+    });
+
+    afterEach(() => {
+      globalThis.FileReader = original;
+    });
+
+    async function openComposer() {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      return screen.findByPlaceholderText('Type a message, or drop a file...');
+    }
+
+    function drop(...files: File[]) {
+      fireEvent.drop(document.querySelector('.message-form') as Element, {
+        dataTransfer: { files, types: ['Files'] },
+      });
+    }
+
+    it('shows a dropped file at once with its progress and holds Send until it is read', async () => {
+      const composer = await openComposer();
+      fireEvent.change(composer, { target: { value: 'Look at this' } });
+
+      drop(new File(['# notes'], 'notes.md', { type: 'text/markdown' }));
+
+      expect(await screen.findByRole('group', { name: 'notes.md: 0%' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+      expect(
+        screen.getByText('Send is ready once the file finishes attaching.')
+      ).toBeInTheDocument();
+      expect(composer).toBeEnabled();
+
+      act(() => HeldReader.readers[0].progress(3, 4));
+      expect(screen.getByRole('progressbar', { name: 'notes.md progress' })).toHaveAttribute(
+        'aria-valuenow',
+        '75'
+      );
+
+      fireEvent.keyDown(composer, { key: 'Enter' });
+      expect(mockWsSend).not.toHaveBeenCalledWith(expect.stringContaining('Look at this'));
+
+      act(() => HeldReader.readers[0].finish('# notes'));
+
+      await waitFor(() => expect(screen.queryByTestId('transfer-chip')).toBeNull());
+      expect(screen.getByRole('button', { name: 'Remove notes.md' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+      expect(screen.queryByText(/Send is ready once/)).toBeNull();
+    });
+
+    it('tracks each of several dropped files on its own', async () => {
+      await openComposer();
+
+      drop(
+        new File(['a'], 'one.txt', { type: 'text/plain' }),
+        new File(['b'], 'two.txt', { type: 'text/plain' })
+      );
+
+      expect(await screen.findAllByTestId('transfer-chip')).toHaveLength(2);
+      expect(screen.getByText('Send is ready once 2 files finish attaching.')).toBeInTheDocument();
+
+      act(() => HeldReader.readers[1].finish('b'));
+
+      await waitFor(() => expect(screen.getAllByTestId('transfer-chip')).toHaveLength(1));
+      expect(screen.getByRole('group', { name: 'one.txt: 0%' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Remove two.txt' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    });
+
+    it('cancels a file that is still being read and frees Send', async () => {
+      const composer = await openComposer();
+      fireEvent.change(composer, { target: { value: 'Never mind the file' } });
+
+      drop(new File(['big'], 'big.log', { type: 'text/plain' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel big.log' }));
+
+      expect(screen.queryByTestId('transfer-chip')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Remove big.log' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
     });
   });
 
@@ -2350,6 +2470,25 @@ describe('ChatsPage', () => {
         expect(screen.getByText('System')).toBeInTheDocument();
         expect(screen.getByText('System message')).toBeInTheDocument();
       });
+    });
+
+    it('lists each chat with the model its chosen provider runs', async () => {
+      mockClient.getChats.mockResolvedValueOnce([
+        { ...mockChats[0], provider: 'codex', provider_model: 'gpt-6-sol' },
+        { ...mockChats[1], provider: 'openai', provider_model: null },
+        { ...mockChats[2], provider: null, provider_model: null },
+      ]);
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      const listed = (title: string) =>
+        screen.getByText(title).closest('.chat-item')?.querySelector('.chat-meta-model');
+      expect(listed('Chat 1')).toHaveTextContent(/^gpt-6-sol$/);
+      expect(listed('Chat 2')).toHaveTextContent(/^Automatic$/);
+      expect(listed('Chat 3')).toHaveTextContent(/^llama2$/);
     });
 
     it('labels the model badge with the full model id and splits the list meta', async () => {
@@ -3139,7 +3278,7 @@ describe('ChatsPage', () => {
       sendTurn();
 
       await waitFor(() => expect(mockWsSend).toHaveBeenCalled());
-      expect(await screen.findByRole('status')).toHaveTextContent('Generating response…');
+      expect(await screen.findByRole('status')).toHaveTextContent(RESPONDING);
       await waitFor(() => expect(mockGetChatProviders).toHaveBeenCalledTimes(2));
     });
 
@@ -3201,7 +3340,7 @@ describe('ChatsPage', () => {
 
       await screen.findByTestId('chat-providers-error');
       expect(mockWsSend).toHaveBeenCalled();
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
     });
 
@@ -3513,6 +3652,42 @@ describe('ChatsPage', () => {
       });
       await waitFor(() => expect(badge()).toHaveTextContent('Claude Code·Automatic'));
       expect(mockClient.updateChat).not.toHaveBeenCalled();
+    });
+
+    const listedModel = () => document.querySelector('.chat-item.active .chat-meta-model');
+
+    it('lists the chosen model as soon as a provider is chosen mid-chat', async () => {
+      await openChat();
+      await screen.findByTestId('chat-provider');
+      expect(listedModel()).toHaveTextContent(/^llama2$/);
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        provider: 'codex',
+        provider_model: 'gpt-6-sol',
+      });
+      mockClient.getChats.mockResolvedValue([
+        { ...mockChats[0], provider: 'codex', provider_model: 'gpt-6-sol' },
+        ...mockChats.slice(1),
+      ]);
+
+      chooseSelectOption('chat-provider', 'Codex');
+
+      await waitFor(() => expect(listedModel()).toHaveTextContent(/^gpt-6-sol$/));
+    });
+
+    it('lists a model changed mid-chat without waiting for the next message', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: codexOffer }));
+      await openChat({ model_name: 'gpt-6-sol' });
+      await screen.findByTestId('chat-provider-model');
+      mockClient.updateChat.mockResolvedValue({ ...mockChatWithMessages, model_name: 'gpt-5.5' });
+      mockClient.getChats.mockResolvedValue([
+        { ...mockChats[0], model_name: 'gpt-5.5' },
+        ...mockChats.slice(1),
+      ]);
+
+      chooseSelectOption('chat-provider-model', 'gpt-5.5');
+
+      await waitFor(() => expect(listedModel()).toHaveTextContent(/^gpt-5\.5$/));
     });
 
     const openChatById = async () => {

@@ -89,27 +89,6 @@ export async function prepareImage(
   }
 }
 
-export async function poolMap<T, R>(
-  items: T[],
-  limit: number,
-  worker: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  const run = async () => {
-    for (;;) {
-      const index = next;
-      next += 1;
-      if (index >= items.length) return;
-      results[index] = await worker(items[index], index);
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(Math.max(limit, 1), items.length) }, () => run())
-  );
-  return results;
-}
-
 export function captionBatches<T extends { group?: number }>(
   items: T[],
   size = CAPTION_BATCH

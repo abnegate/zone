@@ -11,6 +11,7 @@ export * from './gallery';
 export * from './handover';
 export * from './links';
 export * from './modelOptions';
+export * from './newChatSettings';
 export * from './panel';
 export * from './plainText';
 export * from './popoverOffset';
