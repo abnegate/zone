@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::db::{projects, tasks};
+use crate::secret::Unseal;
 use crate::services::backend;
 use crate::services::checkout::{self, Baseline, Repository};
 use crate::services::endpoint::{Endpoint, Error as EndpointError};
@@ -205,7 +206,7 @@ impl Publication<'_> {
             .await
             .map_err(|_| "Cannot verify publication identity")?
             .ok_or("Task not found")?;
-        let repository = Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+        let repository = Repository::resolve(self.state.db(), self.state.master_key(), &task)
             .await?
             .ok_or("Task repository changed during execution")?;
         if repository.url != baseline.repository
@@ -265,7 +266,7 @@ impl Publication<'_> {
             return Ok(PrCreationResult::Sandbox);
         }
         if self.baseline.is_none()
-            && Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+            && Repository::resolve(self.state.db(), self.state.master_key(), &task)
                 .await?
                 .is_none()
         {
@@ -297,7 +298,7 @@ impl Publication<'_> {
             self.identity(baseline).await?;
             return Ok(PrCreationResult::NoChanges);
         }
-        let repository = Repository::resolve(self.state.db(), self.state.encryption_key(), &task)
+        let repository = Repository::resolve(self.state.db(), self.state.master_key(), &task)
             .await?
             .ok_or("Task repository changed during execution")?;
         let token = repository
@@ -586,7 +587,7 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
     else {
         return RepairOutcome::Failed("No GitHub repository configured".to_string());
     };
-    let access_token = SecretValue::new(crate::crypto::open(state.encryption_key(), stored_token));
+    let access_token = state.master_key().open_lenient(stored_token);
 
     let pull_requests = match state.config().pull_requests() {
         Ok(service) => service,
@@ -818,10 +819,7 @@ pub(crate) async fn access_token(state: &AppState, task: &tasks::TaskRow) -> Opt
         if let Ok(Some(project)) = projects::get_project(state.db(), *project_id).await
             && let Some(token) = project.github_access_token
         {
-            return Some(SecretValue::new(crate::crypto::open(
-                state.encryption_key(),
-                &token,
-            )));
+            return Some(state.master_key().open_lenient(&token));
         }
     }
     None
@@ -1092,6 +1090,7 @@ mod tests {
     }
 
     use crate::db::{organizations, projects, users, workspace_members, workspaces};
+    use abnegate_secret::MasterKey;
     use sqlx::PgPool;
     use std::path::PathBuf;
     use std::sync::{
@@ -1190,7 +1189,7 @@ mod tests {
             };
             let mut sandbox = task.clone();
             sandbox.project_ids.clear();
-            let key: [u8; 32] = rand::random();
+            let key = MasterKey::generate().unwrap();
             let checkout =
                 crate::services::checkout::Checkout::prepare(&pool, &key, &sandbox, execution)
                     .await
@@ -2272,7 +2271,7 @@ mod publication_tests {
             std::fs::remove_dir_all(&fixture.path).unwrap();
             let checkout = crate::services::checkout::Checkout::prepare(
                 fixture.state.db(),
-                fixture.state.encryption_key(),
+                fixture.state.master_key(),
                 &task,
                 fixture.execution,
             )

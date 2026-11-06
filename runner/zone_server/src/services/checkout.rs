@@ -26,6 +26,7 @@
 //! started on and the commit the service pushed — never from refs in the
 //! clone, which a run could move to make its commits look published.
 
+use abnegate_secret::MasterKey;
 use abnegate_secret::SecretValue;
 use abnegate_vcs::Checkout as GitCheckout;
 use abnegate_vcs::worktree;
@@ -41,6 +42,7 @@ use crate::db::{
     projects,
     tasks::{self, TaskRow},
 };
+use crate::secret::Unseal;
 
 const ROOT: &str = "zone-checkouts-v1";
 
@@ -105,7 +107,7 @@ impl Repository {
     /// stores it (encrypted at rest, or plain from before it was).
     pub async fn resolve(
         pool: &PgPool,
-        encryption_key: &[u8],
+        key: &MasterKey,
         task: &TaskRow,
     ) -> Result<Option<Self>, String> {
         let requested = task
@@ -127,9 +129,9 @@ impl Repository {
                 let url = GitService::repository_url(&url).map_err(|error| error.to_string())?;
                 repositories.push(Self {
                     url,
-                    token: project.github_access_token.map(|stored| {
-                        SecretValue::new(crate::crypto::open(encryption_key, &stored))
-                    }),
+                    token: project
+                        .github_access_token
+                        .map(|stored| key.open_lenient(&stored)),
                 });
             }
         }
@@ -232,12 +234,12 @@ pub struct Checkout {
 impl Checkout {
     pub async fn prepare(
         pool: &PgPool,
-        encryption_key: &[u8],
+        key: &MasterKey,
         task: &TaskRow,
         execution: tasks::Execution,
     ) -> Result<Self, String> {
         let tasks::Execution { run, owner, .. } = execution;
-        let repository = Repository::resolve(pool, encryption_key, task).await?;
+        let repository = Repository::resolve(pool, key, task).await?;
         if !execution
             .authorized(pool, false)
             .await
@@ -1649,7 +1651,7 @@ mod tests {
         let run = tasks::create_task_run(&pool, task.id).await.unwrap();
         let owner = Uuid::new_v4();
         assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
-        let key: [u8; 32] = rand::random();
+        let key = MasterKey::generate().unwrap();
         let checkout = Checkout::prepare(
             &pool,
             &key,

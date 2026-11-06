@@ -7,6 +7,7 @@ pub mod github;
 pub mod hook;
 pub mod linear;
 
+use abnegate_secret::MasterKey;
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
@@ -389,12 +390,12 @@ pub struct SyncRegistry {
 }
 
 impl SyncRegistry {
-    /// Create a new sync registry with all providers
-    pub fn new() -> Self {
+    /// Create a new sync registry with all providers, opening stored tokens under `master_key`
+    pub fn new(master_key: Arc<MasterKey>) -> Self {
         let mut providers: HashMap<String, Arc<dyn SyncProvider>> = HashMap::new();
 
         // Register GitHub provider
-        let github = Arc::new(github::GitHubSyncProvider::new());
+        let github = Arc::new(github::GitHubSyncProvider::new(master_key));
         providers.insert(github.provider_name().to_string(), github);
 
         // Register Linear provider
@@ -420,15 +421,13 @@ impl SyncRegistry {
     }
 }
 
-impl Default for SyncRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn key() -> Arc<MasterKey> {
+        Arc::new(MasterKey::generate().expect("a key"))
+    }
 
     #[test]
     fn every_provider_reads_back_from_its_name() {
@@ -447,7 +446,7 @@ mod tests {
 
     #[test]
     fn the_registry_serves_exactly_the_named_providers() {
-        let registry = SyncRegistry::new();
+        let registry = SyncRegistry::new(key());
         let mut registered = registry.list_providers();
         registered.sort();
         let mut named = Provider::ALL.map(|provider| provider.as_str().to_string());
@@ -463,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_sync_registry_creates_with_providers() {
-        let registry = SyncRegistry::new();
+        let registry = SyncRegistry::new(key());
         let providers = registry.list_providers();
 
         assert!(providers.contains(&"github".to_string()));
@@ -473,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_sync_registry_get_github_provider() {
-        let registry = SyncRegistry::new();
+        let registry = SyncRegistry::new(key());
         let provider = registry.get_provider("github");
 
         assert!(provider.is_ok());
@@ -482,7 +481,7 @@ mod tests {
 
     #[test]
     fn test_sync_registry_get_linear_provider() {
-        let registry = SyncRegistry::new();
+        let registry = SyncRegistry::new(key());
         let provider = registry.get_provider("linear");
 
         assert!(provider.is_ok());
@@ -491,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_sync_registry_unknown_provider() {
-        let registry = SyncRegistry::new();
+        let registry = SyncRegistry::new(key());
         let result = registry.get_provider("unknown");
 
         assert!(result.is_err());

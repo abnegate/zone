@@ -225,7 +225,7 @@ impl AppState {
                 context_service,
                 mail,
                 rate_limiter,
-                sync_registry: SyncRegistry::new(),
+                sync_registry: SyncRegistry::new(Arc::clone(&master_key)),
                 pull_registry: PullRegistry::new(),
                 train_jobs: TrainRegistry::new(),
                 encryption_key,
@@ -480,6 +480,8 @@ pub(crate) fn test_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret::Unseal;
+    use crate::secret::fixture;
     use abnegate_notify::MockMailer;
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
@@ -705,7 +707,17 @@ mod tests {
             state.frame_semaphore().available_permits(),
             MAX_CONCURRENT_FRAME_EXTRACT
         );
-        assert_eq!(state.encryption_key().len(), 32);
+        assert_eq!(
+            state
+                .master_key()
+                .open_strict(&fixture::seal(
+                    "ghp_sealed_by_the_state",
+                    state.master_key()
+                ))
+                .unwrap()
+                .expose(),
+            "ghp_sealed_by_the_state"
+        );
         let _ = state.rate_limiter();
         let _ = state.sync_registry();
         let _ = state.pull_registry();

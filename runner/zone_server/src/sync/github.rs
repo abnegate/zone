@@ -1,11 +1,13 @@
 //! GitHub Issues synchronization provider
 
+use abnegate_secret::MasterKey;
 use async_trait::async_trait;
 use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::{
     Delivery, ExternalIssue, IgnoredDelivery, IssueOrigin, IssueState, Provider, StateChange,
@@ -13,6 +15,7 @@ use super::{
 };
 use crate::db::sync_config::SyncEventType;
 use crate::db::tasks::TaskRow;
+use crate::secret::Unseal;
 
 const SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
 const EVENT_HEADER: &str = "X-GitHub-Event";
@@ -139,30 +142,39 @@ pub fn repository_name(url: &str) -> Option<String> {
 pub struct GitHubSyncProvider {
     client: reqwest::Client,
     base_url: String,
+    master_key: Arc<MasterKey>,
 }
 
 impl GitHubSyncProvider {
-    /// Create a new GitHub sync provider
-    pub fn new() -> Self {
+    /// Create a new GitHub sync provider that opens stored tokens under `master_key`
+    pub fn new(master_key: Arc<MasterKey>) -> Self {
         Self {
             client: reqwest::Client::new(),
             base_url: "https://api.github.com".to_string(),
+            master_key,
         }
     }
 
     /// Create with custom base URL (for testing)
     #[cfg(test)]
-    pub fn with_base_url(base_url: String) -> Self {
+    pub fn with_base_url(base_url: String, master_key: Arc<MasterKey>) -> Self {
         Self {
             client: reqwest::Client::new(),
             base_url,
+            master_key,
         }
     }
 
-    /// Parse GitHub config from sync config
+    /// Parse GitHub config from sync config, opening its token when it is sealed
     fn parse_config(&self, config: &SyncConfig) -> SyncResult<GitHubConfig> {
-        serde_json::from_value(config.config.clone())
-            .map_err(|e| SyncError::InvalidConfig(format!("Invalid GitHub config: {}", e)))
+        let mut parsed: GitHubConfig = serde_json::from_value(config.config.clone())
+            .map_err(|e| SyncError::InvalidConfig(format!("Invalid GitHub config: {}", e)))?;
+        parsed.token = self
+            .master_key
+            .open_lenient(&parsed.token)
+            .expose()
+            .to_string();
+        Ok(parsed)
     }
 
     /// Verify HMAC-SHA256 signature for GitHub webhooks
@@ -210,12 +222,6 @@ impl GitHubSyncProvider {
             "open" => IssueState::Open,
             _ => IssueState::Open,
         }
-    }
-}
-
-impl Default for GitHubSyncProvider {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -446,13 +452,76 @@ impl SyncProvider for GitHubSyncProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret::fixture;
     use crate::utils::crypto::generate_token;
     use std::sync::LazyLock;
     use uuid::Uuid;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const TOKEN: &str = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
+    const OWNER: &str = "test-owner";
+    const REPOSITORY: &str = "test-repo";
+    const ISSUE: &str = "42";
+
+    fn key() -> Arc<MasterKey> {
+        Arc::new(MasterKey::generate().expect("a key"))
+    }
+
+    fn sync_config(token: &str) -> SyncConfig {
+        SyncConfig {
+            id: Uuid::new_v4(),
+            project_id: Uuid::new_v4(),
+            provider: Provider::GitHub.as_str().to_string(),
+            enabled: true,
+            config: serde_json::json!({
+                "owner": OWNER,
+                "repo": REPOSITORY,
+                "token": token,
+            }),
+            webhook_secret_encrypted: None,
+        }
+    }
+
+    #[test]
+    fn a_plaintext_sealed_or_legacy_token_parses_to_the_same_token() {
+        let key = key();
+        let provider = GitHubSyncProvider::new(Arc::clone(&key));
+
+        for stored in [
+            TOKEN.to_string(),
+            fixture::seal(TOKEN, &key),
+            fixture::seal_legacy(TOKEN, &key),
+        ] {
+            let parsed = provider.parse_config(&sync_config(&stored)).unwrap();
+            assert_eq!(parsed.token, TOKEN, "{stored} did not parse to the token");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sealed_token_authorizes_the_same_as_its_plaintext() {
+        let key = key();
+        for stored in [TOKEN.to_string(), fixture::seal(TOKEN, &key)] {
+            let server = MockServer::start().await;
+            Mock::given(method("PATCH"))
+                .and(path(format!("/repos/{OWNER}/{REPOSITORY}/issues/{ISSUE}")))
+                .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            GitHubSyncProvider::with_base_url(server.uri(), Arc::clone(&key))
+                .close_issue(&sync_config(&stored), ISSUE)
+                .await
+                .unwrap_or_else(|error| panic!("{stored} did not authorize: {error}"));
+            server.verify().await;
+        }
+    }
 
     #[test]
     fn test_provider_name() {
-        let provider = GitHubSyncProvider::new();
+        let provider = GitHubSyncProvider::new(key());
         assert_eq!(provider.provider_name(), "github");
     }
 
@@ -535,7 +604,7 @@ mod tests {
 
     fn parse_signed(event: Option<&str>, body: &serde_json::Value) -> SyncResult<Delivery> {
         let body = serde_json::to_vec(body).unwrap();
-        GitHubSyncProvider::new().parse_webhook(&signed_headers(&body, event), &body, &SECRET)
+        GitHubSyncProvider::new(key()).parse_webhook(&signed_headers(&body, event), &body, &SECRET)
     }
 
     fn ping() -> serde_json::Value {
@@ -607,7 +676,7 @@ mod tests {
         let mut headers = signed_headers(&bytes, Some(ISSUES_EVENT));
         headers.insert(DELIVERY_HEADER, "delivery-1".parse().unwrap());
 
-        let Delivery::Issue(event) = GitHubSyncProvider::new()
+        let Delivery::Issue(event) = GitHubSyncProvider::new(key())
             .parse_webhook(&headers, &bytes, &SECRET)
             .unwrap()
         else {
@@ -683,7 +752,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(EVENT_HEADER, PING_EVENT.parse().unwrap());
 
-        let result = GitHubSyncProvider::new().parse_webhook(&headers, &body, &SECRET);
+        let result = GitHubSyncProvider::new(key()).parse_webhook(&headers, &body, &SECRET);
 
         assert!(matches!(
             result,
@@ -859,7 +928,7 @@ mod tests {
 
     #[test]
     fn test_parse_webhook_missing_signature() {
-        let provider = GitHubSyncProvider::new();
+        let provider = GitHubSyncProvider::new(key());
         let headers = HeaderMap::new();
         let body = b"{}";
         let secret = generate_token();
@@ -877,14 +946,14 @@ mod tests {
         let body = b"not valid json";
         let headers = signed_headers(body, Some(ISSUES_EVENT));
 
-        let result = GitHubSyncProvider::new().parse_webhook(&headers, body, &SECRET);
+        let result = GitHubSyncProvider::new(key()).parse_webhook(&headers, body, &SECRET);
 
         assert!(matches!(result, Err(SyncError::InvalidWebhookPayload(_))));
     }
 
     #[test]
     fn test_parse_config_valid() {
-        let provider = GitHubSyncProvider::new();
+        let provider = GitHubSyncProvider::new(key());
         let config = SyncConfig {
             id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),
@@ -906,7 +975,7 @@ mod tests {
 
     #[test]
     fn test_parse_config_invalid() {
-        let provider = GitHubSyncProvider::new();
+        let provider = GitHubSyncProvider::new(key());
         let config = SyncConfig {
             id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),

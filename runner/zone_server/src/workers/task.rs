@@ -1187,7 +1187,7 @@ async fn execute_in_checkout(
     let checkout = &*slot.insert(
         match crate::services::checkout::Checkout::prepare(
             state.db(),
-            state.encryption_key(),
+            state.master_key(),
             &task,
             execution,
         )

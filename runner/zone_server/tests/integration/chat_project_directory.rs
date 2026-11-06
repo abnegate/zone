@@ -86,7 +86,8 @@ impl Fixture {
 
     async fn source(&self, kind: &str, config: Value, token: Option<&str>) -> Uuid {
         let sealed = token.map(|token| {
-            zone_server::crypto::encrypt(self.state.encryption_key(), token).expect("a token")
+            abnegate_secret::encrypt_value(&SecretValue::new(token), self.state.master_key())
+                .expect("a token")
         });
         sources::create_source(
             &self.pool,

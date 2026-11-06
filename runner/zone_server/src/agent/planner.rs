@@ -557,9 +557,9 @@ impl Tool for FinalizeProjectTool {
                 };
                 // Stored the way the source keeps it: encrypted at rest, opened
                 // by the checkout and pull request code that uses it.
-                let sealed = match crate::crypto::encrypt(
-                    self.0.state.encryption_key(),
-                    credential.token.expose(),
+                let sealed = match abnegate_secret::encrypt_value(
+                    &credential.token,
+                    self.0.state.master_key(),
                 ) {
                     Ok(sealed) => sealed,
                     Err(_) => {

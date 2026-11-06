@@ -1,5 +1,7 @@
 //! Project endpoints
 
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -517,7 +519,7 @@ pub async fn link_github(
     let sealed = req
         .access_token
         .as_deref()
-        .map(|token| crate::crypto::encrypt(state.encryption_key(), token))
+        .map(|token| encrypt_value(&SecretValue::new(token), state.master_key()))
         .transpose()
         .map_err(|error| {
             tracing::error!(%error, "Could not encrypt the repository token");

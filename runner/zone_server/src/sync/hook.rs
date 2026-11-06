@@ -17,6 +17,7 @@ use thiserror::Error;
 use super::{Provider, webhook_path};
 use crate::db::projects;
 use crate::db::sync_config::{self, SyncConfigRow};
+use crate::secret::Unseal;
 use crate::state::AppState;
 use uuid::Uuid;
 
@@ -97,7 +98,7 @@ impl Hook {
         Ok(Some(Self {
             service,
             repository,
-            token: SecretValue::new(crate::crypto::open(state.encryption_key(), &stored)),
+            token: state.master_key().open_lenient(&stored),
             url,
         }))
     }
