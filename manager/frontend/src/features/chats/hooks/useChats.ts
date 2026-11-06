@@ -30,7 +30,7 @@ export function useChats(options: UseChatsOptions = {}) {
   };
 
   const fetchChats = useCallback(
-    async (opts?: { silent?: boolean }) => {
+    async ({ silent = false }: { silent?: boolean } = {}) => {
       const currentRequest = ++request.current;
       const currentRevision = revision.current;
       if (!workspaceId) {
@@ -38,7 +38,7 @@ export function useChats(options: UseChatsOptions = {}) {
         setLoading(false);
         return;
       }
-      if (!opts?.silent) {
+      if (!silent) {
         setLoading(true);
       }
       setError(null);
@@ -53,9 +53,9 @@ export function useChats(options: UseChatsOptions = {}) {
               : chat;
           })
         );
-      } catch (err) {
-        if (currentRequest !== request.current) return;
-        setError(err instanceof Error ? err.message : 'Failed to fetch chats');
+      } catch (error) {
+        if (currentRequest !== request.current || silent) return;
+        setError(error instanceof Error ? error.message : 'Failed to fetch chats');
       } finally {
         if (currentRequest === request.current) setLoading(false);
       }

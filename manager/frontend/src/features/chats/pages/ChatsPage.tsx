@@ -697,7 +697,10 @@ export default function ChatsPage() {
     } catch (error) {
       reportForChat(chatId, failure(PROVIDER_EFFORT_RESET_FAILED, error));
     } finally {
-      if (latestSelectedChatId.current === chatId) await refreshChat();
+      await Promise.all([
+        refreshChats(),
+        latestSelectedChatId.current === chatId ? refreshChat() : undefined,
+      ]);
       markChanging(chatId, false);
     }
     return true;
@@ -721,9 +724,12 @@ export default function ChatsPage() {
       reportForChat(chatId, failure(MODEL_EFFORT_RESET_FAILED, error));
     } finally {
       try {
-        if (latestSelectedChatId.current === chatId) {
-          await Promise.all([refreshProviders(), refreshChat()]);
-        }
+        await Promise.all([
+          refreshChats(),
+          latestSelectedChatId.current === chatId
+            ? Promise.all([refreshProviders(), refreshChat()])
+            : undefined,
+        ]);
       } finally {
         markChanging(chatId, false);
       }
@@ -995,7 +1001,7 @@ export default function ChatsPage() {
       <div className="chat-item-content">
         <span className="chat-title">{chat.title}</span>
         <span className="chat-meta">
-          <span className="chat-meta-model">{modelLabel(chat.model_name)}</span>
+          <span className="chat-meta-model">{modelLabel(requestedModel(chat))}</span>
           <span className="chat-meta-time">· {formatDate(chat.updated_at)}</span>
         </span>
       </div>
