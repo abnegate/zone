@@ -1,10 +1,14 @@
 import { Button } from '@zone/ui';
 import { useCallback, useMemo, useState } from 'react';
+import { meetsOrganizationRole } from '../../../shared/components/ProtectedRoute';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { getErrors } from '../../../validation';
 import { formStateFromConfig, getSourceById, getSourceLabel } from '../config';
 import { type SourceVerifyResponse, UpdateSourceRequestSchema } from '../schemas';
 import type { Source, UpdateSourceRequest } from '../types';
+import { isAppBacked } from '../utils';
 import { FormFieldRenderer, FormFieldsRenderer } from './FormFields';
+import { GitHubSourceConnection } from './GitHubSourceConnection';
 
 interface SourceDetailProps {
   source: Source;
@@ -30,6 +34,10 @@ export function SourceDetail({
   verifySource,
 }: SourceDetailProps) {
   const definition = getSourceById(source.source_type);
+  const { currentOrganization } = useWorkspace();
+  const organizationId = currentOrganization?.id ?? null;
+  const role = currentOrganization?.role;
+  const canManage = role !== undefined && meetsOrganizationRole(role, 'admin');
   const baseline = useMemo(
     () => formStateFromConfig(source.source_type, source.config),
     [source.source_type, source.config]
@@ -150,6 +158,16 @@ export function SourceDetail({
           <label htmlFor="source-url">URL</label>
           <input id="source-url" className="input-mono" value={source.url} readOnly disabled />
         </div>
+        {source.source_type === 'github' && (
+          <GitHubSourceConnection
+            source={source}
+            organizationId={organizationId}
+            canManage={canManage}
+            updateSource={updateSource}
+            onSaved={onSaved}
+            onError={setError}
+          />
+        )}
         <div className="form-group">
           <label htmlFor="source-name">Name</label>
           <input id="source-name" value={name} onChange={(event) => setName(event.target.value)} />
@@ -183,7 +201,7 @@ export function SourceDetail({
             onChange={handleFieldChange}
           />
         )}
-        {definition?.credentialField && (
+        {definition?.credentialField && !isAppBacked(source) && (
           <FormFieldRenderer
             field={{ ...definition.credentialField, required: false }}
             value={credentials}
