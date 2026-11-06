@@ -122,6 +122,9 @@ async function openNewSource(user: ReturnType<typeof userEvent.setup>) {
 async function addGitHubSource(user: ReturnType<typeof userEvent.setup>, nested: HTMLElement) {
   await within(nested).findByRole('button', { name: /GitHub/ });
   await user.click(within(nested).getByRole('button', { name: 'Next' }));
+  await user.click(
+    await within(nested).findByRole('button', { name: 'Use an access token instead' })
+  );
   await user.type(await within(nested).findByLabelText(/Owner/), 'abnegate');
   await user.type(within(nested).getByLabelText(/Repository/), 'zone');
   await user.click(within(nested).getByRole('button', { name: 'Next' }));
