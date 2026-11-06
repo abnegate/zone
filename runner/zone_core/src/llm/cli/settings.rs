@@ -11,6 +11,8 @@ pub fn settings() -> CliSettings {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use abnegate_llm::Credential;
 
     use super::*;
@@ -24,6 +26,16 @@ mod tests {
             turn > command,
             "an agent runs a loop of commands, so {turn:?} must exceed one command's {command:?}"
         );
+    }
+
+    /// The crate gives a run five minutes, which a chat turn that reads,
+    /// edits and tests a repository outlives.
+    #[test]
+    fn zone_settings_allow_thirty_minutes() {
+        const THIRTY_MINUTES: Duration = Duration::from_secs(30 * 60);
+
+        assert_eq!(settings().timeout, THIRTY_MINUTES);
+        assert!(settings().timeout > abnegate_agent_cli::DEFAULT_TIMEOUT);
     }
 
     #[test]

@@ -16,6 +16,17 @@ use tempfile::TempDir;
 use super::*;
 use crate::llm::cli::{SignIn, settings};
 use crate::llm::window::FIVE_HOURS;
+use stand_in::StandIn;
+
+mod environment;
+mod images;
+mod isolation;
+mod models;
+mod occupancy;
+mod stand_in;
+mod stream;
+mod toolset;
+mod wording;
 
 const COMPLETION: &str = r#"{
     "id": "completion",
@@ -1901,10 +1912,113 @@ async fn a_limit_ends_the_stream_on_zones_name_for_its_window() {
     );
 }
 
-#[test]
-fn a_model_the_agent_does_not_know_is_left_to_the_agent() {
-    assert_eq!(known(AgentKind::Claude, "sonnet"), "sonnet");
-    for unknown in ["auto", "qwen2.5:7b-instruct", ""] {
-        assert_eq!(known(AgentKind::Claude, unknown), "", "{unknown:?}");
+/// How long a stand-in's turn may run before the test gives up on it.
+const PATIENCE: Duration = Duration::from_secs(20);
+
+/// Set on the copy of this binary a test re-runs itself in, naming the test.
+const COPY: &str = "ZONE_CORE_CLIENT_COPY";
+
+/// A Claude stand-in's reply to a turn that goes as planned.
+const CLAUDE_ANSWER: &str = r#"
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}'
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#;
+
+/// A Codex stand-in's reply to a turn that goes as planned.
+const CODEX_ANSWER: &str = r#"
+echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Done."}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":4,"output_tokens":1}}'
+"#;
+
+/// The model each agent is asked for, one it knows.
+fn model(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Codex => "gpt-5.5",
+        _ => "sonnet",
     }
+}
+
+/// A stand-in for `agent` that answers its turn as planned.
+fn answering(agent: AgentKind) -> StandIn {
+    StandIn::new(match agent {
+        AgentKind::Codex => CODEX_ANSWER,
+        _ => CLAUDE_ANSWER,
+    })
+}
+
+/// Zone's settings for a run of `stand_in`, which may take [`PATIENCE`].
+fn standing_in(stand_in: &StandIn) -> CliSettings {
+    settings()
+        .with_executable(stand_in.executable())
+        .with_timeout(PATIENCE)
+}
+
+/// A client that runs `agent` under `settings`.
+fn running(agent: AgentKind, settings: CliSettings) -> LlmClient {
+    LlmClient::new(LlmConfig::default()).with_backend(LlmBackend::cli(agent, settings))
+}
+
+/// Every chunk of a turn on `model` asking `messages`, and the error it
+/// ended in, whether the stream failed to open or failed on the way.
+async fn streamed(
+    client: &LlmClient,
+    model: &str,
+    messages: &[Message],
+) -> (Vec<ChatStreamChunk>, Option<Error>) {
+    match client
+        .chat_stream_with_options(model, messages, None, RequestOptions::new(512))
+        .await
+    {
+        Ok(stream) => collected(stream).await,
+        Err(error) => (Vec::new(), Some(error)),
+    }
+}
+
+/// A turn on the agent's own [`model`] asking what a file does.
+async fn asked(client: &LlmClient, agent: AgentKind) -> (Vec<ChatStreamChunk>, Option<Error>) {
+    streamed(client, model(agent), &[Message::user("What does a.rs do?")]).await
+}
+
+/// Re-run `test` of `module` in a copy of this binary whose environment
+/// also holds `environment`, unless this is that copy. Returns whether this
+/// call was the original, which has nothing left to do once the copy passed.
+///
+/// Setting the variables in this process would race every other test that
+/// starts a child.
+async fn delegated(module: &str, test: &str, environment: &[(&str, &str)]) -> bool {
+    let module = module.split_once("::").map_or(module, |(_, path)| path);
+    let test = format!("{module}::{test}");
+    if std::env::var(COPY).as_deref() == Ok(test.as_str()) {
+        return false;
+    }
+    let output = tokio::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", &test, "--nocapture"])
+        .env(COPY, &test)
+        .env_remove(crate::llm::cli::PASSTHROUGH)
+        .envs(environment.iter().copied())
+        .output()
+        .await
+        .expect("a copy of this test binary");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(output.status.success(), "{printed}");
+    assert!(
+        printed.contains("1 passed"),
+        "the copy ran no test: {printed}"
+    );
+    true
+}
+
+/// The `-c` override attaching zone's MCP server among Codex's `arguments`.
+fn zones_server(arguments: &[String]) -> String {
+    let attached = format!("mcp_servers.{}=", Toolset::SERVER);
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == "-c" && pair[1].starts_with(&attached))
+        .map(|pair| pair[1].clone())
+        .unwrap_or_else(|| panic!("zone's server among codex's overrides: {arguments:?}"))
 }
