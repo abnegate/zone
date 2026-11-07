@@ -298,10 +298,34 @@ that refusal instead of training an adapter no video graph loads.
 
 The manager creates each training job under `models/.zone-train/` readable
 only by its owner (`0700`). On a Linux bind mount the uid is not translated,
-so the host trainer must run as the uid of the container's `zone` user, which
-`docker compose exec manager id -u zone` prints. Run as anyone else, the
+so the host trainer must run as the uid of the container's `zone` user, 999,
+which `docker compose exec manager id -u zone` prints. Run as anyone else, the
 trainer cannot read a queued job and the manager cannot read its progress or
 publish its weight. See the host worker in [COMFYUI.md](COMFYUI.md).
+
+## Volume ownership
+
+The manager image's `zone` user is uid and gid 999. Started as root, the
+manager's entrypoint gives back to `zone` anything in `zone_manager_agent_state`,
+`zone_manager_artifacts`, `zone_manager_embed_cache` and `zone_manager_repos`
+that it does not own, so a volume left by an image whose `zone` had another uid
+recovers on the next start. Images built after the browser libraries landed and
+before these ids were pinned ran as 996. The walk visits every file on each
+start and writes only to the wrong ones. A path inside a volume that it cannot
+change is named in the log and the manager still starts, so check the log if a
+turn still reports `Permission denied`. A volume mounted read-only stops the
+manager starting, because its top directory's mode cannot be set.
+
+The walk stays on each volume's filesystem. If you nest a mount from another
+filesystem inside one of these volumes, only the mount's top directory is
+changed, so repair ownership inside it yourself. A nested Docker volume usually
+shares the filesystem and is walked like the rest.
+
+`zone_comfyui_models` is left alone, because `comfyui-model-setup` and a host
+trainer write there too. Whatever an image running as 996 created in it stays
+996, including `.zone-train`, `.zone-train-upload` and `loras`, so `zone` cannot
+write there. Chown what the manager created back to 999, and move a host trainer
+you set to 996 back to 999.
 
 ## Pulling models into the bundled Ollama
 
