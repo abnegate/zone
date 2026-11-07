@@ -45,6 +45,7 @@ const ENVELOPE_OPENING: &str = "ENC[v1:";
 const ENVELOPE_CLOSING: char = ']';
 const SNAPSHOT_TABLES: &[&str] = &[
     "agent_logins",
+    "github_apps",
     "organization_ai_settings",
     "projects",
     "sources",
@@ -237,6 +238,23 @@ impl Scratch {
         id
     }
 
+    /// A GitHub App of `tenant`'s organization holding `secret` in each of its sealed columns.
+    async fn github_app(&self, tenant: &Tenant, secret: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO github_apps(id,organization_id,app_id,slug,name,owner_login,owner_type,html_url,client_id,client_secret,private_key,webhook_secret) \
+             VALUES($1,$2,$3,'zone-app','Zone','abnegate','Organization','https://github.com/apps/zone-app','Iv1.client',$4,$4,$4)",
+        )
+        .bind(id)
+        .bind(tenant.organization)
+        .bind(rand::random_range(1..i64::MAX))
+        .bind(secret)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
+    }
+
     async fn agent_login(&self, tenant: &Tenant, credential: &str) -> Uuid {
         let id = Uuid::new_v4();
         sqlx::query(
@@ -322,6 +340,12 @@ impl Scratch {
         self.admin.close().await;
     }
 }
+
+const APP_COLUMNS: [Column; 3] = [
+    Column::AppClientSecret,
+    Column::AppPrivateKey,
+    Column::AppWebhookSecret,
+];
 
 const AI_KEYS: &[AiKey] = &[
     AiKey::LitellmKey,
@@ -955,6 +979,9 @@ async fn counted_columns_are_counted_and_never_written() {
     scratch
         .source(&tenant, None, &github_app("-----BEGIN PRIVATE KEY-----"))
         .await;
+    scratch
+        .github_app(&tenant, &envelope("app-secret", &key))
+        .await;
     let backup = scratch.backup(&[]).await;
     let before = scratch.snapshot().await;
 
@@ -985,6 +1012,10 @@ async fn counted_columns_are_counted_and_never_written() {
         report.outcome(Column::GithubAppPrivateKey, Outcome::Reported),
         1
     );
+    for column in APP_COLUMNS {
+        assert_eq!(report.count(column, Class::Envelope), 1, "{column}");
+        assert_eq!(report.outcome(column, Outcome::Skipped), 1, "{column}");
+    }
     assert_eq!(report.written(), 0);
     scratch.cleanup().await;
 }
@@ -1325,6 +1356,39 @@ async fn a_key_that_opens_only_counted_columns_writes_nothing() {
         );
     }
     assert_eq!(scratch.snapshot().await, before, "nothing was written");
+    scratch.cleanup().await;
+}
+
+#[tokio::test]
+async fn github_app_secrets_sealed_under_another_key_refuse_the_run() {
+    let scratch = Scratch::new().await;
+    let deployment = key();
+    let mistaken = key();
+    let tenant = scratch.tenant().await;
+    scratch
+        .github_app(&tenant, &envelope("app-secret", &mistaken))
+        .await;
+    scratch
+        .project(&tenant, Some("ghp_plaintext_project"))
+        .await;
+    let backup = scratch.backup(&[]).await;
+    let before = scratch.snapshot().await;
+
+    for dry_run in [true, false] {
+        assert!(
+            matches!(
+                scratch.attempt(&deployment, dry_run, backup.path()).await,
+                Err(SealingError::KeyMismatch { unopened: 3 })
+            ),
+            "every sealed GitHub App column is checked against the key: {dry_run}"
+        );
+    }
+    assert_eq!(scratch.snapshot().await, before, "nothing was written");
+
+    let report = scratch.run(&mistaken, true, backup.path()).await;
+    for column in APP_COLUMNS {
+        assert_eq!(report.count(column, Class::Envelope), 1, "{column}");
+    }
     scratch.cleanup().await;
 }
 
