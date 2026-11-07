@@ -192,6 +192,18 @@ export const PREVIEW_LABEL = 'Effect, read from the call by the server';
 /// compares rather than letting a reload relabel the same call.
 export const AWAITING_ANSWER_DETAIL = 'Waiting for your answer…';
 
+/// The approval is client-only, so once it is gone these words are what say a
+/// call was denied. Held to the server's `DENIED` by `schemas.contract.test.ts`.
+export const DENIED_DETAIL = 'The user denied this tool call.';
+
+/// Held to the server's `ERROR_PREFIX` by `schemas.contract.test.ts`.
+export const TOOL_ERROR_PREFIX = 'Error: ';
+
+/// What a call a turn never finished shows, written by the console on a turn it
+/// stopped and by the server on the record it stores. Held to the server's
+/// `UNFINISHED_DETAIL` by `schemas.contract.test.ts`.
+export const UNFINISHED_DETAIL = 'Did not finish';
+
 /// Tools that change something outside the conversation and are therefore
 /// asked to say why. The trace row is where a reader sees that answer, whether
 /// the call is still waiting on them or already done, so an absent reason is

@@ -27,6 +27,7 @@ import {
   type ReasoningEffort,
   type SendMessageRequest,
   type ToolCallRecord,
+  UNFINISHED_DETAIL,
   type UpdateChatRequest,
   type Waiting,
   type WaitSettled,
@@ -696,7 +697,7 @@ export function useChat(
                     pending: false,
                     success: false,
                     approval: call.approval === 'pending' ? ('denied' as const) : call.approval,
-                    detail: 'Did not finish',
+                    detail: UNFINISHED_DETAIL,
                   }
                 : call
             );

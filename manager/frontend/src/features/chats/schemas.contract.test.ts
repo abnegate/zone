@@ -33,10 +33,13 @@ import {
 import {
   ACTION_TARGETS,
   AWAITING_ANSWER_DETAIL,
+  DENIED_DETAIL,
   PULL_REQUEST_CHECKS,
   PULL_REQUEST_MERGEABILITY,
   PULL_REQUEST_STATES,
   REASONED_TOOLS,
+  TOOL_ERROR_PREFIX,
+  UNFINISHED_DETAIL,
 } from './types';
 
 const CITATIONS_RS = join(
@@ -57,6 +60,8 @@ const QUESTION_RS = join(
 );
 
 const CHAT_WS_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ws/chat.rs');
+
+const TOOLS_MOD_RS = join(import.meta.dir, '../../../../../runner/zone_core/src/tools/mod.rs');
 
 const JOB_RS = join(import.meta.dir, '../../../../../runner/zone_core/src/tools/job.rs');
 
@@ -197,6 +202,30 @@ describe('a question call is labelled the same live as it is after a reload', ()
   test('the console writes the detail the server persists, ellipsis included', () => {
     expect(AWAITING_ANSWER_DETAIL).toBe(
       rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'AWAITING_ANSWER_DETAIL')
+    );
+  });
+});
+
+/**
+ * The approval a reader gave is client-only, so after the result settles a
+ * call, or after a reload, the server's words are all that say it was denied.
+ */
+describe('a denied call stays labelled denied after the server settles it', () => {
+  test('the console reads the words the server tells a denied call', () => {
+    expect(DENIED_DETAIL).toBe(rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'DENIED'));
+  });
+
+  test('the console reads the prefix the server puts in front of a failed call', () => {
+    expect(TOOL_ERROR_PREFIX).toBe(
+      rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'ERROR_PREFIX')
+    );
+  });
+});
+
+describe('a call a stopped turn left open is labelled the same live as after a reload', () => {
+  test('the console writes the detail the server stores an unfinished call with', () => {
+    expect(UNFINISHED_DETAIL).toBe(
+      rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'UNFINISHED_DETAIL')
     );
   });
 });

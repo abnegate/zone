@@ -5586,7 +5586,7 @@ describe('ChatsPage', () => {
     const traceOf = (answer: Element | null | undefined): string[] =>
       Array.from(answer?.children ?? []).map((part) =>
         part.matches('[data-testid="activity"]')
-          ? `tools:${part.textContent?.includes('Read a file') ? 'read' : 'listed'}`
+          ? `tools:${/Read(?:ing)? a file/.test(part.textContent ?? '') ? 'read' : 'listed'}`
           : `text:${part.textContent?.trim()}`
       );
 
