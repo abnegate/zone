@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use abnegate_agent_cli::{AgentEvent, AgentKind, AgentStream, StdoutParseResult, activity};
+use abnegate_agent_cli::{
+    AgentEvent, AgentKind, AgentStream, CUT_SHORT, StdoutParseResult, activity,
+};
 use abnegate_llm::finish_reason::STOP;
 use abnegate_llm::{
     ChatStreamChunk, Completion, Error, Message, ProviderError, StreamChoice, StreamDelta,
@@ -101,7 +103,7 @@ impl Turn {
         }
 
         let mut delta = StreamDelta::default();
-        let mut finished = false;
+        let mut finished = None;
         let mut usage = None;
         let mut reported_window = None;
         let mut session = None;
@@ -133,16 +135,15 @@ impl Turn {
                     reported = finish_reason.as_deref().unwrap_or("none"),
                     "agent finished its turn"
                 );
-                finished = true;
+                finished = Some(ended(finish_reason.as_deref()));
             }
             _ => return None,
         }
 
         let choice = StreamChoice::new(0, delta);
-        let choice = if finished {
-            choice.with_finish_reason(STOP)
-        } else {
-            choice
+        let choice = match finished {
+            Some(reason) => choice.with_finish_reason(reason),
+            None => choice,
         };
         let mut chunk = ChatStreamChunk::new(vec![choice]);
         chunk.usage = usage;
@@ -190,6 +191,16 @@ impl Turn {
                 .with_usage(stdout.usage)
                 .with_finish_reason(stdout.finish_reason),
         )
+    }
+}
+
+/// The finish reason a turn the agent reported finishing for `reported` ends on: cut short when
+/// the crate says the agent was stopped before it finished, and stopped otherwise, whatever the
+/// agent's own word for it.
+pub(super) fn ended(reported: Option<&str>) -> &'static str {
+    match reported {
+        Some(CUT_SHORT) => CUT_SHORT,
+        _ => STOP,
     }
 }
 

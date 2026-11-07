@@ -108,6 +108,29 @@ const MAX_CONTEXT_IN_PROMPT: usize = 5;
 /// Maximum response length (100KB - same as message)
 const MAX_RESPONSE_LENGTH: usize = 100_000;
 
+/// What follows an answer that ran past [`MAX_RESPONSE_LENGTH`].
+const TRUNCATED_NOTE: &str = "\n\n[Response truncated due to length limit]";
+
+/// What follows the part of an answer written before the turn failed.
+const INTERRUPTED_NOTE: &str = "\n\n[Response interrupted]";
+
+/// What follows an answer a coding agent gave before it was stopped short of finishing. The
+/// answer stands, so the turn is no failure, but the reader is told it did not end on its own.
+const CUT_SHORT_NOTE: &str = "\n\n[Cut short: the agent was stopped before it finished]";
+
+/// The note an answer that did not end as its model meant it to closes with, if any.
+const fn closing_note(truncated: bool, failed: bool, cut_short: bool) -> Option<&'static str> {
+    if truncated {
+        Some(TRUNCATED_NOTE)
+    } else if failed {
+        Some(INTERRUPTED_NOTE)
+    } else if cut_short {
+        Some(CUT_SHORT_NOTE)
+    } else {
+        None
+    }
+}
+
 /// Bound image output independently from text so a provider cannot make a
 /// WebSocket frame or message metadata grow without limit.
 const MAX_GENERATED_IMAGES: usize = 8;
@@ -3692,6 +3715,7 @@ async fn handle_chat_generation(
     let mut response_truncated = false;
     let mut asked = false;
     let mut waited = false;
+    let mut cut_short = false;
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
     let mut citations: Vec<Citation> = Vec::new();
     let mut action_receipts: Vec<ActionReceipt> = Vec::new();
@@ -4032,6 +4056,7 @@ async fn handle_chat_generation(
                             }
                             break;
                         }
+                        Some(AgentEvent::CutShort) => cut_short = true,
                         None => {
                             // Stream ended
                             break;
@@ -4400,10 +4425,8 @@ async fn handle_chat_generation(
 
     // Save assistant message to database
     // Note: We save even truncated responses so users see partial results
-    if response_truncated {
-        full_content.push_str("\n\n[Response truncated due to length limit]");
-    } else if failure.is_some() {
-        full_content.push_str("\n\n[Response interrupted]");
+    if let Some(note) = closing_note(response_truncated, failure.is_some(), cut_short) {
+        full_content.push_str(note);
     }
 
     // Tools can run without the model ever producing prose. The turn is still
@@ -9101,6 +9124,26 @@ cat 'DIR/reply.jsonl'
             "a question is the one of the two the reader can act on"
         );
         assert_eq!(STOPPED_AFTER_WAITING, "[Stopped while waiting]");
+    }
+
+    #[test]
+    fn an_answer_cut_short_is_marked_as_neither_finished_nor_failed() {
+        assert_eq!(closing_note(false, false, false), None);
+        assert_eq!(closing_note(false, false, true), Some(CUT_SHORT_NOTE));
+        assert_eq!(
+            CUT_SHORT_NOTE,
+            "\n\n[Cut short: the agent was stopped before it finished]"
+        );
+        assert_eq!(
+            closing_note(false, true, true),
+            Some(INTERRUPTED_NOTE),
+            "a turn that failed says so, whatever the agent kept"
+        );
+        assert_eq!(
+            closing_note(true, true, true),
+            Some(TRUNCATED_NOTE),
+            "the length limit is what the reader can act on"
+        );
     }
 
     #[test]

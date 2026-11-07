@@ -126,6 +126,9 @@ const WAITING_ON_ANSWER: &str = "Task run is waiting on a question";
 const WAITING_ON_OUTCOME: &str = "Task run is waiting on something outside its loop";
 const RESUMED_ON_ANSWER: &str = "Task run resumed on an answer";
 const LOST_LEASE: &str = "Task execution lost its lease";
+/// Why an attempt whose coding agent was stopped before it finished failed: its timeout ran out
+/// while it worked, or it exited partway through a later turn.
+const AGENT_CUT_SHORT: &str = "The coding agent was stopped before it finished the task";
 const ANSWER_WITHDRAWN: &str = "The claim on the answer was withdrawn before one arrived";
 
 /// Between what one turn said and what the turn after the question said.
@@ -3134,6 +3137,7 @@ async fn run_task_loop(
             }
             AgentEvent::Limited(limit) => return Err(Halt::Limited(Box::new(limit))),
             AgentEvent::Failed(error) => return Err(Halt::Failed(error)),
+            AgentEvent::CutShort => return Err(Halt::Failed(AGENT_CUT_SHORT.to_string())),
         }
     }
     if let Some(park) = parked {
@@ -8330,6 +8334,44 @@ mod cli_tests {
 
         assert!(fault.message.contains("4096"), "{}", fault.message);
         assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        fixture.remove().await;
+    }
+
+    /// An agent stopped before it finished has not done what the task asked, so the attempt
+    /// fails rather than handing on the answer it gave before it was stopped.
+    #[tokio::test]
+    async fn an_attempt_whose_agent_was_cut_short_has_not_finished() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let owner = fixture.claim().await;
+        let agent = Agent::with(|_| {
+            [
+                json!({"type": "system", "subtype": "init", "session_id": "s"}),
+                json!({"type": "result", "subtype": "success", "is_error": false, "result": "Planned."}),
+                json!({"type": "system", "subtype": "init", "session_id": "s"}),
+                json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Writing the fi"}]}}),
+            ]
+            .map(|line| format!("echo '{line}'"))
+            .join("\n")
+        });
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let backend = LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default().with_executable(agent.path(EXECUTABLE)),
+        );
+
+        let fault = attempt(
+            &state,
+            &fixture,
+            owner,
+            &backend,
+            tokio::time::Instant::now() + SPAWN_TIMEOUT,
+        )
+        .await
+        .expect_err("an attempt its agent was cut short in");
+
+        assert_eq!(fault.message, AGENT_CUT_SHORT);
         fixture.remove().await;
     }
 

@@ -53,6 +53,9 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
 const ANSWER: &str = "Written.";
 
+/// What a stand-in claude had written of a later turn when it exited.
+const UNFINISHED: &str = "Still writ";
+
 /// Where the server keeps its organizations' agent homes, under the test's directory.
 const AGENTS: &str = "agents";
 
@@ -175,6 +178,25 @@ impl Agent {
             format!("#!/bin/sh\ncat > /dev/null\necho '{assistant}'\necho '{result}'\n"),
         )
         .expect("the reporting stand-in");
+    }
+
+    /// Turns the stand-in into a claude that answers, begins a later turn and exits while it is
+    /// still writing it, which leaves the answer it gave cut short.
+    fn exiting_mid_turn(&self) {
+        let lines = [
+            json!({"type": "system", "subtype": "init", "session_id": "s"}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}, "parent_tool_use_id": null}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER}),
+            json!({"type": "system", "subtype": "init", "session_id": "s"}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": UNFINISHED}]}, "parent_tool_use_id": null}),
+        ]
+        .map(|line| format!("echo '{line}'"))
+        .join("\n");
+        std::fs::write(
+            &self.executable,
+            format!("#!/bin/sh\ncat > /dev/null\n{lines}\n"),
+        )
+        .expect("the stand-in that exits mid-turn");
     }
 
     /// Turns the stand-in into a Codex that answers at once, lingers after the line that finishes
@@ -1176,4 +1198,40 @@ async fn the_chat_reads_the_agent_stream_to_its_end() {
         .find(|frame| frame["type"] == "context")
         .unwrap_or_else(|| panic!("no context frame in {frames:?}"))["usage"];
     assert_eq!(usage["limit"], json!(CODEX_WINDOW), "{usage}");
+}
+
+/// An agent stopped before it finished keeps the answer it gave, and the reader is told it was
+/// cut short: the turn is neither an error nor a finished answer.
+#[tokio::test]
+async fn an_answer_the_agent_was_cut_short_after_is_kept_and_marked_cut_short() {
+    let harness = Harness::start(false, true).await;
+    harness.agent.exiting_mid_turn();
+
+    let frames = harness
+        .turn("Write it up.")
+        .await
+        .await
+        .expect("the turn ends");
+
+    successful(&frames);
+    let ended = frames
+        .iter()
+        .find(|frame| frame["type"] == "message_end")
+        .expect("a message_end");
+    let shown = ended["content"].as_str().expect("the answer's content");
+    assert_eq!(
+        shown,
+        format!(
+            "{ANSWER}\n\n{UNFINISHED}\n\n[Cut short: the agent was stopped before it finished]"
+        ),
+        "{frames:?}"
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE chat_id = $1 AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(harness.chat)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the stored answer");
+    assert_eq!(stored, shown, "a reload reads the answer differently");
 }

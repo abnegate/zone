@@ -3,9 +3,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use abnegate_agent_cli::{
-    AgentEvent, AgentStream, CREDITS_REQUIRED, Output, STDERR_HEADING, StepStatus, Subagent,
-    SubagentStatus, SubagentStep,
+    AgentEvent, AgentStream, CREDITS_REQUIRED, CUT_SHORT, Output, STDERR_HEADING, StepStatus,
+    Subagent, SubagentStatus, SubagentStep,
 };
+use abnegate_llm::finish_reason::STOP;
 use abnegate_llm::{
     ChatResponse, ChatStreamChunk, Credential, Effort, Error, Limit, LlmConfig, Message,
     ProviderError, RequestOptions, ToolCall, ToolDefinition, Trust, Usage, Window, WindowKind,
@@ -1653,6 +1654,68 @@ async fn the_session_an_agent_announces_rides_the_chunk_it_arrived_on() {
     assert_eq!(sessions, [Some("6f1"), None, None]);
     assert_eq!(spoken(&delivered), "Done.");
     assert_eq!(reasons(&delivered), [STOP]);
+}
+
+#[tokio::test]
+async fn a_turn_the_crate_cut_short_ends_cut_short_rather_than_stopped() {
+    let events = agent_events(vec![
+        Ok(AgentEvent::Text("First.".to_string())),
+        Ok(AgentEvent::finished(Some(CUT_SHORT.to_string()))),
+    ]);
+
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
+
+    assert!(failure.is_none(), "a cut-short turn failed: {failure:?}");
+    assert_eq!(spoken(&delivered), "First.");
+    assert_eq!(reasons(&delivered), [CUT_SHORT]);
+}
+
+#[tokio::test]
+async fn a_host_agent_that_exits_mid_turn_answers_cut_short() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let script = r#"
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"First."}'
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Still writ"}]}}'
+"#;
+    let client = agent_client(fake(&directory, script));
+
+    let response = client
+        .chat(&[Message::user("What does a.rs do?")], None)
+        .await
+        .expect("the answer the agent kept");
+
+    let choice = response.choices.first().expect("a choice");
+    assert_eq!(choice.message.content.as_deref(), Some("First."));
+    assert_eq!(
+        choice.finish_reason.as_deref(),
+        Some(CUT_SHORT),
+        "an answer cut short read as finished"
+    );
+}
+
+#[tokio::test]
+async fn a_host_agent_that_exits_mid_turn_streams_its_answer_cut_short() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let script = r#"
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"First."}'
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Still writ"}]}}'
+"#;
+    let client = agent_client(fake(&directory, script));
+
+    let stream = stream_turn(&client, None).await.expect("a running agent");
+    let (delivered, failure) = collected(stream).await;
+
+    assert!(failure.is_none(), "the turn failed: {failure:?}");
+    assert!(spoken(&delivered).starts_with("First."), "{delivered:?}");
+    assert_eq!(
+        reasons(&delivered).last().map(String::as_str),
+        Some(CUT_SHORT),
+        "a turn whose later answer was cut off read as finished"
+    );
 }
 
 #[tokio::test]

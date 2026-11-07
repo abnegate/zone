@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use abnegate_agent_cli::{AgentKind, AgentStream, CliProvider, CliSettings, Occupancy};
-use abnegate_llm::finish_reason::STOP;
 use abnegate_llm::{
     ChatResponse, ChatStreamChunk, Choice, Completion, CompletionRequest, Effort, Error, LlmConfig,
     Message, RequestOptions, ToolDefinition,
@@ -16,7 +15,7 @@ use futures::Stream;
 use super::backend::LlmBackend;
 use super::cli::{BuiltinTools, Observer, SignIn, Toolset, confined};
 use reported::Reported;
-use turn::{Turn, failed};
+use turn::{Turn, ended, failed};
 
 mod reported;
 mod turn;
@@ -96,7 +95,8 @@ fn response(completion: Completion, model: &str) -> ChatResponse {
     );
 
     let answered = ChatResponse::new(vec![
-        Choice::new(0, completion.message).with_finish_reason(STOP),
+        Choice::new(0, completion.message)
+            .with_finish_reason(ended(completion.finish_reason.as_deref())),
     ])
     .with_id(format!("{}-{}", completion.provider, uuid::Uuid::new_v4()))
     .with_created(chrono::Utc::now().timestamp())
