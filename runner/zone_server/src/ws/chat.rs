@@ -68,8 +68,10 @@ use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 use zone_chat::history::ReplayMessage;
 use zone_core::context::ContextUsage;
 
+mod ending;
 mod queue;
 
+use ending::Ending;
 use queue::{Finished, Interrupted, Queued, Started};
 
 /// WebSocket polling interval in milliseconds
@@ -108,28 +110,13 @@ const MAX_CONTEXT_IN_PROMPT: usize = 5;
 /// Maximum response length (100KB - same as message)
 const MAX_RESPONSE_LENGTH: usize = 100_000;
 
-/// What follows an answer that ran past [`MAX_RESPONSE_LENGTH`].
 const TRUNCATED_NOTE: &str = "\n\n[Response truncated due to length limit]";
 
-/// What follows the part of an answer written before the turn failed.
 const INTERRUPTED_NOTE: &str = "\n\n[Response interrupted]";
 
-/// What follows an answer a coding agent gave before it was stopped short of finishing. The
-/// answer stands, so the turn is no failure, but the reader is told it did not end on its own.
+/// The answer a coding agent gave before it was stopped stands, so the turn is no failure, but
+/// the reader is told it did not end on its own.
 const CUT_SHORT_NOTE: &str = "\n\n[Cut short: the agent was stopped before it finished]";
-
-/// The note an answer that did not end as its model meant it to closes with, if any.
-const fn closing_note(truncated: bool, failed: bool, cut_short: bool) -> Option<&'static str> {
-    if truncated {
-        Some(TRUNCATED_NOTE)
-    } else if failed {
-        Some(INTERRUPTED_NOTE)
-    } else if cut_short {
-        Some(CUT_SHORT_NOTE)
-    } else {
-        None
-    }
-}
 
 /// Bound image output independently from text so a provider cannot make a
 /// WebSocket frame or message metadata grow without limit.
@@ -4213,7 +4200,7 @@ async fn handle_chat_generation(
                 model = repicked;
             }
             llm_client = llm_client.with_backend(crate::services::backend::effort(
-                switch.backend.clone(),
+                crate::services::backend::ahead_of(switch.backend.clone(), remaining),
                 effort,
             ));
             llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
@@ -4423,9 +4410,16 @@ async fn handle_chat_generation(
         return Ok(());
     }
 
-    // Save assistant message to database
-    // Note: We save even truncated responses so users see partial results
-    if let Some(note) = closing_note(response_truncated, failure.is_some(), cut_short) {
+    let ending = if response_truncated {
+        Ending::Truncated
+    } else if failure.is_some() {
+        Ending::Interrupted
+    } else if cut_short {
+        Ending::CutShort
+    } else {
+        Ending::Finished
+    };
+    if let Some(note) = ending.note() {
         full_content.push_str(note);
     }
 
@@ -9128,22 +9122,10 @@ cat 'DIR/reply.jsonl'
 
     #[test]
     fn an_answer_cut_short_is_marked_as_neither_finished_nor_failed() {
-        assert_eq!(closing_note(false, false, false), None);
-        assert_eq!(closing_note(false, false, true), Some(CUT_SHORT_NOTE));
-        assert_eq!(
-            CUT_SHORT_NOTE,
-            "\n\n[Cut short: the agent was stopped before it finished]"
-        );
-        assert_eq!(
-            closing_note(false, true, true),
-            Some(INTERRUPTED_NOTE),
-            "a turn that failed says so, whatever the agent kept"
-        );
-        assert_eq!(
-            closing_note(true, true, true),
-            Some(TRUNCATED_NOTE),
-            "the length limit is what the reader can act on"
-        );
+        assert_eq!(Ending::Finished.note(), None);
+        assert_eq!(Ending::CutShort.note(), Some(CUT_SHORT_NOTE));
+        assert_ne!(Ending::CutShort.note(), Ending::Interrupted.note());
+        assert_ne!(Ending::CutShort.note(), Ending::Truncated.note());
     }
 
     #[test]

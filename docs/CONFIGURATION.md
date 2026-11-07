@@ -1033,13 +1033,17 @@ server runs:
 - for claude, until the work it sent to the background has ended: a
   background command, a monitor, a subagent or a wakeup it scheduled holds the
   turn, and the later answer it leads to is part of the reply. Work that never
-  ends holds the turn until its time runs out.
+  ends, such as a server left running, holds the turn until its time runs out.
+  A chat's agent is stopped up to 30 seconds, and at most a quarter of its
+  time, before the chat itself gives up, so that what it answered is kept.
 
-A claude stopped before it finished, by its time running out while it waited
-or by exiting partway through a later answer, keeps what it had answered. A
-chat shows that answer ending in *[Cut short: the agent was stopped before it
-finished]*, with no error; a task attempt fails with *The coding agent was
-stopped before it finished the task*.
+A chat whose claude was stopped before it finished, by its time running out
+or by exiting partway through a later answer, keeps everything it showed,
+the unfinished part included, followed by *[Cut short: the agent was stopped
+before it finished]*, and reports no error. A task attempt whose claude
+exits partway through a later answer fails with *The coding agent ended
+before it finished the task* and is tried again; one whose claude runs out
+of time fails as any attempt that runs out of time does.
 
 A turn fails once its answer passes 4 MiB, with a failure that begins "the
 agent's prose exceeded"; what the agent's tools print does not count toward

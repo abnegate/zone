@@ -44,6 +44,9 @@ use zone_server::services::route::Route;
 /// Longer than the thirty minutes a coding agent's turn gets by default.
 const CHAT_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// A chat's whole time, short enough for a test to outlast.
+const SHORT_CHAT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// How long the test waits for the spawned agent to report how it was invoked.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -197,6 +200,24 @@ impl Agent {
             format!("#!/bin/sh\ncat > /dev/null\n{lines}\n"),
         )
         .expect("the stand-in that exits mid-turn");
+    }
+
+    /// Turns the stand-in into a claude that answers while a background command it started runs
+    /// on, and never ends.
+    fn answering_over_endless_background_work(&self) {
+        let lines = [
+            json!({"type": "system", "subtype": "init", "session_id": "s"}),
+            json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "bg1", "task_type": "local_bash", "description": "server"}], "session_id": "s"}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}, "parent_tool_use_id": null}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER}),
+        ]
+        .map(|line| format!("echo '{line}'"))
+        .join("\n");
+        std::fs::write(
+            &self.executable,
+            format!("#!/bin/sh\ncat > /dev/null\n{lines}\nexec sleep 600\n"),
+        )
+        .expect("the stand-in whose background work never ends");
     }
 
     /// Turns the stand-in into a Codex that answers at once, lingers after the line that finishes
@@ -383,6 +404,16 @@ impl Harness {
     }
 
     async fn start_on(kind: AgentKind, agent_enabled: bool, sandboxed: bool) -> Self {
+        Self::start_within(kind, agent_enabled, sandboxed, None).await
+    }
+
+    /// A harness whose chats get `timeout`, in place of the configured default.
+    async fn start_within(
+        kind: AgentKind,
+        agent_enabled: bool,
+        sandboxed: bool,
+        timeout: Option<Duration>,
+    ) -> Self {
         let provider = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v2/model/info"))
@@ -423,6 +454,9 @@ impl Harness {
             agent: kind,
             executable: Some(agent.executable.clone()),
         };
+        if let Some(timeout) = timeout {
+            config.chat.timeout = timeout;
+        }
         config.agents = AgentConfig {
             state: directory.path().join(AGENTS),
             codex_api_url: provider.uri(),
@@ -974,7 +1008,12 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
     let LlmBackend::Cli { settings, .. } = agent.llm.backend() else {
         panic!("the turn was moved off its agent");
     };
-    assert_eq!(settings.timeout, CHAT_TIMEOUT);
+    assert!(
+        settings.timeout < CHAT_TIMEOUT
+            && settings.timeout >= CHAT_TIMEOUT - Duration::from_secs(60),
+        "the agent's clock {:?} must stop it shortly before the chat's {CHAT_TIMEOUT:?}",
+        settings.timeout
+    );
 }
 
 const CREATE_PULL_REQUEST: &str = "create_pull_request";
@@ -1234,4 +1273,31 @@ async fn an_answer_the_agent_was_cut_short_after_is_kept_and_marked_cut_short() 
     .await
     .expect("the stored answer");
     assert_eq!(stored, shown, "a reload reads the answer differently");
+}
+
+/// A claude whose background work outlasts the chat's time still keeps the answer it gave: its
+/// own clock stops it before the chat's does, so the answer ends cut short rather than lost to
+/// the chat timing out.
+#[tokio::test]
+async fn an_answer_given_before_background_work_outlasted_the_turn_is_kept_cut_short() {
+    let harness =
+        Harness::start_within(AgentKind::Claude, false, true, Some(SHORT_CHAT_TIMEOUT)).await;
+    harness.agent.answering_over_endless_background_work();
+
+    let frames = harness
+        .turn("Start the server and tell me when it is up.")
+        .await
+        .await
+        .expect("the turn ends");
+
+    successful(&frames);
+    let ended = frames
+        .iter()
+        .find(|frame| frame["type"] == "message_end")
+        .expect("a message_end");
+    assert_eq!(
+        ended["content"],
+        format!("{ANSWER}\n\n[Cut short: the agent was stopped before it finished]"),
+        "{frames:?}"
+    );
 }

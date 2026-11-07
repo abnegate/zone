@@ -120,6 +120,10 @@ fn resetting(resets_at: Option<DateTime<Utc>>) -> String {
     }
 }
 
+/// How long the crate may take to stop a coding agent that ran out of time, drain what it wrote
+/// and hand back the answer it kept.
+const STOPPING: Duration = Duration::from_secs(30);
+
 /// The instance-wide default the environment selects, with every variable its
 /// agent runs with.
 pub fn instance(config: &Config) -> LlmBackend {
@@ -352,6 +356,16 @@ pub fn remedied(backend: &LlmBackend, message: String) -> Remedied {
 /// it runs for, a chat's or a task attempt's, rather than its own default.
 pub fn bounded(backend: LlmBackend, timeout: Duration) -> LlmBackend {
     backend.configured(|settings| settings.with_timeout(timeout))
+}
+
+/// `backend` with a coding agent stopped far enough ahead of a deadline `remaining` away that
+/// the crate has stopped it, and handed back the answer it kept, before that deadline gives up
+/// on the turn. Stopping takes at most [`STOPPING`], and never more than a quarter of the time.
+pub fn ahead_of(backend: LlmBackend, remaining: Duration) -> LlmBackend {
+    bounded(
+        backend,
+        remaining.saturating_sub(STOPPING.min(remaining / 4)),
+    )
 }
 
 /// `backend` with a coding agent run in `directory`, where a chat's tools run, in place of the
@@ -1577,7 +1591,30 @@ mod tests {
     }
 
     #[test]
-    fn production_claude_backends_wait_for_its_background_work() {
+    fn an_agent_is_stopped_ahead_of_a_deadline_with_time_to_keep_its_answer() {
+        for (remaining, expected) in [
+            (
+                Duration::from_secs(30 * 60),
+                Duration::from_secs(30 * 60 - 30),
+            ),
+            (Duration::from_secs(20), Duration::from_secs(15)),
+            (Duration::ZERO, Duration::ZERO),
+        ] {
+            let (_, settings, _) = cli(Ok(ahead_of(
+                LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
+                remaining,
+            )));
+
+            assert_eq!(settings.timeout, expected, "{remaining:?}");
+        }
+        assert!(matches!(
+            ahead_of(LlmBackend::Http, Duration::from_secs(60)),
+            LlmBackend::Http
+        ));
+    }
+
+    #[test]
+    fn production_claude_backends_wait_for_their_background_work() {
         for (reached, backend) in
             production_backends(AgentKind::Claude, CodexSandbox::WorkspaceWrite)
         {

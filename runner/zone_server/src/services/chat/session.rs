@@ -415,7 +415,7 @@ pub async fn build(
     let backend = match &mode {
         Mode::Preview => backend::instance(state.config()),
         Mode::Generation(generation) => backend::effort(
-            backend::bounded(generation.resolved.backend.clone(), settings.timeout),
+            backend::ahead_of(generation.resolved.backend.clone(), settings.timeout),
             chat.reasoning_effort,
         ),
     };
