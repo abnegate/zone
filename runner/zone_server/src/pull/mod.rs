@@ -15,6 +15,7 @@ use futures::StreamExt;
 use partial::Partial;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::task::Poll;
@@ -482,10 +483,17 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
         });
         return;
     };
+    let staged = staging(&target);
     if std::fs::metadata(&target)
         .ok()
         .is_some_and(|metadata| metadata.is_file() && metadata.len() == manifest.size_bytes)
     {
+        let partials = [Partial::of(&target), Partial::of(&staged)];
+        tidy(&target, move || {
+            let [legacy, staged] = partials.each_ref().map(Partial::discard);
+            legacy.and(staged)
+        })
+        .await;
         job.publish(Event::Complete {
             success: true,
             message: "Model installed successfully",
@@ -512,13 +520,8 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
         });
         return;
     }
-    let staged = staging(&target);
-    if let Err(error) = Partial::of(&target).move_to(&Partial::of(&staged)) {
-        tracing::warn!(
-            "Could not carry an interrupted download of {} over: {error}",
-            target.display()
-        );
-    }
+    let (legacy, successor) = (Partial::of(&target), Partial::of(&staged));
+    tidy(&target, move || legacy.move_to(&successor)).await;
     let installed = match fetch_weights(
         &manifest.url,
         &staged,
@@ -537,6 +540,20 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
             message: "Model installed successfully",
         }),
         Err(message) => job.publish(Event::Error { message }),
+    }
+}
+
+/// Run `work` on the interrupted downloads of `target` off the async
+/// workers, since it may remove a part many gigabytes long.
+async fn tidy(target: &Path, work: impl FnOnce() -> io::Result<()> + Send + 'static) {
+    let tidied = tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|error| Err(io::Error::other(error)));
+    if let Err(error) = tidied {
+        tracing::warn!(
+            "Could not tidy an interrupted download of {}: {error}",
+            target.display()
+        );
     }
 }
 
@@ -1105,6 +1122,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_installed_weight_removes_its_interrupted_downloads() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(RELATIVE_PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, BODY).unwrap();
+        let legacy = legacy_part(directory.path());
+        let staged = part(directory.path());
+        for leftover in [&legacy, &staged] {
+            std::fs::write(leftover, b"stale").unwrap();
+            std::fs::write(validator(leftover), ENTITY_TAG).unwrap();
+        }
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(body_pull(
+            directory.path(),
+            "http://127.0.0.1:1/missing.bin".into(),
+        ));
+
+        assert_complete(&registry, "tiny").await;
+        assert_no_legacy_partial(directory.path());
+        for leftover in [staged.clone(), validator(&staged), transfer_lock(&staged)] {
+            assert!(
+                !leftover.exists(),
+                "{} outlived the installed weight",
+                leftover.display()
+            );
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), BODY);
+    }
+
+    #[tokio::test]
     async fn downloads_manifest_weight_into_relative_path() {
         let payload = BODY.to_vec();
         let origin = serve(Router::new().route(
@@ -1662,6 +1709,59 @@ mod tests {
         assert_eq!(requests[0].headers[header::IF_RANGE], ENTITY_TAG);
         assert_no_legacy_partial(directory.path());
         assert!(!part(directory.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn an_empty_staged_part_still_resumes_a_download_from_before_staging() {
+        let server = ranged_origin().await;
+        let url = format!("{}/file.bin", server.uri());
+        let directory = tempfile::tempdir().unwrap();
+        seed_partial(
+            &legacy_part(directory.path()),
+            &BODY[..HEAD_LENGTH],
+            Some(&url),
+        );
+        std::fs::write(part(directory.path()), b"").unwrap();
+        let registry = PullRegistry::new();
+
+        let _subscription = registry.start(body_pull(directory.path(), url));
+
+        assert_complete(&registry, "tiny").await;
+        assert_eq!(
+            std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap(),
+            BODY
+        );
+        let requests = requests_to(&server).await;
+        assert_eq!(requests.len(), 1, "the resume fetched only the tail");
+        assert_eq!(
+            requests[0].headers[header::RANGE],
+            format!("bytes={HEAD_LENGTH}-")
+        );
+        assert_eq!(requests[0].headers[header::IF_RANGE], ENTITY_TAG);
+        assert_no_legacy_partial(directory.path());
+    }
+
+    #[tokio::test]
+    async fn an_unremovable_legacy_part_does_not_keep_the_staged_part() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(RELATIVE_PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, BODY).unwrap();
+        std::fs::create_dir(legacy_part(directory.path())).unwrap();
+        let staged = part(directory.path());
+        seed_partial(&staged, b"stale", Some("http://127.0.0.1:1/missing.bin"));
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(body_pull(
+            directory.path(),
+            "http://127.0.0.1:1/missing.bin".into(),
+        ));
+
+        assert_complete(&registry, "tiny").await;
+        assert!(
+            !staged.exists(),
+            "the staged part outlived the installed weight"
+        );
+        assert!(!validator(&staged).exists());
     }
 
     #[tokio::test]

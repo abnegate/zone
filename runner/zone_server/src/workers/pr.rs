@@ -2510,7 +2510,7 @@ mod publication_tests {
             tokens
                 .iter()
                 .all(|token| matches!(token, Err(GitHubError::Revoked))),
-            "{tokens:?}"
+            "every ordering must be refused as revoked, never answered with the stored token"
         );
         assert!(server.received_requests().await.unwrap().is_empty());
     }
@@ -2532,7 +2532,10 @@ mod publication_tests {
         let repair = repair_conflicts_for_task(&state, task.id).await;
 
         fixture.cleanup().await;
-        assert!(matches!(token, Ok(None)), "{token:?}");
+        assert!(
+            matches!(token, Ok(None)),
+            "no token may be resolved for a pull request in another repository"
+        );
         assert_eq!(synced, ReceptionSyncResult::NoCredentials);
         assert!(
             matches!(&repair, RepairOutcome::Failed(reason) if reason == NO_HOLDER),
