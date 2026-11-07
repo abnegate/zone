@@ -391,7 +391,7 @@ pub fn merged<'a>(
                 // The agent writes before it calls, so what it wrote is counted ahead of the call.
                 biased;
                 event = events.next() => match event {
-                    Some(ended @ (AgentEvent::Limited(_) | AgentEvent::Failed(_))) => {
+                    Some(ended @ (AgentEvent::Limited(_) | AgentEvent::Failed(_) | AgentEvent::CutShort)) => {
                         while let Ok(call) = calls.try_recv() {
                             yield call;
                         }
@@ -626,6 +626,34 @@ mod tests {
             order,
             ["call", "failed"],
             "a turn stops reading at a failure, so a call queued behind it lands in the next login's round"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_that_arrived_before_the_round_was_cut_short_is_yielded_before_it() {
+        let (sender, mut calls) = unbounded_channel();
+        sender
+            .send(AgentEvent::ToolCallStarted {
+                id: "call_1".to_string(),
+                name: "list_chats".to_string(),
+                arguments: "{}".to_string(),
+            })
+            .unwrap();
+        let cut_short = futures::stream::iter(vec![AgentEvent::CutShort]);
+
+        let order: Vec<&str> = merged(cut_short, &mut calls)
+            .map(|event| match event {
+                AgentEvent::CutShort => "cut short",
+                AgentEvent::ToolCallStarted { .. } => "call",
+                _ => "other",
+            })
+            .collect()
+            .await;
+
+        assert_eq!(
+            order,
+            ["call", "cut short"],
+            "a task stops reading where its round was cut short, so a call queued behind it is never recorded"
         );
     }
 

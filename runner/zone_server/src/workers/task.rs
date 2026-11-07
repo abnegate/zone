@@ -126,9 +126,9 @@ const WAITING_ON_ANSWER: &str = "Task run is waiting on a question";
 const WAITING_ON_OUTCOME: &str = "Task run is waiting on something outside its loop";
 const RESUMED_ON_ANSWER: &str = "Task run resumed on an answer";
 const LOST_LEASE: &str = "Task execution lost its lease";
-/// Why an attempt whose coding agent was stopped before it finished failed: its timeout ran out
-/// while it worked, or it exited partway through a later turn.
-const AGENT_CUT_SHORT: &str = "The coding agent was stopped before it finished the task";
+/// Why an attempt whose coding agent ended partway through a later turn failed. An agent that
+/// runs out of the attempt's time fails as a timeout instead, since its time is the attempt's.
+const AGENT_CUT_SHORT: &str = "The coding agent ended before it finished the task";
 const ANSWER_WITHDRAWN: &str = "The claim on the answer was withdrawn before one arrived";
 
 /// Between what one turn said and what the turn after the question said.
@@ -8337,8 +8337,8 @@ mod cli_tests {
         fixture.remove().await;
     }
 
-    /// An agent stopped before it finished has not done what the task asked, so the attempt
-    /// fails rather than handing on the answer it gave before it was stopped.
+    /// An agent that ended partway through a later turn has not done what the task asked, so the
+    /// attempt fails, and is tried again, rather than handing on the answer it gave first.
     #[tokio::test]
     async fn an_attempt_whose_agent_was_cut_short_has_not_finished() {
         let _execution = EXECUTION.lock().await;
@@ -8372,6 +8372,11 @@ mod cli_tests {
         .expect_err("an attempt its agent was cut short in");
 
         assert_eq!(fault.message, AGENT_CUT_SHORT);
+        assert_eq!(
+            fault.failure,
+            Failure::Transient,
+            "an agent that ended early is tried again"
+        );
         fixture.remove().await;
     }
 
