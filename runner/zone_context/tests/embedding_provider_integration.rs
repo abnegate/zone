@@ -262,8 +262,14 @@ async fn test_ollama_validates_url() {
         Err(other) => panic!("Expected InvalidSourceConfig for {host}, got {other:?}"),
         Ok(_) => panic!("{host} should be refused"),
     };
-    assert!(message("ftp://invalid.com").contains("ftp"));
-    assert!(message("not-a-url").contains("not-a-url"));
+    assert_eq!(
+        message("ftp://invalid.com"),
+        "invalid base URL: its scheme is not http or https"
+    );
+    assert_eq!(
+        message("not-a-url"),
+        "invalid base URL: relative URL without a base"
+    );
 }
 
 #[tokio::test]
@@ -272,7 +278,7 @@ async fn an_invalid_url_scheme_is_refused_in_the_crates_wording() {
         EmbeddingProviderFactory::create(&self_hosted("ftp://invalid.com".to_string(), None, None));
     match result {
         Err(ContextError::InvalidSourceConfig(message)) => assert_eq!(
-            message, "invalid base URL ftp://invalid.com: the ftp scheme is not http or https",
+            message, "invalid base URL: its scheme is not http or https",
             "Zone said \"Invalid URL scheme 'ftp': only http and https are supported\""
         ),
         Err(other) => panic!("Expected InvalidSourceConfig, got {other:?}"),

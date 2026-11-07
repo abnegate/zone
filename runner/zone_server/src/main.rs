@@ -151,10 +151,8 @@ async fn main() {
                 );
                 Some(service)
             }
-            Err(e) => {
-                // ContextError's Display leaves API keys out, but an invalid base URL
-                // error names the configured URL.
-                tracing::warn!("Failed to initialize embedding service: {}", e);
+            Err(error) => {
+                tracing::warn!("Failed to initialize embedding service: {}", error);
                 tracing::warn!("Context features will be unavailable");
                 None
             }

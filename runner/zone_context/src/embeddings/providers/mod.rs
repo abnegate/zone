@@ -361,14 +361,17 @@ mod tests {
     }
 
     #[test]
-    fn the_http_engines_refuse_a_host_that_is_not_http() {
+    fn the_http_engines_refuse_a_host_that_is_not_http_without_repeating_it() {
         for engine in [None, Some(EMBEDDING_ENGINE_OPENAI_COMPATIBLE)] {
             let settings = AiSettings {
-                litellm_host: Some("ftp://example.com".to_string()),
+                litellm_host: Some("ftp://user:secret@example.com".to_string()),
                 ..self_hosted(engine, None)
             };
             let message = invalid_source_config(&settings);
-            assert!(message.contains("ftp"), "{message}");
+            assert_eq!(
+                message, "invalid base URL: its scheme is not http or https",
+                "{engine:?}"
+            );
         }
     }
 
