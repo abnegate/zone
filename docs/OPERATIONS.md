@@ -311,12 +311,20 @@ manager's entrypoint gives back to `zone` anything in `zone_manager_agent_state`
 that it does not own, so a volume left by an image whose `zone` had another uid
 recovers on the next start. Images built after the browser libraries landed and
 before these ids were pinned ran as 996. The walk visits every file on each
-start and writes only to the wrong ones.
+start and writes only to the wrong ones. A path it cannot change is named in the
+log and the manager starts anyway, so check the log if one turn still reports
+`Permission denied`.
+
+The walk stays on each volume's filesystem. If you nest a mount from another
+filesystem inside one of these volumes, only the mount's top directory is
+changed, so repair ownership inside it yourself. A nested Docker volume usually
+shares the filesystem and is walked like the rest.
 
 `zone_comfyui_models` is left alone, because `comfyui-model-setup` and a host
-trainer write there too. A training job an image running as 996 queued under
-`models/.zone-train/` stays 996 and unreadable to `zone`, so chown it by hand if
-it still matters.
+trainer write there too. Whatever an image running as 996 created in it stays
+996, including `.zone-train`, `.zone-train-upload` and `loras`, so `zone` cannot
+write there. Chown what the manager created back to 999, and move a host trainer
+you set to 996 back to 999.
 
 ## Pulling models into the bundled Ollama
 

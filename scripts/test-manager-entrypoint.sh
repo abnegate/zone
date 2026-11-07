@@ -18,7 +18,9 @@ docker run --rm --interactive \
     --volume /app/agent-state \
     --volume /app/artifacts \
     --volume /app/embed-cache \
+    --volume /outside \
     --tmpfs /app/agent-state/nested \
+    --tmpfs /app/embed-cache/read-only:ro \
     "$image" sh -s <<'FIXTURE'
 set -eu
 
@@ -72,7 +74,9 @@ settled=$(stat -c '%z' /app/artifacts/settled)
 mkdir -p /app/embed-cache/models
 printf 'weights' > /app/embed-cache/models/weights
 printf 'group' > /app/embed-cache/group-only
-chown "999:996" /app/embed-cache/group-only
+chown '999:996' /app/embed-cache/group-only
+printf 'user' > /app/embed-cache/user-only
+chown '996:999' /app/embed-cache/user-only
 
 printf 'source' > /tmp/repos/clone/run.sh
 chmod 0750 /tmp/repos/clone
@@ -91,7 +95,8 @@ if ! sh /entrypoint.sh sh -c "
     test \"\$(id -u)\" = 999 \
     && cat '$login/credentials' >/dev/null \
     && touch '$login/written' /app/embed-cache/models/written /tmp/repos/clone/written
-"; then
+" 2>/tmp/entrypoint.log; then
+    cat /tmp/entrypoint.log >&2
     fail 'zone could not reach and write what the entrypoint reclaimed'
 fi
 
@@ -104,6 +109,9 @@ assert_owner /app/embed-cache "$zone"
 assert_owner /app/embed-cache/models "$zone"
 assert_owner /app/embed-cache/models/weights "$zone"
 assert_owner /app/embed-cache/group-only "$zone"
+assert_owner /app/embed-cache/user-only "$zone"
+grep -qF '/app/embed-cache/read-only' /tmp/entrypoint.log \
+    || fail 'the entrypoint should name the path it could not reclaim'
 assert_owner /tmp/repos "$zone"
 assert_owner /tmp/repos/clone/run.sh "$zone"
 
@@ -133,7 +141,8 @@ assert_owner /app/workspace/untouched "$foreign"
 
 rm -rf /tmp/repos
 ln -s /outside/directory /tmp/repos
-if ! sh /entrypoint.sh true; then
+if ! sh /entrypoint.sh true 2>/tmp/entrypoint.log; then
+    cat /tmp/entrypoint.log >&2
     fail 'the entrypoint should start when a reclaimed path is a symlink'
 fi
 assert_owner /tmp/repos 0:0
@@ -144,5 +153,5 @@ if [ "$failures" -ne 0 ]; then
     printf '%s\n' "$failures failed" >&2
     exit 1
 fi
-printf '%s\n' 'The entrypoint recovers every volume and stays inside them.'
+printf '%s\n' 'The entrypoint recovers every volume and follows no symlink out of them.'
 FIXTURE
