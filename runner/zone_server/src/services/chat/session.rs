@@ -1451,9 +1451,17 @@ mod tests {
             Some(ReasoningEffort::Max),
             "the agent is told the chat's effort"
         );
-        assert_eq!(
-            settings.timeout,
+        let LlmBackend::Cli {
+            settings: budgeted, ..
+        } = backend::ahead_of(
+            LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
             state.config().chat.timeout,
+        )
+        else {
+            panic!("a CLI backend stays one");
+        };
+        assert_eq!(
+            settings.timeout, budgeted.timeout,
             "the effort leaves the chat's budget in place"
         );
 
