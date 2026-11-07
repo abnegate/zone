@@ -1029,7 +1029,17 @@ server runs:
   turn, 30 minutes by default, what is left of its hour for a task attempt,
   and 30 minutes for any other run, such as a review; the crate's own
   five-minute default never applies. A task attempt whose CLI runs out of time
-  fails without a retry.
+  fails without a retry;
+- for claude, until the work it sent to the background has ended: a
+  background command, a monitor, a subagent or a wakeup it scheduled holds the
+  turn, and the later answer it leads to is part of the reply. Work that never
+  ends holds the turn until its time runs out.
+
+A claude stopped before it finished, by its time running out while it waited
+or by exiting partway through a later answer, keeps what it had answered. A
+chat shows that answer ending in *[Cut short: the agent was stopped before it
+finished]*, with no error; a task attempt fails with *The coding agent was
+stopped before it finished the task*.
 
 A turn fails once its answer passes 4 MiB, with a failure that begins "the
 agent's prose exceeded"; what the agent's tools print does not count toward
