@@ -18,9 +18,15 @@
 //!   refresh its OAuth token during the run, the rotated token replaces the host's, and a host
 //!   claude refreshing at the same moment can lose that race and be signed out. It skips when
 //!   `claude auth status` reports the item signed out.
-//! - The codex test copies `~/.codex/auth.json` and skips when its last refresh is a week old,
-//!   since a refresh inside the copy would rotate the token and sign the host's own codex out. It
-//!   fails when the host's `auth.json` changed during the run.
+//! - The codex test copies `~/.codex/auth.json` into the run and into each login home it makes.
+//!   A refresh inside a copy rotates the refresh token, leaving the host's unchanged `auth.json`
+//!   with a spent one, which signs the host's own codex out. The test skips when the host's last
+//!   refresh is a week old, a heuristic for a token codex is likely to refresh, not a guarantee.
+//!   After the run, whether it passed or not, it fails when any copy differs from what was copied,
+//!   which catches a rotation inside the copies, and keeps the newest changed copy at
+//!   [`ROTATED`] under the run root, readable by its owner only, for the host's sign-in to be
+//!   restored from. It also fails when the host's own `auth.json` changed during the run, which
+//!   catches the host's own codex refreshing meanwhile and says nothing of the copies.
 //! - The claude organization login test runs only when `CLAUDE_CODE_OAUTH_TOKEN` holds a token
 //!   from `claude setup-token`, and only that test's copy is handed the token.
 //!
@@ -35,11 +41,11 @@ use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use abnegate_agent_cli::login::codex::CREDENTIALS;
 use abnegate_agent_cli::login::{Cli, Status};
@@ -113,6 +119,8 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(240);
 const STOP_WITHIN: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(100);
 const EXECUTABLE: u32 = 0o755;
+const PRIVATE: u32 = 0o600;
+const PERMISSIONS: u32 = 0o777;
 
 const WRAPPERS: &str = "bin";
 const PIDFILE: &str = "pid";
@@ -120,12 +128,13 @@ const NAMES: &str = "names";
 const HOMES: &str = "homes";
 const HOME_A: &str = "a";
 const HOME_B: &str = "b";
-const AUTH: &str = "auth.json";
 const AGENTS: &str = "agents";
 const PROBE: &str = "probe";
 const PROJECT: &str = "project";
 const SESSIONS: &str = "sessions";
 const SKIPPED: &str = "skipped";
+/// Where a copy of codex's sign-in that codex rotated during the run is kept, under the run root.
+const ROTATED: &str = "rotated-codex-auth.json";
 
 const PROBED_TOOL: &str = "list_files";
 const RECALL: &str = "What was the word I asked you to remember? Reply with only that word.";
@@ -297,11 +306,67 @@ fn codex_credentials() -> PathBuf {
     host_home().join(HOST_CODEX_HOME).join(CREDENTIALS)
 }
 
-/// The SHA-256 of the host's own codex sign-in, or `None` when it cannot be read.
-fn codex_fingerprint() -> Option<Vec<u8>> {
-    fs::read(codex_credentials())
+/// The SHA-256 of the file at `path`, or `None` when it cannot be read.
+fn fingerprint(path: &Path) -> Option<Vec<u8>> {
+    fs::read(path)
         .ok()
-        .map(|credentials| Sha256::digest(credentials).to_vec())
+        .map(|contents| Sha256::digest(contents).to_vec())
+}
+
+/// Write `contents` to a new file at `path` that only its owner can read, replacing any there.
+fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(PRIVATE)
+        .open(path)?
+        .write_all(contents)
+}
+
+/// The copies of codex's sign-in under `run` whose SHA-256 is no longer `original`, newest first.
+fn rotated_copies(run: &Path, original: &[u8]) -> Vec<PathBuf> {
+    let mut rotated: Vec<(SystemTime, PathBuf)> = files(run)
+        .into_iter()
+        .filter(|path| path.file_name().is_some_and(|name| name == CREDENTIALS))
+        .filter(|path| fingerprint(path).as_deref() != Some(original))
+        .map(|path| {
+            let modified = fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            (modified, path)
+        })
+        .collect();
+    rotated.sort_by(|left, right| right.cmp(left));
+    rotated.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Why the run must fail when codex rotated its sign-in inside any copy under `run`, after
+/// keeping the newest rotated copy at `kept`; `None` when every copy still holds `original`.
+fn rotation(run: &Path, original: &[u8], kept: &Path) -> Option<String> {
+    let rotated = rotated_copies(run, original);
+    let newest = rotated.first()?;
+    let restore = match fs::read(newest).and_then(|contents| write_private(kept, &contents)) {
+        Ok(()) => format!(
+            "restore it with `install -m 600 '{}' '{}'`, or run `codex login`",
+            kept.display(),
+            codex_credentials().display()
+        ),
+        Err(error) => format!(
+            "keeping the rotated copy at {} failed ({error}), so run `codex login`",
+            kept.display()
+        ),
+    };
+    Some(format!(
+        "codex rotated its sign-in inside {} of the run's copies of {CREDENTIALS} ({rotated:?}): \
+         the host's {} still holds the refresh token the copy spent, so the host's codex is \
+         probably signed out; {restore}",
+        rotated.len(),
+        codex_credentials().display()
+    ))
 }
 
 /// Say a test skipped on the process's real standard error, which the test harness does not
@@ -403,7 +468,7 @@ fn codex_refresh_is_stale() -> Option<String> {
 
 /// Prepare a run for `agent` and run `test` in a copy of this binary given only the [`KEPT`]
 /// variables and its temporary homes, then assert the host's own homes hold nothing of it and,
-/// for codex, that the host's own sign-in is unchanged.
+/// for codex, that no copy of its sign-in was rotated and the host's own sign-in is unchanged.
 fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
     let before = Listing::take();
     let unready = match (agent, sign_in) {
@@ -419,7 +484,6 @@ fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
         skipped(&reason);
         return;
     }
-    let codex_before = (agent == AgentKind::Codex).then(codex_fingerprint);
     let root = env::var_os(ROOT).map_or_else(env::temp_dir, PathBuf::from);
     fs::create_dir_all(&root).expect("the run root");
     let run = TempDir::new_in(&root).expect("a run directory");
@@ -427,6 +491,7 @@ fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
     for directory in [HOME_A, HOME_B, AGENTS, PROBE] {
         fs::create_dir_all(run.path().join(directory)).expect("a run subdirectory");
     }
+    let mut codex_original = None;
 
     let mut command = Command::new(env::current_exe().expect("this test binary"));
     command.env_clear().args([
@@ -475,8 +540,10 @@ fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
             );
         }
         (AgentKind::Codex, _) => {
-            fs::copy(codex_credentials(), run.path().join(AUTH))
+            let credentials = fs::read(codex_credentials()).expect("codex's sign-in");
+            write_private(&run.path().join(CREDENTIALS), &credentials)
                 .expect("a copy of codex's sign-in");
+            codex_original = Some(Sha256::digest(&credentials).to_vec());
         }
         _ => {}
     }
@@ -488,11 +555,15 @@ fn parent(agent: AgentKind, sign_in: SignIn, test: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
     println!("{printed}");
-    if let Some(before) = codex_before {
+    if let Some(original) = codex_original {
+        if let Some(failure) = rotation(run.path(), &original, &root.join(ROTATED)) {
+            panic!("{failure}");
+        }
         assert!(
-            codex_fingerprint() == before,
-            "{} changed while the codex lanes ran: the host user's codex login may have been \
-             rotated and signed out; run `codex login` if the host's codex no longer works",
+            fingerprint(&codex_credentials()).as_deref() == Some(original.as_slice()),
+            "{} changed while the codex lanes ran: the host's own codex refreshed its sign-in \
+             meanwhile, or something else rewrote it; run `codex login` if the host's codex no \
+             longer works",
             codex_credentials().display()
         );
     }
@@ -931,7 +1002,9 @@ async fn login(state: &AppState, run: &Run, organization: Uuid, label: &str) -> 
                 .agents
                 .create_login_home(organization, AgentKind::Codex, row.id)
                 .expect("the login's home");
-            fs::copy(run.root.join(AUTH), home.join(CREDENTIALS)).expect("the login's sign-in");
+            let credentials =
+                fs::read(run.root.join(CREDENTIALS)).expect("the run's copy of the sign-in");
+            write_private(&home.join(CREDENTIALS), &credentials).expect("the login's sign-in");
             Login::Codex { home }
         }
         _ => Login::Claude {
@@ -1106,5 +1179,60 @@ fn a_claude_organization_login_runs_moves_stops_and_resumes_through_zone() {
         AgentKind::Claude,
         SignIn::Organization,
         "agent_cli_live::a_claude_organization_login_runs_moves_stops_and_resumes_through_zone",
+    );
+}
+
+#[test]
+fn a_codex_sign_in_rotated_inside_a_copy_fails_the_run_and_is_kept_private() {
+    let run = TempDir::new().expect("a run directory");
+    let root = TempDir::new().expect("a run root");
+    let kept = root.path().join(ROTATED);
+    let login = run.path().join(AGENTS).join("organization").join("login");
+    fs::create_dir_all(&login).expect("a login home");
+    let original = br#"{"tokens":"original"}"#;
+    let digest = Sha256::digest(original).to_vec();
+    let run_copy = run.path().join(CREDENTIALS);
+    let login_copy = login.join(CREDENTIALS);
+    write_private(&run_copy, original).expect("the run's copy");
+    write_private(&login_copy, original).expect("the login's copy");
+    assert_eq!(
+        rotation(run.path(), &digest, &kept),
+        None,
+        "unchanged copies fail the run"
+    );
+    assert!(!kept.exists(), "an unchanged copy was kept");
+
+    let older = br#"{"tokens":"rotated-first"}"#;
+    let newest = br#"{"tokens":"rotated-last"}"#;
+    write_private(&run_copy, older).expect("the run's rotated copy");
+    fs::File::options()
+        .write(true)
+        .open(&run_copy)
+        .and_then(|file| file.set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+        .expect("an older rotation");
+    write_private(&login_copy, newest).expect("the login's rotated copy");
+
+    let failure = rotation(run.path(), &digest, &kept).expect("a rotated copy fails the run");
+    assert!(
+        failure.contains("inside 2 of the run's copies"),
+        "the failure does not count both rotated copies: {failure}"
+    );
+    assert!(
+        failure.contains(&format!("install -m 600 '{}'", kept.display())),
+        "the failure does not say how to restore the host's sign-in: {failure}"
+    );
+    assert_eq!(
+        fs::read(&kept).expect("the kept copy"),
+        newest,
+        "the newest rotated copy was not the one kept"
+    );
+    assert_eq!(
+        fs::metadata(&kept)
+            .expect("the kept copy's metadata")
+            .permissions()
+            .mode()
+            & PERMISSIONS,
+        PRIVATE,
+        "the kept copy is readable by others"
     );
 }
