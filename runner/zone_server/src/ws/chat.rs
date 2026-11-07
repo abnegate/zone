@@ -4083,7 +4083,12 @@ async fn handle_chat_generation(
                 .as_mut()
                 .and_then(|pinned| pinned.restart(llm_client.backend().clone()))
         {
-            llm_client = llm_client.with_backend(backend);
+            llm_client = equipped(
+                llm_client.with_backend(backend),
+                agent_tools.as_ref(),
+                &observer,
+                sandboxed,
+            );
             replay = whole.clone();
             context = match continuing {
                 true => handover::replayed(&whole),
@@ -6456,6 +6461,59 @@ cat 'DIR/reply.jsonl'
                 let second = second.expect("the replay recorded its session");
                 assert_eq!(second.id, fresh);
                 assert_eq!(second.prompt, first.prompt);
+            }
+
+            #[tokio::test]
+            async fn a_refused_resume_replays_with_the_tools_and_the_watch_of_the_turn() {
+                const SURVEY: &str = "toolu_01Survey";
+                let chat = Chat::on_claude().await;
+                sqlx::query(
+                    "UPDATE chats SET agent_enabled = TRUE, agent_sandboxed = FALSE WHERE id = $1",
+                )
+                .bind(chat.organization.chat)
+                .execute(&chat.organization.pool)
+                .await
+                .expect("an agentic, unsandboxed chat");
+
+                chat.ask(FIRST).await;
+                std::fs::write(
+                    chat.agent.directory.path().join("reply.jsonl"),
+                    subagents_until_the_first_result(),
+                )
+                .expect("the stand-in's reply");
+                chat.agent.refuse();
+                chat.ask(SECOND).await;
+                let runs = chat.agent.runs();
+                let stored =
+                    db::chat_subagents::list(&chat.organization.pool, chat.organization.chat)
+                        .await
+                        .expect("the chat's subagents");
+                chat.remove().await;
+
+                let [served, _, replayed] = runs.as_slice() else {
+                    panic!("expected three sessioned runs, got {}", runs.len());
+                };
+                assert!(
+                    served.flag("--mcp-config").is_some(),
+                    "the chat serves its agent tools: {:?}",
+                    served.arguments
+                );
+                assert!(
+                    replayed.flag("--mcp-config").is_some(),
+                    "the replay lost zone's tools: {:?}",
+                    replayed.arguments
+                );
+                for flag in ["--tools", "--permission-prompt-tool"] {
+                    assert_eq!(
+                        replayed.flag(flag),
+                        served.flag(flag),
+                        "the replay changed {flag}"
+                    );
+                }
+                assert!(
+                    stored.iter().any(|row| row.external_id == SURVEY),
+                    "nothing watched the replay's subagents: {stored:?}"
+                );
             }
 
             /// Claude's subagents fixture up to the turn's first result, which
