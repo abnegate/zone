@@ -303,7 +303,7 @@ const BARE_STREAM_LABEL = /^std(?:out|err):(?:\s*\(\d+ lines\))?$/;
 /// record nothing here can summarise is left out rather than shown as braces,
 /// and a denial the label already states is not said twice.
 function toolDetail(call: ToolCallRecord, state: ToolState, titles: Titles): string {
-  if (state === 'denied') return '';
+  if (state === 'denied' && call.name in TOOL_ACTIONS) return '';
   if (!call.success || call.pending || call.approval === 'pending') return call.detail;
   const derive = DETAIL_FROM_ARGUMENTS[call.name];
   const args = derive ? parseArguments(call.arguments) : null;

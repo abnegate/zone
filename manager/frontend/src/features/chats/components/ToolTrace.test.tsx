@@ -494,6 +494,13 @@ describe('ToolTrace', () => {
     );
   });
 
+  it('keeps the denial in the detail of a tool whose label cannot say it', () => {
+    render(<ToolTrace calls={[call({ name: 'Bash', success: false, detail: DENIED_DETAIL })]} />);
+
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+    expect(screen.getByText(DENIED_DETAIL)).toBeInTheDocument();
+  });
+
   it('names a tool it does not know the same way in every state', () => {
     render(
       <ToolTrace
