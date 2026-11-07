@@ -238,17 +238,21 @@ impl Scratch {
         id
     }
 
-    /// A GitHub App of `tenant`'s organization holding `secret` in each of its sealed columns.
-    async fn github_app(&self, tenant: &Tenant, secret: &str) -> Uuid {
+    /// A GitHub App of `tenant`'s organization holding `secrets` in its client secret,
+    /// private key and webhook secret columns.
+    async fn github_app(&self, tenant: &Tenant, secrets: [&str; 3]) -> Uuid {
+        let [client_secret, private_key, webhook_secret] = secrets;
         let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO github_apps(id,organization_id,app_id,slug,name,owner_login,owner_type,html_url,client_id,client_secret,private_key,webhook_secret) \
-             VALUES($1,$2,$3,'zone-app','Zone','abnegate','Organization','https://github.com/apps/zone-app','Iv1.client',$4,$4,$4)",
+             VALUES($1,$2,$3,'zone-app','Zone','abnegate','Organization','https://github.com/apps/zone-app','Iv1.client',$4,$5,$6)",
         )
         .bind(id)
         .bind(tenant.organization)
         .bind(rand::random_range(1..i64::MAX))
-        .bind(secret)
+        .bind(client_secret)
+        .bind(private_key)
+        .bind(webhook_secret)
         .execute(&self.pool)
         .await
         .unwrap();
@@ -980,7 +984,14 @@ async fn counted_columns_are_counted_and_never_written() {
         .source(&tenant, None, &github_app("-----BEGIN PRIVATE KEY-----"))
         .await;
     scratch
-        .github_app(&tenant, &envelope("app-secret", &key))
+        .github_app(
+            &tenant,
+            [
+                &envelope("app-client-secret", &key),
+                "-----BEGIN PRIVATE KEY-----",
+                &legacy("app-webhook-secret", &key),
+            ],
+        )
         .await;
     let backup = scratch.backup(&[]).await;
     let before = scratch.snapshot().await;
@@ -1012,9 +1023,17 @@ async fn counted_columns_are_counted_and_never_written() {
         report.outcome(Column::GithubAppPrivateKey, Outcome::Reported),
         1
     );
-    for column in APP_COLUMNS {
-        assert_eq!(report.count(column, Class::Envelope), 1, "{column}");
-        assert_eq!(report.outcome(column, Outcome::Skipped), 1, "{column}");
+    let app_classes = [
+        (Column::AppClientSecret, Class::Envelope, Outcome::Skipped),
+        (Column::AppPrivateKey, Class::Plaintext, Outcome::Reported),
+        (Column::AppWebhookSecret, Class::Legacy, Outcome::Reported),
+    ];
+    for (column, class, outcome) in app_classes {
+        for other in Class::ALL {
+            let expected = u64::from(*other == class);
+            assert_eq!(report.count(column, *other), expected, "{column} {other}");
+        }
+        assert_eq!(report.outcome(column, outcome), 1, "{column}");
     }
     assert_eq!(report.written(), 0);
     scratch.cleanup().await;
@@ -1366,7 +1385,14 @@ async fn github_app_secrets_sealed_under_another_key_refuse_the_run() {
     let mistaken = key();
     let tenant = scratch.tenant().await;
     scratch
-        .github_app(&tenant, &envelope("app-secret", &mistaken))
+        .github_app(
+            &tenant,
+            [
+                &envelope("app-client-secret", &mistaken),
+                &envelope("app-private-key", &mistaken),
+                &envelope("app-webhook-secret", &mistaken),
+            ],
+        )
         .await;
     scratch
         .project(&tenant, Some("ghp_plaintext_project"))
@@ -1385,6 +1411,17 @@ async fn github_app_secrets_sealed_under_another_key_refuse_the_run() {
     }
     assert_eq!(scratch.snapshot().await, before, "nothing was written");
 
+    for (column, credential) in [
+        (Column::AppClientSecret, "app-client-secret"),
+        (Column::AppPrivateKey, "app-private-key"),
+        (Column::AppWebhookSecret, "app-webhook-secret"),
+    ] {
+        let rows = column.page(&scratch.pool, None, BATCH_SIZE).await.unwrap();
+        match rows.as_slice() {
+            [(_, value)] => assert_eq!(opened(value, &mistaken), credential, "{column}"),
+            rows => panic!("{column} reads one value: {} rows", rows.len()),
+        }
+    }
     let report = scratch.run(&mistaken, true, backup.path()).await;
     for column in APP_COLUMNS {
         assert_eq!(report.count(column, Class::Envelope), 1, "{column}");

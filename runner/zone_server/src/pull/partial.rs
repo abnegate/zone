@@ -84,8 +84,9 @@ impl Partial {
     }
 
     fn remove(&self) -> io::Result<()> {
-        remove(&self.part)?;
-        remove(&self.validator())
+        let part = remove(&self.part);
+        let validator = remove(&self.validator());
+        part.and(validator)
     }
 }
 

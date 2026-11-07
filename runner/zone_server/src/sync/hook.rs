@@ -392,7 +392,7 @@ mod tests {
             }
         }
 
-        async fn sync(&self) -> SyncConfigRow {
+        async fn sync(&self, webhook: Option<u64>) -> SyncConfigRow {
             let workspace = seed_workspace(&self.pool, self.organization).await;
             let installation = installed(
                 &self.pool,
@@ -418,11 +418,14 @@ mod tests {
                 project.id,
                 "github",
                 true,
-                json!({
-                    "external_repo_url": "http://127.0.0.1/acme/project",
-                    HOOK_ID: WEBHOOK,
-                    HOOK_SIGNED: true,
-                }),
+                match webhook {
+                    Some(id) => json!({
+                        "external_repo_url": "http://127.0.0.1/acme/project",
+                        HOOK_ID: id,
+                        HOOK_SIGNED: true,
+                    }),
+                    None => json!({"external_repo_url": "http://127.0.0.1/acme/project"}),
+                },
                 None,
             )
             .await
@@ -453,7 +456,7 @@ mod tests {
         let hooked = Hooked::new().await;
         issuing(&hooked.github, hooked.number, "ghs_hooktoken", 1).await;
         answering(&hooked.github, "PATCH", "ghs_hooktoken", 200).await;
-        let row = hooked.sync().await;
+        let row = hooked.sync(Some(WEBHOOK)).await;
 
         let hook = Hook::of(&hooked.state, &row)
             .await
@@ -472,7 +475,7 @@ mod tests {
         issuing(&hooked.github, hooked.number, "ghs_reminted", 1).await;
         answering(&hooked.github, "PATCH", "ghs_refused", 401).await;
         answering(&hooked.github, "PATCH", "ghs_reminted", 200).await;
-        let row = hooked.sync().await;
+        let row = hooked.sync(Some(WEBHOOK)).await;
 
         let hook = Hook::of(&hooked.state, &row)
             .await
@@ -482,6 +485,34 @@ mod tests {
 
         hooked.cleanup().await;
         assert_eq!(signed.unwrap().id, row.id);
+    }
+
+    #[tokio::test]
+    async fn a_refused_installation_token_is_minted_again_to_register_the_webhook() {
+        let hooked = Hooked::new().await;
+        issuing_once(&hooked.github, hooked.number, "ghs_refused").await;
+        issuing(&hooked.github, hooked.number, "ghs_reminted", 1).await;
+        for (token, status) in [("ghs_refused", 401), ("ghs_reminted", 201)] {
+            Mock::given(method("POST"))
+                .and(path("/repos/acme/project/hooks"))
+                .and(header("authorization", format!("Bearer {token}").as_str()))
+                .respond_with(ResponseTemplate::new(status).set_body_json(json!({"id": WEBHOOK})))
+                .expect(1)
+                .mount(&hooked.github)
+                .await;
+        }
+        let row = hooked.sync(None).await;
+
+        let hook = Hook::of(&hooked.state, &row)
+            .await
+            .unwrap()
+            .expect("an installation project has a credential for its webhook");
+        let signed = hook.sign_with(&hooked.state, row, "first").await;
+
+        hooked.cleanup().await;
+        let signed = signed.unwrap();
+        assert_eq!(id_of(&signed), Some(WEBHOOK));
+        assert!(registered(&signed));
     }
 
     #[tokio::test]
@@ -498,7 +529,7 @@ mod tests {
                 .mount(&hooked.github)
                 .await;
         }
-        let row = hooked.sync().await;
+        let row = hooked.sync(Some(WEBHOOK)).await;
 
         remove(&hooked.state, &row).await;
         let forgotten = sync_config::get_sync_config(&hooked.pool, row.id)

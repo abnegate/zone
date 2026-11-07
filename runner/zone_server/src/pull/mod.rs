@@ -490,7 +490,8 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
     {
         let partials = [Partial::of(&target), Partial::of(&staged)];
         tidy(&target, move || {
-            partials.iter().try_for_each(Partial::discard)
+            let [legacy, staged] = partials.each_ref().map(Partial::discard);
+            legacy.and(staged)
         })
         .await;
         job.publish(Event::Complete {
@@ -1708,6 +1709,59 @@ mod tests {
         assert_eq!(requests[0].headers[header::IF_RANGE], ENTITY_TAG);
         assert_no_legacy_partial(directory.path());
         assert!(!part(directory.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn an_empty_staged_part_still_resumes_a_download_from_before_staging() {
+        let server = ranged_origin().await;
+        let url = format!("{}/file.bin", server.uri());
+        let directory = tempfile::tempdir().unwrap();
+        seed_partial(
+            &legacy_part(directory.path()),
+            &BODY[..HEAD_LENGTH],
+            Some(&url),
+        );
+        std::fs::write(part(directory.path()), b"").unwrap();
+        let registry = PullRegistry::new();
+
+        let _subscription = registry.start(body_pull(directory.path(), url));
+
+        assert_complete(&registry, "tiny").await;
+        assert_eq!(
+            std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap(),
+            BODY
+        );
+        let requests = requests_to(&server).await;
+        assert_eq!(requests.len(), 1, "the resume fetched only the tail");
+        assert_eq!(
+            requests[0].headers[header::RANGE],
+            format!("bytes={HEAD_LENGTH}-")
+        );
+        assert_eq!(requests[0].headers[header::IF_RANGE], ENTITY_TAG);
+        assert_no_legacy_partial(directory.path());
+    }
+
+    #[tokio::test]
+    async fn an_unremovable_legacy_part_does_not_keep_the_staged_part() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join(RELATIVE_PATH);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, BODY).unwrap();
+        std::fs::create_dir(legacy_part(directory.path())).unwrap();
+        let staged = part(directory.path());
+        seed_partial(&staged, b"stale", Some("http://127.0.0.1:1/missing.bin"));
+        let registry = PullRegistry::new();
+        let _subscription = registry.start(body_pull(
+            directory.path(),
+            "http://127.0.0.1:1/missing.bin".into(),
+        ));
+
+        assert_complete(&registry, "tiny").await;
+        assert!(
+            !staged.exists(),
+            "the staged part outlived the installed weight"
+        );
+        assert!(!validator(&staged).exists());
     }
 
     #[tokio::test]
