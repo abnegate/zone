@@ -14,6 +14,7 @@ pub mod connect;
 pub mod context;
 pub mod devices;
 pub mod error;
+pub mod github;
 pub mod health;
 pub mod host_mounts;
 pub mod invitations;
@@ -28,20 +29,25 @@ pub mod webhooks;
 pub mod workspace_themes;
 pub mod workspaces;
 
-use axum::http::{Method, header};
+use axum::body::Body;
+use axum::http::{Method, Request, header};
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, MatchedPath},
     middleware,
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
+use tracing::Span;
 
 use crate::auth::{ModelInstaller, require_auth};
 use crate::config::AllowedOrigins;
+use crate::services::github_app::manifest::{MANIFEST_CALLBACK_PATH, SETUP_CALLBACK_PATH};
 use crate::state::AppState;
 use crate::ws;
+
+const UNMATCHED_PATH: &str = "unmatched";
 
 /// Create the main API router
 pub fn create_router(state: AppState) -> Router {
@@ -123,7 +129,17 @@ pub fn create_router(state: AppState) -> Router {
         .route("/ws/pull", get(ws::handle_pull_ws))
         .route("/ws/chats/{chat_id}", get(ws::handle_chat_ws))
         .route("/ws/tasks/runs/{run_id}", get(ws::handle_task_ws))
-        .route("/ws/context/{gathering_id}", get(ws::handle_context_ws));
+        .route("/ws/context/{gathering_id}", get(ws::handle_context_ws))
+        // GitHub's redirects back after registering or installing an App
+        // (public - the single-use state authenticates them)
+        .route(
+            MANIFEST_CALLBACK_PATH,
+            get(github::callbacks::manifest).head(github::callbacks::refuse),
+        )
+        .route(
+            SETUP_CALLBACK_PATH,
+            get(github::callbacks::setup).head(github::callbacks::refuse),
+        );
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
@@ -180,6 +196,39 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/invitations/{token}/accept",
             post(invitations::accept_invitation),
+        )
+        // Organization GitHub connection
+        .route(
+            "/api/organizations/{org_id}/github",
+            get(github::connection::get),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/apps",
+            post(github::connection::register),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/apps/{app_id}",
+            delete(github::connection::delete_app),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/apps/{app_id}/installations",
+            post(github::installations::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/installations/sync",
+            post(github::installations::sync),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/installations/{id}",
+            delete(github::installations::delete),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/repositories",
+            get(github::repositories::list),
+        )
+        .route(
+            "/api/organizations/{org_id}/github/installations/{id}/repositories/{owner}/{repository}/branches",
+            get(github::repositories::branches),
         )
         // Workspaces (nested under organizations)
         .route(
@@ -484,17 +533,132 @@ pub fn create_router(state: AppState) -> Router {
         .merge(public_routes)
         .merge(protected_routes)
         .layer(middleware::from_fn(crate::metrics::track_http))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(span))
         .layer(cors)
         .with_state(state)
+}
+
+/// The matched route template, never the raw path or query, which can carry
+/// a token or a GitHub callback's code and state.
+fn span(request: &Request<Body>) -> Span {
+    let path = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or(UNMATCHED_PATH, MatchedPath::as_str);
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        path = %path,
+        version = ?request.version(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::http::StatusCode;
+    use std::io;
+    use std::sync::{Arc, Mutex};
     use tower::ServiceExt;
+
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the capture is writable")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn spanned(route: &str, uri: &str) -> String {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let _capturing = tracing::subscriber::set_default(subscriber);
+        let router = Router::new()
+            .route(route, get(|| async {}).post(|| async {}))
+            .layer(TraceLayer::new_for_http().make_span_with(span));
+
+        router
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("a request"),
+            )
+            .await
+            .expect("the router answers");
+
+        String::from_utf8_lossy(&captured.0.lock().expect("the capture is readable")).into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_request_span_records_the_path_and_never_the_query() {
+        let logs = spanned(
+            MANIFEST_CALLBACK_PATH,
+            &format!("{MANIFEST_CALLBACK_PATH}?code=secret-code&state=secret-state"),
+        )
+        .await;
+
+        assert!(
+            logs.contains(&format!("path={MANIFEST_CALLBACK_PATH}")),
+            "{logs}"
+        );
+        assert!(logs.contains("method=POST"), "{logs}");
+        for (case, forbidden) in [
+            ("the code", "secret-code"),
+            ("the state", "secret-state"),
+            ("the query", "?"),
+        ] {
+            assert!(!logs.contains(forbidden), "{case} reached the logs: {logs}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_span_records_the_route_template_and_never_the_raw_path() {
+        let logs = spanned(
+            "/api/invitations/{token}/accept",
+            "/api/invitations/secret-invitation-token/accept",
+        )
+        .await;
+
+        assert!(
+            logs.contains("path=/api/invitations/{token}/accept"),
+            "{logs}"
+        );
+        assert!(
+            !logs.contains("secret-invitation-token"),
+            "the raw path reached the logs: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unrouted_request_span_records_a_placeholder_and_never_the_raw_path() {
+        let logs = spanned(
+            "/api/invitations/{token}/accept",
+            "/api/unrouted/secret-path-token",
+        )
+        .await;
+
+        assert!(logs.contains(&format!("path={UNMATCHED_PATH}")), "{logs}");
+        assert!(
+            !logs.contains("secret-path-token"),
+            "the raw path reached the logs: {logs}"
+        );
+    }
 
     fn router(origins: &[&str]) -> Router {
         router_with_credentials(origins, false)

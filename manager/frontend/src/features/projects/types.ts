@@ -1,3 +1,5 @@
+import type { GitHubInstallationStatus } from '../github/installationStatus';
+
 export type ProjectStatus = 'active' | 'on_hold' | 'cancelled';
 
 export interface Project {
@@ -15,6 +17,9 @@ export interface Project {
   auto_paused_reason?: string | null;
   /** When every agentic task was merged, when it was. */
   auto_completed_at?: string | null;
+  github_installation_id?: string | null;
+  github_installation_status?: GitHubInstallationStatus | null;
+  github_account_login?: string | null;
   position: number;
   last_used_at?: string | null;
   created_at: string;

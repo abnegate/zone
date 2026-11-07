@@ -243,12 +243,18 @@ class Client {
     return projectsApi.unlinkSource(projectId);
   }
 
-  // Deprecated GitHub-specific methods (kept for backward compatibility)
-  async linkGitHub(projectId: string, repoUrl: string): Promise<Project> {
+  async linkGitHub(
+    projectId: string,
+    repositoryUrl: string,
+    githubInstallationId?: string
+  ): Promise<Project> {
     const response = await fetch(`${API_BASE}/api/projects/${projectId}/github`, {
-      method: 'PUT',
+      method: 'POST',
       headers: this.getHeaders(),
-      body: JSON.stringify({ repo_url: repoUrl }),
+      body: JSON.stringify({
+        repo_url: repositoryUrl,
+        ...(githubInstallationId && { github_installation_id: githubInstallationId }),
+      }),
     });
     if (!response.ok) {
       throw new Error(`Failed to link GitHub: ${response.status}`);

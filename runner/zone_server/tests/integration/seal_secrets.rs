@@ -32,9 +32,6 @@ use zone_server::db::sealing::Report;
 use zone_server::db::sealing::Sealer;
 use zone_server::db::sealing::SealingError;
 use zone_server::db::sealing::Table;
-use zone_server::services::github_app::ApplicationId;
-use zone_server::services::github_app::InstallationId;
-use zone_server::services::github_app::StoredConfiguration;
 
 /// Every test replays the whole migration chain into an empty database and dumps it.
 static DATABASES: Semaphore = Semaphore::const_new(4);
@@ -341,6 +338,19 @@ fn key() -> Arc<MasterKey> {
 
 fn envelope(credential: &str, key: &MasterKey) -> String {
     encrypt_value(&SecretValue::new(credential), key).expect("a seal")
+}
+
+/// A source config carrying a GitHub App the way sources held one before
+/// organization-wide connections replaced it, its key sealed as `private_key`.
+fn app_configuration(private_key: &str) -> Value {
+    json!({
+        "owner": "abnegate",
+        "github_app": {
+            "application_id": 1,
+            "installation_id": 2,
+            "private_key": private_key,
+        },
+    })
 }
 
 /// A value sealed before envelopes existed: the body of an envelope, bare.
@@ -1294,15 +1304,7 @@ async fn a_key_that_opens_only_counted_columns_writes_nothing() {
     let deployment = key();
     let mistaken = key();
     let tenant = scratch.tenant().await;
-    let stored = StoredConfiguration::seal(
-        ApplicationId::new(1),
-        InstallationId::new(2),
-        &SecretValue::new("-----BEGIN PRIVATE KEY-----"),
-        &mistaken,
-    )
-    .expect("a sealed configuration");
-    let mut config = json!({"owner": "abnegate"});
-    stored.write(&mut config).expect("a written configuration");
+    let config = app_configuration(&envelope("-----BEGIN PRIVATE KEY-----", &mistaken));
     scratch.source(&tenant, None, &config).await;
     scratch
         .project(&tenant, Some(&legacy("ghp_legacy_project", &deployment)))
@@ -1368,15 +1370,7 @@ async fn the_github_app_key_is_read_from_a_stored_configuration() {
     let key = key();
     let tenant = scratch.tenant().await;
     let private_key = SecretValue::new("-----BEGIN PRIVATE KEY-----");
-    let stored = StoredConfiguration::seal(
-        ApplicationId::new(1),
-        InstallationId::new(2),
-        &private_key,
-        &key,
-    )
-    .expect("a sealed configuration");
-    let mut config = json!({"owner": "abnegate"});
-    stored.write(&mut config).expect("a written configuration");
+    let config = app_configuration(&envelope(private_key.expose(), &key));
     let source = scratch.source(&tenant, None, &config).await;
 
     let rows = Column::GithubAppPrivateKey

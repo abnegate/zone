@@ -3,7 +3,6 @@ import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
 
-// Mock data generators
 const generateMockSource = (
   id: string,
   name: string,
@@ -57,15 +56,15 @@ const isSourcesListRequest = (requestUrl: string) =>
 const addSourceButton = (page: Page) =>
   page.locator('.page-bar').getByRole('button', { name: 'Add source' });
 
+const openAccessTokenFields = (page: Page) =>
+  page.getByRole('button', { name: 'Use an access token instead' }).click();
+
 test.describe('Sources Page', () => {
   test.beforeEach(async ({ context, page }) => {
-    // Block service worker
     await blockServiceWorker(context);
 
-    // Set up API mocks
     await mockCommonEndpoints(page);
 
-    // Mock organizations with query params
     await routeApi(page, '**/api/organizations?*', (route) => {
       route.fulfill({
         status: 200,
@@ -86,7 +85,6 @@ test.describe('Sources Page', () => {
       });
     });
 
-    // Mock workspaces with query params
     await routeApi(page, '**/api/organizations/*/workspaces?*', (route) => {
       route.fulfill({
         status: 200,
@@ -108,7 +106,14 @@ test.describe('Sources Page', () => {
       });
     });
 
-    // Default sources mock
+    await routeApi(page, '**/api/organizations/*/github/repositories*', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ repositories: [], installations: [], total: 0, next_page: null }),
+      });
+    });
+
     await routeApi(page, sourcesRoutePattern, (route) => {
       if (
         route.request().method() === 'GET' &&
@@ -124,15 +129,12 @@ test.describe('Sources Page', () => {
       }
     });
 
-    // Navigate and set up auth
     await page.goto('/');
     await setupAuth(page);
     await page.reload();
 
-    // Wait for app to load
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
-    // Navigate to sources page
     await page.click('a[href="/sources"]');
     await expect(page).toHaveURL('/sources');
     await expect(page.locator('.sources-page')).toBeVisible({ timeout: 10000 });
@@ -338,9 +340,10 @@ test.describe('Sources Page', () => {
       ]);
     });
 
-    test('shows GitHub form fields by default', async ({ page }) => {
+    test('shows the access-token GitHub fields behind the disclosure', async ({ page }) => {
       await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
+      await openAccessTokenFields(page);
 
       await expect(page.locator('#ghOwner')).toBeVisible();
       await expect(page.locator('#ghRepo')).toBeVisible();
@@ -409,6 +412,7 @@ test.describe('Sources Page', () => {
 
       await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
+      await openAccessTokenFields(page);
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
       await page.getByRole('button', { name: 'Next' }).click();
@@ -442,6 +446,7 @@ test.describe('Sources Page', () => {
 
       await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
+      await openAccessTokenFields(page);
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
       await page.getByRole('button', { name: 'Next' }).click();
@@ -472,6 +477,7 @@ test.describe('Sources Page', () => {
 
       await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
+      await openAccessTokenFields(page);
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
       await page.getByRole('button', { name: 'Next' }).click();
@@ -507,6 +513,7 @@ test.describe('Sources Page', () => {
     test('shows details fields on final step', async ({ page }) => {
       await addSourceButton(page).click();
       await page.getByRole('button', { name: 'Next' }).click();
+      await openAccessTokenFields(page);
       await page.fill('#ghOwner', 'test');
       await page.fill('#ghRepo', 'repo');
       await page.getByRole('button', { name: 'Next' }).click();

@@ -22,6 +22,7 @@ export const SettingsSection = {
   Devices: 'devices',
   Billing: 'billing',
   Audit: 'audit',
+  GitHub: 'github',
   Features: 'features',
   Connect: 'connect',
   Sessions: 'sessions',
@@ -118,6 +119,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     section: SettingsSection.Audit,
     label: 'Audit log',
     visible: administersOrganization,
+  },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.GitHub,
+    label: 'GitHub',
+    visible: inOrganization,
   },
   {
     group: SettingsGroup.Server,

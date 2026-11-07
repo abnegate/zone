@@ -8,6 +8,7 @@ import {
   HANDOVER_AGENTS,
   HANDOVER_REASONS,
   PULL_REQUEST_CHECKS,
+  PULL_REQUEST_CONNECTIONS,
   PULL_REQUEST_MERGEABILITY,
   PULL_REQUEST_STATES,
 } from './types';
@@ -506,6 +507,7 @@ export const ChatPullRequestSchema = z.object({
   status: PullRequestStatusSchema.nullable().catch(null),
   writable: z.boolean(),
   credentialed: z.boolean(),
+  connection: z.enum(PULL_REQUEST_CONNECTIONS).catch('uncredentialed'),
   auto_fix: z.boolean().catch(false),
   auto_fixing: z.boolean().catch(false),
 });

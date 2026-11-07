@@ -1,5 +1,6 @@
 use crate::common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use abnegate_secret::MasterKey;
@@ -10,6 +11,7 @@ use uuid::Uuid;
 use zone_server::db::actions::{self, StartTask};
 use zone_server::db::tasks;
 use zone_server::services::checkout::Repository;
+use zone_server::services::github_app::Provider;
 
 use crate::common::{
     TestClient, create_test_pool, create_test_router, create_test_state, test_config, test_email,
@@ -380,9 +382,9 @@ async fn pr_worker_rejects_legacy_foreign_project_associations() {
         .await
         .expect("task is readable")
         .expect("task exists");
-    // Any key does: the refusal comes before a token is read.
-    let key = MasterKey::generate().unwrap();
-    let error = match Repository::resolve(&pool, &key, &row).await {
+    // Any key does: the refusal comes before a credential is resolved.
+    let github = Provider::new(&test_config(), Arc::new(MasterKey::generate().unwrap()));
+    let error = match Repository::resolve(&pool, &github, &row).await {
         Err(error) => error,
         Ok(_) => panic!("a foreign project must not resolve to a repository"),
     };

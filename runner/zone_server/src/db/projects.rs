@@ -3,17 +3,21 @@
 mod order;
 
 use std::collections::HashMap;
+use std::fmt;
 
+use abnegate_secret::REDACTED;
 use chrono::NaiveDateTime;
 use sqlx::{PgConnection, PgPool};
+use thiserror::Error;
 use uuid::Uuid;
 
 use super::DbResult;
+use super::github_installations::UNATTACHABLE;
 
 pub use order::Reorder;
 
 /// Project row from database
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub struct ProjectRow {
     pub id: Uuid,
     pub workspace_id: Option<Uuid>,
@@ -25,7 +29,31 @@ pub struct ProjectRow {
     pub github_access_token: Option<String>,
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
+    pub github_installation_id: Option<Uuid>,
     pub position: i32,
+}
+
+impl fmt::Debug for ProjectRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProjectRow")
+            .field("id", &self.id)
+            .field("workspace_id", &self.workspace_id)
+            .field("source_id", &self.source_id)
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("status", &self.status)
+            .field("github_repo_url", &self.github_repo_url)
+            .field(
+                "github_access_token",
+                &self.github_access_token.as_ref().map(|_| REDACTED),
+            )
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .field("github_installation_id", &self.github_installation_id)
+            .field("position", &self.position)
+            .finish()
+    }
 }
 
 /// A workspace's projects in the workspace's own order, optionally of one status
@@ -38,7 +66,8 @@ pub async fn list_projects(
         ProjectRow,
         r#"
         SELECT id, workspace_id, source_id, name, description, status,
-               github_repo_url, github_access_token, created_at, updated_at, "position"
+               github_repo_url, github_access_token, created_at, updated_at,
+               github_installation_id, "position"
         FROM projects
         WHERE workspace_id = $1 AND ($2::text IS NULL OR status = $2)
         ORDER BY "position", created_at DESC, id
@@ -106,7 +135,8 @@ pub async fn get_project(pool: &PgPool, id: Uuid) -> DbResult<Option<ProjectRow>
         ProjectRow,
         r#"
         SELECT id, workspace_id, source_id, name, description, status,
-               github_repo_url, github_access_token, created_at, updated_at, "position"
+               github_repo_url, github_access_token, created_at, updated_at,
+               github_installation_id, "position"
         FROM projects
         WHERE id = $1
         "#,
@@ -126,7 +156,8 @@ pub async fn get_project_in_workspace(
         ProjectRow,
         r#"
         SELECT id, workspace_id, source_id, name, description, status,
-               github_repo_url, github_access_token, created_at, updated_at, "position"
+               github_repo_url, github_access_token, created_at, updated_at,
+               github_installation_id, "position"
         FROM projects
         WHERE id = $1 AND workspace_id = $2
         "#,
@@ -170,7 +201,8 @@ pub async fn create(pool: &PgPool, project: NewProject<'_>) -> DbResult<ProjectR
         VALUES ($1, $2, $3, $4, COALESCE($5, 'active'),
                 COALESCE((SELECT MIN("position") FROM projects WHERE workspace_id = $3), 1) - 1)
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at, "position"
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id, "position"
         "#,
         project.name,
         project.description,
@@ -217,7 +249,8 @@ pub async fn set_source(
         SET source_id = $2, updated_at = NOW()
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at, "position"
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id, "position"
         "#,
         id,
         source_id
@@ -244,7 +277,8 @@ pub async fn update_project(
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at, "position"
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id, "position"
         "#,
         id,
         name,
@@ -264,30 +298,68 @@ pub async fn delete_project(pool: &PgPool, id: Uuid) -> DbResult<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-/// Link a GitHub repository to a project
+#[derive(Debug, Error)]
+pub enum LinkError {
+    #[error("{UNATTACHABLE}")]
+    Unattachable,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+impl LinkError {
+    fn refused(error: sqlx::Error) -> Self {
+        match &error {
+            sqlx::Error::Database(database) if database.is_foreign_key_violation() => {
+                Self::Unattachable
+            }
+            _ => Self::Database(error),
+        }
+    }
+}
+
+/// Link a GitHub repository to a project. An installation outside the
+/// project's organization, revoked or suspended, links nothing.
 pub async fn link_github(
     pool: &PgPool,
     id: Uuid,
     repo_url: &str,
     access_token: Option<&str>,
-) -> DbResult<Option<ProjectRow>> {
-    sqlx::query_as!(
+    github_installation_id: Option<Uuid>,
+) -> Result<Option<ProjectRow>, LinkError> {
+    let linked = sqlx::query_as!(
         ProjectRow,
         r#"
         UPDATE projects
         SET github_repo_url = $2,
             github_access_token = $3,
+            github_installation_id = $4,
             updated_at = NOW()
         WHERE id = $1
+          AND ($4::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM github_installations gi
+              JOIN workspaces w ON w.organization_id = gi.organization_id
+              WHERE gi.id = $4 AND w.id = projects.workspace_id
+                AND gi.revoked_at IS NULL AND gi.suspended_at IS NULL
+          ))
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at, "position"
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id, "position"
         "#,
         id,
         repo_url,
-        access_token
+        access_token,
+        github_installation_id
     )
     .fetch_optional(pool)
     .await
+    .map_err(LinkError::refused)?;
+    if linked.is_some() || github_installation_id.is_none() {
+        return Ok(linked);
+    }
+    match get_project(pool, id).await? {
+        Some(_) => Err(LinkError::Unattachable),
+        None => Ok(None),
+    }
 }
 
 /// Unlink GitHub repository from a project
@@ -298,10 +370,12 @@ pub async fn unlink_github(pool: &PgPool, id: Uuid) -> DbResult<Option<ProjectRo
         UPDATE projects
         SET github_repo_url = NULL,
             github_access_token = NULL,
+            github_installation_id = NULL,
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, workspace_id, source_id, name, description, status,
-                  github_repo_url, github_access_token, created_at, updated_at, "position"
+                  github_repo_url, github_access_token, created_at, updated_at,
+                  github_installation_id, "position"
         "#,
         id
     )

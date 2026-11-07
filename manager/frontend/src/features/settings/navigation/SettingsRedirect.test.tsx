@@ -50,6 +50,14 @@ describe('SettingsRedirect', () => {
     expect(screen.getByTestId('location').textContent).toBe('/settings/organization/members?x=1#y');
   });
 
+  it('sends an old GitHub callback to the GitHub section with its outcome and organization', () => {
+    renderAt('/org-settings?tab=github&github=installed&organization=org-2');
+
+    expect(screen.getByTestId('location').textContent).toBe(
+      '/settings/organization/github?github=installed&organization=org-2'
+    );
+  });
+
   it('sends an unknown organization tab to AI defaults', () => {
     renderAt('/org-settings?tab=unknown');
 

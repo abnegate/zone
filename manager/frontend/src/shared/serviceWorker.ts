@@ -1,5 +1,6 @@
 export const SERVICE_WORKER_FILE = 'sw.js';
 export const SERVICE_WORKER_IDLE_TIMEOUT_MILLISECONDS = 5000;
+export const SERVICE_WORKER_NAVIGATION_DENYLIST: RegExp[] = [/^\/api\//];
 
 const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1']);
 

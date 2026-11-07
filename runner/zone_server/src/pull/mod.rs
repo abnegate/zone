@@ -5,11 +5,14 @@
 //! can attach, detach, and cancel independently of the download.
 
 mod comfy_reference;
+mod partial;
+mod transfer_lock;
 
 use abnegate_llm::download::{self, Checksum, DownloadError, DownloadProgress};
 use comfy_reference::ComfyReference;
 use dashmap::DashMap;
 use futures::StreamExt;
+use partial::Partial;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -510,6 +513,12 @@ async fn download_manifest(models_directory: &Path, manifest: &ManifestFile, job
         return;
     }
     let staged = staging(&target);
+    if let Err(error) = Partial::of(&target).move_to(&Partial::of(&staged)) {
+        tracing::warn!(
+            "Could not carry an interrupted download of {} over: {error}",
+            target.display()
+        );
+    }
     let installed = match fetch_weights(
         &manifest.url,
         &staged,
@@ -793,7 +802,7 @@ mod tests {
     use tokio::net::TcpListener;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{self, method, path},
     };
 
     const BODY: &[u8] = b"zone-setup-weight-bytes-for-a-resumable-transfer";
@@ -943,6 +952,66 @@ mod tests {
 
     async fn requests_to(server: &MockServer) -> Vec<wiremock::Request> {
         server.received_requests().await.unwrap_or_default()
+    }
+
+    fn legacy_part(directory: &Path) -> PathBuf {
+        directory.join(format!("{RELATIVE_PATH}.part"))
+    }
+
+    fn validator(part: &Path) -> PathBuf {
+        PathBuf::from(format!("{}.validator", part.display()))
+    }
+
+    fn seed_partial(part: &Path, bytes: &[u8], url: Option<&str>) {
+        std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+        std::fs::write(part, bytes).unwrap();
+        if let Some(url) = url {
+            let stored = serde_json::json!({ "url": url, "entity_tag": ENTITY_TAG });
+            std::fs::write(validator(part), stored.to_string()).unwrap();
+        }
+    }
+
+    /// Serves `BODY` whole, or its tail from `HEAD_LENGTH` to a request for
+    /// that range guarded by `ENTITY_TAG`.
+    async fn ranged_origin() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(matchers::header(
+                header::RANGE.as_str(),
+                format!("bytes={HEAD_LENGTH}-").as_str(),
+            ))
+            .and(matchers::header(header::IF_RANGE.as_str(), ENTITY_TAG))
+            .respond_with(
+                ResponseTemplate::new(StatusCode::PARTIAL_CONTENT.as_u16())
+                    .insert_header(header::ETAG.as_str(), ENTITY_TAG)
+                    .insert_header(
+                        header::CONTENT_RANGE.as_str(),
+                        format!("bytes {HEAD_LENGTH}-{}/{}", BODY.len() - 1, BODY.len()).as_str(),
+                    )
+                    .set_body_bytes(&BODY[HEAD_LENGTH..]),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(StatusCode::OK.as_u16())
+                    .insert_header(header::ETAG.as_str(), ENTITY_TAG)
+                    .set_body_bytes(BODY),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn assert_no_legacy_partial(directory: &Path) {
+        let part = legacy_part(directory);
+        for leftover in [part.clone(), validator(&part), transfer_lock(&part)] {
+            assert!(
+                !leftover.exists(),
+                "{} outlived the pull",
+                leftover.display()
+            );
+        }
     }
 
     #[test]
@@ -1563,6 +1632,84 @@ mod tests {
         let requests = requests_to(&server).await;
         assert_eq!(requests.len(), 1);
         assert!(!requests[0].headers.contains_key(header::RANGE));
+    }
+
+    #[tokio::test]
+    async fn resumes_a_download_interrupted_before_staging() {
+        let server = ranged_origin().await;
+        let url = format!("{}/file.bin", server.uri());
+        let directory = tempfile::tempdir().unwrap();
+        seed_partial(
+            &legacy_part(directory.path()),
+            &BODY[..HEAD_LENGTH],
+            Some(&url),
+        );
+        let registry = PullRegistry::new();
+
+        let _subscription = registry.start(body_pull(directory.path(), url));
+
+        assert_complete(&registry, "tiny").await;
+        assert_eq!(
+            std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap(),
+            BODY
+        );
+        let requests = requests_to(&server).await;
+        assert_eq!(requests.len(), 1, "the resume fetched only the tail");
+        assert_eq!(
+            requests[0].headers[header::RANGE],
+            format!("bytes={HEAD_LENGTH}-")
+        );
+        assert_eq!(requests[0].headers[header::IF_RANGE], ENTITY_TAG);
+        assert_no_legacy_partial(directory.path());
+        assert!(!part(directory.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn an_unresumable_download_from_before_staging_is_removed() {
+        let server = ranged_origin().await;
+        let url = format!("{}/file.bin", server.uri());
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = legacy_part(directory.path());
+        seed_partial(&legacy, &BODY[..HEAD_LENGTH], None);
+        std::fs::write(transfer_lock(&legacy), b"").unwrap();
+        let registry = PullRegistry::new();
+
+        let _subscription = registry.start(body_pull(directory.path(), url));
+
+        assert_complete(&registry, "tiny").await;
+        assert_eq!(
+            std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap(),
+            BODY
+        );
+        let requests = requests_to(&server).await;
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].headers.contains_key(header::RANGE));
+        assert_no_legacy_partial(directory.path());
+    }
+
+    #[tokio::test]
+    async fn a_download_from_before_staging_yields_to_a_staged_one() {
+        let server = ranged_origin().await;
+        let url = format!("{}/file.bin", server.uri());
+        let directory = tempfile::tempdir().unwrap();
+        seed_partial(&legacy_part(directory.path()), b"stale", Some(&url));
+        seed_partial(&part(directory.path()), &BODY[..HEAD_LENGTH], Some(&url));
+        let registry = PullRegistry::new();
+
+        let _subscription = registry.start(body_pull(directory.path(), url));
+
+        assert_complete(&registry, "tiny").await;
+        assert_eq!(
+            std::fs::read(directory.path().join(RELATIVE_PATH)).unwrap(),
+            BODY
+        );
+        let requests = requests_to(&server).await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].headers[header::RANGE],
+            format!("bytes={HEAD_LENGTH}-")
+        );
+        assert_no_legacy_partial(directory.path());
     }
 
     #[tokio::test]

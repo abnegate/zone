@@ -1,45 +1,84 @@
-//! What a caller receives when it asks for a source's credentials.
+use std::fmt;
 
 use abnegate_secret::SecretValue;
 
-/// A bearer credential for one source, whatever minted it.
-///
-/// A personal access token read from the database and an installation token
-/// minted seconds ago are the same thing to the caller: a string to put in an
-/// `Authorization` header. Nothing on this type says which one it holds, so no
-/// caller can grow a branch on the answer and no caller has to change when a
-/// source moves from one to the other.
-#[derive(Debug, Clone)]
+use super::scope::Scope;
+
+/// Nothing a caller can read says whether a stored token or a minted one is
+/// held, so no caller can grow a branch on the answer.
+#[derive(Clone)]
 pub struct Credential {
-    token: SecretValue,
+    secret: SecretValue,
+    scope: Option<Scope>,
 }
 
 impl Credential {
-    pub fn new(token: SecretValue) -> Self {
-        Self { token }
+    pub(crate) fn stored(secret: SecretValue) -> Self {
+        Self {
+            secret,
+            scope: None,
+        }
     }
 
-    /// Read the credential. Call this at the point of use and nowhere else.
-    pub fn expose(&self) -> &str {
-        self.token.expose()
+    pub(crate) fn installed(secret: SecretValue, scope: Scope) -> Self {
+        Self {
+            secret,
+            scope: Some(scope),
+        }
+    }
+
+    pub(super) fn scope(&self) -> Option<Scope> {
+        self.scope
+    }
+
+    /// This credential presenting `secret`, the token a call through
+    /// [`super::Provider::retrying`] last succeeded with, so the next call
+    /// starts from the token GitHub accepted rather than one it refused.
+    pub fn renewed(&self, secret: SecretValue) -> Self {
+        Self {
+            secret,
+            scope: self.scope,
+        }
+    }
+
+    pub fn secret(&self) -> &SecretValue {
+        &self.secret
     }
 
     pub fn into_secret(self) -> SecretValue {
-        self.token
+        self.secret
+    }
+}
+
+impl fmt::Debug for Credential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Credential")
+            .field("secret", &self.secret)
+            .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::*;
+    use crate::services::github_app::tenant::Tenant;
+
+    fn scope() -> Scope {
+        Scope {
+            tenant: Tenant::Workspace(Uuid::new_v4()),
+            installation: Uuid::new_v4(),
+        }
+    }
 
     #[test]
-    fn a_personal_access_token_and_an_installation_token_are_the_same_type() {
-        let personal = Credential::new(SecretValue::new("ghp_personalaccesstoken"));
-        let installation = Credential::new(SecretValue::new("ghs_installationtoken"));
+    fn two_credentials_render_identically() {
+        let personal = Credential::stored(SecretValue::new("ghp_personalaccesstoken"));
+        let installation =
+            Credential::installed(SecretValue::new("ghs_installationtoken"), scope());
 
-        assert_eq!(personal.expose(), "ghp_personalaccesstoken");
-        assert_eq!(installation.expose(), "ghs_installationtoken");
         assert_eq!(
             format!("{personal:?}"),
             format!("{installation:?}"),
@@ -49,7 +88,7 @@ mod tests {
 
     #[test]
     fn the_credential_never_renders_itself() {
-        let credential = Credential::new(SecretValue::new("ghp_personalaccesstoken"));
+        let credential = Credential::stored(SecretValue::new("ghp_personalaccesstoken"));
         let rendered = format!("{credential:?}");
 
         assert!(!rendered.contains("ghp_personalaccesstoken"));
@@ -57,8 +96,34 @@ mod tests {
     }
 
     #[test]
-    fn the_secret_survives_being_taken_out() {
-        let credential = Credential::new(SecretValue::new("ghs_installationtoken"));
+    fn only_a_minted_credential_names_its_installation() {
+        let scope = scope();
+
+        assert_eq!(
+            Credential::installed(SecretValue::new("ghs_installationtoken"), scope).scope(),
+            Some(scope)
+        );
+        assert_eq!(
+            Credential::stored(SecretValue::new("ghp_personalaccesstoken")).scope(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_renewed_credential_presents_the_new_token_for_the_same_installation() {
+        let scope = scope();
+        let renewed = Credential::installed(SecretValue::new("ghs_refusedtoken"), scope)
+            .renewed(SecretValue::new("ghs_reminted"));
+
+        assert_eq!(renewed.secret().expose(), "ghs_reminted");
+        assert_eq!(renewed.scope(), Some(scope));
+    }
+
+    #[test]
+    fn the_secret_survives_being_read_and_taken_out() {
+        let credential = Credential::stored(SecretValue::new("ghs_installationtoken"));
+
+        assert_eq!(credential.secret().expose(), "ghs_installationtoken");
         assert_eq!(credential.into_secret().expose(), "ghs_installationtoken");
     }
 }
