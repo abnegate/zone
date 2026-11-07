@@ -95,6 +95,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "abnegate-learn"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0704ed8aaa302060b9358c366e8fded28f974ef41a20617f39484a23ab21f2a2"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "abnegate-llm"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -177,9 +187,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-vcs"
-version = "0.1.9"
+version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ade9e1a44d81a55014f7fc82278b0f0a709e11220647200711405145f691632c"
+checksum = "c4e62029475a1c7ab7ffe8a940efc824d51cbb2b92c07777885d6c88ebe4161e"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
@@ -187,6 +197,7 @@ dependencies = [
  "chrono",
  "hex",
  "hmac",
+ "jsonwebtoken",
  "nix",
  "reqwest 0.13.5",
  "serde",
@@ -9604,6 +9615,7 @@ dependencies = [
  "abnegate-exec",
  "abnegate-http",
  "abnegate-index",
+ "abnegate-learn",
  "abnegate-llm",
  "abnegate-notify",
  "abnegate-search",

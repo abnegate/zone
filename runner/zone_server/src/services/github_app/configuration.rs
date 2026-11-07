@@ -2,12 +2,18 @@
 
 use std::fmt;
 
-use abnegate_secret::{MasterKey, SecretValue, decrypt_value, encrypt_value, is_encrypted};
-use serde::{Deserialize, Serialize};
+use abnegate_secret::MasterKey;
+use abnegate_secret::SecretValue;
+use abnegate_secret::decrypt_value;
+use abnegate_secret::encrypt_value;
+use abnegate_secret::is_encrypted;
+use abnegate_vcs::ApplicationId;
+use abnegate_vcs::InstallationId;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::Value;
 
 use super::error::GithubAppError;
-use super::identifier::{ApplicationId, InstallationId};
 
 /// The key a source's `config` column holds its GitHub App settings under.
 pub const CONFIGURATION_KEY: &str = "github_app";

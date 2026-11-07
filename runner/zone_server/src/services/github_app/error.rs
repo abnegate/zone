@@ -1,5 +1,6 @@
 //! Failures on the GitHub App path, worded so none can carry a credential.
 
+use abnegate_vcs::ApplicationError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -24,20 +25,28 @@ pub enum GithubAppError {
     Credential,
 }
 
-/// A `reqwest` failure as a [`GithubAppError::Transport`], with the URL removed.
-///
-/// `reqwest::Error` appends `for url (...)` to its `Display`. A GitHub App
-/// request carries its bearer credential in a header rather than the URL, but a
-/// redirect, a proxy or a future caller can put one in the URL, and an error
-/// string is copied into logs and handed back to users. Stripping the URL costs
-/// nothing and removes the whole class of leak.
-pub fn transport(error: reqwest::Error) -> GithubAppError {
-    GithubAppError::Transport(error.without_url().to_string())
+impl From<ApplicationError> for GithubAppError {
+    fn from(error: ApplicationError) -> Self {
+        match error {
+            ApplicationError::InvalidOrigin
+            | ApplicationError::Client
+            | ApplicationError::InvalidCode => Self::Configuration,
+            ApplicationError::PrivateKey => Self::PrivateKey,
+            ApplicationError::Signing | ApplicationError::AuthenticationRequired => Self::Signing,
+            ApplicationError::Transport(cause) => Self::Transport(cause),
+            ApplicationError::Status(status) => Self::Status(status),
+            ApplicationError::Response => Self::Response,
+            _ => Self::Configuration,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CAUSE: &str = "error sending request";
+    const STATUS: u16 = 403;
 
     #[test]
     fn no_variant_echoes_key_material() {
@@ -49,23 +58,88 @@ mod tests {
         assert!(!GithubAppError::Signing.to_string().contains("BEGIN"));
     }
 
-    #[tokio::test]
-    async fn transport_errors_drop_the_request_url() {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(50))
-            .build()
-            .expect("client");
+    #[test]
+    fn application_errors_keep_zones_variants() {
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::PrivateKey),
+            GithubAppError::PrivateKey
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Signing),
+            GithubAppError::Signing
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Transport(CAUSE.to_string())),
+            GithubAppError::Transport(cause) if cause == CAUSE
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Status(STATUS)),
+            GithubAppError::Status(STATUS)
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Response),
+            GithubAppError::Response
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::InvalidOrigin),
+            GithubAppError::Configuration
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::Client),
+            GithubAppError::Configuration
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::InvalidCode),
+            GithubAppError::Configuration
+        ));
+        assert!(matches!(
+            GithubAppError::from(ApplicationError::AuthenticationRequired),
+            GithubAppError::Signing
+        ));
 
-        let error = client
-            .post("http://127.0.0.1:1/app/installations/1/access_tokens?credential=leaked")
-            .send()
-            .await
-            .expect_err("a request to a closed port fails");
-
-        let rendered = transport(error).to_string();
-        assert!(
-            !rendered.contains("credential=leaked") && !rendered.contains("127.0.0.1"),
-            "the request URL survived into the error: {rendered}"
-        );
+        for (error, expected) in [
+            (
+                ApplicationError::PrivateKey,
+                "The GitHub App private key could not be read.".to_string(),
+            ),
+            (
+                ApplicationError::Signing,
+                "The GitHub App JWT could not be signed.".to_string(),
+            ),
+            (
+                ApplicationError::AuthenticationRequired,
+                "The GitHub App JWT could not be signed.".to_string(),
+            ),
+            (
+                ApplicationError::InvalidOrigin,
+                "The GitHub App configuration is missing or invalid.".to_string(),
+            ),
+            (
+                ApplicationError::Client,
+                "The GitHub App configuration is missing or invalid.".to_string(),
+            ),
+            (
+                ApplicationError::InvalidCode,
+                "The GitHub App configuration is missing or invalid.".to_string(),
+            ),
+            (
+                ApplicationError::Transport(CAUSE.to_string()),
+                format!("The installation token request failed: {CAUSE}"),
+            ),
+            (
+                ApplicationError::Status(STATUS),
+                format!("GitHub returned HTTP {STATUS} for the installation token request."),
+            ),
+            (
+                ApplicationError::Response,
+                "The installation token response could not be read.".to_string(),
+            ),
+        ] {
+            assert_eq!(
+                GithubAppError::from(error).to_string(),
+                expected,
+                "a mapped variant must keep Zone's wording, whatever the crate calls it"
+            );
+        }
     }
 }

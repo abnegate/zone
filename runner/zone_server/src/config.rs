@@ -33,26 +33,6 @@ pub const MINIMUM_ENCRYPTION_KEY_BYTES: usize = 32;
 /// The fewest bytes a `JWT_SECRET` may hold.
 pub const MINIMUM_JWT_SECRET_BYTES: usize = 32;
 
-/// The path GitHub Enterprise serves its REST API under.
-const GITHUB_VERSIONED_REST: [&str; 2] = ["api", "v3"];
-
-/// Where GitHub's GraphQL API answers for the REST `origin`: beside REST on
-/// GitHub, and at `api/graphql` on an Enterprise install that serves REST
-/// under `api/v3`.
-pub fn github_graphql_url(origin: &reqwest::Url) -> Option<reqwest::Url> {
-    let segments: Vec<&str> = origin
-        .path_segments()
-        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
-        .unwrap_or_default();
-    let versioned = segments.ends_with(&GITHUB_VERSIONED_REST);
-    let base = match origin.path().ends_with('/') {
-        true => origin.clone(),
-        false => reqwest::Url::parse(&format!("{origin}/")).ok()?,
-    };
-    base.join(if versioned { "../graphql" } else { "graphql" })
-        .ok()
-}
-
 /// Where a Claude authorization code is exchanged and its tokens renewed.
 pub const DEFAULT_CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 
@@ -1126,12 +1106,6 @@ impl Config {
         }
     }
 
-    /// The configured GitHub REST origin, ending in a slash so that a
-    /// relative path joins beneath it instead of replacing its last segment.
-    pub fn github_rest_origin(&self) -> Option<reqwest::Url> {
-        reqwest::Url::parse(&format!("{}/", self.github_api_url.trim_end_matches('/'))).ok()
-    }
-
     /// The `ENCRYPTION_KEY` the server seals credentials under, refused when shorter than
     /// [`MINIMUM_ENCRYPTION_KEY_BYTES`].
     pub fn encryption_key_from_env() -> Result<String, ConfigError> {
@@ -1348,7 +1322,14 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_secret::SecretValue;
+    use serde_json::json;
     use std::net::Ipv6Addr;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
     use zone_core::variables::Variables;
 
     fn create_test_config() -> Config {
@@ -1388,42 +1369,67 @@ mod tests {
         }
     }
 
-    #[test]
-    fn github_graphql_answers_beside_rest_or_under_an_enterprise_api() {
-        for (configured, rest, graphql) in [
-            (
-                DEFAULT_GITHUB_API_URL,
-                "https://api.github.com/",
-                "https://api.github.com/graphql",
-            ),
-            (
-                "https://github.example.com/api/v3",
-                "https://github.example.com/api/v3/",
-                "https://github.example.com/api/graphql",
-            ),
-            (
-                "http://127.0.0.1:9000",
-                "http://127.0.0.1:9000/",
-                "http://127.0.0.1:9000/graphql",
-            ),
+    #[tokio::test]
+    async fn github_graphql_answers_beside_rest_or_under_an_enterprise_api() {
+        const DEFAULT_GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
+        const GITHUB_PULL_REQUEST_URL: &str = "https://github.com/owner/repository/pull/7";
+
+        let default = reqwest::Url::parse(DEFAULT_GITHUB_API_URL).unwrap();
+        let mut answered = Vec::new();
+        for (prefix, graphql) in [
+            ("", "/graphql"),
+            (default.path(), "/graphql"),
+            ("/api/v3", "/api/graphql"),
         ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(graphql))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {"repository": {"pullRequest": {"number": 7, "reviewThreads": {
+                        "pageInfo": {"hasNextPage": false, "endCursor": null},
+                        "nodes": [],
+                    }}}}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
             let config = Config {
-                github_api_url: configured.to_string(),
+                github_api_url: format!("{}{prefix}", server.uri()),
+                github_api_allows_http: true,
                 ..crate::state::test_config()
             };
-            assert_eq!(
-                config.github_rest_origin().map(String::from).as_deref(),
-                Some(rest)
-            );
-            assert_eq!(
-                config
-                    .github_rest_origin()
-                    .and_then(|origin| github_graphql_url(&origin))
-                    .map(String::from)
-                    .as_deref(),
-                Some(graphql)
-            );
+            let service = config.pull_requests().unwrap();
+            let reference = service
+                .pull_request(&format!("{}/owner/repository/pull/7", server.uri()))
+                .unwrap();
+
+            service
+                .fetch_review_thread_counts(&reference, &SecretValue::new("token"))
+                .await
+                .unwrap_or_else(|error| panic!("{prefix:?}: {error:?}"));
+            if prefix == default.path() {
+                answered = server.received_requests().await.unwrap();
+            }
         }
+
+        let [request] = answered.as_slice() else {
+            panic!("the default origin's path must send one GraphQL request: {answered:?}");
+        };
+        assert_eq!(
+            default.join(request.url.path()).unwrap().as_str(),
+            DEFAULT_GITHUB_GRAPHQL_URL,
+            "GraphQL must answer beside REST on GitHub's own API"
+        );
+        let config = Config {
+            github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
+            github_api_allows_http: false,
+            ..crate::state::test_config()
+        };
+        config
+            .pull_requests()
+            .expect("the default origin is GitHub's own HTTPS API")
+            .pull_request(GITHUB_PULL_REQUEST_URL)
+            .expect("the default origin answers for github.com pull requests");
     }
 
     #[test]

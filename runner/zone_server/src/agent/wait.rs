@@ -995,7 +995,7 @@ impl WaitForTool {
                     .map_err(|_| SOURCE_CREDENTIALS_INVALID.to_string())?,
             );
         }
-        Github::new(configuration)?.at(scope.state.config())
+        Github::new(configuration, scope.state.config())
     }
 }
 
@@ -1003,15 +1003,24 @@ impl WaitForTool {
 mod tests {
     use super::*;
 
-    use crate::agent::integrations::{PENDING_ASSESSMENT, SUCCESS_ASSESSMENT};
-    use crate::state::{AppState, test_config};
+    use crate::agent::integrations::PENDING_ASSESSMENT;
+    use crate::agent::integrations::SUCCESS_ASSESSMENT;
+    use crate::state::AppState;
+    use crate::state::test_config;
     use abnegate_llm::Role;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::HashMap;
+    use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex as Lock;
     use tempfile::TempDir;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
     use zone_core::context;
-    use zone_core::tools::job::{JobCommand, JobStarted};
+    use zone_core::tools::job::JobCommand;
+    use zone_core::tools::job::JobStarted;
 
     const POLL: Duration = Duration::from_millis(20);
     const POLL_LIMIT: usize = 500;
@@ -1131,6 +1140,58 @@ mod tests {
         async fn assess(&self, _sha: &str) -> Result<&'static str, String> {
             Err(self.0.to_string())
         }
+    }
+
+    #[tokio::test]
+    async fn a_source_without_a_token_polls_its_checks_anonymously() {
+        const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let server = MockServer::start().await;
+        for (endpoint, body) in [
+            (format!("commits/{SHA}"), json!({"sha": SHA})),
+            (
+                "actions/runs".to_string(),
+                json!({"workflow_runs": [], "total_count": 0}),
+            ),
+            (
+                format!("commits/{SHA}/check-runs"),
+                json!({"check_runs": [{"id": 21, "name": "test", "head_sha": SHA,
+                       "status": "completed", "conclusion": "success"}]}),
+            ),
+            (
+                format!("commits/{SHA}/status"),
+                json!({"statuses": [], "total_count": 0}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(format!("/repos/owner/repository/{endpoint}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        let mut config = test_config();
+        config.github_api_url = server.uri();
+        config.github_api_allows_http = true;
+        let github = Github::new(
+            Configuration {
+                owner: "owner".into(),
+                repo: "repository".into(),
+                branch: None,
+                path: None,
+                token: None,
+                review_signals: None,
+            },
+            &config,
+        )
+        .unwrap();
+        assert_eq!(github.assess(SHA).await, Ok(SUCCESS_ASSESSMENT));
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests.is_empty(), "the checks must have been read");
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.headers.contains_key("authorization")),
+            "a tokenless source's poll must carry no Authorization header"
+        );
     }
 
     fn commit(assessment: &'static str, polls: &[&'static str]) -> Commit {
