@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { test as base, expect, type Locator, type Page } from '@playwright/test';
+import { setupCompleteKey } from '../src/features/models/setupComplete';
 
 /**
  * The live suite talks to a real server. Nothing here mocks a route, forges a
@@ -35,10 +36,18 @@ export const comfyStub = process.env.ZONE_COMFY_STUB || 'http://127.0.0.1:8188';
 
 /** Sign in through the real login form and land on the seeded workspace. */
 export async function signIn(page: Page, who: Tenant = state.owner): Promise<void> {
-  await page.addInitScript((context) => {
-    localStorage.setItem('manager_current_org', context.organization);
-    localStorage.setItem('manager_current_workspace', context.workspace);
-  }, { organization: who.organization.id, workspace: who.workspace.id });
+  await page.addInitScript(
+    (context) => {
+      localStorage.setItem('manager_current_org', context.organization);
+      localStorage.setItem('manager_current_workspace', context.workspace);
+      localStorage.setItem(context.setupComplete, '1');
+    },
+    {
+      organization: who.organization.id,
+      workspace: who.workspace.id,
+      setupComplete: setupCompleteKey(who.user.id),
+    }
+  );
 
   // An already-signed-in page is bounced off /login, so the session in hand is
   // dropped first: a test may sign in as a second account on the same page.

@@ -284,7 +284,7 @@ test('a reminder that carries a prompt runs a turn when it fires, and can be lis
   const due = new Date(Date.now() + 70_000).toISOString();
   await script(`schedule the time report ${s}`, [
     { calls: [{ name: 'load_tools', arguments: { names: ['create_reminder', 'list_reminders', 'cancel_reminder'] } }] },
-    { calls: [{ name: 'create_reminder', arguments: { content: `Time report ${s}`, due_at: due, rrule: 'FREQ=HOURLY', prompt: `Report the time ${s}` } }] },
+    { calls: [{ name: 'create_reminder', arguments: { content: `Time report ${s}`, due_at: due, time_zone: 'UTC', rrule: 'FREQ=HOURLY', prompt: `Report the time ${s}` } }] },
     { calls: [{ name: 'list_reminders', arguments: {} }] },
     { text: `Scheduled the hourly time report ${s}.` },
   ]);
@@ -382,9 +382,12 @@ test('a knowledge search the model makes is cited on the reply', async ({ page, 
   const rounds = await roundsFor(`what does the deployment checklist ${s} say`);
   expect(rounds).toHaveLength(2);
   expect(rounds[1].tool_results.map((r) => r.content).join('\n')).toContain(`Rotate the signing key ${s}`);
-  const citations = page.locator('[data-testid="citations"]');
-  await expect(citations).toBeVisible();
-  await expect(citations).toContainText(title);
+  await page
+    .locator('.message-assistant')
+    .last()
+    .getByRole('button', { name: /^\d+ sources?$/ })
+    .click();
+  await expect(page.getByTestId('citation').filter({ hasText: title })).toBeVisible();
   expect(consoleErrors).toEqual([]);
 });
 
