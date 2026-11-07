@@ -52,14 +52,25 @@ impl Partial {
         let theirs = TransferLock::try_acquire(&successor.part)?;
         let resumable = theirs.is_some()
             && self.validator().is_file()
-            && self.part.is_file()
-            && !successor.part.exists();
+            && length(&self.part) > 0
+            && length(&successor.part) == 0;
         if !resumable {
             return self.remove();
         }
-        remove(&successor.validator())?;
+        successor.remove()?;
         std::fs::rename(&self.part, &successor.part)?;
         std::fs::rename(self.validator(), successor.validator())
+    }
+
+    /// Remove this interrupted download, unless a transfer holds it.
+    pub(super) fn discard(&self) -> io::Result<()> {
+        if !self.exists() {
+            return Ok(());
+        }
+        match TransferLock::try_acquire(&self.part)? {
+            Some(_own) => self.remove(),
+            None => Ok(()),
+        }
     }
 
     fn exists(&self) -> bool {
@@ -76,6 +87,13 @@ impl Partial {
         remove(&self.part)?;
         remove(&self.validator())
     }
+}
+
+fn length(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .map_or(0, |metadata| metadata.len())
 }
 
 fn remove(path: &Path) -> io::Result<()> {
@@ -129,6 +147,73 @@ mod tests {
         assert!(!legacy.validator().exists());
         assert!(!TransferLock::path(legacy.part()).exists());
         assert!(!TransferLock::path(successor.part()).exists());
+    }
+
+    #[test]
+    fn an_empty_successor_part_does_not_cost_the_download_its_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = Partial::of(&directory.path().join("model.gguf"));
+        let successor = Partial::of(&directory.path().join("model.gguf.download"));
+        seed(&legacy);
+        std::fs::write(successor.part(), b"").unwrap();
+
+        legacy.move_to(&successor).unwrap();
+
+        assert_eq!(std::fs::read(successor.part()).unwrap(), BYTES);
+        assert_eq!(std::fs::read(successor.validator()).unwrap(), VALIDATOR);
+        assert!(!legacy.part().exists());
+    }
+
+    #[test]
+    fn a_successor_with_bytes_of_its_own_keeps_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = Partial::of(&directory.path().join("model.gguf"));
+        let successor = Partial::of(&directory.path().join("model.gguf.download"));
+        seed(&legacy);
+        std::fs::write(successor.part(), b"theirs").unwrap();
+
+        legacy.move_to(&successor).unwrap();
+
+        assert_eq!(std::fs::read(successor.part()).unwrap(), b"theirs");
+        assert!(!legacy.part().exists());
+        assert!(!legacy.validator().exists());
+    }
+
+    #[test]
+    fn a_validator_without_its_part_is_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = Partial::of(&directory.path().join("model.gguf"));
+        let successor = Partial::of(&directory.path().join("model.gguf.download"));
+        std::fs::write(legacy.validator(), VALIDATOR).unwrap();
+
+        legacy.move_to(&successor).unwrap();
+
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_discarded_download_leaves_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = Partial::of(&directory.path().join("model.gguf"));
+        seed(&legacy);
+
+        legacy.discard().unwrap();
+
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_download_held_by_a_transfer_is_not_discarded() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = Partial::of(&directory.path().join("model.gguf"));
+        seed(&legacy);
+        let held = File::create(TransferLock::path(legacy.part())).unwrap();
+        held.lock().unwrap();
+
+        legacy.discard().unwrap();
+
+        assert_eq!(std::fs::read(legacy.part()).unwrap(), BYTES);
+        assert!(legacy.validator().exists());
     }
 
     #[test]
