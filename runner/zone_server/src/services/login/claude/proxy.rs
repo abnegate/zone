@@ -7,6 +7,7 @@ use abnegate_agent_cli::login::LoginError;
 use abnegate_agent_cli::login::claude::Client;
 use hyper_util::client::proxy::matcher::Intercept;
 
+use super::Unbuilt;
 use credentials::Credentials;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,12 +19,11 @@ pub struct Proxy {
 impl Proxy {
     /// The proxy `intercept` chose, signed in to with the username and password the server's
     /// proxy variable carried for it.
-    pub fn intercepted(intercept: &Intercept) -> Result<Self, LoginError> {
-        let credentials = match (intercept.basic_auth(), intercept.raw_auth()) {
-            (Some(header), _) => Some(Credentials::basic(header)?),
-            (None, Some((username, password))) => Some(Credentials::new(username, password)),
-            (None, None) => None,
-        };
+    pub fn intercepted(intercept: &Intercept) -> Result<Self, Unbuilt> {
+        let credentials = intercept
+            .basic_auth()
+            .map(|header| Credentials::basic(header).ok_or(Unbuilt::UnreadableProxyCredentials))
+            .transpose()?;
         Ok(Self {
             url: intercept.uri().to_string(),
             credentials,

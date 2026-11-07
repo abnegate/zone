@@ -2,7 +2,6 @@
 
 use std::fmt;
 
-use abnegate_agent_cli::login::LoginError;
 use abnegate_secret::SecretValue;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -11,7 +10,6 @@ use zeroize::Zeroizing;
 
 const BASIC_SCHEME: &str = "Basic ";
 const SEPARATOR: char = ':';
-const UNREADABLE: &str = "The username and password of the server's proxy cannot be read";
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Credentials {
@@ -20,7 +18,7 @@ pub struct Credentials {
 }
 
 impl Credentials {
-    pub fn new(username: &str, password: &str) -> Self {
+    fn new(username: &str, password: &str) -> Self {
         Self {
             username: username.to_string(),
             password: SecretValue::new(password),
@@ -28,20 +26,13 @@ impl Credentials {
     }
 
     /// The credentials an HTTP Basic `header` carries, split where the proxy splits them: at the
-    /// first colon. Sent on again, they are the header itself, byte for byte.
-    pub fn basic(header: &HeaderValue) -> Result<Self, LoginError> {
-        let unreadable = || LoginError::Malformed(UNREADABLE);
-        let encoded = header
-            .to_str()
-            .ok()
-            .and_then(|header| header.strip_prefix(BASIC_SCHEME))
-            .ok_or_else(unreadable)?;
-        let decoded = Zeroizing::new(STANDARD.decode(encoded).map_err(|_| unreadable())?);
-        let (username, password) = std::str::from_utf8(&decoded)
-            .ok()
-            .and_then(|decoded| decoded.split_once(SEPARATOR))
-            .ok_or_else(unreadable)?;
-        Ok(Self::new(username, password))
+    /// first colon. Sent on again, they are the header itself, byte for byte. `None` for a header
+    /// that is not HTTP Basic credentials.
+    pub fn basic(header: &HeaderValue) -> Option<Self> {
+        let encoded = header.to_str().ok()?.strip_prefix(BASIC_SCHEME)?;
+        let decoded = Zeroizing::new(STANDARD.decode(encoded).ok()?);
+        let (username, password) = std::str::from_utf8(&decoded).ok()?.split_once(SEPARATOR)?;
+        Some(Self::new(username, password))
     }
 
     pub fn username(&self) -> &str {
@@ -92,13 +83,7 @@ mod tests {
             HeaderValue::from_static("Basic !!!"),
             header("no-separator"),
         ] {
-            assert!(
-                matches!(
-                    Credentials::basic(&header),
-                    Err(LoginError::Malformed(UNREADABLE))
-                ),
-                "{header:?}"
-            );
+            assert!(Credentials::basic(&header).is_none(), "{header:?}");
         }
     }
 

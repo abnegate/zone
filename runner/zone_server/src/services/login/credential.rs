@@ -215,6 +215,8 @@ mod tests {
     use abnegate_agent_cli::login::LoginError;
     use abnegate_agent_cli::login::claude::Refusal;
     use abnegate_agent_cli::login::codex::CREDENTIALS;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
     use chrono::TimeDelta;
     use futures::future::{join_all, try_join_all};
     use hyper_util::client::proxy::matcher::Matcher;
@@ -222,7 +224,7 @@ mod tests {
     use sqlx::PgPool;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use tempfile::TempDir;
-    use wiremock::matchers::{header_exists, method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -989,7 +991,13 @@ mod tests {
         let proxy = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path(TOKEN_PATH))
-            .and(header_exists("proxy-authorization"))
+            .and(header(
+                "proxy-authorization",
+                format!(
+                    "Basic {}",
+                    STANDARD.encode(format!("zone:{PROXY_PASSWORD}"))
+                ),
+            ))
             .respond_with(renewed())
             .expect(1)
             .mount(&proxy)

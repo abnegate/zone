@@ -460,11 +460,13 @@ fn report(organization: Uuid, error: &Error) {
     }
 }
 
-/// Why Zone could not reach claude.com's token endpoint, as the admin is told it: a proxy the
-/// server names for it that cannot be used is the operator's to fix, not Zone's own failure.
+/// Why Zone could not build the client that reaches claude.com's token endpoint, as the admin is
+/// told it.
 fn unbuilt(error: Unbuilt) -> Error {
-    let Unbuilt::Login(error) = error;
-    ungranted(error)
+    match error {
+        Unbuilt::UnreadableProxyCredentials => Error::Unreachable(error.to_string()),
+        Unbuilt::Login(error) => ungranted(error),
+    }
 }
 
 /// Why claude.com's token endpoint granted no tokens, as the admin is told it.
