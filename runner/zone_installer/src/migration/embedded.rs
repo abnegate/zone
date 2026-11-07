@@ -22,5 +22,6 @@ macro_rules! source {
 
 pub const EMBEDDED: &[Source] = &[
     source!("0001_v1.sql"),
-    source!("0002_github_connections.sql"),
+    source!("0002_search_knowledge_active_candidates.sql"),
+    source!("0003_github_connections.sql"),
 ];
