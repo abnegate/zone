@@ -35,18 +35,18 @@ rmcp = { version = "=3.4.0", default-features = false }
 
 # Shared crates, published from abnegate/crates. Caret ranges, unlike every
 # other dependency here, so a patch release of a crate reaches zone on update.
-abnegate-agent-cli = "0.1.13"
-abnegate-comfy = "0.2.1"
+abnegate-agent-cli = "0.1.14"
+abnegate-comfy = "0.2.4"
 abnegate-config = "0.1.6"
 abnegate-exec = "0.1.9"
 abnegate-http = "0.1.5"
-abnegate-index = "0.1"
+abnegate-index = "0.1.1"
 abnegate-learn = "0.1.3"
-abnegate-llm = "0.1.10"
+abnegate-llm = "0.1.11"
 abnegate-notify = "0.1.6"
 abnegate-search = "0.1.5"
 abnegate-secret = "0.1.7"
-abnegate-vcs = "0.1.11"
+abnegate-vcs = "0.1.12"
 
 # Server dependencies
 axum = { version = "=0.8.9", features = ["ws", "macros", "multipart"] }
