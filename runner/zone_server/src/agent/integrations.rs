@@ -7814,7 +7814,10 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert_eq!(refused, NO_PUSH_CREDENTIAL, "{token:?}");
+            assert_eq!(
+                refused, NO_PUSH_CREDENTIAL,
+                "a missing or empty token must refuse the push"
+            );
         }
     }
 

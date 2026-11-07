@@ -47,8 +47,8 @@
 //! [`crate::db::knowledge`].
 //!
 //! Fixing it properly means per-job leader election on a session-scoped
-//! advisory lock over a pinned connection, in the shape
-//! `zone_installer::migration::lock` already uses. That is a behaviour change
+//! advisory lock over a pinned connection, the shape sqlx's migrator uses for
+//! `_sqlx_migrations`. That is a behaviour change
 //! rather than a move, it needs a connection held for the length of a sweep,
 //! and it cannot be tested here, so it is deliberately out of scope for this
 //! change. The seam for it is [`Sweep`]: a sweep's work is a closure, so

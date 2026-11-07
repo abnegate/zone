@@ -8753,7 +8753,11 @@ mod cli_tests {
         );
         assert_eq!(outcomes(&logs), ["reroute", "retry"]);
         let tokens = agent.lines(TOKENS);
-        assert_eq!(tokens.len(), 3, "{tokens:?}");
+        assert_eq!(
+            tokens.len(),
+            3,
+            "three agent runs must each present a token"
+        );
         assert_eq!(tokens[..2], ["first-access", "second-access"]);
         let backoff = logs[1].metadata.as_ref().expect("the backoff's metadata");
         assert_eq!(backoff["attempt"], 1);

@@ -27,10 +27,6 @@ dirs = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
-sqlx = { workspace = true }
-thiserror = { workspace = true }
-sha2 = "=0.10.9"
-crc = "=3.4.0"
 
 [dev-dependencies]
 tempfile = "3"

@@ -12,6 +12,7 @@ use super::error::SealingError;
 use super::policy::Policy;
 
 const AGENT_LOGINS: &str = "agent_logins";
+const GITHUB_APPS: &str = "github_apps";
 const PROJECTS: &str = "projects";
 const SOURCES: &str = "sources";
 const SYNC_CONFIGS: &str = "sync_configs";
@@ -40,6 +41,12 @@ pub enum Column {
     GithubSyncToken,
     /// The GitHub App `private_key` in a `sources.config`.
     GithubAppPrivateKey,
+    /// `github_apps.client_secret`.
+    AppClientSecret,
+    /// `github_apps.private_key`.
+    AppPrivateKey,
+    /// `github_apps.webhook_secret`.
+    AppWebhookSecret,
     /// The `api_key` in a Linear `sync_configs.config`.
     LinearApiKey,
     /// A provider key in an AI settings table.
@@ -55,6 +62,9 @@ impl Column {
         Self::AgentLoginCredential,
         Self::GithubSyncToken,
         Self::GithubAppPrivateKey,
+        Self::AppClientSecret,
+        Self::AppPrivateKey,
+        Self::AppWebhookSecret,
         Self::LinearApiKey,
         Self::ai(AiScope::Organization, AiKey::LitellmKey),
         Self::ai(AiScope::Organization, AiKey::OpenaiApiKey),
@@ -81,6 +91,7 @@ impl Column {
             Self::WebhookSecret | Self::GithubSyncToken | Self::LinearApiKey => SYNC_CONFIGS,
             Self::ProjectToken => PROJECTS,
             Self::AgentLoginCredential => AGENT_LOGINS,
+            Self::AppClientSecret | Self::AppPrivateKey | Self::AppWebhookSecret => GITHUB_APPS,
             Self::AiSetting { scope, .. } => scope.table(),
         }
     }
@@ -95,6 +106,9 @@ impl Column {
             Self::GithubSyncToken => SYNC_TOKEN,
             Self::GithubAppPrivateKey => GITHUB_APP_PRIVATE_KEY,
             Self::LinearApiKey => LINEAR_API_KEY,
+            Self::AppClientSecret => "client_secret",
+            Self::AppPrivateKey => "private_key",
+            Self::AppWebhookSecret => "webhook_secret",
             Self::AiSetting { key, .. } => key.column(),
         }
     }
@@ -105,9 +119,12 @@ impl Column {
             Self::SourceCredentials | Self::AgentLoginCredential => Policy::Strict,
             Self::WebhookSecret => Policy::Mixed,
             Self::ProjectToken | Self::GithubSyncToken => Policy::Lenient,
-            Self::GithubAppPrivateKey | Self::LinearApiKey | Self::AiSetting { .. } => {
-                Policy::Counted
-            }
+            Self::GithubAppPrivateKey
+            | Self::AppClientSecret
+            | Self::AppPrivateKey
+            | Self::AppWebhookSecret
+            | Self::LinearApiKey
+            | Self::AiSetting { .. } => Policy::Counted,
         }
     }
 
@@ -175,7 +192,12 @@ impl Column {
                 .bind(sealed)
                 .bind(old)
                 .bind(Provider::GitHub.as_str()),
-            Self::GithubAppPrivateKey | Self::LinearApiKey | Self::AiSetting { .. } => {
+            Self::GithubAppPrivateKey
+            | Self::AppClientSecret
+            | Self::AppPrivateKey
+            | Self::AppWebhookSecret
+            | Self::LinearApiKey
+            | Self::AiSetting { .. } => {
                 return Err(SealingError::Counted(*self));
             }
         };

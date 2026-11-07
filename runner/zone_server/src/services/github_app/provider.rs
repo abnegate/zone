@@ -519,7 +519,8 @@ mod tests {
     use crate::secret::fixture::seal_legacy;
     use crate::services::github_app::Failure;
     use crate::services::github_app::testing::{
-        TEST_PRIVATE_KEY, installation_number, installed, issuing, provider, uninstalled,
+        TEST_PRIVATE_KEY, installation_number, installed, issuing, issuing_once, provider,
+        uninstalled,
     };
 
     const APPLICATION: ApplicationId = ApplicationId::new(12345);
@@ -833,16 +834,6 @@ mod tests {
             "expires_at": (chrono::Utc::now() + chrono::Duration::hours(1))
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         }))
-    }
-
-    async fn issuing_once(server: &MockServer, number: u64, token: &str) {
-        Mock::given(method("POST"))
-            .and(path(tokens_path(number)))
-            .respond_with(issued(token))
-            .up_to_n_times(1)
-            .expect(1)
-            .mount(server)
-            .await;
     }
 
     fn installation_answer(number: u64, suspended_at: Option<&str>) -> ResponseTemplate {
