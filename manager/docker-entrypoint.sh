@@ -1,13 +1,14 @@
 #!/bin/sh
 set -eu
 
-# Named volumes created before the image contained these directories are
-# root-owned. Reclaim each one for the service user without opening it to others.
+# Named volumes can be root-owned, or hold files from an image whose zone had
+# another uid. Agents write to these volumes and this runs as root, so nothing
+# here may follow a symlink: -h and the -L test keep it inside the volume.
 reclaim() {
     directory=$1
     mode=$2
-    if [ -d "$directory" ]; then
-        chown zone:zone "$directory"
+    if [ -d "$directory" ] && [ ! -L "$directory" ]; then
+        find "$directory" -xdev \( ! -user zone -o ! -group zone \) -exec chown -h zone:zone {} +
         chmod "$mode" "$directory"
     fi
 }
@@ -17,6 +18,7 @@ ZONE_PATH="$PATH:/home/zone/.local/bin:/home/zone/.bun/bin:/home/zone/.cargo/bin
 if [ "$(id -u)" -eq 0 ]; then
     reclaim /app/artifacts 0755
     reclaim /app/agent-state 0700
+    reclaim /app/embed-cache 0755
     reclaim /tmp/repos 0700
     exec runuser -u zone -- env PATH="$ZONE_PATH" "$@"
 fi
