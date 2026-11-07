@@ -844,14 +844,14 @@ of `*`, domains, which also cover their subdomains with or without a leading
 dot, and IP addresses or ranges such as `10.0.0.0/8`. Zone builds the token
 client once, and again only when the token URL or its proxy changes.
 
-The chosen proxy must be an `http` or `https` URL with no username or
-password, and must not name a link-local or cloud metadata address. Otherwise
-the sign-in fails, and so does every renewal, with *Claude's sign-in cannot go
-through the server's proxy: HTTPS_PROXY, HTTP_PROXY and ALL_PROXY must be http
-or https URLs with no username or password, or NO_PROXY must list Claude's
-token host*. The message never repeats the proxy's credentials; let the proxy
-admit the server by its address, or list the token host in `NO_PROXY`. Zone
-follows no redirect from the endpoint, and its requests name
+The chosen proxy must be an `http` or `https` URL, and must not name a
+link-local or cloud metadata address. A username and password written in it
+are sent to the proxy, and only to it, as HTTP Basic, exactly as the server's
+other HTTP clients send them. Otherwise the sign-in fails, and so does every
+renewal, with *Claude's sign-in cannot go through the server's proxy:
+HTTPS_PROXY, HTTP_PROXY and ALL_PROXY must be http or https URLs, or NO_PROXY
+must list Claude's token host*. The message never repeats the proxy's
+credentials. Zone follows no redirect from the endpoint, and its requests name
 `abnegate-agent-cli/<version>` as their user agent.
 
 The callback request carries no Zone session, so the listener never exchanges

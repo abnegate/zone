@@ -222,7 +222,7 @@ mod tests {
     use sqlx::PgPool;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use tempfile::TempDir;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -985,27 +985,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_renewal_through_a_credentialed_proxy_fails_in_zones_words() {
+    async fn a_renewal_through_a_credentialed_proxy_signs_in_to_it() {
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(TOKEN_PATH))
+            .and(header_exists("proxy-authorization"))
+            .respond_with(renewed())
+            .expect(1)
+            .mount(&proxy)
+            .await;
         let fixture = Fixture::new(UNREACHABLE.to_string()).await;
         let lapsed = fixture
             .sign_in(&tokens(Utc::now() - TimeDelta::minutes(1), Some(REFRESH)))
             .await;
         let proxies = Matcher::builder()
-            .http(format!("http://zone:{PROXY_PASSWORD}@proxy.internal:3128"))
+            .http(format!("http://zone:{PROXY_PASSWORD}@{}", proxy.address()))
             .build();
         let agents = fixture.state.config().agents.clone();
 
-        let failed = resolve_claude(&fixture.state, &lapsed, || {
+        let renewed = resolve_claude(&fixture.state, &lapsed, || {
             claude::client_through(&agents, &proxies)
         })
         .await;
         fixture.remove().await;
 
-        let Err(Error::Renewal(message)) = failed else {
-            panic!("expected a failed renewal, got {failed:?}");
-        };
-        assert_eq!(message, Unbuilt::CredentialedProxy.to_string());
-        assert!(!message.contains(PROXY_PASSWORD), "{message}");
+        assert_eq!(token(renewed), RENEWED);
+        proxy.verify().await;
     }
 
     #[tokio::test]

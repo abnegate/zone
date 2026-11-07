@@ -463,10 +463,8 @@ fn report(organization: Uuid, error: &Error) {
 /// Why Zone could not reach claude.com's token endpoint, as the admin is told it: a proxy the
 /// server names for it that cannot be used is the operator's to fix, not Zone's own failure.
 fn unbuilt(error: Unbuilt) -> Error {
-    match error {
-        Unbuilt::CredentialedProxy => Error::Unreachable(error.to_string()),
-        Unbuilt::Login(error) => ungranted(error),
-    }
+    let Unbuilt::Login(error) = error;
+    ungranted(error)
 }
 
 /// Why claude.com's token endpoint granted no tokens, as the admin is told it.
@@ -770,14 +768,8 @@ mod tests {
 
     #[test]
     fn a_proxy_the_sign_in_cannot_use_is_shown_as_the_operators_to_fix() {
-        let credentialed = format!("http://zone:{PROXY_PASSWORD}@proxy.internal:3128");
-        for (proxy, shown) in [
-            (
-                credentialed.as_str(),
-                Unbuilt::CredentialedProxy.to_string(),
-            ),
-            (SOCKS_PROXY, String::new()),
-        ] {
+        let credentialed = format!("socks5://zone:{PROXY_PASSWORD}@proxy.internal:1080");
+        for proxy in [SOCKS_PROXY, credentialed.as_str()] {
             let proxies = Matcher::builder().https(proxy).build();
 
             let error = claude::client_through(&crate::state::test_agents(), &proxies)
@@ -787,7 +779,6 @@ mod tests {
             assert!(matches!(error, Error::Unreachable(_)), "{proxy}: {error:?}");
             assert_ne!(error.shown(), UNSAVED, "{proxy}");
             assert!(error.shown().contains("NO_PROXY"), "{proxy}: {error}");
-            assert!(error.shown().starts_with(&shown), "{proxy}: {error}");
             assert!(!format!("{error:?}").contains(PROXY_PASSWORD), "{error:?}");
         }
     }

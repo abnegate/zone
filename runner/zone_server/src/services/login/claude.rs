@@ -4,6 +4,7 @@
 
 mod clients;
 mod explained;
+mod proxy;
 mod sealed;
 mod sealing_error;
 mod unbuilt;
@@ -19,6 +20,7 @@ use reqwest::Url;
 
 use crate::config::AgentConfig;
 use clients::Clients;
+use proxy::Proxy;
 
 pub use explained::Explained;
 pub use sealed::Sealed;
@@ -32,9 +34,8 @@ pub const ROOT_PATH: &str = "/";
 pub(super) const PROXY_ENDPOINT: &str = "proxy";
 
 const PROXY_REFUSED: &str = "Claude's sign-in cannot go through the server's proxy: \
-                             HTTPS_PROXY, HTTP_PROXY and ALL_PROXY must be http or https URLs \
-                             with no username or password, or NO_PROXY must list Claude's token \
-                             host";
+                             HTTPS_PROXY, HTTP_PROXY and ALL_PROXY must be http or https URLs, \
+                             or NO_PROXY must list Claude's token host";
 const UNPROXIABLE: &str = "Claude's token URL cannot be matched against the server's proxy rules";
 const UNREACHABLE: &str = "Could not reach Claude's sign-in service";
 
@@ -47,7 +48,7 @@ pub fn endpoints(agents: &AgentConfig) -> Result<Endpoints, LoginError> {
 }
 
 /// The client for the operator's token endpoint, through the proxy the server's environment
-/// names for it, as any other HTTP client of the server would choose it.
+/// names for it, as any other HTTP client of the server would choose it and sign in to it.
 pub fn client(agents: &AgentConfig) -> Result<Client, Unbuilt> {
     client_through(agents, &Matcher::from_system())
 }
@@ -58,28 +59,25 @@ pub(super) fn client_through(agents: &AgentConfig, proxies: &Matcher) -> Result<
     let endpoints = endpoints(agents)?;
     let proxy = proxy(proxies, endpoints.token())?;
     let token = endpoints.token().to_string();
-    CLIENTS.get(&token, proxy.as_deref(), || {
+    CLIENTS.get(&token, proxy.as_ref(), || {
         let client = Client::new(endpoints)?;
         match &proxy {
-            Some(proxy) => Ok(client.with_proxy(proxy)?),
+            Some(proxy) => Ok(proxy.through(client)?),
             None => Ok(client),
         }
     })
 }
 
-/// The proxy `proxies` choose for `token`: by its scheme, unless its host is one the proxies
-/// bypass.
-fn proxy(proxies: &Matcher, token: &Url) -> Result<Option<String>, Unbuilt> {
+/// The proxy `proxies` choose for `token`, by its scheme, unless its host is one the proxies
+/// bypass, with the username and password the server's proxy variable gave it.
+fn proxy(proxies: &Matcher, token: &Url) -> Result<Option<Proxy>, Unbuilt> {
     let token: Uri = token
         .as_str()
         .parse()
         .map_err(|_| LoginError::Malformed(UNPROXIABLE))?;
     match proxies.intercept(&token) {
         None => Ok(None),
-        Some(intercept) if intercept.basic_auth().is_some() || intercept.raw_auth().is_some() => {
-            Err(Unbuilt::CredentialedProxy)
-        }
-        Some(intercept) => Ok(Some(intercept.uri().to_string())),
+        Some(intercept) => Ok(Some(Proxy::intercepted(&intercept)?)),
     }
 }
 
@@ -257,24 +255,101 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_proxy_with_credentials_is_refused_in_zones_words() {
-        for credentialed in [
-            format!("http://zone:{PROXY_PASSWORD}@secure.internal:3128"),
-            format!("http://{PROXY_PASSWORD}@secure.internal:3128"),
+    /// A token endpoint only a stand-in proxy can reach, so a request that gets an answer went
+    /// through it.
+    const PROXIED_TOKEN_URL: &str = "http://platform.claude.test/v1/oauth/token";
+
+    /// A stand-in HTTP proxy that answers every forwarded token request with tokens.
+    async fn proxying() -> MockServer {
+        answering(
+            200,
+            json!({ "access_token": ACCESS, "expires_in": LIFETIME }),
+        )
+        .await
+    }
+
+    /// The proxy authorization `proxy` received, one per request.
+    async fn signed_in_as(proxy: &MockServer) -> Vec<String> {
+        proxy
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .iter()
+            .filter_map(|request| request.headers.get("proxy-authorization"))
+            .filter_map(|header| header.to_str().ok())
+            .map(str::to_string)
+            .collect()
+    }
+
+    async fn exchanged_through(proxies: &Matcher) -> Result<Tokens, LoginError> {
+        client_through(&agents(PROXIED_TOKEN_URL), proxies)
+            .expect("a client through the proxy")
+            .exchange(
+                &Code::new("fake-code", "fake-state").expect("a code"),
+                &SecretValue::new("fake-verifier"),
+                Scope::Inference,
+                Redirect::Paste,
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_proxy_with_credentials_is_signed_in_to_as_the_server_always_signed_in_to_it() {
+        for credentials in [
+            format!("zone:{PROXY_PASSWORD}"),
+            "zone:p%40ss%3Aword".to_string(),
+            "a%3Ab:c".to_string(),
+            "zone:".to_string(),
+            "zone".to_string(),
         ] {
-            let proxies = proxies("", &credentialed, "", "");
+            let proxy = proxying().await;
+            let address = proxy.address();
+            let url = format!("http://{credentials}@{address}");
+            let proxies = proxies(&url, "", "", "");
+            let expected = proxies
+                .intercept(&PROXIED_TOKEN_URL.parse().expect("a token URI"))
+                .and_then(|intercept| intercept.basic_auth().cloned())
+                .expect("the sign-in the server's other clients send");
 
-            let error = client_through(&agents(CLAUDE_TOKEN_URL), &proxies)
-                .expect_err("a credentialed proxy");
+            let tokens = exchanged_through(&proxies).await;
 
-            assert!(
-                matches!(error, Unbuilt::CredentialedProxy),
-                "{credentialed}: {error:?}"
+            assert!(tokens.is_ok(), "{credentials}: {tokens:?}");
+            assert_eq!(
+                signed_in_as(&proxy).await,
+                [expected.to_str().expect("a header")],
+                "{credentials}"
             );
-            assert_eq!(error.to_string(), PROXY_REFUSED);
-            assert!(!format!("{error:?}").contains(PROXY_PASSWORD), "{error:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_proxy_without_credentials_is_sent_none() {
+        let proxy = proxying().await;
+        let proxies = proxies(&format!("http://{}", proxy.address()), "", "", "");
+
+        exchanged_through(&proxies)
+            .await
+            .expect("tokens through the proxy");
+
+        assert!(signed_in_as(&proxy).await.is_empty());
+    }
+
+    #[test]
+    fn a_proxy_with_credentials_keeps_its_password_out_of_the_client() {
+        let credentialed = format!("http://zone:{PROXY_PASSWORD}@secure.internal:3128");
+        let proxies = proxies("", &credentialed, "", "");
+
+        let client = client_through(&agents(CLAUDE_TOKEN_URL), &proxies)
+            .expect("a client through a credentialed proxy");
+
+        assert_eq!(
+            client.proxy().map(|proxy| proxy.as_str()),
+            Some("http://secure.internal:3128/")
+        );
+        assert!(
+            !format!("{client:?}").contains(PROXY_PASSWORD),
+            "{client:?}"
+        );
     }
 
     #[test]
