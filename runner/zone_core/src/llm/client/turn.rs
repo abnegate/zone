@@ -25,6 +25,7 @@ pub(super) struct Turn {
     reported: Reported,
     hidden: String,
     spoke: bool,
+    earlier: bool,
 }
 
 impl Turn {
@@ -43,6 +44,7 @@ impl Turn {
             reported,
             hidden: agent.tool(Toolset::SERVER, ""),
             spoke: false,
+            earlier: false,
         }
     }
 
@@ -118,7 +120,10 @@ impl Turn {
                     return None;
                 }
                 self.spoke = true;
-                delta.content = Some(answer);
+                delta.content = Some(match self.earlier {
+                    true => format!("{PARAGRAPH_BREAK}{answer}"),
+                    false => answer,
+                });
             }
             AgentEvent::Tool(call) => {
                 delta.reasoning_content = activity(&call, &[&self.hidden]);
@@ -135,6 +140,8 @@ impl Turn {
                     reported = finish_reason.as_deref().unwrap_or("none"),
                     "agent finished its turn"
                 );
+                self.earlier |= self.spoke;
+                self.spoke = false;
                 finished = Some(ended(finish_reason.as_deref()));
             }
             _ => return None,
@@ -193,6 +200,9 @@ impl Turn {
         )
     }
 }
+
+/// What keeps a later turn's answer apart from the prose before it, as the crate keeps its own.
+const PARAGRAPH_BREAK: &str = "\n\n";
 
 /// The finish reason a turn the agent reported finishing for `reported` ends on: cut short when
 /// the crate says the agent was stopped before it finished, and stopped otherwise, whatever the

@@ -1671,6 +1671,26 @@ async fn a_turn_the_crate_cut_short_ends_cut_short_rather_than_stopped() {
 }
 
 #[tokio::test]
+async fn a_later_turn_that_only_reports_its_answer_still_streams_it() {
+    let events = agent_events(vec![
+        Ok(AgentEvent::Text("First.".to_string())),
+        Ok(AgentEvent::Answer("First.".to_string())),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
+        Ok(AgentEvent::Answer("Second.".to_string())),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
+    ]);
+
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
+
+    assert!(failure.is_none(), "{failure:?}");
+    assert_eq!(
+        spoken(&delivered),
+        "First.\n\nSecond.",
+        "the later turn's answer was dropped as a repeat of the first's"
+    );
+}
+
+#[tokio::test]
 async fn a_host_agent_that_exits_mid_turn_answers_cut_short() {
     let directory = TempDir::new().expect("a temporary directory");
     let script = r#"
