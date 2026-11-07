@@ -416,13 +416,16 @@ impl Harness {
         let workspace = self.workspace.parse().expect("a workspace id");
         let source = zone_server::db::sources::create_source(
             &self.pool,
-            workspace,
-            &Uuid::new_v4().to_string(),
-            "filesystem",
-            json!({"base_path": directory}),
-            None,
-            None,
-            None,
+            zone_server::db::sources::NewSource {
+                workspace_id: workspace,
+                name: &Uuid::new_v4().to_string(),
+                source_type: "filesystem",
+                config: json!({"base_path": directory}),
+                description: None,
+                url: None,
+                credentials_encrypted: None,
+                github_installation_id: None,
+            },
         )
         .await
         .expect("a source");
@@ -874,13 +877,16 @@ async fn prompted_on(
 async fn add_github_source(pool: &PgPool, workspace: Uuid) -> Uuid {
     zone_server::db::sources::create_source(
         pool,
-        workspace,
-        &Uuid::new_v4().to_string(),
-        zone_server::db::sources::GITHUB,
-        json!({"owner": "abnegate", "repo": "zone"}),
-        None,
-        None,
-        None,
+        zone_server::db::sources::NewSource {
+            workspace_id: workspace,
+            name: &Uuid::new_v4().to_string(),
+            source_type: zone_server::db::sources::GITHUB,
+            config: json!({"owner": "abnegate", "repo": "zone"}),
+            description: None,
+            url: None,
+            credentials_encrypted: None,
+            github_installation_id: None,
+        },
     )
     .await
     .expect("a GitHub source")

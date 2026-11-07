@@ -2,12 +2,12 @@ import { ActionMenu, type ActionMenuItem } from '@zone/ui';
 import type { ChatPullRequest, PullRequestChange } from '../types';
 import {
   AUTO_MERGE_HINT,
+  connectionHint,
   mergeReading,
   pullRequestKind,
   pullRequestName,
   pullRequestTitle,
   READ_ONLY_HINT,
-  UNCREDENTIALED_HINT,
 } from '../utils/pullRequests';
 import { MenuIcon } from './MenuIcon';
 import { PullRequestStatusIcon } from './PullRequestStatusIcon';
@@ -37,7 +37,7 @@ function menuItems({
 }: PullRequestItemProps): ActionMenuItem[] {
   const { status, writable, credentialed, url } = pullRequest;
   const readOnly = writable ? undefined : READ_ONLY_HINT;
-  const uncredentialed = credentialed ? undefined : UNCREDENTIALED_HINT;
+  const unreachable = connectionHint(pullRequest);
   const items: ActionMenuItem[] = [
     {
       label: 'Open on GitHub',
@@ -58,15 +58,15 @@ function menuItems({
       label: 'View changes',
       icon: <MenuIcon path={CHANGES_ICON} />,
       disabled: !credentialed,
-      hint: uncredentialed,
+      hint: unreachable,
       onSelect: () => onViewChanges(pullRequest),
     },
   ];
   const open = status?.state === 'open';
   if (open) {
     const autoMerge = status.auto_merge;
-    const mergeHint = readOnly ?? uncredentialed ?? autoMerge.unavailable ?? undefined;
-    const draftHint = readOnly ?? uncredentialed ?? status.draft_unavailable ?? undefined;
+    const mergeHint = readOnly ?? unreachable ?? autoMerge.unavailable ?? undefined;
+    const draftHint = readOnly ?? unreachable ?? status.draft_unavailable ?? undefined;
     items.push(
       {
         label: autoMerge.enabled ? 'Cancel auto-merge' : 'Merge when ready',
@@ -93,7 +93,7 @@ function menuItems({
       onSelect: () => onChange(pullRequest, { auto_fix: false }),
     });
   } else if (open) {
-    const fixHint = readOnly ?? uncredentialed;
+    const fixHint = readOnly ?? unreachable;
     items.push({
       label: 'Fix automatically',
       icon: <MenuIcon path={FIX_ICON} />,

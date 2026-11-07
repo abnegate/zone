@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { chooseMenuItem, openMenu, settleMenu } from '../../../test/menu';
 import type { ChatPullRequest, PullRequestStatus } from '../types';
+import { DISCONNECTED_HINT, UNAVAILABLE_HINT, UNCREDENTIALED_HINT } from '../utils/pullRequests';
 
 const mockGetChatPullRequests = mock();
 const mockUpdateChatPullRequest = mock();
@@ -55,6 +56,7 @@ const OPEN: ChatPullRequest = {
   status: STATUS,
   writable: true,
   credentialed: true,
+  connection: 'credentialed',
   auto_fix: false,
   auto_fixing: false,
 };
@@ -216,7 +218,9 @@ describe('ChangesBox', () => {
 
   it('still lets a writer stop auto-fix once no source or status can be read', async () => {
     mockUpdateChatPullRequest.mockResolvedValue({ ...OPEN, auto_fix: false });
-    await shown([{ ...OPEN, auto_fix: true, credentialed: false, status: null }]);
+    await shown([
+      { ...OPEN, auto_fix: true, credentialed: false, connection: 'uncredentialed', status: null },
+    ]);
 
     await chooseMenuItem(MENU, 'Stop fixing automatically');
     expect(mockUpdateChatPullRequest).toHaveBeenCalledWith('chat-1', 'pr-1', {
@@ -333,15 +337,35 @@ describe('ChangesBox', () => {
   });
 
   it('leaves only open, copy and dismiss to a reader no source lets act', async () => {
-    await shown([{ ...OPEN, credentialed: false }]);
+    await shown([{ ...OPEN, credentialed: false, connection: 'uncredentialed' }]);
 
     await openMenu(MENU);
     for (const name of [/View changes/, /Merge when ready/, /Convert to draft/]) {
       expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
+      expect(menuItem(name)).toHaveTextContent(UNCREDENTIALED_HINT);
     }
     for (const name of ['Open on GitHub', 'Copy link', 'Dismiss']) {
       expect(menuItem(name)).not.toHaveAttribute('aria-disabled');
     }
+  });
+
+  it('says GitHub is unreachable for now rather than asking for a source to be connected', async () => {
+    await shown([{ ...OPEN, credentialed: false, connection: 'unavailable' }]);
+
+    await openMenu(MENU);
+    for (const name of [/View changes/, /Merge when ready/, /Convert to draft/]) {
+      expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
+      expect(menuItem(name)).toHaveTextContent(UNAVAILABLE_HINT);
+      expect(menuItem(name)).not.toHaveTextContent(UNCREDENTIALED_HINT);
+    }
+  });
+
+  it('asks for GitHub to be reconnected when its connection was removed', async () => {
+    await shown([{ ...OPEN, credentialed: false, connection: 'disconnected' }]);
+
+    await openMenu(MENU);
+    expect(menuItem(/View changes/)).toHaveTextContent(DISCONNECTED_HINT);
+    expect(menuItem(/View changes/)).not.toHaveTextContent(UNCREDENTIALED_HINT);
   });
 
   it('lets a read-only reader view the changes but not dismiss or change it', async () => {

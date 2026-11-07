@@ -4,6 +4,8 @@ use uuid::Uuid;
 
 use super::*;
 use crate::db::actions::{self, StartTask};
+use crate::db::github_installations;
+use crate::db::sources::testing;
 use crate::db::tasks::Origin;
 use crate::db::workspace_members::{self, WorkspaceRole};
 
@@ -436,4 +438,187 @@ async fn an_auto_project_goes_first_in_its_workspaces_order() {
     .expect("an auto project");
 
     assert_eq!(fixture.names().await, ["Planned", "Other", "Manual"]);
+}
+
+async fn widgets(pool: &PgPool, workspace_id: Uuid) -> ProjectRow {
+    create(
+        pool,
+        NewProject {
+            name: "Widgets",
+            description: None,
+            workspace_id: Some(workspace_id),
+            source_id: None,
+            status: None,
+        },
+    )
+    .await
+    .expect("a project")
+}
+
+#[tokio::test]
+async fn linking_with_an_installation_stores_it_and_unlinking_clears_it() {
+    let pool = testing::pool().await;
+    let installation = testing::installation(&pool).await;
+    let project = widgets(&pool, installation.workspace).await;
+    assert_eq!(project.github_installation_id, None);
+
+    let linked = link_github(
+        &pool,
+        project.id,
+        "https://github.com/acme/widgets",
+        None,
+        Some(installation.id),
+    )
+    .await
+    .expect("the link")
+    .expect("the project");
+    assert_eq!(linked.github_installation_id, Some(installation.id));
+    assert_eq!(linked.github_access_token, None);
+
+    let unlinked = unlink_github(&pool, project.id)
+        .await
+        .expect("the unlink")
+        .expect("the project");
+    assert_eq!(unlinked.github_installation_id, None);
+    assert_eq!(unlinked.github_repo_url, None);
+}
+
+#[tokio::test]
+async fn an_installation_lost_after_the_check_links_nothing() {
+    let pool = testing::pool().await;
+    let revoked = testing::installation(&pool).await;
+    let deleted = testing::installation(&pool).await;
+    let projects = [
+        widgets(&pool, revoked.workspace).await,
+        widgets(&pool, deleted.workspace).await,
+    ];
+    for installation in [&revoked, &deleted] {
+        assert!(
+            github_installations::attachable(&pool, installation.workspace, installation.id)
+                .await
+                .expect("the check")
+                .is_some()
+        );
+    }
+    sqlx::query("UPDATE github_installations SET revoked_at = NOW() WHERE id = $1")
+        .bind(revoked.id)
+        .execute(&pool)
+        .await
+        .expect("the installation is revoked");
+    sqlx::query("DELETE FROM github_installations WHERE id = $1")
+        .bind(deleted.id)
+        .execute(&pool)
+        .await
+        .expect("the installation is deleted");
+
+    for (project, installation, reason) in [
+        (&projects[0], &revoked, "a revoked"),
+        (&projects[1], &deleted, "a deleted"),
+    ] {
+        let linked = link_github(
+            &pool,
+            project.id,
+            "https://github.com/acme/widgets",
+            None,
+            Some(installation.id),
+        )
+        .await;
+
+        assert!(
+            matches!(linked, Err(LinkError::Unattachable)),
+            "{reason} installation must be refused, got {linked:?}"
+        );
+        let unchanged = get_project(&pool, project.id)
+            .await
+            .expect("the read")
+            .expect("the project");
+        assert_eq!(unchanged.github_installation_id, None, "{reason}");
+        assert_eq!(unchanged.github_repo_url, None, "{reason}");
+    }
+}
+
+#[tokio::test]
+async fn linking_a_missing_project_finds_nothing_rather_than_refusing() {
+    let pool = testing::pool().await;
+    let installation = testing::installation(&pool).await;
+
+    let linked = link_github(
+        &pool,
+        Uuid::new_v4(),
+        "https://github.com/acme/widgets",
+        None,
+        Some(installation.id),
+    )
+    .await;
+
+    assert!(matches!(linked, Ok(None)), "{linked:?}");
+}
+
+#[tokio::test]
+async fn every_project_read_and_write_returns_the_installation() {
+    let pool = testing::pool().await;
+    let installation = testing::installation(&pool).await;
+    let project = widgets(&pool, installation.workspace).await;
+    link_github(
+        &pool,
+        project.id,
+        "https://github.com/acme/widgets",
+        None,
+        Some(installation.id),
+    )
+    .await
+    .expect("the link");
+    let expected = Some(installation.id);
+
+    let in_workspace = get_project_in_workspace(&pool, project.id, installation.workspace)
+        .await
+        .expect("the read")
+        .expect("the project");
+    assert_eq!(in_workspace.github_installation_id, expected);
+    let by_id = get_project(&pool, project.id)
+        .await
+        .expect("the read")
+        .expect("the project");
+    assert_eq!(by_id.github_installation_id, expected);
+    for status in [None, Some("active")] {
+        let listed = list_projects(&pool, installation.workspace, status)
+            .await
+            .expect("the listing");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].github_installation_id, expected);
+    }
+    let renamed = update_project(&pool, project.id, Some("Gadgets"), None, None)
+        .await
+        .expect("the update")
+        .expect("the project");
+    assert_eq!(renamed.github_installation_id, expected);
+    let unsourced = set_source(&pool, project.id, None)
+        .await
+        .expect("the update")
+        .expect("the project");
+    assert_eq!(unsourced.github_installation_id, expected);
+}
+
+#[test]
+fn debug_redacts_the_access_token() {
+    let row = ProjectRow {
+        id: Uuid::new_v4(),
+        workspace_id: None,
+        source_id: None,
+        name: "Widgets".to_string(),
+        description: None,
+        status: "active".to_string(),
+        github_repo_url: Some("https://github.com/acme/widgets".to_string()),
+        github_access_token: Some("ghp_legacy_plaintext".to_string()),
+        created_at: None,
+        updated_at: None,
+        github_installation_id: None,
+        position: 0,
+    };
+
+    let rendered = format!("{row:?}");
+
+    assert!(!rendered.contains("ghp_legacy_plaintext"), "{rendered}");
+    assert!(rendered.contains(REDACTED), "{rendered}");
+    assert!(rendered.contains("acme/widgets"), "{rendered}");
 }

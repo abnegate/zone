@@ -20,10 +20,9 @@ import { textSource } from './text';
 import type { FormField, SourceDefinition } from './types';
 import { webSource } from './web';
 
-// Re-export types
+export { GITHUB_SOURCE_TYPE } from './github';
 export type { FormField, FormRow, SourceDefinition } from './types';
 
-// Registry of all source types
 export const sourceRegistry: SourceDefinition[] = [
   githubSource,
   gitlabSource,
@@ -36,7 +35,6 @@ export const sourceRegistry: SourceDefinition[] = [
   slackSource,
 ];
 
-// Lookup helpers
 export const getSourceById = (id: SourceType): SourceDefinition | undefined =>
   sourceRegistry.find((s) => s.id === id);
 
@@ -45,13 +43,11 @@ export const getSourcesByCategory = (category: SourceCategory): SourceDefinition
 
 export const getEnabledSources = (): SourceDefinition[] => sourceRegistry.filter((s) => s.enabled);
 
-// For SourceTypeBadge component
 export const getSourceBadgeColor = (type: SourceType): string =>
   getSourceById(type)?.badgeColor ?? 'badge-gray';
 
 export const getSourceLabel = (type: SourceType): string => getSourceById(type)?.name ?? type;
 
-// Initialize form state for a source type
 export const initializeFormState = (sourceId: SourceType): Record<string, unknown> => {
   const source = getSourceById(sourceId);
   if (!source) return {};

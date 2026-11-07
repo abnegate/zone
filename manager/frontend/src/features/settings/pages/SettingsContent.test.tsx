@@ -34,6 +34,7 @@ mock.module('../organization/components', () => ({
   AuditLogsSection: marker('audit-logs-section'),
   BillingSection: marker('billing-section'),
   DevicesSection: marker('devices-section'),
+  GitHubSection: marker('github-section'),
   OrganizationAiSection: marker('organization-ai-section'),
   OrganizationMembersSection: marker('organization-members-section'),
 }));
@@ -154,6 +155,37 @@ describe('SettingsContent', () => {
         expect(propsOf('organization-members-section')).toEqual({ invitations });
       });
     }
+  });
+
+  describe('organization GitHub', () => {
+    const cases: { role: OrgRole | undefined; canManage: boolean }[] = [
+      { role: 'member', canManage: false },
+      { role: 'admin', canManage: true },
+      { role: 'owner', canManage: true },
+      { role: undefined, canManage: true },
+    ];
+
+    for (const { role, canManage } of cases) {
+      it(`lets an organization ${role ?? 'role the server never says'} ${canManage ? 'manage' : 'only view'} GitHub`, () => {
+        renderSection(SettingsGroup.Organization, SettingsSection.GitHub, {
+          ...access('member'),
+          organizationRole: role,
+        });
+        expect(propsOf('github-section')).toEqual({ organizationId, canManage });
+      });
+    }
+
+    it('renders no GitHub section without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.GitHub}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
   });
 
   describe('server features', () => {

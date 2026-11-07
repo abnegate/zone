@@ -9667,9 +9667,11 @@ dependencies = [
  "urlencoding",
  "uuid",
  "wiremock",
+ "zeroize",
  "zone_chat",
  "zone_context",
  "zone_core",
+ "zone_server",
 ]
 
 [[package]]

@@ -195,7 +195,7 @@ describe('SettingsPage', () => {
       renderAt('/settings/workspace/general');
 
       expect(linkLabels('Workspace')).toEqual(['General', 'AI', 'Folders', 'Members']);
-      expect(linkLabels('Organization')).toEqual(['Members']);
+      expect(linkLabels('Organization')).toEqual(['Members', 'GitHub']);
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
@@ -212,6 +212,7 @@ describe('SettingsPage', () => {
         'Devices',
         'Billing',
         'Audit log',
+        'GitHub',
       ]);
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
@@ -236,7 +237,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
     });
 
-    it('shows an organization owner and workspace admin all twelve sections', () => {
+    it('shows an organization owner and workspace admin all thirteen sections', () => {
       signInAs('owner', 'admin');
 
       renderAt('/settings/workspace/general');
@@ -248,6 +249,7 @@ describe('SettingsPage', () => {
         'Devices',
         'Billing',
         'Audit log',
+        'GitHub',
       ]);
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);

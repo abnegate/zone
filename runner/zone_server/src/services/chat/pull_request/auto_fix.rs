@@ -136,7 +136,7 @@ async fn project(
         .await?
         .into_iter()
         .find(|project| {
-            project.github_access_token.is_some()
+            (project.github_access_token.is_some() || project.github_installation_id.is_some())
                 && project.github_repo_url.as_deref().and_then(repository) == Some(wanted.clone())
         })
         .map(|project| project.id))
@@ -400,6 +400,49 @@ mod tests {
         })
         .await
         .expect("the claimed run is executed rather than left for recovery to fail");
+    }
+
+    #[tokio::test]
+    async fn a_project_connected_through_a_github_installation_can_push() {
+        let pool = crate::db::sources::testing::pool().await;
+        let installation = crate::db::sources::testing::installation(&pool).await;
+        let project = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO projects (id, workspace_id, name, github_repo_url, github_installation_id)
+             VALUES ($1, $2, 'Widgets', 'https://github.com/acme/widgets', $3)",
+        )
+        .bind(project)
+        .bind(installation.workspace)
+        .bind(installation.id)
+        .execute(&pool)
+        .await
+        .expect("a project");
+        let chat = create_chat(&pool, None, "Changes", "qwen3:8b", false, true)
+            .await
+            .expect("a chat");
+        let row = chat_pull_requests::record(
+            &pool,
+            &NewPullRequest {
+                chat_id: chat.id,
+                owner: "acme",
+                repo: "widgets",
+                number: 7,
+                url: "https://github.com/acme/widgets/pull/7",
+                title: None,
+                source_id: None,
+            },
+        )
+        .await
+        .expect("the pull request");
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+
+        assert_eq!(
+            super::project(&state, installation.workspace, &row)
+                .await
+                .expect("the projects"),
+            Some(project),
+            "a project the installation pushes for holds a push credential"
+        );
     }
 
     #[tokio::test]

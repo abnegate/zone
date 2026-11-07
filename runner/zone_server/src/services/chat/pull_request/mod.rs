@@ -7,6 +7,7 @@ mod auto_merge;
 mod cache;
 mod changes;
 mod checks;
+mod connection;
 mod credential;
 mod detection;
 mod error;
@@ -30,11 +31,14 @@ use uuid::Uuid;
 
 use crate::db::DbResult;
 use crate::db::chat_pull_requests::{self, PullRequestRow};
+use crate::db::sources::SourceRow;
+use crate::services::github_app::{self, Credential};
 use crate::state::AppState;
 
 pub use auto_merge::AutoMerge;
 pub use cache::StatusCache;
 pub use checks::Checks;
+pub use connection::Connection;
 pub use error::Error;
 pub use mergeable::Mergeable;
 pub use opened::Opened;
@@ -79,17 +83,20 @@ pub async fn track(
         return Ok(Tracked {
             row,
             status: Some(cached),
-            credentialed: true,
+            connection: Connection::Credentialed,
         });
     }
-    let Some(token) = token(state, workspace_id, &row).await? else {
-        return Ok(Tracked {
-            row,
-            status: None,
-            credentialed: false,
-        });
+    let credential = match credential(state, workspace_id, &row).await? {
+        Ok(credential) => credential,
+        Err(connection) => {
+            return Ok(Tracked {
+                row,
+                status: None,
+                connection,
+            });
+        }
     };
-    let status = match observed(state, &row, &token).await {
+    let status = match observed(state, &row, credential).await {
         Ok(Observation {
             status,
             branch,
@@ -108,7 +115,7 @@ pub async fn track(
     Ok(Tracked {
         row,
         status,
-        credentialed: true,
+        connection: Connection::Credentialed,
     })
 }
 
@@ -172,23 +179,41 @@ pub async fn diff(
     workspace_id: Uuid,
     row: &PullRequestRow,
 ) -> Result<Excerpt, Error> {
-    let token = required_token(state, workspace_id, row).await?;
+    let credential = required(state, workspace_id, row).await?;
     let service = state.config().pull_requests()?;
     let reference = service.pull_request(&row.url)?;
-    Ok(service.fetch_diff(&reference, &token, DIFF_BYTES).await?)
+    let (service, reference) = (&service, &reference);
+    state
+        .github()
+        .retrying(state.db(), credential, |token| async move {
+            Ok(service.fetch_diff(reference, &token, DIFF_BYTES).await?)
+        })
+        .await
 }
 
 async fn open(state: &AppState, workspace_id: Uuid, row: &PullRequestRow) -> Result<Open, Error> {
-    let token = required_token(state, workspace_id, row).await?;
+    let credential = required(state, workspace_id, row).await?;
     let service = state.config().pull_requests()?;
     let reference = service.pull_request(&row.url)?;
-    let Observation {
-        status,
-        node_id,
-        head,
-        methods,
-        ..
-    } = observe(&service, &reference, &token, row, Reading::Change).await?;
+    let (
+        Observation {
+            status,
+            node_id,
+            head,
+            methods,
+            ..
+        },
+        token,
+    ) = {
+        let (service, reference) = (&service, &reference);
+        state
+            .github()
+            .retrying(state.db(), credential, |token| async move {
+                let observation = observe(service, reference, &token, row, Reading::Change).await?;
+                Ok::<_, Error>((observation, token))
+            })
+            .await?
+    };
     if !status.open() {
         return Err(Error::Refused(AutoMerge::SETTLED.to_string()));
     }
@@ -202,27 +227,48 @@ async fn open(state: &AppState, workspace_id: Uuid, row: &PullRequestRow) -> Res
     })
 }
 
-async fn token(
+/// The credential of the source that can act on `row`, or else why the
+/// workspace cannot reach GitHub for it.
+async fn credential(
     state: &AppState,
     workspace_id: Uuid,
     row: &PullRequestRow,
-) -> DbResult<Option<SecretValue>> {
-    let source = credential::source(state, workspace_id, row).await?;
-    Ok(source.and_then(|source| credential::token(state, &source)))
+) -> DbResult<Result<Credential, Connection>> {
+    let Some(source) = credential::source(state, workspace_id, row).await? else {
+        return Ok(Err(Connection::Uncredentialed));
+    };
+    Ok(match resolved(state, row, &source).await {
+        Ok(Some(credential)) => Ok(credential),
+        Ok(None) => Err(Connection::Uncredentialed),
+        Err(error) => Err(Connection::from(error)),
+    })
 }
 
-async fn required_token(
+async fn required(
     state: &AppState,
     workspace_id: Uuid,
     row: &PullRequestRow,
-) -> Result<SecretValue, Error> {
-    token(state, workspace_id, row)
+) -> Result<Credential, Error> {
+    let source = credential::source(state, workspace_id, row)
         .await
         .map_err(|error| {
             tracing::error!(pull_request = %row.id, %error, "could not read a pull request's source");
             Error::Storage
         })?
+        .ok_or(Error::Uncredentialed)?;
+    resolved(state, row, &source)
+        .await?
         .ok_or(Error::Uncredentialed)
+}
+
+async fn resolved(
+    state: &AppState,
+    row: &PullRequestRow,
+    source: &SourceRow,
+) -> Result<Option<Credential>, github_app::Error> {
+    credential::credential(state, source).await.inspect_err(|error| {
+        tracing::warn!(pull_request = %row.id, source = %source.id, %error, "could not resolve a pull request source's GitHub credential");
+    })
 }
 
 async fn remember(state: &AppState, row: &PullRequestRow, status: &Status) {
@@ -237,11 +283,17 @@ async fn remember(state: &AppState, row: &PullRequestRow, status: &Status) {
 async fn observed(
     state: &AppState,
     row: &PullRequestRow,
-    token: &SecretValue,
+    credential: Credential,
 ) -> Result<Observation, Error> {
     let service = state.config().pull_requests()?;
     let reference = service.pull_request(&row.url)?;
-    observe(&service, &reference, token, row, Reading::Listing).await
+    let (service, reference) = (&service, &reference);
+    state
+        .github()
+        .retrying(state.db(), credential, |token| async move {
+            observe(service, reference, &token, row, Reading::Listing).await
+        })
+        .await
 }
 
 async fn observe(

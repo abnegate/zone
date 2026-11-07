@@ -1,10 +1,13 @@
 import { Button } from '@zone/ui';
 import { useCallback, useMemo, useState } from 'react';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { getErrors } from '../../../validation';
-import { formStateFromConfig, getSourceById, getSourceLabel } from '../config';
+import { formStateFromConfig, GITHUB_SOURCE_TYPE, getSourceById, getSourceLabel } from '../config';
 import { type SourceVerifyResponse, UpdateSourceRequestSchema } from '../schemas';
 import type { Source, UpdateSourceRequest } from '../types';
+import { isAppBacked } from '../utils';
 import { FormFieldRenderer, FormFieldsRenderer } from './FormFields';
+import { GitHubSourceConnection } from './GitHubSourceConnection';
 
 interface SourceDetailProps {
   source: Source;
@@ -30,6 +33,8 @@ export function SourceDetail({
   verifySource,
 }: SourceDetailProps) {
   const definition = getSourceById(source.source_type);
+  const { currentOrganization } = useWorkspace();
+  const organizationId = currentOrganization?.id ?? null;
   const baseline = useMemo(
     () => formStateFromConfig(source.source_type, source.config),
     [source.source_type, source.config]
@@ -144,15 +149,42 @@ export function SourceDetail({
 
         <div className="form-group">
           <label htmlFor="source-type">Type</label>
-          <input id="source-type" value={getSourceLabel(source.source_type)} readOnly disabled />
+          <input
+            type="text"
+            id="source-type"
+            value={getSourceLabel(source.source_type)}
+            readOnly
+            disabled
+          />
         </div>
         <div className="form-group">
           <label htmlFor="source-url">URL</label>
-          <input id="source-url" className="input-mono" value={source.url} readOnly disabled />
+          <input
+            type="text"
+            id="source-url"
+            className="input-mono"
+            value={source.url}
+            readOnly
+            disabled
+          />
         </div>
+        {source.source_type === GITHUB_SOURCE_TYPE && (
+          <GitHubSourceConnection
+            source={source}
+            organizationId={organizationId}
+            updateSource={updateSource}
+            onSaved={onSaved}
+            onError={setError}
+          />
+        )}
         <div className="form-group">
           <label htmlFor="source-name">Name</label>
-          <input id="source-name" value={name} onChange={(event) => setName(event.target.value)} />
+          <input
+            type="text"
+            id="source-name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+          />
         </div>
         <div className="form-group">
           <label htmlFor="source-description">
@@ -183,7 +215,7 @@ export function SourceDetail({
             onChange={handleFieldChange}
           />
         )}
-        {definition?.credentialField && (
+        {definition?.credentialField && !isAppBacked(source) && (
           <FormFieldRenderer
             field={{ ...definition.credentialField, required: false }}
             value={credentials}

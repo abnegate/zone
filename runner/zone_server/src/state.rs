@@ -4,7 +4,7 @@ use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
 use dashmap::DashMap;
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{OnceCell, Semaphore};
 use uuid::Uuid;
@@ -22,6 +22,7 @@ use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
+use crate::services::github_app::Provider;
 use crate::services::mail::AccountMail;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
@@ -111,6 +112,7 @@ struct AppStateInner {
     pub frame_semaphore: Arc<Semaphore>,
     /// Process-wide MCP hub. Connected once, shared across chat turns.
     pub mcp: OnceCell<McpHub>,
+    pub github: OnceLock<Provider>,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
     /// publish to, so a state built per test observes the same runs.
@@ -227,6 +229,7 @@ impl AppState {
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
                 mcp: OnceCell::new(),
+                github: OnceLock::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
                 pull_request_statuses: StatusCache::default(),
@@ -383,6 +386,21 @@ impl AppState {
     pub fn install_mcp(&self, hub: McpHub) {
         let _ = self.inner.mcp.set(hub);
     }
+
+    pub fn github(&self) -> &Provider {
+        self.inner
+            .github
+            .get_or_init(|| Provider::new(&self.inner.config, Arc::clone(&self.inner.master_key)))
+    }
+
+    /// Panics if a provider is already in place.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn install_github(&self, provider: Provider) {
+        assert!(
+            self.inner.github.set(provider).is_ok(),
+            "install_github must run before the first github() call"
+        );
+    }
 }
 
 /// Decrements the live-connection count for a device when the socket ends.
@@ -451,6 +469,7 @@ pub(crate) fn test_config() -> Config {
         app_base_url: "http://localhost:3000".to_string(),
         github_api_url: crate::config::DEFAULT_GITHUB_API_URL.to_string(),
         github_api_allows_http: false,
+        github_web_url: crate::config::DEFAULT_GITHUB_WEB_URL.to_string(),
         web_search: crate::services::search::defaults(),
         comfyui: crate::services::comfy::settings::development(),
         source_index: Default::default(),
@@ -470,7 +489,11 @@ mod tests {
     use super::*;
     use crate::secret::Unseal;
     use crate::secret::fixture;
+    use crate::services::github_app::testing::{TEST_PRIVATE_KEY, provider};
     use abnegate_notify::MockMailer;
+    use abnegate_secret::SecretValue;
+    use abnegate_vcs::pull_request::ApplicationId;
+    use std::num::{NonZeroU8, NonZeroU32};
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
     use zone_core::llm::AgentKind;
@@ -488,6 +511,71 @@ mod tests {
             .await
             .expect("REDIS_URL must point to a reachable cache");
         Some(cache)
+    }
+
+    #[tokio::test]
+    async fn every_clone_shares_one_github_provider() {
+        let state = AppState::for_tests();
+        let clone = state.clone();
+
+        assert!(std::ptr::eq(state.github(), clone.github()));
+        assert!(std::ptr::eq(state.github(), state.github()));
+    }
+
+    #[tokio::test]
+    async fn an_installed_github_provider_replaces_the_configured_one() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/app/installations"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(Vec::<()>::new()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let state = AppState::for_tests();
+
+        state.install_github(provider(&server, Arc::clone(state.master_key())));
+
+        let github = state.github();
+        let sealed = github
+            .seal(&SecretValue::new(TEST_PRIVATE_KEY))
+            .expect("seal");
+        let jwt = github
+            .application_jwt(ApplicationId::new(1), &sealed)
+            .expect("sign");
+        let listed = github
+            .applications()
+            .expect("the installed provider has a usable origin")
+            .list_installations(&jwt, NonZeroU32::MIN, NonZeroU8::MIN)
+            .await
+            .expect("the installed provider asks the stand-in");
+        assert!(listed.items.is_empty());
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "install_github must run before the first github() call")]
+    async fn installing_a_github_provider_after_one_is_in_use_panics() {
+        let state = AppState::for_tests();
+        let _ = state.github();
+
+        state.install_github(Provider::new(
+            &test_config(),
+            Arc::clone(state.master_key()),
+        ));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "install_github must run before the first github() call")]
+    async fn installing_a_second_github_provider_panics() {
+        let state = AppState::for_tests();
+        state.install_github(Provider::new(
+            &test_config(),
+            Arc::clone(state.master_key()),
+        ));
+
+        state.install_github(Provider::new(
+            &test_config(),
+            Arc::clone(state.master_key()),
+        ));
     }
 
     #[tokio::test]
@@ -540,6 +628,7 @@ mod tests {
             app_base_url: "http://localhost:3000".to_string(),
             github_api_url: crate::config::DEFAULT_GITHUB_API_URL.to_string(),
             github_api_allows_http: false,
+            github_web_url: crate::config::DEFAULT_GITHUB_WEB_URL.to_string(),
             web_search: crate::services::search::defaults(),
             comfyui: crate::services::comfy::settings::development(),
             source_index: Default::default(),

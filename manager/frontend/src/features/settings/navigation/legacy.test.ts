@@ -8,6 +8,7 @@ const ORGANIZATION_TABS = [
   ['devices', '/settings/organization/devices'],
   ['billing', '/settings/organization/billing'],
   ['audit', '/settings/organization/audit'],
+  ['github', '/settings/organization/github'],
 ] as const;
 
 const WORKSPACE_TABS = [
@@ -32,6 +33,12 @@ describe('legacyOrganizationPath', () => {
     );
     expect(legacyOrganizationPath('?a=1&tab=billing&b=2', '')).toBe(
       '/settings/organization/billing?a=1&b=2'
+    );
+  });
+
+  it("keeps a GitHub callback's outcome and organization on the GitHub section", () => {
+    expect(legacyOrganizationPath('?tab=github&github=installed&organization=org-2', '')).toBe(
+      '/settings/organization/github?github=installed&organization=org-2'
     );
   });
 

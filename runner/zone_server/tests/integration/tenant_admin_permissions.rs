@@ -1,7 +1,7 @@
 //! A signed-up account can reach the console's tenant settings pages.
 //!
-//! The console has always gated `/settings` and `/org-settings` on
-//! `workspaces:update` and `organizations:update`. Migration 001 seeded a
+//! The console has always gated its workspace and organization settings pages
+//! on `workspaces:update` and `organizations:update`. Migration 001 seeded a
 //! permission row for every other resource the console names and none for these
 //! two, so no role could hold either and both pages answered "Access Denied" to
 //! every user, including the owner of the organization. Migration 022 seeds them.

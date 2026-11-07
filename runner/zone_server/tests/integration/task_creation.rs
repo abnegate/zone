@@ -35,13 +35,16 @@ async fn check_creation() {
         .unwrap();
     let source = sources::create_source(
         &pool,
-        workspace_id,
-        &format!("Repository {workspace_id}"),
-        "github",
-        json!({}),
-        None,
-        None,
-        None,
+        sources::NewSource {
+            workspace_id,
+            name: &format!("Repository {workspace_id}"),
+            source_type: "github",
+            config: json!({}),
+            description: None,
+            url: None,
+            credentials_encrypted: None,
+            github_installation_id: None,
+        },
     )
     .await
     .unwrap();
