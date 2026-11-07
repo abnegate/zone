@@ -9,7 +9,7 @@ reclaim() {
     mode=$2
     if [ -d "$directory" ] && [ ! -L "$directory" ]; then
         if ! find "$directory" -xdev \( ! -user zone -o ! -group zone \) -exec chown -h zone:zone {} +; then
-            printf 'Starting anyway: zone may not reach the paths above in %s\n' "$directory" >&2
+            printf 'zone may not be able to reach the paths above in %s\n' "$directory" >&2
         fi
         chmod "$mode" "$directory"
     fi

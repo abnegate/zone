@@ -311,9 +311,10 @@ manager's entrypoint gives back to `zone` anything in `zone_manager_agent_state`
 that it does not own, so a volume left by an image whose `zone` had another uid
 recovers on the next start. Images built after the browser libraries landed and
 before these ids were pinned ran as 996. The walk visits every file on each
-start and writes only to the wrong ones. A path it cannot change is named in the
-log and the manager starts anyway, so check the log if one turn still reports
-`Permission denied`.
+start and writes only to the wrong ones. A path inside a volume that it cannot
+change is named in the log and the manager still starts, so check the log if a
+turn still reports `Permission denied`. A volume mounted read-only stops the
+manager starting, because its top directory's mode cannot be set.
 
 The walk stays on each volume's filesystem. If you nest a mount from another
 filesystem inside one of these volumes, only the mount's top directory is

@@ -112,6 +112,8 @@ assert_owner /app/embed-cache/group-only "$zone"
 assert_owner /app/embed-cache/user-only "$zone"
 grep -qF '/app/embed-cache/read-only' /tmp/entrypoint.log \
     || fail 'the entrypoint should name the path it could not reclaim'
+grep -qF 'zone may not be able to reach the paths above in /app/embed-cache' /tmp/entrypoint.log \
+    || fail 'the entrypoint should say which volume is left partly reclaimed'
 assert_owner /tmp/repos "$zone"
 assert_owner /tmp/repos/clone/run.sh "$zone"
 
