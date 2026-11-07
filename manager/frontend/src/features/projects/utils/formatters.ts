@@ -3,13 +3,10 @@ import type { ProjectSort } from './order';
 
 const NEVER_USED = 'Never used';
 
-/**
- * Format a date string for display
- * @param dateStr ISO date string
- * @returns Formatted date string (e.g., "Jan 15, 2024")
- */
-export function formatDate(dateStr: string): string {
-  const date = new Date(dateStr);
+/** An ISO date as "Jan 15, 2024", or nothing when it cannot be read. */
+export function formatDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
