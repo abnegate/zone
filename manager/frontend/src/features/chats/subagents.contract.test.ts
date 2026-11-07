@@ -1,30 +1,27 @@
 /**
  * A subagent reaches the console over REST and the chat socket in the shape the
  * server's `ChatSubagent` serialises to. Nothing in the type system links the
- * two, so this reads the Rust definitions and asserts the console's schemas and
- * status lists still match them.
+ * two, so this reads the Rust definition and asserts the console's schemas and
+ * status lists still match it. The steps and statuses come from
+ * `abnegate-agent-cli`, whose source isn't in this repository, so
+ * `subagents.contract.json` stands between them: `chat_subagent.rs` holds the
+ * crate's types to that file, and this test holds the console to it.
  */
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { rustVariants, structFields } from '../../test/rust';
+import { structFields } from '../../test/rust';
 import { ChatSubagentSchema, SubagentStepSchema } from './subagentSchemas';
+import contract from './subagents.contract.json';
 import { STEP_STATUSES, SUBAGENT_STATUSES } from './subagentTypes';
 
 const RUNNER = join(import.meta.dir, '../../../../../runner');
 const CHAT_SUBAGENT_RS = join(RUNNER, 'zone_server/src/services/chat/subagent/chat_subagent.rs');
-const SUBAGENT_RS = join(RUNNER, 'zone_core/src/llm/provider/subagent');
 
-function read(path: string): string {
-  return readFileSync(path, 'utf8');
-}
-
-function rustKeys(source: string, structName: string): string[] {
-  return structFields(source, structName)
-    .map((field) => field.name)
-    .sort();
+function chatSubagentFields() {
+  return structFields(readFileSync(CHAT_SUBAGENT_RS, 'utf8'), 'ChatSubagent');
 }
 
 function zodKeys(schema: { shape: Record<string, unknown> }): string[] {
@@ -33,28 +30,25 @@ function zodKeys(schema: { shape: Record<string, unknown> }): string[] {
 
 describe('a chat subagent reads as the server sends it', () => {
   test('ChatSubagent carries the same fields on both sides', () => {
-    expect(zodKeys(ChatSubagentSchema)).toEqual(rustKeys(read(CHAT_SUBAGENT_RS), 'ChatSubagent'));
-  });
-
-  test('SubagentStep carries the same fields on both sides', () => {
-    expect(zodKeys(SubagentStepSchema)).toEqual(
-      rustKeys(read(join(SUBAGENT_RS, 'step.rs')), 'SubagentStep')
+    expect(zodKeys(ChatSubagentSchema)).toEqual(
+      chatSubagentFields()
+        .map((field) => field.name)
+        .sort()
     );
   });
 
+  test('SubagentStep carries the same fields on both sides', () => {
+    expect(zodKeys(SubagentStepSchema)).toEqual(contract.step_fields);
+  });
+
   test('no field is left out of the wire, so none is optional on the server', () => {
-    const fields = [
-      ...structFields(read(CHAT_SUBAGENT_RS), 'ChatSubagent'),
-      ...structFields(read(join(SUBAGENT_RS, 'step.rs')), 'SubagentStep'),
-    ];
-    expect(fields.filter((field) => field.optional)).toEqual([]);
+    expect(chatSubagentFields().filter((field) => field.optional)).toEqual([]);
   });
 
   test.each([
-    ['status.rs', 'SubagentStatus', SUBAGENT_STATUSES],
-    ['step_status.rs', 'StepStatus', STEP_STATUSES],
-  ] as const)('%s variants match', (file, name, values) => {
-    const source = read(join(SUBAGENT_RS, file));
-    expect([...values].sort()).toEqual(rustVariants(source, name).sort());
+    ['SubagentStatus', SUBAGENT_STATUSES, contract.subagent_statuses],
+    ['StepStatus', STEP_STATUSES, contract.step_statuses],
+  ] as const)('%s values match', (_name, values, expected) => {
+    expect([...values].sort()).toEqual(expected);
   });
 });

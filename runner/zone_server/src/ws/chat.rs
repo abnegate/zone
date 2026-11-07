@@ -12,6 +12,7 @@
 //!    "remove_queued" act on the queue, and every change is sent as "queue"
 //! 6. Connection closes on error or client disconnect
 
+use abnegate_agent_cli::SubagentStep;
 use abnegate_comfy::MediaType;
 use abnegate_llm::{Message as LlmMessage, Role as LlmRole, Usage};
 use axum::{
@@ -33,7 +34,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer, SubagentStep};
+use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
 use zone_core::tools::Session as ToolSession;
 use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
@@ -3299,7 +3300,7 @@ async fn prepare_chat(
         None => None,
     };
     if let Some(organization) = organization {
-        handover::settle(state.config(), organization, &resolved);
+        handover::settle(state.config(), organization, &resolved).await;
     }
     let current = resolved.login.clone();
     let chosen = route.chosen().is_some();
@@ -4082,7 +4083,12 @@ async fn handle_chat_generation(
                 .as_mut()
                 .and_then(|pinned| pinned.restart(llm_client.backend().clone()))
         {
-            llm_client = llm_client.with_backend(backend);
+            llm_client = equipped(
+                llm_client.with_backend(backend),
+                agent_tools.as_ref(),
+                &observer,
+                sandboxed,
+            );
             replay = whole.clone();
             context = match continuing {
                 true => handover::replayed(&whole),
@@ -4985,11 +4991,11 @@ mod tests {
         use crate::services::provider::Provider;
         use crate::services::stages::AUTO;
         use crate::services::stages::testing::{MODEL_FLAG, StandIn};
+        use abnegate_agent_cli::AgentKind;
         use tempfile::TempDir;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
-        use zone_core::llm::AgentKind;
 
         const CATALOG: &str = "/api/tags";
         const QUESTION: &str = "What is a monad?";
@@ -5421,7 +5427,14 @@ mod tests {
             .await;
             organization.remove().await;
 
-            let Ok(Routing::Image(config, LlmBackend::Cli { agent, settings }, _)) = routing else {
+            let Ok(Routing::Image(
+                config,
+                LlmBackend::Cli {
+                    agent, settings, ..
+                },
+                _,
+            )) = routing
+            else {
                 panic!("expected an image route carrying the organization's agent");
             };
             assert_eq!(agent, AgentKind::Claude);
@@ -5445,16 +5458,16 @@ mod tests {
             access: &str,
             headroom: f64,
         ) -> Uuid {
-            let sealed = crate::services::login::claude::Tokens {
-                access: abnegate_secret::SecretValue::new(access),
-                refresh: None,
-                expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(8),
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            }
-            .seal(state.master_key())
-            .expect("tokens to seal");
+            let tokens = abnegate_agent_cli::login::claude::Tokens::new(
+                abnegate_secret::SecretValue::new(access),
+                None,
+                chrono::Utc::now() + chrono::TimeDelta::hours(8),
+                None,
+                "user:inference",
+                None,
+            );
+            let sealed = crate::services::login::claude::Sealed::seal(&tokens, state.master_key())
+                .expect("tokens to seal");
             let login = db::agent_logins::insert(
                 &organization.pool,
                 &db::agent_logins::Insert {
@@ -5767,7 +5780,7 @@ cat 'DIR/reply.jsonl'
                                 .split_terminator('\0')
                                 .map(str::to_string)
                                 .collect(),
-                            stdin: zone_core::llm::provider::prompt(&stdin),
+                            stdin: zone_core::llm::cli::prompt(&stdin),
                             directory: directory.trim().to_string(),
                         })
                         .filter(|run| run.flag("--session-id").or(run.flag("--resume")).is_some())
@@ -5928,7 +5941,7 @@ cat 'DIR/reply.jsonl'
                 fn transcript(&self, directory: &std::path::Path, id: &str) -> std::path::PathBuf {
                     self.home()
                         .join("projects")
-                        .join(crate::services::agent::sessions::sanitized(directory))
+                        .join(abnegate_agent_cli::Session::project(directory))
                         .join(format!("{id}.jsonl"))
                 }
 
@@ -6450,11 +6463,64 @@ cat 'DIR/reply.jsonl'
                 assert_eq!(second.prompt, first.prompt);
             }
 
+            #[tokio::test]
+            async fn a_refused_resume_replays_with_the_tools_and_the_watch_of_the_turn() {
+                const SURVEY: &str = "toolu_01Survey";
+                let chat = Chat::on_claude().await;
+                sqlx::query(
+                    "UPDATE chats SET agent_enabled = TRUE, agent_sandboxed = FALSE WHERE id = $1",
+                )
+                .bind(chat.organization.chat)
+                .execute(&chat.organization.pool)
+                .await
+                .expect("an agentic, unsandboxed chat");
+
+                chat.ask(FIRST).await;
+                std::fs::write(
+                    chat.agent.directory.path().join("reply.jsonl"),
+                    subagents_until_the_first_result(),
+                )
+                .expect("the stand-in's reply");
+                chat.agent.refuse();
+                chat.ask(SECOND).await;
+                let runs = chat.agent.runs();
+                let stored =
+                    db::chat_subagents::list(&chat.organization.pool, chat.organization.chat)
+                        .await
+                        .expect("the chat's subagents");
+                chat.remove().await;
+
+                let [served, _, replayed] = runs.as_slice() else {
+                    panic!("expected three sessioned runs, got {}", runs.len());
+                };
+                assert!(
+                    served.flag("--mcp-config").is_some(),
+                    "the chat serves its agent tools: {:?}",
+                    served.arguments
+                );
+                assert!(
+                    replayed.flag("--mcp-config").is_some(),
+                    "the replay lost zone's tools: {:?}",
+                    replayed.arguments
+                );
+                for flag in ["--tools", "--permission-prompt-tool"] {
+                    assert_eq!(
+                        replayed.flag(flag),
+                        served.flag(flag),
+                        "the replay changed {flag}"
+                    );
+                }
+                assert!(
+                    stored.iter().any(|row| row.external_id == SURVEY),
+                    "nothing watched the replay's subagents: {stored:?}"
+                );
+            }
+
             /// Claude's subagents fixture up to the turn's first result, which
             /// leaves its background review still running when the turn ends.
             fn subagents_until_the_first_result() -> String {
                 const FIXTURE: &str = include_str!(
-                    "../../../zone_core/src/llm/provider/parser/fixtures/claude/subagents.jsonl"
+                    "../../../zone_core/src/llm/client/fixtures/claude/subagents.jsonl"
                 );
                 let mut reply = String::new();
                 for line in FIXTURE
@@ -6473,7 +6539,7 @@ cat 'DIR/reply.jsonl'
             #[tokio::test]
             async fn a_turns_subagents_reach_its_readers_and_its_store_and_are_swept_when_it_ends()
             {
-                use zone_core::llm::{StepStatus, SubagentStatus};
+                use abnegate_agent_cli::{StepStatus, SubagentStatus};
 
                 const SURVEY: &str = "toolu_01Survey";
                 const REVIEW: &str = "toolu_04Review";
@@ -6905,8 +6971,8 @@ cat 'DIR/reply.jsonl'
         Notice {
             from: "a@example.com".to_string(),
             to: "c@example.com".to_string(),
-            from_agent: zone_core::llm::AgentKind::Claude,
-            agent: zone_core::llm::AgentKind::Codex,
+            from_agent: abnegate_agent_cli::AgentKind::Claude,
+            agent: abnegate_agent_cli::AgentKind::Codex,
             reason: crate::services::chat::handover::Reason::Limit,
             resets_at: chrono::DateTime::parse_from_rfc3339("2026-09-23T06:10:00Z")
                 .ok()
@@ -7167,7 +7233,7 @@ cat 'DIR/reply.jsonl'
             kind: None,
             model: None,
             background: true,
-            status: zone_core::llm::SubagentStatus::Running,
+            status: abnegate_agent_cli::SubagentStatus::Running,
             tool_uses: None,
             duration_ms: None,
             tokens: None,
@@ -7192,12 +7258,7 @@ cat 'DIR/reply.jsonl'
             stream: stream.clone(),
         };
         let changed = subagent(chat_id);
-        let step = SubagentStep {
-            id: "toolu_x".to_string(),
-            name: "Bash".to_string(),
-            subject: None,
-            status: zone_core::llm::StepStatus::Running,
-        };
+        let step = SubagentStep::new("toolu_x", "Bash", abnegate_agent_cli::StepStatus::Running);
 
         frames.announce(changed.clone(), vec![step]).await;
 
@@ -7250,20 +7311,17 @@ cat 'DIR/reply.jsonl'
     struct Watching;
 
     impl Observer for Watching {
-        fn observe(&self, _output: &zone_core::llm::Output) {}
+        fn observe(&self, _output: &abnegate_agent_cli::Output) {}
     }
 
     fn observed(client: &LlmClient) -> Option<Arc<dyn Observer>> {
-        match client.backend() {
-            LlmBackend::Cli { settings, .. } => settings.observer.clone(),
-            LlmBackend::Http => None,
-        }
+        client.observer().cloned()
     }
 
     fn cli() -> LlmBackend {
         LlmBackend::cli(
-            zone_core::llm::AgentKind::Claude,
-            zone_core::llm::CliSettings::default(),
+            abnegate_agent_cli::AgentKind::Claude,
+            abnegate_agent_cli::CliSettings::default(),
         )
     }
 
@@ -7296,6 +7354,41 @@ cat 'DIR/reply.jsonl'
             true,
         );
         assert!(matches!(endpoint.backend(), LlmBackend::Http));
+    }
+
+    #[test]
+    fn a_coding_agent_served_tools_is_watched_beside_them() {
+        let observer: Arc<dyn Observer> = Arc::new(Watching);
+        let mut tools = ChatTools::empty();
+        let served = AgentTools::serve(
+            &cli(),
+            &mut tools,
+            crate::mcp::testing::scope(Uuid::new_v4()),
+            "http://127.0.0.1:1/mcp",
+        )
+        .expect("a coding agent is served the turn's tools");
+
+        for (sandboxed, kept) in [
+            (true, BuiltinTools::Withheld),
+            (false, BuiltinTools::Granted),
+        ] {
+            let client = equipped(
+                LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli()),
+                Some(&served),
+                &observer,
+                sandboxed,
+            );
+
+            assert!(
+                client.toolset().is_some(),
+                "sandboxed {sandboxed}: the agent reaches the turn's tools"
+            );
+            assert_eq!(client.builtin_tools(), kept, "sandboxed {sandboxed}");
+            assert!(
+                observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
+                "sandboxed {sandboxed}: serving tools does not unwatch the agent"
+            );
+        }
     }
 
     #[tokio::test]

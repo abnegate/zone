@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use zone_core::llm::AgentKind;
+use abnegate_agent_cli::AgentKind;
 
 /// What an admin is told when Zone itself failed; the server's log has why.
 pub const UNSAVED: &str = "Zone could not finish the sign-in. Start again.";
@@ -75,8 +75,8 @@ mod tests {
         }
         for (error, shown) in [
             (
-                Error::Refused("Claude refused the sign-in (HTTP 400): Invalid code".to_string()),
-                "Claude refused the sign-in (HTTP 400): Invalid code",
+                Error::Refused("Claude refused the sign-in (HTTP 401). Start again.".to_string()),
+                "Claude refused the sign-in (HTTP 401). Start again.",
             ),
             (
                 Error::Unreachable(

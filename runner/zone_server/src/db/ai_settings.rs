@@ -1,5 +1,6 @@
 //! AI provider settings database queries
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_secret::SecretValue;
 use chrono::NaiveDateTime;
 use sqlx::{Executor, PgConnection, PgPool, Postgres};
@@ -7,7 +8,6 @@ use uuid::Uuid;
 use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
-use zone_core::llm::AgentKind;
 
 use crate::services::endpoint;
 use crate::services::hosts::Hosts;
@@ -32,19 +32,25 @@ pub(crate) const PROVIDERS: [&str; 6] = [
     PROVIDER_CODEX,
 ];
 
+/// Each coding agent Zone runs, beside the provider that selects it. An agent the crate drives
+/// that is missing here has no provider, rather than one no setting can select.
+const AGENT_PROVIDERS: [(AgentKind, &str); 2] = [
+    (AgentKind::Claude, PROVIDER_CLAUDE_CODE),
+    (AgentKind::Codex, PROVIDER_CODEX),
+];
+
 pub fn agent(provider: &str) -> Option<AgentKind> {
-    match provider {
-        PROVIDER_CLAUDE_CODE => Some(AgentKind::Claude),
-        PROVIDER_CODEX => Some(AgentKind::Codex),
-        _ => None,
-    }
+    AGENT_PROVIDERS
+        .iter()
+        .find(|(_, selecting)| *selecting == provider)
+        .map(|(agent, _)| *agent)
 }
 
-pub fn provider(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => PROVIDER_CLAUDE_CODE,
-        AgentKind::Codex => PROVIDER_CODEX,
-    }
+pub fn provider(agent: AgentKind) -> Option<&'static str> {
+    AGENT_PROVIDERS
+        .iter()
+        .find(|(kind, _)| *kind == agent)
+        .map(|(_, provider)| *provider)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1442,9 +1448,30 @@ mod tests {
     fn each_agent_provider_selects_its_agent_and_back() {
         assert_eq!(agent(PROVIDER_CLAUDE_CODE), Some(AgentKind::Claude));
         assert_eq!(agent(PROVIDER_CODEX), Some(AgentKind::Codex));
-        for kind in AgentKind::ALL {
-            assert_eq!(agent(provider(kind)), Some(kind));
+        for &kind in AgentKind::ALL {
+            let selecting = provider(kind).expect("every agent the crate drives has a provider");
+            assert_eq!(agent(selecting), Some(kind));
         }
+    }
+
+    /// A provider is one an operator can save, and an agent's provider reads back as that agent,
+    /// so no agent is named by a provider the settings would refuse or read as no agent.
+    #[test]
+    fn every_agents_provider_is_a_provider_that_selects_it() {
+        for (kind, selecting) in AGENT_PROVIDERS {
+            assert!(
+                PROVIDERS.contains(&selecting),
+                "{selecting} cannot be saved"
+            );
+            assert_eq!(provider(kind), Some(selecting));
+            assert_eq!(agent(selecting), Some(kind));
+        }
+        let agents: Vec<AgentKind> = AGENT_PROVIDERS.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(
+            agents,
+            AgentKind::ALL,
+            "an agent the crate drives has no provider"
+        );
     }
 
     #[test]

@@ -9,11 +9,11 @@ rust-version.workspace = true
 
 [features]
 sqlx = ["abnegate-secret/sqlx"]
-# Test-only environment guards (`variables`, `vpn::Hold`) for other crates' tests.
+# Test-only helpers for other crates' tests: the environment guards
+# (`variables`, `vpn::Hold`) and `llm::cli::prompt`.
 test-support = []
 
 [dependencies]
-base64 = { workspace = true }
 tempfile = "=3.27.0"
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -33,6 +33,7 @@ nix = { workspace = true, features = ["fs"] }
 # Session storage
 dirs = { workspace = true }
 
+abnegate-agent-cli = { workspace = true }
 abnegate-exec = { workspace = true }
 abnegate-llm = { workspace = true }
 abnegate-secret = { workspace = true }

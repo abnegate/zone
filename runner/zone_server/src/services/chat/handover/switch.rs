@@ -1,5 +1,6 @@
+use abnegate_agent_cli::Session;
 use chrono::{DateTime, Utc};
-use zone_core::llm::{LlmBackend, Session};
+use zone_core::llm::LlmBackend;
 
 use super::{Notice, Reason};
 use crate::services::login::identity::LoginIdentity;

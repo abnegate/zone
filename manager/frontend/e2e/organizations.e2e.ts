@@ -499,11 +499,14 @@ test.describe('Organizations & Context Switcher', () => {
 
   test.describe('Loading States', () => {
     test('shows loading indicator while fetching organizations', async ({ page }) => {
-      // Add delay to the organizations endpoint
+      let answer = () => {};
+      const answered = new Promise<void>((resolve) => {
+        answer = resolve;
+      });
       await page.unroute('**/api/organizations?*');
       await page.unroute('**/api/organizations');
       await routeApi(page, '**/api/organizations?*', async (route) => {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await answered;
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -511,7 +514,7 @@ test.describe('Organizations & Context Switcher', () => {
         });
       });
       await routeApi(page, '**/api/organizations', async (route) => {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await answered;
         route.fulfill({
           status: 200,
           contentType: 'application/json',
@@ -525,6 +528,7 @@ test.describe('Organizations & Context Switcher', () => {
       const placeholder = page.getByRole('status', { name: 'Loading organizations' });
       await expect(placeholder).toBeVisible();
 
+      answer();
       await expect(page.locator('.org-name')).toContainText('Acme Corp', { timeout: 10000 });
       await expect(placeholder).toHaveCount(0);
     });

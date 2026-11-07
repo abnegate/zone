@@ -1327,11 +1327,11 @@ mod tests {
     #[tokio::test]
     async fn a_chats_effort_reaches_an_agent_on_its_backend_and_an_endpoint_in_its_body() {
         use crate::db::{chats, organizations, workspaces};
+        use abnegate_agent_cli::{AgentKind, CliSettings};
         use serde_json::json;
         use sqlx::PgPool;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        use zone_core::llm::{AgentKind, CliSettings};
 
         const MODEL: &str = "reasoner";
         let server = MockServer::start().await;
@@ -1440,6 +1440,7 @@ mod tests {
         let LlmBackend::Cli {
             agent: kind,
             settings,
+            ..
         } = agent.llm.backend()
         else {
             panic!("an agent turn runs on its CLI");

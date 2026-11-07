@@ -117,8 +117,8 @@ impl IntoResponse for Failure {
 
 #[cfg(test)]
 mod tests {
+    use abnegate_agent_cli::AgentKind;
     use serde_json::{Value, json};
-    use zone_core::llm::AgentKind;
 
     use super::*;
 

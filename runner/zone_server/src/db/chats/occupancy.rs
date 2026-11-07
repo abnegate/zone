@@ -1,9 +1,9 @@
 //! The context window a coding agent last reported running a chat's turn in.
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::Occupancy;
 use sqlx::{Executor, Postgres};
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
-use zone_core::llm::provider::Occupancy;
 
 use crate::db::DbResult;
 
@@ -31,7 +31,7 @@ where
             agent: AgentKind::named(&agent)?,
             model,
             occupancy: Occupancy::reported(
-                u64::try_from(window).ok(),
+                u64::try_from(window).ok()?,
                 used.and_then(|used| u64::try_from(used).ok()),
             )?,
         })

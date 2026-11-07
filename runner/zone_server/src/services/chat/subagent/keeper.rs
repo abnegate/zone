@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_agent_cli::{Subagent, SubagentStatus, SubagentStep};
 use sqlx::{Acquire, PgConnection, Postgres, Transaction};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
-use zone_core::llm::{Subagent, SubagentStatus, SubagentStep};
 
 use super::batch::Batch;
 use super::pending::Pending;
@@ -237,7 +237,7 @@ impl Keeper {
             background: update.background,
             status: update.status,
             tool_uses: update.tool_uses.map(stored),
-            duration_ms: update.duration_ms.map(stored),
+            duration_ms: update.duration.map(milliseconds),
             tokens: update.tokens.map(stored),
             last_tool: update.last_tool.as_deref(),
             summary: update.summary.as_deref(),
@@ -339,4 +339,9 @@ fn transient(error: &sqlx::Error) -> bool {
 
 fn stored(count: u64) -> i64 {
     i64::try_from(count).unwrap_or(i64::MAX)
+}
+
+/// `duration` as the milliseconds a subagent's run is stored in.
+fn milliseconds(duration: Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }

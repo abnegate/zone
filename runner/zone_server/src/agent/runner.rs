@@ -411,7 +411,8 @@ pub fn run_with_context(
                 if let Some(deltas) = &choice.delta.tool_calls {
                     pending.merge(deltas);
                 }
-                // A usage-only SSE frame may follow finish_reason; drain through [DONE].
+                // A usage-only SSE frame, or the window a coding agent reports once it has
+                // exited, may follow finish_reason; drain through the stream's end.
             }
             let mut requested = pending.finish();
             let parsed = if agentic && !text.is_empty() {
@@ -1869,6 +1870,7 @@ mod tests {
     /// fail every agentic turn instead of answering it.
     mod cli_backend {
         use super::*;
+        use abnegate_agent_cli::{AgentKind, CliSettings};
         use abnegate_llm::LlmConfig;
         use serde_json::{Value, json};
         use std::path::PathBuf;
@@ -1877,7 +1879,7 @@ mod tests {
         use tempfile::TempDir;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-        use zone_core::llm::{AgentKind, BuiltinTools, CliSettings, Toolset};
+        use zone_core::llm::{BuiltinTools, Toolset};
 
         const ANSWER: &str = "Ready.";
         const SESSION: &str = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f";

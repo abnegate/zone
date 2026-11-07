@@ -65,8 +65,8 @@ pub fn assemble(context: &RunContext, unseen: &[String], note: String) -> Option
 
 #[cfg(test)]
 mod tests {
+    use abnegate_agent_cli::transcript::render;
     use zone_core::context::project;
-    use zone_core::llm::provider::render;
 
     use super::*;
     use crate::services::chat::session::composed;
@@ -102,7 +102,7 @@ mod tests {
     }
 
     fn sent(tail: &RunContext) -> String {
-        render(&project(&tail.entries, tail.summary.as_ref()).expect("a projectable tail")).text()
+        render(&project(&tail.entries, tail.summary.as_ref()).expect("a projectable tail"))
     }
 
     #[test]

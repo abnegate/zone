@@ -12,12 +12,12 @@ pub use offer::{Offer, choose, offers};
 pub use offered::Offered;
 pub use refusal::Refusal;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_secret::SecretValue;
 use serde::{Deserialize, Serialize};
 use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
-use zone_core::llm::AgentKind;
 
 use crate::db::ai_settings::{
     EffectiveAiSettings, PROVIDER_ANTHROPIC, PROVIDER_CLAUDE_CODE, PROVIDER_CODEX,

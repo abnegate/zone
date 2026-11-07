@@ -1,5 +1,5 @@
+use abnegate_agent_cli::SubagentStep;
 use sqlx::types::Json;
-use zone_core::llm::SubagentStep;
 
 use super::SubagentRow;
 

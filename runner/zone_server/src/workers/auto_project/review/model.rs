@@ -253,7 +253,7 @@ mod tests {
     use super::*;
     use crate::db::ai_settings::EffectiveAiSettings;
     use crate::services::stages::Installed;
-    use zone_core::llm::AgentKind;
+    use abnegate_agent_cli::AgentKind;
 
     fn installed(name: &str, bytes: u64) -> Installed {
         Installed {

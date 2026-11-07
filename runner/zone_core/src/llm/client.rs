@@ -2,20 +2,24 @@
 //! this host, behind one client.
 
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_agent_cli::{AgentKind, AgentStream, CliProvider, CliSettings, Occupancy};
 use abnegate_llm::finish_reason::STOP;
 use abnegate_llm::{
-    ChatResponse, ChatStreamChunk, Choice, Completion, CompletionProvider, CompletionRequest,
-    Effort, Error, LlmConfig, Message, RequestOptions, StreamChoice, StreamDelta, ToolDefinition,
+    ChatResponse, ChatStreamChunk, Choice, Completion, CompletionRequest, Effort, Error, LlmConfig,
+    Message, RequestOptions, ToolDefinition,
 };
-use futures::{Stream, StreamExt};
+use futures::Stream;
 
-use super::provider::{
-    AgentEvent, AgentKind, AgentStream, BuiltinTools, CliProvider, CliSettings, Observer,
-    Occupancy, Toolset, activity,
-};
+use super::backend::LlmBackend;
+use super::cli::{BuiltinTools, Observer, SignIn, Toolset, confined};
+use reported::Reported;
+use turn::{Turn, failed};
+
+mod reported;
+mod turn;
 
 /// The longest a buffered completion may take, from sending the request to
 /// reading the last byte of its answer. A local model on a CPU can spend
@@ -31,30 +35,6 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// A completion in pieces, whichever backend produced it.
 pub type ChatStream = Pin<Box<dyn Stream<Item = Result<ChatStreamChunk, Error>> + Send>>;
 
-/// Where completions come from.
-#[derive(Debug, Clone, Default)]
-pub enum LlmBackend {
-    /// The OpenAI-compatible endpoint at [`LlmConfig::base_url`].
-    #[default]
-    Http,
-    /// A coding agent CLI on this host, run as a child process. A single-user
-    /// self-host can point zone at the `claude` or `codex` it has already
-    /// signed in and spend that subscription instead of a metered API key.
-    Cli {
-        agent: AgentKind,
-        settings: Box<CliSettings>,
-    },
-}
-
-impl LlmBackend {
-    pub fn cli(agent: AgentKind, settings: CliSettings) -> Self {
-        Self::Cli {
-            agent,
-            settings: Box::new(settings),
-        }
-    }
-}
-
 /// A chat client that answers from the endpoint its config names or, when
 /// its backend says so, from a coding agent CLI on this host.
 #[derive(Debug, Clone)]
@@ -62,21 +42,9 @@ pub struct LlmClient {
     endpoint: abnegate_llm::LlmClient,
     backend: LlmBackend,
     reported: Reported,
-}
-
-/// What a coding agent last reported of its context, and which agent did, shared by every clone
-/// of the client that ran it.
-#[derive(Debug, Clone, Default)]
-struct Reported(Arc<Mutex<Option<(AgentKind, Occupancy)>>>);
-
-impl Reported {
-    fn record(&self, agent: AgentKind, occupancy: Occupancy) {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((agent, occupancy));
-    }
-
-    fn latest(&self) -> Option<(AgentKind, Occupancy)> {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
+    toolset: Option<Arc<Toolset>>,
+    builtin_tools: BuiltinTools,
+    observer: Option<Arc<dyn Observer>>,
 }
 
 /// Refuse a turn that expects zone's tools to be callable.
@@ -101,91 +69,19 @@ fn refuse_tools(tools: Option<&[ToolDefinition]>, agent: AgentKind) -> Result<()
     )))
 }
 
-/// One agent event in the shape the agent loop already consumes.
-///
-/// Tool activity becomes reasoning rather than a tool-call delta. The agent
-/// has already run those tools, so replaying them through zone's registry
-/// would run each a second time -- but a turn that spends ten minutes reading
-/// and editing files should not look to the reader like a turn doing nothing,
-/// so what the agent reached for is listed as the thinking it was. Zone's own
-/// tools reach the reader as cards when the agent calls them over MCP. A
-/// subagent's calls are listed the same way when no observer took them, and
-/// any other news of it is no chunk at all.
-fn chunk(event: AgentEvent, provider: &str) -> Result<Option<ChatStreamChunk>, Error> {
-    let mut delta = StreamDelta::default();
-    let mut finished = false;
-    let mut usage = None;
-    let mut window = None;
-    let mut session = None;
-
-    match event {
-        AgentEvent::Text(text) => delta.content = Some(text),
-        AgentEvent::Tool(call) => {
-            delta.reasoning_content = activity(&call);
-        }
-        AgentEvent::Subagent(subagent) => {
-            let Some(line) = subagent.activity() else {
-                return Ok(None);
-            };
-            delta.reasoning_content = Some(line);
-        }
-        AgentEvent::Output(_) | AgentEvent::Occupancy(_) => {}
-        AgentEvent::Usage(counts) => usage = Some(counts),
-        AgentEvent::Window(reported) => window = Some(reported),
-        AgentEvent::Session(announced) => session = Some(announced),
-        AgentEvent::Finished {
-            finish_reason: reported,
-        } => {
-            tracing::debug!(
-                provider,
-                reported = reported.as_deref().unwrap_or("none"),
-                "agent finished its turn"
-            );
-            finished = true;
-        }
-        AgentEvent::Failed(message) => return Err(Error::agent(message)),
-        AgentEvent::Limited(limit) => return Err(Error::limited(provider, limit)),
-    }
-
-    let choice = StreamChoice::new(0, delta);
-    let choice = if finished {
-        choice.with_finish_reason(STOP)
+/// The model to name to `agent`: `model` when the agent knows it, or none,
+/// leaving the choice to the agent rather than failing at its API on a name
+/// such as zone's own `auto` or a local model's.
+fn known(agent: AgentKind, model: &str) -> &str {
+    if agent.knows(model) {
+        model
     } else {
-        choice
-    };
-    let mut chunk = ChatStreamChunk::new(vec![choice]);
-    chunk.usage = usage;
-    chunk.window = window;
-    chunk.session = session;
-    Ok(Some(chunk))
-}
-
-fn chunks(
-    events: AgentStream,
-    agent: AgentKind,
-    reported: Reported,
-) -> impl Stream<Item = Result<ChatStreamChunk, Error>> + Send {
-    let provider = agent.to_string();
-    async_stream::stream! {
-        let mut events = events;
-        while let Some(event) = events.next().await {
-            let translated = match event {
-                Ok(AgentEvent::Occupancy(occupancy)) => {
-                    reported.record(agent, occupancy);
-                    continue;
-                }
-                Ok(event) => chunk(event, &provider),
-                Err(error) => Err(Error::from(error)),
-            };
-            match translated {
-                Ok(Some(chunk)) => yield Ok(chunk),
-                Ok(None) => {}
-                Err(error) => {
-                    yield Err(error);
-                    break;
-                }
-            }
-        }
+        tracing::debug!(
+            %agent,
+            model,
+            "the agent does not know this model, so it chooses its own"
+        );
+        ""
     }
 }
 
@@ -219,6 +115,9 @@ impl LlmClient {
             endpoint: abnegate_llm::LlmClient::new(config),
             backend: LlmBackend::Http,
             reported: Reported::default(),
+            toolset: None,
+            builtin_tools: BuiltinTools::default(),
+            observer: None,
         }
     }
 
@@ -254,32 +153,48 @@ impl LlmClient {
     /// itself, so there is nothing here for it to lose: a request it makes
     /// still carries whatever definitions it was given.
     pub fn with_toolset(mut self, toolset: Toolset, builtin_tools: BuiltinTools) -> Self {
-        if let LlmBackend::Cli { settings, .. } = &mut self.backend {
-            let current = std::mem::take(settings.as_mut());
-            **settings = current
-                .with_toolset(toolset)
-                .with_builtin_tools(builtin_tools);
+        if matches!(self.backend, LlmBackend::Cli { .. }) {
+            self.toolset = Some(Arc::new(toolset));
+            self.builtin_tools = builtin_tools;
         }
         self
     }
 
-    /// Hand each of the agent's own finished tool calls to `observer`. Like a
-    /// toolset, it belongs to one turn and is not carried to another backend.
+    /// Hand each of the agent's own finished tool calls, and each update to
+    /// a subagent it started, to `observer`. Like a toolset, it belongs to
+    /// one turn and is not carried to another backend.
     pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
-        if let LlmBackend::Cli { settings, .. } = &mut self.backend {
-            let current = std::mem::take(settings.as_mut());
-            **settings = current.with_observer(observer);
+        if matches!(self.backend, LlmBackend::Cli { .. }) {
+            self.observer = Some(observer);
         }
         self
     }
 
     /// This client on `backend` instead, keeping everything else it was built
-    /// with. A toolset attached to the old backend is not carried over: it was
-    /// minted for that backend's agent, so a caller that still serves the turn
-    /// tools attaches them again.
+    /// with. A toolset or observer attached for the old backend is not
+    /// carried over: it was minted for that backend's agent, so a caller that
+    /// still serves the turn tools attaches them again.
     pub fn with_backend(mut self, backend: LlmBackend) -> Self {
         self.backend = backend;
+        self.toolset = None;
+        self.builtin_tools = BuiltinTools::default();
+        self.observer = None;
         self
+    }
+
+    /// Zone's tools the agent is served this turn, if any.
+    pub fn toolset(&self) -> Option<&Toolset> {
+        self.toolset.as_deref()
+    }
+
+    /// Whether the agent keeps the tools it ships with this turn.
+    pub fn builtin_tools(&self) -> BuiltinTools {
+        self.builtin_tools
+    }
+
+    /// Who is told of the agent's own tool calls and subagents this turn.
+    pub fn observer(&self) -> Option<&Arc<dyn Observer>> {
+        self.observer.as_ref()
     }
 
     /// Derive a client with a task-specific sampling temperature.
@@ -337,7 +252,12 @@ impl LlmClient {
         tools: Option<&[ToolDefinition]>,
         options: RequestOptions,
     ) -> Result<ChatResponse, Error> {
-        let LlmBackend::Cli { agent, settings } = &self.backend else {
+        let LlmBackend::Cli {
+            agent,
+            settings,
+            sign_in,
+        } = &self.backend
+        else {
             return self
                 .endpoint
                 .chat_with_options(model, messages, tools, options)
@@ -345,10 +265,10 @@ impl LlmClient {
         };
 
         refuse_tools(tools, *agent)?;
-        let completion = CliProvider::agent(*agent, settings.as_ref().clone())
-            .complete(CompletionRequest::new(model, messages, options))
+        let (turn, events) = self
+            .start(*agent, settings, *sign_in, model, messages, options)
             .await?;
-        Ok(response(completion, model))
+        Ok(response(turn.completion(events).await?, model))
     }
 
     /// Stream a chat completion from the configured model.
@@ -381,7 +301,12 @@ impl LlmClient {
         tools: Option<&[ToolDefinition]>,
         options: RequestOptions,
     ) -> Result<ChatStream, Error> {
-        let LlmBackend::Cli { agent, settings } = &self.backend else {
+        let LlmBackend::Cli {
+            agent,
+            settings,
+            sign_in,
+        } = &self.backend
+        else {
             let stream = self
                 .endpoint
                 .chat_stream_with_options(model, messages, tools, options)
@@ -390,9 +315,54 @@ impl LlmClient {
         };
 
         refuse_tools(tools, *agent)?;
-        let events = CliProvider::agent(*agent, settings.as_ref().clone())
-            .stream(CompletionRequest::new(model, messages, options))?;
-        Ok(Box::pin(chunks(events, *agent, self.reported.clone())))
+        let (turn, events) = self
+            .start(*agent, settings, *sign_in, model, messages, options)
+            .await?;
+        Ok(Box::pin(turn.chunks(events)))
+    }
+
+    /// Start `agent` on `model` under `settings` and `sign_in`, returning
+    /// the turn its events are read through and the events themselves.
+    async fn start(
+        &self,
+        agent: AgentKind,
+        settings: &CliSettings,
+        sign_in: SignIn,
+        model: &str,
+        messages: &[Message],
+        options: RequestOptions,
+    ) -> Result<(Turn, AgentStream), Error> {
+        let events = self
+            .provider(agent, settings)
+            .stream(CompletionRequest::new(
+                known(agent, model),
+                messages,
+                options,
+            ))
+            .await
+            .map_err(failed)?;
+        let turn = Turn::new(
+            agent,
+            sign_in,
+            settings.working_directory.as_deref(),
+            self.observer.clone(),
+            self.reported.clone(),
+        );
+        Ok((turn, events))
+    }
+
+    /// The provider that runs this turn's `agent`, under `settings` confined
+    /// as every run Zone starts is, with the turn's toolset attached.
+    fn provider(&self, agent: AgentKind, settings: &CliSettings) -> CliProvider {
+        CliProvider::agent(
+            agent,
+            confined(
+                agent,
+                settings.clone(),
+                self.toolset.as_deref(),
+                self.builtin_tools,
+            ),
+        )
     }
 
     /// The endpoint settings, with any temperature a `with_` method set.
