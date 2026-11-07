@@ -59,6 +59,10 @@ pub const MAX_TOOL_MESSAGE_CHARS: usize = MAX_TOOL_OUTPUT_CHARS + TOOL_FRAMING_C
 /// model reads is longer than the cap it asked for.
 pub(crate) const ERROR_PREFIX: &str = "Error: ";
 
+/// What a call the reader did not allow is told, wherever it was asked. The
+/// console reads a denial back from these words once the approval is gone.
+pub const DENIED: &str = "The user denied this tool call.";
+
 /// Longest a rendered approval preview may run.
 ///
 /// The reader is deciding, not reading. A preview past a screenful is one

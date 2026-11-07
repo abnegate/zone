@@ -17,7 +17,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, Toolset};
-use zone_core::tools::{PERMISSION_TOOL, ToolResult};
+use zone_core::tools::{DENIED, PERMISSION_TOOL, ToolResult, content_lines};
 
 use super::progress::Progress;
 use super::scope::Scope;
@@ -44,10 +44,6 @@ const STALLED: &str = "Repeated failed calls made no progress. Finish with what 
 /// What the console is told when the turn stalls, in the words zone's own loop
 /// uses for the same thing.
 const REPEATED: &str = "Repeated failed calls made no progress.";
-
-/// What a call is told when the reader did not allow it. The same words a
-/// chat's own denied call is told, because it is the same decision.
-const DENIED: &str = "The user denied this tool call.";
 
 /// What the agent is told when zone could not read its permission question.
 const UNREADABLE: &str = "Zone could not read that permission request.";
@@ -410,10 +406,7 @@ pub fn merged<'a>(
 }
 
 fn detail(message: &str) -> String {
-    let line = message
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default();
+    let line = content_lines(message).next().unwrap_or_default();
     match line.char_indices().nth(DETAIL_CHARS) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
         None => line.to_string(),
@@ -1010,5 +1003,12 @@ mod tests {
         let long = detail(&"x".repeat(DETAIL_CHARS * 2));
         assert_eq!(long.chars().count(), DETAIL_CHARS + 1, "{long}");
         assert!(long.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn a_detail_shows_a_command_output_rather_than_its_stream_label() {
+        assert_eq!(detail("stdout:\nhello\n"), "hello");
+        assert_eq!(detail("stdout:\n\n\nstderr:\nwarning"), "warning");
+        assert_eq!(detail("stdout:\n\n"), "");
     }
 }

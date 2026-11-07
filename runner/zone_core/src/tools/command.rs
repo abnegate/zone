@@ -34,6 +34,18 @@ const ALLOWED_COMMANDS: &[&str] = &[
 
 const PUBLIC_WEB_COMMANDS: &[&str] = &["curl", "wget"];
 
+const STDOUT_LABEL: &str = "stdout:";
+const STDERR_LABEL: &str = "stderr:";
+
+/// The lines of a tool's output that carry something: neither blank nor the
+/// label a command's report heads each captured stream with.
+pub fn content_lines(output: &str) -> impl Iterator<Item = &str> {
+    output.lines().filter(|line| {
+        let line = line.trim();
+        !line.is_empty() && line != STDOUT_LABEL && line != STDERR_LABEL
+    })
+}
+
 /// Run a shell command
 pub struct RunCommandTool;
 
@@ -354,7 +366,8 @@ impl Waiting for RunCommandTool {
         let mut result = String::new();
 
         if !stdout.is_empty() {
-            result.push_str("stdout:\n");
+            result.push_str(STDOUT_LABEL);
+            result.push('\n');
             result.push_str(&stdout);
         }
 
@@ -362,7 +375,8 @@ impl Waiting for RunCommandTool {
             if !result.is_empty() {
                 result.push_str("\n\n");
             }
-            result.push_str("stderr:\n");
+            result.push_str(STDERR_LABEL);
+            result.push('\n');
             result.push_str(&stderr);
         }
 
@@ -676,10 +690,10 @@ impl Waiting for RunShellTool {
             None => report.push_str("Killed by signal\n"),
         }
         if !stdout.trim().is_empty() {
-            report.push_str(&format!("stdout:\n{}\n", stdout));
+            report.push_str(&format!("{STDOUT_LABEL}\n{stdout}\n"));
         }
         if !stderr.trim().is_empty() {
-            report.push_str(&format!("stderr:\n{}\n", stderr));
+            report.push_str(&format!("{STDERR_LABEL}\n{stderr}\n"));
         }
         if report.is_empty() {
             report.push_str("(no output)");
@@ -1245,6 +1259,33 @@ mod tests {
 
         assert!(result.success, "{:?}", result.error);
         assert!(result.output.unwrap().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn a_command_report_reads_as_its_content_without_the_stream_labels() {
+        let shell = RunShellTool
+            .execute(
+                json!({"command": "echo hello; echo careful >&2"}),
+                &shell_test_context(),
+            )
+            .await
+            .unwrap();
+        let command = RunCommandTool
+            .execute(
+                json!({"command": "echo", "args": ["hello"]}),
+                &create_test_context(),
+            )
+            .await
+            .unwrap();
+
+        let shell = shell.output.unwrap();
+        let command = command.output.unwrap();
+        assert!(shell.contains(STDOUT_LABEL), "{shell}");
+        assert_eq!(
+            content_lines(&shell).collect::<Vec<_>>(),
+            ["hello", "careful"]
+        );
+        assert_eq!(content_lines(&command).collect::<Vec<_>>(), ["hello"]);
     }
 
     #[tokio::test]
