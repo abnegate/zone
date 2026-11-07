@@ -1576,6 +1576,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn production_claude_backends_wait_for_its_background_work() {
+        for (reached, backend) in
+            production_backends(AgentKind::Claude, CodexSandbox::WorkspaceWrite)
+        {
+            let (_, settings, _) = cli(Ok(backend));
+            assert!(
+                settings.await_background,
+                "claude on {reached} is stopped while its subagents still run"
+            );
+        }
+    }
+
     /// Claude's isolation variables are not folded into a backend: `confined` isolates every
     /// run and sets them there, beside the MCP timeouts only a toolset asks for.
     #[test]

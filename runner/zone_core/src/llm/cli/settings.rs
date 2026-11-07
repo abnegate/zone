@@ -4,9 +4,12 @@ use super::TURN_TIMEOUT;
 
 /// The settings every agent run Zone starts begins from: the crate's
 /// defaults, given a chat turn's [`TURN_TIMEOUT`] rather than the crate's
-/// budget for one command.
+/// budget for one command, and read until the work Claude left running in
+/// the background has finished.
 pub fn settings() -> CliSettings {
-    CliSettings::default().with_timeout(TURN_TIMEOUT)
+    CliSettings::default()
+        .with_timeout(TURN_TIMEOUT)
+        .await_background()
 }
 
 #[cfg(test)]
@@ -46,5 +49,13 @@ mod tests {
         assert!(settings.executable.is_none());
         assert!(settings.working_directory.is_none());
         assert_eq!(settings.timeout, TURN_TIMEOUT);
+    }
+
+    #[test]
+    fn zone_settings_wait_for_the_agents_background_work() {
+        assert!(
+            settings().await_background,
+            "a run that stops once claude first answers kills the subagent or monitor it left running"
+        );
     }
 }
