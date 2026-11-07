@@ -2,7 +2,6 @@
 
 pub mod client;
 pub mod frontend;
-pub mod migration;
 pub mod proxy;
 pub mod serve;
 
