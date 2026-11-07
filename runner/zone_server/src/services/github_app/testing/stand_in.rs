@@ -33,7 +33,7 @@ pub(crate) fn installation_number() -> u64 {
     installation_id().unsigned_abs()
 }
 
-pub(crate) async fn issuing(server: &MockServer, installation_id: u64, token: &str, calls: u64) {
+fn issuance(installation_id: u64, token: &str) -> Mock {
     let expires_at = (Utc::now() + Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
 
     Mock::given(method("POST"))
@@ -45,7 +45,21 @@ pub(crate) async fn issuing(server: &MockServer, installation_id: u64, token: &s
             "token": token,
             "expires_at": expires_at,
         })))
+}
+
+pub(crate) async fn issuing(server: &MockServer, installation_id: u64, token: &str, calls: u64) {
+    issuance(installation_id, token)
         .expect(calls)
+        .mount(server)
+        .await;
+}
+
+/// GitHub issues `token` for installation `installation_id` exactly once, so
+/// an issuance mounted after it answers every later exchange.
+pub(crate) async fn issuing_once(server: &MockServer, installation_id: u64, token: &str) {
+    issuance(installation_id, token)
+        .up_to_n_times(1)
+        .expect(1)
         .mount(server)
         .await;
 }

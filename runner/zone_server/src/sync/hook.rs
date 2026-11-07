@@ -7,6 +7,8 @@
 //! whether it was last given the secret Zone keeps, live in the sync's
 //! configuration.
 
+use std::future::Future;
+
 use abnegate_secret::SecretValue;
 use abnegate_vcs::pull_request::{Repository, WebhookEvent};
 use abnegate_vcs::{PullRequestError, PullRequestService};
@@ -18,7 +20,7 @@ use super::{Provider, webhook_path};
 use crate::db::projects;
 use crate::db::sync_config::{self, SyncConfigRow};
 use crate::services::github::Refusal;
-use crate::services::github_app;
+use crate::services::github_app::{self, Credential, Unauthenticated};
 use crate::state::AppState;
 use uuid::Uuid;
 
@@ -37,7 +39,7 @@ pub enum HookError {
     Tokenless,
 
     #[error("the project's GitHub credential could not be resolved: {0}")]
-    Credential(github_app::Error),
+    Credential(#[from] github_app::Error),
 
     #[error("a credential is sealed under a key this deployment does not hold")]
     Unopenable,
@@ -64,11 +66,17 @@ pub enum HookError {
     Database(#[from] sqlx::Error),
 }
 
+impl Unauthenticated for HookError {
+    fn unauthenticated(&self) -> bool {
+        matches!(self, Self::GitHub(error) if error.unauthenticated())
+    }
+}
+
 /// The webhook a GitHub sync's repository delivers to Zone through.
 pub struct Hook {
     service: PullRequestService,
     repository: Repository,
-    token: SecretValue,
+    credential: Credential,
     url: Url,
 }
 
@@ -89,12 +97,7 @@ impl Hook {
         else {
             return Ok(None);
         };
-        let Some(credential) = state
-            .github()
-            .project(state.db(), &project)
-            .await
-            .map_err(HookError::Credential)?
-        else {
+        let Some(credential) = state.github().project(state.db(), &project).await? else {
             return Ok(None);
         };
         let service = state.config().pull_requests().map_err(HookError::Origin)?;
@@ -110,7 +113,7 @@ impl Hook {
         Ok(Some(Self {
             service,
             repository,
-            token: credential.into_secret(),
+            credential,
             url,
         }))
     }
@@ -124,37 +127,66 @@ impl Hook {
         row: SyncConfigRow,
         secret: &str,
     ) -> Result<SyncConfigRow, HookError> {
-        let secret = SecretValue::new(secret.to_string());
+        let secret = &SecretValue::new(secret.to_string());
         if let Some(id) = id_of(&row) {
-            match self
-                .service
-                .update_webhook(&self.repository, &self.token, id, &self.url, &secret)
-                .await
-            {
+            let updated = self
+                .authenticated(state, |token| async move {
+                    self.service
+                        .update_webhook(&self.repository, &token, id, &self.url, secret)
+                        .await
+                })
+                .await;
+            match updated {
                 Ok(()) if registered(&row) => return Ok(row),
                 Ok(()) => return record(state, &row, Some(id), true).await,
-                Err(PullRequestError::NotFound) => {}
-                Err(error) => return Err(error.into()),
+                Err(HookError::GitHub(PullRequestError::NotFound)) => {}
+                Err(error) => return Err(error),
             }
         }
         let id = self
-            .service
-            .create_webhook(&self.repository, &self.token, &self.url, &secret, &EVENTS)
+            .authenticated(state, |token| async move {
+                self.service
+                    .create_webhook(&self.repository, &token, &self.url, secret, &EVENTS)
+                    .await
+            })
             .await?;
         let recorded = record(state, &row, Some(id), true).await;
         if recorded.is_err() {
-            self.delete(id).await;
+            self.delete(state, id).await;
         }
         recorded
     }
 
-    /// Whether GitHub no longer holds webhook `id`.
-    async fn delete(&self, id: u64) -> bool {
-        match self
-            .service
-            .delete_webhook(&self.repository, &self.token, id)
+    /// Run `call` with the project's token, minted again and run once more
+    /// if GitHub refuses it.
+    async fn authenticated<T, Call, Answer>(
+        &self,
+        state: &AppState,
+        call: Call,
+    ) -> Result<T, HookError>
+    where
+        Call: Fn(SecretValue) -> Answer,
+        Answer: Future<Output = Result<T, PullRequestError>>,
+    {
+        state
+            .github()
+            .retrying(state.db(), self.credential.clone(), |token| {
+                let answer = call(token);
+                async move { Ok(answer.await?) }
+            })
             .await
-        {
+    }
+
+    /// Whether GitHub no longer holds webhook `id`.
+    async fn delete(&self, state: &AppState, id: u64) -> bool {
+        let deleted = self
+            .authenticated(state, |token| async move {
+                self.service
+                    .delete_webhook(&self.repository, &token, id)
+                    .await
+            })
+            .await;
+        match deleted {
             Ok(()) => true,
             Err(error) => {
                 tracing::warn!(
@@ -213,7 +245,7 @@ impl Removal {
     /// logged rather than refused.
     pub async fn run(self, state: &AppState) {
         for (hook, id, config) in self.0 {
-            if hook.delete(id).await {
+            if hook.delete(state, id).await {
                 forget(state, config, id).await;
             }
         }
@@ -321,76 +353,161 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
-    use crate::services::github_app::testing::{installation_number, installed, issuing, provider};
+    use crate::services::github_app::testing::{
+        installation_number, installed, issuing, issuing_once, provider,
+    };
 
     const WEBHOOK: u64 = 7;
 
-    #[tokio::test]
-    async fn an_installation_project_signs_its_webhook_with_a_minted_token() {
-        let github = MockServer::start().await;
-        let number = installation_number();
-        issuing(&github, number, "ghs_hooktoken", 1).await;
-        Mock::given(method("PATCH"))
-            .and(path(format!("/repos/acme/project/hooks/{WEBHOOK}/config")))
-            .and(header("authorization", "Bearer ghs_hooktoken"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-            .expect(1)
-            .mount(&github)
+    struct Hooked {
+        github: MockServer,
+        pool: sqlx::PgPool,
+        state: AppState,
+        organization: Uuid,
+        number: u64,
+    }
+
+    impl Hooked {
+        async fn new() -> Self {
+            let github = MockServer::start().await;
+            let pool = pool().await;
+            let state = AppState::new(
+                Config {
+                    github_api_url: github.uri(),
+                    github_api_allows_http: true,
+                    app_base_url: "https://console.example.test".to_string(),
+                    ..crate::state::test_config()
+                },
+                pool.clone(),
+                None,
+            );
+            state.install_github(provider(&github, std::sync::Arc::clone(state.master_key())));
+            let organization = seed_organization(&pool).await;
+            Self {
+                github,
+                pool,
+                state,
+                organization,
+                number: installation_number(),
+            }
+        }
+
+        async fn sync(&self) -> SyncConfigRow {
+            let workspace = seed_workspace(&self.pool, self.organization).await;
+            let installation = installed(
+                &self.pool,
+                self.state.github(),
+                self.organization,
+                self.number,
+            )
             .await;
-        let pool = pool().await;
-        let state = AppState::new(
-            Config {
-                github_api_url: github.uri(),
-                github_api_allows_http: true,
-                app_base_url: "https://console.example.test".to_string(),
-                ..crate::state::test_config()
-            },
-            pool.clone(),
-            None,
-        );
-        state.install_github(provider(&github, std::sync::Arc::clone(state.master_key())));
-        let organization = seed_organization(&pool).await;
-        let workspace = seed_workspace(&pool, organization).await;
-        let installation = installed(&pool, state.github(), organization, number).await;
-        let project = projects::create_project(&pool, "Hooked", None, Some(workspace))
+            let project = projects::create_project(&self.pool, "Hooked", None, Some(workspace))
+                .await
+                .unwrap();
+            projects::link_github(
+                &self.pool,
+                project.id,
+                "http://127.0.0.1/acme/project",
+                None,
+                Some(installation),
+            )
             .await
             .unwrap();
-        projects::link_github(
-            &pool,
-            project.id,
-            "http://127.0.0.1/acme/project",
-            None,
-            Some(installation),
-        )
-        .await
-        .unwrap();
-        let row = sync_config::create_sync_config(
-            &pool,
-            project.id,
-            "github",
-            true,
-            json!({
-                "external_repo_url": "http://127.0.0.1/acme/project",
-                HOOK_ID: WEBHOOK,
-                HOOK_SIGNED: true,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
+            sync_config::create_sync_config(
+                &self.pool,
+                project.id,
+                "github",
+                true,
+                json!({
+                    "external_repo_url": "http://127.0.0.1/acme/project",
+                    HOOK_ID: WEBHOOK,
+                    HOOK_SIGNED: true,
+                }),
+                None,
+            )
+            .await
+            .unwrap()
+        }
 
-        let hook = Hook::of(&state, &row)
+        async fn cleanup(&self) {
+            sqlx::query("DELETE FROM organizations WHERE id=$1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    async fn answering(github: &MockServer, verb: &str, token: &str, status: u16) {
+        Mock::given(method(verb))
+            .and(path(format!("/repos/acme/project/hooks/{WEBHOOK}/config")))
+            .and(header("authorization", format!("Bearer {token}").as_str()))
+            .respond_with(ResponseTemplate::new(status).set_body_json(json!({})))
+            .expect(1)
+            .mount(github)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_installation_project_signs_its_webhook_with_a_minted_token() {
+        let hooked = Hooked::new().await;
+        issuing(&hooked.github, hooked.number, "ghs_hooktoken", 1).await;
+        answering(&hooked.github, "PATCH", "ghs_hooktoken", 200).await;
+        let row = hooked.sync().await;
+
+        let hook = Hook::of(&hooked.state, &row)
             .await
             .unwrap()
             .expect("an installation project has a credential for its webhook");
-        let signed = hook.sign_with(&state, row.clone(), "rotated").await;
+        let signed = hook.sign_with(&hooked.state, row.clone(), "rotated").await;
 
-        sqlx::query("DELETE FROM organizations WHERE id=$1")
-            .bind(organization)
-            .execute(&pool)
-            .await
-            .unwrap();
+        hooked.cleanup().await;
         assert_eq!(signed.unwrap().id, row.id);
+    }
+
+    #[tokio::test]
+    async fn a_refused_installation_token_is_minted_again_to_sign_the_webhook() {
+        let hooked = Hooked::new().await;
+        issuing_once(&hooked.github, hooked.number, "ghs_refused").await;
+        issuing(&hooked.github, hooked.number, "ghs_reminted", 1).await;
+        answering(&hooked.github, "PATCH", "ghs_refused", 401).await;
+        answering(&hooked.github, "PATCH", "ghs_reminted", 200).await;
+        let row = hooked.sync().await;
+
+        let hook = Hook::of(&hooked.state, &row)
+            .await
+            .unwrap()
+            .expect("an installation project has a credential for its webhook");
+        let signed = hook.sign_with(&hooked.state, row.clone(), "rotated").await;
+
+        hooked.cleanup().await;
+        assert_eq!(signed.unwrap().id, row.id);
+    }
+
+    #[tokio::test]
+    async fn a_refused_installation_token_is_minted_again_to_remove_the_webhook() {
+        let hooked = Hooked::new().await;
+        issuing_once(&hooked.github, hooked.number, "ghs_refused").await;
+        issuing(&hooked.github, hooked.number, "ghs_reminted", 1).await;
+        for (token, status) in [("ghs_refused", 401), ("ghs_reminted", 204)] {
+            Mock::given(method("DELETE"))
+                .and(path(format!("/repos/acme/project/hooks/{WEBHOOK}")))
+                .and(header("authorization", format!("Bearer {token}").as_str()))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&hooked.github)
+                .await;
+        }
+        let row = hooked.sync().await;
+
+        remove(&hooked.state, &row).await;
+        let forgotten = sync_config::get_sync_config(&hooked.pool, row.id)
+            .await
+            .unwrap()
+            .expect("the sync survives its webhook");
+
+        hooked.cleanup().await;
+        assert_eq!(id_of(&forgotten), None, "the removed webhook is forgotten");
     }
 
     #[test]

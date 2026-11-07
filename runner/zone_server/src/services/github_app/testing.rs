@@ -31,4 +31,6 @@ snLljJnOKrZGf+JfNkPul+la0f9cJo9Ka/oCy6X243y8VmzRG6/BX6eEfnWEJ+NB
 mod stand_in;
 
 #[cfg(test)]
-pub(crate) use stand_in::{installation_number, installed, issuing, provider, uninstalled};
+pub(crate) use stand_in::{
+    installation_number, installed, issuing, issuing_once, provider, uninstalled,
+};
