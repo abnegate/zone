@@ -119,7 +119,7 @@ async fn consider_source(
     let Some(registry) = state.adapter_registry() else {
         return Err("adapter registry unavailable".to_string());
     };
-    let Some(core) = core_source_from_row(state, source.as_source_row()) else {
+    let Some(core) = core_source_from_row(state, source.as_source_row()).await else {
         return Ok(false);
     };
     let adapter = registry

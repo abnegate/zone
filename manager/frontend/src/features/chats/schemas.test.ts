@@ -4,6 +4,7 @@ import {
   ActionReceiptSchema,
   ActionTargetSchema,
   ChatProvidersSchema,
+  ChatPullRequestSchema,
   ChatSchema,
   CreateChatRequestSchema,
   HandoverSchema,
@@ -387,6 +388,39 @@ describe('a pull request status', () => {
   it('reads counts no server could send, or none at all, as unknown', () => {
     for (const threads of [{ open: -1, resolved: 0 }, { open: 1.5, resolved: 0 }, undefined]) {
       expect(PullRequestStatusSchema.parse({ ...status, threads }).threads).toBeNull();
+    }
+  });
+});
+
+describe('a chat pull request', () => {
+  const pullRequest = {
+    id: 'pr-1',
+    provider: 'github',
+    owner: 'acme',
+    repo: 'widgets',
+    number: 12,
+    url: 'https://github.com/acme/widgets/pull/12',
+    title: null,
+    dismissed: false,
+    created_at: '2026-11-05T10:00:00Z',
+    status: null,
+    writable: true,
+    credentialed: false,
+  };
+
+  it('keeps every way the server says GitHub is reached', () => {
+    for (const connection of ['credentialed', 'uncredentialed', 'disconnected', 'unavailable']) {
+      expect(ChatPullRequestSchema.parse({ ...pullRequest, connection }).connection).toBe(
+        connection
+      );
+    }
+  });
+
+  it('reads a connection it does not know, or none, as uncredentialed', () => {
+    for (const connection of ['rerouted', undefined]) {
+      expect(ChatPullRequestSchema.parse({ ...pullRequest, connection }).connection).toBe(
+        'uncredentialed'
+      );
     }
   });
 });

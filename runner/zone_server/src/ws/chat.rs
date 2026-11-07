@@ -5872,13 +5872,16 @@ cat 'DIR/reply.jsonl'
                     let pool = &self.organization.pool;
                     let source = db::sources::create_source(
                         pool,
-                        self.organization.workspace,
-                        &Uuid::new_v4().to_string(),
-                        kind,
-                        config,
-                        None,
-                        None,
-                        None,
+                        db::sources::NewSource {
+                            workspace_id: self.organization.workspace,
+                            name: &Uuid::new_v4().to_string(),
+                            source_type: kind,
+                            config,
+                            description: None,
+                            url: None,
+                            credentials_encrypted: None,
+                            github_installation_id: None,
+                        },
                     )
                     .await
                     .expect("a source");

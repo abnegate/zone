@@ -31,12 +31,13 @@ use zone_core::context::Entry;
 use zone_core::tools::job::{JobExited, Jobs};
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
-use super::integrations::{Configuration, Github, SETTLED_ASSESSMENTS};
+use super::integrations::{Configuration, SETTLED_ASSESSMENTS, authenticated};
 use super::tools::WorkspaceScope;
-use crate::db::{sources, task_access, tasks, workspace_members};
-use crate::secret::Unseal;
+use crate::db::sources::{self, SourceRow};
+use crate::db::{task_access, tasks, workspace_members};
 use crate::services::chat::session::RunContext;
 use crate::services::task_progress::ProgressMessage;
+use crate::state::AppState;
 
 pub const WAIT_FOR: &str = "wait_for";
 
@@ -322,7 +323,6 @@ const SOURCE_FOREIGN: &str = "Source not found in this workspace or inactive.";
 const SOURCE_NOT_GITHUB: &str = "Waiting on checks currently supports connected GitHub sources \
     only.";
 const SOURCE_CONFIGURATION_INVALID: &str = "The GitHub source configuration is invalid.";
-const SOURCE_CREDENTIALS_INVALID: &str = "The source credentials could not be decrypted.";
 const WORKSPACE_UNREADABLE: &str = "You cannot read this workspace.";
 
 /// What a wait nobody registered is called, so even that reads as a timeout
@@ -362,8 +362,33 @@ trait Checks: Send + Sync {
     async fn assess(&self, sha: &str) -> Result<&'static str, String>;
 }
 
+/// A source's checks, read with the credential the source holds at each
+/// read. A wait can outlive the installation token it opened with, so every
+/// poll resolves the credential again, which answers the cached token while
+/// it lasts and mints a fresh one once GitHub refuses it.
+struct Watched {
+    state: AppState,
+    source: SourceRow,
+    configuration: Configuration,
+}
+
+impl Watched {
+    async fn settled(
+        &self,
+        reference: Option<&str>,
+    ) -> Result<(String, String, &'static str), String> {
+        authenticated(
+            &self.state,
+            &self.source,
+            self.configuration.clone(),
+            |github| async move { github.settled(reference).await },
+        )
+        .await
+    }
+}
+
 #[async_trait]
-impl Checks for Github {
+impl Checks for Watched {
     /// Polled against the resolved SHA rather than the reference, so a branch
     /// that moves mid-wait does not silently change what is being waited on.
     ///
@@ -953,13 +978,13 @@ impl WaitForTool {
     ) -> Result<(String, Option<String>, Subscription), String> {
         let scope = self.scope.as_ref().ok_or(WORKSPACE_REQUIRED)?;
         let source = Uuid::parse_str(&request.id).map_err(|_| SOURCE_ID_INVALID.to_string())?;
-        let github = self.github(scope, source).await?;
-        let (reference, sha, assessment) = github.settled(request.reference.as_deref()).await?;
+        let watched = self.watched(scope, source).await?;
+        let (reference, sha, assessment) = watched.settled(request.reference.as_deref()).await?;
         Ok((
             check_subject(&reference, &sha),
             Some(reference.clone()),
             Subscription::Commit(Commit {
-                checks: Box::new(github),
+                checks: Box::new(watched),
                 reference,
                 sha,
                 assessment,
@@ -967,7 +992,7 @@ impl WaitForTool {
         ))
     }
 
-    async fn github(&self, scope: &WorkspaceScope, source: Uuid) -> Result<Github, String> {
+    async fn watched(&self, scope: &WorkspaceScope, source: Uuid) -> Result<Watched, String> {
         let database = scope.state.db();
         if !workspace_members::can_read(database, scope.workspace_id, scope.user_id)
             .await
@@ -980,22 +1005,16 @@ impl WaitForTool {
             .map_err(|_| SOURCE_UNREADABLE.to_string())?
             .filter(|source| source.is_active.unwrap_or(true))
             .ok_or(SOURCE_FOREIGN)?;
-        if source.source_type != "github" {
+        if source.source_type != sources::GITHUB {
             return Err(SOURCE_NOT_GITHUB.to_string());
         }
-        let mut configuration: Configuration = serde_json::from_value(source.config)
+        let configuration = Configuration::deserialize(&source.config)
             .map_err(|_| SOURCE_CONFIGURATION_INVALID.to_string())?;
-        if let Some(encrypted) = source.credentials_encrypted {
-            configuration.token = Some(
-                scope
-                    .state
-                    .master_key()
-                    .open_strict(&encrypted)
-                    .map(|token| token.expose().to_string())
-                    .map_err(|_| SOURCE_CREDENTIALS_INVALID.to_string())?,
-            );
-        }
-        Github::new(configuration, scope.state.config())
+        Ok(Watched {
+            state: scope.state.clone(),
+            source,
+            configuration,
+        })
     }
 }
 
@@ -1003,8 +1022,18 @@ impl WaitForTool {
 mod tests {
     use super::*;
 
+    use crate::agent::integrations::Github;
     use crate::agent::integrations::PENDING_ASSESSMENT;
+    use crate::agent::integrations::SOURCE_DISCONNECTED;
     use crate::agent::integrations::SUCCESS_ASSESSMENT;
+    use crate::agent::testing::Connected;
+    use crate::agent::testing::MINTED_TOKEN;
+    use crate::agent::testing::OWNER;
+    use crate::agent::testing::REPOSITORY;
+    use crate::agent::testing::STORED_TOKEN;
+    use crate::agent::testing::number;
+    use crate::services::github_app::testing::issuing;
+    use crate::services::github_app::testing::uninstalled;
     use crate::state::AppState;
     use crate::state::test_config;
     use abnegate_llm::Role;
@@ -1016,6 +1045,7 @@ mod tests {
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
     use zone_core::context;
@@ -1183,7 +1213,13 @@ mod tests {
             &config,
         )
         .unwrap();
-        assert_eq!(github.assess(SHA).await, Ok(SUCCESS_ASSESSMENT));
+        assert_eq!(
+            github
+                .settled(Some(SHA))
+                .await
+                .map(|(_, _, assessment)| assessment),
+            Ok(SUCCESS_ASSESSMENT)
+        );
         let requests = server.received_requests().await.unwrap();
         assert!(!requests.is_empty(), "the checks must have been read");
         assert!(
@@ -2232,5 +2268,262 @@ mod tests {
             .await
             .expect("the fixture ends the run");
         }
+    }
+
+    const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    async fn answering(connected: &Connected, token: &str, endpoint: &str, body: Value) {
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}/{endpoint}")))
+            .and(header("Authorization", format!("Bearer {token}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+    }
+
+    /// What a check wait opened on `source` reads of its branch.
+    async fn settled(
+        tool: &WaitForTool,
+        scope: &WorkspaceScope,
+        source: Uuid,
+    ) -> Result<(String, String, &'static str), String> {
+        tool.watched(scope, source).await?.settled(None).await
+    }
+
+    #[tokio::test]
+    async fn a_check_wait_reads_github_with_the_installations_minted_token() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 1).await;
+        answering(
+            &connected,
+            MINTED_TOKEN,
+            "commits/main",
+            json!({"sha": HEAD}),
+        )
+        .await;
+        answering(
+            &connected,
+            MINTED_TOKEN,
+            "actions/runs",
+            json!({"workflow_runs": [], "total_count": 0}),
+        )
+        .await;
+        answering(
+            &connected,
+            MINTED_TOKEN,
+            &format!("commits/{HEAD}/check-runs"),
+            json!({"check_runs": []}),
+        )
+        .await;
+        answering(
+            &connected,
+            MINTED_TOKEN,
+            &format!("commits/{HEAD}/status"),
+            json!({"statuses": [], "total_count": 0}),
+        )
+        .await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        let (reference, sha, _) = settled(&tool, scope, source.id)
+            .await
+            .expect("the checks are read with the installation's token");
+
+        assert_eq!((reference.as_str(), sha.as_str()), ("main", HEAD));
+    }
+
+    /// GitHub mints `token` for installation `number` the next time it is asked, and only then.
+    async fn minting_once(connected: &Connected, number: u64, token: &str) {
+        Mock::given(method("POST"))
+            .and(path(format!("/app/installations/{number}/access_tokens")))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "token": token,
+                "expires_at": (Utc::now() + chrono::Duration::hours(1))
+                    .to_rfc3339_opts(SecondsFormat::Secs, true),
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_check_wait_github_refuses_the_minted_token_for_mints_again_and_reads_the_checks() {
+        const REFUSED_TOKEN: &str = "ghs_refusedinstallationtoken";
+        let connected = Connected::new().await;
+        let number = number();
+        minting_once(&connected, number, REFUSED_TOKEN).await;
+        minting_once(&connected, number, MINTED_TOKEN).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}/commits/main")))
+            .and(header("Authorization", format!("Bearer {REFUSED_TOKEN}")))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        for (endpoint, body) in [
+            ("commits/main".to_string(), json!({"sha": HEAD})),
+            (
+                "actions/runs".to_string(),
+                json!({"workflow_runs": [], "total_count": 0}),
+            ),
+            (
+                format!("commits/{HEAD}/check-runs"),
+                json!({"check_runs": []}),
+            ),
+            (
+                format!("commits/{HEAD}/status"),
+                json!({"statuses": [], "total_count": 0}),
+            ),
+        ] {
+            answering(&connected, MINTED_TOKEN, &endpoint, body).await;
+        }
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        let (reference, sha, _) = settled(&tool, scope, source.id)
+            .await
+            .expect("the checks are read with a freshly minted token");
+
+        assert_eq!((reference.as_str(), sha.as_str()), ("main", HEAD));
+    }
+
+    #[tokio::test]
+    async fn a_check_wait_whose_token_github_refuses_mid_wait_polls_on_a_reminted_token() {
+        const OPENING_TOKEN: &str = "ghs_openinginstallationtoken";
+        let connected = Connected::new().await;
+        let number = number();
+        minting_once(&connected, number, OPENING_TOKEN).await;
+        minting_once(&connected, number, MINTED_TOKEN).await;
+        for (endpoint, body) in [
+            ("commits/main".to_string(), json!({"sha": HEAD})),
+            (
+                "actions/runs".to_string(),
+                json!({"workflow_runs": [], "total_count": 0}),
+            ),
+            (
+                format!("commits/{HEAD}/check-runs"),
+                json!({"check_runs": []}),
+            ),
+            (
+                format!("commits/{HEAD}/status"),
+                json!({"statuses": [], "total_count": 0}),
+            ),
+        ] {
+            answering(&connected, OPENING_TOKEN, &endpoint, body).await;
+        }
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}/commits/{HEAD}")))
+            .and(header("Authorization", format!("Bearer {OPENING_TOKEN}")))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        for (endpoint, body) in [
+            (format!("commits/{HEAD}"), json!({"sha": HEAD})),
+            (
+                "actions/runs".to_string(),
+                json!({"workflow_runs": [], "total_count": 0}),
+            ),
+            (
+                format!("commits/{HEAD}/check-runs"),
+                json!({"check_runs": [
+                    {"head_sha": HEAD, "status": "completed", "conclusion": "success"}
+                ]}),
+            ),
+            (
+                format!("commits/{HEAD}/status"),
+                json!({"statuses": [], "total_count": 0}),
+            ),
+        ] {
+            answering(&connected, MINTED_TOKEN, &endpoint, body).await;
+        }
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let request = Request {
+            kind: KIND_CHECK.to_string(),
+            id: source.id.to_string(),
+            reference: None,
+            timeout_secs: None,
+        };
+
+        let Subscription::Commit(commit) = tool
+            .commit(&request)
+            .await
+            .expect("the wait opens on the opening token")
+            .2
+        else {
+            panic!("a check wait sits on a commit");
+        };
+        let polled = commit.checks.assess(&commit.sha).await;
+
+        assert_eq!(commit.assessment, UNKNOWN_ASSESSMENT);
+        assert_eq!(polled, Ok(SUCCESS_ASSESSMENT));
+    }
+
+    #[tokio::test]
+    async fn a_check_wait_whose_refused_token_finds_the_installation_removed_is_refused_as_disconnected()
+     {
+        const REFUSED_TOKEN: &str = "ghs_refusedinstallationtoken";
+        let connected = Connected::new().await;
+        let number = number();
+        minting_once(&connected, number, REFUSED_TOKEN).await;
+        Mock::given(method("POST"))
+            .and(path(format!("/app/installations/{number}/access_tokens")))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        uninstalled(&connected.github, number).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/repos/{OWNER}/{REPOSITORY}/commits/main")))
+            .and(header("Authorization", format!("Bearer {REFUSED_TOKEN}")))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        let refusal = settled(&tool, scope, source.id).await.err();
+
+        assert_eq!(refusal.as_deref(), Some(SOURCE_DISCONNECTED));
+    }
+
+    #[tokio::test]
+    async fn a_check_wait_on_an_installation_github_removed_is_refused_without_the_stored_token() {
+        let connected = Connected::new().await;
+        let number = number();
+        Mock::given(method("POST"))
+            .and(path(format!("/app/installations/{number}/access_tokens")))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&connected.github)
+            .await;
+        uninstalled(&connected.github, number).await;
+        Mock::given(header("Authorization", format!("Bearer {STORED_TOKEN}")))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&connected.github)
+            .await;
+        let installation = connected.installation(number).await;
+        let source = connected
+            .source(Some(installation), Some(STORED_TOKEN))
+            .await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        let refusal = settled(&tool, scope, source.id).await.err();
+
+        assert_eq!(refusal.as_deref(), Some(SOURCE_DISCONNECTED));
     }
 }

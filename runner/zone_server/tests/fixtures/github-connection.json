@@ -1,0 +1,52 @@
+{
+  "apps": [
+    {
+      "id": "00000000-0000-0000-0000-000000000001",
+      "app_id": 42,
+      "slug": "zone-acme-x7k2",
+      "name": "Zone acme x7k2",
+      "owner_login": "acme",
+      "owner_type": "Organization",
+      "html_url": "https://github.com/apps/zone-acme-x7k2",
+      "settings_url": "https://github.com/organizations/acme/settings/apps/zone-acme-x7k2",
+      "created_at": "2026-11-01T00:00:00Z"
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000002",
+      "app_id": 43,
+      "slug": "zone-octocat-p4q9",
+      "name": "Zone octocat p4q9",
+      "owner_login": "octocat",
+      "owner_type": "User",
+      "html_url": "https://github.com/apps/zone-octocat-p4q9",
+      "settings_url": "https://github.com/settings/apps/zone-octocat-p4q9",
+      "created_at": "2026-11-01T00:00:00Z"
+    }
+  ],
+  "installations": [
+    {
+      "id": "00000000-0000-0000-0000-000000000003",
+      "github_app_id": "00000000-0000-0000-0000-000000000001",
+      "installation_id": 7,
+      "account_login": "acme",
+      "account_type": "Organization",
+      "repository_selection": "all",
+      "html_url": "https://github.com/organizations/acme/settings/installations/7",
+      "suspended_at": null,
+      "revoked_at": null,
+      "created_at": "2026-11-01T00:00:00Z"
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000004",
+      "github_app_id": "00000000-0000-0000-0000-000000000002",
+      "installation_id": 8,
+      "account_login": "octocat",
+      "account_type": "User",
+      "repository_selection": "selected",
+      "html_url": "https://github.com/settings/installations/8",
+      "suspended_at": "2026-11-01T00:00:00Z",
+      "revoked_at": "2026-11-01T00:00:00Z",
+      "created_at": "2026-11-01T00:00:00Z"
+    }
+  ]
+}

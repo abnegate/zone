@@ -9,6 +9,7 @@ const ORGANIZATION_TABS: ReadonlyMap<string, SettingsSection> = new Map([
   ['devices', SettingsSection.Devices],
   ['billing', SettingsSection.Billing],
   ['audit', SettingsSection.Audit],
+  ['github', SettingsSection.GitHub],
 ]);
 
 const WORKSPACE_TABS: ReadonlyMap<string, string> = new Map([

@@ -1,0 +1,31 @@
+{
+  "repositories": [
+    {
+      "installation_id": "00000000-0000-0000-0000-000000000007",
+      "id": 42,
+      "owner": "acme",
+      "name": "widgets",
+      "full_name": "acme/widgets",
+      "private": true,
+      "archived": false,
+      "default_branch": "trunk",
+      "html_url": "https://github.com/acme/widgets"
+    }
+  ],
+  "installations": [
+    {
+      "id": "00000000-0000-0000-0000-000000000007",
+      "account_login": "acme",
+      "html_url": "https://github.com/organizations/acme/settings/installations/7",
+      "error": null
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000008",
+      "account_login": "octocat",
+      "html_url": "https://github.com/settings/installations/8",
+      "error": "suspended"
+    }
+  ],
+  "total": 51,
+  "next_page": 2
+}

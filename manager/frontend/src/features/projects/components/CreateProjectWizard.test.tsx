@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
 import { clientModule } from '../../../test/client';
 import type { Source } from '../../../types';
 import type { WorkspaceRole } from '../../auth/types';
@@ -90,12 +91,14 @@ function renderWizard() {
   });
   render(
     <QueryClientProvider client={queryClient}>
-      <CreateProjectWizard
-        isOpen
-        onClose={mockClose}
-        onCreated={() => {}}
-        createProject={mockCreateProject}
-      />
+      <MemoryRouter>
+        <CreateProjectWizard
+          isOpen
+          onClose={mockClose}
+          onCreated={() => {}}
+          createProject={mockCreateProject}
+        />
+      </MemoryRouter>
     </QueryClientProvider>
   );
   return queryClient;
@@ -122,6 +125,9 @@ async function openNewSource(user: ReturnType<typeof userEvent.setup>) {
 async function addGitHubSource(user: ReturnType<typeof userEvent.setup>, nested: HTMLElement) {
   await within(nested).findByRole('button', { name: /GitHub/ });
   await user.click(within(nested).getByRole('button', { name: 'Next' }));
+  await user.click(
+    await within(nested).findByRole('button', { name: 'Use an access token instead' })
+  );
   await user.type(await within(nested).findByLabelText(/Owner/), 'abnegate');
   await user.type(within(nested).getByLabelText(/Repository/), 'zone');
   await user.click(within(nested).getByRole('button', { name: 'Next' }));

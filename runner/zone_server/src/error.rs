@@ -25,6 +25,9 @@ pub enum ServerError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Bad gateway: {0}")]
+    BadGateway(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 
@@ -44,26 +47,27 @@ pub enum ServerError {
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            ServerError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            ServerError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            ServerError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
-            ServerError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            ServerError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            ServerError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            ServerError::Database(e) => {
-                tracing::error!("Database error: {}", e);
+            ServerError::NotFound(message) => (StatusCode::NOT_FOUND, message.clone()),
+            ServerError::BadRequest(message) => (StatusCode::BAD_REQUEST, message.clone()),
+            ServerError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message.clone()),
+            ServerError::Forbidden(message) => (StatusCode::FORBIDDEN, message.clone()),
+            ServerError::Conflict(message) => (StatusCode::CONFLICT, message.clone()),
+            ServerError::BadGateway(message) => (StatusCode::BAD_GATEWAY, message.clone()),
+            ServerError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+            ServerError::Database(error) => {
+                tracing::error!("Database error: {}", error);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Database error".to_string(),
                 )
             }
-            ServerError::Redis(e) => {
-                tracing::error!("Redis error: {}", e);
+            ServerError::Redis(error) => {
+                tracing::error!("Redis error: {}", error);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Cache error".to_string())
             }
-            ServerError::Json(e) => (StatusCode::BAD_REQUEST, format!("JSON error: {}", e)),
-            ServerError::Core(e) => {
-                tracing::error!("Core error: {}", e);
+            ServerError::Json(error) => (StatusCode::BAD_REQUEST, format!("JSON error: {}", error)),
+            ServerError::Core(error) => {
+                tracing::error!("Core error: {}", error);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Internal error".to_string(),
@@ -86,8 +90,6 @@ pub type Result<T> = std::result::Result<T, ServerError>;
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
-
-    // ============ Error display tests ============
 
     #[test]
     fn test_not_found_display() {
@@ -120,6 +122,12 @@ mod tests {
     }
 
     #[test]
+    fn test_bad_gateway_display() {
+        let err = ServerError::BadGateway("GitHub did not answer".to_string());
+        assert_eq!(err.to_string(), "Bad gateway: GitHub did not answer");
+    }
+
+    #[test]
     fn test_internal_display() {
         let err = ServerError::Internal("Something went wrong".to_string());
         assert_eq!(err.to_string(), "Internal error: Something went wrong");
@@ -140,8 +148,6 @@ mod tests {
         assert!(err.to_string().contains("Connection failed"));
     }
 
-    // ============ Debug tests ============
-
     #[test]
     fn test_error_debug() {
         let err = ServerError::NotFound("test".to_string());
@@ -158,6 +164,7 @@ mod tests {
             ServerError::Unauthorized("test".to_string()),
             ServerError::Forbidden("test".to_string()),
             ServerError::Conflict("test".to_string()),
+            ServerError::BadGateway("test".to_string()),
             ServerError::Internal("test".to_string()),
         ];
 
@@ -166,8 +173,6 @@ mod tests {
             assert!(!debug_str.is_empty());
         }
     }
-
-    // ============ IntoResponse status code tests ============
 
     #[tokio::test]
     async fn test_not_found_response_status() {
@@ -205,6 +210,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bad_gateway_response_status_and_body() {
+        let response =
+            ServerError::BadGateway("GitHub refused the manifest".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["success"], false);
+        assert_eq!(json["error"], "GitHub refused the manifest");
+    }
+
+    #[tokio::test]
     async fn test_internal_response_status() {
         let err = ServerError::Internal("Server error".to_string());
         let response = err.into_response();
@@ -226,8 +243,6 @@ mod tests {
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
-
-    // ============ IntoResponse body tests ============
 
     #[tokio::test]
     async fn test_response_body_format() {
@@ -257,8 +272,6 @@ mod tests {
         assert_eq!(json["success"], false);
         assert_eq!(json["error"], "Internal error");
     }
-
-    // ============ From trait conversion tests ============
 
     #[test]
     fn test_from_serde_json_error() {
@@ -302,8 +315,6 @@ mod tests {
         assert!(matches!(err, ServerError::Core(_)));
     }
 
-    // ============ Result type alias tests ============
-
     #[test]
     fn test_result_type_ok() {
         fn get_result() -> Result<i32> {
@@ -333,8 +344,6 @@ mod tests {
 
         assert!(caller().is_err());
     }
-
-    // ============ Edge case tests ============
 
     #[test]
     fn test_empty_message() {
@@ -372,8 +381,6 @@ mod tests {
         // JSON should properly escape special characters
         assert_eq!(json["error"], "Test \"quotes\" and \\backslash");
     }
-
-    // ============ Error trait tests ============
 
     #[test]
     fn test_error_is_send_sync() {

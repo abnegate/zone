@@ -118,6 +118,7 @@ describe('SettingsNav', () => {
       ['Devices', '/settings/organization/devices'],
       ['Billing', '/settings/organization/billing'],
       ['Audit log', '/settings/organization/audit'],
+      ['GitHub', '/settings/organization/github'],
       ['Features', '/settings/server/features'],
       ['Connect a device', '/settings/server/connect'],
       ['Sessions', '/settings/you/sessions'],
@@ -154,6 +155,7 @@ describe('SettingsNav', () => {
       'Devices',
       'Billing',
       'Audit log',
+      'GitHub',
     ]);
   });
 

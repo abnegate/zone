@@ -18,6 +18,7 @@ import {
   AuditLogsSection,
   BillingSection,
   DevicesSection,
+  GitHubSection,
   OrganizationAiSection,
   OrganizationMembersSection,
 } from '../organization/components';
@@ -88,6 +89,13 @@ function organizationContent(
       return (
         <OrganizationMembersSection
           invitations={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
+        />
+      );
+    case SettingsSection.GitHub:
+      return (
+        <GitHubSection
+          organizationId={organizationId}
+          canManage={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
         />
       );
     case SettingsSection.Devices:

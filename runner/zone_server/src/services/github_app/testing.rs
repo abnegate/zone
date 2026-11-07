@@ -1,5 +1,3 @@
-//! Fixtures shared by this module's tests.
-
 /// A throwaway RSA key, generated for these tests and used nowhere else.
 pub const TEST_PRIVATE_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
 MIIEogIBAAKCAQEAu5dqhjvoHZtbdSz9bGJAMp3r+1bqzy/9lhjVz5crI2yWhz7I
@@ -28,3 +26,9 @@ V4ABAoGAJQaRxv9kpn6TMTCDtTPtWpVyxymF0A58t8/Yy3lcC3HS3V5hDRZlBGyL
 snLljJnOKrZGf+JfNkPul+la0f9cJo9Ka/oCy6X243y8VmzRG6/BX6eEfnWEJ+NB
 +ehfHUDVhe3oJRr15Rw1gt7CrSORoe46YkbnxO3H80of1gn9Vyw=
 -----END RSA PRIVATE KEY-----";
+
+#[cfg(test)]
+mod stand_in;
+
+#[cfg(test)]
+pub(crate) use stand_in::{installation_number, installed, issuing, provider, uninstalled};

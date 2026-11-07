@@ -462,6 +462,10 @@ describe('sources page layout', () => {
     );
     expect(rule(css, '.source-details-actions')).toContain('height: var(--ui-header-height)');
   });
+
+  it('aligns the access token disclosure with the field labels', () => {
+    expect(rule(css, '.github-configuration > .ui-btn-link')).toContain('padding-inline: 0');
+  });
 });
 
 describe('settings page layout', () => {
@@ -566,5 +570,17 @@ describe('setup license list', () => {
     const panel = read(join(features, 'models', 'components', 'FeaturesPanel.css'));
     expect(rule(panel, '.models-setup-licenses ul')).toContain('list-style: none');
     expect(rule(panel, '.models-setup-licenses li')).toContain('overflow-wrap: anywhere');
+  });
+});
+
+describe('github repository picker', () => {
+  const css = read(join(features, 'github', 'components', 'RepositoryPicker.css'));
+
+  it('lays the popup out in flow so a scrolling wizard or modal body grows instead of clipping it', () => {
+    const popup = rule(css, '.repository-picker-popup');
+    expect(popup).not.toContain('position');
+    expect(popup).toContain('max-height: min(16rem, 40dvh)');
+    expect(popup).toContain('overflow-y: auto');
+    expect(css).not.toContain('ui-fade-down');
   });
 });

@@ -29,6 +29,8 @@ pub mod receipts;
 pub mod releases;
 pub mod runner;
 pub mod skills;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod toolbox;
 pub mod tools;
 pub mod verification;

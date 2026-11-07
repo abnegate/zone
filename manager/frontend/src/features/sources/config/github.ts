@@ -1,9 +1,11 @@
-import type { GitHubConfig } from '../types';
+import type { GitHubConfig, SourceType } from '../types';
 import { GitHubIcon } from './icons';
 import type { SourceDefinition } from './types';
 
+export const GITHUB_SOURCE_TYPE = 'github' satisfies SourceType;
+
 export const githubSource: SourceDefinition = {
-  id: 'github',
+  id: GITHUB_SOURCE_TYPE,
   name: 'GitHub',
   category: 'file',
   description: 'GitHub repository',

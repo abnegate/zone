@@ -4,16 +4,18 @@
 //! anyone outside the chat's workspace.
 
 use crate::common::context::{Socket, finish, send};
+use crate::common::github_app::{self, Seeded};
 use crate::common::stand_in::{MCP_CONFIGURATION, MCP_TOKEN};
 use crate::common::{
-    TestClient, context_database_url, create_test_router, create_test_state, test_config,
-    test_email, test_password,
+    TestClient, context_database_url, create_test_router, create_test_state, test_email,
+    test_password,
 };
 
 use abnegate_agent_cli::AgentKind;
 use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
 use axum::http::StatusCode;
+use chrono::{Duration as Interval, SecondsFormat, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
@@ -26,9 +28,9 @@ use wiremock::matchers::{body_partial_json, body_string_contains, header, method
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use zone_server::config::{Config, ModelBackend};
 use zone_server::db::chat_pull_requests::{self, NewPullRequest};
-use zone_server::db::sources;
 use zone_server::db::workspace_members::{self, WorkspaceRole};
-use zone_server::services::chat::pull_request::AutoMerge;
+use zone_server::db::{github_installations, sources, workspaces};
+use zone_server::services::chat::pull_request::{AutoMerge, Error};
 use zone_server::state::AppState;
 
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -37,6 +39,8 @@ const GITHUB_TOKEN: &str = "ghp_chat_pull_requests_test";
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
 const TITLE: &str = "Add widgets";
 const NODE: &str = "PR_kwDOchat";
+const MINTED_TOKEN: &str = "ghs_minted";
+const DIFF: &str = "diff --git a/src/widgets.rs b/src/widgets.rs\n+pub struct Widget;\n";
 const NUMBER: u64 = 12;
 
 /// A stand-in for the host's `claude`, held open until the test has done what
@@ -151,20 +155,62 @@ impl Workspace {
             .expect("an encrypted token");
         sources::create_source(
             self.state.db(),
-            self.workspace,
-            &format!("widgets-{}", Uuid::new_v4()),
-            "github",
-            json!({"owner": "acme", "repo": "widgets", "branch": "main"}),
-            None,
-            None,
-            Some(&encrypted),
+            sources::NewSource {
+                workspace_id: self.workspace,
+                name: &format!("widgets-{}", Uuid::new_v4()),
+                source_type: "github",
+                config: json!({"owner": "acme", "repo": "widgets", "branch": "main"}),
+                description: None,
+                url: None,
+                credentials_encrypted: Some(&encrypted),
+                github_installation_id: None,
+            },
         )
         .await
         .expect("a GitHub source")
         .id
     }
 
+    /// An installation of a GitHub App on the workspace's organization, with
+    /// its tokens minted by `github`.
+    async fn install(&self, github: &MockServer) -> Seeded {
+        self.state
+            .install_github(github_app::issuer_provider(github, &self.state));
+        let organization = workspaces::get_workspace(self.state.db(), self.workspace)
+            .await
+            .expect("the workspace reads")
+            .expect("the workspace exists")
+            .organization_id;
+        github_app::seed_installation(&self.state, organization, github_app::installation_id())
+            .await
+    }
+
+    /// A source for acme/widgets connected only through `installation`, with
+    /// no personal access token.
+    async fn connect_installation(&self, installation: Uuid) -> Uuid {
+        sources::create_source(
+            self.state.db(),
+            sources::NewSource {
+                workspace_id: self.workspace,
+                name: &format!("widgets-installed-{}", Uuid::new_v4()),
+                source_type: "github",
+                config: json!({"owner": "acme", "repo": "widgets", "branch": "main"}),
+                description: None,
+                url: None,
+                credentials_encrypted: None,
+                github_installation_id: Some(installation),
+            },
+        )
+        .await
+        .expect("an installation-backed GitHub source")
+        .id
+    }
+
     async fn record(&self, url: &str) -> Uuid {
+        self.record_through(url, None).await
+    }
+
+    async fn record_through(&self, url: &str, source_id: Option<Uuid>) -> Uuid {
         chat_pull_requests::record(
             self.state.db(),
             &NewPullRequest {
@@ -174,12 +220,20 @@ impl Workspace {
                 number: 12,
                 url,
                 title: Some(TITLE),
-                source_id: None,
+                source_id,
             },
         )
         .await
         .expect("a recorded pull request")
         .id
+    }
+
+    async fn diff(&self, id: Uuid) -> (StatusCode, Value) {
+        let response = self
+            .client
+            .get_auth(&format!("{}/diff", self.pull_request(id)), &self.token)
+            .await;
+        (response.status, response.json_value())
     }
 
     fn pull_requests(&self) -> String {
@@ -246,10 +300,8 @@ async fn member(client: &TestClient) -> (String, Uuid) {
 }
 
 fn config(github: &MockServer, database: String) -> Config {
-    let mut config = test_config();
+    let mut config = github_app::config_for(github);
     config.database_url = database;
-    config.github_api_url = github.uri();
-    config.github_api_allows_http = true;
     config.comfyui.enabled = false;
     config.web_search.enabled = false;
     config
@@ -257,6 +309,24 @@ fn config(github: &MockServer, database: String) -> Config {
 
 fn link(github: &MockServer, number: u64) -> String {
     format!("{}/acme/widgets/pull/{number}", github.uri())
+}
+
+fn access_tokens(installation_id: i64) -> wiremock::MockBuilder {
+    Mock::given(method("POST")).and(path(format!(
+        "/app/installations/{installation_id}/access_tokens"
+    )))
+}
+
+fn minted(token: &str) -> ResponseTemplate {
+    let expires_at = (Utc::now() + Interval::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
+    ResponseTemplate::new(201).set_body_json(json!({"token": token, "expires_at": expires_at}))
+}
+
+fn diff_read(token: &str) -> wiremock::MockBuilder {
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/12"))
+        .and(header("Accept", "application/vnd.github.diff"))
+        .and(header("Authorization", format!("Bearer {token}")))
 }
 
 /// Pull request 12 as GitHub's REST API describes it: open, and a draft when
@@ -284,9 +354,14 @@ fn detail(github: &MockServer, draft: bool) -> Value {
 /// GitHub as it describes pull request 12: open, its checks passing, and its
 /// repository allowing auto-merge.
 async fn describe(github: &MockServer, draft: bool) {
+    describe_to(github, draft, GITHUB_TOKEN).await;
+}
+
+/// GitHub describing pull request 12 as `describe` does, to `token` alone.
+async fn describe_to(github: &MockServer, draft: bool, token: &str) {
     Mock::given(method("GET"))
         .and(path("/repos/acme/widgets/pulls/12"))
-        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
+        .and(header("Authorization", format!("Bearer {token}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(detail(github, draft)))
         .mount(github)
         .await;
@@ -410,15 +485,25 @@ impl Automation {
 }
 
 fn automation_read() -> wiremock::MockBuilder {
+    automation_read_by(GITHUB_TOKEN)
+}
+
+fn automation_read_by(token: &str) -> wiremock::MockBuilder {
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
+        .and(header("Authorization", format!("Bearer {token}")))
         .and(body_string_contains("autoMergeAllowed"))
 }
 
 /// GitHub answering every read of pull request 12's automation as `automation`.
 async fn automate(github: &MockServer, automation: Automation) {
-    automation_read()
+    automate_to(github, automation, GITHUB_TOKEN).await;
+}
+
+/// GitHub answering `token`'s every read of pull request 12's automation as
+/// `automation`.
+async fn automate_to(github: &MockServer, automation: Automation, token: &str) {
+    automation_read_by(token)
         .respond_with(automation.answer())
         .mount(github)
         .await;
@@ -438,9 +523,15 @@ async fn automate_change(github: &MockServer, before: Automation, after: Automat
 
 /// GitHub carrying out the GraphQL mutation `name` on pull request 12, once.
 async fn mutation(github: &MockServer, name: &str, variables: Value) {
+    mutation_by(github, name, variables, GITHUB_TOKEN).await;
+}
+
+/// GitHub carrying out `token`'s GraphQL mutation `name` on pull request 12,
+/// once.
+async fn mutation_by(github: &MockServer, name: &str, variables: Value, token: &str) {
     Mock::given(method("POST"))
         .and(path("/graphql"))
-        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
+        .and(header("Authorization", format!("Bearer {token}")))
         .and(body_string_contains(name))
         .and(body_partial_json(json!({"variables": variables})))
         .respond_with(
@@ -1425,13 +1516,16 @@ async fn a_source_without_a_credential_never_stands_in_for_one_that_has_one() {
     let workspace = Workspace::new(config(&github, database), pool).await;
     let bare = sources::create_source(
         workspace.state.db(),
-        workspace.workspace,
-        &format!("widgets-bare-{}", Uuid::new_v4()),
-        "github",
-        json!({"owner": "acme", "repo": "widgets"}),
-        None,
-        None,
-        None,
+        sources::NewSource {
+            workspace_id: workspace.workspace,
+            name: &format!("widgets-bare-{}", Uuid::new_v4()),
+            source_type: "github",
+            config: json!({"owner": "acme", "repo": "widgets"}),
+            description: None,
+            url: None,
+            credentials_encrypted: None,
+            github_installation_id: None,
+        },
     )
     .await
     .expect("a source without a credential")
@@ -1462,12 +1556,8 @@ async fn a_source_without_a_credential_never_stands_in_for_one_that_has_one() {
 #[tokio::test]
 async fn the_diff_is_read_with_the_sources_credential() {
     let github = MockServer::start().await;
-    let diff = "diff --git a/src/widgets.rs b/src/widgets.rs\n+pub struct Widget;\n";
-    Mock::given(method("GET"))
-        .and(path("/repos/acme/widgets/pulls/12"))
-        .and(header("Accept", "application/vnd.github.diff"))
-        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
-        .respond_with(ResponseTemplate::new(200).set_body_string(diff))
+    diff_read(GITHUB_TOKEN)
+        .respond_with(ResponseTemplate::new(200).set_body_string(DIFF))
         .expect(1)
         .mount(&github)
         .await;
@@ -1487,6 +1577,255 @@ async fn the_diff_is_read_with_the_sources_credential() {
     response.assert_status(StatusCode::OK);
     assert_eq!(
         response.json_value(),
-        json!({"diff": diff, "truncated": false})
+        json!({"diff": DIFF, "truncated": false})
     );
+}
+
+#[tokio::test]
+async fn a_source_connected_only_through_an_installation_reads_with_a_minted_token() {
+    let github = MockServer::start().await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    let seeded = workspace.install(&github).await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted(MINTED_TOKEN))
+        .expect(1)
+        .mount(&github)
+        .await;
+    diff_read(MINTED_TOKEN)
+        .respond_with(ResponseTemplate::new(200).set_body_string(DIFF))
+        .expect(1)
+        .mount(&github)
+        .await;
+    let source = workspace.connect_installation(seeded.installation).await;
+    let id = workspace
+        .record_through(&link(&github, 12), Some(source))
+        .await;
+
+    let (status, body) = workspace.diff(id).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"diff": DIFF, "truncated": false}));
+}
+
+#[tokio::test]
+async fn a_revoked_installation_never_falls_back_to_a_personal_access_token() {
+    let github = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/12"))
+        .and(header("Authorization", format!("Bearer {GITHUB_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(DIFF))
+        .expect(0)
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    let seeded = workspace.install(&github).await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted(MINTED_TOKEN))
+        .expect(0)
+        .mount(&github)
+        .await;
+    let revoked = workspace.connect_installation(seeded.installation).await;
+    github_installations::mark_revoked(workspace.state.db(), seeded.installation)
+        .await
+        .expect("the installation is revoked");
+    workspace.connect_github().await;
+    let id = workspace
+        .record_through(&link(&github, 12), Some(revoked))
+        .await;
+
+    let (status, body) = workspace.diff(id).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], Error::Disconnected.to_string(), "{body}");
+    let listed = workspace.listed(&workspace.token).await;
+    assert_eq!(listed[0]["credentialed"], false, "{listed}");
+}
+
+#[tokio::test]
+async fn an_installation_token_github_refuses_is_minted_again_once() {
+    let github = MockServer::start().await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    let seeded = workspace.install(&github).await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted("ghs_stale"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&github)
+        .await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted(MINTED_TOKEN))
+        .expect(1)
+        .mount(&github)
+        .await;
+    diff_read("ghs_stale")
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "message": "Bad credentials",
+            "documentation_url": "https://docs.github.com/rest",
+        })))
+        .expect(1)
+        .mount(&github)
+        .await;
+    diff_read(MINTED_TOKEN)
+        .respond_with(ResponseTemplate::new(200).set_body_string(DIFF))
+        .expect(1)
+        .mount(&github)
+        .await;
+    let source = workspace.connect_installation(seeded.installation).await;
+    let id = workspace
+        .record_through(&link(&github, 12), Some(source))
+        .await;
+
+    let (status, body) = workspace.diff(id).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({"diff": DIFF, "truncated": false}));
+}
+
+#[tokio::test]
+async fn a_disconnected_installation_lists_its_pull_request_as_needing_github_again() {
+    let github = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/12"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&github)
+        .await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    let seeded = workspace.install(&github).await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted(MINTED_TOKEN))
+        .expect(0)
+        .mount(&github)
+        .await;
+    let revoked = workspace.connect_installation(seeded.installation).await;
+    github_installations::mark_revoked(workspace.state.db(), seeded.installation)
+        .await
+        .expect("the installation is revoked");
+    workspace.connect_github().await;
+    let id = workspace
+        .record_through(&link(&github, 12), Some(revoked))
+        .await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["id"], id.to_string(), "{listed}");
+    assert_eq!(listed[0]["connection"], "disconnected", "{listed}");
+    assert_eq!(listed[0]["credentialed"], false, "{listed}");
+    assert_eq!(listed[0]["status"], Value::Null, "{listed}");
+    assert!(
+        !listed.to_string().contains(GITHUB_TOKEN),
+        "the list carries no credential: {listed}"
+    );
+}
+
+#[tokio::test]
+async fn a_pull_request_opened_through_an_installation_is_listed_with_a_minted_token() {
+    let github = MockServer::start().await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    let seeded = workspace.install(&github).await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted(MINTED_TOKEN))
+        .expect(1)
+        .mount(&github)
+        .await;
+    describe_to(&github, false, MINTED_TOKEN).await;
+    automate_to(&github, Automation::default(), MINTED_TOKEN).await;
+    let source = workspace.connect_installation(seeded.installation).await;
+    workspace
+        .record_through(&link(&github, 12), Some(source))
+        .await;
+
+    let listed = workspace.listed(&workspace.token).await;
+
+    assert_eq!(listed[0]["connection"], "credentialed", "{listed}");
+    assert_eq!(listed[0]["credentialed"], true, "{listed}");
+    assert_eq!(listed[0]["status"]["state"], "open", "{listed}");
+    assert_eq!(
+        listed[0]["status"]["auto_merge"],
+        json!({"enabled": false, "unavailable": null}),
+        "{listed}"
+    );
+}
+
+#[tokio::test]
+async fn an_installation_token_github_refuses_while_changing_a_pull_request_is_minted_again_once() {
+    let github = MockServer::start().await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    let seeded = workspace.install(&github).await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted("ghs_stale"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&github)
+        .await;
+    access_tokens(seeded.installation_id)
+        .respond_with(minted(MINTED_TOKEN))
+        .expect(1)
+        .mount(&github)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/12"))
+        .and(header("Authorization", "Bearer ghs_stale"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "message": "Bad credentials",
+            "documentation_url": "https://docs.github.com/rest",
+        })))
+        .expect(1)
+        .mount(&github)
+        .await;
+    describe_to(&github, false, MINTED_TOKEN).await;
+    automate_to(&github, Automation::default(), MINTED_TOKEN).await;
+    mutation_by(
+        &github,
+        "convertPullRequestToDraft",
+        json!({"id": NODE}),
+        MINTED_TOKEN,
+    )
+    .await;
+    let source = workspace.connect_installation(seeded.installation).await;
+    let id = workspace
+        .record_through(&link(&github, 12), Some(source))
+        .await;
+
+    let (status, changed) = workspace.update(id, json!({"draft": true})).await;
+
+    assert_eq!(status, StatusCode::OK, "{changed}");
+    assert_eq!(changed["connection"], "credentialed", "{changed}");
+}
+
+#[tokio::test]
+async fn github_failing_to_mint_an_installation_token_is_a_bad_gateway() {
+    let github = MockServer::start().await;
+    let database = context_database_url();
+    let pool = PgPool::connect(&database).await.expect("the test database");
+    let workspace = Workspace::new(config(&github, database), pool).await;
+    let seeded = workspace.install(&github).await;
+    access_tokens(seeded.installation_id)
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&github)
+        .await;
+    let source = workspace.connect_installation(seeded.installation).await;
+    let id = workspace
+        .record_through(&link(&github, 12), Some(source))
+        .await;
+
+    let (status, body) = workspace.diff(id).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["error"], Error::Unreachable.to_string(), "{body}");
 }

@@ -126,9 +126,34 @@ async fn owned(state: &AppState, chat: Uuid, id: Uuid) -> Result<PullRequestRow,
 
 fn refused(error: Error) -> ServerError {
     match error {
-        Error::Uncredentialed | Error::Refused(_) => ServerError::Conflict(error.to_string()),
-        Error::Unreachable | Error::Storage | Error::Unsaved => {
-            ServerError::Internal(error.to_string())
+        Error::Uncredentialed
+        | Error::Disconnected
+        | Error::Unauthenticated
+        | Error::Refused(_) => ServerError::Conflict(error.to_string()),
+        Error::Unreachable => ServerError::BadGateway(error.to_string()),
+        Error::Storage | Error::Unsaved => ServerError::Internal(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_out_of_reach_is_a_bad_gateway() {
+        assert!(matches!(
+            refused(Error::Unreachable),
+            ServerError::BadGateway(message) if message == Error::Unreachable.to_string()
+        ));
+        assert!(matches!(refused(Error::Storage), ServerError::Internal(_)));
+        assert!(matches!(refused(Error::Unsaved), ServerError::Internal(_)));
+        for error in [
+            Error::Uncredentialed,
+            Error::Disconnected,
+            Error::Unauthenticated,
+            Error::Refused("Resource not accessible by integration".to_string()),
+        ] {
+            assert!(matches!(refused(error), ServerError::Conflict(_)));
         }
     }
 }

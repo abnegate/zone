@@ -758,8 +758,37 @@ describe('Client', () => {
 
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/projects/1/github',
-        expect.objectContaining({ method: 'PUT' })
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ repo_url: 'https://github.com/test' }),
+        })
       );
+    });
+
+    it('linkGitHub sends the GitHub installation when one is given', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          project: {
+            ...mockProject,
+            github_repo_url: 'https://github.com/test',
+            github_installation_id: 'installation-1',
+            github_installation_status: 'active',
+            github_account_login: 'acme',
+          },
+        }),
+      });
+
+      const project = await client.linkGitHub('1', 'https://github.com/test', 'installation-1');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        '/api/projects/1/github',
+        expect.objectContaining({
+          method: 'POST',
+          body: '{"repo_url":"https://github.com/test","github_installation_id":"installation-1"}',
+        })
+      );
+      expect(project.github_installation_status).toBe('active');
     });
 
     it('unlinkGitHub unlinks GitHub repo', async () => {
@@ -2178,10 +2207,6 @@ describe('Client', () => {
     });
   });
 
-  // =============================================================================
-  // Organization Member Management Tests
-  // =============================================================================
-
   describe('Organization Member Management', () => {
     const orgId = 'org-123';
     const userId = 'user-456';
@@ -2687,10 +2712,6 @@ describe('Client', () => {
     });
   });
 
-  // =============================================================================
-  // Workspace Member Management Tests
-  // =============================================================================
-
   describe('Workspace Member Management', () => {
     const orgId = 'org-123';
     const workspaceId = 'ws-456';
@@ -3155,10 +3176,6 @@ describe('Client', () => {
     });
   });
 
-  // =============================================================================
-  // Invitation Management Tests
-  // =============================================================================
-
   describe('Invitation Management', () => {
     const orgId = 'org-123';
     const invitationId = 'inv-456';
@@ -3597,10 +3614,6 @@ describe('Client', () => {
       });
     });
   });
-
-  // =============================================================================
-  // Billing & Usage API Tests
-  // =============================================================================
 
   describe('Billing & Usage API', () => {
     const orgId = 'org-123';
