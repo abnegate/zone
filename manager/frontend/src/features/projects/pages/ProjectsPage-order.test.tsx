@@ -16,6 +16,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { clientModule } from '../../../test/client';
 import { chooseSelect } from '../../../test/select';
 import type { Project } from '../types';
+import { formatDate } from '../utils/formatters';
 import { applyOrder, sortKey } from '../utils/order';
 
 const SLOT_HEIGHT = 72;
@@ -188,6 +189,43 @@ describe('project order', () => {
 
     chooseSelect('Sort projects', 'Status');
     expect(shownOrder()).toEqual(['cloud', 'zone', 'jbs']);
+  });
+
+  describe('the date on each card', () => {
+    const shownDate = (id: string) =>
+      document.querySelector(
+        `.project-slot[data-project="${id}"] .project-card-footer > :last-child`
+      )?.textContent;
+
+    it('is when the project was last used once sorted by most recently used', async () => {
+      renderPage();
+      await loaded();
+
+      chooseSelect('Sort projects', 'Most recently used');
+
+      expect(shownDate('jbs')).toBe(formatDate('2026-11-05T00:00:00Z'));
+      expect(shownDate('cloud')).toBe(formatDate('2026-11-01T00:00:00Z'));
+      expect(shownDate('zone')).toBe('Never used');
+    });
+
+    it('is when the project was added once sorted by date added', async () => {
+      renderPage();
+      await loaded();
+
+      chooseSelect('Sort projects', 'Date added');
+
+      expect(shownDate('cloud')).toBe(formatDate('2026-11-06T00:00:00Z'));
+      expect(shownDate('zone')).toBe(formatDate('2026-09-01T00:00:00Z'));
+    });
+
+    it('is when the project was last updated in any other order', async () => {
+      renderPage();
+      await loaded();
+
+      expect(shownDate('cloud')).toBe(formatDate('2026-01-01T00:00:00Z'));
+      chooseSelect('Sort projects', 'Name');
+      expect(shownDate('cloud')).toBe(formatDate('2026-01-01T00:00:00Z'));
+    });
   });
 
   it('remembers each viewer’s sort', async () => {
