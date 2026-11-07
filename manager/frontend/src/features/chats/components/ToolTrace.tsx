@@ -135,9 +135,10 @@ const DENIED_DETAILS = new Set([DENIED_DETAIL, `${TOOL_ERROR_PREFIX}${DENIED_DET
 function toolState(call: ToolCallRecord): ToolState {
   if (call.approval === 'pending') return 'approval';
   if (call.pending) return 'pending';
+  if (call.approval === 'denied' && call.detail !== UNFINISHED_DETAIL) return 'denied';
+  if (call.success) return 'ok';
   if (call.detail === UNFINISHED_DETAIL) return 'stopped';
-  if (call.approval === 'denied' || DENIED_DETAILS.has(call.detail)) return 'denied';
-  return call.success ? 'ok' : 'failed';
+  return DENIED_DETAILS.has(call.detail) ? 'denied' : 'failed';
 }
 
 function toolLabel(name: string, state: ToolState): string {

@@ -501,6 +501,23 @@ describe('ToolTrace', () => {
     expect(screen.getByText(DENIED_DETAIL)).toBeInTheDocument();
   });
 
+  it('reads a successful call as run even when its output repeats a server outcome', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({ id: 'a', name: 'tail_job', detail: DENIED_DETAIL }),
+          call({ id: 'b', name: 'run_shell', detail: UNFINISHED_DETAIL }),
+        ]}
+      />
+    );
+
+    const names = screen
+      .getAllByTestId('tool-call')
+      .map((row) => row.querySelector('.tool-call-name')?.textContent);
+    expect(names).toEqual(['Read a job log', 'Ran a shell command']);
+    expect(screen.getByText(DENIED_DETAIL)).toBeInTheDocument();
+  });
+
   it('names a tool it does not know the same way in every state', () => {
     render(
       <ToolTrace
