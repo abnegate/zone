@@ -28,14 +28,6 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
-/// The tool an agent asks before running one of its own.
-///
-/// Served by zone over the same MCP endpoint as every other tool, and named
-/// to the agent on its command line. It is not a workspace tool: nothing in a
-/// prompt teaches it, and it spends none of a turn's call budget, because the
-/// agent asking whether a call may run is not the call.
-pub const PERMISSION_TOOL: &str = "approve_tool_call";
-
 /// Budget a tool spends on output it pages or trims for itself: a `read_file`
 /// page, a captured command log.
 pub const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
@@ -58,26 +50,6 @@ pub const MAX_TOOL_MESSAGE_CHARS: usize = MAX_TOOL_OUTPUT_CHARS + TOOL_FRAMING_C
 /// A tool trimming to a caller's cap has to reserve this, or the message the
 /// model reads is longer than the cap it asked for.
 pub(crate) const ERROR_PREFIX: &str = "Error: ";
-
-/// What a call the reader did not allow is told, wherever it was asked. The
-/// console reads a denial back from these words once the approval is gone.
-pub const DENIED: &str = "The user denied this tool call.";
-
-/// What a call is told when nobody answered its approval in time. Not the
-/// reader's answer, so it reads apart from [`DENIED`].
-pub const APPROVAL_TIMED_OUT: &str =
-    "Nobody answered the approval request in time, so this tool call did not run.";
-
-/// What a call is told when its turn stopped while it waited for approval.
-pub const APPROVAL_CANCELLED: &str =
-    "The turn stopped before this tool call was approved, so it did not run.";
-
-/// Whether a call's outcome line is one of the fixed refusals above, as a
-/// permission card states it or as a failed call's error.
-pub fn is_refusal(detail: &str) -> bool {
-    let bare = detail.strip_prefix(ERROR_PREFIX).unwrap_or(detail);
-    [DENIED, APPROVAL_TIMED_OUT, APPROVAL_CANCELLED].contains(&bare)
-}
 
 /// Longest a rendered approval preview may run.
 ///
@@ -567,16 +539,12 @@ impl Default for ToolRegistry {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::cell::RefCell;
     use std::collections::BTreeMap;
-    use std::future::Future;
-    use std::io;
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Arc, Mutex, Once};
     use tempfile::TempDir;
-    use tracing_subscriber::fmt::MakeWriter;
 
     use crate::llm::cli;
+    pub(crate) use crate::llm::logs::captured_logs;
 
     /// What a server's environment holds that no child of a tool may be
     /// handed. Every value says `notreal`, so a leak shows under any name.
@@ -707,75 +675,6 @@ pub(crate) mod test_support {
                 self.program
             );
         }
-    }
-
-    /// One subscriber for the whole binary, because a scoped one is not
-    /// reliable here: `tracing` caches each callsite's interest globally, and a
-    /// test running in parallel with no subscriber of its own caches
-    /// `Interest::never` for a callsite another test is about to read.
-    static INSTALLED: Once = Once::new();
-
-    thread_local! {
-        static SINK: RefCell<Option<Arc<Mutex<Vec<u8>>>>> = const { RefCell::new(None) };
-    }
-
-    /// Routes each line to whichever buffer the emitting thread is collecting
-    /// into, and drops it when that thread is not collecting.
-    struct Sink;
-
-    impl io::Write for Sink {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            SINK.with(|sink| {
-                if let Some(buffer) = sink.borrow().as_ref() {
-                    buffer.lock().expect("log buffer").extend_from_slice(bytes);
-                }
-            });
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'writer> MakeWriter<'writer> for Sink {
-        type Writer = Self;
-
-        fn make_writer(&'writer self) -> Self::Writer {
-            Sink
-        }
-    }
-
-    /// One collector at a time.
-    ///
-    /// The sink is per-thread but the subscriber and `tracing`'s interest
-    /// cache are not, and two tests collecting at once have found an empty
-    /// buffer. Serialising here rather than at each call site means a test
-    /// added later cannot forget to.
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    /// Run `work` and return it with everything it logged on this thread.
-    ///
-    /// `zone_server` turns `zone_core=debug` on by default, so a debug field is
-    /// a production log line. This is how a test reads one back.
-    pub(crate) async fn captured_logs<T>(work: impl Future<Output = T>) -> (T, String) {
-        let _collecting = SERIAL.lock().await;
-        INSTALLED.call_once(|| {
-            let _ = tracing_subscriber::fmt()
-                .with_max_level(tracing::Level::DEBUG)
-                .with_ansi(false)
-                .with_writer(Sink)
-                .try_init();
-        });
-
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        SINK.with(|sink| *sink.borrow_mut() = Some(buffer.clone()));
-        let value = work.await;
-        SINK.with(|sink| sink.borrow_mut().take());
-
-        let logged =
-            String::from_utf8(buffer.lock().expect("log buffer").clone()).expect("logs are utf-8");
-        (value, logged)
     }
 }
 

@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 use uuid::Uuid;
 use zone_core::tools::Tier;
 
-mod refusal;
+pub mod refusal;
 
 pub use refusal::Refusal;
 

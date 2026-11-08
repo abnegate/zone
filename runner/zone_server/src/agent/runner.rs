@@ -23,13 +23,14 @@ use super::plan;
 use super::question::{self, Question};
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
+use super::trace::content_lines;
 use super::wait::{self, Waiting};
 use crate::services::chat::session::RunContext;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
-use zone_core::tools::{Session, content_lines, is_vision_url};
+use zone_core::tools::{Session, is_vision_url};
 
 /// What the calls queued behind a turn-ending question are told.
 ///

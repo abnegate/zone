@@ -23,6 +23,7 @@ mod buffered;
 mod environment;
 mod images;
 mod isolation;
+pub(crate) mod logs;
 mod models;
 mod occupancy;
 mod stand_in;

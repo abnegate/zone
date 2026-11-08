@@ -2,7 +2,6 @@
 //! agent attaches one, with the turn's token kept off its command line.
 
 use super::*;
-use crate::tools::PERMISSION_TOOL;
 
 const ENDPOINT: &str = "http://127.0.0.1:8421/mcp";
 const TOKEN: &str = "zone-turn-5c1d7a90e3b24f68";
@@ -143,7 +142,7 @@ async fn a_granted_claude_run_asks_zone_for_permission() {
 
     assert_eq!(
         claude.argument("--permission-prompt-tool"),
-        Some(AgentKind::Claude.tool(Toolset::SERVER, PERMISSION_TOOL))
+        Some(AgentKind::Claude.tool(Toolset::SERVER, Toolset::PERMISSION))
     );
 }
 
@@ -157,7 +156,7 @@ async fn codex_is_never_given_a_permission_prompt() {
             arguments
                 .iter()
                 .all(|argument| !argument.contains("permission")
-                    && !argument.contains(PERMISSION_TOOL)),
+                    && !argument.contains(Toolset::PERMISSION)),
             "{builtin_tools:?}: {arguments:?}"
         );
     }
