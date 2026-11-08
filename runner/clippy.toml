@@ -5,3 +5,8 @@
 # Many database and API functions legitimately need many parameters
 # The ai_settings functions have 16 parameters due to many optional fields
 too-many-arguments-threshold = 20
+
+disallowed-methods = [
+    { path = "abnegate_recurrence::Recurrence::parse", reason = "schedule::parse holds every rule to MIN_PERIOD" },
+    { path = "abnegate_recurrence::Timezone::parse", reason = "time_zone::parse names the time_zone field a model has to fix" },
+]
