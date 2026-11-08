@@ -1,5 +1,6 @@
 //! Application state
 
+use abnegate_agent::McpHub;
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
 use dashmap::DashMap;
@@ -14,7 +15,7 @@ use zone_context::adapters::{
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
 use zone_core::llm::{LlmBackend, cli};
-use zone_core::mcp::McpHub;
+use zone_core::servers;
 
 use crate::cache::Cache;
 #[cfg(test)]
@@ -319,7 +320,12 @@ impl AppState {
 
     /// MCP servers for this process. Connected once on first chat or task use.
     pub async fn mcp_hub(&self) -> &McpHub {
-        self.inner.mcp.get_or_init(McpHub::connect_from_env).await
+        self.inner
+            .mcp
+            .get_or_init(|| async {
+                McpHub::connect_through(&servers::config(), &zone_routing::proxy()).await
+            })
+            .await
     }
 
     /// Terminal frames for task runs. A waiter subscribes here; the writers

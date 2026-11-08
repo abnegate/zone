@@ -1,11 +1,14 @@
 //! The chat agent's reason/act loop, expressed as a stream of events.
 //!
-//! `zone_core::agent::Agent` runs the same pattern for tasks, but it blocks on
+//! `abnegate_agent::Agent` runs the same pattern for tasks, but it blocks on
 //! whole completions and reports progress through a callback. A chat has to
 //! render tokens as they arrive and stay cancellable mid-tool, so this loop
 //! streams every completion and yields events instead. The websocket handler
 //! consumes the result exactly like the plain completion stream it replaces.
 
+use abnegate_agent::ToolResult;
+use abnegate_agent::context::{self, ContextStatus, ContextUsage, Entry, Summary};
+use abnegate_agent::tool::{Session, is_vision_url};
 use abnegate_agent_cli::CUT_SHORT;
 use abnegate_llm::{
     Error, Limit, Message as LlmMessage, RequestOptions, Role as LlmRole, StreamToolCall,
@@ -29,8 +32,6 @@ use crate::services::chat::session::RunContext;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage};
-use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
-use zone_core::tools::{Session, is_vision_url};
 
 /// What the calls queued behind a turn-ending question are told.
 ///
@@ -296,7 +297,7 @@ pub fn run_with_context(
             }
             yield AgentEvent::Context(usage);
             let mut prepared = match context::prepare(
-                &llm,
+                &llm.summarizer(),
                 &model,
                 &context.entries,
                 definitions,
@@ -590,7 +591,7 @@ pub fn run_with_context(
                         let signature = signature(&call);
                         let started = Instant::now();
                         let result = match refusal {
-                            Some(refusal) => zone_core::tools::ToolResult::error(refusal.message()),
+                            Some(refusal) => ToolResult::error(refusal.message()),
                             None => {
                                 tools
                                     .execute(&call.function.name, &call.function.arguments)
@@ -794,12 +795,11 @@ fn runs_own_loop(llm: &LlmClient) -> bool {
 /// never about. A consumer that rebuilds a turn from the events therefore does
 /// not see these, and [`workers::task::accumulate`] says so.
 fn nudge(context: &mut RunContext, instruction: String) {
-    context.entries.push(Entry {
-        id: Uuid::new_v4().to_string(),
-        message: LlmMessage::system(instruction),
-        preserve: true,
-        consumed: true,
-    });
+    context.entries.push(
+        Entry::new(Uuid::new_v4().to_string(), LlmMessage::system(instruction))
+            .with_preserve(true)
+            .with_consumed(true),
+    );
 }
 
 fn canonical(message: LlmMessage, mutations: Vec<String>) -> NewEntry {
@@ -826,7 +826,7 @@ struct FinishedTool {
 async fn finish_tool(
     tools: &ChatTools,
     call: LlmToolCall,
-    result: zone_core::tools::ToolResult,
+    result: ToolResult,
     duration_ms: u64,
     refusal: Option<Refusal>,
 ) -> FinishedTool {
@@ -915,7 +915,7 @@ pub(crate) fn call_signature(name: &str, arguments: &str) -> (String, String) {
 const DETAIL_CHARS: usize = 240;
 
 /// One line describing how a tool call went, for the UI rather than the model.
-fn summarize(tool: &str, result: &zone_core::tools::ToolResult, output: &str) -> String {
+fn summarize(tool: &str, result: &ToolResult, output: &str) -> String {
     if !result.success {
         return output.lines().next().unwrap_or("Failed").to_string();
     }
@@ -1280,7 +1280,6 @@ fn complete_ident(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_core::tools::ToolResult;
 
     fn parse_text_tool_calls(text: &str) -> Vec<LlmToolCall> {
         match super::parse_text_tool_calls(text, &["run_shell".into(), "list_projects".into()]) {

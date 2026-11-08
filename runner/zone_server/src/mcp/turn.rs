@@ -7,6 +7,7 @@
 //! `tools/list`, and its own [`crate::agent::ApprovalPolicy`] decides each
 //! `tools/call` before the registry runs it.
 
+use abnegate_agent::ToolResult;
 use dashmap::DashMap;
 use futures::{Stream, StreamExt};
 use once_cell::sync::Lazy;
@@ -17,7 +18,6 @@ use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, Toolset};
-use zone_core::tools::ToolResult;
 
 use super::progress::Progress;
 use super::scope::Scope;
@@ -562,13 +562,14 @@ mod tests {
     use crate::agent::approval::refusal::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
     use crate::agent::wait::{self, WAIT_FOR};
     use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy};
+    use abnegate_agent::ToolContext;
+    use abnegate_agent::tool::job::{JobCommand, Jobs};
+    use abnegate_agent::tool::{EnvironmentPolicy, Session};
     use serde_json::json;
-    use std::collections::HashMap;
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
+    use zone_core::application::application;
     use zone_core::llm::cli::TURN_TIMEOUT;
-    use zone_core::tools::Session;
-    use zone_core::tools::job::{JobCommand, Jobs};
 
     #[tokio::test]
     async fn what_the_agent_wrote_is_yielded_before_a_call_that_arrived_with_it() {
@@ -1053,18 +1054,14 @@ mod tests {
         let mut opened = open(ApprovalPolicy::auto()).await;
         let turn = Turn::find(&opened.token).expect("the turn");
         let session = Session::Chat(opened.chat);
-        let environment = HashMap::from([(
-            "PATH".to_string(),
-            std::env::var("PATH").unwrap_or_default(),
-        )]);
-        let job = Jobs::spawn(
-            session,
-            &JobCommand::shell("sleep 30"),
-            directory.path(),
-            &environment,
-        )
-        .await
-        .expect("the job starts");
+        let context = ToolContext::default()
+            .within(directory.path())
+            .with_session(session)
+            .with_application(application())
+            .with_environment(EnvironmentPolicy::empty().allow(["PATH"]));
+        let job = Jobs::spawn(&JobCommand::shell("sleep 30"), &context)
+            .await
+            .expect("the job starts");
         let question = json!({"questions": [{
             "header": "Scope",
             "question": "Which scope?",

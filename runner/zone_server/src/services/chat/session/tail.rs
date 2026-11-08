@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
+use abnegate_agent::context::Entry;
 use abnegate_llm::{Message, Role};
 use abnegate_search::SearchContext;
-use zone_core::context::Entry;
 
 use super::{INSTRUCTIONS, RunContext, prompt};
 
@@ -45,12 +45,11 @@ pub fn assemble(context: &RunContext, unseen: &[String], note: String) -> Option
         return None;
     }
     Some(RunContext {
-        entries: std::iter::once(Entry {
-            id: INSTRUCTIONS.into(),
-            message: Message::system(note),
-            preserve: true,
-            consumed: true,
-        })
+        entries: std::iter::once(
+            Entry::new(INSTRUCTIONS, Message::system(note))
+                .with_preserve(true)
+                .with_consumed(true),
+        )
         .chain(entries)
         .collect(),
         summary: None,
@@ -65,8 +64,8 @@ pub fn assemble(context: &RunContext, unseen: &[String], note: String) -> Option
 
 #[cfg(test)]
 mod tests {
+    use abnegate_agent::context::project;
     use abnegate_agent_cli::transcript::render;
-    use zone_core::context::project;
 
     use super::*;
     use crate::services::chat::session::composed;
