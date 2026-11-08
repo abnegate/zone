@@ -1,6 +1,8 @@
 //! The HTTP cross-encoder over abnegate-llm's rerank provider, against a
 //! mocked rerank endpoint.
 
+use std::net::TcpListener;
+
 use serde_json::Value;
 use serde_json::json;
 use wiremock::Mock;
@@ -21,7 +23,7 @@ const DOCUMENTS: [&str; 2] = [
     "fn should_skip_blob(uri: &str, sha: &str) -> bool",
     "generic authentication helper with a login form",
 ];
-const UNREACHABLE_URL: &str = "http://127.0.0.1:1/rerank";
+const LOOPBACK: &str = "127.0.0.1:0";
 const FOUND: u16 = 302;
 const SERVICE_UNAVAILABLE: u16 = 503;
 const REQUEST_PREFIX: &str = "rerank request: ";
@@ -51,6 +53,13 @@ async fn endpoint(response: ResponseTemplate) -> MockServer {
 
 fn rerank_url(server: &MockServer) -> String {
     format!("{}{RERANK_PATH}", server.uri())
+}
+
+fn closed_url() -> String {
+    let listener = TcpListener::bind(LOOPBACK).expect("bind a loopback port");
+    let address = listener.local_addr().expect("read the bound address");
+    drop(listener);
+    format!("http://{address}/rerank")
 }
 
 fn encoder(url: &str) -> HttpCrossEncoder {
@@ -194,7 +203,7 @@ async fn an_unparsable_answer_is_a_parse_error() {
 #[tokio::test]
 async fn an_unreachable_endpoint_is_a_request_error() {
     let message = embedding_failure(
-        encoder(UNREACHABLE_URL)
+        encoder(&closed_url())
             .score_documents(QUERY, &DOCUMENTS)
             .await,
     );
