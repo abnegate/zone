@@ -5901,7 +5901,8 @@ cat 'DIR/reply.jsonl'
                     }
                 }
 
-                async fn ask(&self, content: &str) {
+                /// Runs one turn on `content` and returns the id of its answer.
+                async fn ask(&self, content: &str) -> Uuid {
                     run_turn(
                         &self.state,
                         self.organization.chat,
@@ -5910,7 +5911,7 @@ cat 'DIR/reply.jsonl'
                         content,
                         None,
                     )
-                    .await;
+                    .await
                 }
 
                 /// Puts the chat in a new project whose source is the folder `path`.
@@ -6529,20 +6530,27 @@ cat 'DIR/reply.jsonl'
                 )
                 .expect("the stand-in's reply");
                 chat.agent.refuse();
-                let (_, mut frames) = ChatStream::of(chat.organization.chat).join().await;
-                chat.ask(SECOND).await;
-                tokio::time::timeout(Duration::from_secs(30), async {
+                let stream = ChatStream::of(chat.organization.chat);
+                let (_, mut frames) = stream.join().await;
+                let watched = tokio::spawn(async move {
                     loop {
-                        if let ServerMessage::Subagent { subagent, .. } =
-                            frames.recv().await.expect("the chat's frames")
-                            && subagent.external_id == SURVEY
-                        {
-                            return;
+                        match frames.recv().await {
+                            Ok(ServerMessage::Subagent { subagent, .. })
+                                if subagent.external_id == SURVEY =>
+                            {
+                                return subagent.message_id;
+                            }
+                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(broadcast::error::RecvError::Closed) => return None,
                         }
                     }
-                })
-                .await
-                .expect("the replay's survey reaches the chat's readers once it is stored");
+                });
+                let replayed_turn = chat.ask(SECOND).await;
+                let watched = tokio::time::timeout(Duration::from_secs(30), watched)
+                    .await
+                    .expect("nothing watched the replay's subagents: no survey reached its readers")
+                    .expect("the chat's readers");
+                drop(stream);
                 let runs = chat.agent.runs();
                 let stored =
                     db::chat_subagents::list(&chat.organization.pool, chat.organization.chat)
@@ -6570,9 +6578,14 @@ cat 'DIR/reply.jsonl'
                         "the replay changed {flag}"
                     );
                 }
+                assert_eq!(
+                    watched,
+                    Some(replayed_turn),
+                    "the survey was not the replayed turn's"
+                );
                 assert!(
                     stored.iter().any(|row| row.external_id == SURVEY),
-                    "nothing watched the replay's subagents: {stored:?}"
+                    "the replay's survey reached its readers but not the store: {stored:?}"
                 );
             }
 
