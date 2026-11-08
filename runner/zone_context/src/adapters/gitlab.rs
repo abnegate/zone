@@ -3,25 +3,46 @@
 //! Provides intelligent repository traversal with pattern matching,
 //! binary file detection, and progressive fetching strategies.
 
+use crate::adapters::ProgressCallback;
+use crate::adapters::RateLimitConfig;
+use crate::adapters::SourceAdapter;
+use crate::adapters::SyncState;
+use crate::adapters::status::Status;
+use crate::adapters::token::Token;
+use crate::content::ContentCategory;
+use crate::content::ContentItem;
+use crate::content::ContentMetadata;
+use crate::content::FetchConfig;
+use crate::content::FetchResult;
+use crate::content::FetchStrategy;
+use crate::content::TokenBudget;
+use crate::content::estimate_tokens_from_bytes;
+use crate::content::prioritize_paths;
+use crate::error::ContextError;
+use crate::error::Result;
+use abnegate_vcs::Blob;
+use abnegate_vcs::GitLabError;
+use abnegate_vcs::GitLabService;
+use abnegate_vcs::ParseError;
+use abnegate_vcs::Project;
+use abnegate_vcs::RemoteBranchName;
+use abnegate_vcs::RepositoryPath;
+use abnegate_vcs::TreeEntry;
+use abnegate_vcs::TreeEntryKind;
 use async_trait::async_trait;
-use base64::Engine;
 use chrono::Utc;
 use glob::Pattern;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use serde::Deserialize;
+use serde::Serialize;
+use sha2::Digest;
+use sha2::Sha256;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::RwLock;
-
-use crate::adapters::{ProgressCallback, RateLimitConfig, SourceAdapter, SyncState};
-use crate::content::{
-    ContentCategory, ContentItem, ContentMetadata, FetchConfig, FetchResult, FetchStrategy,
-    TokenBudget, estimate_tokens_from_bytes, prioritize_paths,
-};
-use crate::error::{ContextError, Result};
 use zone_core::Source;
 
 /// Binary file extensions to skip (same as GitHub/Filesystem)
@@ -32,9 +53,7 @@ const BINARY_EXTENSIONS: &[&str] = &[
     ".eot",
 ];
 
-/// Maximum file size in bytes (10MB)
-#[allow(dead_code)]
-const MAX_FILE_SIZE_BYTES: usize = 10 * 1024 * 1024;
+const SOURCE_TYPE: &str = "gitlab";
 
 /// Configuration for GitLab sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,50 +77,10 @@ pub struct GitLabConfig {
     pub base_url: Option<String>,
 }
 
-/// GitLab tree entry from API
-#[derive(Debug, Clone, Deserialize)]
-struct GitLabTreeEntry {
-    path: String,
-    #[serde(rename = "type")]
-    entry_type: String,
-    #[allow(dead_code)]
-    mode: String,
-    id: String,
-}
-
-/// GitLab file response
-#[derive(Debug, Clone, Deserialize)]
-struct GitLabFile {
-    #[allow(dead_code)]
-    file_name: String,
-    #[allow(dead_code)]
-    file_path: String,
-    size: usize,
-    #[allow(dead_code)]
-    encoding: String,
-    content: Option<String>,
-    #[allow(dead_code)]
-    content_sha256: String,
-    #[allow(dead_code)]
-    ref_: Option<String>,
-    #[allow(dead_code)]
-    blob_id: String,
-}
-
-/// GitLab project response
-#[derive(Debug, Clone, Deserialize)]
-struct GitLabProject {
-    #[allow(dead_code)]
-    id: i64,
-    #[allow(dead_code)]
-    name: String,
-    default_branch: String,
-}
-
 /// Cached tree entry with LRU tracking
 #[derive(Debug, Clone)]
 struct CachedTree {
-    tree: Vec<GitLabTreeEntry>,
+    tree: Vec<TreeEntry>,
     cached_at: Instant,
     last_accessed: Instant,
     size_bytes: usize,
@@ -127,6 +106,8 @@ impl TreeCache {
     /// Maximum total cached size (10MB)
     const MAX_TOTAL_BYTES: usize = 10 * 1024 * 1024;
 
+    const ENTRY_OVERHEAD_BYTES: usize = 20;
+
     fn new(ttl_secs: u64) -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
@@ -138,18 +119,18 @@ impl TreeCache {
     }
 
     /// Estimate size of a tree in bytes
-    fn estimate_tree_size(tree: &[GitLabTreeEntry]) -> usize {
+    fn estimate_tree_size(tree: &[TreeEntry]) -> usize {
         tree.iter()
             .map(|entry| {
-                40 + // id
-                entry.path.len() +
-                20 + // type string + overhead
-                10 // mode
+                entry.path.len()
+                    + entry.sha.as_str().len()
+                    + entry.mode.len()
+                    + Self::ENTRY_OVERHEAD_BYTES
             })
             .sum()
     }
 
-    async fn get(&self, key: &TreeCacheKey) -> Option<Vec<GitLabTreeEntry>> {
+    async fn get(&self, key: &TreeCacheKey) -> Option<Vec<TreeEntry>> {
         let mut entries = self.entries.write().await;
         entries.get_mut(key).and_then(|entry| {
             if entry.cached_at.elapsed() < self.ttl {
@@ -161,7 +142,7 @@ impl TreeCache {
         })
     }
 
-    async fn insert(&self, key: TreeCacheKey, tree: Vec<GitLabTreeEntry>) {
+    async fn insert(&self, key: TreeCacheKey, tree: Vec<TreeEntry>) {
         let mut entries = self.entries.write().await;
         let tree_size = Self::estimate_tree_size(&tree);
 
@@ -209,7 +190,7 @@ impl TreeCache {
 /// GitLab source adapter
 #[derive(Debug, Clone)]
 pub struct GitLabAdapter {
-    base_url: String,
+    service: std::result::Result<GitLabService, String>,
     tree_cache: TreeCache,
 }
 
@@ -223,20 +204,63 @@ impl GitLabAdapter {
     /// Tree cache TTL in seconds (5 minutes)
     const TREE_CACHE_TTL_SECS: u64 = 300;
 
-    /// Create a new GitLab adapter with the default GitLab API URL
+    /// Estimated size of a file, since GitLab's tree lists none
+    const ESTIMATED_FILE_BYTES: usize = 2048;
+
+    /// Create a new GitLab adapter reading from gitlab.com
     pub fn new() -> Self {
+        Self::serving(
+            GitLabService::new()
+                .map(GitLabService::with_anonymous_reads)
+                .map_err(Self::unbuilt),
+        )
+    }
+
+    /// Create a GitLab adapter that reads through `service`
+    pub fn with_service(service: GitLabService) -> Self {
+        Self::serving(Ok(service))
+    }
+
+    fn serving(service: std::result::Result<GitLabService, String>) -> Self {
         Self {
-            base_url: "https://gitlab.com/api/v4".to_string(),
+            service,
             tree_cache: TreeCache::new(Self::TREE_CACHE_TTL_SECS),
         }
     }
 
-    /// Create a new GitLab adapter with a custom base URL (for testing or self-hosted)
-    pub fn with_base_url(base_url: String) -> Self {
-        Self {
-            base_url,
-            tree_cache: TreeCache::new(Self::TREE_CACHE_TTL_SECS),
+    fn unbuilt(error: GitLabError) -> String {
+        match error {
+            GitLabError::Http(error) => format!("Failed to build HTTP client: {error}"),
+            error => format!("Failed to build HTTP client: {error}"),
         }
+    }
+
+    fn service(&self) -> Result<&GitLabService> {
+        self.service
+            .as_ref()
+            .map_err(|message| ContextError::Config(message.clone()))
+    }
+
+    fn limited(error: &GitLabError) -> bool {
+        matches!(error, GitLabError::RateLimited { .. })
+    }
+
+    fn status(error: &GitLabError) -> Option<Status> {
+        match error {
+            GitLabError::NotFound => Some(Status::NOT_FOUND),
+            GitLabError::AuthenticationFailed => Some(Status::UNAUTHORIZED),
+            GitLabError::Forbidden => Some(Status::FORBIDDEN),
+            GitLabError::Refused { status, .. } => Some(Status(*status)),
+            _ => None,
+        }
+    }
+
+    fn not_found(project: &str) -> ContextError {
+        ContextError::InvalidSourceConfig(format!("Project not found: {project}"))
+    }
+
+    fn project(project: &str) -> Result<Project> {
+        Project::parse(project).map_err(|_| Self::not_found(project))
     }
 
     /// Validate GitLab identifier to prevent URL injection
@@ -284,71 +308,6 @@ impl GitLabAdapter {
     fn parse_config(&self, source: &Source) -> Result<GitLabConfig> {
         serde_json::from_value(source.config.clone())
             .map_err(|e| ContextError::InvalidSourceConfig(format!("Invalid GitLab config: {}", e)))
-    }
-
-    /// Build HTTP client with GitLab API configuration
-    fn build_client(&self, token: Option<&str>) -> Result<reqwest::Client> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::USER_AGENT,
-            "zone-context"
-                .parse()
-                .map_err(|e| ContextError::Config(format!("Invalid header: {}", e)))?,
-        );
-
-        if let Some(token) = token {
-            headers.insert(
-                "PRIVATE-TOKEN",
-                token.parse().map_err(|_| {
-                    ContextError::Config(
-                        "Invalid authorization token format (token not logged for security)"
-                            .to_string(),
-                    )
-                })?,
-            );
-        }
-
-        reqwest::Client::builder()
-            .default_headers(headers)
-            .timeout(std::time::Duration::from_secs(30))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| ContextError::Config(format!("Failed to build HTTP client: {}", e)))
-    }
-
-    /// Fetch with retry logic for rate limiting
-    async fn fetch_with_retry(
-        &self,
-        url: &str,
-        client: &reqwest::Client,
-    ) -> Result<reqwest::Response> {
-        let config = self.rate_limit_config();
-        let mut retries = 0;
-
-        loop {
-            let response =
-                client.get(url).send().await.map_err(|e| {
-                    ContextError::adapter("gitlab", format!("Request failed: {}", e))
-                })?;
-
-            // Check for rate limiting
-            let is_rate_limited = response.status() == 429;
-
-            if is_rate_limited && retries < config.max_retries {
-                retries += 1;
-                let backoff_ms = config.backoff_base_ms * (2_u64.pow(retries - 1));
-                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
-                continue;
-            }
-
-            if is_rate_limited {
-                return Err(ContextError::RateLimited {
-                    retry_after_secs: 60,
-                });
-            }
-
-            return Ok(response);
-        }
     }
 
     /// Check if a file is binary based on extension
@@ -417,130 +376,115 @@ impl GitLabAdapter {
         true
     }
 
-    /// URL-encode project ID for GitLab API (handles both numeric IDs and paths)
-    fn encode_project_id(project: &str) -> String {
-        utf8_percent_encode(project, NON_ALPHANUMERIC).to_string()
-    }
-
-    /// Fetch project info to get default branch
-    async fn get_project_info(&self, project: &str, token: Option<&str>) -> Result<GitLabProject> {
+    /// Fetch the project's default branch
+    async fn get_default_branch(
+        &self,
+        project: &str,
+        token: Option<&str>,
+    ) -> Result<RemoteBranchName> {
         Self::validate_gitlab_identifier(project, "project")?;
 
-        let client = self.build_client(token)?;
-        let encoded_project = Self::encode_project_id(project);
-        let url = format!("{}/projects/{}", self.base_url, encoded_project);
+        let token = Token::private(token)?;
+        let service = self.service()?;
+        let parsed = Self::project(project)?;
 
-        let response = self.fetch_with_retry(&url, &client).await?;
+        let answer = self
+            .rate_limit_config()
+            .retried(Self::limited, || {
+                service.get_default_branch(&parsed, token.secret())
+            })
+            .await?;
 
-        if response.status() == 404 {
-            return Err(ContextError::InvalidSourceConfig(format!(
-                "Project not found: {}",
-                project
-            )));
-        } else if response.status() == 403 || response.status() == 401 {
-            return Err(ContextError::PermissionDenied(
-                "Access forbidden - check token permissions".to_string(),
-            ));
-        } else if !response.status().is_success() {
-            return Err(ContextError::adapter(
-                "gitlab",
-                format!("API error: {}", response.status()),
-            ));
+        match answer {
+            Ok(Some(branch)) => Ok(branch),
+            Ok(None) => Err(ContextError::adapter(
+                SOURCE_TYPE,
+                "Failed to parse project info: default_branch is null",
+            )),
+            Err(GitLabError::NotFound) => Err(Self::not_found(project)),
+            Err(GitLabError::AuthenticationFailed | GitLabError::Forbidden) => {
+                Err(ContextError::PermissionDenied(
+                    "Access forbidden - check token permissions".to_string(),
+                ))
+            }
+            Err(GitLabError::Refused { status, .. }) => Err(ContextError::adapter(
+                SOURCE_TYPE,
+                format!("API error: {}", Status(status)),
+            )),
+            Err(GitLabError::Http(error)) => Err(ContextError::adapter(
+                SOURCE_TYPE,
+                format!("Request failed: {error}"),
+            )),
+            Err(GitLabError::GitLabApi(reason)) => Err(ContextError::adapter(
+                SOURCE_TYPE,
+                format!("Failed to parse project info: {reason}"),
+            )),
+            Err(GitLabError::Parse(error @ ParseError::BranchName(_))) => {
+                Err(ContextError::adapter(
+                    SOURCE_TYPE,
+                    format!("Failed to parse project info: {error}"),
+                ))
+            }
+            Err(error @ GitLabError::InvalidOrigin) => Err(ContextError::Config(error.to_string())),
+            Err(error) => Err(ContextError::adapter(
+                SOURCE_TYPE,
+                format!("API error: {error}"),
+            )),
         }
-
-        response.json::<GitLabProject>().await.map_err(|e| {
-            ContextError::adapter("gitlab", format!("Failed to parse project info: {}", e))
-        })
     }
 
-    /// Fetch repository tree (recursive)
+    /// Fetch repository tree (recursive, every page)
     async fn get_tree(
         &self,
         project: &str,
         branch: &str,
         path: Option<&str>,
         token: Option<&str>,
-    ) -> Result<Vec<GitLabTreeEntry>> {
+    ) -> Result<Vec<TreeEntry>> {
         Self::validate_gitlab_identifier(project, "project")?;
         Self::validate_gitlab_identifier(branch, "branch")?;
-        if let Some(p) = path
-            && !p.is_empty()
-        {
-            Self::validate_path(p)?;
+        let path = path.filter(|path| !path.is_empty());
+        if let Some(path) = path {
+            Self::validate_path(path)?;
         }
 
-        let client = self.build_client(token)?;
-        let encoded_project = Self::encode_project_id(project);
-        let encoded_branch = utf8_percent_encode(branch, NON_ALPHANUMERIC).to_string();
+        let token = Token::private(token)?;
+        let service = self.service()?;
+        let project = Self::project(project)?;
+        let prefix = path
+            .map(RepositoryPath::parse)
+            .transpose()
+            .map_err(|_| Self::unlisted(Status::NOT_FOUND))?;
 
-        let mut url = format!(
-            "{}/projects/{}/repository/tree?ref={}&recursive=true&per_page=100",
-            self.base_url, encoded_project, encoded_branch
-        );
+        self.rate_limit_config()
+            .retried(Self::limited, || {
+                service.fetch_tree_at(&project, token.secret(), branch, prefix.as_ref())
+            })
+            .await?
+            .map_err(Self::tree_error)
+    }
 
-        if let Some(p) = path
-            && !p.is_empty()
-        {
-            url.push_str(&format!(
-                "&path={}",
-                utf8_percent_encode(p, NON_ALPHANUMERIC)
-            ));
+    fn unlisted(status: Status) -> ContextError {
+        ContextError::adapter(SOURCE_TYPE, format!("Failed to fetch tree: {status}"))
+    }
+
+    fn tree_error(error: GitLabError) -> ContextError {
+        if let Some(status) = Self::status(&error) {
+            return Self::unlisted(status);
         }
-
-        // GitLab paginates results, so we may need to fetch multiple pages
-        let mut all_entries = Vec::new();
-        let mut current_url = url;
-
-        loop {
-            let response = self.fetch_with_retry(&current_url, &client).await?;
-
-            if !response.status().is_success() {
-                return Err(ContextError::adapter(
-                    "gitlab",
-                    format!("Failed to fetch tree: {}", response.status()),
-                ));
+        match error {
+            GitLabError::Parse(ParseError::BranchName(_)) => Self::unlisted(Status::NOT_FOUND),
+            GitLabError::Http(error) => {
+                ContextError::adapter(SOURCE_TYPE, format!("Request failed: {error}"))
             }
-
-            // Check for next page link
-            let next_link = response
-                .headers()
-                .get("link")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|links| {
-                    links.split(',').find_map(|link| {
-                        if link.contains("rel=\"next\"") {
-                            link.split(';').next().map(|url| {
-                                url.trim().trim_matches('<').trim_matches('>').to_string()
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                });
-
-            // Get response text first for better error reporting in tests
-            let response_text = response.text().await.map_err(|e| {
-                ContextError::adapter("gitlab", format!("Failed to read response: {}", e))
-            })?;
-
-            let entries: Vec<GitLabTreeEntry> =
-                serde_json::from_str(&response_text).map_err(|e| {
-                    #[cfg(test)]
-                    eprintln!("Failed to parse JSON. Response was: {}", response_text);
-                    ContextError::adapter("gitlab", format!("Failed to parse tree: {}", e))
-                })?;
-
-            all_entries.extend(entries);
-
-            // Check if there's a next page
-            if let Some(next) = next_link {
-                current_url = next;
-            } else {
-                break;
+            GitLabError::GitLabApi(reason) => {
+                ContextError::adapter(SOURCE_TYPE, format!("Failed to parse tree: {reason}"))
             }
+            GitLabError::Parse(error @ ParseError::ObjectId(_)) => {
+                ContextError::adapter(SOURCE_TYPE, format!("Failed to parse tree: {error}"))
+            }
+            error => ContextError::adapter(SOURCE_TYPE, format!("Failed to fetch tree: {error}")),
         }
-
-        Ok(all_entries)
     }
 
     /// Get tree with caching and in-flight tracking
@@ -550,7 +494,7 @@ impl GitLabAdapter {
         branch: &str,
         path: Option<&str>,
         token: Option<&str>,
-    ) -> Result<Vec<GitLabTreeEntry>> {
+    ) -> Result<Vec<TreeEntry>> {
         let key = (project.to_string(), branch.to_string());
 
         // Check cache first
@@ -606,58 +550,37 @@ impl GitLabAdapter {
         Ok(tree)
     }
 
-    /// Fetch file content
-    async fn get_file_content(
+    /// Fetch a file's bytes by its blob sha
+    async fn get_blob(
         &self,
         project: &str,
-        path: &str,
-        branch: &str,
+        entry: &TreeEntry,
         token: Option<&str>,
-    ) -> Result<GitLabFile> {
+    ) -> Result<Blob> {
         Self::validate_gitlab_identifier(project, "project")?;
-        Self::validate_gitlab_identifier(branch, "branch")?;
-        Self::validate_path(path)?;
 
-        let client = self.build_client(token)?;
-        let encoded_project = Self::encode_project_id(project);
-        let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
-        let encoded_branch = utf8_percent_encode(branch, NON_ALPHANUMERIC).to_string();
+        let token = Token::private(token)?;
+        let service = self.service()?;
+        let project = Self::project(project)?;
 
-        let url = format!(
-            "{}/projects/{}/repository/files/{}?ref={}",
-            self.base_url, encoded_project, encoded_path, encoded_branch
-        );
-
-        let response = self.fetch_with_retry(&url, &client).await?;
-
-        if !response.status().is_success() {
-            return Err(ContextError::adapter(
-                "gitlab",
-                format!("Failed to fetch content: {}", response.status()),
-            ));
-        }
-
-        response
-            .json::<GitLabFile>()
-            .await
-            .map_err(|e| ContextError::adapter("gitlab", format!("Failed to parse content: {}", e)))
+        self.rate_limit_config()
+            .retried(Self::limited, || {
+                service.fetch_blob(&project, token.secret(), &entry.sha, usize::MAX)
+            })
+            .await?
+            .map_err(Self::content_error)
     }
 
-    /// Decode base64 content as UTF-8 text.
-    fn decode_text_content(content: &str) -> Result<Option<String>> {
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(content.replace('\n', ""))
-            .map_err(|e| ContextError::Parse(format!("Failed to decode base64: {}", e)))?;
-
-        Ok(String::from_utf8(decoded).ok())
-    }
-
-    /// Decode base64 content
-    #[cfg(test)]
-    fn decode_content(content: &str) -> Result<String> {
-        Self::decode_text_content(content)?.ok_or_else(|| {
-            ContextError::Parse("Failed to decode UTF-8: blob is not valid UTF-8".to_string())
-        })
+    fn content_error(error: GitLabError) -> ContextError {
+        let message = match Self::status(&error) {
+            Some(status) => format!("Failed to fetch content: {status}"),
+            None => match error {
+                GitLabError::Http(error) => format!("Request failed: {error}"),
+                GitLabError::GitLabApi(reason) => format!("Failed to parse content: {reason}"),
+                error => format!("Failed to fetch content: {error}"),
+            },
+        };
+        ContextError::adapter(SOURCE_TYPE, message)
     }
 
     /// Create a ContentItem from a GitLab file
@@ -726,23 +649,20 @@ impl GitLabAdapter {
         Ok(item)
     }
 
-    /// Estimate file size from tree entry (GitLab doesn't provide size in tree API)
-    fn estimate_file_size(_entry: &GitLabTreeEntry) -> usize {
-        // GitLab tree API doesn't include file sizes, so we use a conservative estimate
-        // This will be updated when we fetch the actual file
-        2048 // 2KB default estimate
+    fn estimate_file_size(_entry: &TreeEntry) -> usize {
+        Self::ESTIMATED_FILE_BYTES
     }
 
     fn file_uri(project: &str, path: &str, branch: &str) -> String {
         format!("gitlab://{project}/{path}@{branch}")
     }
 
-    fn tree_version(entries: &[GitLabTreeEntry]) -> String {
+    fn tree_version(entries: &[TreeEntry]) -> String {
         let mut hasher = Sha256::new();
         for entry in entries {
-            if entry.entry_type == "blob" {
+            if entry.kind == TreeEntryKind::Blob {
                 hasher.update(entry.path.as_bytes());
-                hasher.update(entry.id.as_bytes());
+                hasher.update(entry.sha.as_str().as_bytes());
             }
         }
         hasher
@@ -756,7 +676,7 @@ impl GitLabAdapter {
 #[async_trait]
 impl SourceAdapter for GitLabAdapter {
     fn source_type(&self) -> &str {
-        "gitlab"
+        SOURCE_TYPE
     }
 
     fn rate_limit_config(&self) -> RateLimitConfig {
@@ -773,11 +693,6 @@ impl SourceAdapter for GitLabAdapter {
     async fn verify(&self, source: &Source) -> Result<()> {
         let config = self.parse_config(source)?;
 
-        // Apply base_url if provided
-        if config.base_url.is_some() {
-            // Validation happens in get_project_info
-        }
-
         // Validate required fields
         if config.project.is_empty() {
             return Err(ContextError::InvalidSourceConfig(
@@ -790,9 +705,7 @@ impl SourceAdapter for GitLabAdapter {
             Self::validate_gitlab_identifier(branch, "branch")?;
         }
 
-        // Try to fetch project info to verify it exists and is accessible
-        let _ = self
-            .get_project_info(&config.project, config.token.as_deref())
+        self.get_default_branch(&config.project, config.token.as_deref())
             .await?;
 
         Ok(())
@@ -801,15 +714,11 @@ impl SourceAdapter for GitLabAdapter {
     async fn estimate_tokens(&self, source: &Source) -> Result<usize> {
         let config = self.parse_config(source)?;
 
-        // Get project info to determine branch
-        let project_info = self
-            .get_project_info(&config.project, config.token.as_deref())
+        let default_branch = self
+            .get_default_branch(&config.project, config.token.as_deref())
             .await?;
 
-        let branch = config
-            .branch
-            .as_deref()
-            .unwrap_or(&project_info.default_branch);
+        let branch = config.branch.as_deref().unwrap_or(default_branch.as_str());
 
         // Fetch tree (with caching)
         let tree = self
@@ -824,8 +733,7 @@ impl SourceAdapter for GitLabAdapter {
         let mut total_tokens = 0;
 
         for entry in &tree {
-            // Skip directories
-            if entry.entry_type != "blob" {
+            if entry.kind != TreeEntryKind::Blob {
                 continue;
             }
 
@@ -859,15 +767,14 @@ impl SourceAdapter for GitLabAdapter {
     ) -> Result<FetchResult> {
         let config = self.parse_config(source)?;
 
-        // Get project info to determine branch
-        let project_info = self
-            .get_project_info(&config.project, config.token.as_deref())
+        let default_branch = self
+            .get_default_branch(&config.project, config.token.as_deref())
             .await?;
 
         let branch = config
             .branch
             .as_deref()
-            .unwrap_or(&project_info.default_branch)
+            .unwrap_or(default_branch.as_str())
             .to_string();
 
         // Fetch tree (with caching)
@@ -881,11 +788,10 @@ impl SourceAdapter for GitLabAdapter {
             .await?;
 
         // Filter files
-        let files: Vec<&GitLabTreeEntry> = tree
+        let files: Vec<&TreeEntry> = tree
             .iter()
             .filter(|entry| {
-                // Only blobs (files)
-                if entry.entry_type != "blob" {
+                if entry.kind != TreeEntryKind::Blob {
                     return false;
                 }
 
@@ -921,11 +827,11 @@ impl SourceAdapter for GitLabAdapter {
 
         match strategy {
             FetchStrategy::Full => {
-                let to_fetch: Vec<&&GitLabTreeEntry> = files
+                let to_fetch: Vec<&&TreeEntry> = files
                     .iter()
                     .filter(|entry| {
                         let uri = Self::file_uri(&config.project, &entry.path, &branch);
-                        !fetch_config.should_skip_blob(&uri, &entry.id)
+                        !fetch_config.should_skip_blob(&uri, entry.sha.as_str())
                     })
                     .collect();
                 result.stats.items_skipped = total_files.saturating_sub(to_fetch.len());
@@ -935,28 +841,14 @@ impl SourceAdapter for GitLabAdapter {
                     result.stats.items_skipped
                 ));
                 for (idx, entry) in to_fetch.iter().enumerate() {
-                    let file_content = self
-                        .get_file_content(
-                            &config.project,
-                            &entry.path,
-                            &branch,
-                            config.token.as_deref(),
-                        )
+                    let blob = self
+                        .get_blob(&config.project, entry, config.token.as_deref())
                         .await?;
-
-                    let content = match file_content.content.as_deref() {
-                        Some(encoded) => match Self::decode_text_content(encoded)? {
-                            Some(text) => Some(text),
-                            None => {
-                                tracing::debug!(
-                                    path = %entry.path,
-                                    "skipping non-UTF-8 GitLab file"
-                                );
-                                progress.on_progress(idx + 1, Some(total_files));
-                                continue;
-                            }
-                        },
-                        None => None,
+                    let size = blob.content.len();
+                    let Ok(text) = String::from_utf8(blob.content) else {
+                        tracing::debug!(path = %entry.path, "skipping non-UTF-8 GitLab file");
+                        progress.on_progress(idx + 1, Some(total_files));
+                        continue;
                     };
 
                     let item = Self::create_content_item(
@@ -964,9 +856,9 @@ impl SourceAdapter for GitLabAdapter {
                         &config.project,
                         &branch,
                         &entry.path,
-                        &entry.id,
-                        file_content.size,
-                        content,
+                        entry.sha.as_str(),
+                        size,
+                        Some(text),
                         false,
                     )?;
 
@@ -986,7 +878,7 @@ impl SourceAdapter for GitLabAdapter {
                         &config.project,
                         &branch,
                         &entry.path,
-                        &entry.id,
+                        entry.sha.as_str(),
                         Self::estimate_file_size(entry),
                         None,
                         true,
@@ -1009,27 +901,13 @@ impl SourceAdapter for GitLabAdapter {
                         estimate_tokens_from_bytes(Self::estimate_file_size(entry));
 
                     if budget.can_fit(estimated_tokens) {
-                        let file_content = self
-                            .get_file_content(
-                                &config.project,
-                                &entry.path,
-                                &branch,
-                                config.token.as_deref(),
-                            )
+                        let blob = self
+                            .get_blob(&config.project, entry, config.token.as_deref())
                             .await?;
-
-                        let content = match file_content.content.as_deref() {
-                            Some(encoded) => match Self::decode_text_content(encoded)? {
-                                Some(text) => Some(text),
-                                None => {
-                                    tracing::debug!(
-                                        path = %entry.path,
-                                        "skipping non-UTF-8 GitLab file"
-                                    );
-                                    continue;
-                                }
-                            },
-                            None => None,
+                        let size = blob.content.len();
+                        let Ok(text) = String::from_utf8(blob.content) else {
+                            tracing::debug!(path = %entry.path, "skipping non-UTF-8 GitLab file");
+                            continue;
                         };
 
                         let item = Self::create_content_item(
@@ -1037,9 +915,9 @@ impl SourceAdapter for GitLabAdapter {
                             &config.project,
                             &branch,
                             &entry.path,
-                            &entry.id,
-                            file_content.size,
-                            content,
+                            entry.sha.as_str(),
+                            size,
+                            Some(text),
                             false,
                         )?;
 
@@ -1098,27 +976,13 @@ impl SourceAdapter for GitLabAdapter {
                 // Fetch in priority order
                 for (idx, priority_item) in prioritized.iter().enumerate() {
                     if let Some(entry) = files.iter().find(|e| e.path == priority_item.path) {
-                        let file_content = self
-                            .get_file_content(
-                                &config.project,
-                                &entry.path,
-                                &branch,
-                                config.token.as_deref(),
-                            )
+                        let blob = self
+                            .get_blob(&config.project, entry, config.token.as_deref())
                             .await?;
-
-                        let content = match file_content.content.as_deref() {
-                            Some(encoded) => match Self::decode_text_content(encoded)? {
-                                Some(text) => Some(text),
-                                None => {
-                                    tracing::debug!(
-                                        path = %entry.path,
-                                        "skipping non-UTF-8 GitLab file"
-                                    );
-                                    continue;
-                                }
-                            },
-                            None => None,
+                        let size = blob.content.len();
+                        let Ok(text) = String::from_utf8(blob.content) else {
+                            tracing::debug!(path = %entry.path, "skipping non-UTF-8 GitLab file");
+                            continue;
                         };
 
                         let item = Self::create_content_item(
@@ -1126,9 +990,9 @@ impl SourceAdapter for GitLabAdapter {
                             &config.project,
                             &branch,
                             &entry.path,
-                            &entry.id,
-                            file_content.size,
-                            content,
+                            entry.sha.as_str(),
+                            size,
+                            Some(text),
                             false,
                         )?;
 
@@ -1150,15 +1014,11 @@ impl SourceAdapter for GitLabAdapter {
     async fn get_sync_state(&self, source: &Source) -> Result<SyncState> {
         let config = self.parse_config(source)?;
 
-        // Get project info to determine branch
-        let project_info = self
-            .get_project_info(&config.project, config.token.as_deref())
+        let default_branch = self
+            .get_default_branch(&config.project, config.token.as_deref())
             .await?;
 
-        let branch = config
-            .branch
-            .as_deref()
-            .unwrap_or(&project_info.default_branch);
+        let branch = config.branch.as_deref().unwrap_or(default_branch.as_str());
 
         let tree = self
             .get_tree_cached(
@@ -1182,11 +1042,18 @@ impl SourceAdapter for GitLabAdapter {
 mod tests {
     use super::*;
     use crate::adapters::NoOpProgress;
-    use chrono::Utc;
+    use abnegate_vcs::ObjectId;
     use serde_json::json;
     use uuid::Uuid;
-    use wiremock::matchers::{header, method, path_regex};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path_regex;
+
+    const README_SHA: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+    const FILE_SHA: &str = "f9e8d7c6b5a40312837f6e5d4c3b2a1098765432";
 
     fn create_test_source(config: serde_json::Value) -> Source {
         Source {
@@ -1200,6 +1067,14 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    fn served(server: &MockServer) -> GitLabAdapter {
+        GitLabAdapter::with_service(
+            GitLabService::configured_allowing_http(&server.uri())
+                .unwrap()
+                .with_anonymous_reads(),
+        )
     }
 
     #[test]
@@ -1246,7 +1121,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let adapter = GitLabAdapter::with_base_url(mock_server.uri());
+        let adapter = served(&mock_server);
         let source = create_test_source(json!({
             "project": "test-owner/test-project"
         }));
@@ -1270,7 +1145,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let adapter = GitLabAdapter::with_base_url(mock_server.uri());
+        let adapter = served(&mock_server);
         let source = create_test_source(json!({
             "project": "test-owner/test-project",
             "token": "test-token"
@@ -1311,13 +1186,6 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_content() {
-        let encoded = base64::engine::general_purpose::STANDARD.encode("Hello, World!");
-        let decoded = GitLabAdapter::decode_content(&encoded).unwrap();
-        assert_eq!(decoded, "Hello, World!");
-    }
-
-    #[test]
     fn test_create_content_item() {
         let source_id = Uuid::new_v4();
         let item = GitLabAdapter::create_content_item(
@@ -1325,7 +1193,7 @@ mod tests {
             "owner/project",
             "main",
             "src/lib.rs",
-            "abc123",
+            README_SHA,
             1000,
             Some("fn main() {}".to_string()),
             false,
@@ -1351,7 +1219,7 @@ mod tests {
                     "path": "README.md",
                     "type": "blob",
                     "mode": "100644",
-                    "id": "abc123"
+                    "id": README_SHA
                 }
             ])))
             .mount(&mock_server)
@@ -1368,7 +1236,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let adapter = GitLabAdapter::with_base_url(mock_server.uri());
+        let adapter = served(&mock_server);
         let source = create_test_source(json!({
             "project": "test/project"
         }));
@@ -1379,11 +1247,7 @@ mod tests {
             .fetch(&source, &config, FetchStrategy::MetadataOnly, &progress)
             .await;
 
-        if let Err(ref e) = result {
-            eprintln!("Test failed with error: {:?}", e);
-        }
-        assert!(result.is_ok());
-        let fetch_result = result.unwrap();
+        let fetch_result = result.expect("the metadata is fetched");
         assert_eq!(fetch_result.items.len(), 1);
         assert!(fetch_result.items[0].metadata_only);
     }
@@ -1431,7 +1295,7 @@ mod tests {
                     "path": "README.md",
                     "type": "blob",
                     "mode": "100644",
-                    "id": "abc123"
+                    "id": README_SHA
                 }
             ])))
             .mount(&mock_server)
@@ -1448,7 +1312,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let adapter = GitLabAdapter::with_base_url(mock_server.uri());
+        let adapter = served(&mock_server);
         let source = create_test_source(json!({
             "project": "test/project",
             "branch": "feature/my-branch"
@@ -1476,7 +1340,7 @@ mod tests {
                     "path": "file.txt",
                     "type": "blob",
                     "mode": "100644",
-                    "id": "xyz789"
+                    "id": FILE_SHA
                 }
             ])))
             .mount(&mock_server)
@@ -1493,7 +1357,7 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let adapter = GitLabAdapter::with_base_url(mock_server.uri());
+        let adapter = served(&mock_server);
 
         // Test branch name with special characters
         let source = create_test_source(json!({
@@ -1509,6 +1373,186 @@ mod tests {
 
         // Should succeed - branch name should be properly URL-encoded
         assert!(result.is_ok());
+    }
+
+    fn adapter_message(error: ContextError) -> String {
+        match error {
+            ContextError::Adapter {
+                source_type,
+                message,
+            } if source_type == SOURCE_TYPE => message,
+            other => panic!("expected a gitlab adapter error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_answered_status_is_named_by_its_variant() {
+        for (error, status) in [
+            (GitLabError::NotFound, Some(Status::NOT_FOUND)),
+            (
+                GitLabError::AuthenticationFailed,
+                Some(Status::UNAUTHORIZED),
+            ),
+            (GitLabError::Forbidden, Some(Status::FORBIDDEN)),
+            (GitLabError::refused(502), Some(Status(502))),
+            (GitLabError::TooLarge, None),
+            (GitLabError::rate_limited(None), None),
+        ] {
+            assert_eq!(GitLabAdapter::status(&error), status, "{error:?}");
+        }
+        assert!(GitLabAdapter::limited(&GitLabError::rate_limited(None)));
+        assert!(!GitLabAdapter::limited(&GitLabError::NotFound));
+    }
+
+    #[test]
+    fn a_tree_error_is_written_as_the_old_adapter_wrote_it() {
+        for (error, written) in [
+            (
+                GitLabError::Forbidden,
+                "Failed to fetch tree: 403 Forbidden",
+            ),
+            (
+                GitLabError::refused(599),
+                "Failed to fetch tree: 599 <unknown status code>",
+            ),
+            (
+                GitLabError::Parse(ParseError::BranchName("@".to_string())),
+                "Failed to fetch tree: 404 Not Found",
+            ),
+            (
+                GitLabError::GitLabApi("REPEATED".to_string()),
+                "Failed to parse tree: REPEATED",
+            ),
+            (
+                GitLabError::Parse(ParseError::ObjectId("abc".to_string())),
+                "Failed to parse tree: Invalid object name: \"abc\"",
+            ),
+        ] {
+            assert_eq!(adapter_message(GitLabAdapter::tree_error(error)), written);
+        }
+    }
+
+    #[test]
+    fn a_blob_error_is_written_as_the_old_adapter_wrote_it() {
+        for (error, written) in [
+            (
+                GitLabError::AuthenticationFailed,
+                "Failed to fetch content: 401 Unauthorized",
+            ),
+            (
+                GitLabError::GitLabApi("UNREADABLE".to_string()),
+                "Failed to parse content: UNREADABLE",
+            ),
+            (
+                GitLabError::TooLarge,
+                "Failed to fetch content: The content is larger than the limit the caller set",
+            ),
+        ] {
+            assert_eq!(
+                adapter_message(GitLabAdapter::content_error(error)),
+                written
+            );
+        }
+    }
+
+    #[test]
+    fn the_tree_version_hashes_only_blob_paths_and_shas() {
+        let sha = |value: &str| ObjectId::parse(value).unwrap();
+        let entries = [
+            TreeEntry::new("README.md", "100644", TreeEntryKind::Blob, sha(README_SHA)),
+            TreeEntry::new("src", "040000", TreeEntryKind::Tree, sha(FILE_SHA)),
+            TreeEntry::new("link", "120000", TreeEntryKind::Blob, sha(FILE_SHA)),
+        ];
+
+        let mut hasher = Sha256::new();
+        for (path, sha) in [("README.md", README_SHA), ("link", FILE_SHA)] {
+            hasher.update(path.as_bytes());
+            hasher.update(sha.as_bytes());
+        }
+        let expected: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
+        assert_eq!(GitLabAdapter::tree_version(&entries), expected);
+    }
+
+    #[tokio::test]
+    async fn a_project_gitlab_would_not_find_is_refused_unsent() {
+        let mock_server = MockServer::start().await;
+
+        let error = served(&mock_server)
+            .get_default_branch("group/", None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ContextError::InvalidSourceConfig(message) if message == "Project not found: group/"),
+            "{error:?}"
+        );
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_path_prefix_with_an_empty_segment_is_refused_unsent() {
+        let mock_server = MockServer::start().await;
+        let adapter = served(&mock_server);
+
+        let error = adapter
+            .get_tree("group/project", "main", Some("a//b"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            adapter_message(error),
+            "Failed to fetch tree: 404 Not Found"
+        );
+
+        let traversal = adapter
+            .get_tree("group/project", "main", Some("src/../x"), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&traversal, ContextError::InvalidSourceConfig(message) if message == "Path cannot contain '..'"),
+            "{traversal:?}"
+        );
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_malformed_token_is_a_configuration_error_at_every_read() {
+        let mock_server = MockServer::start().await;
+        let adapter = served(&mock_server);
+        let entry = TreeEntry::new(
+            "README.md",
+            "100644",
+            TreeEntryKind::Blob,
+            ObjectId::parse(README_SHA).unwrap(),
+        );
+        let malformed = Some("bad\ntoken");
+
+        let errors = [
+            adapter
+                .get_default_branch("group/project", malformed)
+                .await
+                .unwrap_err(),
+            adapter
+                .get_tree("group/project", "main", None, malformed)
+                .await
+                .unwrap_err(),
+            adapter
+                .get_blob("group/project", &entry, malformed)
+                .await
+                .unwrap_err(),
+        ];
+
+        for error in errors {
+            assert!(
+                matches!(&error, ContextError::Config(message) if message == "Invalid authorization token format (token not logged for security)"),
+                "{error:?}"
+            );
+        }
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
     }
 
     #[test]
