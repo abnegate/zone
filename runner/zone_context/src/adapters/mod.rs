@@ -8,7 +8,9 @@ mod github;
 mod gitlab;
 mod notion;
 mod registry;
+mod status;
 mod text;
+mod token;
 mod web;
 
 pub use filesystem::FilesystemAdapter;
@@ -22,8 +24,10 @@ pub use web::WebAdapter;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::content::{ContentItem, FetchConfig, FetchResult, FetchStrategy};
+use crate::error::ContextError;
 use crate::error::Result;
 use zone_core::Source;
 
@@ -48,6 +52,8 @@ impl ProgressCallback for NoOpProgress {
     fn on_message(&self, _message: &str) {}
 }
 
+const RETRY_AFTER_SECONDS: u64 = 60;
+
 /// Rate limit configuration for an adapter
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
@@ -71,6 +77,36 @@ impl Default for RateLimitConfig {
             retry_after_429: true,
             max_retries: 3,
             backoff_base_ms: 1000,
+        }
+    }
+}
+
+impl RateLimitConfig {
+    pub(crate) async fn retried<T, E, Call, Answer>(
+        &self,
+        limited: fn(&E) -> bool,
+        mut call: Call,
+    ) -> Result<std::result::Result<T, E>>
+    where
+        Call: FnMut() -> Answer,
+        Answer: Future<Output = std::result::Result<T, E>>,
+    {
+        let mut retries = 0;
+        loop {
+            let answer = call().await;
+            if !answer.as_ref().is_err_and(limited) {
+                return Ok(answer);
+            }
+            if retries >= self.max_retries {
+                return Err(ContextError::RateLimited {
+                    retry_after_secs: RETRY_AFTER_SECONDS,
+                });
+            }
+            retries += 1;
+            tokio::time::sleep(Duration::from_millis(
+                self.backoff_base_ms * 2_u64.pow(retries - 1),
+            ))
+            .await;
         }
     }
 }
@@ -171,5 +207,76 @@ mod tests {
         // These should not panic
         progress.on_message("test");
         progress.on_progress(0, Some(100));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limit_is_retried_with_doubling_waits_until_the_retries_run_out() {
+        let calls = std::cell::Cell::new(0);
+        let started = tokio::time::Instant::now();
+
+        let answer = RateLimitConfig::default()
+            .retried(
+                |_: &()| true,
+                || {
+                    calls.set(calls.get() + 1);
+                    std::future::ready(Err::<(), ()>(()))
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(
+                answer,
+                Err(ContextError::RateLimited {
+                    retry_after_secs: 60
+                })
+            ),
+            "{answer:?}"
+        );
+        assert_eq!(calls.get(), 4);
+        assert_eq!(started.elapsed(), Duration::from_millis(7000));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_after_a_rate_limit_is_returned() {
+        let calls = std::cell::Cell::new(0);
+        let started = tokio::time::Instant::now();
+
+        let answer = RateLimitConfig::default()
+            .retried(
+                |_: &()| true,
+                || {
+                    calls.set(calls.get() + 1);
+                    std::future::ready(match calls.get() {
+                        1 => Err(()),
+                        _ => Ok(5),
+                    })
+                },
+            )
+            .await;
+
+        assert!(matches!(answer, Ok(Ok(5))), "{answer:?}");
+        assert_eq!(calls.get(), 2);
+        assert_eq!(started.elapsed(), Duration::from_millis(1000));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_error_that_is_not_a_rate_limit_is_returned_unretried() {
+        let calls = std::cell::Cell::new(0);
+        let started = tokio::time::Instant::now();
+
+        let answer = RateLimitConfig::default()
+            .retried(
+                |_: &()| false,
+                || {
+                    calls.set(calls.get() + 1);
+                    std::future::ready(Err::<(), ()>(()))
+                },
+            )
+            .await;
+
+        assert!(matches!(answer, Ok(Err(()))), "{answer:?}");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 }

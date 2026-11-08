@@ -9496,6 +9496,8 @@ dependencies = [
  "abnegate-http",
  "abnegate-index",
  "abnegate-llm",
+ "abnegate-secret",
+ "abnegate-vcs",
  "async-stream",
  "async-trait",
  "base64 0.23.1",
