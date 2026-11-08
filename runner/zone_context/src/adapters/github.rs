@@ -106,8 +106,8 @@ struct CachedTree {
     size_bytes: usize,
 }
 
-/// Cache key for GitHub trees (owner, repo, branch)
-type TreeCacheKey = (String, String, String);
+/// Cache key for GitHub trees (owner, repo, branch, credential fingerprint)
+type TreeCacheKey = (String, String, String, String);
 
 #[derive(Debug, Clone)]
 struct TreeCache {
@@ -518,7 +518,12 @@ impl GitHubAdapter {
         branch: &str,
         token: Option<&str>,
     ) -> Result<Tree> {
-        let key = (owner.to_string(), repo.to_string(), branch.to_string());
+        let key = (
+            owner.to_string(),
+            repo.to_string(),
+            branch.to_string(),
+            Credential::checked(token)?.fingerprint(),
+        );
 
         if let Some(tree) = self.tree_cache.get(&key).await {
             return Ok(tree);
@@ -1068,10 +1073,21 @@ mod tests {
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
 
     const GITHUB_HOST: &str = "github.com";
+
+    const REPOSITORY_ROUTE: &str = "/repos/test-owner/test-repo";
+
+    const TREE_ROUTE: &str = "/repos/test-owner/test-repo/git/trees/main";
+
+    const AUTHORIZATION: &str = "authorization";
+
+    const TOKEN: &str = "ghp_cached";
+
+    const MISSING_TREE: &str = "Failed to fetch tree: 404 Not Found";
 
     const LIB_SHA: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 
@@ -1393,6 +1409,54 @@ mod tests {
         assert!(item.content.is_none());
         assert!(item.metadata_only);
         assert_eq!(item.token_count, 0);
+    }
+
+    #[tokio::test]
+    async fn a_tokenless_source_never_reads_the_tree_a_tokened_one_cached() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(REPOSITORY_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "test-repo",
+                "default_branch": "main"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(TREE_ROUTE))
+            .and(header(AUTHORIZATION, format!("Bearer {TOKEN}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "sha": TREE_SHA,
+                "tree": [listed_blob("README.md", 400)],
+                "truncated": false
+            })))
+            .mount(&mock_server)
+            .await;
+        let adapter = served(&mock_server);
+        let mut tokened = test_repository();
+        tokened["token"] = json!(TOKEN);
+
+        let estimated = adapter
+            .estimate_tokens(&create_test_source(tokened))
+            .await
+            .unwrap();
+        let tokenless = adapter
+            .estimate_tokens(&create_test_source(test_repository()))
+            .await;
+
+        assert_eq!(estimated, estimate_tokens_from_bytes(400));
+        assert!(
+            matches!(&tokenless, Err(ContextError::Adapter { message, .. }) if message == MISSING_TREE),
+            "{tokenless:?}"
+        );
+        let trees = mock_server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == TREE_ROUTE)
+            .count();
+        assert_eq!(trees, 2);
     }
 
     #[tokio::test]
