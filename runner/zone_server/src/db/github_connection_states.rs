@@ -223,7 +223,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO github_connection_states \
                (nonce_hash, organization_id, user_id, purpose, expires_at) \
-             VALUES ($1, $2, $3, 'registration', NOW() - INTERVAL '1 minute')",
+             VALUES ($1, $2, $3, 'registration', NOW() + INTERVAL '1 hour')",
         )
         .bind(hash_token(&expired))
         .bind(organization)
@@ -232,6 +232,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(stored(&pool, &expired).await, 1);
+        sqlx::query(
+            "UPDATE github_connection_states SET expires_at = NOW() - INTERVAL '1 minute' \
+             WHERE nonce_hash = $1",
+        )
+        .bind(hash_token(&expired))
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let issued = issue(&pool, organization, user, Purpose::Registration, None)
             .await
