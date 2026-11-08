@@ -15,13 +15,13 @@ use crate::common::context::{Harness, answer, calls, successful, tool};
 use serde_json::{Value, json};
 use std::time::Duration;
 use uuid::Uuid;
-use zone_server::db::reminders::Queue;
+use zone_server::db::reminders::Sweep;
 
 /// The production worker, sweeping only the harness's own workspace.
 pub(crate) fn dispatcher(harness: &Harness) -> tokio::task::JoinHandle<()> {
     zone_server::workers::reminders::spawn(
         common::create_test_state(harness.config.clone(), harness.pool.clone()),
-        Queue::Workspace(harness.workspace),
+        Sweep::Workspace(harness.workspace),
     )
 }
 

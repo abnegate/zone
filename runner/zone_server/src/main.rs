@@ -19,7 +19,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use zone_context::context::ContextService;
 use zone_server::cache::Cache;
 use zone_server::config::Config;
-use zone_server::db::reminders::Queue;
+use zone_server::db::reminders::Sweep;
 use zone_server::db::sealing::Options;
 use zone_server::db::sealing::Sealer;
 use zone_server::routes;
@@ -208,7 +208,7 @@ async fn main() {
 
     // Start background workers
     zone_server::workers::housekeeping::spawn(state.clone());
-    zone_server::workers::reminders::spawn(state.clone(), Queue::All);
+    zone_server::workers::reminders::spawn(state.clone(), Sweep::All);
     if state.config().auto.enabled {
         zone_server::workers::auto_project::spawn(state.clone());
     }

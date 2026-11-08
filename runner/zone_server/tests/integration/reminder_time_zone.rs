@@ -19,7 +19,10 @@ use chrono::{DateTime, Duration, FixedOffset, NaiveTime, Timelike, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_core::context;
-use zone_server::db::reminders::{self, Delivered, Queue, Reminder};
+use zone_server::db::reminders;
+use zone_server::db::reminders::Delivered;
+use zone_server::db::reminders::Reminder;
+use zone_server::db::reminders::Sweep;
 use zone_server::db::{chats, users};
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;
@@ -280,7 +283,7 @@ async fn fire(harness: &Harness, reminder: Uuid) -> DateTime<Utc> {
         .await
         .expect("the reminder is due");
     assert_eq!(
-        reminders::deliver_next(&harness.pool, Queue::Workspace(harness.workspace))
+        reminders::deliver_next(&harness.pool, Sweep::Workspace(harness.workspace))
             .await
             .unwrap(),
         Delivered::Settled,
@@ -292,7 +295,7 @@ async fn fire(harness: &Harness, reminder: Uuid) -> DateTime<Utc> {
             .fetch_one(&harness.pool)
             .await
             .expect("the reminder is readable");
-    assert!(fired > 0, "the workspace's only due reminder is this one");
+    assert_eq!(fired, 1, "the workspace's only due reminder fired once");
     due_at
 }
 

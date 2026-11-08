@@ -91,6 +91,7 @@ mod pre_v1_ledger;
 mod project_order;
 mod prompt_assembly;
 mod pull_ws;
+mod reminder_sweep;
 mod reminder_time_zone;
 mod reminder_turn;
 mod role_demotion;

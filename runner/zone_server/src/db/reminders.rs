@@ -346,12 +346,12 @@ struct Due {
 
 /// The reminders a dispatcher sweeps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Queue {
+pub enum Sweep {
     All,
     Workspace(Uuid),
 }
 
-impl Queue {
+impl Sweep {
     fn workspace(self) -> Option<Uuid> {
         match self {
             Self::All => None,
@@ -437,7 +437,7 @@ fn reschedule(
 }
 
 /// The claim, message, and terminal state share a transaction across all workers.
-pub async fn deliver_next(pool: &PgPool, queue: Queue) -> DbResult<Delivered> {
+pub async fn deliver_next(pool: &PgPool, sweep: Sweep) -> DbResult<Delivered> {
     let mut transaction = pool.begin().await?;
     let next = sqlx::query_as::<_, Due>(
         "SELECT id, workspace_id, created_by, chat_id, content, rrule, anchor_at, due_at, \
@@ -445,7 +445,7 @@ pub async fn deliver_next(pool: &PgPool, queue: Queue) -> DbResult<Delivered> {
          AND due_at <= NOW() AND ($1::uuid IS NULL OR workspace_id = $1) \
          ORDER BY due_at, id LIMIT 1 FOR UPDATE SKIP LOCKED",
     )
-    .bind(queue.workspace())
+    .bind(sweep.workspace())
     .fetch_optional(&mut *transaction)
     .await?;
     let Some(Due {
@@ -595,7 +595,7 @@ const MAX_TURN_ATTEMPTS: i32 = 3;
 /// and of the two only the duplicate is something a person has to read.
 pub async fn claim_turn(
     pool: &PgPool,
-    queue: Queue,
+    sweep: Sweep,
     lease: Duration,
 ) -> DbResult<Option<PendingTurn>> {
     let seconds = lease.as_secs_f64();
@@ -621,7 +621,7 @@ pub async fn claim_turn(
     )
     .bind(MAX_TURN_ATTEMPTS)
     .bind(seconds)
-    .bind(queue.workspace())
+    .bind(sweep.workspace())
     .fetch_all(&mut *transaction)
     .await?;
     for reminder_id in abandoned {
@@ -669,7 +669,7 @@ pub async fn claim_turn(
     )
     .bind(MAX_TURN_ATTEMPTS)
     .bind(seconds)
-    .bind(queue.workspace())
+    .bind(sweep.workspace())
     .fetch_optional(&mut *transaction)
     .await?;
     transaction.commit().await?;
