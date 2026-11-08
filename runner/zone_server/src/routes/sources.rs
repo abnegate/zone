@@ -1157,7 +1157,7 @@ fn describe_kind(kind: &str) -> SourceTypeInfo {
                 "type": "object",
                 "properties": {
                     "project_id": {"type": "string", "description": "Project path or numeric id"},
-                    "host": {"type": "string", "description": "GitLab host for self-hosted instances"},
+                    "host": {"type": "string", "description": "GitLab instance URL (https://...), defaulting to https://gitlab.com"},
                     "branch": {"type": "string", "description": "Default branch"}
                 },
                 "required": ["project_id"]
