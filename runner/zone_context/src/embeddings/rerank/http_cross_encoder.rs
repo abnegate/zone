@@ -7,6 +7,7 @@ use abnegate_llm::modality::vendor::HttpRerankConfig;
 use abnegate_llm::modality::vendor::HttpRerankProvider;
 use async_trait::async_trait;
 use reqwest::StatusCode;
+use reqwest::Url;
 
 use crate::embeddings::rerank::CrossEncoder;
 use crate::error::ContextError;
@@ -24,6 +25,7 @@ const PROBE_DOCUMENTS: [&str; 2] = [
 ];
 const PROBE_MARGIN: f32 = 0.02;
 const UNCLASSIFIED_FAILURE: &str = "rerank failed";
+const UNPARSABLE_URL: &str = "<unparsable URL>";
 const VERBATIM_PARSE_DETAILS: [&str; 3] = [
     "empty rerank response",
     "rerank response scored no document",
@@ -66,7 +68,11 @@ impl HttpCrossEncoder {
             .await
             .ok()?;
         if scores.len() == PROBE_DOCUMENTS.len() && scores[0] > scores[1] + PROBE_MARGIN {
-            tracing::info!(url, model = %encoder.model(), "using HTTP cross-encoder reranker");
+            tracing::info!(
+                url = %redacted(url),
+                model = %encoder.model(),
+                "using HTTP cross-encoder reranker"
+            );
             Some(Arc::new(encoder))
         } else {
             None
@@ -92,6 +98,19 @@ impl CrossEncoder for HttpCrossEncoder {
             .rerank(query, &documents)
             .await
             .map_err(context_error)
+    }
+}
+
+fn redacted(url: &str) -> String {
+    let Ok(parsed) = Url::parse(url) else {
+        return UNPARSABLE_URL.to_string();
+    };
+    let Some(host) = parsed.host_str() else {
+        return UNPARSABLE_URL.to_string();
+    };
+    match parsed.port() {
+        Some(port) => format!("{}://{host}:{port}", parsed.scheme()),
+        None => format!("{}://{host}", parsed.scheme()),
     }
 }
 
@@ -182,6 +201,26 @@ mod tests {
                 if message == "rerank client: invalid base URL: relative URL"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn a_logged_url_keeps_only_its_origin() {
+        assert_eq!(
+            redacted("https://user:key@host:8443/v1/rerank?api-key=x#fragment"),
+            "https://host:8443"
+        );
+        assert_eq!(
+            redacted("http://token@127.0.0.1/rerank?secret=y"),
+            "http://127.0.0.1"
+        );
+        assert_eq!(redacted("http://[::1]:7997/rerank"), "http://[::1]:7997");
+    }
+
+    #[test]
+    fn an_unparsable_logged_url_is_a_placeholder() {
+        for url in ["not a url secret", "https://user:secret@"] {
+            assert_eq!(redacted(url), UNPARSABLE_URL, "{url}");
+        }
     }
 
     #[test]
