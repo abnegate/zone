@@ -253,7 +253,7 @@ impl Turn {
             id,
             name: name.to_string(),
             success: result.success,
-            detail: detail(&message),
+            detail: detail(name, &message),
             duration_ms: started.elapsed().as_millis() as u64,
             citations: match result.success {
                 true => crate::agent::citations::from_tool(name, &message),
@@ -404,8 +404,8 @@ pub fn merged<'a>(
     }
 }
 
-fn detail(message: &str) -> String {
-    let line = content_lines(message).next().unwrap_or_default();
+fn detail(tool: &str, message: &str) -> String {
+    let line = content_lines(tool, message).next().unwrap_or_default();
     match line.char_indices().nth(DETAIL_CHARS) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
         None => line.to_string(),
@@ -1043,16 +1043,23 @@ mod tests {
 
     #[test]
     fn a_detail_is_one_line_the_console_can_show() {
-        assert_eq!(detail("\n\nfirst line\nsecond line"), "first line");
-        let long = detail(&"x".repeat(DETAIL_CHARS * 2));
+        assert_eq!(
+            detail("read_file", "\n\nfirst line\nsecond line"),
+            "first line"
+        );
+        let long = detail("read_file", &"x".repeat(DETAIL_CHARS * 2));
         assert_eq!(long.chars().count(), DETAIL_CHARS + 1, "{long}");
         assert!(long.ends_with('\u{2026}'));
     }
 
     #[test]
     fn a_detail_shows_a_command_output_rather_than_its_stream_label() {
-        assert_eq!(detail("stdout:\nhello\n"), "hello");
-        assert_eq!(detail("stdout:\n\n\nstderr:\nwarning"), "warning");
-        assert_eq!(detail("stdout:\n\n"), "");
+        assert_eq!(detail("run_shell", "stdout:\nhello\n"), "hello");
+        assert_eq!(
+            detail("run_command", "stdout:\n\n\nstderr:\nwarning"),
+            "warning"
+        );
+        assert_eq!(detail("run_shell", "stdout:\n\n"), "");
+        assert_eq!(detail("read_file", "stdout:\nreal"), "stdout:");
     }
 }

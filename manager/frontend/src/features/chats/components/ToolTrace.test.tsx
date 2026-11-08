@@ -592,6 +592,14 @@ describe('ToolTrace', () => {
     expect(details).toEqual(['', '', 'stdout: is where it went']);
   });
 
+  it('shows a stream label that another tool returned as its own output', () => {
+    render(<ToolTrace calls={[call({ name: 'read_file', arguments: '{}', detail: 'stdout:' })]} />);
+
+    expect(screen.getByTestId('tool-call').querySelector('.tool-call-detail')?.textContent).toBe(
+      'stdout:'
+    );
+  });
+
   it('hides the duration until the call finishes', () => {
     const { rerender } = render(<ToolTrace calls={[call({ pending: true, duration_ms: 0 })]} />);
     expect(screen.queryByText('128ms')).not.toBeInTheDocument();

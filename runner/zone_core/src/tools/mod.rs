@@ -72,6 +72,13 @@ pub const APPROVAL_TIMED_OUT: &str =
 pub const APPROVAL_CANCELLED: &str =
     "The turn stopped before this tool call was approved, so it did not run.";
 
+/// Whether a call's outcome line is one of the fixed refusals above, as a
+/// permission card states it or as a failed call's error.
+pub fn is_refusal(detail: &str) -> bool {
+    let bare = detail.strip_prefix(ERROR_PREFIX).unwrap_or(detail);
+    [DENIED, APPROVAL_TIMED_OUT, APPROVAL_CANCELLED].contains(&bare)
+}
+
 /// Longest a rendered approval preview may run.
 ///
 /// The reader is deciding, not reading. A preview past a screenful is one

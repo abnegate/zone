@@ -814,6 +814,7 @@ async fn finish_tool(
         )
         .await;
     let output = result.to_message();
+    let detail = summarize(&call.function.name, &result, &output);
     let citations = if result.success {
         citations::from_tool(&call.function.name, &output)
     } else {
@@ -823,7 +824,7 @@ async fn finish_tool(
         id: call.id,
         name: call.function.name,
         success: result.success,
-        detail: summarize(&result, &output),
+        detail,
         duration_ms,
         citations,
         receipt,
@@ -888,11 +889,11 @@ pub(crate) fn call_signature(name: &str, arguments: &str) -> (String, String) {
 const DETAIL_CHARS: usize = 240;
 
 /// One line describing how a tool call went, for the UI rather than the model.
-fn summarize(result: &zone_core::tools::ToolResult, output: &str) -> String {
+fn summarize(tool: &str, result: &zone_core::tools::ToolResult, output: &str) -> String {
     if !result.success {
         return output.lines().next().unwrap_or("Failed").to_string();
     }
-    let lines: Vec<&str> = content_lines(output).collect();
+    let lines: Vec<&str> = content_lines(tool, output).collect();
     let summary = match lines.as_slice() {
         [] => "No output".to_string(),
         [only] => only.to_string(),
@@ -1581,7 +1582,7 @@ mod tests {
         let result = ToolResult::error("The knowledge base search failed.");
         let output = result.to_message();
         assert_eq!(
-            summarize(&result, &output),
+            summarize("search_knowledge", &result, &output),
             "Error: The knowledge base search failed."
         );
     }
@@ -1590,32 +1591,51 @@ mod tests {
     fn summarize_counts_multi_line_output() {
         let result = ToolResult::success("first hit\nsecond hit\nthird hit");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "first hit (3 lines)");
+        assert_eq!(
+            summarize("search_knowledge", &result, &output),
+            "first hit (3 lines)"
+        );
     }
 
     #[test]
     fn summarize_shows_a_command_output_rather_than_its_stream_label() {
         let result = ToolResult::success("stdout:\nhello");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "hello");
+        assert_eq!(summarize("run_shell", &result, &output), "hello");
 
         let result = ToolResult::success("stdout:\nfirst\nsecond\n\nstderr:\nwarning");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "first (3 lines)");
+        assert_eq!(
+            summarize("run_command", &result, &output),
+            "first (3 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_keeps_a_stream_label_another_tool_returned() {
+        let result = ToolResult::success("stdout:\nreal");
+        let output = result.to_message();
+        assert_eq!(
+            summarize("read_file", &result, &output),
+            "stdout: (2 lines)"
+        );
     }
 
     #[test]
     fn summarize_shows_no_bare_label_when_a_stream_held_only_whitespace() {
         let result = ToolResult::success("stdout:\n\n");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "No output");
+        assert_eq!(summarize("run_shell", &result, &output), "No output");
     }
 
     #[test]
     fn summarize_passes_through_single_lines() {
         let result = ToolResult::success("This workspace has no tasks.");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "This workspace has no tasks.");
+        assert_eq!(
+            summarize("search_knowledge", &result, &output),
+            "This workspace has no tasks."
+        );
     }
 
     #[test]
@@ -1641,7 +1661,9 @@ mod tests {
         let result = ToolResult::success("x".repeat(DETAIL_CHARS * 2));
         let output = result.to_message();
         assert_eq!(
-            summarize(&result, &output).chars().count(),
+            summarize("search_knowledge", &result, &output)
+                .chars()
+                .count(),
             DETAIL_CHARS + 1
         );
     }

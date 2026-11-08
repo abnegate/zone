@@ -329,6 +329,7 @@ const DETAIL_FROM_ARGUMENTS: Partial<Record<string, Derive>> = {
 
 const JSON_LINE = /^\s*(?:\{\s*(?:"|\})|\[\s*(?:[{["\]]|\d))/;
 const BARE_STREAM_LABEL = /^std(?:out|err):(?:\s*\(\d+ lines\))?$/;
+const COMMAND_TOOLS = new Set(['run_command', 'run_shell']);
 
 /// A failed call's detail is its error and a waiting call's is its state, and
 /// both are the server's words about this call rather than a preamble. A JSON
@@ -341,7 +342,8 @@ function toolDetail(call: ToolCallRecord, state: ToolState, titles: Titles): str
   const args = derive ? parseArguments(call.arguments) : null;
   const derived = derive && args ? derive(args, call.detail, titles) : null;
   if (derived) return derived;
-  return JSON_LINE.test(call.detail) || BARE_STREAM_LABEL.test(call.detail) ? '' : call.detail;
+  const bareLabel = COMMAND_TOOLS.has(call.name) && BARE_STREAM_LABEL.test(call.detail);
+  return JSON_LINE.test(call.detail) || bareLabel ? '' : call.detail;
 }
 
 function formatDuration(ms: number): string {

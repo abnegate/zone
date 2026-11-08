@@ -34,15 +34,19 @@ const ALLOWED_COMMANDS: &[&str] = &[
 
 const PUBLIC_WEB_COMMANDS: &[&str] = &["curl", "wget"];
 
+const RUN_COMMAND: &str = "run_command";
+const RUN_SHELL: &str = "run_shell";
 const STDOUT_LABEL: &str = "stdout:";
 const STDERR_LABEL: &str = "stderr:";
 
-/// The lines of a tool's output that carry something: neither blank nor the
-/// label a command's report heads each captured stream with.
-pub fn content_lines(output: &str) -> impl Iterator<Item = &str> {
-    output.lines().filter(|line| {
+/// The lines of a tool's output that carry something: never blank, and for a
+/// command, never the label its report heads each captured stream with. Any
+/// other tool's `stdout:` line is its own output.
+pub fn content_lines<'a>(tool: &str, output: &'a str) -> impl Iterator<Item = &'a str> + use<'a> {
+    let labelled = tool == RUN_COMMAND || tool == RUN_SHELL;
+    output.lines().filter(move |line| {
         let line = line.trim();
-        !line.is_empty() && line != STDOUT_LABEL && line != STDERR_LABEL
+        !line.is_empty() && !(labelled && (line == STDOUT_LABEL || line == STDERR_LABEL))
     })
 }
 
@@ -210,7 +214,7 @@ impl<T: Waiting> Tool for Unwaited<T> {
 #[async_trait]
 impl Tool for RunCommandTool {
     fn name(&self) -> &str {
-        "run_command"
+        RUN_COMMAND
     }
 
     fn description(&self) -> &str {
@@ -539,7 +543,7 @@ fn sleep_seconds(operand: &str) -> Option<f64> {
 #[async_trait]
 impl Tool for RunShellTool {
     fn name(&self) -> &str {
-        "run_shell"
+        RUN_SHELL
     }
 
     fn description(&self) -> &str {
@@ -1282,10 +1286,21 @@ mod tests {
         let command = command.output.unwrap();
         assert!(shell.contains(STDOUT_LABEL), "{shell}");
         assert_eq!(
-            content_lines(&shell).collect::<Vec<_>>(),
+            content_lines(RUN_SHELL, &shell).collect::<Vec<_>>(),
             ["hello", "careful"]
         );
-        assert_eq!(content_lines(&command).collect::<Vec<_>>(), ["hello"]);
+        assert_eq!(
+            content_lines(RUN_COMMAND, &command).collect::<Vec<_>>(),
+            ["hello"]
+        );
+    }
+
+    #[test]
+    fn a_stream_label_another_tool_returned_is_its_own_content() {
+        assert_eq!(
+            content_lines("read_file", "stdout:\nreal").collect::<Vec<_>>(),
+            ["stdout:", "real"]
+        );
     }
 
     #[tokio::test]
