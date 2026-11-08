@@ -1,6 +1,6 @@
 //! The wall clock a person reads.
 //!
-//! The IANA timezone, and the instants its times name across a daylight-saving
+//! The IANA time zone, and the instants its times name across a daylight-saving
 //! change, come from `abnegate_recurrence`. Zone keeps its own wording for a
 //! name it refuses, because the refusal reaches a model as a tool result and
 //! names the `time_zone` field it has to fix.
@@ -11,7 +11,9 @@ pub use abnegate_recurrence::Timezone as TimeZone;
 /// whitespace, and refuses one the tz database does not hold with an example
 /// of a name it does.
 pub fn parse(name: &str) -> Result<TimeZone, String> {
-    TimeZone::parse(name).map_err(|_| {
+    #[expect(clippy::disallowed_methods)]
+    let parsed = TimeZone::parse(name);
+    parsed.map_err(|_| {
         format!(
             "time_zone \"{name}\" is not an IANA time zone name. Use one such as \
              Europe/London or Pacific/Auckland."
@@ -40,8 +42,9 @@ mod tests {
         );
     }
 
+    /// The minute step stops at the end of the calendar instead of stepping past it.
     #[test]
-    fn a_time_past_the_end_of_the_calendar_has_no_instant() {
+    fn the_calendars_last_minute_behind_utc_has_no_instant() {
         assert_eq!(
             parse("America/New_York")
                 .unwrap()

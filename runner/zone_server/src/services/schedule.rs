@@ -190,6 +190,16 @@ mod tests {
         ] {
             assert!(parse(rule).is_ok(), "{rule} is at or under the ceiling");
         }
+
+        assert_eq!(
+            parse("FREQ=DAILY;BYMINUTE=0,30"),
+            Err(
+                "Two of those firings are 30 minutes apart, and once an hour is the ceiling. Ask \
+                 for a slower schedule, or wait on the event itself if you need to know the \
+                 moment it changes."
+                    .to_string()
+            )
+        );
     }
 
     /// A monthly step past the calendar has no next period, rather than

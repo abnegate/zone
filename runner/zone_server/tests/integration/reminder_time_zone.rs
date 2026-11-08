@@ -27,7 +27,7 @@ use zone_server::db::{chats, users};
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;
 use zone_server::services::schedule;
-use zone_server::services::time_zone::TimeZone;
+use zone_server::services::time_zone::{self, TimeZone};
 
 fn at(text: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(text)
@@ -36,7 +36,7 @@ fn at(text: &str) -> DateTime<Utc> {
 }
 
 fn zone(name: &str) -> TimeZone {
-    TimeZone::parse(name).expect("the fixture is an IANA zone")
+    time_zone::parse(name).expect("the fixture is an IANA zone")
 }
 
 /// Each firing after `anchor`, in order, as `rule` reads in `zone`.
