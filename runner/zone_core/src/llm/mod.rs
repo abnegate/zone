@@ -11,4 +11,6 @@ pub mod window;
 
 pub use backend::LlmBackend;
 pub use cli::{BuiltinTools, Observer, SignIn, Toolset};
+#[cfg(test)]
+pub(crate) use client::tests::logs;
 pub use client::{ChatStream, LlmClient, READ_TIMEOUT, TIMEOUT};

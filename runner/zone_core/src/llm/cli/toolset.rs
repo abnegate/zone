@@ -33,6 +33,14 @@ impl Toolset {
     /// neither an argv nor any other server.
     pub const TOKEN_VARIABLE: &'static str = "ZONE_MCP_TOKEN";
 
+    /// The tool an agent asks before running one of its own.
+    ///
+    /// Served by zone over the same MCP endpoint as every other tool, and named
+    /// to the agent on its command line. It is not a workspace tool: nothing in a
+    /// prompt teaches it, and it spends none of a turn's call budget, because the
+    /// agent asking whether a call may run is not the call.
+    pub const PERMISSION: &'static str = "approve_tool_call";
+
     pub fn new(
         endpoint: impl Into<String>,
         token: impl Into<SecretValue>,
@@ -82,6 +90,11 @@ mod tests {
         assert_eq!(toolset.tools, ["read_file"]);
         assert_eq!(toolset.endpoint, ENDPOINT);
         assert_eq!(toolset.token.expose(), "token");
+    }
+
+    #[test]
+    fn the_permission_tool_keeps_its_wire_name() {
+        assert_eq!(Toolset::PERMISSION, "approve_tool_call");
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub mod skills;
 pub(crate) mod testing;
 pub mod toolbox;
 pub mod tools;
+pub(crate) mod trace;
 pub mod verification;
 pub mod wait;
 pub mod web;

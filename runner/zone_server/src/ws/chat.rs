@@ -36,7 +36,7 @@ use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
 use zone_core::tools::Session as ToolSession;
-use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
+use zone_core::tools::job::{JobExited, JobStarted, JobState, Jobs, parse_receipt};
 
 use crate::agent::wait::{self, Outcome, WaitSettled, Waited, Waiting};
 use crate::agent::{
@@ -69,6 +69,7 @@ use zone_chat::history::ReplayMessage;
 use zone_core::context::ContextUsage;
 
 mod ending;
+pub mod job;
 mod queue;
 
 use ending::Ending;
@@ -1203,7 +1204,7 @@ fn spawned_job(message: &ReplayMessage) -> Option<(String, JobStarted)> {
         return None;
     }
     let call = message.tool_call_id.clone()?;
-    let job = job::parse_receipt(message.content.as_deref()?)?;
+    let job = parse_receipt(message.content.as_deref()?)?;
     Some((call, job))
 }
 
@@ -9114,8 +9115,10 @@ cat 'DIR/reply.jsonl'
     #[test]
     fn a_spawn_receipt_reads_back_as_the_job_it_announced() {
         let job = spawned();
-        let message =
-            ReplayMessage::from(&LlmMessage::tool_result("call_1", job::started_text(&job)));
+        let message = ReplayMessage::from(&LlmMessage::tool_result(
+            "call_1",
+            zone_core::tools::job::started_text(&job),
+        ));
 
         let (call, read) = spawned_job(&message).expect("a spawn receipt announces its job");
         assert_eq!(call, "call_1");
@@ -9125,7 +9128,7 @@ cat 'DIR/reply.jsonl'
     #[test]
     fn anything_but_a_spawn_receipt_starts_no_job_card() {
         let job = spawned();
-        let receipt = job::started_text(&job);
+        let receipt = zone_core::tools::job::started_text(&job);
         let mut mislabelled =
             ReplayMessage::from(&LlmMessage::tool_result("call_1", receipt.as_str()));
         mislabelled.role = LlmRole::Assistant;
@@ -9437,7 +9440,7 @@ cat 'DIR/reply.jsonl'
     async fn background(session: ToolSession, cwd: &std::path::Path, script: &str) -> JobStarted {
         Jobs::spawn(
             session,
-            &job::JobCommand::shell(script),
+            &zone_core::tools::job::JobCommand::shell(script),
             cwd,
             &std::collections::HashMap::new(),
         )

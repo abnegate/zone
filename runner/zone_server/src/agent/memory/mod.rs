@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
+use super::approval::Refusal;
 use super::tools::WorkspaceScope;
 use crate::db::memory::{
     self, MAX_FACTS, MAX_NAME_CHARS, MemoryCategory, MemoryIndexRow, MemoryOutcome, MemoryRow,
@@ -94,7 +95,7 @@ pub const TRACE_DETAIL: &str = "Private to the person it belongs to; not shown h
 
 /// The outcome line the trace shows for a finished call.
 pub fn trace_detail(name: &str, detail: &str) -> String {
-    if is_private(name) && !zone_core::tools::is_refusal(detail) {
+    if is_private(name) && Refusal::worded(detail).is_none() {
         TRACE_DETAIL.to_string()
     } else {
         detail.to_string()
@@ -822,7 +823,7 @@ mod tests {
     /// remembered, so hiding it would only hide why the call did not run.
     #[test]
     fn a_memory_call_keeps_why_its_approval_did_not_go_through() {
-        use zone_core::tools::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
+        use crate::agent::approval::refusal::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
 
         for refusal in [DENIED, APPROVAL_TIMED_OUT, APPROVAL_CANCELLED] {
             let failed = format!("Error: {refusal}");

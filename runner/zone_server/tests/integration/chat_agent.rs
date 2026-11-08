@@ -14,8 +14,9 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::LlmClient;
 use zone_core::tools::job::{self, Jobs};
-use zone_core::tools::{APPROVAL_CANCELLED, DENIED, Session, Tool};
+use zone_core::tools::{Session, Tool};
 use zone_core::variables::Variables;
+use zone_server::agent::approval::refusal::{APPROVAL_CANCELLED, DENIED};
 use zone_server::agent::prompt;
 use zone_server::agent::wait::{self, KIND_JOB, WAIT_FOR};
 use zone_server::agent::{

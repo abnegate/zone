@@ -1,7 +1,6 @@
 use abnegate_agent_cli::{AgentKind, CliSettings};
 
 use super::{BuiltinTools, Toolset, passthrough};
-use crate::tools::PERMISSION_TOOL;
 
 /// The gateways an agent signs in through, which the crate counts among its
 /// credentials. One an operator names in the passthrough is set on the run
@@ -63,7 +62,7 @@ fn confine(
             settings.withhold_tools()
         }
         BuiltinTools::Granted if agent == AgentKind::Claude && toolset.is_some() => {
-            settings.with_permission_prompt(Toolset::SERVER, PERMISSION_TOOL)
+            settings.with_permission_prompt(Toolset::SERVER, Toolset::PERMISSION)
         }
         BuiltinTools::Granted => settings,
     }
@@ -202,7 +201,7 @@ mod tests {
         assert!(!claude.withhold_tools);
         assert_eq!(
             claude.permission_prompt,
-            Some(AgentKind::Claude.tool(Toolset::SERVER, PERMISSION_TOOL))
+            Some(AgentKind::Claude.tool(Toolset::SERVER, Toolset::PERMISSION))
         );
         assert_eq!(granted(AgentKind::Claude, None).permission_prompt, None);
 
