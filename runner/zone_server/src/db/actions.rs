@@ -447,44 +447,9 @@ mod tests {
     use super::*;
     use crate::db::reminders;
     use crate::db::reminders::Delivered;
-    use chrono::{Duration, Utc};
-
-    /// The key every test that dispatches a reminder takes first.
-    ///
-    /// `deliver_next` claims the oldest due reminder in the whole database
-    /// rather than the oldest in one workspace — it is a dispatcher, and every
-    /// server instance shares it — and `claim_turn` takes the oldest firing
-    /// that still owes a turn the same way. Two tests that both have one
-    /// therefore steal each other's.
-    ///
-    /// In the database rather than in this process, because CI runs these
-    /// under `cargo nextest`, which gives every test a process of its own: a
-    /// `Mutex` here would serialise nothing there, and the tests would pass
-    /// locally and race in CI. Postgres releases a session lock when the
-    /// connection holding it goes, which covers a test that panics as well as
-    /// one that returns.
-    ///
-    /// Not a fixture concern: the rows are already isolated by workspace. It is
-    /// the claim that is global, which is the behaviour under test.
-    const DISPATCH: i64 = 0x7A6F_6E65_5245_4D44;
-
-    /// Held for the length of a dispatching test. Its connection is its own
-    /// rather than the pool's, because a pooled connection is returned to the
-    /// pool still holding the lock.
-    async fn dispatching() -> sqlx::PgConnection {
-        use sqlx::Connection;
-        let mut connection = sqlx::PgConnection::connect(
-            &std::env::var("DATABASE_URL").expect("DATABASE_URL required"),
-        )
-        .await
-        .expect("a connection of its own to hold the dispatch lock");
-        sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(DISPATCH)
-            .execute(&mut connection)
-            .await
-            .expect("the dispatch lock is takeable");
-        connection
-    }
+    use crate::db::reminders::Sweep;
+    use chrono::Duration;
+    use chrono::Utc;
 
     /// Long enough that a claimed turn stays claimed for the length of a test,
     /// which is what a real lease is for.
@@ -494,10 +459,12 @@ mod tests {
     /// and never came back — without a test that has to wait out a real one.
     const ABANDONED: std::time::Duration = std::time::Duration::ZERO;
 
+    fn database() -> String {
+        std::env::var("TEST_DATABASE_URL").expect("a disposable, migrated TEST_DATABASE_URL")
+    }
+
     async fn fixture() -> (PgPool, Uuid, Uuid, Uuid, Uuid) {
-        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
-            .await
-            .unwrap();
+        let pool = PgPool::connect(&database()).await.unwrap();
         let organization = Uuid::new_v4();
         let workspace = Uuid::new_v4();
         let user = Uuid::new_v4();
@@ -527,7 +494,7 @@ mod tests {
     async fn named_pool(application: &str) -> PgPool {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
-            .connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
+            .connect(&database())
             .await
             .unwrap();
         sqlx::query_scalar::<_, String>("SELECT set_config('application_name', $1, false)")
@@ -907,8 +874,8 @@ mod tests {
     /// other.
     #[tokio::test]
     async fn a_schedule_runs_one_firing_at_a_time_and_does_not_hold_up_another() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let watch = |name: &str| reminders::Reminder {
             content: name.into(),
             due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
@@ -942,11 +909,11 @@ mod tests {
 
         // One from each schedule, and then nothing: the second firing of each
         // is waiting on the first, not on the other schedule.
-        let first = reminders::claim_turn(&pool, LEASE)
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("the oldest firing is claimable");
-        let second = reminders::claim_turn(&pool, LEASE)
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("the other schedule is not held up by the first");
@@ -955,14 +922,17 @@ mod tests {
             "a schedule with a firing in flight must not be handed its next one"
         );
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "both schedules now have a firing in flight, so neither offers its second"
         );
 
         // And once a firing is done, the one behind it is offered — to the same
         // schedule, so the next comparison is against what the first recorded.
         reminders::finish_turn(&pool, first.id).await.unwrap();
-        let next = reminders::claim_turn(&pool, LEASE)
+        let next = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("the firing behind a finished one is offered");
@@ -988,8 +958,8 @@ mod tests {
     /// alone, never by how many times it has been tried.
     #[tokio::test]
     async fn a_firing_on_its_last_attempt_still_holds_the_one_behind_it() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1039,7 +1009,7 @@ mod tests {
         .await
         .unwrap();
 
-        let third = reminders::claim_turn(&pool, LEASE)
+        let third = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("a firing whose claim went stale is offered again");
@@ -1051,7 +1021,10 @@ mod tests {
             .unwrap();
         assert_eq!(attempts, 3, "the third claim reaches the attempt bound");
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "a firing out for the last time still holds the one behind it; otherwise the two run \
              together and the watch compares both against the same reading"
         );
@@ -1179,8 +1152,8 @@ mod tests {
     /// pending. Both deliver exactly one message per firing.
     #[tokio::test]
     async fn an_automation_moves_to_its_next_firing_where_a_one_shot_is_finished() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let one_shot = reminders::Reminder {
             content: "Once".into(),
             due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
@@ -1237,15 +1210,15 @@ mod tests {
         .await
         .unwrap();
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         assert!(
-            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
+            reminders::deliver_next(&pool, sweep).await.unwrap() == Delivered::Nothing,
             "the rescheduled automation is not due again immediately"
         );
 
@@ -1286,7 +1259,7 @@ mod tests {
     #[tokio::test]
     async fn a_finite_count_delivers_exactly_the_firings_it_named() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
-        let _dispatch = dispatching().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1311,11 +1284,11 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         assert!(
-            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
+            reminders::deliver_next(&pool, sweep).await.unwrap() == Delivered::Nothing,
             "COUNT=1 must not leave a second firing scheduled"
         );
 
@@ -1346,7 +1319,7 @@ mod tests {
     #[tokio::test]
     async fn a_prompt_is_written_down_as_a_turn_and_stores_no_message_of_its_own() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
-        let _dispatch = dispatching().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1376,9 +1349,9 @@ mod tests {
         .await
         .unwrap();
 
-        let delivered = reminders::deliver_next(&pool).await.unwrap();
+        let delivered = reminders::deliver_next(&pool, sweep).await.unwrap();
         assert_eq!(delivered, Delivered::Settled);
-        let turn = reminders::claim_turn(&pool, LEASE)
+        let turn = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("a prompt leaves a turn to run");
@@ -1388,7 +1361,10 @@ mod tests {
         assert_eq!(turn.reminder_id, id);
         assert!(turn.prompt.starts_with("Say what changed"), "{turn:?}");
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "a claimed turn is not offered to a second worker inside its lease"
         );
 
@@ -1415,7 +1391,10 @@ mod tests {
 
         reminders::finish_turn(&pool, turn.id).await.unwrap();
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "a turn that has run is not owed again"
         );
         cleanup(&pool, organization, user).await;
@@ -1429,8 +1408,8 @@ mod tests {
     /// a crash loop and not a delivery.
     #[tokio::test]
     async fn a_turn_whose_worker_died_is_offered_again_and_then_given_up_on() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1453,19 +1432,19 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        reminders::deliver_next(&pool).await.unwrap();
+        reminders::deliver_next(&pool, sweep).await.unwrap();
 
         // Three claims, each abandoned: the lease of zero is a worker that
         // never came back, without a test that has to wait out a real one.
         for attempt in 1..=3 {
-            let turn = reminders::claim_turn(&pool, ABANDONED)
+            let turn = reminders::claim_turn(&pool, sweep, ABANDONED)
                 .await
                 .unwrap()
                 .unwrap_or_else(|| panic!("attempt {attempt} must be offered the turn"));
             assert_eq!(turn.reminder_id, id);
         }
         assert!(
-            reminders::claim_turn(&pool, ABANDONED)
+            reminders::claim_turn(&pool, sweep, ABANDONED)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1484,13 +1463,123 @@ mod tests {
         cleanup(&pool, organization, user).await;
     }
 
+    #[tokio::test]
+    async fn a_workspace_sweep_leaves_every_other_workspace_s_firings_alone() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let (_, other_organization, other_workspace, other_user, other_chat) = fixture().await;
+        let reminder = |prompt: Option<&str>| reminders::Reminder {
+            content: "Elsewhere".into(),
+            due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
+            rrule: None,
+            prompt: prompt.map(Into::into),
+            timing_mode: None,
+            time_zone: None,
+        };
+        reminders::create(
+            &pool,
+            other_workspace,
+            other_user,
+            other_chat,
+            reminder(None),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE workspace_id = $1",
+        )
+        .bind(other_workspace)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let created = reminders::create(
+            &pool,
+            other_workspace,
+            other_user,
+            other_chat,
+            reminder(Some("Say what changed.")),
+        )
+        .await
+        .unwrap();
+        let watch: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        for (attempts, claimed) in [(0, None), (3, Some(Utc::now() - Duration::days(1)))] {
+            sqlx::query(
+                "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, \
+                 prompt, attempts, claimed_at) VALUES ($1, $2, $3, $4, 'Check it', $5, $6)",
+            )
+            .bind(watch)
+            .bind(other_workspace)
+            .bind(other_chat)
+            .bind(other_user)
+            .bind(attempts)
+            .bind(claimed)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let sweep = Sweep::Workspace(workspace);
+        assert_eq!(
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
+            Delivered::Nothing,
+            "another workspace's due reminder is not this sweep's to deliver"
+        );
+        assert!(
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
+            "another workspace's owed turn is not this sweep's to claim"
+        );
+        let owed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM reminder_turns WHERE workspace_id = $1")
+                .bind(other_workspace)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            owed, 2,
+            "another workspace's spent turn is not this sweep's to give up on"
+        );
+
+        let delivered = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+                .bind(other_chat)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        assert_eq!(
+            delivered().await,
+            0,
+            "nothing reached the other workspace's chat"
+        );
+
+        let elsewhere = Sweep::Workspace(other_workspace);
+        assert_eq!(
+            reminders::deliver_next(&pool, elsewhere).await.unwrap(),
+            Delivered::Settled,
+            "the reminder is still there for its own workspace's sweep"
+        );
+        assert_eq!(delivered().await, 1);
+        assert_eq!(
+            reminders::claim_turn(&pool, elsewhere, LEASE)
+                .await
+                .unwrap()
+                .map(|turn| turn.reminder_id),
+            Some(watch),
+            "the turn is still there for its own workspace's sweep"
+        );
+        cleanup(&pool, organization, user).await;
+        cleanup(&pool, other_organization, other_user).await;
+    }
+
     /// Stopping a standing job stops the firing it has already claimed as well.
     /// Being answered once more by something just cancelled reads as the cancel
     /// not having worked.
     #[tokio::test]
     async fn cancelling_a_schedule_drops_the_turn_it_has_not_run_yet() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1516,11 +1605,14 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        reminders::deliver_next(&pool).await.unwrap();
+        reminders::deliver_next(&pool, sweep).await.unwrap();
 
         reminders::cancel(&pool, workspace, user, id).await.unwrap();
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "a cancelled schedule owes nothing, including what it had already claimed"
         );
         cleanup(&pool, organization, user).await;
@@ -1531,8 +1623,8 @@ mod tests {
     /// reader can tell a schedule that ran out from one somebody stopped.
     #[tokio::test]
     async fn an_automation_past_its_lifetime_expires_rather_than_firing_for_ever() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1560,7 +1652,7 @@ mod tests {
         .await
         .unwrap();
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
 
@@ -1585,7 +1677,7 @@ mod tests {
             "a schedule nobody renewed must not get one more message on its way out"
         );
         assert!(
-            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
+            reminders::deliver_next(&pool, sweep).await.unwrap() == Delivered::Nothing,
             "an expired schedule is never claimed again"
         );
         cleanup(&pool, organization, user).await;
@@ -1593,8 +1685,8 @@ mod tests {
 
     #[tokio::test]
     async fn reminders_cancel_revoke_and_deliver_once_across_workers() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let reminder = || reminders::Reminder {
             content: "Check release".into(),
             due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
@@ -1631,13 +1723,13 @@ mod tests {
         .await
         .unwrap();
         let (first, second) = tokio::join!(
-            reminders::deliver_next(&pool),
-            reminders::deliver_next(&pool)
+            reminders::deliver_next(&pool, sweep),
+            reminders::deliver_next(&pool, sweep)
         );
         let claimed = |outcome: Delivered| usize::from(outcome != Delivered::Nothing);
         assert_eq!(claimed(first.unwrap()) + claimed(second.unwrap()), 1);
         assert_eq!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
@@ -1662,7 +1754,7 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")

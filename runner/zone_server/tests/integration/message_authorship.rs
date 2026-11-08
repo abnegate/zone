@@ -6,7 +6,9 @@
 
 use crate::common;
 use crate::common::context::{Harness, answer, finish, successful};
-use crate::reminder_turn::{dispatching, make_due, until_stored};
+use crate::reminder_turn::dispatcher;
+use crate::reminder_turn::make_due;
+use crate::reminder_turn::until_stored;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -80,7 +82,6 @@ async fn a_message_posted_over_http_cannot_claim_a_reminder_sent_it() {
 
 #[tokio::test]
 async fn a_message_sent_over_the_socket_cannot_claim_a_reminder_sent_it() {
-    let _dispatch = dispatching().await;
     let harness = Harness::new(
         Some(32_768),
         false,
@@ -155,10 +156,7 @@ async fn a_message_sent_over_the_socket_cannot_claim_a_reminder_sent_it() {
     .expect("a prompt-bearing reminder is storable");
     let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
     make_due(&harness, reminder).await;
-    let worker = zone_server::workers::reminders::spawn(common::create_test_state(
-        harness.config.clone(),
-        harness.pool.clone(),
-    ));
+    let worker = dispatcher(&harness);
     let messages = until_stored(&harness, reminder, 4).await;
     worker.abort();
 

@@ -344,6 +344,22 @@ struct Due {
     time_zone: String,
 }
 
+/// The reminders a dispatcher sweeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sweep {
+    All,
+    Workspace(Uuid),
+}
+
+impl Sweep {
+    fn workspace(self) -> Option<Uuid> {
+        match self {
+            Self::All => None,
+            Self::Workspace(workspace) => Some(workspace),
+        }
+    }
+}
+
 /// What one claim did.
 ///
 /// A reminder that carries no prompt is finished when its message is stored:
@@ -421,14 +437,15 @@ fn reschedule(
 }
 
 /// The claim, message, and terminal state share a transaction across all workers.
-pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
+pub async fn deliver_next(pool: &PgPool, sweep: Sweep) -> DbResult<Delivered> {
     let mut transaction = pool.begin().await?;
     let next = sqlx::query_as::<_, Due>(
         "SELECT id, workspace_id, created_by, chat_id, content, rrule, anchor_at, due_at, \
          expires_at, fired_count, prompt, time_zone FROM reminders WHERE status = 'pending' \
-         AND due_at <= NOW() \
+         AND due_at <= NOW() AND ($1::uuid IS NULL OR workspace_id = $1) \
          ORDER BY due_at, id LIMIT 1 FOR UPDATE SKIP LOCKED",
     )
+    .bind(sweep.workspace())
     .fetch_optional(&mut *transaction)
     .await?;
     let Some(Due {
@@ -557,8 +574,7 @@ pub async fn deliver_next(pool: &PgPool) -> DbResult<Delivered> {
 }
 
 /// The key the claim serialises on. Arbitrary and constant; it only has to be
-/// the same number in every process, and distinct from the one the dispatch
-/// tests take.
+/// the same number in every process.
 const CLAIM_LOCK: i64 = 0x7A6F_6E65_5455_524E;
 
 /// How many times one firing's turn is offered before it is given up on.
@@ -577,7 +593,11 @@ const MAX_TURN_ATTEMPTS: i32 = 3;
 /// timeout, plus however long one may sit queued behind the chat's own
 /// semaphore. Too short costs a duplicate turn and too long costs a late one,
 /// and of the two only the duplicate is something a person has to read.
-pub async fn claim_turn(pool: &PgPool, lease: Duration) -> DbResult<Option<PendingTurn>> {
+pub async fn claim_turn(
+    pool: &PgPool,
+    sweep: Sweep,
+    lease: Duration,
+) -> DbResult<Option<PendingTurn>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
     // One claim at a time across the fleet, released when this transaction
@@ -596,10 +616,12 @@ pub async fn claim_turn(pool: &PgPool, lease: Duration) -> DbResult<Option<Pendi
     // receives is worth one line saying which schedule it belonged to.
     let abandoned: Vec<Uuid> = sqlx::query_scalar(
         "DELETE FROM reminder_turns WHERE attempts >= $1 AND claimed_at IS NOT NULL \
-         AND claimed_at <= NOW() - make_interval(secs => $2) RETURNING reminder_id",
+         AND claimed_at <= NOW() - make_interval(secs => $2) \
+         AND ($3::uuid IS NULL OR workspace_id = $3) RETURNING reminder_id",
     )
     .bind(MAX_TURN_ATTEMPTS)
     .bind(seconds)
+    .bind(sweep.workspace())
     .fetch_all(&mut *transaction)
     .await?;
     for reminder_id in abandoned {
@@ -636,6 +658,7 @@ pub async fn claim_turn(pool: &PgPool, lease: Duration) -> DbResult<Option<Pendi
         "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = NOW() WHERE id = ( \
          SELECT owed.id FROM reminder_turns AS owed WHERE owed.attempts < $1 \
          AND (owed.claimed_at IS NULL OR owed.claimed_at <= NOW() - make_interval(secs => $2)) \
+         AND ($3::uuid IS NULL OR owed.workspace_id = $3) \
          AND NOT EXISTS ( \
            SELECT 1 FROM reminder_turns AS ahead \
            WHERE ahead.reminder_id = owed.reminder_id AND ahead.id <> owed.id \
@@ -646,6 +669,7 @@ pub async fn claim_turn(pool: &PgPool, lease: Duration) -> DbResult<Option<Pendi
     )
     .bind(MAX_TURN_ATTEMPTS)
     .bind(seconds)
+    .bind(sweep.workspace())
     .fetch_optional(&mut *transaction)
     .await?;
     transaction.commit().await?;

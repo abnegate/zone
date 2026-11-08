@@ -1,8 +1,8 @@
 //! Persistent reminder dispatch. Database locks coordinate all server instances.
-use crate::{
-    db::reminders::{self, Delivered},
-    state::AppState,
-};
+use crate::db::reminders;
+use crate::db::reminders::Delivered;
+use crate::db::reminders::Sweep;
+use crate::state::AppState;
 use serde_json::json;
 use std::time::Duration;
 
@@ -59,7 +59,7 @@ fn watching(prompt: &str, baseline: Option<&str>) -> String {
     )
 }
 
-pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
+pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -70,7 +70,7 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             // stores a message, or writes down a turn that is still owed, and
             // either way the schedule moves on within the same transaction.
             loop {
-                match reminders::deliver_next(state.db()).await {
+                match reminders::deliver_next(state.db(), sweep).await {
                     Ok(Delivered::Settled) => {}
                     Ok(Delivered::Nothing) => break,
                     Err(error) => {
@@ -82,7 +82,7 @@ pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
             // Then whatever the claims left owing, which is also where a turn
             // abandoned by a restart is picked back up.
             loop {
-                match reminders::claim_turn(state.db(), lease).await {
+                match reminders::claim_turn(state.db(), sweep, lease).await {
                     Ok(None) => break,
                     Ok(Some(turn)) => {
                         // Spawned rather than awaited: a generation takes as

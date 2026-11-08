@@ -11,7 +11,6 @@
 //!   first of the two, and the second is not fired as well.
 //!
 //! An hourly rule counts elapsed hours, which no clock change moves.
-use super::reminder_turn::dispatching;
 use crate::common::context::Harness;
 use crate::common::{TestClient, test_email, test_password};
 use axum::body::Body;
@@ -20,7 +19,10 @@ use chrono::{DateTime, Duration, FixedOffset, NaiveTime, Timelike, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_core::context;
-use zone_server::db::reminders::{self, Delivered, Reminder};
+use zone_server::db::reminders;
+use zone_server::db::reminders::Delivered;
+use zone_server::db::reminders::Reminder;
+use zone_server::db::reminders::Sweep;
 use zone_server::db::{chats, users};
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;
@@ -274,33 +276,27 @@ fn refusal(error: sqlx::Error) -> String {
 }
 
 /// Fires one due reminder and returns where it was moved to.
-///
-/// The claim takes the oldest due row in the whole database, so it is retried
-/// until it has taken this one, under the dispatch lock every test that fires
-/// a reminder holds.
 async fn fire(harness: &Harness, reminder: Uuid) -> DateTime<Utc> {
     sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
         .bind(reminder)
         .execute(&harness.pool)
         .await
         .expect("the reminder is due");
-    for _ in 0..50 {
-        let (fired, due_at): (i32, DateTime<Utc>) =
-            sqlx::query_as("SELECT fired_count, due_at FROM reminders WHERE id = $1")
-                .bind(reminder)
-                .fetch_one(&harness.pool)
-                .await
-                .expect("the reminder is readable");
-        if fired > 0 {
-            return due_at;
-        }
-        assert_eq!(
-            reminders::deliver_next(&harness.pool).await.unwrap(),
-            Delivered::Settled,
-            "a due reminder is waiting to be claimed"
-        );
-    }
-    panic!("the reminder was never claimed");
+    assert_eq!(
+        reminders::deliver_next(&harness.pool, Sweep::Workspace(harness.workspace))
+            .await
+            .unwrap(),
+        Delivered::Settled,
+        "a due reminder is waiting to be claimed"
+    );
+    let (fired, due_at): (i32, DateTime<Utc>) =
+        sqlx::query_as("SELECT fired_count, due_at FROM reminders WHERE id = $1")
+            .bind(reminder)
+            .fetch_one(&harness.pool)
+            .await
+            .expect("the reminder is readable");
+    assert_eq!(fired, 1, "the workspace's only due reminder fired once");
+    due_at
 }
 
 fn unjittered(reminder: Uuid, rule: &str, next: DateTime<Utc>) -> DateTime<Utc> {
@@ -309,7 +305,6 @@ fn unjittered(reminder: Uuid, rule: &str, next: DateTime<Utc>) -> DateTime<Utc> 
 
 #[tokio::test]
 async fn a_stored_repeat_fires_next_at_nine_on_its_own_clock() {
-    let _dispatch = dispatching().await;
     let harness = Harness::new(Some(32_768), false, Vec::new()).await;
     let berlin = zone("Europe/Berlin");
 
@@ -428,7 +423,6 @@ async fn a_repeat_with_no_zone_known_is_read_in_utc_and_says_so() {
 
 #[tokio::test]
 async fn a_reminder_stored_before_zones_keeps_firing_in_utc() {
-    let _dispatch = dispatching().await;
     let harness = Harness::new(Some(32_768), false, Vec::new()).await;
     let user = owner(&harness).await;
     let rule = "FREQ=DAILY;BYHOUR=9";
