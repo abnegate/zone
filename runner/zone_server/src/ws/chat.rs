@@ -6529,7 +6529,20 @@ cat 'DIR/reply.jsonl'
                 )
                 .expect("the stand-in's reply");
                 chat.agent.refuse();
+                let (_, mut frames) = ChatStream::of(chat.organization.chat).join().await;
                 chat.ask(SECOND).await;
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        if let ServerMessage::Subagent { subagent, .. } =
+                            frames.recv().await.expect("the chat's frames")
+                            && subagent.external_id == SURVEY
+                        {
+                            return;
+                        }
+                    }
+                })
+                .await
+                .expect("the replay's survey reaches the chat's readers once it is stored");
                 let runs = chat.agent.runs();
                 let stored =
                     db::chat_subagents::list(&chat.organization.pool, chat.organization.chat)
