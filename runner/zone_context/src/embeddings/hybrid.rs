@@ -349,19 +349,40 @@ async fn path_matched_item_ids(
     if patterns.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
-    let workspace_id = filters.and_then(|filters| filters.workspace_id);
+    let workspace_id = filters.and_then(|filter| filter.workspace_id);
+    let source_ids = filters.and_then(|filter| filter.source_ids.as_deref());
+    let categories = filters.and_then(|filter| {
+        filter.categories.as_ref().map(|categories| {
+            categories
+                .iter()
+                .map(|category| category.to_lowercase())
+                .collect::<Vec<_>>()
+        })
+    });
+    let min_quality = filters.and_then(|filter| filter.min_quality);
+    let since = filters.and_then(|filter| filter.since.map(|time| time.naive_utc()));
     sqlx::query_scalar(
         r#"
         SELECT ci.id
         FROM content_items ci
+        LEFT JOIN heuristic_analysis ha ON ha.content_item_id = ci.id
         WHERE ($2::uuid IS NULL OR ci.workspace_id = $2)
+          AND ($3::uuid[] IS NULL OR ci.source_id = ANY($3))
+          AND ($4::text[] IS NULL OR ci.category = ANY($4))
+          AND ($5::float IS NULL OR ha.quality->>'score' IS NULL OR (ha.quality->>'score')::float >= $5)
+          AND ($6::timestamp IS NULL OR ci.fetched_at >= $6)
           AND ci.uri ILIKE ANY($1::text[])
+        GROUP BY ci.id
         ORDER BY length(ci.uri), ci.uri
-        LIMIT $3
+        LIMIT $7
         "#,
     )
     .bind(&patterns)
     .bind(workspace_id)
+    .bind(source_ids)
+    .bind(categories.as_deref())
+    .bind(min_quality.map(|quality| quality as f64))
+    .bind(since)
     .bind(limit as i64)
     .fetch_all(pool)
     .await
