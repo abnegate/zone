@@ -101,11 +101,13 @@ impl RateLimitConfig {
                 });
             }
             retries += 1;
-            tokio::time::sleep(Duration::from_millis(
-                self.backoff_base_ms * 2_u64.pow(retries - 1),
-            ))
-            .await;
+            tokio::time::sleep(self.wait(retries)).await;
         }
+    }
+
+    fn wait(&self, retries: u32) -> Duration {
+        let doubling = 1_u64.checked_shl(retries - 1).unwrap_or(u64::MAX);
+        Duration::from_millis(self.backoff_base_ms.saturating_mul(doubling))
     }
 }
 
@@ -198,6 +200,32 @@ mod tests {
         let progress = NoOpProgress;
         progress.on_message("test");
         progress.on_progress(0, Some(100));
+    }
+
+    #[test]
+    fn the_wait_doubles_from_the_base() {
+        let config = RateLimitConfig::default();
+
+        let waits = [1, 2, 3].map(|retries| config.wait(retries));
+
+        assert_eq!(
+            waits,
+            [1000, 2000, 4000].map(Duration::from_millis),
+            "{waits:?}"
+        );
+    }
+
+    #[test]
+    fn a_wait_past_sixty_four_retries_saturates_instead_of_overflowing() {
+        let config = RateLimitConfig::default();
+
+        for retries in [64, 65, u32::MAX] {
+            assert_eq!(
+                config.wait(retries),
+                Duration::from_millis(u64::MAX),
+                "retry {retries}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
