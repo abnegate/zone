@@ -35,6 +35,7 @@ use chrono::Utc;
 use glob::Pattern;
 use serde::Deserialize;
 use serde::Serialize;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
@@ -97,7 +98,6 @@ pub struct GitHubConfig {
     pub token: Option<String>,
 }
 
-/// Cached tree entry with LRU tracking
 #[derive(Debug, Clone)]
 struct CachedTree {
     tree: Tree,
@@ -109,7 +109,6 @@ struct CachedTree {
 /// Cache key for GitHub trees (owner, repo, branch)
 type TreeCacheKey = (String, String, String);
 
-/// Tree cache with TTL and size limits
 #[derive(Debug, Clone)]
 struct TreeCache {
     entries: Arc<RwLock<HashMap<TreeCacheKey, CachedTree>>>,
@@ -120,25 +119,27 @@ struct TreeCache {
 }
 
 impl TreeCache {
-    /// Maximum number of cached trees
     const MAX_ENTRIES: usize = 50;
 
-    /// Maximum total cached size (10MB)
     const MAX_TOTAL_BYTES: usize = 10 * 1024 * 1024;
-
-    fn new(ttl_secs: u64) -> Self {
-        Self {
-            entries: Arc::new(RwLock::new(HashMap::new())),
-            in_flight: Arc::new(RwLock::new(HashSet::new())),
-            ttl: Duration::from_secs(ttl_secs),
-            max_entries: Self::MAX_ENTRIES,
-            max_total_bytes: Self::MAX_TOTAL_BYTES,
-        }
-    }
 
     const ENTRY_KIND_AND_OVERHEAD_BYTES: usize = 20;
 
     const ENTRY_SIZE_FIELD_BYTES: usize = 8;
+
+    const WAIT_ATTEMPTS: u64 = 10;
+
+    const WAIT_INTERVAL_MILLISECONDS: u64 = 100;
+
+    fn new(ttl: Duration) -> Self {
+        Self {
+            entries: Arc::new(RwLock::new(HashMap::new())),
+            in_flight: Arc::new(RwLock::new(HashSet::new())),
+            ttl,
+            max_entries: Self::MAX_ENTRIES,
+            max_total_bytes: Self::MAX_TOTAL_BYTES,
+        }
+    }
 
     fn estimate_tree_size(tree: &Tree) -> usize {
         let entries: usize = tree
@@ -160,7 +161,6 @@ impl TreeCache {
         let mut entries = self.entries.write().await;
         entries.get_mut(key).and_then(|entry| {
             if entry.cached_at.elapsed() < self.ttl {
-                // Update last accessed time for LRU
                 entry.last_accessed = Instant::now();
                 Some(entry.tree.clone())
             } else {
@@ -173,18 +173,15 @@ impl TreeCache {
         let mut entries = self.entries.write().await;
         let tree_size = Self::estimate_tree_size(&tree);
 
-        // Calculate current total size
-        let mut total_size: usize = entries.values().map(|e| e.size_bytes).sum();
+        let mut total_size: usize = entries.values().map(|entry| entry.size_bytes).sum();
 
-        // Evict entries if needed to make space
         while (entries.len() >= self.max_entries || total_size + tree_size > self.max_total_bytes)
             && !entries.is_empty()
         {
-            // Find LRU entry (oldest last_accessed)
             if let Some((lru_key, _)) = entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_accessed)
-                .map(|(k, v)| (k.clone(), v.size_bytes))
+                .map(|(key, entry)| (key.clone(), entry.size_bytes))
             {
                 if let Some(removed) = entries.remove(&lru_key) {
                     total_size = total_size.saturating_sub(removed.size_bytes);
@@ -212,7 +209,6 @@ impl TreeCache {
             },
         );
 
-        // Cleanup stale entries (optional, as we now have size-based eviction)
         let ttl = self.ttl;
         entries.retain(|_, entry| entry.cached_at.elapsed() < ttl);
     }
@@ -228,7 +224,6 @@ enum ContentRequest<'service> {
     Skipped(ContextError),
 }
 
-/// GitHub source adapter
 #[derive(Debug, Clone)]
 pub struct GitHubAdapter {
     service: std::result::Result<PullRequestService, String>,
@@ -242,8 +237,7 @@ impl Default for GitHubAdapter {
 }
 
 impl GitHubAdapter {
-    /// Tree cache TTL in seconds (5 minutes)
-    const TREE_CACHE_TTL_SECS: u64 = 300;
+    const TREE_CACHE_TTL: Duration = Duration::from_secs(300);
 
     /// Create a new GitHub adapter reading from api.github.com
     pub fn new() -> Self {
@@ -262,7 +256,7 @@ impl GitHubAdapter {
     fn serving(service: std::result::Result<PullRequestService, String>) -> Self {
         Self {
             service,
-            tree_cache: TreeCache::new(Self::TREE_CACHE_TTL_SECS),
+            tree_cache: TreeCache::new(Self::TREE_CACHE_TTL),
         }
     }
 
@@ -392,7 +386,6 @@ impl GitHubAdapter {
             )));
         }
 
-        // Check for path traversal and injection characters
         if identifier.contains('/')
             || identifier.contains('\\')
             || identifier.contains('\n')
@@ -408,17 +401,16 @@ impl GitHubAdapter {
         Ok(())
     }
 
-    /// Parse GitHub config from source
     fn parse_config(&self, source: &Source) -> Result<GitHubConfig> {
-        serde_json::from_value(source.config.clone())
-            .map_err(|e| ContextError::InvalidSourceConfig(format!("Invalid GitHub config: {}", e)))
+        serde_json::from_value(source.config.clone()).map_err(|error| {
+            ContextError::InvalidSourceConfig(format!("Invalid GitHub config: {}", error))
+        })
     }
 
-    /// Check if a file is binary based on extension
     fn is_binary_file(path: &str) -> bool {
-        if let Some(ext_start) = path.rfind('.') {
-            let ext = &path[ext_start..];
-            BINARY_EXTENSIONS.contains(&ext)
+        if let Some(extension_start) = path.rfind('.') {
+            let extension = &path[extension_start..];
+            BINARY_EXTENSIONS.contains(&extension)
         } else {
             false
         }
@@ -426,9 +418,9 @@ impl GitHubAdapter {
 
     /// Map file extension to content type (same as FilesystemAdapter)
     fn get_content_type(path: &str) -> String {
-        if let Some(ext_start) = path.rfind('.') {
-            let ext = &path[ext_start + 1..].to_lowercase();
-            match ext.as_str() {
+        if let Some(extension_start) = path.rfind('.') {
+            let extension = &path[extension_start + 1..].to_lowercase();
+            match extension.as_str() {
                 "rs" => "text/rust".to_string(),
                 "py" => "text/python".to_string(),
                 "ts" | "tsx" => "text/typescript".to_string(),
@@ -446,7 +438,6 @@ impl GitHubAdapter {
         }
     }
 
-    /// Check if a path matches any of the patterns
     fn matches_patterns(path: &str, patterns: &[String]) -> bool {
         if patterns.is_empty() {
             return false;
@@ -461,23 +452,19 @@ impl GitHubAdapter {
         })
     }
 
-    /// Check if a file should be included based on patterns
     fn should_include_file(
         path: &str,
         include_patterns: &[String],
         exclude_patterns: &[String],
     ) -> bool {
-        // Check exclude patterns first
         if Self::matches_patterns(path, exclude_patterns) {
             return false;
         }
 
-        // If include patterns specified, file must match at least one
         if !include_patterns.is_empty() {
             return Self::matches_patterns(path, include_patterns);
         }
 
-        // No include patterns, include by default (unless excluded above)
         true
     }
 
@@ -504,7 +491,6 @@ impl GitHubAdapter {
             .map_err(|error| Self::repository_error(owner, repo, error))
     }
 
-    /// Fetch Git tree (recursive)
     async fn get_tree(
         &self,
         owner: &str,
@@ -528,7 +514,6 @@ impl GitHubAdapter {
             .map_err(Self::tree_error)
     }
 
-    /// Get tree with caching and in-flight tracking
     async fn get_tree_cached(
         &self,
         owner: &str,
@@ -538,37 +523,31 @@ impl GitHubAdapter {
     ) -> Result<Tree> {
         let key = (owner.to_string(), repo.to_string(), branch.to_string());
 
-        // Check cache first
         if let Some(tree) = self.tree_cache.get(&key).await {
             return Ok(tree);
         }
 
-        // Check if already being fetched by another task
         {
             let mut in_flight = self.tree_cache.in_flight.write().await;
             if in_flight.contains(&key) {
-                // Drop the lock and wait a bit before retrying
                 drop(in_flight);
 
-                // Wait for the in-flight fetch to complete (with timeout)
-                for _ in 0..10 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                for _ in 0..TreeCache::WAIT_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(
+                        TreeCache::WAIT_INTERVAL_MILLISECONDS,
+                    ))
+                    .await;
                     if let Some(tree) = self.tree_cache.get(&key).await {
                         return Ok(tree);
                     }
                 }
-
-                // If still not cached after waiting, fall through to fetch
             } else {
-                // Mark as in-flight
                 in_flight.insert(key.clone());
             }
         }
 
-        // Fetch from API (outside the lock)
         let fetch_result = self.get_tree(owner, repo, branch, token).await;
 
-        // Remove from in-flight and handle result
         {
             let mut in_flight = self.tree_cache.in_flight.write().await;
             in_flight.remove(&key);
@@ -576,7 +555,6 @@ impl GitHubAdapter {
 
         let tree = fetch_result?;
 
-        // Store in cache
         self.tree_cache.insert(key, tree.clone()).await;
 
         Ok(tree)
@@ -690,7 +668,6 @@ impl GitHubAdapter {
         )?))
     }
 
-    /// Create a ContentItem from a GitHub file
     fn create_content_item(
         source_id: uuid::Uuid,
         owner: &str,
@@ -704,7 +681,7 @@ impl GitHubAdapter {
     ) -> Result<ContentItem> {
         let file_name = Path::new(path)
             .file_name()
-            .and_then(|n| n.to_str())
+            .and_then(|name| name.to_str())
             .unwrap_or(path)
             .to_string();
 
@@ -714,11 +691,10 @@ impl GitHubAdapter {
         let mut item = ContentItem::new(source_id, ContentCategory::File, uri, file_name)
             .with_content_type(content_type);
 
-        // Build metadata
         let extension = Path::new(path)
             .extension()
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_string());
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_string());
         let mut content_metadata = ContentMetadata {
             size_bytes: Some(size),
             extension,
@@ -727,10 +703,9 @@ impl GitHubAdapter {
             ..Default::default()
         };
 
-        // Detect language from extension
-        if let Some(ext_start) = path.rfind('.') {
-            let ext = &path[ext_start + 1..].to_lowercase();
-            let lang = match ext.as_str() {
+        if let Some(extension_start) = path.rfind('.') {
+            let extension = &path[extension_start + 1..].to_lowercase();
+            let language = match extension.as_str() {
                 "rs" => Some("rust"),
                 "py" => Some("python"),
                 "ts" | "tsx" => Some("typescript"),
@@ -742,14 +717,13 @@ impl GitHubAdapter {
                 "h" | "hpp" => Some("c++"),
                 _ => None,
             };
-            if let Some(l) = lang {
-                content_metadata.language = Some(l.to_string());
+            if let Some(language) = language {
+                content_metadata.language = Some(language.to_string());
             }
         }
 
         item = item.with_metadata(content_metadata);
 
-        // Set content if provided
         if !metadata_only && let Some(content) = content {
             item = item.with_content(content);
         }
@@ -759,6 +733,12 @@ impl GitHubAdapter {
 
     fn file_uri(owner: &str, repo: &str, path: &str, branch: &str) -> String {
         format!("github://{owner}/{repo}/{path}@{branch}")
+    }
+
+    fn priority(priority_order: &[String], path: &str) -> Option<usize> {
+        priority_order.iter().position(|pattern| {
+            Pattern::new(pattern).is_ok_and(|glob_pattern| glob_pattern.matches(path))
+        })
     }
 }
 
@@ -770,7 +750,6 @@ impl SourceAdapter for GitHubAdapter {
 
     fn rate_limit_config(&self) -> RateLimitConfig {
         // GitHub rate limits: 5000/hr authenticated, 60/hr unauthenticated
-        // Convert to requests per second
         RateLimitConfig {
             requests_per_second: 1.0, // Conservative: ~3600/hr
             burst_size: 10,
@@ -783,7 +762,6 @@ impl SourceAdapter for GitHubAdapter {
     async fn verify(&self, source: &Source) -> Result<()> {
         let config = self.parse_config(source)?;
 
-        // Validate required fields
         if config.owner.is_empty() {
             return Err(ContextError::InvalidSourceConfig(
                 "owner is required".to_string(),
@@ -796,7 +774,6 @@ impl SourceAdapter for GitHubAdapter {
             ));
         }
 
-        // Validate identifiers before making any API calls
         Self::validate_github_identifier(&config.owner, "owner")?;
         Self::validate_github_identifier(&config.repo, "repo")?;
         if let Some(ref branch) = config.branch {
@@ -817,7 +794,6 @@ impl SourceAdapter for GitHubAdapter {
             .await?;
         let branch = config.branch.as_deref().unwrap_or(default_branch.as_str());
 
-        // Fetch tree (with caching)
         let tree = self
             .get_tree_cached(&config.owner, &config.repo, branch, config.token.as_deref())
             .await?;
@@ -872,7 +848,6 @@ impl SourceAdapter for GitHubAdapter {
             .unwrap_or(default_branch.as_str())
             .to_string();
 
-        // Fetch tree (with caching)
         let tree = self
             .get_tree_cached(
                 &config.owner,
@@ -938,7 +913,7 @@ impl SourceAdapter for GitHubAdapter {
                     to_fetch.len(),
                     result.stats.items_skipped
                 ));
-                for (idx, entry) in to_fetch.iter().enumerate() {
+                for (index, entry) in to_fetch.iter().enumerate() {
                     if let Some(item) = self
                         .fetch_file_item(source.id, &config, &branch, entry)
                         .await?
@@ -946,7 +921,7 @@ impl SourceAdapter for GitHubAdapter {
                         progress.on_item(&item);
                         result.add_item(item);
                     }
-                    progress.on_progress(idx + 1, Some(to_fetch.len().max(1)));
+                    progress.on_progress(index + 1, Some(to_fetch.len().max(1)));
                 }
             }
             FetchStrategy::MetadataOnly => {
@@ -954,7 +929,7 @@ impl SourceAdapter for GitHubAdapter {
                     "Fetching metadata for {} files from GitHub",
                     total_files
                 ));
-                for (idx, entry) in files.iter().enumerate() {
+                for (index, entry) in files.iter().enumerate() {
                     let item = Self::create_content_item(
                         source.id,
                         &config.owner,
@@ -969,7 +944,7 @@ impl SourceAdapter for GitHubAdapter {
 
                     progress.on_item(&item);
                     result.add_item(item);
-                    progress.on_progress(idx + 1, Some(total_files));
+                    progress.on_progress(index + 1, Some(total_files));
                 }
             }
             FetchStrategy::Partial { max_tokens } => {
@@ -988,7 +963,7 @@ impl SourceAdapter for GitHubAdapter {
                     .map(|entry| (entry.path.as_str(), entry))
                     .collect();
 
-                for (idx, score) in prioritized.iter().enumerate() {
+                for (index, score) in prioritized.iter().enumerate() {
                     let Some(entry) = files_by_path.get(score.path.as_str()) else {
                         continue;
                     };
@@ -1007,13 +982,12 @@ impl SourceAdapter for GitHubAdapter {
                         progress.on_item(&item);
                         result.add_item(item);
                     }
-                    progress.on_progress(idx + 1, Some(total_files));
+                    progress.on_progress(index + 1, Some(total_files));
                 }
             }
             FetchStrategy::Progressive { priority_order } => {
                 progress.on_message("Fetching files from GitHub by priority");
 
-                // Build priority scores
                 let paths_with_sizes: Vec<(String, Option<usize>)> = files
                     .iter()
                     .map(|entry| (entry.path.clone(), Self::size(entry)))
@@ -1021,40 +995,27 @@ impl SourceAdapter for GitHubAdapter {
 
                 let mut prioritized = prioritize_paths(&paths_with_sizes);
 
-                // If user provided priority_order, reorder to match those patterns first
                 if !priority_order.is_empty() {
-                    prioritized.sort_by(|a, b| {
-                        let a_priority = priority_order.iter().position(|pattern| {
-                            if let Ok(glob_pattern) = Pattern::new(pattern) {
-                                glob_pattern.matches(&a.path)
-                            } else {
-                                false
+                    prioritized.sort_by(|left, right| {
+                        match (
+                            Self::priority(&priority_order, &left.path),
+                            Self::priority(&priority_order, &right.path),
+                        ) {
+                            (Some(left_position), Some(right_position)) => {
+                                left_position.cmp(&right_position)
                             }
-                        });
-
-                        let b_priority = priority_order.iter().position(|pattern| {
-                            if let Ok(glob_pattern) = Pattern::new(pattern) {
-                                glob_pattern.matches(&b.path)
-                            } else {
-                                false
-                            }
-                        });
-
-                        match (a_priority, b_priority) {
-                            (Some(ap), Some(bp)) => ap.cmp(&bp),
-                            (Some(_), None) => std::cmp::Ordering::Less,
-                            (None, Some(_)) => std::cmp::Ordering::Greater,
-                            (None, None) => b
+                            (Some(_), None) => Ordering::Less,
+                            (None, Some(_)) => Ordering::Greater,
+                            (None, None) => right
                                 .score
-                                .partial_cmp(&a.score)
-                                .unwrap_or(std::cmp::Ordering::Equal),
+                                .partial_cmp(&left.score)
+                                .unwrap_or(Ordering::Equal),
                         }
                     });
                 }
 
-                // Fetch in priority order
-                for (idx, priority_item) in prioritized.iter().enumerate() {
-                    if let Some(entry) = files.iter().find(|e| e.path == priority_item.path)
+                for (index, priority_item) in prioritized.iter().enumerate() {
+                    if let Some(entry) = files.iter().find(|entry| entry.path == priority_item.path)
                         && let Some(item) = self
                             .fetch_file_item(source.id, &config, &branch, entry)
                             .await?
@@ -1062,7 +1023,7 @@ impl SourceAdapter for GitHubAdapter {
                         progress.on_item(&item);
                         result.add_item(item);
                     }
-                    progress.on_progress(idx + 1, Some(prioritized.len()));
+                    progress.on_progress(index + 1, Some(prioritized.len()));
                 }
             }
         }
@@ -1175,9 +1136,8 @@ mod tests {
 
         let result = adapter.verify(&source).await;
         assert!(result.is_err());
-        if let Err(ContextError::InvalidSourceConfig(msg)) = result {
-            // Serde error will contain "missing field" when field is required
-            assert!(msg.contains("owner") || msg.contains("missing field"));
+        if let Err(ContextError::InvalidSourceConfig(message)) = result {
+            assert!(message.contains("owner") || message.contains("missing field"));
         } else {
             panic!("Expected InvalidSourceConfig error for missing owner");
         }
@@ -1192,9 +1152,8 @@ mod tests {
 
         let result = adapter.verify(&source).await;
         assert!(result.is_err());
-        if let Err(ContextError::InvalidSourceConfig(msg)) = result {
-            // Serde error will contain "missing field" when field is required
-            assert!(msg.contains("repo") || msg.contains("missing field"));
+        if let Err(ContextError::InvalidSourceConfig(message)) = result {
+            assert!(message.contains("repo") || message.contains("missing field"));
         } else {
             panic!("Expected InvalidSourceConfig error for missing repo");
         }
@@ -1286,7 +1245,6 @@ mod tests {
 
     #[test]
     fn test_github_adapter_estimate_tokens_excludes_binary() {
-        // Test binary detection logic
         assert!(GitHubAdapter::is_binary_file("image.png"));
         assert!(GitHubAdapter::is_binary_file("file.zip"));
         assert!(!GitHubAdapter::is_binary_file("file.rs"));
