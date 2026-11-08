@@ -38,7 +38,8 @@ scraper = "=0.27.0"
 # Text processing
 sha2 = "=0.11.0"
 
-# Chunk output depends on these exact versions, so bumping any of them is a reindex event.
+# Chunk output depends on these exact versions and on the locked abnegate-index,
+# regex-automata and regex-syntax versions, so changing any of them is a reindex event.
 regex = "=1.13.1"
 tree-sitter = "=0.27.0"
 tree-sitter-language = "=0.1.8"

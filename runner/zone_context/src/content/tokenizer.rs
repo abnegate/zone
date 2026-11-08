@@ -60,7 +60,7 @@ pub fn estimate_tokens_for_type(content: &str, content_type: &str) -> usize {
 
 /// Character budget for one embedding request
 pub fn embed_char_budget(model_max_tokens: usize) -> usize {
-    // Assume ~2 chars/token for identifier-heavy code and keep 25% headroom
+    // 1.5 chars per token: identifier-heavy code averages ~2, less 25% headroom
     let conservative = model_max_tokens.saturating_mul(3).saturating_div(2);
     conservative.clamp(512, MAX_EMBED_CHARS)
 }
