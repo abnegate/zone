@@ -6,7 +6,6 @@
 mod sizing;
 mod tokenizer;
 
-pub(crate) use abnegate_index::estimate_tokens;
 pub use sizing::*;
 pub use tokenizer::*;
 
