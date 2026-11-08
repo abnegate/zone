@@ -83,6 +83,8 @@ dirs = { workspace = true, optional = true }
 abnegate-http = { workspace = true }
 abnegate-index = { workspace = true }
 abnegate-llm = { workspace = true, features = ["ollama", "openai-compatible"] }
+abnegate-secret = { workspace = true }
+abnegate-vcs = { workspace = true, features = ["github", "gitlab"] }
 zone_core = { path = "../zone_core" }
 
 [dev-dependencies]
@@ -90,3 +92,4 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "=3.27.0"
 zone_core = { path = "../zone_core", features = ["test-support"] }
 wiremock = "=0.6.5"
+abnegate-vcs = { workspace = true, features = ["github", "gitlab", "testing"] }
