@@ -4,6 +4,10 @@ use serde_json::Value;
 use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
+use std::collections::HashMap;
+use std::net::TcpListener;
+use std::sync::Mutex;
+use std::thread;
 use uuid::Uuid;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -20,13 +24,17 @@ use zone_context::ContextError;
 use zone_context::FetchResult;
 use zone_context::adapters::GitLabAdapter;
 use zone_context::adapters::NoOpProgress;
+use zone_context::adapters::ProgressCallback;
 use zone_context::adapters::SourceAdapter;
+use zone_context::content::ContentItem;
 use zone_context::content::FetchConfig;
 use zone_context::content::FetchStrategy;
+use zone_context::content::IndexedBlob;
 use zone_core::Source;
 use zone_core::SourceCategory;
 use zone_core::SourceType;
 
+const LOOPBACK: &str = "127.0.0.1:0";
 const PROJECT: &str = "group/project";
 const PROJECT_ROUTE: &str = "/api/v4/projects/group%2Fproject";
 const TREE_ROUTE: &str = "/api/v4/projects/group%2Fproject/repository/tree";
@@ -36,6 +44,7 @@ const FIRST_PAGE_QUERY: &str = "ref=main&recursive=true&per_page=100";
 const USER_AGENT: &str = "abnegate-vcs";
 const PRIVATE_TOKEN: &str = "private-token";
 const MAXIMUM_ANSWER_BYTES: usize = 16 * 1024 * 1024;
+const RETRIED_ATTEMPTS: u64 = 4;
 const ACCESS_FORBIDDEN: &str = "Permission denied: Access forbidden - check token permissions";
 const MALFORMED_TOKEN: &str =
     "Configuration error: Invalid authorization token format (token not logged for security)";
@@ -62,12 +71,44 @@ fn project() -> Source {
     source(json!({ "project": PROJECT }))
 }
 
-fn served(server: &MockServer) -> GitLabAdapter {
+#[derive(Default)]
+struct RecordedProgress {
+    reports: Mutex<Vec<(usize, Option<usize>)>>,
+}
+
+impl RecordedProgress {
+    fn reports(&self) -> Vec<(usize, Option<usize>)> {
+        self.reports.lock().unwrap().clone()
+    }
+}
+
+impl ProgressCallback for RecordedProgress {
+    fn on_item(&self, _item: &ContentItem) {}
+
+    fn on_progress(&self, current: usize, total: Option<usize>) {
+        self.reports.lock().unwrap().push((current, total));
+    }
+
+    fn on_message(&self, _message: &str) {}
+}
+
+fn addressed(origin: &str) -> GitLabAdapter {
     GitLabAdapter::with_service(
-        GitLabService::configured_allowing_http(&server.uri())
+        GitLabService::configured_allowing_http(origin)
             .unwrap()
             .with_anonymous_reads(),
     )
+}
+
+fn served(server: &MockServer) -> GitLabAdapter {
+    addressed(&server.uri())
+}
+
+fn dropping() -> String {
+    let listener = TcpListener::bind(LOOPBACK).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || listener.incoming().for_each(drop));
+    origin
 }
 
 fn object(digit: char) -> String {
@@ -254,7 +295,7 @@ async fn a_rate_limited_project_is_retried_three_times_and_then_rate_limited() {
     Mock::given(method("GET"))
         .and(path(PROJECT_ROUTE))
         .respond_with(ResponseTemplate::new(429))
-        .expect(4)
+        .expect(RETRIED_ATTEMPTS)
         .mount(&server)
         .await;
 
@@ -1039,4 +1080,111 @@ async fn an_unreadable_or_oversized_project_answer_fails_with_a_fixed_reason() {
         assert_gitlab_failure(&error, expected);
         assert!(!error.to_string().contains("secret-body"));
     }
+}
+
+#[tokio::test]
+async fn an_origin_that_drops_the_connection_is_a_request_failure() {
+    let error = addressed(&dropping()).verify(&project()).await.unwrap_err();
+
+    assert!(
+        matches!(
+            &error,
+            ContextError::Adapter { source_type, message }
+                if source_type == "gitlab" && message.starts_with("Request failed: ")
+        ),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .starts_with("Adapter error for gitlab: Request failed: "),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_project_answer_with_only_its_default_branch_is_read() {
+    let server = MockServer::start().await;
+    answer_project(
+        &server,
+        ResponseTemplate::new(200).set_body_json(json!({ "default_branch": "main" })),
+    )
+    .await;
+    mount_tree(&server, json!([file("README.md", 'a')])).await;
+    let adapter = served(&server);
+
+    adapter.verify(&project()).await.unwrap();
+    let result = fetched(&adapter, &project(), FetchStrategy::MetadataOnly)
+        .await
+        .unwrap();
+
+    assert_eq!(titles(&result), ["README.md"]);
+}
+
+async fn reported(
+    server: &MockServer,
+    config: &FetchConfig,
+    strategy: FetchStrategy,
+) -> Vec<(usize, Option<usize>)> {
+    let progress = RecordedProgress::default();
+    let result = served(server)
+        .fetch(&project(), config, strategy, &progress)
+        .await
+        .unwrap();
+    assert!(!titles(&result).contains(&"binary.txt"));
+    progress.reports()
+}
+
+#[tokio::test]
+async fn only_a_full_fetch_reports_progress_for_a_file_that_is_not_utf8() {
+    let server = MockServer::start().await;
+    mount_project(&server).await;
+    mount_tree(
+        &server,
+        json!([
+            file("unchanged.rs", 'c'),
+            file("README.md", 'a'),
+            file("binary.txt", 'b'),
+        ]),
+    )
+    .await;
+    mount_blob(&server, 'a', b"# Readme").await;
+    mount_blob(&server, 'b', &[0xff, 0xfe]).await;
+    mount_blob(&server, 'c', b"fn unchanged() {}").await;
+    let indexed = FetchConfig {
+        known_blobs: HashMap::from([(
+            format!("gitlab://{PROJECT}/unchanged.rs@main"),
+            IndexedBlob {
+                blob_sha: Some(object('c')),
+                has_embeddings: true,
+            },
+        )]),
+        ..FetchConfig::default()
+    };
+
+    let full = reported(&server, &indexed, FetchStrategy::Full).await;
+    let partial = reported(
+        &server,
+        &FetchConfig::default(),
+        FetchStrategy::Partial {
+            max_tokens: 100_000,
+        },
+    )
+    .await;
+    let progressive = reported(
+        &server,
+        &FetchConfig::default(),
+        FetchStrategy::Progressive {
+            priority_order: vec!["unchanged.rs".to_string(), "README.md".to_string()],
+        },
+    )
+    .await;
+
+    assert_eq!(
+        full,
+        [(1, Some(2)), (2, Some(3))],
+        "a full fetch counts the skipped file against every listed file"
+    );
+    assert_eq!(partial, [(1, Some(3)), (2, Some(3))]);
+    assert_eq!(progressive, [(1, Some(3)), (2, Some(3))]);
 }
