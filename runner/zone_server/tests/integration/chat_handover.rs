@@ -13,12 +13,17 @@
 //! under which home and MCP token, and what it read on stdin.
 
 use crate::common::context::{finish, next, send, successful};
+use crate::common::stand_in::MCP_TOKEN;
 use crate::common::transcript::{self, Speaker};
 use crate::common::{
     TestClient, context_database_url, create_test_router, create_test_state, test_config,
     test_email, test_password,
 };
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::CREDITS_REQUIRED;
+use abnegate_agent_cli::Session;
+use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::SecretValue;
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -32,16 +37,13 @@ use tokio_tungstenite::connect_async;
 use uuid::Uuid;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::AgentKind;
-use zone_core::llm::provider::UNFUNDED;
 use zone_core::variables::Variables;
 use zone_server::config::{AgentConfig, Config, ModelBackend};
 use zone_server::db::agent_logins::{self, AgentLoginRow, Insert};
 use zone_server::db::ai_settings;
 use zone_server::db::chats::{self, ChatSession};
-use zone_server::services::agent::sessions;
 use zone_server::services::backend;
-use zone_server::services::login::claude::Tokens;
+use zone_server::services::login::claude::Sealed;
 use zone_server::services::login::router::unfunded;
 use zone_server::state::AppState;
 
@@ -152,7 +154,7 @@ const BOB: Account = Account {
 static STAND_INS: LazyLock<PathBuf> = LazyLock::new(|| {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("chat-handover-stand-ins");
     std::fs::create_dir_all(&directory).expect("a directory for the stand-ins on PATH");
-    for agent in AgentKind::ALL {
+    for &agent in AgentKind::ALL {
         let name = agent.executable();
         let staged = directory.join(format!("{name}.{}", std::process::id()));
         std::fs::write(
@@ -437,7 +439,7 @@ impl Agent {
             "#!/bin/sh\nruns='{runs}'\nplans='{plans}'\nn=0\nwhile ! mkdir \"$runs/$n\" 2>/dev/null; \
              do n=$((n + 1)); done\nrun=\"$runs/$n\"\nprintf '%s\\0' \"$@\" > \"$run/arguments\"\npwd \
              -P > \"$run/directory\"\nprintf '%s' \"${home}\" > \"$run/home\"\nprintf '%s' \
-             \"$CLAUDE_CODE_OAUTH_TOKEN\" > \"$run/token\"\nprintf '%s' \"$ZONE_MCP_TOKEN\" > \
+             \"$CLAUDE_CODE_OAUTH_TOKEN\" > \"$run/token\"\nprintf '%s' \"{MCP_TOKEN}\" > \
              \"$run/tools\"\ncat > \"$run/prompt\"\n{body}",
             runs = self.runs.display(),
             plans = self.plans.display(),
@@ -472,7 +474,7 @@ impl Agent {
                         .filter(|argument| !argument.is_empty())
                         .map(str::to_string)
                         .collect(),
-                    prompt: zone_core::llm::provider::prompt(&read("prompt")),
+                    prompt: zone_core::llm::cli::prompt(&read("prompt")),
                     directory: PathBuf::from(read("directory").trim_end()),
                     home: PathBuf::from(read("home")),
                     token: read("token"),
@@ -668,14 +670,14 @@ impl Harness {
             })))
             .mount(&self.services)
             .await;
-        let sealed = Tokens {
-            access: SecretValue::new(account.token),
-            refresh: None,
-            expires_at: Utc::now() + TimeDelta::days(30),
-            issued_at: None,
-            scope: "user:inference".to_string(),
-            subscription: None,
-        }
+        let sealed = Tokens::new(
+            SecretValue::new(account.token),
+            None,
+            Utc::now() + TimeDelta::days(30),
+            None,
+            "user:inference",
+            None,
+        )
         .seal(self.state.master_key())
         .expect("the tokens to seal");
         self.insert(AgentKind::Claude, account.label, Some(&sealed))
@@ -782,16 +784,16 @@ impl Harness {
 
     /// Whether session `id`'s file is in `login`'s home, where Claude resumes it from.
     fn holds(&self, login: Uuid, id: &str) -> bool {
-        sessions::locate(
-            &self.home(AgentKind::Claude, login),
-            AgentKind::Claude,
-            &self
-                .config
-                .agents
-                .work(self.organization, AgentKind::Claude),
-            id,
-        )
-        .is_some()
+        Session::resumed(id)
+            .locate(
+                AgentKind::Claude,
+                &self.home(AgentKind::Claude, login),
+                &self
+                    .config
+                    .agents
+                    .work(self.organization, AgentKind::Claude),
+            )
+            .is_some()
     }
 }
 
@@ -1390,7 +1392,7 @@ async fn a_credits_limit_hands_over_and_ends_with_the_credits_wording_when_none_
     );
     let failure = failure(&frames);
     assert!(
-        failure.contains(UNFUNDED),
+        failure.contains(CREDITS_REQUIRED),
         "the turn ends in the credits wording: {failure}"
     );
     let runs = harness.claude.invocations();
@@ -1636,7 +1638,7 @@ async fn a_turn_handed_to_the_other_agent_is_told_the_chats_effort_its_own_way()
     };
     assert_eq!(
         setting(moved, CODEX_EFFORT),
-        Some("xhigh"),
+        Some("\"xhigh\""),
         "codex is told the chat's effort as its own setting: {:?}",
         moved.arguments
     );

@@ -11,15 +11,16 @@ pub use routing::Routing;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use abnegate_agent_cli::{AgentKind, CliSettings, STDERR_HEADING, Session};
 use abnegate_llm::{Credential, ReasoningEffort};
 use chrono::{DateTime, SecondsFormat, Utc};
 use uuid::Uuid;
-use zone_core::llm::provider::{STDERR_HEADING, SignIn};
-use zone_core::llm::{AgentKind, CliSettings, LlmBackend, Session};
+use zone_core::llm::{LlmBackend, SignIn, cli};
 
 use crate::config::Config;
 use crate::db::agent_logins;
 use crate::db::ai_settings::EffectiveAiSettings;
+use crate::services::agent::home::{self, CLAUDE_CODE_OAUTH_TOKEN};
 use crate::services::endpoint::Origin;
 use crate::services::login::credential::{self, Login};
 use crate::services::login::identity::LoginIdentity;
@@ -119,13 +120,19 @@ fn resetting(resets_at: Option<DateTime<Utc>>) -> String {
     }
 }
 
+/// How long the crate may take to stop a coding agent that ran out of time, drain what it wrote
+/// and hand back the answer it kept.
+const STOPPING: Duration = Duration::from_secs(30);
+
 /// The instance-wide default the environment selects, with every variable its
 /// agent runs with.
 pub fn instance(config: &Config) -> LlmBackend {
     match crate::state::llm_backend(config) {
-        LlmBackend::Cli { agent, settings } => {
-            LlmBackend::cli(agent, prepared(config, agent, *settings))
-        }
+        LlmBackend::Cli {
+            agent,
+            settings,
+            sign_in,
+        } => LlmBackend::cli(agent, prepared(config, agent, *settings)).with_sign_in(sign_in),
         LlmBackend::Http => LlmBackend::Http,
     }
 }
@@ -203,13 +210,7 @@ pub fn on_login(
 ) -> Result<Resolved, Error> {
     let agent = chosen.agent;
     let work = config.agents.work(organization, agent);
-    let cli = executed(
-        config,
-        agent,
-        CliSettings::default()
-            .with_working_directory(work)
-            .with_sign_in(SignIn::Organization),
-    );
+    let cli = executed(config, agent, cli::settings().with_working_directory(work));
     let cli = match &chosen.resolved {
         Login::Claude { token } => {
             let home = config
@@ -225,8 +226,8 @@ pub fn on_login(
                             .display()
                     ),
                 })?;
-            let variable = agent.token().ok_or(Error::SignedOut { agent })?;
-            homed(cli, agent, &home)?.with_credential(Credential::key(variable, token.clone()))
+            homed(cli, agent, &home)?
+                .with_credential(Credential::key(CLAUDE_CODE_OAUTH_TOKEN, token.clone()))
         }
         Login::Codex { home } => homed(cli, agent, home)?,
     };
@@ -235,7 +236,8 @@ pub fn on_login(
         None => cli,
     };
     Ok(Resolved {
-        backend: LlmBackend::cli(agent, prepared(config, agent, cli)),
+        backend: LlmBackend::cli(agent, prepared(config, agent, cli))
+            .with_sign_in(SignIn::Organization),
         login: Some(identity(chosen)),
     })
 }
@@ -250,17 +252,10 @@ fn host(config: &Config, organization: Uuid, agent: AgentKind) -> Result<Resolve
             agent,
             message: format!("{}: {error}", work.display()),
         })?;
-    let cli = executed(
-        config,
-        agent,
-        CliSettings::default()
-            .with_working_directory(work)
-            .with_sign_in(SignIn::Host),
-    );
-    Ok(Resolved::unrouted(LlmBackend::cli(
-        agent,
-        prepared(config, agent, cli),
-    )))
+    let cli = executed(config, agent, cli::settings().with_working_directory(work));
+    Ok(Resolved::unrouted(
+        LlmBackend::cli(agent, prepared(config, agent, cli)).with_sign_in(SignIn::Host),
+    ))
 }
 
 fn identity(chosen: &Chosen) -> LoginIdentity {
@@ -307,6 +302,7 @@ pub fn remedy(agent: AgentKind, sign_in: SignIn, message: &str) -> Option<String
     let failures = match agent {
         AgentKind::Claude => CLAUDE_SIGN_IN_FAILURES,
         AgentKind::Codex => CODEX_SIGN_IN_FAILURES,
+        _ => &[],
     };
     let words = own_words(message).to_ascii_lowercase();
     let whole = message.to_ascii_lowercase();
@@ -323,8 +319,8 @@ pub fn remedy(agent: AgentKind, sign_in: SignIn, message: &str) -> Option<String
     })
 }
 
-/// A coding agent's own words about a failure it reported. zone_core follows
-/// them with [`STDERR_HEADING`] and the tail of the agent's stderr.
+/// A coding agent's own words about a failure it reported, without the
+/// [`STDERR_HEADING`] and stderr tail that follow them.
 pub fn own_words(message: &str) -> &str {
     message
         .split_once(STDERR_HEADING)
@@ -334,13 +330,13 @@ pub fn own_words(message: &str) -> &str {
 /// `message`, a failure a client on `backend` reported, followed by its
 /// remedy when a coding agent's sign-in failed.
 pub fn remedied(backend: &LlmBackend, message: String) -> Remedied {
-    let LlmBackend::Cli { agent, settings } = backend else {
+    let LlmBackend::Cli { agent, sign_in, .. } = backend else {
         return Remedied {
             message,
             signed_out: false,
         };
     };
-    match remedy(*agent, settings.sign_in, &message) {
+    match remedy(*agent, *sign_in, &message) {
         Some(fix) if message.contains(&fix) => Remedied {
             message,
             signed_out: true,
@@ -359,46 +355,36 @@ pub fn remedied(backend: &LlmBackend, message: String) -> Remedied {
 /// `backend` with a coding agent's turn given `timeout`: the budget of what
 /// it runs for, a chat's or a task attempt's, rather than its own default.
 pub fn bounded(backend: LlmBackend, timeout: Duration) -> LlmBackend {
-    match backend {
-        LlmBackend::Cli { agent, settings } => {
-            LlmBackend::cli(agent, settings.with_timeout(timeout))
-        }
-        LlmBackend::Http => LlmBackend::Http,
-    }
+    backend.configured(|settings| settings.with_timeout(timeout))
+}
+
+/// `backend` with a coding agent stopped far enough ahead of a deadline `remaining` away that
+/// the crate has stopped it, and handed back the answer it kept, before that deadline gives up
+/// on the turn. Stopping takes at most [`STOPPING`], and never more than a quarter of the time.
+pub fn ahead_of(backend: LlmBackend, remaining: Duration) -> LlmBackend {
+    bounded(
+        backend,
+        remaining.saturating_sub(STOPPING.min(remaining / 4)),
+    )
 }
 
 /// `backend` with a coding agent run in `directory`, where a chat's tools run, in place of the
 /// directory it was resolved with. An endpoint runs nowhere.
 pub fn in_directory(backend: LlmBackend, directory: &Path) -> LlmBackend {
-    match backend {
-        LlmBackend::Cli { agent, settings } => {
-            LlmBackend::cli(agent, settings.with_working_directory(directory))
-        }
-        LlmBackend::Http => LlmBackend::Http,
-    }
+    backend.configured(|settings| settings.with_working_directory(directory))
 }
 
 /// `backend` with a coding agent told to think at a chat's `effort`. An
 /// endpoint takes its effort in each request's body instead.
 pub fn effort(backend: LlmBackend, effort: ReasoningEffort) -> LlmBackend {
-    match backend {
-        LlmBackend::Cli { agent, settings } => LlmBackend::cli(agent, settings.with_effort(effort)),
-        LlmBackend::Http => LlmBackend::Http,
-    }
+    backend.configured(|settings| settings.with_effort(effort))
 }
 
-/// `settings` with the variables `agent` always runs with and, for codex, the
-/// sandbox the instance allows its tools.
+/// `settings` with, for codex, the sandbox the instance allows its tools.
 fn prepared(config: &Config, agent: AgentKind, settings: CliSettings) -> CliSettings {
-    let settings = agent
-        .defaults()
-        .iter()
-        .fold(settings, |settings, (name, value)| {
-            settings.with_variable(*name, *value)
-        });
     match agent {
         AgentKind::Codex => settings.with_sandbox(config.agents.codex_sandbox),
-        AgentKind::Claude => settings,
+        _ => settings,
     }
 }
 
@@ -410,30 +396,37 @@ fn overridden(config: &Config, agent: AgentKind) -> Option<PathBuf> {
 
 /// `settings` with `agent` pointed at `home` for its settings and sign-in.
 fn homed(settings: CliSettings, agent: AgentKind, home: &Path) -> Result<CliSettings, Error> {
+    let variable = home::variable(agent).ok_or_else(|| Error::Home {
+        agent,
+        message: format!("the {agent} CLI names no directory to keep its state in"),
+    })?;
     let directory = home.to_str().ok_or_else(|| Error::Home {
         agent,
         message: format!("{} is not valid UTF-8", home.display()),
     })?;
-    Ok(settings.with_variable(agent.home(), directory))
+    Ok(settings.with_variable(variable, directory))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_agent_cli::CodexSandbox;
+    use abnegate_agent_cli::login::claude::Tokens;
+    use abnegate_agent_cli::{
+        CREDITS_REQUIRED, CREDITS_UNCONFIRMED, LONG_CONTEXT_CREDITS_REQUIRED,
+    };
     use abnegate_secret::{SecretValue, redact};
     use chrono::{TimeDelta, Utc};
     use sqlx::PgPool;
     use tempfile::TempDir;
     use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
-    use zone_core::llm::CodexSandbox;
-    use zone_core::llm::provider::{UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT};
 
-    use crate::config::{AgentConfig, ModelBackend};
+    use crate::config::{AgentConfig, GRANTED_SANDBOXES, ModelBackend};
     use crate::db::agent_logins::{self, Insert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, workspaces};
     use crate::services::endpoint::testing::settings;
-    use crate::services::login::claude::Tokens;
+    use crate::services::login::claude::Sealed;
     use crate::services::route::Route;
     use crate::workers::auto_project::review::model::Venue;
 
@@ -524,14 +517,14 @@ mod tests {
 
         /// A Claude login on `access`, beside any the organization has.
         async fn add_claude(&self, state: &AppState, access: &str, expires_in: TimeDelta) -> Uuid {
-            let tokens = Tokens {
-                access: SecretValue::new(access),
-                refresh: None,
-                expires_at: Utc::now() + expires_in,
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            };
+            let tokens = Tokens::new(
+                SecretValue::new(access),
+                None,
+                Utc::now() + expires_in,
+                None,
+                "user:inference",
+                None,
+            );
             let sealed = tokens.seal(state.master_key()).expect("tokens to seal");
             self.store(AgentKind::Claude, Some(&sealed)).await
         }
@@ -617,21 +610,19 @@ mod tests {
         }
     }
 
-    fn cli(resolved: Result<LlmBackend, Error>) -> (AgentKind, CliSettings) {
+    fn cli(resolved: Result<LlmBackend, Error>) -> (AgentKind, CliSettings, SignIn) {
         match resolved {
-            Ok(LlmBackend::Cli { agent, settings }) => (agent, *settings),
+            Ok(LlmBackend::Cli {
+                agent,
+                settings,
+                sign_in,
+            }) => (agent, *settings, sign_in),
             other => panic!("expected a coding agent CLI, got {other:?}"),
         }
     }
 
     fn variable<'a>(settings: &'a CliSettings, name: &str) -> Option<&'a str> {
         settings.variables.get(name).map(String::as_str)
-    }
-
-    fn assert_defaults(agent: AgentKind, settings: &CliSettings) {
-        for (name, value) in agent.defaults() {
-            assert_eq!(variable(settings, name), Some(*value), "{name}");
-        }
     }
 
     fn assert_private(directory: &Path) {
@@ -683,7 +674,7 @@ mod tests {
         let resolved = fixture.resolve(&state).await;
         fixture.remove().await;
 
-        let (agent, settings) = cli(resolved);
+        let (agent, settings, sign_in) = cli(resolved);
         assert_eq!(agent, AgentKind::Claude);
         assert_eq!(settings.executable, Some(executable));
         assert_eq!(
@@ -695,12 +686,11 @@ mod tests {
             "the instance's own agent runs under the host's sign-in, not an organization's"
         );
         assert_eq!(
-            settings.sign_in,
+            sign_in,
             SignIn::Instance,
             "only the operator can renew the instance's own sign-in"
         );
         assert_eq!(variable(&settings, CLAUDE_CONFIG_DIR), None);
-        assert_defaults(AgentKind::Claude, &settings);
     }
 
     #[tokio::test]
@@ -719,9 +709,9 @@ mod tests {
         let resolved = fixture.resolve(&state).await;
         fixture.remove().await;
 
-        let (agent, settings) = cli(resolved);
+        let (agent, settings, _) = cli(resolved);
         assert_eq!(agent, AgentKind::Codex);
-        assert_eq!(settings.sandbox, CodexSandbox::DangerFullAccess);
+        assert_eq!(settings.sandbox, Some(CodexSandbox::DangerFullAccess));
         assert_eq!(settings.working_directory, None);
     }
 
@@ -734,17 +724,16 @@ mod tests {
         let resolved = fixture.resolve(&state).await;
         fixture.remove().await;
 
-        let (agent, settings) = cli(resolved);
+        let (agent, settings, sign_in) = cli(resolved);
         assert_eq!(agent, AgentKind::Claude);
         assert_eq!(settings.credential.variable(), Some(CLAUDE_TOKEN));
         assert_eq!(settings.credential.expose(), Some(ACCESS));
-        assert_eq!(settings.sign_in, SignIn::Organization);
+        assert_eq!(sign_in, SignIn::Organization);
         let home = fixture.login_home(AgentKind::Claude, login);
         assert_eq!(
             variable(&settings, CLAUDE_CONFIG_DIR).map(PathBuf::from),
             Some(home.clone())
         );
-        assert_defaults(AgentKind::Claude, &settings);
         let work = fixture.root(AgentKind::Claude).join("work");
         assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
         assert_private(&home);
@@ -764,10 +753,10 @@ mod tests {
         let resolved = fixture.resolve(&state).await;
         fixture.remove().await;
 
-        let (agent, settings) = cli(resolved);
+        let (agent, settings, sign_in) = cli(resolved);
         assert_eq!(agent, AgentKind::Codex);
         assert!(matches!(settings.credential, Credential::Inherited));
-        assert_eq!(settings.sign_in, SignIn::Organization);
+        assert_eq!(sign_in, SignIn::Organization);
         let home = fixture.login_home(AgentKind::Codex, login);
         assert_eq!(
             variable(&settings, CODEX_HOME).map(PathBuf::from),
@@ -778,7 +767,7 @@ mod tests {
         let work = fixture.root(AgentKind::Codex).join("work");
         assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
         assert_private(&work);
-        assert_eq!(settings.sandbox, CodexSandbox::DangerFullAccess);
+        assert_eq!(settings.sandbox, Some(CodexSandbox::DangerFullAccess));
     }
 
     #[tokio::test]
@@ -791,11 +780,11 @@ mod tests {
         let resolved = fixture.resolve(&state).await;
         fixture.remove().await;
 
-        let (agent, settings) = cli(resolved);
+        let (agent, settings, sign_in) = cli(resolved);
         assert_eq!(agent, AgentKind::Claude);
         assert!(matches!(settings.credential, Credential::Inherited));
         assert_eq!(
-            settings.sign_in,
+            sign_in,
             SignIn::Host,
             "the host's account pays for the turn until the organization signs in"
         );
@@ -809,7 +798,6 @@ mod tests {
         let work = fixture.root(AgentKind::Claude).join("work");
         assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
         assert_private(&work);
-        assert_defaults(AgentKind::Claude, &settings);
     }
 
     #[tokio::test]
@@ -976,7 +964,7 @@ mod tests {
         for (login, resolved) in resolved {
             let identity = resolved.login.expect("a login's own identity");
             assert_eq!(identity.id, login);
-            let (agent, settings) = cli(Ok(resolved.backend));
+            let (agent, settings, sign_in) = cli(Ok(resolved.backend));
             assert_eq!(identity.agent, agent);
             assert_eq!(
                 identity.label,
@@ -986,12 +974,12 @@ mod tests {
             let work = fixture.root(agent).join("work");
             assert_eq!(settings.working_directory.as_deref(), Some(work.as_path()));
             assert_eq!(
-                variable(&settings, agent.home()).map(PathBuf::from),
+                variable(&settings, home::variable(agent).expect("a home variable"))
+                    .map(PathBuf::from),
                 Some(fixture.login_home(agent, login)),
                 "each login keeps its own home"
             );
-            assert_eq!(settings.sign_in, SignIn::Organization);
-            assert_defaults(agent, &settings);
+            assert_eq!(sign_in, SignIn::Organization);
         }
     }
 
@@ -1002,10 +990,7 @@ mod tests {
         let state = fixture.state(config.clone());
         let claude = fixture.sign_in_claude(&state, TimeDelta::hours(8)).await;
         let codex = fixture.sign_in_codex().await;
-        let session = Session {
-            id: "resumed-session".to_string(),
-            resume: true,
-        };
+        let session = Session::resumed("resumed-session");
 
         let mut resolved = Vec::new();
         for login in [claude, codex] {
@@ -1024,13 +1009,13 @@ mod tests {
         fixture.remove().await;
 
         for (resumed, fresh) in resolved {
-            let (agent, settings) = cli(Ok(resumed.backend));
+            let (agent, settings, _) = cli(Ok(resumed.backend));
             assert_eq!(
                 settings.session.as_ref(),
                 Some(&session),
                 "{agent} resumes the session it was handed"
             );
-            let (agent, settings) = cli(Ok(fresh.backend));
+            let (agent, settings, _) = cli(Ok(fresh.backend));
             assert_eq!(settings.session, None, "{agent} starts a fresh session");
         }
     }
@@ -1053,10 +1038,7 @@ mod tests {
             entry: 3,
             prompt: None,
         };
-        let kept = Session {
-            id: previous.id.clone(),
-            resume: true,
-        };
+        let kept = Session::resumed(previous.id.clone());
         let on_first = fixture.chosen(&state, first).await;
         let on_second = fixture.chosen(&state, second).await;
         let on_codex = fixture.chosen(&state, codex).await;
@@ -1156,7 +1138,7 @@ mod tests {
         fixture.remove().await;
 
         assert_eq!(host.login, None);
-        assert_eq!(cli(Ok(host.backend)).1.sign_in, SignIn::Host);
+        assert_eq!(cli(Ok(host.backend)).2, SignIn::Host);
         assert_eq!(own.login.map(|identity| identity.id), Some(login));
     }
 
@@ -1197,8 +1179,8 @@ mod tests {
         );
     }
 
-    /// A CLI's failure as the chat loop reports it: zone_core redacts it, and
-    /// the loop and `LlmClient` wrap it.
+    /// A CLI's failure as the chat loop reports it: redacted, and wrapped by
+    /// the loop and `LlmClient`.
     fn reported(agent: AgentKind, failure: &str) -> String {
         format!(
             "Failed to generate response: {}",
@@ -1246,9 +1228,9 @@ mod tests {
         "Could not refresh your login because another Claude Code process is refreshing it (or exited mid-refresh) · Try again in a minute",
         "Authentication error · Try again",
         "rate limit reached (five_hour, rejected)",
-        UNFUNDED,
-        UNFUNDED_CONTEXT,
-        UNCONFIRMED,
+        CREDITS_REQUIRED,
+        LONG_CONTEXT_CREDITS_REQUIRED,
+        CREDITS_UNCONFIRMED,
         "Fable 5.1 requires usage credits. Switch to another model to continue.",
         "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
         "API Error: Usage credits required for 1M context · turn on usage credits at claude.ai/settings/usage?from=cc_cli_limit_message (they take effect in a new session)",
@@ -1299,7 +1281,7 @@ mod tests {
 
     #[test]
     fn remedy_leaves_every_other_failure_alone() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             for sign_in in [SignIn::Instance, SignIn::Organization, SignIn::Host] {
                 for failure in OTHER_FAILURES {
                     assert_eq!(
@@ -1337,12 +1319,12 @@ mod tests {
         );
     }
 
-    /// The stderr tail zone_core appends to an agent's failure is read for a
+    /// The stderr tail that follows an agent's failure is read for a
     /// renewal the agent reports nowhere else, and for nothing more: a line
     /// about some other server is not this agent's sign-in failing.
     #[test]
     fn a_sign_in_phrase_only_on_stderr_is_not_the_agents_sign_in() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let failure = reported(
                 agent,
                 &format!("stream disconnected before completion{STDERR_HEADING}{UNRELATED_STDERR}"),
@@ -1377,10 +1359,8 @@ mod tests {
 
     #[test]
     fn an_organizations_sign_in_failure_is_followed_by_its_remedy_once() {
-        let backend = LlmBackend::cli(
-            AgentKind::Claude,
-            CliSettings::default().with_sign_in(SignIn::Organization),
-        );
+        let backend = LlmBackend::cli(AgentKind::Claude, CliSettings::default())
+            .with_sign_in(SignIn::Organization);
         let failure = reported(AgentKind::Claude, CLAUDE_SIGN_IN_FAILURES[0]);
 
         let explained = remedied(&backend, failure.clone());
@@ -1403,7 +1383,7 @@ mod tests {
     /// server's environment, and no organization admin can renew either.
     #[test]
     fn the_servers_own_sign_in_failing_is_left_to_the_operator() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let backend = LlmBackend::cli(agent, CliSettings::default());
             let failure = reported(agent, "Not logged in");
 
@@ -1427,20 +1407,18 @@ mod tests {
     #[test]
     fn a_bounded_agent_runs_for_the_budget_it_is_given_and_an_endpoint_is_left_alone() {
         let budget = Duration::from_secs(3600);
-        let organizations = CliSettings::default().with_sign_in(SignIn::Organization);
+        let organizations = LlmBackend::cli(AgentKind::Codex, CliSettings::default())
+            .with_sign_in(SignIn::Organization);
 
-        let LlmBackend::Cli { settings, .. } =
-            bounded(LlmBackend::cli(AgentKind::Codex, organizations), budget)
+        let LlmBackend::Cli {
+            settings, sign_in, ..
+        } = bounded(organizations, budget)
         else {
             panic!("the agent was moved off its CLI");
         };
 
         assert_eq!(settings.timeout, budget);
-        assert_eq!(
-            settings.sign_in,
-            SignIn::Organization,
-            "only the timeout moves"
-        );
+        assert_eq!(sign_in, SignIn::Organization, "only the timeout moves");
         assert!(matches!(
             bounded(LlmBackend::Http, budget),
             LlmBackend::Http
@@ -1449,22 +1427,21 @@ mod tests {
 
     #[test]
     fn an_agent_is_told_the_chats_effort_and_an_endpoint_is_left_alone() {
-        let organizations = CliSettings::default().with_sign_in(SignIn::Organization);
+        let organizations = LlmBackend::cli(AgentKind::Claude, CliSettings::default())
+            .with_sign_in(SignIn::Organization);
 
-        let LlmBackend::Cli { agent, settings } = effort(
-            LlmBackend::cli(AgentKind::Claude, organizations),
-            ReasoningEffort::Max,
-        ) else {
+        let LlmBackend::Cli {
+            agent,
+            settings,
+            sign_in,
+        } = effort(organizations, ReasoningEffort::Max)
+        else {
             panic!("the agent was moved off its CLI");
         };
 
         assert_eq!(agent, AgentKind::Claude);
         assert_eq!(settings.effort, Some(ReasoningEffort::Max));
-        assert_eq!(
-            settings.sign_in,
-            SignIn::Organization,
-            "only the effort moves"
-        );
+        assert_eq!(sign_in, SignIn::Organization, "only the effort moves");
         assert!(matches!(
             effort(LlmBackend::Http, ReasoningEffort::Max),
             LlmBackend::Http
@@ -1495,5 +1472,272 @@ mod tests {
                 signed_out: false,
             }
         );
+    }
+
+    /// The variables `isolate()` sets on every Claude run.
+    const ISOLATION_VARIABLES: [&str; 5] = [
+        "DISABLE_AUTOUPDATER",
+        "MCP_TOOL_TIMEOUT",
+        "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT",
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+    ];
+
+    const SIGN_INS: [SignIn; 3] = [SignIn::Instance, SignIn::Organization, SignIn::Host];
+
+    /// A config whose instance default is `agent`, keeping agent state under `state`.
+    fn defaulting_to(agent: AgentKind, state: &Path, sandbox: CodexSandbox) -> Config {
+        let mut config = Config {
+            model_backend: ModelBackend::Cli {
+                agent,
+                executable: None,
+            },
+            agents: AgentConfig {
+                state: state.to_path_buf(),
+                ..crate::state::test_agents()
+            },
+            ..crate::state::test_config()
+        };
+        config.agents.codex_sandbox = sandbox;
+        config
+    }
+
+    /// One of `organization`'s logins of `agent`, resolved to `resolved`, as the router hands
+    /// it over: no database holds it.
+    fn picked(organization: Uuid, agent: AgentKind, resolved: Login) -> Chosen {
+        let now = Utc::now();
+        Chosen {
+            login: agent_logins::AgentLoginRow {
+                id: Uuid::new_v4(),
+                organization_id: organization,
+                agent: agent.as_str().to_string(),
+                account: None,
+                credential: None,
+                label: None,
+                expires_at: None,
+                windows: None,
+                headroom: None,
+                usage_fetched_at: None,
+                exhausted_until: None,
+                last_used_at: None,
+                created_at: now,
+                updated_at: now,
+            },
+            agent,
+            resolved,
+            snapshot: None,
+        }
+    }
+
+    fn resolved_login(agent: AgentKind, codex_home: &Path) -> Login {
+        match agent {
+            AgentKind::Codex => Login::Codex {
+                home: codex_home.to_path_buf(),
+            },
+            _ => Login::Claude {
+                token: SecretValue::new(ACCESS),
+            },
+        }
+    }
+
+    /// Every backend Zone builds to run `agent` in production, by how it was reached: the
+    /// instance's default, the host's sign-in standing in for an organization, and an
+    /// organization's own login.
+    fn production_backends(
+        agent: AgentKind,
+        sandbox: CodexSandbox,
+    ) -> Vec<(&'static str, LlmBackend)> {
+        let state = TempDir::new().expect("an agent state root");
+        let codex_home = TempDir::new().expect("a codex login's home");
+        let config = defaulting_to(agent, state.path(), sandbox);
+        let organization = Uuid::new_v4();
+        let chosen = picked(
+            organization,
+            agent,
+            resolved_login(agent, codex_home.path()),
+        );
+        vec![
+            ("the instance's default", instance(&config)),
+            (
+                "the host's sign-in",
+                host(&config, organization, agent)
+                    .expect("the host's backend")
+                    .backend,
+            ),
+            (
+                "an organization's login",
+                on_login(&config, organization, &chosen, None)
+                    .expect("the login's backend")
+                    .backend,
+            ),
+        ]
+    }
+
+    /// Every backend Zone runs an agent on allows thirty minutes, not the crate's default
+    /// five, so a task or a review that never bounds its backend is not cut short.
+    #[test]
+    fn production_agent_backends_allow_thirty_minutes() {
+        for &agent in AgentKind::ALL {
+            for (reached, backend) in production_backends(agent, CodexSandbox::WorkspaceWrite) {
+                let (_, settings, _) = cli(Ok(backend));
+                assert_eq!(
+                    settings.timeout,
+                    cli::TURN_TIMEOUT,
+                    "{agent} on {reached} kept the crate's {:?}",
+                    abnegate_agent_cli::DEFAULT_TIMEOUT
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_agent_is_stopped_ahead_of_a_deadline_with_time_to_keep_its_answer() {
+        for (remaining, expected) in [
+            (
+                Duration::from_secs(30 * 60),
+                Duration::from_secs(30 * 60 - 30),
+            ),
+            (Duration::from_secs(20), Duration::from_secs(15)),
+            (Duration::ZERO, Duration::ZERO),
+        ] {
+            let (_, settings, _) = cli(Ok(ahead_of(
+                LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
+                remaining,
+            )));
+
+            assert_eq!(settings.timeout, expected, "{remaining:?}");
+        }
+        assert!(matches!(
+            ahead_of(LlmBackend::Http, Duration::from_secs(60)),
+            LlmBackend::Http
+        ));
+    }
+
+    #[test]
+    fn production_claude_backends_wait_for_their_background_work() {
+        for (reached, backend) in
+            production_backends(AgentKind::Claude, CodexSandbox::WorkspaceWrite)
+        {
+            let (_, settings, _) = cli(Ok(backend));
+            assert!(
+                settings.await_background,
+                "claude on {reached} is stopped while its subagents still run"
+            );
+        }
+    }
+
+    /// Claude's isolation variables are not folded into a backend: `confined` isolates every
+    /// run and sets them there, beside the MCP timeouts only a toolset asks for.
+    #[test]
+    fn prepared_settings_carry_no_claude_defaults() {
+        for &agent in AgentKind::ALL {
+            for (reached, backend) in production_backends(agent, CodexSandbox::WorkspaceWrite) {
+                let (agent, settings, _) = cli(Ok(backend));
+                for name in ISOLATION_VARIABLES {
+                    assert_eq!(
+                        variable(&settings, name),
+                        None,
+                        "{agent} on {reached} carries {name}"
+                    );
+                }
+                let run = cli::confined(
+                    agent,
+                    settings,
+                    None,
+                    zone_core::llm::BuiltinTools::Withheld,
+                );
+                assert!(run.isolated, "{agent} on {reached} runs unisolated");
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_codex_settings_name_the_configured_sandbox() {
+        for sandbox in GRANTED_SANDBOXES {
+            for (reached, backend) in production_backends(AgentKind::Codex, sandbox) {
+                assert_eq!(
+                    cli(Ok(backend)).1.sandbox,
+                    Some(sandbox),
+                    "codex on {reached}"
+                );
+            }
+            for (reached, backend) in production_backends(AgentKind::Claude, sandbox) {
+                assert_eq!(
+                    cli(Ok(backend)).1.sandbox,
+                    None,
+                    "claude on {reached} names no sandbox"
+                );
+            }
+        }
+    }
+
+    /// A run withholds the host's configuration variables, so a login's home reaches its agent
+    /// only as a variable Zone sets, never as a name passed through from the host.
+    #[test]
+    fn an_organization_login_names_its_home_through_a_variable() {
+        for &agent in AgentKind::ALL {
+            let state = TempDir::new().expect("an agent state root");
+            let codex_home = TempDir::new().expect("a codex login's home");
+            let config = defaulting_to(agent, state.path(), CodexSandbox::WorkspaceWrite);
+            let organization = Uuid::new_v4();
+            let chosen = picked(
+                organization,
+                agent,
+                resolved_login(agent, codex_home.path()),
+            );
+            let home = match agent {
+                AgentKind::Codex => codex_home.path().to_path_buf(),
+                _ => config
+                    .agents
+                    .login_home(organization, agent, chosen.login.id),
+            };
+            let name = home::variable(agent).expect("a home variable");
+
+            let (_, settings, _) = cli(Ok(on_login(&config, organization, &chosen, None)
+                .expect("the login's backend")
+                .backend));
+            let run = cli::confined(
+                agent,
+                settings,
+                None,
+                zone_core::llm::BuiltinTools::Withheld,
+            );
+
+            assert!(
+                run.withhold_host_credentials,
+                "{agent} inherits the host's sign-in"
+            );
+            assert_eq!(
+                variable(&run, name).map(PathBuf::from),
+                Some(home),
+                "{agent} is not pointed at its login's home"
+            );
+            assert!(
+                !run.allowed.contains(name),
+                "{agent} takes {name} from the host"
+            );
+        }
+    }
+
+    /// `bounded`, `in_directory` and `effort` reconfigure a backend's agent and leave whose
+    /// sign-in it runs under alone, so a failed sign-in is still sent to whoever can renew it.
+    #[test]
+    fn bounding_a_backend_keeps_its_sign_in() {
+        let directory = TempDir::new().expect("a chat's directory");
+        let budget = Duration::from_secs(60);
+        for &agent in AgentKind::ALL {
+            for sign_in in SIGN_INS {
+                let backend = || LlmBackend::cli(agent, cli::settings()).with_sign_in(sign_in);
+                for (change, configured) in [
+                    ("bounded", bounded(backend(), budget)),
+                    ("in_directory", in_directory(backend(), directory.path())),
+                    ("effort", effort(backend(), ReasoningEffort::High)),
+                ] {
+                    let (kept, _, kept_sign_in) = cli(Ok(configured));
+                    assert_eq!(kept, agent, "{change} moved the backend off {agent}");
+                    assert_eq!(kept_sign_in, sign_in, "{change} dropped {agent}'s sign-in");
+                }
+            }
+        }
     }
 }

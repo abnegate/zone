@@ -135,7 +135,7 @@ fn escape(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use zone_core::llm::AgentKind;
+    use abnegate_agent_cli::AgentKind;
 
     use super::*;
     use crate::services::login::error::UNSAVED;

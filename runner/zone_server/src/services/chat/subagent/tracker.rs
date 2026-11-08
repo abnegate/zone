@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
+use abnegate_agent_cli::Subagent;
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
-use zone_core::llm::Subagent;
 
 use super::Announcer;
 use super::keeper::Keeper;
@@ -58,10 +58,10 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use abnegate_agent_cli::{StepStatus, SubagentStatus, SubagentStep};
     use sqlx::PgPool;
     use tokio::sync::Notify;
     use tokio::sync::mpsc::{self, UnboundedReceiver};
-    use zone_core::llm::{StepStatus, SubagentStatus, SubagentStep};
 
     use super::*;
     use crate::db::chat_subagents::{self, SubagentChange};
@@ -239,26 +239,15 @@ mod tests {
     }
 
     fn step(id: &str, status: StepStatus) -> SubagentStep {
-        SubagentStep {
-            id: id.to_string(),
-            name: "Bash".to_string(),
-            subject: Some("cargo test".to_string()),
-            status,
-        }
+        SubagentStep::new(id, "Bash", status).with_subject("cargo test")
     }
 
     fn stepped(id: &str, step: SubagentStep) -> Subagent {
-        Subagent {
-            step: Some(step),
-            ..Subagent::new(id)
-        }
+        Subagent::new(id).with_step(step)
     }
 
     fn finished(id: &str) -> Subagent {
-        Subagent {
-            status: Some(SubagentStatus::Completed),
-            ..Subagent::new(id)
-        }
+        Subagent::new(id).with_status(SubagentStatus::Completed)
     }
 
     #[tokio::test]
@@ -266,30 +255,27 @@ mod tests {
         let turn = Turn::new().await;
         let (tracker, mut announced) = turn.track();
 
-        tracker.track(&Subagent {
-            description: Some("Ask for a review".to_string()),
-            kind: Some("general-purpose".to_string()),
-            background: Some(true),
-            step: Some(step("toolu_01Step", StepStatus::Running)),
-            ..Subagent::new("toolu_01Agent")
-        });
+        tracker.track(
+            &Subagent::new("toolu_01Agent")
+                .with_description("Ask for a review")
+                .with_kind("general-purpose")
+                .with_background(true)
+                .with_step(step("toolu_01Step", StepStatus::Running)),
+        );
         let first = next(&mut announced).await;
         tracker.track(&stepped(
             "toolu_01Agent",
             step("toolu_01Step", StepStatus::Succeeded),
         ));
         let second = next(&mut announced).await;
-        tracker.track(&Subagent {
-            tool_uses: Some(2),
-            last_tool: Some("Read".to_string()),
-            step: Some(step("toolu_02Step", StepStatus::Running)),
-            ..Subagent::new("toolu_01Agent")
-        });
+        tracker.track(
+            &Subagent::new("toolu_01Agent")
+                .with_tool_uses(2)
+                .with_last_tool("Read")
+                .with_step(step("toolu_02Step", StepStatus::Running)),
+        );
         let third = next(&mut announced).await;
-        tracker.track(&Subagent {
-            summary: Some("Looks good".to_string()),
-            ..finished("toolu_01Agent")
-        });
+        tracker.track(&finished("toolu_01Agent").with_summary("Looks good"));
         let (last, settled) = next(&mut announced).await;
         drop(tracker);
 
@@ -369,6 +355,35 @@ mod tests {
         assert_eq!(subagent.step_count, 20);
         assert_eq!(subagent.status, SubagentStatus::Completed);
         assert_eq!(turn.steps(subagent).await, steps);
+    }
+
+    #[tokio::test]
+    async fn a_subagents_duration_is_stored_in_milliseconds() {
+        const RUN: Duration = Duration::from_micros(61_000_999);
+        const STORED: i64 = 61_000;
+        let turn = Turn::new().await;
+        let (tracker, mut announced) = turn.track();
+
+        tracker.track(&Subagent::new("toolu_01Agent").with_duration(RUN));
+        let (running, _) = next(&mut announced).await;
+        tracker.track(&finished("toolu_01Agent").with_duration(Duration::MAX));
+        let (ended, _) = next(&mut announced).await;
+        drop(tracker);
+
+        assert_eq!(running.duration_ms, Some(STORED));
+        assert_eq!(
+            ended.duration_ms,
+            Some(i64::MAX),
+            "a duration past what the column holds is stored as its most"
+        );
+        let stored = chat_subagents::list(turn.state.db(), turn.chat_id)
+            .await
+            .expect("the chat's subagents");
+        assert_eq!(
+            stored.iter().map(|row| row.duration_ms).collect::<Vec<_>>(),
+            [Some(i64::MAX)]
+        );
+        assert_eq!(rest(announced).await, []);
     }
 
     #[tokio::test]
@@ -569,10 +584,7 @@ mod tests {
         let turn = Turn::new().await;
         let (tracker, announced, hold, _) = turn.failing(1);
 
-        tracker.track(&Subagent {
-            summary: Some("Looks good".to_string()),
-            ..finished("toolu_01Agent")
-        });
+        tracker.track(&finished("toolu_01Agent").with_summary("Looks good"));
         drop(tracker);
         hold.notify_one();
 
@@ -591,11 +603,11 @@ mod tests {
     async fn updates_kept_from_the_database_go_ahead_of_the_next_burst() {
         let turn = Turn::new().await;
         let (tracker, mut announced, hold, outage) = turn.failing(1);
-        tracker.track(&Subagent {
-            description: Some("Survey".to_string()),
-            step: Some(step("toolu_first", StepStatus::Running)),
-            ..Subagent::new("toolu_01Agent")
-        });
+        tracker.track(
+            &Subagent::new("toolu_01Agent")
+                .with_description("Survey")
+                .with_step(step("toolu_first", StepStatus::Running)),
+        );
         hold.notify_one();
         tokio::time::timeout(PATIENCE, async {
             while outage.load(Ordering::SeqCst) > 0 {
@@ -641,10 +653,7 @@ mod tests {
         let (started, _) = next(&mut announced).await;
 
         outage.store(failures, Ordering::SeqCst);
-        tracker.track(&Subagent {
-            summary: Some("Looks good".to_string()),
-            ..finished("toolu_01Agent")
-        });
+        tracker.track(&finished("toolu_01Agent").with_summary("Looks good"));
         drop(tracker);
 
         let announcements = rest(announced).await;
@@ -726,14 +735,8 @@ mod tests {
             .await;
         let (tracker, announced, hold, outage) = turn.failing(4);
 
-        tracker.track(&Subagent {
-            summary: Some("Looks good".to_string()),
-            ..finished("toolu_kept")
-        });
-        tracker.track(&Subagent {
-            summary: Some("Nul\0byte".to_string()),
-            ..finished("toolu_refused")
-        });
+        tracker.track(&finished("toolu_kept").with_summary("Looks good"));
+        tracker.track(&finished("toolu_refused").with_summary("Nul\0byte"));
         drop(tracker);
         hold.notify_one();
 

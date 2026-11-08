@@ -1,5 +1,5 @@
+use abnegate_agent_cli::AgentKind;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoginIdentity {

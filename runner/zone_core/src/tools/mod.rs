@@ -59,6 +59,26 @@ pub const MAX_TOOL_MESSAGE_CHARS: usize = MAX_TOOL_OUTPUT_CHARS + TOOL_FRAMING_C
 /// model reads is longer than the cap it asked for.
 pub(crate) const ERROR_PREFIX: &str = "Error: ";
 
+/// What a call the reader did not allow is told, wherever it was asked. The
+/// console reads a denial back from these words once the approval is gone.
+pub const DENIED: &str = "The user denied this tool call.";
+
+/// What a call is told when nobody answered its approval in time. Not the
+/// reader's answer, so it reads apart from [`DENIED`].
+pub const APPROVAL_TIMED_OUT: &str =
+    "Nobody answered the approval request in time, so this tool call did not run.";
+
+/// What a call is told when its turn stopped while it waited for approval.
+pub const APPROVAL_CANCELLED: &str =
+    "The turn stopped before this tool call was approved, so it did not run.";
+
+/// Whether a call's outcome line is one of the fixed refusals above, as a
+/// permission card states it or as a failed call's error.
+pub fn is_refusal(detail: &str) -> bool {
+    let bare = detail.strip_prefix(ERROR_PREFIX).unwrap_or(detail);
+    [DENIED, APPROVAL_TIMED_OUT, APPROVAL_CANCELLED].contains(&bare)
+}
+
 /// Longest a rendered approval preview may run.
 ///
 /// The reader is deciding, not reading. A preview past a screenful is one
@@ -548,6 +568,7 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
     use std::future::Future;
     use std::io;
     use std::os::unix::fs::PermissionsExt;
@@ -555,7 +576,7 @@ pub(crate) mod test_support {
     use tempfile::TempDir;
     use tracing_subscriber::fmt::MakeWriter;
 
-    use crate::environment;
+    use crate::llm::cli;
 
     /// What a server's environment holds that no child of a tool may be
     /// handed. Every value says `notreal`, so a leak shows under any name.
@@ -628,7 +649,7 @@ pub(crate) mod test_support {
                     .args(["--exact", test, "--nocapture"])
                     .env(COPY, "1")
                     .envs(SERVER_SECRETS)
-                    .env(environment::PASSTHROUGH, PASSED_THROUGH.0)
+                    .env(cli::PASSTHROUGH, PASSED_THROUGH.0)
                     .env(PASSED_THROUGH.0, PASSED_THROUGH.1)
                     .env("PATH", path)
                     .output()
@@ -657,7 +678,12 @@ pub(crate) mod test_support {
                 .filter_map(|entry| entry.split_once('='))
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect();
-            let allowed = environment::filter(variables.clone(), PASSED_THROUGH.0);
+            let inheritable = cli::inheritable(&[PASSED_THROUGH.0.to_string()]);
+            let allowed: BTreeMap<&str, &str> = variables
+                .iter()
+                .filter(|(name, _)| inheritable.contains(name))
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
             let handed: Vec<&str> = variables
                 .iter()
                 .map(|(name, _)| name.as_str())
@@ -675,7 +701,7 @@ pub(crate) mod test_support {
                 self.program
             );
             assert_eq!(
-                allowed.get(PASSED_THROUGH.0).map(String::as_str),
+                allowed.get(PASSED_THROUGH.0).copied(),
                 Some(PASSED_THROUGH.1),
                 "the operator's passthrough did not reach {}",
                 self.program

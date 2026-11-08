@@ -6,6 +6,7 @@
 //! streams every completion and yields events instead. The websocket handler
 //! consumes the result exactly like the plain completion stream it replaces.
 
+use abnegate_agent_cli::CUT_SHORT;
 use abnegate_llm::{
     Error, Limit, Message as LlmMessage, RequestOptions, Role as LlmRole, StreamToolCall,
     ToolCall as LlmToolCall, Usage, Window,
@@ -16,7 +17,7 @@ use std::time::Instant;
 use zone_core::llm::{LlmBackend, LlmClient};
 
 use super::Citation;
-use super::approval::ApprovalPolicy;
+use super::approval::{ApprovalPolicy, Refusal};
 use super::citations;
 use super::plan;
 use super::question::{self, Question};
@@ -28,7 +29,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
-use zone_core::tools::{Session, is_vision_url};
+use zone_core::tools::{Session, content_lines, is_vision_url};
 
 /// What the calls queued behind a turn-ending question are told.
 ///
@@ -144,6 +145,7 @@ pub enum AgentEvent {
         duration_ms: u64,
         citations: Vec<Citation>,
         receipt: Option<ActionReceipt>,
+        refusal: Option<Refusal>,
     },
     /// The model produced an image. Carries the raw URL from the provider;
     /// the consumer decides how to store it and whether it is a duplicate.
@@ -191,6 +193,11 @@ pub enum AgentEvent {
     Limited(Limit),
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
+    /// A coding agent was stopped before it finished, by its timeout or by
+    /// exiting mid-way through a later turn. The answer it gave before that is
+    /// already streamed and kept, so this is the turn's last event, and it is
+    /// no failure.
+    CutShort,
 }
 
 /// Everything one agent turn needs.
@@ -353,6 +360,7 @@ pub fn run_with_context(
             let mut thinking_blocks = Vec::new();
             let mut pending = ToolCallAccumulator::default();
             let mut images = Vec::new();
+            let mut cut_short = false;
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
@@ -373,6 +381,9 @@ pub fn run_with_context(
                 let Some(choice) = chunk.choices.first() else {
                     continue;
                 };
+                if let Some(reason) = &choice.finish_reason {
+                    cut_short = reason == CUT_SHORT;
+                }
                 if let Some(content) = &choice.delta.content {
                     text.push_str(content);
                     if (!agentic || pending.is_empty() && !might_be_tool_text(&text))
@@ -411,7 +422,8 @@ pub fn run_with_context(
                 if let Some(deltas) = &choice.delta.tool_calls {
                     pending.merge(deltas);
                 }
-                // A usage-only SSE frame may follow finish_reason; drain through [DONE].
+                // A usage-only SSE frame, or the window a coding agent reports once it has
+                // exited, may follow finish_reason; drain through the stream's end.
             }
             let mut requested = pending.finish();
             let parsed = if agentic && !text.is_empty() {
@@ -459,6 +471,9 @@ pub fn run_with_context(
                 let id = entry.id.clone();
                 yield AgentEvent::Canonical(entry);
                 yield AgentEvent::Consumed(vec![id]);
+                if cut_short {
+                    yield AgentEvent::CutShort;
+                }
                 return;
             }
             if finalizing {
@@ -542,7 +557,7 @@ pub fn run_with_context(
                     };
                 }
                 let call = &batch[0];
-                let denied = if approval.confirms(tier) {
+                let refusal = if approval.confirms(tier) {
                     // Register before the request goes out: a client that
                     // answers immediately would otherwise be told the call
                     // is not waiting for approval.
@@ -554,9 +569,9 @@ pub fn run_with_context(
                         reason: super::reason(&call.function.arguments),
                         preview: tools.effect(&call.function.name, &call.function.arguments),
                     };
-                    !approval.awaited_decision(&call.id, pending).await
+                    approval.awaited_decision(&call.id, pending).await.refusal()
                 } else {
-                    false
+                    None
                 };
                 // A fresh acknowledgement boundary after potentially long approval waits.
                 yield AgentEvent::Context(context.usage(&model, definitions));
@@ -573,16 +588,23 @@ pub fn run_with_context(
                     async move {
                         let signature = signature(&call);
                         let started = Instant::now();
-                        let result = if denied {
-                            zone_core::tools::ToolResult::error("The user denied this tool call.")
-                        } else {
-                            tools
-                                .execute(&call.function.name, &call.function.arguments)
-                                .await
+                        let result = match refusal {
+                            Some(refusal) => zone_core::tools::ToolResult::error(refusal.message()),
+                            None => {
+                                tools
+                                    .execute(&call.function.name, &call.function.arguments)
+                                    .await
+                            }
                         };
                         (
                             signature,
-                            finish_tool(tools, call, result, started.elapsed().as_millis() as u64)
+                            finish_tool(
+                                tools,
+                                call,
+                                result,
+                                started.elapsed().as_millis() as u64,
+                                refusal,
+                            )
                                 .await,
                         )
                     }
@@ -635,6 +657,7 @@ pub fn run_with_context(
                         duration_ms: finished.duration_ms,
                         citations: finished.citations,
                         receipt: finished.receipt,
+                        refusal: finished.refusal,
                     };
                     if let Some((tool_call_id, park)) = park {
                         let queued = park.queued();
@@ -796,6 +819,7 @@ struct FinishedTool {
     receipt: Option<ActionReceipt>,
     images: Vec<String>,
     output: String,
+    refusal: Option<Refusal>,
 }
 
 async fn finish_tool(
@@ -803,6 +827,7 @@ async fn finish_tool(
     call: LlmToolCall,
     result: zone_core::tools::ToolResult,
     duration_ms: u64,
+    refusal: Option<Refusal>,
 ) -> FinishedTool {
     let receipt = tools
         .write_receipt(
@@ -813,6 +838,7 @@ async fn finish_tool(
         )
         .await;
     let output = result.to_message();
+    let detail = summarize(&call.function.name, &result, &output);
     let citations = if result.success {
         citations::from_tool(&call.function.name, &output)
     } else {
@@ -822,12 +848,13 @@ async fn finish_tool(
         id: call.id,
         name: call.function.name,
         success: result.success,
-        detail: summarize(&result, &output),
+        detail,
         duration_ms,
         citations,
         receipt,
         images: result.images,
         output,
+        refusal,
     }
 }
 
@@ -887,19 +914,18 @@ pub(crate) fn call_signature(name: &str, arguments: &str) -> (String, String) {
 const DETAIL_CHARS: usize = 240;
 
 /// One line describing how a tool call went, for the UI rather than the model.
-fn summarize(result: &zone_core::tools::ToolResult, output: &str) -> String {
+fn summarize(tool: &str, result: &zone_core::tools::ToolResult, output: &str) -> String {
     if !result.success {
         return output.lines().next().unwrap_or("Failed").to_string();
     }
-    let line_count = output.lines().filter(|l| !l.trim().is_empty()).count();
-    let first = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let summary = match line_count {
-        0 => "No output".to_string(),
-        1 => first.to_string(),
-        n => format!("{} ({} lines)", first, n),
+    let lines: Vec<&str> = content_lines(tool, output).collect();
+    let summary = match lines.as_slice() {
+        [] => "No output".to_string(),
+        [only] => only.to_string(),
+        [first, ..] => format!("{first} ({} lines)", lines.len()),
     };
     match summary.char_indices().nth(DETAIL_CHARS) {
-        Some((byte_idx, _)) => format!("{}…", &summary[..byte_idx]),
+        Some((cut, _)) => format!("{}…", &summary[..cut]),
         None => summary,
     }
 }
@@ -1581,7 +1607,7 @@ mod tests {
         let result = ToolResult::error("The knowledge base search failed.");
         let output = result.to_message();
         assert_eq!(
-            summarize(&result, &output),
+            summarize("search_knowledge", &result, &output),
             "Error: The knowledge base search failed."
         );
     }
@@ -1590,14 +1616,51 @@ mod tests {
     fn summarize_counts_multi_line_output() {
         let result = ToolResult::success("first hit\nsecond hit\nthird hit");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "first hit (3 lines)");
+        assert_eq!(
+            summarize("search_knowledge", &result, &output),
+            "first hit (3 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_shows_a_command_output_rather_than_its_stream_label() {
+        let result = ToolResult::success("stdout:\nhello");
+        let output = result.to_message();
+        assert_eq!(summarize("run_shell", &result, &output), "hello");
+
+        let result = ToolResult::success("stdout:\nfirst\nsecond\n\nstderr:\nwarning");
+        let output = result.to_message();
+        assert_eq!(
+            summarize("run_command", &result, &output),
+            "first (3 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_keeps_a_stream_label_another_tool_returned() {
+        let result = ToolResult::success("stdout:\nreal");
+        let output = result.to_message();
+        assert_eq!(
+            summarize("read_file", &result, &output),
+            "stdout: (2 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_shows_no_bare_label_when_a_stream_held_only_whitespace() {
+        let result = ToolResult::success("stdout:\n\n");
+        let output = result.to_message();
+        assert_eq!(summarize("run_shell", &result, &output), "No output");
     }
 
     #[test]
     fn summarize_passes_through_single_lines() {
         let result = ToolResult::success("This workspace has no tasks.");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "This workspace has no tasks.");
+        assert_eq!(
+            summarize("search_knowledge", &result, &output),
+            "This workspace has no tasks."
+        );
     }
 
     #[test]
@@ -1623,7 +1686,9 @@ mod tests {
         let result = ToolResult::success("x".repeat(DETAIL_CHARS * 2));
         let output = result.to_message();
         assert_eq!(
-            summarize(&result, &output).chars().count(),
+            summarize("search_knowledge", &result, &output)
+                .chars()
+                .count(),
             DETAIL_CHARS + 1
         );
     }
@@ -1869,6 +1934,7 @@ mod tests {
     /// fail every agentic turn instead of answering it.
     mod cli_backend {
         use super::*;
+        use abnegate_agent_cli::{AgentKind, CliSettings};
         use abnegate_llm::LlmConfig;
         use serde_json::{Value, json};
         use std::path::PathBuf;
@@ -1877,7 +1943,7 @@ mod tests {
         use tempfile::TempDir;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-        use zone_core::llm::{AgentKind, BuiltinTools, CliSettings, Toolset};
+        use zone_core::llm::{BuiltinTools, Toolset};
 
         const ANSWER: &str = "Ready.";
         const SESSION: &str = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f";
@@ -1949,6 +2015,35 @@ mod tests {
                 json!({"type": "system", "subtype": "init", "session_id": SESSION}),
                 json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}, "parent_tool_use_id": null}),
                 json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER, "session_id": SESSION}),
+            ]
+            .map(|line| line.to_string());
+            std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
+            let path = directory.path().join("agent");
+            let mut file = std::fs::File::create(&path).expect("the fake agent");
+            writeln!(
+                file,
+                "#!/bin/sh\ncat > /dev/null\ncat '{}'",
+                recording.display()
+            )
+            .expect("the fake agent body");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake agent to be executable");
+            path
+        }
+
+        /// A stand-in agent that answers, begins a later turn and exits while it is still
+        /// writing it, which the crate ends cut short with the answer it kept.
+        fn exiting_mid_turn(directory: &TempDir) -> PathBuf {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+
+            let recording = directory.path().join("recording.jsonl");
+            let lines = [
+                json!({"type": "system", "subtype": "init", "session_id": SESSION}),
+                json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER, "session_id": SESSION}),
+                json!({"type": "system", "subtype": "init", "session_id": SESSION}),
+                json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Still writ"}]}, "parent_tool_use_id": null}),
             ]
             .map(|line| line.to_string());
             std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
@@ -2069,6 +2164,45 @@ mod tests {
                 1,
                 "a text-only turn spent more than the round it needed"
             );
+        }
+
+        fn cut_short(events: &[AgentEvent]) -> usize {
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::CutShort))
+                .count()
+        }
+
+        #[tokio::test]
+        async fn an_answer_the_agent_was_cut_short_after_is_kept_and_said_to_be() {
+            let directory = TempDir::new().expect("a temporary directory");
+
+            let events = turn(cli(exiting_mid_turn(&directory)), ChatTools::empty()).await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert!(spoken(&events).starts_with(ANSWER), "{events:?}");
+            assert_eq!(cut_short(&events), 1, "{events:?}");
+            assert!(
+                matches!(events.last(), Some(AgentEvent::CutShort)),
+                "the answer was not kept before the turn said it was cut short: {events:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Canonical(_))),
+                "{events:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_answer_the_agent_finished_is_not_cut_short() {
+            let directory = TempDir::new().expect("a temporary directory");
+            let calls = directory.path().join("calls");
+
+            let events = turn(cli(agent(&directory, &calls)), ChatTools::empty()).await;
+
+            assert_eq!(spoken(&events), ANSWER);
+            assert_eq!(cut_short(&events), 0, "{events:?}");
         }
 
         #[tokio::test]

@@ -14,7 +14,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::LlmClient;
 use zone_core::tools::job::{self, Jobs};
-use zone_core::tools::{Session, Tool};
+use zone_core::tools::{APPROVAL_CANCELLED, DENIED, Session, Tool};
 use zone_core::variables::Variables;
 use zone_server::agent::prompt;
 use zone_server::agent::wait::{self, KIND_JOB, WAIT_FOR};
@@ -755,9 +755,46 @@ async fn denied_writes_do_not_touch_the_file() {
     )));
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::ToolCallCompleted { id, success: false, .. } if id == "deny_write"
+        AgentEvent::ToolCallCompleted { id, success: false, detail, .. }
+            if id == "deny_write" && detail.contains(DENIED)
     )));
     assert_eq!(answer(&events), "Stopped.");
+}
+
+#[tokio::test]
+async fn a_write_whose_turn_stops_while_it_waits_is_told_it_was_cancelled() {
+    let path = std::env::temp_dir().join(format!("zone-cancel-{}.txt", Uuid::new_v4()));
+    std::fs::write(&path, "before").unwrap();
+    let gate = ApprovalGate::new();
+    let poll = gate.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            poll.cancel_all();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    let write = json!({"id":"cancel_write","name":"write_file","arguments":{"path":path,"content":"after"}});
+    let (events, _) = exercise_approved(
+        vec![(200, text(&write.to_string())), (200, text("Stopped."))],
+        vec![Message::user("Overwrite the file.")],
+        ApprovalPolicy::required(gate),
+    )
+    .await;
+    let kept = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(kept, "before");
+    let detail = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCallCompleted { id, detail, .. } if id == "cancel_write" => {
+                Some(detail.as_str())
+            }
+            _ => None,
+        })
+        .expect("the cancelled call completes");
+    assert!(detail.contains(APPROVAL_CANCELLED), "{detail}");
+    assert!(!detail.contains(DENIED), "nobody denied it: {detail}");
 }
 
 #[tokio::test]
@@ -1337,6 +1374,7 @@ async fn a_stated_reason_reaches_the_approval_frame_and_the_stored_record() {
         questions: Vec::new(),
         job: None,
         waiting: None,
+        refusal: None,
     };
     assert_eq!(record.reason.as_deref(), Some(WHY));
     let stored = serde_json::to_value(&record).unwrap();

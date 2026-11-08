@@ -2,10 +2,16 @@ import { describe, expect, it } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { ToolCallRecordSchema } from '../schemas';
 import {
+  APPROVAL_CANCELLED_DETAIL,
+  APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_ANSWER_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
+  DENIED_DETAIL,
   type JobStarted,
   type Question,
+  TOOL_ERROR_PREFIX,
   type ToolCallRecord,
+  UNFINISHED_DETAIL,
   type Waiting,
 } from '../types';
 import { ToolTrace } from './ToolTrace';
@@ -389,6 +395,284 @@ describe('ToolTrace', () => {
     const [failed, pending] = screen.getAllByTestId('tool-call');
     expect(failed.closest('li')).toHaveClass('tool-call--failed');
     expect(pending.closest('li')).toHaveClass('tool-call--pending');
+  });
+
+  it('labels a call by the state it is in rather than as already run', () => {
+    const shell = { name: 'run_shell', arguments: '{"command":"ls"}' };
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            ...shell,
+            id: 'waiting',
+            pending: true,
+            approval: 'pending',
+            detail: 'Waiting for approval…',
+            duration_ms: 0,
+          }),
+          call({ ...shell, id: 'running', pending: true, detail: 'Running…', duration_ms: 0 }),
+          call({
+            ...shell,
+            id: 'approved',
+            pending: true,
+            approval: 'approved',
+            detail: 'Approved. Running…',
+            duration_ms: 0,
+          }),
+          call({ ...shell, id: 'denied', approval: 'denied', success: false, detail: 'Denied' }),
+          call({ ...shell, id: 'ran', detail: 'README.md' }),
+        ]}
+      />
+    );
+
+    const names = screen
+      .getAllByTestId('tool-call')
+      .map((row) => row.querySelector('.tool-call-name')?.textContent);
+    expect(names).toEqual([
+      'Waiting to run a shell command',
+      'Running a shell command',
+      'Running a shell command',
+      'Denied running a shell command',
+      'Ran a shell command',
+    ]);
+  });
+
+  it('keeps a denied call labelled denied once the server has settled it', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            id: 'chat',
+            name: 'write_file',
+            success: false,
+            detail: `Error: ${DENIED_DETAIL}`,
+          }),
+          call({ id: 'agent', name: 'run_command', success: false, detail: DENIED_DETAIL }),
+        ]}
+      />
+    );
+
+    const names = screen
+      .getAllByTestId('tool-call')
+      .map((row) => row.querySelector('.tool-call-name')?.textContent);
+    expect(names).toEqual(['Denied writing a file', 'Denied running a command']);
+  });
+
+  it('labels a call a stopped turn left open the same live as after a reload', () => {
+    const shell = { name: 'run_shell', success: false, detail: UNFINISHED_DETAIL };
+    render(
+      <ToolTrace
+        calls={[
+          call({ ...shell, id: 'live', approval: 'denied' }),
+          call({ ...shell, id: 'stored' }),
+        ]}
+      />
+    );
+
+    const names = screen
+      .getAllByTestId('tool-call')
+      .map((row) => row.querySelector('.tool-call-name')?.textContent);
+    expect(names).toEqual(['Stopped running a shell command', 'Stopped running a shell command']);
+  });
+
+  it('labels a failed call as not having done what it set out to', () => {
+    render(
+      <ToolTrace
+        calls={[call({ name: 'write_file', success: false, detail: 'Error: Permission denied' })]}
+      />
+    );
+
+    expect(screen.getByText('Failed to write a file')).toBeInTheDocument();
+    expect(screen.getByText('Error: Permission denied')).toBeInTheDocument();
+  });
+
+  it('does not repeat the denial in the detail once the label says it', () => {
+    render(
+      <ToolTrace
+        calls={[call({ name: 'write_file', success: false, detail: `Error: ${DENIED_DETAIL}` })]}
+      />
+    );
+
+    expect(screen.getByTestId('tool-call').querySelector('.tool-call-detail')?.textContent).toBe(
+      ''
+    );
+  });
+
+  it('keeps the denial in the detail of a tool whose label cannot say it', () => {
+    render(<ToolTrace calls={[call({ name: 'Bash', success: false, detail: DENIED_DETAIL })]} />);
+
+    expect(screen.getByText('Bash')).toBeInTheDocument();
+    expect(screen.getByText(DENIED_DETAIL)).toBeInTheDocument();
+  });
+
+  it('labels a call whose approval timed out or was cancelled apart from a denial', () => {
+    const shell = { name: 'run_shell', success: false };
+    render(
+      <ToolTrace
+        calls={[
+          call({ ...shell, id: 'chat', detail: `Error: ${APPROVAL_TIMED_OUT_DETAIL}` }),
+          call({ ...shell, id: 'agent', detail: APPROVAL_TIMED_OUT_DETAIL }),
+          call({ ...shell, id: 'stopped', detail: `Error: ${APPROVAL_CANCELLED_DETAIL}` }),
+          call({ ...shell, id: 'asked', detail: APPROVAL_CANCELLED_DETAIL }),
+        ]}
+      />
+    );
+
+    const rows = screen.getAllByTestId('tool-call');
+    expect(rows.map((row) => row.querySelector('.tool-call-name')?.textContent)).toEqual([
+      'Approval timed out for running a shell command',
+      'Approval timed out for running a shell command',
+      'Cancelled running a shell command',
+      'Cancelled running a shell command',
+    ]);
+    expect(rows.map((row) => row.querySelector('.tool-call-detail')?.textContent)).toEqual([
+      '',
+      '',
+      '',
+      '',
+    ]);
+  });
+
+  it('keeps why the call did not run in the detail of a tool whose label cannot say it', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({ id: 'a', name: 'Bash', success: false, detail: APPROVAL_TIMED_OUT_DETAIL }),
+          call({ id: 'b', name: 'Bash', success: false, detail: APPROVAL_CANCELLED_DETAIL }),
+        ]}
+      />
+    );
+
+    expect(screen.getByText(APPROVAL_TIMED_OUT_DETAIL)).toBeInTheDocument();
+    expect(screen.getByText(APPROVAL_CANCELLED_DETAIL)).toBeInTheDocument();
+  });
+
+  it('labels a refused call from the refusal it was stored with, not from its words', () => {
+    const shell = { name: 'run_shell', success: false };
+    render(
+      <ToolTrace
+        calls={[
+          call({ ...shell, id: 'denied', detail: 'Refused', refusal: 'denied' }),
+          call({ ...shell, id: 'timed', detail: 'Refused', refusal: 'timed_out' }),
+          call({ ...shell, id: 'cancelled', detail: 'Refused', refusal: 'cancelled' }),
+          call({
+            ...shell,
+            id: 'log',
+            detail: `${TOOL_ERROR_PREFIX}${DENIED_DETAIL}`,
+            refusal: null,
+          }),
+        ]}
+      />
+    );
+
+    const rows = screen.getAllByTestId('tool-call');
+    expect(rows.map((row) => row.querySelector('.tool-call-name')?.textContent)).toEqual([
+      'Denied running a shell command',
+      'Approval timed out for running a shell command',
+      'Cancelled running a shell command',
+      'Failed to run a shell command',
+    ]);
+    expect(rows[3]?.querySelector('.tool-call-detail')?.textContent).toBe(
+      `${TOOL_ERROR_PREFIX}${DENIED_DETAIL}`
+    );
+  });
+
+  it('labels a call with a refusal it cannot read from its words', () => {
+    const parsed = ToolCallRecordSchema.parse({
+      ...call({
+        name: 'run_shell',
+        success: false,
+        detail: `${TOOL_ERROR_PREFIX}${DENIED_DETAIL}`,
+      }),
+      refusal: 'vetoed',
+    });
+    render(<ToolTrace calls={[parsed]} />);
+
+    expect(parsed.refusal).toBeUndefined();
+    expect(screen.getByText('Denied running a shell command')).toBeInTheDocument();
+  });
+
+  it('labels a stored call left waiting for an approval nobody can give as stopped', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            id: 'stored',
+            name: 'run_shell',
+            success: false,
+            detail: AWAITING_APPROVAL_DETAIL,
+          }),
+          call({
+            id: 'live',
+            name: 'run_shell',
+            success: false,
+            detail: AWAITING_APPROVAL_DETAIL,
+            approval: 'pending',
+            pending: true,
+          }),
+        ]}
+      />
+    );
+
+    const names = screen
+      .getAllByTestId('tool-call')
+      .map((row) => row.querySelector('.tool-call-name')?.textContent);
+    expect(names).toEqual(['Stopped running a shell command', 'Waiting to run a shell command']);
+  });
+
+  it('reads a successful call as run even when its output repeats a server outcome', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({ id: 'a', name: 'tail_job', detail: DENIED_DETAIL }),
+          call({ id: 'b', name: 'run_shell', detail: UNFINISHED_DETAIL }),
+        ]}
+      />
+    );
+
+    const names = screen
+      .getAllByTestId('tool-call')
+      .map((row) => row.querySelector('.tool-call-name')?.textContent);
+    expect(names).toEqual(['Read a job log', 'Ran a shell command']);
+    expect(screen.getByText(DENIED_DETAIL)).toBeInTheDocument();
+  });
+
+  it('names a tool it does not know the same way in every state', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({ id: 'a', name: 'some_new_tool', pending: true, approval: 'pending' }),
+          call({ id: 'b', name: 'some_new_tool', approval: 'denied', success: false }),
+        ]}
+      />
+    );
+
+    expect(screen.getAllByText('Some new tool')).toHaveLength(2);
+  });
+
+  it('shows no bare stream label for a command whose stored detail is only that label', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({ id: 'a', name: 'run_shell', detail: 'stdout:' }),
+          call({ id: 'b', name: 'run_command', detail: 'stdout: (2 lines)' }),
+          call({ id: 'c', name: 'run_shell', detail: 'stdout: is where it went' }),
+        ]}
+      />
+    );
+
+    const details = screen
+      .getAllByTestId('tool-call')
+      .map((row) => row.querySelector('.tool-call-detail')?.textContent);
+    expect(details).toEqual(['', '', 'stdout: is where it went']);
+  });
+
+  it('shows a stream label that another tool returned as its own output', () => {
+    render(<ToolTrace calls={[call({ name: 'read_file', arguments: '{}', detail: 'stdout:' })]} />);
+
+    expect(screen.getByTestId('tool-call').querySelector('.tool-call-detail')?.textContent).toBe(
+      'stdout:'
+    );
   });
 
   it('hides the duration until the call finishes', () => {

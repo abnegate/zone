@@ -1,8 +1,8 @@
+use abnegate_agent_cli::AgentKind;
 use abnegate_llm::ReasoningEffort;
 use futures::future::try_join_all;
 use serde::Serialize;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use super::{Availability, Offered, Provider, Refusal};
 use crate::config::Config;
@@ -617,7 +617,7 @@ mod tests {
                 "{provider:?} with {model}"
             );
         }
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let provider = Provider::ALL
                 .into_iter()
                 .find(|provider| provider.agent() == Some(agent))
@@ -634,5 +634,35 @@ mod tests {
             }
         }
         fixture.cleanup().await;
+    }
+
+    /// A chat that names no model leaves the choice to the agent, so it is offered the efforts
+    /// of the model the agent picks, as a blank model is.
+    #[test]
+    fn a_blank_model_offers_the_agents_default_efforts() {
+        for &agent in AgentKind::ALL {
+            let provider = Provider::ALL
+                .into_iter()
+                .find(|provider| provider.agent() == Some(agent))
+                .expect("every agent is a provider");
+            let offer = Offer::new(provider, Availability::Usable, None, &Catalog::default());
+
+            let defaults = match agent {
+                AgentKind::Claude => json!(CLAUDE),
+                _ => json!(CODEX),
+            };
+            assert_eq!(
+                serde_json::to_value(offer.efforts).expect("serialise"),
+                defaults,
+                "{agent} offers no effort to a chat that names no model"
+            );
+            for blank in ["", "   "] {
+                assert_eq!(
+                    agent.efforts(Some(blank)),
+                    offer.efforts,
+                    "{agent} with {blank:?} for a model"
+                );
+            }
+        }
     }
 }

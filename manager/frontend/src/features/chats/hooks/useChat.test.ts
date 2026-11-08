@@ -368,6 +368,56 @@ describe('useChat', () => {
     );
   });
 
+  it('carries what refused a call from its result frame onto the call', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm5', role: 'assistant' });
+    for (const id of ['refused', 'ran']) {
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'm5',
+        tool_call_id: id,
+        name: 'run_shell',
+        arguments: '{"command":"ls"}',
+      });
+    }
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm5',
+      tool_call_id: 'refused',
+      name: 'run_shell',
+      success: false,
+      detail: 'Refused',
+      duration_ms: 1,
+      refusal: 'timed_out',
+    });
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm5',
+      tool_call_id: 'ran',
+      name: 'run_shell',
+      success: false,
+      detail: 'Error: exit 1',
+      duration_ms: 1,
+      refusal: null,
+    });
+
+    await waitFor(() => {
+      expect(
+        result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.map((call) => call.refusal)
+      ).toEqual(['timed_out', null]);
+    });
+  });
+
   it('carries the observed preview from the approval frame onto the call', async () => {
     mockGetChat.mockResolvedValue(mockChat);
 

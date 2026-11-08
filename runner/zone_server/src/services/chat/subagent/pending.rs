@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use zone_core::llm::{StepStatus, Subagent, SubagentStep};
+use abnegate_agent_cli::{StepStatus, Subagent, SubagentStep};
 
 /// Everything one burst said about one subagent: its fields, each the latest
 /// heard, and the steps it touched, each once, in the order first heard of.
@@ -36,7 +36,7 @@ impl Pending {
         newer(&mut earlier.background, later.background);
         newer(&mut earlier.status, later.status);
         newer(&mut earlier.tool_uses, later.tool_uses);
-        newer(&mut earlier.duration_ms, later.duration_ms);
+        newer(&mut earlier.duration, later.duration);
         newer(&mut earlier.tokens, later.tokens);
         newer(&mut earlier.last_tool, later.last_tool);
         newer(&mut earlier.summary, later.summary);
@@ -68,19 +68,11 @@ mod tests {
     use super::*;
 
     fn step(id: &str, status: StepStatus) -> SubagentStep {
-        SubagentStep {
-            id: id.to_string(),
-            name: "Bash".to_string(),
-            subject: None,
-            status,
-        }
+        SubagentStep::new(id, "Bash", status)
     }
 
     fn stepped(step: SubagentStep) -> Subagent {
-        Subagent {
-            step: Some(step),
-            ..Subagent::new("toolu_01Agent")
-        }
+        Subagent::new("toolu_01Agent").with_step(step)
     }
 
     #[test]
@@ -111,16 +103,13 @@ mod tests {
 
     #[test]
     fn a_later_field_replaces_an_earlier_and_a_missing_one_keeps_it() {
-        let mut pending = Pending::new(Subagent {
-            description: Some("Survey".to_string()),
-            tool_uses: Some(1),
-            ..Subagent::new("toolu_01Agent")
-        });
+        let mut pending = Pending::new(
+            Subagent::new("toolu_01Agent")
+                .with_description("Survey")
+                .with_tool_uses(1),
+        );
 
-        pending.fold(Subagent {
-            tool_uses: Some(2),
-            ..Subagent::new("toolu_01Agent")
-        });
+        pending.fold(Subagent::new("toolu_01Agent").with_tool_uses(2));
 
         assert_eq!(pending.update.description.as_deref(), Some("Survey"));
         assert_eq!(pending.update.tool_uses, Some(2));

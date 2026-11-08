@@ -16,6 +16,8 @@ use crate::common::{
     test_email, test_password,
 };
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::SecretValue;
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -28,12 +30,11 @@ use tokio_tungstenite::connect_async;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::AgentKind;
 use zone_server::config::{AgentConfig, Config, ModelBackend};
 use zone_server::db::agent_logins::{self, Insert};
 use zone_server::db::ai_settings;
 use zone_server::db::chats::{self, ChatSession};
-use zone_server::services::login::claude::Tokens;
+use zone_server::services::login::claude::Sealed;
 use zone_server::state::AppState;
 
 const FIRST: &str = "Remember the word heliotrope.";
@@ -168,7 +169,7 @@ impl Agent {
             .map_while(|run| {
                 let arguments =
                     std::fs::read_to_string(self.log.join(format!("{run}.arguments"))).ok()?;
-                let prompt = zone_core::llm::provider::prompt(
+                let prompt = zone_core::llm::cli::prompt(
                     &std::fs::read_to_string(self.log.join(format!("{run}.prompt")))
                         .expect("a run that recorded its arguments recorded its prompt"),
                 );
@@ -370,6 +371,7 @@ impl Harness {
         match agent {
             AgentKind::Claude => &self.claude,
             AgentKind::Codex => &self.codex,
+            other => panic!("no stand-in agent for {other}"),
         }
     }
 
@@ -378,18 +380,19 @@ impl Harness {
     async fn sign_in(&self, agent: AgentKind) -> Uuid {
         let sealed = match agent {
             AgentKind::Claude => Some(
-                Tokens {
-                    access: SecretValue::new("fake-claude-access-token"),
-                    refresh: None,
-                    expires_at: Utc::now() + TimeDelta::days(30),
-                    issued_at: None,
-                    scope: "user:inference".to_string(),
-                    subscription: None,
-                }
+                Tokens::new(
+                    SecretValue::new("fake-claude-access-token"),
+                    None,
+                    Utc::now() + TimeDelta::days(30),
+                    None,
+                    "user:inference",
+                    None,
+                )
                 .seal(self.state.master_key())
                 .expect("the tokens to seal"),
             ),
             AgentKind::Codex => None,
+            other => panic!("no stand-in agent for {other}"),
         };
         let account = Uuid::new_v4().to_string();
         let login = agent_logins::insert(
@@ -516,6 +519,7 @@ fn reply(agent: AgentKind, run: usize) -> String {
     match agent {
         AgentKind::Claude => format!("{CLAUDE_REPLY} {run}"),
         AgentKind::Codex => format!("{CODEX_REPLY} {run}"),
+        other => panic!("no stand-in agent for {other}"),
     }
 }
 

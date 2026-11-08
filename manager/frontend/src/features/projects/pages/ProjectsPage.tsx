@@ -36,7 +36,7 @@ import type {
   SyncProvider,
   UpdateProjectRequest,
 } from '../types';
-import { formatDate } from '../utils/formatters';
+import { cardDate, formatDate } from '../utils/formatters';
 import {
   isProjectSort,
   moveId,
@@ -641,7 +641,7 @@ export default function ProjectsPage() {
                             <span className="no-source">No source</span>
                           );
                         })()}
-                        <span>{formatDate(project.updated_at)}</span>
+                        <span>{cardDate(project, sort)}</span>
                       </div>
                     </div>
                   )}

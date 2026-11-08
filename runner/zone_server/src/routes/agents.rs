@@ -6,6 +6,9 @@ mod kind;
 mod receipt_request;
 mod status_query;
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::login::claude::Flow;
+use abnegate_agent_cli::login::claude::Scope;
 use abnegate_secret::SecretValue;
 use axum::{
     Json,
@@ -16,14 +19,12 @@ use chrono::{DateTime, Utc};
 use futures::future::try_join_all;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use crate::auth::jwt::Claims;
 use crate::auth::{AuthSession, AuthUser};
 use crate::db::ai_settings::{self, AccessError};
 use crate::db::organization_members::OrgRole;
 use crate::services::login::caller::Caller;
-use crate::services::login::claude::{Flow, Scope};
 use crate::services::login::status::{AgentStatus, Viewer};
 use crate::services::login::{devices, oauth};
 use crate::state::AppState;
@@ -86,7 +87,9 @@ pub async fn list(
 ) -> Result<Json<Statuses>, Failure> {
     let viewer = viewer(&state, &auth.0, organization).await?;
     let agents = try_join_all(
-        AgentKind::ALL.map(|agent| AgentStatus::read(&state, organization, agent, viewer, None)),
+        AgentKind::ALL
+            .iter()
+            .map(|&agent| AgentStatus::read(&state, organization, agent, viewer, None)),
     )
     .await
     .map_err(Failure::database)?;
@@ -131,8 +134,15 @@ pub async fn start(
                 email: session.claims.email.clone(),
                 session: session.session_id,
             };
-            let started =
-                oauth::start(organization, &caller, request.scope, redirect, console).await;
+            let started = oauth::start(
+                state.config(),
+                organization,
+                &caller,
+                request.scope,
+                redirect,
+                console,
+            )
+            .await?;
             Login::Claude {
                 authorize_url: started.url,
                 expires_at: started.expires_at,
@@ -148,6 +158,7 @@ pub async fn start(
                 expires_at: prompt.expires_at,
             }
         }
+        _ => return Err(Failure::new(StatusCode::NOT_FOUND, UNKNOWN_AGENT)),
     };
     Ok(Json(login))
 }
@@ -216,6 +227,7 @@ pub async fn cancel(
             admin(&state, &auth.0, organization).await?;
             devices::cancel(&state, organization).await;
         }
+        _ => return Err(Failure::new(StatusCode::NOT_FOUND, UNKNOWN_AGENT)),
     }
     Ok(StatusCode::NO_CONTENT)
 }

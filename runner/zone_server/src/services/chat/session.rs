@@ -415,7 +415,7 @@ pub async fn build(
     let backend = match &mode {
         Mode::Preview => backend::instance(state.config()),
         Mode::Generation(generation) => backend::effort(
-            backend::bounded(generation.resolved.backend.clone(), settings.timeout),
+            backend::ahead_of(generation.resolved.backend.clone(), settings.timeout),
             chat.reasoning_effort,
         ),
     };
@@ -1327,11 +1327,11 @@ mod tests {
     #[tokio::test]
     async fn a_chats_effort_reaches_an_agent_on_its_backend_and_an_endpoint_in_its_body() {
         use crate::db::{chats, organizations, workspaces};
+        use abnegate_agent_cli::{AgentKind, CliSettings};
         use serde_json::json;
         use sqlx::PgPool;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        use zone_core::llm::{AgentKind, CliSettings};
 
         const MODEL: &str = "reasoner";
         let server = MockServer::start().await;
@@ -1440,6 +1440,7 @@ mod tests {
         let LlmBackend::Cli {
             agent: kind,
             settings,
+            ..
         } = agent.llm.backend()
         else {
             panic!("an agent turn runs on its CLI");
@@ -1450,9 +1451,17 @@ mod tests {
             Some(ReasoningEffort::Max),
             "the agent is told the chat's effort"
         );
-        assert_eq!(
-            settings.timeout,
+        let LlmBackend::Cli {
+            settings: budgeted, ..
+        } = backend::ahead_of(
+            LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
             state.config().chat.timeout,
+        )
+        else {
+            panic!("a CLI backend stays one");
+        };
+        assert_eq!(
+            settings.timeout, budgeted.timeout,
             "the effort leaves the chat's budget in place"
         );
 

@@ -55,7 +55,7 @@ axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 hyper = { version = "=1.11.1", features = ["http1", "server"] }
-hyper-util = { version = "=0.1.20", features = ["tokio", "service"] }
+hyper-util = { version = "=0.1.20", features = ["client-proxy", "service", "tokio"] }
 
 # Database
 sqlx = { workspace = true }
@@ -101,6 +101,7 @@ rmcp = { workspace = true, default-features = false }
 aiusg = { version = "=0.5.0", default-features = false }
 
 # Internal
+abnegate-agent-cli = { workspace = true, features = ["login"] }
 abnegate-comfy = { workspace = true }
 abnegate-exec = { workspace = true }
 abnegate-http = { workspace = true }

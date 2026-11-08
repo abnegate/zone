@@ -2,11 +2,10 @@
 
 use std::fmt;
 
+use abnegate_agent_cli::login::codex;
 use abnegate_secret::REDACTED;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
-use super::super::codex;
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prompt {
@@ -45,11 +44,11 @@ mod tests {
     const CODE: &str = "ABCD-EFGHI";
 
     fn printed() -> codex::Prompt {
-        codex::Prompt {
-            verification_url: "https://auth.openai.com/codex/device".to_string(),
-            user_code: CODE.to_string(),
-            expires_at: DateTime::from_timestamp(1_790_149_096, 0).expect("a valid timestamp"),
-        }
+        codex::Prompt::new(
+            "https://auth.openai.com/codex/device",
+            CODE,
+            DateTime::from_timestamp(1_790_149_096, 0).expect("a valid timestamp"),
+        )
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::services::character::ChatCharacter;
-use zone_core::llm::AgentKind;
+use abnegate_agent_cli::AgentKind;
 
 use super::DbResult;
 
@@ -377,11 +377,31 @@ pub async fn complete_title(
         .bind(chat_id).bind(message_id).bind(title).execute(pool).await?.rows_affected() == 1)
 }
 
-/// Delete a chat
+/// Delete a chat, once every write still holding it has finished.
+///
+/// A turn's writes take the chat's lease and then its turn, and a subagent's write holds its
+/// turn, or its message when it has none, before it touches the subagent. Removing the chat cascades to its subagents before its
+/// turns, so taking the lease, the turns and the messages first keeps the order those writes take their locks
+/// in: the delete waits for them instead of deadlocking with them.
 pub async fn delete_chat(pool: &PgPool, id: Uuid) -> DbResult<bool> {
-    let result = sqlx::query!("DELETE FROM chats WHERE id = $1", id)
-        .execute(pool)
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT 1 FROM chat_leases WHERE chat_id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *transaction)
         .await?;
+    sqlx::query("SELECT 1 FROM chat_turns WHERE chat_id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SELECT 1 FROM messages WHERE chat_id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    let result = sqlx::query("DELETE FROM chats WHERE id = $1")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }

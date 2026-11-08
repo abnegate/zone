@@ -22,9 +22,10 @@ const HEADING: &str = "Workspace actions:";
 pub(in crate::agent::prompt) const CREATE_PULL_REQUEST: &str = "create_pull_request";
 pub(in crate::agent::prompt) const COMMENT_ON_ISSUE: &str = "comment_on_issue";
 
-/// A denial reaches the model as an error result, so without this the
-/// fallback to gh would post what the user just refused.
-const DENIED: &str = "- A denied call is the user's answer, not an error: never do it another way.";
+/// A refusal reaches the model as an error result, so without this the
+/// fallback to gh would post what the user refused or never approved.
+const REFUSED: &str =
+    "- A denied, timed-out or cancelled call is not an error: never do it another way.";
 
 /// Named because `waiting` counts it over the assembled prompt: it is the one
 /// bullet that says what to do while a runner is still going, and the section
@@ -168,7 +169,7 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
         ));
     }
     if !bullets.is_empty() {
-        bullets.push(DENIED.to_string());
+        bullets.push(REFUSED.to_string());
     }
     bullets
 }
@@ -179,8 +180,8 @@ mod tests {
     use crate::agent::prompt::Environment;
     use crate::agent::prompt::test_support::{chat_context, environment, task_context};
     use crate::agent::{ChatTools, ToolProfile};
+    use abnegate_agent_cli::AgentKind;
     use std::collections::BTreeSet;
-    use zone_core::llm::AgentKind;
 
     /// Every tool any bullet asks for, which is the catalog that renders all of them.
     fn catalog() -> Vec<&'static str> {
@@ -399,7 +400,7 @@ mod tests {
             "an error can follow a comment GitHub posted, and falling straight back posts it \
              twice: {rendered}"
         );
-        assert_eq!(rendered.matches(DENIED).count(), 1, "{rendered}");
+        assert_eq!(rendered.matches(REFUSED).count(), 1, "{rendered}");
         assert!(
             rendered.contains("with comment_on_issue, not gh"),
             "{rendered}"
@@ -412,7 +413,7 @@ mod tests {
 
     #[test]
     fn a_coding_agent_is_told_the_name_its_model_calls_zones_tool_by() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let tools = ChatTools::with_names(ToolProfile::Chat, &catalog(), None).served_to(agent);
             let rendered = prompted(&tools, &environment().with_github());
 
@@ -448,7 +449,21 @@ mod tests {
             rendered.contains("with comment_on_issue, not gh"),
             "{rendered}"
         );
-        assert!(rendered.contains(DENIED), "{rendered}");
+        assert!(rendered.contains(REFUSED), "{rendered}");
+    }
+
+    /// A call refused for want of an answer comes back as an error, and the
+    /// bullets above send an errored call to gh, which would post what nobody
+    /// approved.
+    #[test]
+    fn a_call_nobody_approved_is_not_an_error_to_work_around() {
+        let every = ChatTools::with_names(ToolProfile::Chat, &catalog(), None);
+        let rendered = prompted(&every, &environment().with_github());
+
+        assert!(
+            rendered.contains("A denied, timed-out or cancelled call is not an error"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -467,7 +482,7 @@ mod tests {
             assert!(!rendered.contains("so Zone can track it"), "{rendered}");
             assert!(!rendered.contains("gh pr create"), "{rendered}");
             assert!(!rendered.contains("not gh"), "{rendered}");
-            assert!(!rendered.contains(DENIED), "{rendered}");
+            assert!(!rendered.contains(REFUSED), "{rendered}");
         }
     }
 

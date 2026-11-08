@@ -1,85 +1,203 @@
 import { useState } from 'react';
 import {
   type Answer,
+  APPROVAL_CANCELLED_DETAIL,
+  APPROVAL_TIMED_OUT_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
+  DENIED_DETAIL,
   PREVIEW_LABEL,
   REASON_MISSING,
   REASONED_TOOLS,
+  REFUSALS,
+  type Refusal,
+  TOOL_ERROR_PREFIX,
   type ToolCallRecord,
+  UNFINISHED_DETAIL,
 } from '../types';
 import { renderAnswers } from '../utils/answers';
 import { JobCard } from './JobCard';
 import { QuestionCard } from './QuestionCard';
 import { Reasoning } from './Reasoning';
 
+interface Verb {
+  base: string;
+  gerund: string;
+  past: string;
+}
+
+function verb(base: string, gerund: string, past: string): Verb {
+  return { base, gerund, past };
+}
+
+const LOAD = verb('load', 'loading', 'loaded');
+const SEARCH = verb('search', 'searching', 'searched');
+const FETCH = verb('fetch', 'fetching', 'fetched');
+const LIST = verb('list', 'listing', 'listed');
+const READ = verb('read', 'reading', 'read');
+const CHECK = verb('check', 'checking', 'checked');
+const CREATE = verb('create', 'creating', 'created');
+const UPDATE = verb('update', 'updating', 'updated');
+const SEND = verb('send', 'sending', 'sent');
+const CANCEL = verb('cancel', 'cancelling', 'cancelled');
+const WRITE = verb('write', 'writing', 'wrote');
+const APPEND = verb('append', 'appending', 'appended');
+const FORGET = verb('forget', 'forgetting', 'forgot');
+const GENERATE = verb('generate', 'generating', 'generated');
+const EDIT = verb('edit', 'editing', 'edited');
+const QUERY = verb('query', 'querying', 'queried');
+const OPEN = verb('open', 'opening', 'opened');
+const COMMENT = verb('comment', 'commenting', 'commented');
+const PATCH = verb('patch', 'patching', 'patched');
+const RUN = verb('run', 'running', 'ran');
+const ASK = verb('ask', 'asking', 'asked');
+const WAIT = verb('wait', 'waiting', 'waited');
+
+interface Action {
+  verb: Verb;
+  object: string;
+}
+
+function action(verb: Verb, object: string): Action {
+  return { verb, object };
+}
+
 /// Tool names are written for the model, so the trace gives the reader a plain
 /// description instead. An unknown name is spelled out from its identifier
 /// rather than hidden, so a newly added tool still shows up as words.
-const TOOL_LABELS: Record<string, string> = {
-  load_tools: 'Loaded tools',
-  search_tools: 'Searched for tools',
-  fetch_url: 'Fetched a web page',
-  web_search: 'Searched the web',
-  search_knowledge: 'Searched the knowledge base',
-  search_chat_history: 'Searched earlier messages',
-  list_sources: 'Listed connected sources',
-  list_projects: 'Listed projects',
-  list_tasks: 'Listed tasks',
-  list_chats: 'Listed chats',
-  list_members: 'Listed members',
-  list_files: 'Listed files',
-  read_file: 'Read a file',
-  list_documents: 'Listed workspace documents',
-  read_document: 'Read a workspace document',
-  read_chat_evidence: 'Read an earlier chat',
-  get_task_run: 'Checked a task run',
-  get_build_status: 'Checked GitHub build status',
-  read_check_logs: 'Read GitHub check logs',
-  list_deployments: 'Listed GitHub deployments',
-  list_issues: 'Listed GitHub issues',
-  get_issue: 'Read a GitHub issue',
-  read_repository_file: 'Read a repository file',
-  create_task: 'Created a task',
-  update_task: 'Updated a task',
-  create_document: 'Created a document',
-  update_document: 'Updated a document',
-  send_message: 'Sent a message',
-  create_reminder: 'Created a reminder',
-  cancel_reminder: 'Cancelled a reminder',
-  list_reminders: 'Listed reminders',
-  memory_write: 'Wrote memory',
-  memory_append: 'Appended to memory',
-  memory_delete: 'Forgot memory',
-  memory_read: 'Read memory',
-  memory_list: 'Listed memories',
-  finalize_project: 'Created a project',
-  generate_image: 'Generated an image',
-  edit_image: 'Edited an image',
-  query_prometheus: 'Queried Prometheus',
-  list_grafana_dashboards: 'Listed Grafana dashboards',
-  create_pull_request: 'Opened a pull request',
-  comment_on_issue: 'Commented on GitHub',
-  apply_patch: 'Patched a file',
-  write_file: 'Wrote a file',
-  run_shell: 'Ran a shell command',
-  run_command: 'Ran a command',
-  ask_user: 'Asked you a question',
-  tail_job: 'Read a job log',
-  wait_for: 'Waited for something to finish',
+const TOOL_ACTIONS: Record<string, Action> = {
+  load_tools: action(LOAD, 'tools'),
+  search_tools: action(SEARCH, 'for tools'),
+  fetch_url: action(FETCH, 'a web page'),
+  web_search: action(SEARCH, 'the web'),
+  search_knowledge: action(SEARCH, 'the knowledge base'),
+  search_chat_history: action(SEARCH, 'earlier messages'),
+  list_sources: action(LIST, 'connected sources'),
+  list_projects: action(LIST, 'projects'),
+  list_tasks: action(LIST, 'tasks'),
+  list_chats: action(LIST, 'chats'),
+  list_members: action(LIST, 'members'),
+  list_files: action(LIST, 'files'),
+  read_file: action(READ, 'a file'),
+  list_documents: action(LIST, 'workspace documents'),
+  read_document: action(READ, 'a workspace document'),
+  read_chat_evidence: action(READ, 'an earlier chat'),
+  get_task_run: action(CHECK, 'a task run'),
+  get_build_status: action(CHECK, 'GitHub build status'),
+  read_check_logs: action(READ, 'GitHub check logs'),
+  list_deployments: action(LIST, 'GitHub deployments'),
+  list_issues: action(LIST, 'GitHub issues'),
+  get_issue: action(READ, 'a GitHub issue'),
+  read_repository_file: action(READ, 'a repository file'),
+  create_task: action(CREATE, 'a task'),
+  update_task: action(UPDATE, 'a task'),
+  create_document: action(CREATE, 'a document'),
+  update_document: action(UPDATE, 'a document'),
+  send_message: action(SEND, 'a message'),
+  create_reminder: action(CREATE, 'a reminder'),
+  cancel_reminder: action(CANCEL, 'a reminder'),
+  list_reminders: action(LIST, 'reminders'),
+  memory_write: action(WRITE, 'memory'),
+  memory_append: action(APPEND, 'to memory'),
+  memory_delete: action(FORGET, 'memory'),
+  memory_read: action(READ, 'memory'),
+  memory_list: action(LIST, 'memories'),
+  finalize_project: action(CREATE, 'a project'),
+  generate_image: action(GENERATE, 'an image'),
+  edit_image: action(EDIT, 'an image'),
+  query_prometheus: action(QUERY, 'Prometheus'),
+  list_grafana_dashboards: action(LIST, 'Grafana dashboards'),
+  create_pull_request: action(OPEN, 'a pull request'),
+  comment_on_issue: action(COMMENT, 'on GitHub'),
+  apply_patch: action(PATCH, 'a file'),
+  write_file: action(WRITE, 'a file'),
+  run_shell: action(RUN, 'a shell command'),
+  run_command: action(RUN, 'a command'),
+  ask_user: action(ASK, 'you a question'),
+  tail_job: action(READ, 'a job log'),
+  wait_for: action(WAIT, 'for something to finish'),
 };
 
 const ACRONYMS = new Set(['url', 'id', 'api', 'pr', 'ci', 'sha', 'http', 'json', 'html']);
 
-function humanise(name: string): string {
-  const words = name
-    .split(/_+/)
-    .filter(Boolean)
-    .map((word) => (ACRONYMS.has(word) ? word.toUpperCase() : word))
-    .join(' ');
-  return words.charAt(0).toUpperCase() + words.slice(1);
+function capitalise(phrase: string): string {
+  return phrase.charAt(0).toUpperCase() + phrase.slice(1);
 }
 
-function toolLabel(name: string): string {
-  return TOOL_LABELS[name] ?? humanise(name);
+function humanise(name: string): string {
+  return capitalise(
+    name
+      .split(/_+/)
+      .filter(Boolean)
+      .map((word) => (ACRONYMS.has(word) ? word.toUpperCase() : word))
+      .join(' ')
+  );
+}
+
+type ToolState =
+  | 'approval'
+  | 'pending'
+  | 'stopped'
+  | 'denied'
+  | 'timed_out'
+  | 'cancelled'
+  | 'ok'
+  | 'failed';
+
+/// A record stored before refusals were kept says why it was refused only in
+/// the server's words, written bare on an agent's own permission card and
+/// behind the error prefix otherwise.
+const WORDED_REFUSALS = new Map<string, Refusal>(
+  (
+    [
+      [DENIED_DETAIL, 'denied'],
+      [APPROVAL_TIMED_OUT_DETAIL, 'timed_out'],
+      [APPROVAL_CANCELLED_DETAIL, 'cancelled'],
+    ] as const
+  ).flatMap(([detail, refusal]) => [
+    [detail, refusal],
+    [`${TOOL_ERROR_PREFIX}${detail}`, refusal],
+  ])
+);
+
+const REFUSED: ReadonlySet<ToolState> = new Set(REFUSALS);
+
+function toolState(call: ToolCallRecord): ToolState {
+  if (call.approval === 'pending') return 'approval';
+  if (call.pending) return 'pending';
+  if (call.approval === 'denied' && call.detail !== UNFINISHED_DETAIL) return 'denied';
+  if (call.success) return 'ok';
+  if (call.detail === UNFINISHED_DETAIL || call.detail === AWAITING_APPROVAL_DETAIL) {
+    return 'stopped';
+  }
+  if (call.refusal !== undefined) return call.refusal ?? 'failed';
+  return WORDED_REFUSALS.get(call.detail) ?? 'failed';
+}
+
+function toolLabel(name: string, state: ToolState): string {
+  const known = TOOL_ACTIONS[name];
+  if (!known) return humanise(name);
+  const {
+    verb: { base, gerund, past },
+    object,
+  } = known;
+  switch (state) {
+    case 'approval':
+      return `Waiting to ${base} ${object}`;
+    case 'pending':
+      return capitalise(`${gerund} ${object}`);
+    case 'stopped':
+      return `Stopped ${gerund} ${object}`;
+    case 'timed_out':
+      return `Approval timed out for ${gerund} ${object}`;
+    case 'cancelled':
+      return `Cancelled ${gerund} ${object}`;
+    case 'denied':
+      return `Denied ${gerund} ${object}`;
+    case 'failed':
+      return `Failed to ${base} ${object}`;
+    case 'ok':
+      return capitalise(`${past} ${object}`);
+  }
 }
 
 type Arguments = Record<string, unknown>;
@@ -215,17 +333,22 @@ const DETAIL_FROM_ARGUMENTS: Partial<Record<string, Derive>> = {
 };
 
 const JSON_LINE = /^\s*(?:\{\s*(?:"|\})|\[\s*(?:[{["\]]|\d))/;
+const BARE_STREAM_LABEL = /^std(?:out|err):(?:\s*\(\d+ lines\))?$/;
+const COMMAND_TOOLS = new Set(['run_command', 'run_shell']);
 
 /// A failed call's detail is its error and a waiting call's is its state, and
 /// both are the server's words about this call rather than a preamble. A JSON
-/// record nothing here can summarise is left out rather than shown as braces.
-function toolDetail(call: ToolCallRecord, titles: Titles): string {
+/// record nothing here can summarise is left out rather than shown as braces,
+/// and why a call did not run is not said twice when its label says it.
+function toolDetail(call: ToolCallRecord, state: ToolState, titles: Titles): string {
+  if (REFUSED.has(state) && call.name in TOOL_ACTIONS) return '';
   if (!call.success || call.pending || call.approval === 'pending') return call.detail;
   const derive = DETAIL_FROM_ARGUMENTS[call.name];
   const args = derive ? parseArguments(call.arguments) : null;
   const derived = derive && args ? derive(args, call.detail, titles) : null;
   if (derived) return derived;
-  return JSON_LINE.test(call.detail) ? '' : call.detail;
+  const bareLabel = COMMAND_TOOLS.has(call.name) && BARE_STREAM_LABEL.test(call.detail);
+  return JSON_LINE.test(call.detail) || bareLabel ? '' : call.detail;
 }
 
 function formatDuration(ms: number): string {
@@ -295,14 +418,8 @@ function ToolTraceRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const args = formatArguments(call.arguments);
-  const status =
-    call.approval === 'pending'
-      ? 'approval'
-      : call.pending
-        ? 'pending'
-        : call.success
-          ? 'ok'
-          : 'failed';
+  const state = toolState(call);
+  const status = REFUSED.has(state) || state === 'stopped' ? 'failed' : state;
 
   return (
     <li className={`tool-call tool-call--${status}`}>
@@ -316,8 +433,8 @@ function ToolTraceRow({
         data-testid="tool-call"
       >
         <span className="tool-call-status" aria-hidden="true" />
-        <span className="tool-call-name">{toolLabel(call.name)}</span>
-        <span className="tool-call-detail">{toolDetail(call, titles)}</span>
+        <span className="tool-call-name">{toolLabel(call.name, state)}</span>
+        <span className="tool-call-detail">{toolDetail(call, state, titles)}</span>
         {!call.pending && call.duration_ms > 0 && (
           <span className="tool-call-duration">{formatDuration(call.duration_ms)}</span>
         )}

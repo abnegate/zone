@@ -14,13 +14,16 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::login::claude::Tokens;
+use abnegate_agent_cli::login::codex::{self, Account};
+use abnegate_agent_cli::login::{Cli, LoginError, Status};
 use abnegate_secret::MasterKey;
 use abnegate_secret::redact;
 use chrono::{DateTime, SubsecRound, Utc};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 pub use login::LoginStatus;
 pub use prompt::Prompt;
@@ -29,11 +32,10 @@ pub use state::State;
 pub use usage::UsageStatus;
 pub use viewer::Viewer;
 
-use super::claude::Tokens;
-use super::probe::{self, Probe};
+use super::claude::Sealed;
 use super::router::Chosen;
 use super::usage::{Availability, Snapshot, refresh};
-use super::{codex, credential, devices, oauth};
+use super::{credential, devices, oauth};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::db::ai_settings;
@@ -50,7 +52,7 @@ static HOST: LazyLock<Host> = LazyLock::new(|| Host::new(FRESH));
 pub struct AgentStatus {
     #[serde(with = "name")]
     pub agent: AgentKind,
-    pub provider: String,
+    pub provider: Option<String>,
     /// The best of the organization's logins, as its `label` is: the one a turn would start on.
     pub state: State,
     pub source: Option<Source>,
@@ -96,6 +98,7 @@ impl AgentStatus {
                 status.error = devices::failure(organization);
                 pending
             }
+            _ => None,
         };
         let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
         let snapshots = refreshed(state, &logins).await;
@@ -163,7 +166,7 @@ impl AgentStatus {
     fn signed_out(agent: AgentKind) -> Self {
         Self {
             agent,
-            provider: ai_settings::provider(agent).to_string(),
+            provider: ai_settings::provider(agent).map(str::to_string),
             state: State::SignedOut,
             source: None,
             label: None,
@@ -219,13 +222,18 @@ fn read(
         Some(AgentKind::Claude) => {
             let tokens = opened(state.master_key(), login);
             let (judged, expires_at) = judged(tokens.as_ref(), now);
-            (judged, expires_at, tokens.and_then(|tokens| tokens.label()))
+            let plan = tokens.and_then(|tokens| tokens.plan());
+            (
+                judged,
+                expires_at,
+                plan.map(|plan| plan.label().to_string()),
+            )
         }
         Some(AgentKind::Codex) => {
             let (saved, plan) = saved(state.config(), login, held);
             (saved, None, plan)
         }
-        None => (State::Expired, None, None),
+        _ => (State::Expired, None, None),
     };
     let availability = availability(snapshot.as_ref(), login.exhausted_until);
     Reading {
@@ -299,16 +307,15 @@ fn saved(config: &Config, login: &AgentLoginRow, held: usize) -> (State, Option<
     } else {
         return (State::Expired, None);
     };
-    let plan = codex::signed_in_as(&home)
-        .and_then(|account| account.plan)
-        .and_then(|plan| codex::plan::label(&plan))
-        .map(str::to_string);
+    let plan = Account::read(&home)
+        .and_then(|account| account.plan())
+        .map(|plan| plan.label().to_string());
     (State::SignedIn, plan)
 }
 
 /// The host's own sign-in, when the server may fall back on it and the host's CLI says it is
 /// signed in.
-async fn host(config: &Config, agent: AgentKind) -> Option<Probe> {
+async fn host(config: &Config, agent: AgentKind) -> Option<Status> {
     if !config.agents.host_login {
         return None;
     }
@@ -317,14 +324,27 @@ async fn host(config: &Config, agent: AgentKind) -> Option<Probe> {
         .await
 }
 
-async fn ask(agent: AgentKind, executable: PathBuf) -> Option<Probe> {
-    match probe::check(agent, &executable, &devices::variables(agent)).await {
-        Ok(probe) => probe.signed_in.then_some(probe),
-        Err(codex::Error::Unavailable {
-            executable,
-            message,
+async fn ask(agent: AgentKind, executable: PathBuf) -> Option<Status> {
+    signed_in(
+        agent,
+        &Cli::new(executable).with_environment(devices::variables(agent)),
+    )
+    .await
+}
+
+/// What `cli` says of its sign-in, when it says it is signed in.
+async fn signed_in(agent: AgentKind, cli: &Cli) -> Option<Status> {
+    match Status::check(agent, cli).await {
+        Ok(status) => status.signed_in.then_some(status),
+        Err(LoginError::Unavailable {
+            executable, reason, ..
         }) => {
-            tracing::debug!(%agent, %executable, %message, "no CLI on the host to fall back on");
+            tracing::debug!(
+                %agent,
+                executable = %executable.display(),
+                %reason,
+                "no CLI on the host to fall back on"
+            );
             None
         }
         Err(error) => {
@@ -340,9 +360,9 @@ async fn ask(agent: AgentKind, executable: PathBuf) -> Option<Probe> {
 
 /// An agent travels as its CLI's name.
 mod name {
+    use abnegate_agent_cli::AgentKind;
     use serde::de::Error as _;
     use serde::{Deserialize, Deserializer, Serializer};
-    use zone_core::llm::AgentKind;
 
     pub(super) fn serialize<S: Serializer>(
         agent: &AgentKind,
@@ -361,6 +381,7 @@ mod name {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use abnegate_secret::SecretValue;
@@ -369,16 +390,22 @@ mod tests {
     use serde_json::{Value, json};
     use sqlx::PgPool;
     use tempfile::TempDir;
-    use zone_core::llm::window;
+    use zone_core::llm::{cli, window};
 
     use abnegate_llm::Window;
 
     use super::*;
     use crate::config::{AgentConfig, ModelBackend};
     use crate::db::agent_logins::Insert;
-    use crate::services::login::codex::testing::fake;
+    use crate::services::login::testing::{capture, environment, fake, fixture, recorded};
 
     const STATUSES: usize = 5;
+    const CLAUDE_SIGNED_IN: &[u8] = fixture!("claude-auth-status-signed-in.json");
+    const CLAUDE_SIGNED_OUT: &[u8] = fixture!("claude-auth-status-signed-out.json");
+    const CODEX_SIGNED_OUT: &[u8] = fixture!("codex-login-status-signed-out.stderr");
+    const CODEX_CHATGPT: &[u8] = fixture!("fake-issuer/codex-login-status-chatgpt.stderr");
+    const CODEX_CORRUPT: &[u8] = fixture!("fake-issuer/codex-login-status-corrupt-auth.stderr");
+    const MISSING_CLI: &str = "/nonexistent/zone/cli";
     const JAKE: &str = "jake@example.com";
     const ADA: &str = "ada@example.com";
     const OLD: &str = "old@example.com";
@@ -398,14 +425,14 @@ mod tests {
     }
 
     fn seal(key: &MasterKey, expires_at: DateTime<Utc>, refresh: Option<&str>) -> SecretValue {
-        let tokens = Tokens {
-            access: SecretValue::new("fake-access-token"),
-            refresh: refresh.map(SecretValue::new),
+        let tokens = Tokens::new(
+            SecretValue::new("fake-access-token"),
+            refresh.map(SecretValue::new),
             expires_at,
-            issued_at: None,
-            scope: "user:inference".to_string(),
-            subscription: None,
-        };
+            None,
+            "user:inference",
+            None,
+        );
         SecretValue::new(tokens.seal(key).expect("seal"))
     }
 
@@ -433,14 +460,14 @@ mod tests {
     }
 
     fn subscribed(key: &MasterKey, expires_at: DateTime<Utc>, refresh: Option<&str>) -> String {
-        let tokens = Tokens {
-            access: SecretValue::new("fake-access-token"),
-            refresh: refresh.map(SecretValue::new),
+        let tokens = Tokens::new(
+            SecretValue::new("fake-access-token"),
+            refresh.map(SecretValue::new),
             expires_at,
-            issued_at: None,
-            scope: "user:inference user:profile".to_string(),
-            subscription: Some("max".to_string()),
-        };
+            None,
+            "user:inference user:profile",
+            Some("max".to_string()),
+        );
         tokens.seal(key).expect("seal")
     }
 
@@ -661,10 +688,7 @@ mod tests {
         let answers = join_all((0..STATUSES).map(|_| host(&config, AgentKind::Codex))).await;
         let later = host(&config, AgentKind::Codex).await;
 
-        let expected = Some(Probe {
-            signed_in: true,
-            label: Some("ChatGPT".to_string()),
-        });
+        let expected = Some(Status::new(true).with_label("ChatGPT"));
         for answer in answers.into_iter().chain([later]) {
             assert_eq!(answer, expected);
         }
@@ -674,6 +698,201 @@ mod tests {
             1,
             "every status asked the host's codex for itself"
         );
+    }
+
+    #[tokio::test]
+    async fn status_asks_the_cli_through_the_crate() {
+        for (agent, arguments, stdout, stderr, code, expected) in [
+            (
+                AgentKind::Claude,
+                "auth status",
+                CLAUDE_SIGNED_IN,
+                &b""[..],
+                0,
+                Some(Status::new(true).with_label("Claude Team")),
+            ),
+            (
+                AgentKind::Codex,
+                "login status",
+                &b""[..],
+                CODEX_CHATGPT,
+                0,
+                Some(Status::new(true).with_label("ChatGPT")),
+            ),
+            (
+                AgentKind::Claude,
+                "auth status",
+                CLAUDE_SIGNED_OUT,
+                &b""[..],
+                1,
+                None,
+            ),
+            (
+                AgentKind::Codex,
+                "login status",
+                &b""[..],
+                CODEX_SIGNED_OUT,
+                1,
+                None,
+            ),
+            (
+                AgentKind::Codex,
+                "login status",
+                &b""[..],
+                CODEX_CORRUPT,
+                1,
+                None,
+            ),
+        ] {
+            let directory = TempDir::new().expect("a temporary directory");
+            let record = directory.path().join("environment");
+            let printed = capture(&directory, "stdout", stdout);
+            let said = capture(&directory, "stderr", stderr);
+            let executable = fake(
+                &directory,
+                arguments,
+                &format!(
+                    "env > '{}'\ncat '{printed}'\ncat '{said}' >&2\nexit {code}",
+                    record.display()
+                ),
+            );
+            let mut given = environment();
+            given.insert("ZONE_STATUS_TEST".to_string(), "kept".to_string());
+
+            let answer = signed_in(
+                agent,
+                &Cli::new(&executable).with_environment(given.clone()),
+            )
+            .await;
+
+            assert_eq!(answer, expected, "{agent} {arguments} exiting {code}");
+            assert!(
+                std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
+                "the test runner no longer sets CARGO_MANIFEST_DIR, so its absence below proves nothing"
+            );
+            assert_eq!(recorded(&record), given);
+        }
+        for &agent in AgentKind::ALL {
+            let missing = Cli::new(MISSING_CLI).with_environment(environment());
+
+            assert_eq!(signed_in(agent, &missing).await, None, "{agent}");
+        }
+    }
+
+    /// Set on the copy of this test binary that runs the sign-in commands, which starts from only
+    /// the variables below, so nothing here calls `set_var` on a process whose other tests start
+    /// children.
+    const COPY: &str = "ZONE_LOGIN_ENVIRONMENT_COPY";
+
+    /// What the copy's sign-in commands inherit: the allowlist, the proxy, the POSIX locale
+    /// categories, and a variable the operator passed through.
+    const REACHES: [(&str, &str); 5] = [
+        ("PATH", "/usr/bin:/bin"),
+        ("HOME", "/home/zone"),
+        ("HTTPS_PROXY", "http://proxy.internal:3128"),
+        ("LC_TIME", "en_GB.UTF-8"),
+        ("CORPORATE_CA", "/etc/zone/corporate-ca.pem"),
+    ];
+
+    /// What they never inherit, the passed-through sign-ins among them: the server's own secrets,
+    /// the host's agent homes, a sign-in that would bill another account, the turn's MCP token,
+    /// and a name riding along on the locale prefix.
+    const STAYS: [(&str, &str); 10] = [
+        ("DATABASE_URL", "postgres://zone:notreal@db.internal/zone"),
+        ("CLAUDE_CONFIG_DIR", "/home/zone/.claude-elsewhere"),
+        ("CODEX_HOME", "/home/zone/.codex-elsewhere"),
+        ("ANTHROPIC_API_KEY", "sk-ant-notrealkey"),
+        ("ANTHROPIC_BASE_URL", "https://gateway.internal"),
+        ("OPENAI_API_KEY", "sk-notrealkey"),
+        ("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "sk-ant-ort01-notreal"),
+        ("AWS_ACCESS_KEY_ID", "AKIANOTREAL"),
+        ("ZONE_MCP_TOKEN", "zone-turn-notrealtoken"),
+        ("LC_SNEAKY", "notreal-locale"),
+    ];
+
+    const PASSED_THROUGH: &str = "CORPORATE_CA,ANTHROPIC_API_KEY,ANTHROPIC_BASE_URL,\
+                                  CLAUDE_CODE_OAUTH_REFRESH_TOKEN,AWS_ACCESS_KEY_ID,ZONE_MCP_TOKEN";
+
+    /// Copied from this process to the copy so it can run and be measured, none of them a name a
+    /// sign-in command inherits.
+    const RUNNER: [&str; 2] = ["LLVM_PROFILE_FILE", "RUST_BACKTRACE"];
+
+    #[tokio::test]
+    async fn login_clis_start_from_the_allowlist_and_the_passthrough() {
+        let path = concat!(
+            module_path!(),
+            "::login_clis_start_from_the_allowlist_and_the_passthrough"
+        );
+        let (_, name) = path.split_once("::").expect("a path inside the crate");
+        if std::env::var(COPY).as_deref() == Ok(name) {
+            return host_sign_in_commands_inherit_only_what_reaches_them().await;
+        }
+
+        let mut copy = tokio::process::Command::new(std::env::current_exe().expect("this binary"));
+        copy.args(["--exact", name, "--nocapture", "--test-threads", "1"])
+            .env_clear()
+            .env(COPY, name)
+            .env(cli::PASSTHROUGH, PASSED_THROUGH)
+            .envs(REACHES)
+            .envs(STAYS);
+        for variable in RUNNER {
+            if let Some(value) = std::env::var_os(variable) {
+                copy.env(variable, value);
+            }
+        }
+        let output = copy.output().await.expect("a copy of this test binary");
+        let printed = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && printed.contains("1 passed"),
+            "{printed}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Asks each host CLI for its sign-in the way a status does, and reads back what it was given.
+    async fn host_sign_in_commands_inherit_only_what_reaches_them() {
+        for (agent, arguments, stdout, stderr, extra) in [
+            (
+                AgentKind::Claude,
+                "auth status",
+                CLAUDE_SIGNED_IN,
+                &b""[..],
+                Some(("DISABLE_AUTOUPDATER", "1")),
+            ),
+            (
+                AgentKind::Codex,
+                "login status",
+                &b""[..],
+                CODEX_CHATGPT,
+                None,
+            ),
+        ] {
+            let directory = TempDir::new().expect("a temporary directory");
+            let record = directory.path().join("environment");
+            let printed = capture(&directory, "stdout", stdout);
+            let said = capture(&directory, "stderr", stderr);
+            let executable = fake(
+                &directory,
+                arguments,
+                &format!(
+                    "env > '{}'\ncat '{printed}'\ncat '{said}' >&2\nexit 0",
+                    record.display()
+                ),
+            );
+
+            let answer = ask(agent, executable).await;
+
+            assert!(
+                answer.is_some_and(|status| status.signed_in),
+                "{agent} {arguments} was not asked"
+            );
+            let expected: BTreeMap<String, String> = REACHES
+                .into_iter()
+                .chain(extra)
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect();
+            assert_eq!(recorded(&record), expected, "{agent}");
+        }
     }
 
     #[tokio::test]
@@ -812,7 +1031,7 @@ mod tests {
         let expected = vec![
             AgentStatus {
                 agent: AgentKind::Claude,
-                provider: "claude_code".to_string(),
+                provider: Some("claude_code".to_string()),
                 state: State::SignedIn,
                 source: Some(Source::Zone),
                 label: Some("jake@example.com".to_string()),
@@ -849,7 +1068,7 @@ mod tests {
             },
             AgentStatus {
                 agent: AgentKind::Codex,
-                provider: "codex".to_string(),
+                provider: Some("codex".to_string()),
                 state: State::Pending,
                 source: None,
                 label: None,
@@ -1091,7 +1310,7 @@ mod tests {
 
     #[test]
     fn a_signed_out_status_offers_the_agents_own_models_and_nothing_else() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let status = AgentStatus::signed_out(agent);
 
             assert_eq!(
@@ -1114,7 +1333,7 @@ mod tests {
 
     #[test]
     fn a_status_with_no_sign_in_lists_no_logins() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let status = AgentStatus::signed_out(agent);
             let serialised = serde_json::to_value(&status).expect("serialise");
 

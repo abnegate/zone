@@ -4,12 +4,12 @@
 use std::sync::LazyLock;
 use std::time::Instant;
 
+use abnegate_agent_cli::login::claude::Code;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dashmap::DashMap;
 use uuid::Uuid;
 
-use super::claude::Code;
 use super::pending::Pending;
 
 const RECEIPT_BYTES: usize = 32;
@@ -67,10 +67,11 @@ fn claim(
 mod tests {
     use std::time::Duration;
 
+    use abnegate_agent_cli::login::claude::Redirect;
+    use abnegate_agent_cli::login::claude::Scope;
     use abnegate_secret::SecretValue;
 
     use super::*;
-    use crate::services::login::claude::{Redirect, Scope};
 
     const CODE: &str = "fake-authorization-code";
     const LATER: Duration = Duration::from_secs(60);
@@ -90,10 +91,7 @@ mod tests {
     }
 
     fn code() -> Code {
-        Code {
-            value: SecretValue::new(CODE),
-            state: "fake-state".to_string(),
-        }
+        Code::new(CODE, "fake-state").expect("a code")
     }
 
     #[test]
