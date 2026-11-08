@@ -625,23 +625,23 @@ pub async fn search(
                 hybrid_config.semantic_weight = weight.clamp(0.0, 1.0);
             }
             if let Some(rrf_k) = query.rrf_k {
-                hybrid_config.rrf_k = rrf_k.max(1.0);
+                hybrid_config.fusion_constant = rrf_k.max(1.0);
             }
             if let Some(min_keyword) = query.min_keyword_score {
-                hybrid_config.min_keyword_score = min_keyword.clamp(0.0, 1.0);
+                hybrid_config.minimum_keyword_score = min_keyword.clamp(0.0, 1.0);
             }
-            hybrid_config.min_semantic_score = query
+            hybrid_config.minimum_semantic_score = query
                 .min_semantic_score
                 .or(threshold)
-                .unwrap_or(hybrid_config.min_semantic_score)
+                .unwrap_or(hybrid_config.minimum_semantic_score)
                 .clamp(0.0, 1.0);
 
             tracing::info!(
                 "Hybrid search: semantic_weight={}, rrf_k={}, min_keyword={}, min_semantic={}",
                 hybrid_config.semantic_weight,
-                hybrid_config.rrf_k,
-                hybrid_config.min_keyword_score,
-                hybrid_config.min_semantic_score
+                hybrid_config.fusion_constant,
+                hybrid_config.minimum_keyword_score,
+                hybrid_config.minimum_semantic_score
             );
 
             match context_service

@@ -3,6 +3,9 @@
 //! The ContextService integrates all components to provide a complete
 //! content gathering, analysis, embedding, and search solution.
 
+use abnegate_index::HybridSearchResult;
+use abnegate_index::cap_per_file;
+use abnegate_index::first_stage_answered;
 use chrono::Utc;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -14,11 +17,17 @@ use crate::content::{
     embed_char_budget, smart_chunk, split_for_embedding,
 };
 use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
-use crate::embeddings::{
-    CrossEncoder, Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult,
-    PgVectorStore, SearchFilters, VectorStore, cap_per_file, embed_cached, keyword_only_search,
-    semantic_only_search,
-};
+use crate::embeddings::CrossEncoder;
+use crate::embeddings::Embedding;
+use crate::embeddings::EmbeddingService;
+use crate::embeddings::HybridSearchConfig;
+use crate::embeddings::Id;
+use crate::embeddings::PgVectorStore;
+use crate::embeddings::SearchFilters;
+use crate::embeddings::VectorStore;
+use crate::embeddings::embed_cached;
+use crate::embeddings::keyword_only_search;
+use crate::embeddings::semantic_only_search;
 use crate::error::{ContextError, Result};
 use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
 use crate::stream::{AnalysisStage, GatheringCallback, GatheringEvent};
@@ -87,18 +96,18 @@ impl SearchResultWithAnalysis {
         }
     }
 
-    fn from_hybrid(r: HybridSearchResult, rrf: bool) -> Self {
+    fn from_hybrid(result: HybridSearchResult<Id>, rrf: bool) -> Self {
         Self {
-            chunk_id: r.chunk_id,
-            content_item_id: r.content_item_id,
-            source_id: r.source_id,
-            similarity: r.semantic_score.unwrap_or(r.score),
-            rrf_score: rrf.then_some(r.fusion_score),
-            semantic_score: r.semantic_score,
-            keyword_score: r.keyword_score,
-            chunk_text: r.chunk_text,
-            item_uri: r.item_uri,
-            item_title: r.item_title,
+            chunk_id: result.id.chunk_id,
+            content_item_id: result.id.content_item_id,
+            source_id: result.id.source_id,
+            similarity: result.semantic_score.unwrap_or(result.score),
+            rrf_score: rrf.then_some(result.fusion_score),
+            semantic_score: result.semantic_score,
+            keyword_score: result.keyword_score,
+            chunk_text: result.chunk_text,
+            item_uri: result.item_uri,
+            item_title: result.item_title,
             analysis: None,
         }
     }
@@ -472,10 +481,10 @@ impl ContextService {
                 query,
                 (limit * 4).max(32),
                 filters.clone(),
-                hybrid_config.min_keyword_score,
+                hybrid_config.minimum_keyword_score,
             )
             .await?;
-            if crate::embeddings::ranker::first_stage_answered(
+            if first_stage_answered(
                 query,
                 keyword
                     .iter()
@@ -531,7 +540,7 @@ impl ContextService {
                     query,
                     candidate_limit,
                     filters,
-                    hybrid_config.min_keyword_score,
+                    hybrid_config.minimum_keyword_score,
                 )
                 .await?
             }
@@ -836,7 +845,7 @@ impl<'a> ProgressCallback for SourceProgressAdapter<'a> {
 
 fn assemble_hybrid_results(
     query: &str,
-    results: Vec<HybridSearchResult>,
+    results: Vec<HybridSearchResult<Id>>,
     used_embedding: bool,
     limit: usize,
 ) -> Vec<SearchResultWithAnalysis> {

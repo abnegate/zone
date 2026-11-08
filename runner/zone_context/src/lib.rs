@@ -56,13 +56,24 @@ pub use content::{
 pub use adapters::{AdapterRegistry, ProgressCallback, SourceAdapter, TextAdapter};
 
 // Embedding types
-pub use embeddings::{
-    CrossEncoder, Embedding, EmbeddingService, HybridSearchConfig, HybridSearchResult,
-    OllamaCrossEncoder, RewrittenQuery, VectorStore, ann_candidate_limit, configure_ann_connection,
-    default_ranker, embed_query_text, hybrid_search, hybrid_search_filtered,
-    identifier_match_boost, keyword_only_search, probe_cross_encoder, rewrite_query, score_hit,
-    semantic_only_search,
-};
+pub use embeddings::CrossEncoder;
+pub use embeddings::Embedding;
+pub use embeddings::EmbeddingService;
+pub use embeddings::HybridSearchConfig;
+pub use embeddings::Id;
+pub use embeddings::RewrittenQuery;
+pub use embeddings::VectorStore;
+pub use embeddings::ann_candidate_limit;
+pub use embeddings::configure_ann_connection;
+pub use embeddings::default_ranker;
+pub use embeddings::embed_query_text;
+pub use embeddings::hybrid_search;
+pub use embeddings::hybrid_search_filtered;
+pub use embeddings::keyword_only_search;
+pub use embeddings::probe_cross_encoder;
+pub use embeddings::rewrite_query;
+pub use embeddings::score_hit;
+pub use embeddings::semantic_only_search;
 
 // Heuristics types
 pub use heuristics::{

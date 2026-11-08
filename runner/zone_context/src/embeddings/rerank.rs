@@ -12,83 +12,6 @@ use std::time::Duration;
 
 use crate::error::{ContextError, Result};
 
-/// Blend learned-ranker logits with a 0-1 cross-encoder score.
-pub fn blend_rank(ltr: f32, cross_encoder: f32) -> f32 {
-    0.62 * ltr + 0.38 * cross_encoder
-}
-
-/// Joint query-document score used when no neural reranker is configured.
-pub fn lexical_cross_score(query: &str, uri: &str, title: &str, text: &str) -> f32 {
-    let rewritten = crate::embeddings::rewrite_query(query);
-    let query_l = query.to_ascii_lowercase();
-    let uri_l = uri.to_ascii_lowercase();
-    let title_l = title.to_ascii_lowercase();
-    let text_l = text.to_ascii_lowercase();
-
-    let role = crate::embeddings::ranker::identifier_role(text, uri, &rewritten.identifiers);
-    let mut ident: f32 = match role {
-        crate::embeddings::ranker::IdentifierRole::Exported => 0.7,
-        crate::embeddings::ranker::IdentifierRole::Defined => 0.55,
-        crate::embeddings::ranker::IdentifierRole::Mention => 0.16,
-        crate::embeddings::ranker::IdentifierRole::None => 0.0,
-    };
-    for id in &rewritten.identifiers {
-        let id_l = id.to_ascii_lowercase();
-        if uri_l.contains(&id_l) {
-            ident += 0.12;
-        } else if title_l.contains(&id_l) {
-            ident += 0.08;
-        }
-    }
-    ident = ident.min(0.75);
-
-    let tokens: Vec<&str> = query
-        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-        .filter(|t| t.len() >= 2)
-        .collect();
-    let coverage = if tokens.is_empty() {
-        0.0
-    } else {
-        tokens
-            .iter()
-            .filter(|token| text_l.contains(&token.to_ascii_lowercase()))
-            .count() as f32
-            / tokens.len() as f32
-    };
-
-    let phrase = if query_l.len() >= 8 && text_l.contains(&query_l) {
-        0.15
-    } else {
-        0.0
-    };
-    let title_hit = if tokens
-        .iter()
-        .any(|token| title_l.contains(&token.to_ascii_lowercase()))
-    {
-        0.08
-    } else {
-        0.0
-    };
-    let path_hit = if tokens
-        .iter()
-        .any(|token| uri_l.contains(&token.to_ascii_lowercase()))
-    {
-        0.07
-    } else {
-        0.0
-    };
-
-    let mut bridge = 0.0f32;
-    for term in crate::embeddings::nl_bridge_terms(query) {
-        if term.contains('_') && text_l.contains(&term) {
-            bridge += 0.12;
-        }
-    }
-    bridge = bridge.min(0.24);
-
-    (ident + 0.22 * coverage + phrase + title_hit + path_hit + bridge).clamp(0.0, 1.0)
-}
-
 #[async_trait]
 pub trait CrossEncoder: Send + Sync {
     async fn score_pair(&self, query: &str, document: &str) -> Result<f32>;
@@ -284,9 +207,6 @@ impl CrossEncoder for HttpCrossEncoder {
     }
 }
 
-/// Back-compat name used by older call sites.
-pub type OllamaCrossEncoder = HttpCrossEncoder;
-
 fn rerank_timeout_ms() -> u64 {
     std::env::var("RERANK_TIMEOUT_MS")
         .ok()
@@ -297,20 +217,6 @@ fn rerank_timeout_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn lexical_cross_encoder_is_joint_over_query_and_doc() {
-        let query = "What does should_skip_blob do?";
-        let exact = lexical_cross_score(
-            query,
-            "github://zone/content/mod.rs",
-            "mod.rs",
-            "fn should_skip_blob(uri: &str) -> bool",
-        );
-        let other = lexical_cross_score(query, "github://zone/auth.ts", "auth.ts", "login form");
-        assert!(exact > other);
-        assert!(exact > 0.4);
-    }
 
     #[test]
     fn min_max_norm_spans_unit_interval() {

@@ -346,10 +346,7 @@ async fn test_hybrid_search_weighting() {
     let query_embedding = vec![0.15_f32; 1024];
 
     // Test semantic-heavy weighting
-    let semantic_config = HybridSearchConfig {
-        semantic_weight: 0.9,
-        ..Default::default()
-    };
+    let semantic_config = HybridSearchConfig::default().with_semantic_weight(0.9);
     let semantic_results = hybrid_search(
         &pool,
         query,
@@ -363,10 +360,7 @@ async fn test_hybrid_search_weighting() {
     .unwrap();
 
     // Test keyword-heavy weighting
-    let keyword_config = HybridSearchConfig {
-        semantic_weight: 0.1,
-        ..Default::default()
-    };
+    let keyword_config = HybridSearchConfig::default().with_semantic_weight(0.1);
     let keyword_results = hybrid_search(
         &pool,
         query,
@@ -504,7 +498,7 @@ async fn test_hybrid_search_source_filter() {
     // All results should be from the specified source
     for result in &results {
         assert_eq!(
-            result.source_id, source_id,
+            result.id.source_id, source_id,
             "Results should be from filtered source"
         );
     }
@@ -537,31 +531,6 @@ async fn test_hybrid_search_limit() {
     .unwrap();
 
     assert!(results.len() <= 2, "Should respect limit parameter");
-}
-
-#[test]
-fn test_hybrid_config_validation() {
-    let config = HybridSearchConfig {
-        semantic_weight: 0.5,
-        rrf_k: 60.0,
-        min_keyword_score: 0.1,
-        min_semantic_score: 0.6,
-    };
-
-    assert_eq!(config.semantic_weight, 0.5);
-    assert_eq!(config.rrf_k, 60.0);
-    assert_eq!(config.min_keyword_score, 0.1);
-    assert_eq!(config.min_semantic_score, 0.6);
-}
-
-#[test]
-fn test_hybrid_config_default() {
-    let config = HybridSearchConfig::default();
-
-    assert_eq!(config.semantic_weight, 0.7);
-    assert_eq!(config.rrf_k, 60.0);
-    assert_eq!(config.min_keyword_score, 0.0);
-    assert_eq!(config.min_semantic_score, 0.35);
 }
 
 // Cleanup helper

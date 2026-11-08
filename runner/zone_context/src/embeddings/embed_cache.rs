@@ -5,10 +5,12 @@
 //! concurrency.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+use std::sync::OnceLock;
+
+use abnegate_index::embed_query_text;
 
 use super::EmbeddingService;
-use super::query::embed_query_text;
 use crate::error::Result;
 
 const CAPACITY: usize = 512;
