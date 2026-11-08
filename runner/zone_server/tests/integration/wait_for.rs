@@ -3,12 +3,14 @@
 
 use crate::common;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use abnegate_agent::ToolContext;
+use abnegate_agent::tool::job::{self, JobCommand, Jobs};
+use abnegate_agent::tool::{EnvironmentPolicy, MAXIMUM_SLEEP, Session};
 use abnegate_llm::{LlmConfig, Message};
 use futures::StreamExt;
 use futures_util::SinkExt;
@@ -20,9 +22,8 @@ use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+use zone_core::application::application;
 use zone_core::llm::LlmClient;
-use zone_core::tools::Session;
-use zone_core::tools::job::{self, JobCommand, Jobs};
 use zone_server::agent::{
     AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend, WorkspaceScope, run, wait,
 };
@@ -74,13 +75,17 @@ const HELD: Duration = Duration::from_secs(30);
 /// A wait window that outlives the stall watchdog's threshold, so a run parked
 /// for all of it would have been announced twice over.
 fn past_the_watchdog() -> Duration {
-    Duration::from_secs(zone_core::tools::MAX_SLEEP_SECS) + Duration::from_secs(2)
+    MAXIMUM_SLEEP + Duration::from_secs(2)
 }
 
-fn environment() -> HashMap<String, String> {
-    std::env::var("PATH")
-        .map(|path| HashMap::from([("PATH".to_string(), path)]))
-        .unwrap_or_default()
+/// The context a job is spawned under: `session`'s, rooted at `root`, with
+/// only the `PATH` a cleared environment needs to resolve the program.
+fn spawning(session: Session, root: &Path) -> ToolContext {
+    ToolContext::default()
+        .within(root)
+        .with_session(session)
+        .with_application(application())
+        .with_environment(EnvironmentPolicy::empty().allow(["PATH"]))
 }
 
 fn directory() -> TempDir {
@@ -638,7 +643,7 @@ async fn a_backgrounded_command_survives_its_turn_and_its_wait_resumes_and_finis
 
     driven.finish();
     assert!(
-        !root.path().join(job::JOB_LOG_DIRECTORY).exists(),
+        !job::log_directory(root.path(), &application()).exists(),
         "the job logged beside its gate instead of inside the checkout it ran in"
     );
     discard(root).await;
@@ -852,10 +857,8 @@ async fn a_wait_on_a_job_is_refused_from_every_session_but_the_one_that_started_
     let root = directory();
 
     let started = Jobs::spawn(
-        Session::Task(owning.run),
         &JobCommand::new("echo", vec!["ledger".to_string()]),
-        root.path(),
-        &environment(),
+        &spawning(Session::Task(owning.run), root.path()),
     )
     .await
     .expect("a job the run owns");
