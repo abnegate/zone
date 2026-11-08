@@ -21,9 +21,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-zone_core = { path = "../zone_core" }
 
 [dev-dependencies]
+abnegate-agent = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tracing-subscriber = { workspace = true }
 wiremock = "=0.6.5"
