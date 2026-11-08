@@ -813,6 +813,19 @@ mod tests {
             reschedule(id, Some(&rule), Some(anchor), anchor, None, 0, "UTC"),
             None
         );
+        assert_eq!(
+            reschedule(
+                id,
+                Some(&rule),
+                Some(anchor),
+                anchor,
+                Some(Utc::now() + MAX_LIFETIME),
+                0,
+                "UTC"
+            ),
+            None,
+            "a row stored with its seven-day expiry is dropped too"
+        );
     }
 
     #[test]

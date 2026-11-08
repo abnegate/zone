@@ -42,7 +42,7 @@ mod tests {
         );
     }
 
-    /// The minute step stops at the end of the calendar instead of stepping past it.
+    /// A wall-clock time past the last instant UTC holds has no instant.
     #[test]
     fn the_calendars_last_minute_behind_utc_has_no_instant() {
         assert_eq!(

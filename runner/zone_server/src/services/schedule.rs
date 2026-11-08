@@ -59,7 +59,9 @@ const MAX_JITTER: Duration = Duration::minutes(15);
 /// Up to a tenth of the period, capped at `MAX_JITTER`: proportional so an
 /// hourly job moves by minutes and a weekly one does not move by days, and
 /// capped so no automation drifts far enough from the time the person named to
-/// read as a different time.
+/// read as a different time. The period is the rule's shortest gap rather than
+/// its widest, because an offset drawn from the widest could push one firing
+/// past the next.
 pub fn jitter(id: Uuid, period: Duration) -> Duration {
     let span = (period / 10).min(MAX_JITTER).num_seconds().max(0);
     if span == 0 {
@@ -207,12 +209,21 @@ mod tests {
     /// unnoticed: `FREQ=HOURLY;BYHOUR=9` would fire every hour, not at nine.
     #[test]
     fn a_clause_the_frequency_never_reads_is_still_refused() {
-        for (rule, clause) in [
-            ("FREQ=HOURLY;BYHOUR=9", "BYHOUR"),
-            ("FREQ=DAILY;BYDAY=MO", "BYDAY"),
+        for (rule, refusal) in [
+            (
+                "FREQ=HOURLY;BYHOUR=9",
+                "Hourly does not use BYHOUR. Drop the clause, or state the FREQ that reads it: \
+                 BYDAY needs WEEKLY, BYMONTHDAY needs MONTHLY, and BYHOUR and BYMINUTE need \
+                 DAILY, WEEKLY or MONTHLY.",
+            ),
+            (
+                "FREQ=DAILY;BYDAY=MO",
+                "Daily does not use BYDAY. Drop the clause, or state the FREQ that reads it: \
+                 BYDAY needs WEEKLY, BYMONTHDAY needs MONTHLY, and BYHOUR and BYMINUTE need \
+                 DAILY, WEEKLY or MONTHLY.",
+            ),
         ] {
-            let refused = parse(rule).expect_err(rule);
-            assert!(refused.contains(clause), "{rule}: {refused}");
+            assert_eq!(parse(rule), Err(refusal.to_string()), "{rule}");
         }
     }
 
