@@ -17,6 +17,7 @@ use super::cli::{BuiltinTools, Observer, SignIn, Toolset, confined};
 use reported::Reported;
 use turn::{Turn, ended, failed};
 
+mod provider;
 mod reported;
 mod turn;
 
@@ -220,6 +221,16 @@ impl LlmClient {
     pub fn without_reasoning(mut self) -> Self {
         self.endpoint = self.endpoint.without_reasoning();
         self
+    }
+
+    /// This client as context compaction asks it for a summary: at
+    /// temperature 0, with no stop sequence to cut the structured answer
+    /// short, and without reasoning.
+    pub fn summarizer(&self) -> Self {
+        self.clone()
+            .with_temperature(0.0)
+            .with_stop(Vec::new())
+            .without_reasoning()
     }
 
     /// Make a chat completion request against the configured model.
