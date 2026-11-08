@@ -11,6 +11,7 @@
 //! - Session management
 
 pub mod agent;
+pub mod commands;
 pub mod context;
 pub mod error;
 pub mod llm;
