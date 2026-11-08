@@ -392,4 +392,4 @@ impl LlmClient {
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

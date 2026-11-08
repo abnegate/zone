@@ -94,7 +94,7 @@ pub struct History {
     pub incomplete: bool,
 }
 
-/// Same v1 tuple encoding as zone_core::context::coverage, excluding mutable flags.
+/// Same v1 tuple encoding as abnegate_agent::context::coverage, excluding mutable flags.
 pub fn fingerprint(entries: &[Entry], ids: &[String]) -> Result<String, String> {
     let mut selected = Vec::with_capacity(ids.len());
     let mut seen = HashSet::new();
@@ -230,15 +230,14 @@ mod tests {
         };
         let ids = vec![entry.id.clone()];
         let original = fingerprint(&[entry.clone()], &ids).unwrap();
-        let canonical = zone_core::context::Entry {
-            id: entry.id.clone(),
-            message: entry.message.clone().into_message(),
-            preserve: false,
-            consumed: entry.consumed,
-        };
+        let canonical = abnegate_agent::context::Entry::new(
+            entry.id.clone(),
+            entry.message.clone().into_message(),
+        )
+        .with_consumed(entry.consumed);
         assert_eq!(
             original,
-            zone_core::context::coverage(&[canonical], &ids)
+            abnegate_agent::context::coverage(&[canonical], &ids)
                 .unwrap()
                 .fingerprint
         );
