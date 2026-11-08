@@ -38,6 +38,8 @@ const RATE_LIMITED: &str = "Rate limited: retry after 60s";
 const RETRIED_ATTEMPTS: u64 = 4;
 const MAXIMUM_ANSWER_BYTES: usize = 16 * 1024 * 1024;
 
+type Kind = fn(&ContextError) -> bool;
+
 fn source(config: Value) -> Source {
     Source {
         id: Uuid::new_v4(),
@@ -283,7 +285,7 @@ async fn a_403_that_says_rate_limit_is_retried() {
 
 #[tokio::test]
 async fn each_repository_status_keeps_its_zone_error() {
-    let cases: [(u16, fn(&ContextError) -> bool, &str); 5] = [
+    let cases: [(u16, Kind, &str); 5] = [
         (
             599,
             adapted,
