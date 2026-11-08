@@ -1,5 +1,5 @@
+use abnegate_agent_cli::{AgentKind, Session};
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, Session};
 
 use crate::db::chats::ChatSession;
 use crate::services::login::router::Chosen;
@@ -26,10 +26,7 @@ impl Continuation<'_> {
             Self::Chat(Some(previous))
                 if previous.agent == chosen.agent && previous.login == Some(chosen.login.id) =>
             {
-                Some(Session {
-                    id: previous.id.clone(),
-                    resume: true,
-                })
+                Some(Session::resumed(previous.id.clone()))
             }
             Self::Chat(_) => Self::fresh(chosen.agent),
         }
@@ -39,11 +36,8 @@ impl Continuation<'_> {
     /// own thread and announces it.
     pub fn fresh(agent: AgentKind) -> Option<Session> {
         match agent {
-            AgentKind::Claude => Some(Session {
-                id: Uuid::new_v4().to_string(),
-                resume: false,
-            }),
-            AgentKind::Codex => None,
+            AgentKind::Claude => Some(Session::pinned(Uuid::new_v4().to_string())),
+            _ => None,
         }
     }
 }

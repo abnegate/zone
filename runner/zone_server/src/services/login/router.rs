@@ -14,11 +14,11 @@ pub use observed::Observed;
 
 use std::cmp::Ordering;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_llm::{Limit, Window};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::join_all;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use super::credential;
 use super::usage::{self, Availability, Snapshot};
@@ -316,6 +316,7 @@ fn group(preferred: AgentKind, agent: AgentKind) -> usize {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use abnegate_agent_cli::login::claude::Tokens;
     use abnegate_secret::SecretValue;
     use chrono::SubsecRound;
     use futures::future::try_join_all;
@@ -329,7 +330,7 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, Config};
     use crate::db::agent_logins::{AgentLoginRow, Insert};
-    use crate::services::login::claude::Tokens;
+    use crate::services::login::claude::Sealed;
     use crate::services::login::credential::Login;
 
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
@@ -400,7 +401,7 @@ mod tests {
         async fn login(&self, agent: AgentKind, label: &str, headroom: Option<f64>) -> Uuid {
             let credential = match agent {
                 AgentKind::Claude => Some(self.sealed(Utc::now() + TimeDelta::hours(8))),
-                AgentKind::Codex => None,
+                _ => None,
             };
             let login = self.insert(agent, label, credential.as_deref()).await;
             if let Some(headroom) = headroom {
@@ -443,14 +444,14 @@ mod tests {
         }
 
         fn sealed(&self, expires_at: DateTime<Utc>) -> String {
-            Tokens {
-                access: SecretValue::new(format!("access-{}", Uuid::new_v4())),
-                refresh: None,
+            Tokens::new(
+                SecretValue::new(format!("access-{}", Uuid::new_v4())),
+                None,
                 expires_at,
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            }
+                None,
+                "user:inference",
+                None,
+            )
             .seal(self.state.master_key())
             .expect("tokens to seal")
         }
@@ -979,9 +980,10 @@ mod tests {
         usage.verify().await;
     }
 
-    /// The windows claude's stream reports in `infos`, as the agent's reader reads them.
+    /// The windows claude's stream reports in `infos`, as the agent's reader reads them and Zone
+    /// names them.
     fn streamed(infos: &[serde_json::Value]) -> Vec<Window> {
-        let mut reader = AgentKind::Claude.reader();
+        let mut reader = AgentKind::Claude.turn();
         let mut events = Vec::new();
         for info in infos {
             let line = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": info});
@@ -990,7 +992,9 @@ mod tests {
         events
             .into_iter()
             .filter_map(|event| match event {
-                zone_core::llm::provider::AgentEvent::Window(window) => Some(window),
+                abnegate_agent_cli::AgentEvent::Window(window) => {
+                    Some(zone_core::llm::window::renamed(window))
+                }
                 _ => None,
             })
             .collect()

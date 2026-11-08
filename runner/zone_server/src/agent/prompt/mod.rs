@@ -581,7 +581,7 @@ mod tests {
             ),
             chat(
                 &ChatTools::with_names(ToolProfile::Chat, CHAT_CATALOG, None)
-                    .served_to(zone_core::llm::AgentKind::Codex),
+                    .served_to(abnegate_agent_cli::AgentKind::Codex),
                 false,
                 &environment,
             ),
@@ -714,7 +714,7 @@ mod tests {
         );
         assert!(native.contains("or use gh pr create, hub"), "{native}");
 
-        for agent in zone_core::llm::AgentKind::ALL {
+        for &agent in abnegate_agent_cli::AgentKind::ALL {
             let served = chat(&chat_tools().served_to(agent), false, &source);
             assert!(
                 served.contains("then calling mcp__zone__create_pull_request so Zone can track it"),
@@ -983,7 +983,7 @@ mod tests {
             "chat prompt is {} chars",
             chat_prompt.len()
         );
-        for agent in zone_core::llm::AgentKind::ALL {
+        for &agent in abnegate_agent_cli::AgentKind::ALL {
             let served = chat(&chat_tools().served_to(agent), false, &github());
             assert!(
                 served.len() <= CHAT_MAX_CHARS,

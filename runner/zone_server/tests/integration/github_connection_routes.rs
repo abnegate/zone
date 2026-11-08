@@ -1896,28 +1896,50 @@ async fn installations_delete_unknown_is_not_found() {
     harness.discard().await;
 }
 
+/// A listing GitHub answers only once the test lets it, after telling the test it was asked.
+struct HeldListing {
+    asked: std::sync::Arc<tokio::sync::Notify>,
+    released: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl wiremock::Respond for HeldListing {
+    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+        self.asked.notify_one();
+        self.released
+            .lock()
+            .expect("the release")
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the test released the listing");
+        ResponseTemplate::new(200).set_body_json(json!([]))
+    }
+}
+
 #[tokio::test]
 async fn installations_sync_keeps_an_installation_recorded_while_github_lists() {
-    let listing = std::time::Duration::from_millis(750);
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let app = harness.organization_app(&tenant).await;
     let stale = harness.installation_of(&app).await;
-    routes_listing_app_installations(
-        &harness.github,
-        app.app_id,
-        ResponseTemplate::new(200)
-            .set_body_json(json!([]))
-            .set_delay(listing),
-        1,
-    )
-    .await;
+    let asked = std::sync::Arc::new(tokio::sync::Notify::new());
+    let (release, released) = std::sync::mpsc::channel();
+    Mock::given(method("GET"))
+        .and(path("/app/installations"))
+        .and(ApplicationJwt(app.app_id))
+        .respond_with(HeldListing {
+            asked: asked.clone(),
+            released: Mutex::new(released),
+        })
+        .expect(1)
+        .mount(&harness.github)
+        .await;
 
     let sync = sync_path(&tenant);
     let (synced, recorded) = tokio::join!(harness.post(&sync, Some(&tenant.owner.token)), async {
-        tokio::time::sleep(listing / 3).await;
-        harness.installation_of(&app).await
-    },);
+        asked.notified().await;
+        let recorded = harness.installation_of(&app).await;
+        release.send(()).expect("the listing is still held");
+        recorded
+    });
 
     synced.assert_status(StatusCode::NO_CONTENT);
     assert!(

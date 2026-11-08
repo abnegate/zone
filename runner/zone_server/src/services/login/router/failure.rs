@@ -1,4 +1,4 @@
-use zone_core::llm::AgentKind;
+use abnegate_agent_cli::AgentKind;
 
 use super::error::Error;
 use crate::db::agent_logins::AgentLoginRow;

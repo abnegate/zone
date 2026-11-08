@@ -5,11 +5,12 @@
 //! are actually installed. On a coding agent, a stage runs only a pin the
 //! agent knows, and otherwise leaves the choice to the agent.
 
+use abnegate_agent_cli::AgentKind;
 use reqwest::Client;
 use serde::Deserialize;
 use std::sync::LazyLock;
 use std::time::Duration;
-use zone_core::llm::{AgentKind, LlmBackend};
+use zone_core::llm::LlmBackend;
 
 use crate::db::ai_settings::EffectiveAiSettings;
 use crate::services::endpoint::{Endpoint, Origin};
@@ -1129,10 +1130,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_agent_backend_runs_its_own_models_whatever_ollama_has_installed() {
+        use abnegate_agent_cli::CliSettings;
         use serde_json::json;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        use zone_core::llm::CliSettings;
 
         let ollama = MockServer::start().await;
         Mock::given(method("GET"))

@@ -34,8 +34,9 @@ impl<'a> Meter<'a> {
 
 #[cfg(test)]
 mod tests {
+    use abnegate_agent_cli::AgentKind;
     use sqlx::PgPool;
-    use zone_core::llm::{AgentKind, window};
+    use zone_core::llm::window;
 
     use super::*;
     use crate::db::agent_logins::{self, Insert};

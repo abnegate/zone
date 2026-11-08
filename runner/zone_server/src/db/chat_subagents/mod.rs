@@ -8,10 +8,10 @@ mod stopped;
 #[cfg(test)]
 mod tests;
 
+use abnegate_agent_cli::{StepStatus, SubagentStatus, SubagentStep};
 use sqlx::types::Json;
 use sqlx::{Executor, PgConnection, Postgres};
 use uuid::Uuid;
-use zone_core::llm::{StepStatus, SubagentStatus, SubagentStep};
 
 use super::DbResult;
 use super::context::RUNNING as TURN_RUNNING;
@@ -338,11 +338,14 @@ where
     Ok(RecordedSteps {
         changed: rows
             .into_iter()
-            .map(|(id, name, subject, status, _)| SubagentStep {
-                id,
-                name,
-                subject,
-                status: StepStatus::named(&status).unwrap_or(StepStatus::Failed),
+            .map(|(id, name, subject, status, _)| {
+                let mut step = SubagentStep::new(
+                    id,
+                    name,
+                    StepStatus::named(&status).unwrap_or(StepStatus::Failed),
+                );
+                step.subject = subject;
+                step
             })
             .collect(),
         added: i64::try_from(added).unwrap_or(i64::MAX),

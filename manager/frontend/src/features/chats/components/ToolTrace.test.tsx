@@ -5,9 +5,11 @@ import {
   APPROVAL_CANCELLED_DETAIL,
   APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_ANSWER_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
   DENIED_DETAIL,
   type JobStarted,
   type Question,
+  TOOL_ERROR_PREFIX,
   type ToolCallRecord,
   UNFINISHED_DETAIL,
   type Waiting,
@@ -543,6 +545,79 @@ describe('ToolTrace', () => {
 
     expect(screen.getByText(APPROVAL_TIMED_OUT_DETAIL)).toBeInTheDocument();
     expect(screen.getByText(APPROVAL_CANCELLED_DETAIL)).toBeInTheDocument();
+  });
+
+  it('labels a refused call from the refusal it was stored with, not from its words', () => {
+    const shell = { name: 'run_shell', success: false };
+    render(
+      <ToolTrace
+        calls={[
+          call({ ...shell, id: 'denied', detail: 'Refused', refusal: 'denied' }),
+          call({ ...shell, id: 'timed', detail: 'Refused', refusal: 'timed_out' }),
+          call({ ...shell, id: 'cancelled', detail: 'Refused', refusal: 'cancelled' }),
+          call({
+            ...shell,
+            id: 'log',
+            detail: `${TOOL_ERROR_PREFIX}${DENIED_DETAIL}`,
+            refusal: null,
+          }),
+        ]}
+      />
+    );
+
+    const rows = screen.getAllByTestId('tool-call');
+    expect(rows.map((row) => row.querySelector('.tool-call-name')?.textContent)).toEqual([
+      'Denied running a shell command',
+      'Approval timed out for running a shell command',
+      'Cancelled running a shell command',
+      'Failed to run a shell command',
+    ]);
+    expect(rows[3]?.querySelector('.tool-call-detail')?.textContent).toBe(
+      `${TOOL_ERROR_PREFIX}${DENIED_DETAIL}`
+    );
+  });
+
+  it('labels a call with a refusal it cannot read from its words', () => {
+    const parsed = ToolCallRecordSchema.parse({
+      ...call({
+        name: 'run_shell',
+        success: false,
+        detail: `${TOOL_ERROR_PREFIX}${DENIED_DETAIL}`,
+      }),
+      refusal: 'vetoed',
+    });
+    render(<ToolTrace calls={[parsed]} />);
+
+    expect(parsed.refusal).toBeUndefined();
+    expect(screen.getByText('Denied running a shell command')).toBeInTheDocument();
+  });
+
+  it('labels a stored call left waiting for an approval nobody can give as stopped', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            id: 'stored',
+            name: 'run_shell',
+            success: false,
+            detail: AWAITING_APPROVAL_DETAIL,
+          }),
+          call({
+            id: 'live',
+            name: 'run_shell',
+            success: false,
+            detail: AWAITING_APPROVAL_DETAIL,
+            approval: 'pending',
+            pending: true,
+          }),
+        ]}
+      />
+    );
+
+    const names = screen
+      .getAllByTestId('tool-call')
+      .map((row) => row.querySelector('.tool-call-name')?.textContent);
+    expect(names).toEqual(['Stopped running a shell command', 'Waiting to run a shell command']);
   });
 
   it('reads a successful call as run even when its output repeats a server outcome', () => {

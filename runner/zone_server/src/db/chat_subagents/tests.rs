@@ -50,12 +50,7 @@ fn named(chat_id: Uuid, external_id: &str) -> SubagentChange<'_> {
 }
 
 fn step(id: &str, status: StepStatus) -> SubagentStep {
-    SubagentStep {
-        id: id.to_string(),
-        name: "Bash".to_string(),
-        subject: Some("cargo test".to_string()),
-        status,
-    }
+    SubagentStep::new(id, "Bash", status).with_subject("cargo test")
 }
 
 async fn running(pool: &PgPool, chat_id: Uuid, external_id: &str, turn: Option<Uuid>) -> Uuid {
@@ -910,6 +905,138 @@ async fn failing_a_finished_subagents_running_steps_returns_them_in_order() {
     );
 }
 
+#[test]
+fn a_step_without_a_subject_still_reads() {
+    let step: SubagentStep =
+        serde_json::from_str(r#"{"id":"toolu_x","name":"Bash","status":"running"}"#)
+            .expect("a step");
+
+    assert_eq!(
+        step,
+        SubagentStep::new("toolu_x", "Bash", StepStatus::Running)
+    );
+}
+
+#[test]
+fn a_step_is_sent_in_the_shape_readers_already_read() {
+    assert_eq!(
+        serde_json::to_value(SubagentStep::new("toolu_x", "Bash", StepStatus::Succeeded))
+            .expect("a step to serialise"),
+        serde_json::json!({
+            "id": "toolu_x",
+            "name": "Bash",
+            "subject": null,
+            "status": "succeeded",
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(step("toolu_y", StepStatus::Failed)).expect("a step to serialise"),
+        serde_json::json!({
+            "id": "toolu_y",
+            "name": "Bash",
+            "subject": "cargo test",
+            "status": "failed",
+        })
+    );
+}
+
+/// The status names the check constraint `constraint` lets its table store.
+async fn allowed(pool: &PgPool, constraint: &str) -> Vec<String> {
+    let definition: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = $1",
+    )
+    .bind(constraint)
+    .fetch_one(pool)
+    .await
+    .expect("the constraint");
+    regex::Regex::new(r"'([a-z_]+)'::text")
+        .expect("a valid status pattern")
+        .captures_iter(&definition)
+        .map(|captures| captures[1].to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn every_status_the_tables_hold_is_one_the_crate_names() {
+    let pool = pool().await;
+
+    let subagents = allowed(&pool, "chat_subagents_status_check").await;
+    let steps = allowed(&pool, "chat_subagent_steps_status_check").await;
+
+    assert_eq!(
+        subagents,
+        SubagentStatus::ALL
+            .iter()
+            .map(|status| status.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        steps,
+        StepStatus::ALL
+            .iter()
+            .map(|status| status.as_str())
+            .collect::<Vec<_>>()
+    );
+    for name in &subagents {
+        let read: SubagentStatus =
+            serde_json::from_value(serde_json::json!(name)).expect("a stored subagent status");
+        assert_eq!(read.as_str(), name);
+    }
+    for name in &steps {
+        let read: StepStatus =
+            serde_json::from_value(serde_json::json!(name)).expect("a stored step status");
+        assert_eq!(read.as_str(), name);
+    }
+}
+
+#[tokio::test]
+async fn steps_stored_before_the_switch_read_as_the_crates_steps() {
+    let pool = pool().await;
+    let chat_id = chat(&pool).await;
+    let subagent = running(&pool, chat_id, "toolu_01Agent", None).await;
+    for (position, (step_id, subject, status)) in [
+        ("toolu_done", Some("cargo test"), "succeeded"),
+        ("toolu_bare", None, "running"),
+        ("toolu_broke", Some("cargo build"), "failed"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sqlx::query(
+            "INSERT INTO chat_subagent_steps (subagent_id, step_id, position, name, subject, status)
+             VALUES ($1, $2, $3, 'Bash', $4, $5)",
+        )
+        .bind(subagent)
+        .bind(step_id)
+        .bind(i64::try_from(position).expect("a small position"))
+        .bind(subject)
+        .bind(status)
+        .execute(&pool)
+        .await
+        .expect("a step as zone stored it");
+    }
+
+    let read = stored(&pool, chat_id, subagent).await;
+    let failed = fail_running_steps(&pool, subagent)
+        .await
+        .expect("the failure");
+
+    assert_eq!(
+        read,
+        [
+            step("toolu_done", StepStatus::Succeeded),
+            SubagentStep::new("toolu_bare", "Bash", StepStatus::Running),
+            SubagentStep::new("toolu_broke", "Bash", StepStatus::Failed)
+                .with_subject("cargo build"),
+        ]
+    );
+    assert_eq!(
+        failed,
+        [SubagentStep::new("toolu_bare", "Bash", StepStatus::Failed)],
+        "a step stored with no subject is failed with none"
+    );
+}
+
 #[tokio::test]
 async fn removing_a_messages_subagents_takes_their_steps_and_leaves_the_rest() {
     let pool = pool().await;
@@ -1060,5 +1187,52 @@ async fn a_starting_turns_sweep_begun_before_a_newer_turn_took_a_subagent_leaves
         stored(&pool, chat_id, subagent).await,
         [step("open", StepStatus::Running)],
         "the newer run's steps run on"
+    );
+}
+
+/// A chat deleted while a write holds one of its turns waits for that write rather than
+/// deadlocking with it: the write holds the turn before it touches a subagent, so the delete
+/// takes the turn before it reaches the chat's subagents.
+#[tokio::test]
+async fn deleting_a_chat_waits_for_a_write_that_holds_its_turn() {
+    let pool = pool().await;
+    let chat_id = chat(&pool).await;
+    let held = turn(&pool, chat_id, TURN_RUNNING).await;
+    running(&pool, chat_id, "thread-1", Some(held)).await;
+    let mut writer = pool.begin().await.expect("a transaction");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("its session");
+    assert!(
+        hold_turn(&mut *writer, chat_id, held)
+            .await
+            .expect("the turn held")
+    );
+    let deleting = tokio::spawn({
+        let pool = pool.clone();
+        async move { crate::db::chats::delete_chat(&pool, chat_id).await }
+    });
+    blocking(&pool, pid).await;
+
+    let written = record(
+        &mut *writer,
+        &SubagentChange {
+            message_id: Some(held),
+            status: Some(SubagentStatus::Completed),
+            ..named(chat_id, "thread-1")
+        },
+    )
+    .await;
+    let committed = writer.commit().await;
+    let deleted = deleting.await.expect("the delete ran");
+
+    assert!(
+        written.is_ok() && committed.is_ok(),
+        "the write deadlocked with the delete: {written:?} {committed:?}"
+    );
+    assert!(
+        deleted.expect("the delete deadlocked with the write"),
+        "the chat was not deleted"
     );
 }

@@ -1374,6 +1374,7 @@ async fn a_stated_reason_reaches_the_approval_frame_and_the_stored_record() {
         questions: Vec::new(),
         job: None,
         waiting: None,
+        refusal: None,
     };
     assert_eq!(record.reason.as_deref(), Some(WHY));
     let stored = serde_json::to_value(&record).unwrap();

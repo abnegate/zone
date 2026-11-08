@@ -2,8 +2,9 @@
 
 use std::fmt;
 
+use abnegate_agent_cli::Output;
 use uuid::Uuid;
-use zone_core::llm::{Observer, Output};
+use zone_core::llm::Observer;
 
 use super::credential;
 use super::detection;

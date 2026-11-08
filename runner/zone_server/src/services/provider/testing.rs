@@ -1,13 +1,14 @@
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::SecretValue;
 use chrono::{TimeDelta, Utc};
 use sqlx::PgPool;
 use tempfile::TempDir;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use crate::config::{AgentConfig, Config};
 use crate::db::agent_logins::{self, Insert};
-use crate::services::login::claude::Tokens;
+use crate::services::login::claude::Sealed;
 use crate::state::AppState;
 
 const CODEX_CREDENTIALS_FILE: &str = "auth.json";
@@ -54,14 +55,14 @@ impl Fixture {
 
     /// Signs the organization in to Claude with a login that renews itself.
     pub async fn sign_in_claude(&self) {
-        let tokens = Tokens {
-            access: SecretValue::new("fake-access-token"),
-            refresh: Some(SecretValue::new("fake-refresh-token")),
-            expires_at: Utc::now() + TimeDelta::hours(8),
-            issued_at: None,
-            scope: "user:inference".to_string(),
-            subscription: None,
-        };
+        let tokens = Tokens::new(
+            SecretValue::new("fake-access-token"),
+            Some(SecretValue::new("fake-refresh-token")),
+            Utc::now() + TimeDelta::hours(8),
+            None,
+            "user:inference",
+            None,
+        );
         let sealed = tokens
             .seal(self.state.master_key())
             .expect("tokens to seal");

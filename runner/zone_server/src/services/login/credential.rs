@@ -2,21 +2,25 @@
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
+use std::time::Duration;
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::login::claude::Client;
+use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_secret::SecretValue;
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 use sqlx::{Postgres, Transaction};
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
+use super::claude::{self, Sealed, Unbuilt};
+use super::homes;
 use super::locks::{Guard, Locks};
-use super::{claude, homes};
 use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::state::AppState;
 
 /// The longest a task attempt runs.
-const MARGIN: TimeDelta = TimeDelta::hours(1);
+const MARGIN: Duration = Duration::from_secs(60 * 60);
 
 const UNOPENED: &str = "the stored sign-in could not be opened";
 
@@ -56,23 +60,22 @@ pub(super) async fn hold(login: Uuid) -> Guard<'static> {
 pub async fn resolve(state: &AppState, login: &AgentLoginRow) -> Result<Login, Error> {
     match AgentKind::named(&login.agent) {
         Some(AgentKind::Claude) => {
-            let endpoint = claude::token_endpoint(&state.config().agents.claude_token_url)
-                .map_err(|error| Error::Renewal(error.to_string()))?;
-            resolve_claude(state, login, &claude::Client::new(endpoint)).await
+            resolve_claude(state, login, || claude::client(&state.config().agents)).await
         }
         Some(AgentKind::Codex) => match homes::adopt(state, login).await {
             Ok(home) => Ok(Login::Codex { home }),
             Err(super::error::Error::Database(error)) => Err(Error::Database(error)),
             Err(error) => Err(Error::Home(error.to_string())),
         },
-        None => Err(Error::Unreadable(format!(
+        _ => Err(Error::Unreadable(format!(
             "{} is not an agent Zone drives",
             login.agent
         ))),
     }
 }
 
-/// [`resolve`] for a Claude login, renewing through `client`.
+/// [`resolve`] for a Claude login, renewing through the client `client` builds, only once a
+/// renewal is due.
 ///
 /// Only one renewal runs per login, across processes: it holds the row's lock, and a turn
 /// that waited for the lock finds the renewed tokens and runs with those. Turns on one server
@@ -81,7 +84,7 @@ pub async fn resolve(state: &AppState, login: &AgentLoginRow) -> Result<Login, E
 pub(crate) async fn resolve_claude(
     state: &AppState,
     login: &AgentLoginRow,
-    client: &claude::Client,
+    client: impl FnOnce() -> Result<Client, Unbuilt>,
 ) -> Result<Login, Error> {
     let margin = margin(state.config());
     let tokens = open(state, login)?;
@@ -99,21 +102,28 @@ pub(crate) async fn resolve_claude(
         return current(tokens);
     }
     let organization = login.organization_id;
-    match client.refresh(&tokens).await {
+    let renewal = match client() {
+        Ok(client) => client
+            .refresh(&tokens)
+            .await
+            .map_err(|error| claude::described(&error)),
+        Err(error) => Err(error.to_string()),
+    };
+    match renewal {
         Ok(renewed) => {
             keep(state, transaction, organization, login.id, &renewed).await;
             Ok(Login::Claude {
                 token: renewed.access,
             })
         }
-        Err(error) => {
+        Err(reason) => {
             tracing::warn!(
                 %organization,
                 login = %login.id,
-                %error,
+                error = %reason,
                 "Could not renew the organization's Claude sign-in"
             );
-            current(tokens).map_err(|_| Error::Renewal(error.to_string()))
+            current(tokens).map_err(|_| Error::Renewal(reason))
         }
     }
 }
@@ -125,7 +135,7 @@ async fn keep(
     mut transaction: Transaction<'_, Postgres>,
     organization: Uuid,
     id: Uuid,
-    renewed: &claude::Tokens,
+    renewed: &Tokens,
 ) {
     let sealed = match renewed.seal(state.master_key()) {
         Ok(sealed) => sealed,
@@ -164,7 +174,7 @@ async fn keep(
 /// Whether `tokens` are renewed before a turn that may run for `margin`. A renewal lasts no longer
 /// than their lifetime, so the margin never exceeds half of it, lest a token renewed a moment ago
 /// count as expiring; tokens of unknown lifetime use [`MARGIN`].
-fn renewable(tokens: &claude::Tokens, now: DateTime<Utc>, margin: TimeDelta) -> bool {
+fn renewable(tokens: &Tokens, now: DateTime<Utc>, margin: Duration) -> bool {
     let margin = tokens
         .lifetime()
         .map_or(MARGIN, |lifetime| margin.min(lifetime / 2));
@@ -173,14 +183,12 @@ fn renewable(tokens: &claude::Tokens, now: DateTime<Utc>, margin: TimeDelta) -> 
 
 /// The longest turn a Claude token may be handed to: a task attempt or a chat, whichever the
 /// operator allows longer.
-fn margin(config: &Config) -> TimeDelta {
-    TimeDelta::from_std(config.chat.timeout)
-        .unwrap_or(TimeDelta::MAX)
-        .max(MARGIN)
+fn margin(config: &Config) -> Duration {
+    config.chat.timeout.max(MARGIN)
 }
 
 /// The access token as it is, while it has not expired.
-fn current(tokens: claude::Tokens) -> Result<Login, Error> {
+fn current(tokens: Tokens) -> Result<Login, Error> {
     if tokens.expires_at > Utc::now() {
         Ok(Login::Claude {
             token: tokens.access,
@@ -190,33 +198,40 @@ fn current(tokens: claude::Tokens) -> Result<Login, Error> {
     }
 }
 
-fn open(state: &AppState, login: &AgentLoginRow) -> Result<claude::Tokens, Error> {
+fn open(state: &AppState, login: &AgentLoginRow) -> Result<Tokens, Error> {
     let sealed = login
         .credential
         .as_ref()
         .ok_or_else(|| Error::Unreadable(UNOPENED.to_string()))?;
-    claude::Tokens::open(state.master_key(), sealed.expose())
+    Tokens::open(state.master_key(), sealed.expose())
         .map_err(|_| Error::Unreadable(UNOPENED.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use abnegate_agent_cli::login::LoginError;
+    use abnegate_agent_cli::login::claude::Refusal;
+    use abnegate_agent_cli::login::codex::CREDENTIALS;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use chrono::TimeDelta;
     use futures::future::{join_all, try_join_all};
+    use hyper_util::client::proxy::matcher::Matcher;
     use serde_json::json;
     use sqlx::PgPool;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use tempfile::TempDir;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
     use crate::config::{AgentConfig, Config};
     use crate::db::agent_logins::Insert;
     use crate::services::chat::session::Settings;
-    use crate::services::login::codex::CREDENTIALS;
+    use crate::services::login::claude::Explained;
 
     const TOKEN_PATH: &str = "/v1/oauth/token";
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
@@ -224,6 +239,7 @@ mod tests {
     const REFRESH: &str = "fake-refresh-token";
     const RENEWED: &str = "fake-renewed-access-token";
     const LIFETIME: i64 = 28_800;
+    const GRANTED: Duration = Duration::from_secs(28_800);
     const TURNS: usize = 5;
     /// A chat an operator allows longer than Claude grants a token for.
     const LONG_CHAT: Duration = Duration::from_secs(12 * 60 * 60);
@@ -240,6 +256,8 @@ mod tests {
     const PAUSE: Duration = Duration::from_millis(50);
     const ATTEMPTS: usize = 100;
     const LEGACY: &str = r#"{"tokens":"legacy"}"#;
+    const UNBUILT: &str = "no TLS backend could start";
+    const PROXY_PASSWORD: &str = "hunter2-proxy-password";
 
     struct Fixture {
         state: AppState,
@@ -358,7 +376,7 @@ mod tests {
             Self::new(format!("{}{TOKEN_PATH}", server.uri())).await
         }
 
-        async fn sign_in(&self, tokens: &claude::Tokens) -> AgentLoginRow {
+        async fn sign_in(&self, tokens: &Tokens) -> AgentLoginRow {
             let sealed = tokens
                 .seal(self.state.master_key())
                 .expect("tokens to seal");
@@ -401,11 +419,11 @@ mod tests {
             .expect("a stored login")
         }
 
-        async fn stored(&self) -> (claude::Tokens, Option<DateTime<Utc>>) {
+        async fn stored(&self) -> (Tokens, Option<DateTime<Utc>>) {
             let login = self.first().await;
             let sealed = login.credential.expect("a sealed credential");
-            let tokens = claude::Tokens::open(self.state.master_key(), sealed.expose())
-                .expect("tokens Zone sealed");
+            let tokens =
+                Tokens::open(self.state.master_key(), sealed.expose()).expect("tokens Zone sealed");
             (tokens, login.expires_at)
         }
 
@@ -432,23 +450,32 @@ mod tests {
         }
     }
 
-    fn tokens(expires_at: DateTime<Utc>, refresh: Option<&str>) -> claude::Tokens {
-        claude::Tokens {
-            access: SecretValue::new(ACCESS),
-            refresh: refresh.map(SecretValue::new),
+    fn tokens(expires_at: DateTime<Utc>, refresh: Option<&str>) -> Tokens {
+        granted(
             expires_at,
-            issued_at: Some(expires_at - TimeDelta::seconds(LIFETIME)),
-            scope: "user:inference".to_string(),
-            subscription: Some("max".to_string()),
-        }
+            Some(expires_at - TimeDelta::seconds(LIFETIME)),
+            refresh,
+        )
     }
 
     /// Renewable tokens as Zone sealed them before it recorded their lifetime.
-    fn untimed(expires_at: DateTime<Utc>) -> claude::Tokens {
-        claude::Tokens {
-            issued_at: None,
-            ..tokens(expires_at, Some(REFRESH))
-        }
+    fn untimed(expires_at: DateTime<Utc>) -> Tokens {
+        granted(expires_at, None, Some(REFRESH))
+    }
+
+    fn granted(
+        expires_at: DateTime<Utc>,
+        issued_at: Option<DateTime<Utc>>,
+        refresh: Option<&str>,
+    ) -> Tokens {
+        Tokens::new(
+            SecretValue::new(ACCESS),
+            refresh.map(SecretValue::new),
+            expires_at,
+            issued_at,
+            "user:inference",
+            Some("max".to_string()),
+        )
     }
 
     fn chat(timeout: Duration) -> Settings {
@@ -531,7 +558,7 @@ mod tests {
 
         assert_eq!(margin(&chatting(30 * 60)), MARGIN);
         assert_eq!(margin(&chatting(60 * 60)), MARGIN);
-        assert_eq!(margin(&chatting(2 * 60 * 60)), TimeDelta::hours(2));
+        assert_eq!(margin(&chatting(2 * 60 * 60)), TWO_HOUR_CHAT);
     }
 
     /// An operator may give a chat longer than a task attempt's hour, and a
@@ -563,24 +590,28 @@ mod tests {
     #[test]
     fn a_token_is_renewed_no_earlier_than_halfway_through_the_lifetime_claude_grants_it() {
         let now = Utc::now();
-        let granted = |lifetime: Option<TimeDelta>, left: TimeDelta| claude::Tokens {
-            issued_at: lifetime.map(|lifetime| now + left - lifetime),
-            ..tokens(now + left, Some(REFRESH))
+        let lasting = |lifetime: Option<TimeDelta>, left: TimeDelta| {
+            granted(
+                now + left,
+                lifetime.map(|lifetime| now + left - lifetime),
+                Some(REFRESH),
+            )
         };
         let (hours, year) = (Some(TimeDelta::hours(8)), Some(TimeDelta::days(365)));
-        let margin = TimeDelta::from_std(LONG_CHAT).expect("a representable chat timeout");
+        let chat = TimeDelta::from_std(LONG_CHAT).expect("a representable chat timeout");
+        let hour = TimeDelta::from_std(MARGIN).expect("a representable margin");
 
         for (lifetime, left, expected) in [
             (hours, TimeDelta::hours(8), false),
             (hours, TimeDelta::hours(4) + TimeDelta::seconds(1), false),
             (hours, TimeDelta::hours(4), true),
-            (year, margin + TimeDelta::seconds(1), false),
-            (year, margin, true),
-            (None, MARGIN + TimeDelta::seconds(1), false),
-            (None, MARGIN, true),
+            (year, chat + TimeDelta::seconds(1), false),
+            (year, chat, true),
+            (None, hour + TimeDelta::seconds(1), false),
+            (None, hour, true),
         ] {
             assert_eq!(
-                renewable(&granted(lifetime, left), now, margin),
+                renewable(&lasting(lifetime, left), now, LONG_CHAT),
                 expected,
                 "a token granted for {lifetime:?} with {left} left"
             );
@@ -612,7 +643,7 @@ mod tests {
         for login in logins {
             assert_eq!(token(login), RENEWED);
         }
-        assert_eq!(stored.lifetime(), Some(TimeDelta::seconds(LIFETIME)));
+        assert_eq!(stored.lifetime(), Some(GRANTED));
         server.verify().await;
     }
 
@@ -644,7 +675,7 @@ mod tests {
             "a token of unknown lifetime with 90 minutes left was renewed"
         );
         assert_eq!(token(renewal), RENEWED);
-        assert_eq!(stored.lifetime(), Some(TimeDelta::seconds(LIFETIME)));
+        assert_eq!(stored.lifetime(), Some(GRANTED));
         server.verify().await;
     }
 
@@ -797,8 +828,8 @@ mod tests {
         fixture.remove().await;
 
         assert!(
-            matches!(&login, Err(Error::Renewal(message)) if message.contains("invalid_grant")),
-            "{login:?}"
+            matches!(&login, Err(Error::Renewal(message)) if message == Refusal::Declined.explained()),
+            "a renewal Claude refused is worded by its refusal: {login:?}"
         );
         server.verify().await;
     }
@@ -920,15 +951,97 @@ mod tests {
         let login = fixture
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
             .await;
-        let client = claude::Client::new(
-            claude::token_endpoint(&format!("{}{TOKEN_PATH}", server.uri()))
-                .expect("a loopback token endpoint"),
-        );
+        let agents = AgentConfig {
+            claude_token_url: format!("{}{TOKEN_PATH}", server.uri()),
+            ..crate::state::test_agents()
+        };
 
-        let resolved = resolve_claude(&fixture.state, &login, &client).await;
+        let resolved = resolve_claude(&fixture.state, &login, || claude::client(&agents)).await;
         fixture.remove().await;
 
         assert_eq!(token(resolved), RENEWED);
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_claude_login_far_from_expiry_builds_no_client() {
+        let fixture = Fixture::new(UNREACHABLE.to_string()).await;
+        let login = fixture
+            .sign_in(&tokens(Utc::now() + TimeDelta::hours(2), Some(REFRESH)))
+            .await;
+        let built = AtomicUsize::new(0);
+
+        let resolved = resolve_claude(&fixture.state, &login, || {
+            built.fetch_add(1, Ordering::SeqCst);
+            claude::client(&fixture.state.config().agents)
+        })
+        .await;
+        fixture.remove().await;
+
+        assert_eq!(token(resolved), ACCESS);
+        assert_eq!(
+            built.load(Ordering::SeqCst),
+            0,
+            "a turn that renews nothing built a token client"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_renewal_through_a_credentialed_proxy_signs_in_to_it() {
+        let proxy = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(TOKEN_PATH))
+            .and(header(
+                "proxy-authorization",
+                format!(
+                    "Basic {}",
+                    STANDARD.encode(format!("zone:{PROXY_PASSWORD}"))
+                ),
+            ))
+            .respond_with(renewed())
+            .expect(1)
+            .mount(&proxy)
+            .await;
+        let fixture = Fixture::new(UNREACHABLE.to_string()).await;
+        let lapsed = fixture
+            .sign_in(&tokens(Utc::now() - TimeDelta::minutes(1), Some(REFRESH)))
+            .await;
+        let proxies = Matcher::builder()
+            .http(format!("http://zone:{PROXY_PASSWORD}@{}", proxy.address()))
+            .build();
+        let agents = fixture.state.config().agents.clone();
+
+        let renewed = resolve_claude(&fixture.state, &lapsed, || {
+            claude::client_through(&agents, &proxies)
+        })
+        .await;
+        fixture.remove().await;
+
+        assert_eq!(token(renewed), RENEWED);
+        proxy.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_client_that_cannot_be_built_keeps_the_current_token_until_it_expires() {
+        let fixture = Fixture::new(UNREACHABLE.to_string()).await;
+        let expiring = fixture
+            .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
+            .await;
+        let unbuilt = || Err(Unbuilt::Login(LoginError::Transport(UNBUILT.to_string())));
+
+        let kept = resolve_claude(&fixture.state, &expiring, unbuilt).await;
+        fixture.remove().await;
+        let expired = Fixture::new(UNREACHABLE.to_string()).await;
+        let lapsed = expired
+            .sign_in(&tokens(Utc::now() - TimeDelta::minutes(1), Some(REFRESH)))
+            .await;
+        let failed = resolve_claude(&expired.state, &lapsed, unbuilt).await;
+        expired.remove().await;
+
+        assert_eq!(token(kept), ACCESS);
+        assert!(
+            matches!(&failed, Err(Error::Renewal(message)) if message.ends_with(UNBUILT)),
+            "{failed:?}"
+        );
     }
 }

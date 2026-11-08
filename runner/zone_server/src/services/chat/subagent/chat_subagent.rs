@@ -1,7 +1,7 @@
+use abnegate_agent_cli::SubagentStatus;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
-use zone_core::llm::SubagentStatus;
 
 use crate::db::chat_subagents::SubagentRow;
 
@@ -63,6 +63,7 @@ impl From<SubagentRow> for ChatSubagent {
 
 #[cfg(test)]
 mod tests {
+    use abnegate_agent_cli::{StepStatus, SubagentStep};
     use serde_json::json;
 
     use super::*;
@@ -128,12 +129,60 @@ mod tests {
 
     #[test]
     fn every_stored_status_is_sent_as_itself() {
-        for status in SubagentStatus::ALL {
+        for &status in SubagentStatus::ALL {
             let stored = SubagentRow {
                 status: status.as_str().to_string(),
                 ..row()
             };
             assert_eq!(ChatSubagent::from(stored).status, status);
         }
+    }
+
+    fn console_contract() -> serde_json::Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../manager/frontend/src/features/chats/subagents.contract.json"
+        );
+        let contract = std::fs::read_to_string(path).expect("the console's subagent contract");
+        serde_json::from_str(&contract).expect("the contract to be JSON")
+    }
+
+    fn sorted<T: Serialize>(values: impl IntoIterator<Item = T>) -> serde_json::Value {
+        let mut names: Vec<String> = values
+            .into_iter()
+            .map(|value| {
+                serde_json::to_value(value)
+                    .expect("a value to serialise")
+                    .as_str()
+                    .expect("a status to serialise as a string")
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        json!(names)
+    }
+
+    #[test]
+    fn a_step_sends_every_field_the_console_reads() {
+        let step = SubagentStep::new("toolu_x", "Bash", StepStatus::Running);
+        let step = serde_json::to_value(step).expect("a step to serialise");
+        let mut fields: Vec<&String> = step.as_object().expect("an object").keys().collect();
+        fields.sort();
+
+        assert_eq!(json!(fields), console_contract()["step_fields"]);
+    }
+
+    #[test]
+    fn the_console_knows_every_status_the_crate_can_send() {
+        let contract = console_contract();
+
+        assert_eq!(
+            sorted(SubagentStatus::ALL.iter().copied()),
+            contract["subagent_statuses"]
+        );
+        assert_eq!(
+            sorted(StepStatus::ALL.iter().copied()),
+            contract["step_statuses"]
+        );
     }
 }

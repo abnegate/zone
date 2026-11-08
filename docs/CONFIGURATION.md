@@ -338,7 +338,11 @@ account that pays:
 `directory` names the organization under `Organization` and `Host`, and is
 `None` under `Instance`. The line comes from `zone_core`, so a `RUST_LOG` that
 keeps only `zone_server`, such as `warn,zone_server=info`, hides it; add
-`zone_core=info`.
+`zone_core=info`. `abnegate-agent-cli` logs the same turn once more, at info:
+"the turn runs on usage credits past the plan's window", with `agent`,
+`window` and `directory` but not `sign_in`, and with the server's own working
+directory as `directory` when the turn names none; `abnegate_agent_cli=info`
+keeps it.
 
 The account's owner stops this by turning usage credits off, or bounds it by
 setting a monthly cap, at claude.ai/settings/usage.
@@ -393,7 +397,7 @@ setting a monthly cap, at claude.ai/settings/usage.
   |------|------------|
   | `logins/<login id>` | One sign-in's home: its `CLAUDE_CONFIG_DIR` or `CODEX_HOME` |
   | `work` | Where every turn of that agent for that organization runs, whichever sign-in it runs on |
-  | `.login/<attempt>` (codex only) | Where a codex sign-in in progress runs, until it succeeds and moves into a home |
+  | `.login/attempt-*` (codex only) | Where a codex sign-in in progress runs, until it succeeds and moves into a home |
 
   Every sign-in of an agent shares its `work` directory, so a chat that moves to
   another account finds the same files there, and its session file keeps the
@@ -437,7 +441,11 @@ setting a monthly cap, at claude.ai/settings/usage.
   and renews them. Tests point it at a local mock. Compose passes it from
   `.env`, where an empty value keeps the default.
 - **Note**: Must be an absolute `http` or `https` URL with a host, carrying no
-  credentials, query or fragment. Anything else is refused at boot.
+  credentials, query or fragment. Anything else is refused at boot. A
+  link-local or cloud metadata address passes that check but fails every
+  sign-in as it starts, and every renewal; so does a name that resolves only
+  to such addresses, once Zone sends it a request. Zone reaches it through the
+  proxy described under *Signing in*.
 
 ### `ZONE_AGENT_USAGE_TTL_SECONDS`
 - **Default**: `60`. Compose passes `60` unless `.env` says otherwise, and the
@@ -576,34 +584,71 @@ setting a monthly cap, at claude.ai/settings/usage.
   profile blocks them, so in a container every sandboxed command fails with
   `bwrap: No permissions to create a new namespace`. Set `workspace-write`
   where your container runtime allows user namespaces. Any other value is
-  refused at boot.
+  refused at boot, `read-only` included: a turn that withholds codex's tools
+  already runs read-only.
 
 ### `ZONE_AGENT_ENV_PASSTHROUGH`
 - **Default**: empty
 - **Description**: Extra variables, comma separated, that the claude and codex
   CLIs, and Zone's own chat and task tools, may inherit from the server's
   environment
-- **Note**: A CLI starts from an empty environment and inherits only `HOME`,
-  `PATH`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `LC_*`, `TZ`, `TMPDIR`,
-  `XDG_RUNTIME_DIR`, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
-  `NO_PROXY` and `ALL_PROXY`, in upper or lower case), `SSL_CERT_FILE`,
-  `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS` and the names listed here. Unless named
-  here, the database URL, the JWT and encryption keys, `LITELLM_KEY`,
-  `CLAUDE_CONFIG_DIR` and `CODEX_HOME` stay behind. `CLAUDE_CODE_OAUTH_TOKEN`,
-  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`,
-  `CODEX_API_KEY` and `ZONE_MCP_TOKEN` stay behind even when named here: each
-  would decide whose account a CLI's turn is billed to or whose tools it
-  reaches. Zone then adds what the turn needs; see *How a turn runs*. The
-  `rg` that `search_code` runs, the `git` a background job runs to find its
-  checkout, and `ffmpeg` and `ffprobe` also start from an allowlist rather
-  than the server's environment.
+- **Note**: Zone runs both CLIs through the `abnegate-agent-cli` crate, and
+  this is its allowlist. A CLI starts from an empty environment and inherits
+  only `HOME`, `PATH`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `TZ`,
+  `TMPDIR`, `XDG_RUNTIME_DIR`, the proxy variables (`HTTP_PROXY`,
+  `HTTPS_PROXY`, `NO_PROXY` and `ALL_PROXY`, in upper or lower case),
+  `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, the thirteen POSIX
+  locale categories (`LC_ALL`, `LC_CTYPE`, `LC_COLLATE`, `LC_MESSAGES`,
+  `LC_MONETARY`, `LC_NUMERIC`, `LC_TIME`, `LC_ADDRESS`, `LC_IDENTIFICATION`,
+  `LC_MEASUREMENT`, `LC_NAME`, `LC_PAPER` and `LC_TELEPHONE`) and the names
+  listed here. Any other `LC_` name stays behind unless it is listed. Unless
+  named here, the database URL, the JWT and encryption keys, `LITELLM_KEY`,
+  `CLAUDE_CONFIG_DIR` and `CODEX_HOME` stay behind. Zone then adds what the
+  turn needs; see *How a turn runs*.
+- **Never passed**: these stay behind even when named here, since each would
+  decide whose account a CLI's turn is billed to, where its requests go, or
+  whose tools it reaches:
+  - what either CLI signs in with: `CLAUDE_CODE_OAUTH_TOKEN`,
+    `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
+    `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_API_KEY` and
+    `CODEX_ACCESS_TOKEN`;
+  - the cloud sign-ins the crate lists as `CLOUD_CREDENTIALS`, for Amazon
+    Bedrock, Google Vertex AI and Microsoft Foundry, such as
+    `CLAUDE_CODE_USE_BEDROCK`, `AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
+    `AWS_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` and `AZURE_CLIENT_SECRET`;
+  - `ZONE_MCP_TOKEN`, and claude's refresh token,
+    `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`.
+- **Base URLs**: `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` named here still
+  reaches the CLI of every turn, claude's and codex's alike, when the server
+  has it set. Zone reads it from the server's environment and sets it on each
+  turn itself, as a setting rather than an inherited value, so it is not
+  scrubbed.
+- **Scrubbed**: every value a CLI inherits through this list, and every proxy
+  URL, is treated as a secret. The crate removes it, as written, JSON-escaped
+  or percent-encoded, from the failure a turn ends with, the tool output and
+  subagent progress the turn reports, and the run's logs, so a variable that
+  holds ordinary text, such as a URL, is hidden there too. The bypass list,
+  `NO_PROXY` and `no_proxy`, is not scrubbed, and a value the agent re-encodes
+  another way, such as in base64, is not recognised.
+- **Other processes**: the `rg` that `search_code` runs, the `git` a
+  background job runs to find its checkout, and the `claude auth status`,
+  `codex login`, `codex login status` and `codex logout` Zone runs start from
+  the same allowlist, the proxy variables and the names listed here, less
+  everything under *Never passed*; a base URL named here does not reach them,
+  and what they print is not scrubbed of the values named here. claude also
+  gets `DISABLE_AUTOUPDATER=1` there, and none of the other variables a turn
+  sets. `ffmpeg` and `ffprobe` also start from an allowlist rather than the
+  server's environment.
 - **Behaviour change**: A CLI used to inherit the server's whole environment
   apart from the provider API keys. A setup that relied on that, such as an
   `ANTHROPIC_BASE_URL` in the server's environment, now has to name the
   variable here. What is named reaches every organization's CLI and the tools
   of every chat and task, so name nothing secret. In compose the manager
   container receives only the variables `docker-compose.yml` lists, so add the
-  variable to the manager service's `environment` as well.
+  variable to the manager service's `environment` as well. Since Zone runs the
+  CLIs through `abnegate-agent-cli`, naming a variable no longer passes an
+  `LC_` name outside the thirteen, `CODEX_ACCESS_TOKEN` or a cloud sign-in, a
+  base URL arrives as a setting Zone makes, and what is named is scrubbed.
 
 ### `ZONE_CHAT_AGENT_CWD`
 - **Default**: the server's working directory. Compose defaults it to
@@ -789,6 +834,26 @@ stores the tokens in the database, sealed with a key derived from
 the token response names one. It shows an expiry date only for a sign-in Zone
 cannot renew, one whose token came without a refresh token.
 
+Zone reaches `ZONE_CLAUDE_TOKEN_URL`, to exchange a code and to renew a token,
+through the proxy the server's environment names for it, chosen as the
+server's other HTTP clients choose one. An `https` token URL goes through
+`HTTPS_PROXY` (or `https_proxy`), an `http` one through `HTTP_PROXY` (or
+`http_proxy`), and either falls back to `ALL_PROXY` (or `all_proxy`). A token
+host that `NO_PROXY` (or `no_proxy`) lists goes direct: a comma-separated list
+of `*`, domains, which also cover their subdomains with or without a leading
+dot, and IP addresses or ranges such as `10.0.0.0/8`. Zone builds the token
+client once, and again only when the token URL or its proxy changes.
+
+The chosen proxy must be an `http` or `https` URL, and must not name a
+link-local or cloud metadata address. A username and password written in it
+are sent to the proxy, and only to it, as HTTP Basic, exactly as the server's
+other HTTP clients send them. Otherwise the sign-in fails, and so does every
+renewal, with *Claude's sign-in cannot go through the server's proxy:
+HTTPS_PROXY, HTTP_PROXY and ALL_PROXY must be http or https URLs, or NO_PROXY
+must list Claude's token host*. The message never repeats the proxy's
+credentials. Zone follows no redirect from the endpoint, and its requests name
+`abnegate-agent-cli/<version>` as their user agent.
+
 The callback request carries no Zone session, so the listener never exchanges
 a code itself. It takes a state only once, within its ten minutes, when Zone
 issued it for this flow, and only at the `localhost:<port>` address the link
@@ -833,7 +898,10 @@ A paste Zone cannot read, such as a code with its `#state` cut off, leaves the
 sign-in open, so you can paste again. So does a pasted callback saying
 claude.com did not approve: open the link, approve, and paste the new code. A
 code claude.com rejects, or a sign-in that expired or was already used, ends
-it. The panel then drops the link and offers **Start again**, which starts
+it, and Zone says why in its own words, chosen by the OAuth error claude.com
+answers with, such as "Claude did not approve the sign-in. Start again.", or by
+the HTTP status when it names none; claude.com's own text is not shown. The
+panel then drops the link and offers **Start again**, which starts
 over with the same access, beside **Try again with full access**. A sign-in in
 progress survives switching to another settings tab and back.
 
@@ -864,10 +932,12 @@ each other's; and it opens a browser on the server itself.
 
 The one-time code is shown only to organization admins and owners and to whoever
 started the sign-in. One codex sign-in runs per organization at a time. codex
-signs in inside a staging directory, `codex/.login/<attempt>`, and its new
+signs in inside a staging directory, `codex/.login/attempt-*`, and its new
 `auth.json` moves into a sign-in's home only when the sign-in succeeds: the home
 of the sign-in it replaces, or a new one beside the others. So a refused or
-expired attempt leaves every existing login as it was. **Cancel** stops the
+expired attempt leaves every existing login as it was. A code nobody enters in
+time ends the sign-in with "The sign-in code expired before anyone entered it.
+Start again." **Cancel** stops the
 sign-in in progress and keeps every login the organization already holds; a
 login codex saved just before is logged out again, so it never outlives the
 attempt. If OpenAI refuses to issue a code, the panel shows codex's error, such
@@ -936,7 +1006,8 @@ started, or after its code began to be exchanged.
 ### How a turn runs
 
 For an organization on Claude Code or Codex, each chat turn, task run, title,
-review or summary starts the CLI where the server runs:
+review or summary starts the CLI, through `abnegate-agent-cli`, where the
+server runs:
 
 - in the organization's `work` directory for the agent under
   `ZONE_AGENT_STATE_DIR`, which every account of the agent shares;
@@ -947,15 +1018,38 @@ review or summary starts the CLI where the server runs:
 - for claude, with `DISABLE_AUTOUPDATER=1` and
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no updates, telemetry or error
   reports), `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (Zone keeps its own memory),
-  and `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` at 30 minutes;
+  and, on a turn Zone serves tools to, `MCP_TOOL_TIMEOUT` and
+  `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` at 30 minutes;
 - for claude, with `--setting-sources ""`, so it loads no settings file, hook,
   `CLAUDE.md`, skill, agent or command from its home, its working directory or
   any directory above it, and with
   `--settings '{"crossSessionInbound":"refuse"}'`, a setting meant to refuse
   messages from other claude sessions of the same OS user;
 - for as long as the turn may take: `ZONE_CHAT_TIMEOUT_SECONDS` for a chat
-  turn, 30 minutes by default, and what is left of its hour for a task
-  attempt. A task attempt whose CLI runs out of time fails without a retry.
+  turn, 30 minutes by default, what is left of its hour for a task attempt,
+  and 30 minutes for any other run, such as a review; the crate's own
+  five-minute default never applies. A task attempt whose CLI runs out of time
+  fails without a retry;
+- for claude, until the work it sent to the background has ended: a
+  background command, a monitor, a subagent or a wakeup it scheduled holds the
+  turn, and the later answer it leads to is part of the reply. Work that never
+  ends, such as a server left running, holds the turn until its time runs out.
+  A chat's agent is stopped up to 30 seconds, and at most a quarter of its
+  time, before the chat itself gives up, so that what it answered is kept.
+
+A chat whose claude was stopped before it finished, by its time running out
+or by exiting partway through a later answer, keeps everything it showed,
+the unfinished part included, followed by *[Cut short: the agent was stopped
+before it finished]*, and reports no error. A task attempt whose claude
+exits partway through a later answer fails with *The coding agent ended
+before it finished the task* and is tried again; one whose claude runs out
+of time fails as any attempt that runs out of time does.
+
+A turn fails once its answer passes 4 MiB, with a failure that begins "the
+agent's prose exceeded"; what the agent's tools print does not count toward
+that, and Zone receives at most 64 KiB of each tool's output, its start and its
+end. A line of the CLI's output longer than 1 MiB fails the turn when the
+answer needs it, and is otherwise dropped.
 
 An organization that chose Claude Code or Codex without signing in to either
 agent, where the host-login fallback is off, gets "The claude CLI is not
@@ -1136,7 +1230,8 @@ that is never recorded cannot pass a run back and forth for ever.
 Zone's own tools are offered to the agent over MCP, to claude and codex alike:
 Zone serves them at `/mcp` on its own port for the life of one turn, behind a
 bearer token minted for that turn and revoked when it ends. The token reaches
-the CLI in the `ZONE_MCP_TOKEN` variable, never on its command line. The agent
+the CLI in a variable whose name is drawn at random for the turn, never on its
+command line or in a file. The agent
 calls the tools as `mcp__zone__<name>`, Zone executes them, and every call goes
 through the approval policy a chat tool call goes through: a chat with
 Auto-approve off raises the usual card and waits for you, and a denial refuses
@@ -1217,13 +1312,18 @@ agent:
   usage credits if the account has them on, which claude spends without
   asking (see *Usage credits*). Whether a Fable turn inside the allowance runs
   with usage credits off is not verified. When claude refuses a Fable turn it
-  cannot fund, Zone reports claude's own words after "The signed-in Claude
-  account cannot spend usage credits on this model: ", as in "…: Fable 5.1
-  requires usage credits. Switch to another model to continue." or "…: You've
-  hit your monthly spend limit. Switch to another model to continue.", and a
-  task run does not retry it. When claude could not look the account's usage
-  credits up, the failure begins "The signed-in Claude account's usage
-  credits could not be confirmed" instead, and a task run retries it. The
+  cannot fund, Zone reports claude's own words after "usage credits required
+  for this model: ", as in "…: Fable 5.1 requires usage credits. Switch to
+  another model to continue." or "…: You've hit your monthly spend limit.
+  Switch to another model to continue.", and a task run does not retry it.
+  Zone knows the refusal by the error kind claude gives it,
+  `model_requires_usage_credits`, not by its words, so a Fable refusal
+  without that kind is a rate limit or an ordinary failure, as its status and
+  words say. When claude could not look the account's usage credits up, the
+  failure begins "usage credits could not be confirmed", with claude's reason
+  in brackets, instead, and a task run retries it. A task run that failed
+  before Zone ran claude through `abnegate-agent-cli` keeps its earlier
+  wording, which began "The signed-in Claude account". The
   account's owner turns usage credits on, or raises their cap, at
   claude.ai/settings/usage; on Team and Enterprise plans an admin does, at
   claude.ai/admin-settings/usage. claude 2.1.278 answers a request Fable
@@ -1257,8 +1357,8 @@ one such as `opus[1m]`, can need usage credits too. claude 2.1.278 names the
 context as the reason it refuses one only when the 429 carries neither the
 `anthropic-ratelimit-unified-representative-claim` nor the
 `anthropic-ratelimit-unified-overage-status` header. Zone then reports claude's
-own words after "The signed-in Claude account cannot spend usage credits on a
-context this long: ", and a task run does not retry it. When the 429 carries
+own words after "usage credits required for this context length: ", and a
+task run does not retry it. When the 429 carries
 either header, claude words the refusal as the plan's limit instead, and Zone
 reports claude's words as a rate limit: a task run backs off before it tries
 again.
@@ -1303,7 +1403,10 @@ happens when the agent gives no usable answer within
   without a verdict pauses the task with the error. When claude says it
   refuses the reviewer model, or the review's context, because the signed-in
   account cannot spend usage credits on it, every tick would be refused the
-  same way, so the task pauses at once with claude's words. *Naming a model* says when claude names a context as the reason.
+  same way, so the task pauses at once with that failure, "usage credits
+  required for this model: " or "usage credits required for this context
+  length: " and claude's words. *Naming a model* says when claude names a
+  context as the reason.
   The reviewer's model is one the agent knows, taken from
   `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
   models, never an installed Ollama model. Zone does not pick `fable` on its
@@ -1345,17 +1448,18 @@ own shares that login, which is why a server with several organizations
 should turn the fallback off.
 
 The fallback runs the CLI without `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, which
-the environment allowlist drops, so each CLI uses its default home under the
-server user's `HOME`: `~/.claude` and `~/.codex`. The turn still runs in the
-organization's `work` directory, but the CLI writes its session transcripts
-into those default homes, beside the user's own.
+Zone withholds unless `ZONE_AGENT_ENV_PASSTHROUGH` names them, so each CLI uses
+its default home under the server user's `HOME`: `~/.claude` and `~/.codex`.
+The turn still runs in the organization's `work` directory, but the CLI writes
+its session transcripts into those default homes, beside the user's own.
 
 - **A login made with `CLAUDE_CONFIG_DIR` set is not found.** On macOS claude
   keeps such a login in a separate Keychain item keyed to that directory, so a
   shell whose `claude auth status` reports a login can still leave the
   fallback with none. Sign in without the variable
   (`env -u CLAUDE_CONFIG_DIR claude auth login`), or name `CLAUDE_CONFIG_DIR`
-  in `ZONE_AGENT_ENV_PASSTHROUGH` so the fallback uses that directory.
+  in `ZONE_AGENT_ENV_PASSTHROUGH` so the fallback uses that directory. Its
+  path is then scrubbed from the run's logs, like every value named there.
 - **The host's settings are not used.** Every claude turn runs with
   `--setting-sources ""`, so the fallback takes the host's login but not its
   `~/.claude/settings.json` (its `env` block, `apiKeyHelper` or model), hooks,
@@ -1384,8 +1488,9 @@ another's, so any process running as that user can:
   every account's home;
 - read the `/proc/<pid>/environ` of any CLI running at the time, which holds
   that turn's `CLAUDE_CODE_OAUTH_TOKEN` and, when Zone serves it tools, its
-  `ZONE_MCP_TOKEN`. The second lets its holder call that turn's Zone tools, as
-  that turn's user and under its approval policy, until the turn ends. A task
+  token for them, under a name drawn at random. The second lets its holder
+  call that turn's Zone tools, as that turn's user and under its approval
+  policy, until the turn ends. A task
   run approves every call, so whoever holds a task run's token can use its
   write tools without anyone approving, and what they write lands in that
   run's pull request;
@@ -1535,8 +1640,8 @@ once approved, and its file tools read whatever else the server's user can.
   one of the spellings above; a `ZONE_CLAUDE_TOKEN_URL` that is not an absolute
   `http` or `https` URL with a host, or that carries credentials, a query or a
   fragment; a `ZONE_CODEX_SANDBOX` other than `workspace-write` or
-  `danger-full-access`; a `ZONE_AGENT_CALLBACK` that is not
-  `http://localhost:<port>` or a port, or whose port the server cannot listen
+  `danger-full-access`, `read-only` included; a `ZONE_AGENT_CALLBACK` that is
+  not `http://localhost:<port>` or a port, or whose port the server cannot listen
   on; a `ZONE_AGENT_CALLBACK_BIND` that is not an IP address, or an IP address
   and port; a `ZONE_CONSOLE_ORIGINS` entry that is not an `http` or `https`
   origin, or that carries credentials, a path, a query or a fragment; a

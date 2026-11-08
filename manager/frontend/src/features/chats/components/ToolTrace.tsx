@@ -3,10 +3,13 @@ import {
   type Answer,
   APPROVAL_CANCELLED_DETAIL,
   APPROVAL_TIMED_OUT_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
   DENIED_DETAIL,
   PREVIEW_LABEL,
   REASON_MISSING,
   REASONED_TOOLS,
+  REFUSALS,
+  type Refusal,
   TOOL_ERROR_PREFIX,
   type ToolCallRecord,
   UNFINISHED_DETAIL,
@@ -140,11 +143,10 @@ type ToolState =
   | 'ok'
   | 'failed';
 
-type Refusal = Extract<ToolState, 'denied' | 'timed_out' | 'cancelled'>;
-
-/// A refused call's record keeps only the server's words for why, written bare
-/// on an agent's own permission card and behind the error prefix otherwise.
-const REFUSALS = new Map<string, Refusal>(
+/// A record stored before refusals were kept says why it was refused only in
+/// the server's words, written bare on an agent's own permission card and
+/// behind the error prefix otherwise.
+const WORDED_REFUSALS = new Map<string, Refusal>(
   (
     [
       [DENIED_DETAIL, 'denied'],
@@ -157,15 +159,18 @@ const REFUSALS = new Map<string, Refusal>(
   ])
 );
 
-const REFUSED: ReadonlySet<ToolState> = new Set(REFUSALS.values());
+const REFUSED: ReadonlySet<ToolState> = new Set(REFUSALS);
 
 function toolState(call: ToolCallRecord): ToolState {
   if (call.approval === 'pending') return 'approval';
   if (call.pending) return 'pending';
   if (call.approval === 'denied' && call.detail !== UNFINISHED_DETAIL) return 'denied';
   if (call.success) return 'ok';
-  if (call.detail === UNFINISHED_DETAIL) return 'stopped';
-  return REFUSALS.get(call.detail) ?? 'failed';
+  if (call.detail === UNFINISHED_DETAIL || call.detail === AWAITING_APPROVAL_DETAIL) {
+    return 'stopped';
+  }
+  if (call.refusal !== undefined) return call.refusal ?? 'failed';
+  return WORDED_REFUSALS.get(call.detail) ?? 'failed';
 }
 
 function toolLabel(name: string, state: ToolState): string {

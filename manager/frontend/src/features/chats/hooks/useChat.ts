@@ -7,12 +7,14 @@ import {
   JobExitedSchema,
   JobStartedSchema,
   QuestionsSchema,
+  RefusalSchema,
   WaitingSchema,
   WaitSettledSchema,
 } from '../schemas';
 import {
   type ActionReceipt,
   AWAITING_ANSWER_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
   type ChatCharacter,
   type ChatWithMessages,
   type Citation,
@@ -25,6 +27,7 @@ import {
   type Question,
   type QueuedMessage,
   type ReasoningEffort,
+  type Refusal,
   type SendMessageRequest,
   type ToolCallRecord,
   UNFINISHED_DETAIL,
@@ -199,6 +202,7 @@ type ServerMessage =
       detail: string;
       duration_ms: number;
       citations?: Citation[];
+      refusal?: Refusal | null;
     }
   | {
       type: 'action_receipt';
@@ -878,7 +882,7 @@ export function useChat(
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
             arguments: payload.arguments,
-            detail: 'Waiting for approval…',
+            detail: AWAITING_APPROVAL_DETAIL,
             pending: true,
             approval: 'pending',
             reason: payload.reason,
@@ -916,6 +920,7 @@ export function useChat(
             success: payload.success,
             detail: payload.detail,
             duration_ms: payload.duration_ms,
+            refusal: RefusalSchema.parse(payload.refusal),
             pending: false,
             approval: undefined,
           });

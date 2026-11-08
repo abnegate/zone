@@ -9,6 +9,7 @@ pub mod context;
 pub mod database;
 pub mod github_app;
 pub mod mail;
+pub mod stand_in;
 pub mod transcript;
 
 pub use database::Database;

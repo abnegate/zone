@@ -22,7 +22,7 @@ use zone_core::tools::{PERMISSION_TOOL, ToolResult, content_lines};
 use super::progress::Progress;
 use super::scope::Scope;
 use crate::agent::runner::call_signature;
-use crate::agent::{AgentEvent, ChatTools, Decision};
+use crate::agent::{AgentEvent, ChatTools, Decision, Refusal};
 use crate::utils::crypto::{generate_token, hash_token};
 
 /// What a call past the turn's budget is told instead of being run.
@@ -187,14 +187,15 @@ impl Turn {
             id,
             name: asked.tool_name,
             success: refusal.is_none(),
-            detail: refusal.unwrap_or(ALLOWED).to_string(),
+            detail: refusal.map_or(ALLOWED, Refusal::message).to_string(),
             duration_ms: started.elapsed().as_millis() as u64,
             citations: Vec::new(),
             receipt: None,
+            refusal,
         });
         match refusal {
             None => verdict(Some(&asked.input), ""),
-            Some(refusal) => verdict(None, refusal),
+            Some(refusal) => verdict(None, refusal.message()),
         }
     }
 
@@ -232,9 +233,10 @@ impl Turn {
         });
 
         let started = Instant::now();
-        let result = match self.allowed(&id, name, arguments).await.refusal() {
+        let refusal = self.allowed(&id, name, arguments).await.refusal();
+        let result = match refusal {
             None => self.tools.execute(name, arguments).await,
-            Some(refusal) => ToolResult::error(refusal),
+            Some(refusal) => ToolResult::error(refusal.message()),
         };
         let receipt = self
             .tools
@@ -260,6 +262,7 @@ impl Turn {
                 false => Vec::new(),
             },
             receipt,
+            refusal,
         });
 
         let content = vec![ContentBlock::text(message)];
@@ -386,7 +389,7 @@ pub fn merged<'a>(
                 // The agent writes before it calls, so what it wrote is counted ahead of the call.
                 biased;
                 event = events.next() => match event {
-                    Some(ended @ (AgentEvent::Limited(_) | AgentEvent::Failed(_))) => {
+                    Some(ended @ (AgentEvent::Limited(_) | AgentEvent::Failed(_) | AgentEvent::CutShort)) => {
                         while let Ok(call) = calls.try_recv() {
                             yield call;
                         }
@@ -561,7 +564,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
-    use zone_core::llm::provider::DEFAULT_TIMEOUT;
+    use zone_core::llm::cli::TURN_TIMEOUT;
     use zone_core::tools::job::{JobCommand, Jobs};
     use zone_core::tools::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED, Session};
 
@@ -622,6 +625,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_call_that_arrived_before_the_round_was_cut_short_is_yielded_before_it() {
+        let (sender, mut calls) = unbounded_channel();
+        sender
+            .send(AgentEvent::ToolCallStarted {
+                id: "call_1".to_string(),
+                name: "list_chats".to_string(),
+                arguments: "{}".to_string(),
+            })
+            .unwrap();
+        let cut_short = futures::stream::iter(vec![AgentEvent::CutShort]);
+
+        let order: Vec<&str> = merged(cut_short, &mut calls)
+            .map(|event| match event {
+                AgentEvent::CutShort => "cut short",
+                AgentEvent::ToolCallStarted { .. } => "call",
+                _ => "other",
+            })
+            .collect()
+            .await;
+
+        assert_eq!(
+            order,
+            ["call", "cut short"],
+            "a task stops reading where its round was cut short, so a call queued behind it is never recorded"
+        );
+    }
+
+    #[tokio::test]
     async fn a_token_reaches_the_turn_it_was_minted_for() {
         let opened = open(ApprovalPolicy::auto()).await;
 
@@ -654,7 +685,7 @@ mod tests {
     async fn a_token_answers_for_as_long_as_its_lease_is_held() {
         let opened = open(ApprovalPolicy::auto()).await;
 
-        tokio::time::advance(DEFAULT_TIMEOUT * 4).await;
+        tokio::time::advance(TURN_TIMEOUT * 4).await;
 
         assert!(
             Turn::find(&opened.token).is_some(),
@@ -871,6 +902,49 @@ mod tests {
         );
     }
 
+    /// Every call completed so far among `events`, with what refused it.
+    fn completed(events: &mut UnboundedReceiver<AgentEvent>) -> Vec<(String, Option<Refusal>)> {
+        let mut completed = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let AgentEvent::ToolCallCompleted { name, refusal, .. } = event {
+                completed.push((name, refusal));
+            }
+        }
+        completed
+    }
+
+    /// The completion zone records for a refused call, the agent's own or zone's, names what
+    /// refused it, so the console labels it from that rather than from its words.
+    #[tokio::test]
+    async fn a_refused_call_is_recorded_with_what_refused_it() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("refused.txt");
+        let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+        let arguments = write(&path).to_string();
+        let asking = turn.clone();
+
+        let call = tokio::spawn(async move { turn.run("write_file", &arguments).await });
+        let card = next_card(&mut opened.events).await;
+        assert!(opened.approval.decide(&card.id, false), "the denial lands");
+        call.await.expect("the call task");
+        let mut refusals = completed(&mut opened.events);
+        let asked = json!({"tool_name": "Bash", "input": {"command": "ls"}}).to_string();
+        let permission = tokio::spawn(async move { asking.run(PERMISSION_TOOL, &asked).await });
+        let card = next_card(&mut opened.events).await;
+        assert!(opened.approval.decide(&card.id, false), "the refusal lands");
+        permission.await.expect("the question is answered");
+        refusals.extend(completed(&mut opened.events));
+
+        assert_eq!(
+            refusals,
+            [
+                ("write_file".to_string(), Some(Refusal::Denied)),
+                ("Bash".to_string(), Some(Refusal::Denied)),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn a_call_whose_turn_stops_while_it_waits_is_told_it_was_cancelled() {
         let directory = tempfile::tempdir().expect("tempdir");
@@ -892,6 +966,10 @@ mod tests {
         assert!(told.contains(APPROVAL_CANCELLED), "{told}");
         assert!(!told.contains(DENIED), "nobody denied it: {told}");
         assert!(!path.exists());
+        assert_eq!(
+            completed(&mut opened.events),
+            [("write_file".to_string(), Some(Refusal::Cancelled))]
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -911,6 +989,10 @@ mod tests {
         assert!(told.contains(APPROVAL_TIMED_OUT), "{told}");
         assert!(!told.contains(DENIED), "nobody denied it: {told}");
         assert!(!path.exists());
+        assert_eq!(
+            completed(&mut opened.events),
+            [("write_file".to_string(), Some(Refusal::TimedOut))]
+        );
     }
 
     #[tokio::test]

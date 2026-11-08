@@ -12,7 +12,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::oneshot;
 use uuid::Uuid;
-use zone_core::tools::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED, Tier};
+use zone_core::tools::Tier;
+
+mod refusal;
+
+pub use refusal::Refusal;
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -36,13 +40,13 @@ impl Decision {
         }
     }
 
-    /// What a call that may not run is told in place of running.
-    pub fn refusal(self) -> Option<&'static str> {
+    /// Why a call that may not run did not.
+    pub fn refusal(self) -> Option<Refusal> {
         match self {
             Self::Approved => None,
-            Self::Denied => Some(DENIED),
-            Self::Cancelled => Some(APPROVAL_CANCELLED),
-            Self::TimedOut => Some(APPROVAL_TIMED_OUT),
+            Self::Denied => Some(Refusal::Denied),
+            Self::Cancelled => Some(Refusal::Cancelled),
+            Self::TimedOut => Some(Refusal::TimedOut),
         }
     }
 }

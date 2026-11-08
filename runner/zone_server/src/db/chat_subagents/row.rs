@@ -13,7 +13,7 @@ pub struct SubagentRow {
     pub kind: Option<String>,
     pub model: Option<String>,
     pub background: bool,
-    /// One of [`zone_core::llm::SubagentStatus`]'s names; the table's check
+    /// One of [`abnegate_agent_cli::SubagentStatus`]'s names; the table's check
     /// refuses any other.
     pub status: String,
     pub tool_uses: Option<i64>,

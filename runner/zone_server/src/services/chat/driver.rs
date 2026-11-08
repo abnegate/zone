@@ -4,11 +4,12 @@
 //! a context a person chose for a self-hosted model does not bound one, so an
 //! agent chat's window is only ever what the agent itself last reported.
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::Occupancy;
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_chat::capacity::Capacity;
-use zone_core::llm::provider::Occupancy;
-use zone_core::llm::{AgentKind, LlmBackend};
+use zone_core::llm::LlmBackend;
 
 use crate::db::chats::occupancy::{self, Reported};
 
@@ -69,5 +70,121 @@ impl Driver {
         if let Err(error) = occupancy::set(pool, chat_id, &reported).await {
             tracing::warn!(%chat_id, %error, "Could not keep the context window the chat's agent reported");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use abnegate_agent_cli::CliSettings;
+    use zone_chat::capacity::Source;
+
+    use super::*;
+    use crate::db::chats::create_chat;
+
+    const MODEL: &str = "sonnet";
+    const WINDOW: u64 = 200_000;
+    const USED: u64 = 48_000;
+
+    async fn chat() -> (PgPool, Uuid) {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .expect("the test database accepts connections");
+        let chat_id = create_chat(&pool, None, "Driver", MODEL, false, true)
+            .await
+            .expect("a chat")
+            .id;
+        (pool, chat_id)
+    }
+
+    fn known(capacity: &(Capacity, Option<u64>)) -> (Option<u64>, Source, Option<u64>) {
+        (capacity.0.limit, capacity.0.source, capacity.1)
+    }
+
+    #[test]
+    fn only_a_coding_agent_drives_a_chat() {
+        assert_eq!(Driver::on(&LlmBackend::Http, MODEL), None);
+        for &agent in AgentKind::ALL {
+            assert_eq!(
+                Driver::on(&LlmBackend::cli(agent, CliSettings::default()), MODEL),
+                Some(Driver::new(agent, MODEL))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_chats_window_is_unknown_until_its_agent_reports_it() {
+        let (pool, chat_id) = chat().await;
+        let claude = Driver::new(AgentKind::Claude, MODEL);
+
+        let before = claude.capacity(&pool, chat_id).await;
+        claude
+            .record(
+                &pool,
+                chat_id,
+                Occupancy::reported(WINDOW, Some(USED)).expect("a reported window"),
+            )
+            .await;
+        let after = claude.capacity(&pool, chat_id).await;
+
+        assert_eq!(known(&before), (None, Source::Unknown, None));
+        assert_eq!(before.0.reason.as_deref(), Some(UNREPORTED));
+        assert_eq!(known(&after), (Some(WINDOW), Source::Runtime, Some(USED)));
+        assert_eq!(after.0.identity, MODEL);
+    }
+
+    #[tokio::test]
+    async fn a_window_another_agent_or_model_reported_is_not_this_drivers() {
+        let (pool, chat_id) = chat().await;
+        Driver::new(AgentKind::Claude, MODEL)
+            .record(
+                &pool,
+                chat_id,
+                Occupancy::reported(WINDOW, Some(USED)).expect("a reported window"),
+            )
+            .await;
+
+        for other in [
+            Driver::new(AgentKind::Codex, MODEL),
+            Driver::new(AgentKind::Claude, "opus"),
+        ] {
+            assert_eq!(
+                known(&other.capacity(&pool, chat_id).await),
+                (None, Source::Unknown, None),
+                "{other:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_latest_report_replaces_the_last() {
+        let (pool, chat_id) = chat().await;
+        let claude = Driver::new(AgentKind::Claude, MODEL);
+        let codex = Driver::new(AgentKind::Codex, "gpt-5.5");
+
+        claude
+            .record(
+                &pool,
+                chat_id,
+                Occupancy::reported(WINDOW, Some(USED)).expect("a reported window"),
+            )
+            .await;
+        codex
+            .record(
+                &pool,
+                chat_id,
+                Occupancy::reported(WINDOW * 2, None).expect("a reported window"),
+            )
+            .await;
+
+        assert_eq!(
+            known(&codex.capacity(&pool, chat_id).await),
+            (Some(WINDOW * 2), Source::Runtime, None)
+        );
+        assert_eq!(
+            known(&claude.capacity(&pool, chat_id).await),
+            (None, Source::Unknown, None),
+            "a report belongs to the agent that made it"
+        );
     }
 }

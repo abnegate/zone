@@ -568,6 +568,7 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
     use std::future::Future;
     use std::io;
     use std::os::unix::fs::PermissionsExt;
@@ -575,7 +576,7 @@ pub(crate) mod test_support {
     use tempfile::TempDir;
     use tracing_subscriber::fmt::MakeWriter;
 
-    use crate::environment;
+    use crate::llm::cli;
 
     /// What a server's environment holds that no child of a tool may be
     /// handed. Every value says `notreal`, so a leak shows under any name.
@@ -648,7 +649,7 @@ pub(crate) mod test_support {
                     .args(["--exact", test, "--nocapture"])
                     .env(COPY, "1")
                     .envs(SERVER_SECRETS)
-                    .env(environment::PASSTHROUGH, PASSED_THROUGH.0)
+                    .env(cli::PASSTHROUGH, PASSED_THROUGH.0)
                     .env(PASSED_THROUGH.0, PASSED_THROUGH.1)
                     .env("PATH", path)
                     .output()
@@ -677,7 +678,12 @@ pub(crate) mod test_support {
                 .filter_map(|entry| entry.split_once('='))
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect();
-            let allowed = environment::filter(variables.clone(), PASSED_THROUGH.0);
+            let inheritable = cli::inheritable(&[PASSED_THROUGH.0.to_string()]);
+            let allowed: BTreeMap<&str, &str> = variables
+                .iter()
+                .filter(|(name, _)| inheritable.contains(name))
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
             let handed: Vec<&str> = variables
                 .iter()
                 .map(|(name, _)| name.as_str())
@@ -695,7 +701,7 @@ pub(crate) mod test_support {
                 self.program
             );
             assert_eq!(
-                allowed.get(PASSED_THROUGH.0).map(String::as_str),
+                allowed.get(PASSED_THROUGH.0).copied(),
                 Some(PASSED_THROUGH.1),
                 "the operator's passthrough did not reach {}",
                 self.program

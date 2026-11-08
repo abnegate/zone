@@ -377,6 +377,135 @@ async fn denied_mutation_has_one_durable_error_result_and_never_writes_the_file(
     );
 }
 
+/// The tool calls stored on the chat's latest assistant message.
+async fn stored_calls(harness: &Harness) -> Vec<Value> {
+    let metadata: Option<Value> = sqlx::query_scalar(
+        "SELECT metadata FROM messages WHERE chat_id = $1 AND role = 'assistant' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(harness.chat)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the stored answer");
+    metadata
+        .and_then(|metadata| metadata["tool_calls"].as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// A chat that asks before it lets any call change something.
+async fn asking(harness: &Harness) {
+    harness
+        .client
+        .put_json_auth(
+            &format!("/api/chats/{}", harness.chat),
+            &json!({"auto_approve":false}),
+            &harness.token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+/// A call refused by the reader carries what refused it, live and stored, so the console
+/// labels it from that rather than from its words.
+#[tokio::test]
+async fn a_denied_call_carries_its_refusal_live_and_stored() {
+    let harness = Harness::new(Some(100_000), true, vec![]).await;
+    let path = harness.directory().join("denied.txt");
+    asking(&harness).await;
+    harness.script.push(calls(
+        "Awaiting permission",
+        vec![tool(
+            "denied",
+            "write_file",
+            json!({"path":path,"content":"must not be written"}),
+        )],
+    ));
+    harness.script.push(answer("Permission declined"));
+    let mut socket = harness.connect().await;
+    send(
+        &mut socket,
+        json!({"type":"send","content":"Propose the write"}),
+    )
+    .await;
+    loop {
+        let frame = next(&mut socket).await;
+        if frame["type"] == "tool_approval_required" {
+            send(&mut socket,json!({"type":"approve_tool","tool_call_id":frame["tool_call_id"],"approved":false})).await;
+            break;
+        }
+    }
+    let frames = finish(&mut socket).await;
+    successful(&frames);
+
+    let result = frames
+        .iter()
+        .find(|frame| frame["type"] == "tool_result")
+        .expect("the denied call's result");
+    assert_eq!(result["refusal"], json!("denied"), "{result}");
+    let stored = stored_calls(&harness).await;
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0]["refusal"], json!("denied"), "{stored:?}");
+}
+
+/// A call that ran carries no refusal, and says so, so a failure whose words happen to be a
+/// refusal's is still read as a failure.
+#[tokio::test]
+async fn a_call_that_ran_is_stored_with_no_refusal() {
+    let harness = Harness::new(Some(100_000), true, vec![]).await;
+    harness.script.push(calls(
+        "Reading",
+        vec![tool("read", "read_file", json!({"path":"missing.txt"}))],
+    ));
+    harness.script.push(answer("Read it"));
+    successful(&harness.turn("Read the file").await);
+
+    let stored = stored_calls(&harness).await;
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    let record = stored[0].as_object().expect("a stored call");
+    assert_eq!(
+        record.get("refusal"),
+        Some(&Value::Null),
+        "a new record says it was not refused: {record:?}"
+    );
+}
+
+/// A turn stopped while a call waits for approval leaves that call unfinished, so a reader who
+/// reloads sees it stopped rather than failed.
+#[tokio::test]
+async fn a_call_stopped_while_awaiting_approval_is_stored_unfinished() {
+    let harness = Harness::new(Some(100_000), true, vec![]).await;
+    let path = harness.directory().join("stopped.txt");
+    asking(&harness).await;
+    harness.script.push(calls(
+        "Awaiting permission",
+        vec![tool(
+            "stopped",
+            "write_file",
+            json!({"path":path,"content":"must not be written"}),
+        )],
+    ));
+    let mut socket = harness.connect().await;
+    send(
+        &mut socket,
+        json!({"type":"send","content":"Propose the write"}),
+    )
+    .await;
+    loop {
+        let frame = next(&mut socket).await;
+        if frame["type"] == "tool_approval_required" {
+            send(&mut socket, json!({"type":"cancel"})).await;
+            break;
+        }
+    }
+    finish(&mut socket).await;
+
+    assert!(!path.exists());
+    let stored = stored_calls(&harness).await;
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0]["detail"], json!("Did not finish"), "{stored:?}");
+    assert_eq!(stored[0]["success"], json!(false), "{stored:?}");
+}
+
 #[tokio::test]
 async fn cancellation_records_an_unknown_mutation_outcome_and_followup_never_reexecutes_it() {
     let harness = Harness::new(Some(100_000), true, vec![]).await;

@@ -180,8 +180,8 @@ mod tests {
     use crate::agent::prompt::Environment;
     use crate::agent::prompt::test_support::{chat_context, environment, task_context};
     use crate::agent::{ChatTools, ToolProfile};
+    use abnegate_agent_cli::AgentKind;
     use std::collections::BTreeSet;
-    use zone_core::llm::AgentKind;
 
     /// Every tool any bullet asks for, which is the catalog that renders all of them.
     fn catalog() -> Vec<&'static str> {
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn a_coding_agent_is_told_the_name_its_model_calls_zones_tool_by() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let tools = ChatTools::with_names(ToolProfile::Chat, &catalog(), None).served_to(agent);
             let rendered = prompted(&tools, &environment().with_github());
 

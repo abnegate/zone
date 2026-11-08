@@ -5,11 +5,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::login::Status;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
-use zone_core::llm::AgentKind;
-
-use super::super::probe::Probe;
 
 pub struct Host {
     lifetime: Duration,
@@ -18,7 +17,7 @@ pub struct Host {
 
 struct Answer {
     asked: Instant,
-    probe: Option<Probe>,
+    status: Option<Status>,
 }
 
 impl Host {
@@ -35,8 +34,8 @@ impl Host {
         &self,
         agent: AgentKind,
         executable: PathBuf,
-        ask: impl Future<Output = Option<Probe>>,
-    ) -> Option<Probe> {
+        ask: impl Future<Output = Option<Status>>,
+    ) -> Option<Status> {
         let slot = self
             .answers
             .entry((agent.as_str(), executable))
@@ -48,14 +47,14 @@ impl Host {
             .as_ref()
             .filter(|answer| answer.asked.elapsed() < self.lifetime)
         {
-            return fresh.probe.clone();
+            return fresh.status.clone();
         }
-        let probe = ask.await;
+        let status = ask.await;
         *answer = Some(Answer {
             asked: Instant::now(),
-            probe: probe.clone(),
+            status: status.clone(),
         });
-        probe
+        status
     }
 }
 
@@ -71,18 +70,15 @@ mod tests {
     const LASTING: Duration = Duration::from_secs(60);
     const CHECKING: Duration = Duration::from_millis(50);
 
-    fn signed_in() -> Probe {
-        Probe {
-            signed_in: true,
-            label: Some("ChatGPT".to_string()),
-        }
+    fn signed_in() -> Status {
+        Status::new(true).with_label("ChatGPT")
     }
 
     fn executable(name: &str) -> PathBuf {
         PathBuf::from("/usr/local/bin").join(name)
     }
 
-    async fn counted(checks: &AtomicUsize) -> Option<Probe> {
+    async fn counted(checks: &AtomicUsize) -> Option<Status> {
         checks.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(CHECKING).await;
         Some(signed_in())

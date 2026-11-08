@@ -37,7 +37,7 @@ pub mod verification;
 pub mod wait;
 pub mod web;
 
-pub use approval::{ApprovalGate, ApprovalPolicy, Decision};
+pub use approval::{ApprovalGate, ApprovalPolicy, Decision, Refusal};
 pub use citations::{Citation, CitationKind, CitationOutcome};
 pub use prompt::{Environment, Surface, Vcs, Verbosity};
 pub use question::{ASK_USER, Answer, Choice, Question};
@@ -117,6 +117,11 @@ pub struct ToolCallRecord {
     /// What this call is waiting for, and until when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<Waiting>,
+    /// Why the call did not run, when it was put to the reader and refused. Always written, so
+    /// a record that has none says so, and only one stored before refusals were kept is read
+    /// back from its outcome's words.
+    #[serde(default)]
+    pub refusal: Option<Refusal>,
 }
 
 #[cfg(test)]
@@ -140,6 +145,7 @@ mod tests {
             questions: Vec::new(),
             job: None,
             waiting: None,
+            refusal: None,
         };
 
         let json = serde_json::to_value(&record).unwrap();
@@ -197,6 +203,7 @@ mod tests {
                 multi_select: false,
                 required: true,
             }],
+            refusal: None,
         };
 
         let json = serde_json::to_value(&record).unwrap();

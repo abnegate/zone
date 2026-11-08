@@ -12,13 +12,15 @@
 
 use std::path::PathBuf;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_llm::{Credential, LlmConfig, Message};
 use axum::http::StatusCode;
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, LlmBackend, LlmClient};
+use zone_core::llm::{LlmBackend, LlmClient};
 use zone_server::config::{AgentConfig, Config};
+use zone_server::services::agent::home;
 use zone_server::services::route::Route;
 use zone_server::services::stages::AUTO;
 
@@ -89,13 +91,18 @@ async fn an_organization_without_a_sign_in_of_its_own_runs_the_hosts_claude() {
         .await
         .expect("the host's own sign-in to serve the organization");
 
-    let LlmBackend::Cli { agent, settings } = &backend else {
+    let LlmBackend::Cli {
+        agent, settings, ..
+    } = &backend
+    else {
         panic!("expected the claude CLI, got {backend:?}");
     };
     assert_eq!(*agent, AgentKind::Claude);
     assert!(matches!(settings.credential, Credential::Inherited));
     assert!(
-        !settings.variables.contains_key(AgentKind::Claude.home()),
+        !settings
+            .variables
+            .contains_key(home::variable(AgentKind::Claude).expect("a home variable")),
         "a CLAUDE_CONFIG_DIR would hide the host's sign-in"
     );
     let work: PathBuf = agents

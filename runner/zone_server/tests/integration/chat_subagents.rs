@@ -12,6 +12,7 @@ use crate::common::{
 
 use std::time::Duration;
 
+use abnegate_agent_cli::{StepStatus, SubagentStatus, SubagentStep};
 use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -19,7 +20,6 @@ use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use uuid::Uuid;
-use zone_core::llm::{StepStatus, SubagentStatus, SubagentStep};
 use zone_server::db::chat_subagents::{self, SubagentChange};
 use zone_server::db::chats::create_chat;
 use zone_server::db::context::Store;
@@ -96,12 +96,7 @@ impl Workspace {
 }
 
 fn step(id: &str, status: StepStatus) -> SubagentStep {
-    SubagentStep {
-        id: id.to_string(),
-        name: "Bash".to_string(),
-        subject: Some("cargo test".to_string()),
-        status,
-    }
+    SubagentStep::new(id, "Bash", status).with_subject("cargo test")
 }
 
 async fn register(client: &TestClient) -> String {
@@ -334,10 +329,7 @@ async fn another_workspaces_member_cannot_see_a_subagents_steps() {
     chat_subagents::record_steps(
         workspace.state.db(),
         subagent,
-        &[SubagentStep {
-            subject: Some("Private".to_string()),
-            ..step("toolu_a", StepStatus::Running)
-        }],
+        &[step("toolu_a", StepStatus::Running).with_subject("Private")],
     )
     .await
     .expect("a step");

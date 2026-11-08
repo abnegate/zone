@@ -1,0 +1,5 @@
+{
+  "step_fields": ["id", "name", "status", "subject"],
+  "subagent_statuses": ["completed", "failed", "running", "stopped"],
+  "step_statuses": ["failed", "running", "succeeded"]
+}
