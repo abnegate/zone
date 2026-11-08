@@ -17,6 +17,8 @@ pub mod verdict;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolResult;
 use abnegate_agent_cli::{CREDITS_REQUIRED, LONG_CONTEXT_CREDITS_REQUIRED};
 use abnegate_llm::{Message, ToolDefinition};
 use abnegate_secret::SecretValue;
@@ -24,8 +26,9 @@ use abnegate_vcs::{ChangedFile, PullRequestDetail, PullRequestReference, PullReq
 use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
+use zone_core::application::application;
 use zone_core::llm::LlmBackend;
-use zone_core::tools::{ToolContext, ToolResult};
+use zone_core::vpn::Offline;
 
 use crate::db::auto_projects::{Finding, ReviewRow};
 use crate::db::tasks::TaskRow;
@@ -169,7 +172,7 @@ pub async fn run(
     let registry = tools::registry(shared);
     let definitions: Option<Vec<ToolDefinition>> =
         matches!(client.backend(), LlmBackend::Http).then(|| registry.definitions());
-    let context = ToolContext::default();
+    let context = context();
     let mut messages = vec![
         Message::system(prompt::system(
             request.round,
@@ -240,9 +243,19 @@ pub async fn run(
     }
 }
 
+fn context() -> ToolContext {
+    ToolContext::default()
+        .inherit_environment()
+        .with_application(application())
+        .with_proxy(zone_routing::proxy())
+        .with_public_web(Arc::new(Offline::new(false)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_agent::ToolError;
+    use abnegate_agent::tool::RunCommandTool;
     use abnegate_agent_cli::AgentKind;
     use abnegate_llm::Limit;
     use abnegate_vcs::{BranchName, CommitSha, Mergeability};
@@ -250,6 +263,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    use zone_core::vpn::{Hold, OFFLINE};
 
     use crate::config::{Config, ModelBackend};
 
@@ -889,5 +904,26 @@ mod tests {
         assert!(matches!(error, ReviewError::Model(_)), "{error:?}");
         assert!(!recorded.contains(KEY), "{recorded}");
         assert!(!recorded.contains("sk-org****e19b"), "{recorded}");
+    }
+    #[tokio::test]
+    async fn a_review_context_inherits_the_environment_and_the_gate() {
+        let context = context();
+
+        assert!(context.environment.inherits());
+        assert_eq!(context.application, application());
+        assert!(context.proxy.is_some());
+        assert!(context.public_web.is_some());
+
+        let _vpn = Hold::required_off();
+        let refused = RunCommandTool::with_commands(&["curl"])
+            .execute(
+                json!({ "command": "curl", "args": ["https://example.com"] }),
+                &context,
+            )
+            .await;
+        assert!(
+            matches!(&refused, Err(ToolError::Execution(message)) if message == OFFLINE),
+            "{refused:?}"
+        );
     }
 }
