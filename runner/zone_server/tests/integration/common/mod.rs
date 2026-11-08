@@ -493,15 +493,30 @@ pub fn test_email() -> String {
 pub fn test_password() -> String {
     static PASSWORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PASSWORD
-        .get_or_init(|| {
-            let id = uuid::Uuid::new_v4();
-            let mut chars: Vec<char> = id.simple().to_string().chars().collect();
-            if let Some(letter) = chars.iter_mut().find(|ch| ch.is_ascii_lowercase()) {
-                *letter = letter.to_ascii_uppercase();
-            }
-            chars.into_iter().collect()
-        })
+        .get_or_init(|| password(uuid::Uuid::new_v4()))
         .clone()
+}
+
+fn password(id: uuid::Uuid) -> String {
+    format!("Zone1{}", id.simple())
+}
+
+#[test]
+fn every_generated_password_meets_the_registration_rules() {
+    for id in [
+        0x11111111_1111_4111_8111_111111111111,
+        0x11111111_1111_4111_a111_111111111111,
+        0xaaaaaaaa_aaaa_4aaa_aaaa_aaaaaaaaaaaa,
+    ] {
+        let password = password(uuid::Uuid::from_u128(id));
+        assert!(
+            password.len() >= 8
+                && password.chars().any(char::is_uppercase)
+                && password.chars().any(char::is_lowercase)
+                && password.chars().any(|character| character.is_ascii_digit()),
+            "{password} is refused by registration"
+        );
+    }
 }
 
 /// Create a test config with a custom litellm_host for mocking external services
