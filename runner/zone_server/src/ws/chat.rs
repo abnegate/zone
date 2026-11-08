@@ -12,6 +12,9 @@
 //!    "remove_queued" act on the queue, and every change is sent as "queue"
 //! 6. Connection closes on error or client disconnect
 
+use abnegate_agent::context::ContextUsage;
+use abnegate_agent::tool::Session as ToolSession;
+use abnegate_agent::tool::job::{JobStarted, JobStatus, Jobs, parse_receipt};
 use abnegate_agent_cli::SubagentStep;
 use abnegate_comfy::MediaType;
 use abnegate_llm::{Message as LlmMessage, Role as LlmRole, Usage};
@@ -35,8 +38,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
-use zone_core::tools::Session as ToolSession;
-use zone_core::tools::job::{JobExited, JobStarted, JobState, Jobs, parse_receipt};
 
 use crate::agent::wait::{self, Outcome, WaitSettled, Waited, Waiting};
 use crate::agent::{
@@ -66,7 +67,6 @@ use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 use zone_chat::history::ReplayMessage;
-use zone_core::context::ContextUsage;
 
 mod ending;
 pub mod job;
@@ -715,7 +715,7 @@ pub enum ServerMessage {
     /// A background job is no longer running. Matched to its card by `job.id`
     /// rather than by a call, because the call that observes an exit is rarely
     /// the call that started the job.
-    JobExited { message_id: Uuid, job: JobExited },
+    JobExited { message_id: Uuid, job: job::JobExit },
     /// The model opened a wait, and the turn is suspended on it. Unlike a
     /// question this is not the last frame of the turn: a second run resumes
     /// the same message once the wait settles.
@@ -1197,7 +1197,7 @@ const fn silent_turn(asked: bool, waited: bool) -> &'static str {
 /// A tool reaches a frame through its result text and nothing else: the
 /// registry holds no pid, `ToolResult` has no detail slot, and the completion
 /// event's `detail` is a truncated first line. Reading the line back is
-/// `zone_core`'s, which owns the format and checks what it read by rebuilding
+/// `abnegate_agent`'s, which owns the format and checks what it read by rebuilding
 /// the receipt from it; what is left here is which messages may carry one.
 fn spawned_job(message: &ReplayMessage) -> Option<(String, JobStarted)> {
     if message.role != LlmRole::Tool {
@@ -1209,7 +1209,7 @@ fn spawned_job(message: &ReplayMessage) -> Option<(String, JobStarted)> {
 }
 
 /// Where a job has got to, or nothing once the registry has let it go.
-async fn job_state(chat_id: Uuid, id: &str) -> Option<JobState> {
+async fn job_state(chat_id: Uuid, id: &str) -> Option<JobStatus> {
     Jobs::read(ToolSession::Chat(chat_id), id, 0, 0)
         .await
         .ok()
@@ -1217,11 +1217,11 @@ async fn job_state(chat_id: Uuid, id: &str) -> Option<JobState> {
 }
 
 /// How a job ended, as the exit field the console reads. No code means killed.
-fn job_exit(id: &str, state: Option<JobState>) -> JobExited {
-    JobExited {
+fn job_exit(id: &str, state: Option<JobStatus>) -> job::JobExit {
+    job::JobExit {
         id: id.to_string(),
         exit_code: match state {
-            Some(JobState::Exited(code)) => Some(code),
+            Some(JobStatus::Exited(code)) => Some(code),
             _ => None,
         },
     }
@@ -1232,7 +1232,7 @@ fn job_exit(id: &str, state: Option<JobState>) -> JobExited {
 /// A job still running here is about to be killed with the turn, so the state
 /// is read before anything kills it: that is what tells a job that finished
 /// apart from one the turn took with it.
-async fn job_exits(chat_id: Uuid, tracked: &[String]) -> Vec<JobExited> {
+async fn job_exits(chat_id: Uuid, tracked: &[String]) -> Vec<job::JobExit> {
     let mut exits = Vec::with_capacity(tracked.len());
     for id in tracked {
         exits.push(job_exit(id, job_state(chat_id, id).await));
@@ -1246,7 +1246,7 @@ async fn job_exits(chat_id: Uuid, tracked: &[String]) -> Vec<JobExited> {
 /// hands its timeout back as an ordinary outcome, and a lost wait reads the
 /// same way. Announcing an exit for either would draw a kill that never
 /// happened, and taking the id out of `tracked` would silence the real end.
-async fn job_wait_exit(chat_id: Uuid, id: &str, tracked: &mut Vec<String>) -> Option<JobExited> {
+async fn job_wait_exit(chat_id: Uuid, id: &str, tracked: &mut Vec<String>) -> Option<job::JobExit> {
     let state = job_state(chat_id, id).await?;
     if !state.settled() {
         return None;
@@ -3834,7 +3834,7 @@ async fn handle_chat_generation(
                             replay.summary=Some(summary);
                         }
                         Some(AgentEvent::Context(usage)) => {
-                            if usage.status==zone_core::context::ContextStatus::Blocked { blocked=Some(usage.clone()); }
+                            if usage.status==abnegate_agent::context::ContextStatus::Blocked { blocked=Some(usage.clone()); }
                             if let Err(error)=session.store.assert_current(&session.lease).await {failure=Some(error.to_string());break;}
                             publish(stream,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await;
                         }
@@ -3957,7 +3957,7 @@ async fn handle_chat_generation(
                                 continue;
                             };
 
-                            if zone_core::tools::is_vision_url(&url) && !replay.entries.iter().any(|entry|entry.message.images.contains(&url) || entry.message.generated_images.iter().any(|image|image.image_url.url==url)) {
+                            if abnegate_agent::tool::is_vision_url(&url) && !replay.entries.iter().any(|entry|entry.message.images.contains(&url) || entry.message.generated_images.iter().any(|image|image.image_url.url==url)) {
                                 pending_images.push(url);
                             }
                             let media_msg = if attachment.mime.starts_with("audio/") {
@@ -4509,17 +4509,10 @@ async fn handle_chat_generation(
                 .retain(|entry| entry.message.role == LlmRole::System);
             replay
                 .entries
-                .extend(
-                    history
-                        .entries
-                        .into_iter()
-                        .map(|entry| zone_core::context::Entry {
-                            id: entry.id,
-                            message: entry.message.into_message(),
-                            preserve: false,
-                            consumed: entry.consumed,
-                        }),
-                );
+                .extend(history.entries.into_iter().map(|entry| {
+                    abnegate_agent::context::Entry::new(entry.id, entry.message.into_message())
+                        .with_consumed(entry.consumed)
+                }));
             replay.summary = history.summary.map(session::core_summary);
             replay.search(&SearchContext::new(&state.config().web_search));
             let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
@@ -6973,11 +6966,7 @@ cat 'DIR/reply.jsonl'
     const JOB_LOG: &str = "/w/.zone/jobs/job_9f3c1a7b2e04.log";
 
     fn spawned() -> JobStarted {
-        JobStarted {
-            id: JOB_ID.to_string(),
-            pid: 48213,
-            log_path: JOB_LOG.to_string(),
-        }
+        JobStarted::new(JOB_ID, 48213, JOB_LOG)
     }
 
     #[test]
@@ -9047,7 +9036,7 @@ cat 'DIR/reply.jsonl'
 
         let exited = serde_json::to_value(ServerMessage::JobExited {
             message_id,
-            job: JobExited {
+            job: job::JobExit {
                 id: JOB_ID.into(),
                 exit_code: Some(1),
             },
@@ -9099,7 +9088,7 @@ cat 'DIR/reply.jsonl'
     fn a_job_killed_with_its_turn_reports_no_exit_code() {
         let json = serde_json::to_value(ServerMessage::JobExited {
             message_id: Uuid::new_v4(),
-            job: JobExited {
+            job: job::JobExit {
                 id: JOB_ID.into(),
                 exit_code: None,
             },
@@ -9117,7 +9106,7 @@ cat 'DIR/reply.jsonl'
         let job = spawned();
         let message = ReplayMessage::from(&LlmMessage::tool_result(
             "call_1",
-            zone_core::tools::job::started_text(&job),
+            abnegate_agent::tool::job::started_text(&job),
         ));
 
         let (call, read) = spawned_job(&message).expect("a spawn receipt announces its job");
@@ -9128,7 +9117,7 @@ cat 'DIR/reply.jsonl'
     #[test]
     fn anything_but_a_spawn_receipt_starts_no_job_card() {
         let job = spawned();
-        let receipt = zone_core::tools::job::started_text(&job);
+        let receipt = abnegate_agent::tool::job::started_text(&job);
         let mut mislabelled =
             ReplayMessage::from(&LlmMessage::tool_result("call_1", receipt.as_str()));
         mislabelled.role = LlmRole::Assistant;
@@ -9240,7 +9229,7 @@ cat 'DIR/reply.jsonl'
         });
         turn.record(&ServerMessage::JobExited {
             message_id,
-            job: JobExited {
+            job: job::JobExit {
                 id: JOB_ID.into(),
                 exit_code: Some(0),
             },
@@ -9438,11 +9427,15 @@ cat 'DIR/reply.jsonl'
     }
 
     async fn background(session: ToolSession, cwd: &std::path::Path, script: &str) -> JobStarted {
+        let context = abnegate_agent::ToolContext::default()
+            .within(cwd)
+            .with_session(session)
+            .with_application(zone_core::application::application())
+            .with_environment(abnegate_agent::tool::EnvironmentPolicy::empty())
+            .with_proxy(abnegate_agent::tool::Proxy::default());
         Jobs::spawn(
-            session,
-            &zone_core::tools::job::JobCommand::shell(script),
-            cwd,
-            &std::collections::HashMap::new(),
+            &abnegate_agent::tool::job::JobCommand::shell(script),
+            &context,
         )
         .await
         .unwrap()
@@ -9508,7 +9501,7 @@ cat 'DIR/reply.jsonl'
 
         assert_eq!(
             job_exits(chat_id, &tracked).await,
-            [JobExited {
+            [job::JobExit {
                 id: running.id.clone(),
                 exit_code: None,
             }],
@@ -9532,7 +9525,7 @@ cat 'DIR/reply.jsonl'
 
         assert_eq!(
             job_wait_exit(chat_id, &finished.id, &mut tracked).await,
-            Some(JobExited {
+            Some(job::JobExit {
                 id: finished.id.clone(),
                 exit_code: Some(5),
             }),

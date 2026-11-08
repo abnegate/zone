@@ -16,12 +16,12 @@ pub use switch::Switch;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use abnegate_agent::context::Entry;
 use abnegate_agent_cli::{AgentKind, Session};
 use abnegate_llm::Message;
 use chrono::Utc;
 use uuid::Uuid;
 use zone_chat::history::NewEntry;
-use zone_core::context::Entry;
 use zone_core::llm::LlmBackend;
 
 use super::session::RunContext;
@@ -308,12 +308,9 @@ pub fn carried(whole: &RunContext) -> RunContext {
 /// [`CONTINUE`], from the user so it follows the answer rather than opening the transcript with
 /// the instructions, and consumed already so it is never written to the chat.
 fn instruction() -> Entry {
-    Entry {
-        id: INSTRUCTION.into(),
-        message: Message::user(CONTINUE),
-        preserve: true,
-        consumed: true,
-    }
+    Entry::new(INSTRUCTION, Message::user(CONTINUE))
+        .with_preserve(true)
+        .with_consumed(true)
 }
 
 /// Moves the session `resolved` is about to resume to where its agent will look for it from the
@@ -442,6 +439,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use abnegate_agent::context::project;
     use abnegate_agent_cli::CliSettings;
     use abnegate_agent_cli::SessionError;
     use abnegate_agent_cli::login::claude::Tokens;
@@ -451,7 +449,6 @@ mod tests {
     use chrono::{DateTime, SecondsFormat, TimeDelta, TimeZone};
     use sqlx::PgPool;
     use tempfile::TempDir;
-    use zone_core::context::project;
 
     use super::*;
     use crate::config::AgentConfig;

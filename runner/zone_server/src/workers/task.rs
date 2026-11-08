@@ -3,6 +3,12 @@
 //! Executes agentic tasks in the background using the same streaming agent
 //! loop as chat, with a task budget and a sandboxed tool context.
 
+use abnegate_agent::AgentPhase;
+use abnegate_agent::ToolResult;
+use abnegate_agent::context::Entry;
+use abnegate_agent::tool::MAXIMUM_SLEEP;
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::job::Jobs;
 use abnegate_agent_cli::CREDITS_REQUIRED;
 use abnegate_agent_cli::LONG_CONTEXT_CREDITS_REQUIRED;
 use abnegate_agent_cli::PROSE_EXCEEDED;
@@ -26,14 +32,9 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use zone_core::agent::AgentPhase;
-use zone_core::context::Entry;
 use zone_core::llm::BuiltinTools;
 use zone_core::llm::LlmBackend;
 use zone_core::llm::LlmClient;
-use zone_core::tools::Session;
-use zone_core::tools::ToolResult;
-use zone_core::tools::job::Jobs;
 
 use crate::agent;
 use crate::agent::AgentEvent;
@@ -113,7 +114,7 @@ const OPTIONAL_ANSWER_WINDOW: Duration = Duration::from_secs(30);
 /// This is the other half: a run that has stopped producing events looks from
 /// outside exactly like one that is working, so the silence gets a line of its
 /// own. Any event resets it, because any event is the run still moving.
-const STALL_AFTER: Duration = Duration::from_secs(zone_core::tools::MAX_SLEEP_SECS);
+const STALL_AFTER: Duration = MAXIMUM_SLEEP;
 
 /// Matches the sampling temperature `session::build` gives an interactive chat.
 const TASK_TEMPERATURE: f32 = 0.7;
@@ -2770,12 +2771,11 @@ fn resume_with(context: &mut RunContext, answered: String, answers: &mut Vec<Str
         }
     }
     let id = Uuid::new_v4().to_string();
-    context.entries.push(Entry {
-        id: id.clone(),
-        message: LlmMessage::user(answered),
-        preserve: true,
-        consumed: true,
-    });
+    context.entries.push(
+        Entry::new(id.clone(), LlmMessage::user(answered))
+            .with_preserve(true)
+            .with_consumed(true),
+    );
     answers.push(id);
 }
 
@@ -6404,12 +6404,11 @@ mod watchdog_tests {
             "a consumed entry is eligible for the checkpoint that replaces it"
         );
 
-        let summary = zone_core::context::Summary {
-            content: "The ledger was read".to_string(),
-            coverage: zone_core::context::coverage(&replay.entries, &["older".to_string()])
-                .unwrap(),
-            revision: 1,
-        };
+        let summary = abnegate_agent::context::Summary::new(
+            "The ledger was read",
+            abnegate_agent::context::coverage(&replay.entries, &["older".to_string()]).unwrap(),
+            1,
+        );
         accumulate(
             &mut replay,
             &AgentEvent::Checkpoint {
@@ -6422,13 +6421,15 @@ mod watchdog_tests {
             Some(&summary.content)
         );
 
-        replay.entries.push(Entry {
-            id: Uuid::new_v4().to_string(),
-            message: LlmMessage::user("Scope: Backfill"),
-            preserve: true,
-            consumed: true,
-        });
-        let projected = zone_core::context::project(&replay.entries, replay.summary.as_ref())
+        replay.entries.push(
+            Entry::new(
+                Uuid::new_v4().to_string(),
+                LlmMessage::user("Scope: Backfill"),
+            )
+            .with_preserve(true)
+            .with_consumed(true),
+        );
+        let projected = abnegate_agent::context::project(&replay.entries, replay.summary.as_ref())
             .expect("the resumed turn projects");
         let carried: Vec<&str> = projected
             .iter()
@@ -6957,14 +6958,18 @@ mod watchdog_tests {
         // A program rather than a shell line: a job runs with a cleared
         // environment, and this way the pid the registry reports is the
         // long-running process itself rather than a shell in front of it.
+        let context = abnegate_agent::ToolContext::default()
+            .within(checkout.path())
+            .with_session(session)
+            .with_application(zone_core::application::application())
+            .with_environment(abnegate_agent::tool::EnvironmentPolicy::empty())
+            .with_proxy(abnegate_agent::tool::Proxy::default());
         let started = Jobs::spawn(
-            session,
-            &zone_core::tools::job::JobCommand::new(
+            &abnegate_agent::tool::job::JobCommand::new(
                 "/bin/sleep",
                 vec![TASK_TIMEOUT.as_secs().to_string()],
             ),
-            checkout.path(),
-            &std::collections::HashMap::new(),
+            &context,
         )
         .await
         .expect("the job starts");

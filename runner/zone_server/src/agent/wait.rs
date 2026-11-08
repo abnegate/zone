@@ -12,6 +12,10 @@
 //! timeout and a commit nothing is reporting on both have to be unphrasable as
 //! a pass, or a model reads "no news" as "green".
 
+use abnegate_agent::context::Entry;
+use abnegate_agent::tool::job::{JobExited, Jobs};
+use abnegate_agent::tool::{Session, Tier};
+use abnegate_agent::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 use abnegate_llm::{Message as LlmMessage, ToolCall};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -27,9 +31,6 @@ use tokio::sync::{Mutex, broadcast};
 use tokio::time::Instant;
 use uuid::Uuid;
 use zone_chat::history;
-use zone_core::context::Entry;
-use zone_core::tools::job::{JobExited, Jobs};
-use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::integrations::{Configuration, SETTLED_ASSESSMENTS, authenticated};
 use super::tools::WorkspaceScope;
@@ -39,7 +40,7 @@ use crate::services::chat::session::RunContext;
 use crate::services::task_progress::ProgressMessage;
 use crate::state::AppState;
 
-pub const WAIT_FOR: &str = "wait_for";
+pub use abnegate_agent::tool::job::WAIT_FOR;
 
 pub const KIND_JOB: &str = "job";
 pub const KIND_TASK_RUN: &str = "task_run";
@@ -537,7 +538,7 @@ impl Subscription {
         match self {
             Self::Deadline => std::future::pending().await,
             Self::Job(exit) => {
-                let JobExited { id, exit_code } = exit.await;
+                let JobExited { id, exit_code, .. } = exit.await;
                 match exit_code {
                     Some(code) => job_exited(&id, code, started.elapsed()),
                     None => job_killed(&id, started.elapsed()),
@@ -772,12 +773,9 @@ pub fn resume_with_outcome(
         mutations: Vec::new(),
     });
     for entry in &pair {
-        context.entries.push(Entry {
-            id: entry.id.clone(),
-            message: entry.message.clone().into_message(),
-            preserve: true,
-            consumed: false,
-        });
+        context.entries.push(
+            Entry::new(entry.id.clone(), entry.message.clone().into_message()).with_preserve(true),
+        );
         waits.push(entry.id.clone());
     }
     pair
@@ -1036,8 +1034,11 @@ mod tests {
     use crate::services::github_app::testing::uninstalled;
     use crate::state::AppState;
     use crate::state::test_config;
+    use abnegate_agent::context;
+    use abnegate_agent::tool::EnvironmentPolicy;
+    use abnegate_agent::tool::job::JobCommand;
+    use abnegate_agent::tool::job::JobStarted;
     use abnegate_llm::Role;
-    use std::collections::HashMap;
     use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex as Lock;
@@ -1048,9 +1049,7 @@ mod tests {
     use wiremock::matchers::header;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
-    use zone_core::context;
-    use zone_core::tools::job::JobCommand;
-    use zone_core::tools::job::JobStarted;
+    use zone_core::application::application;
 
     const POLL: Duration = Duration::from_millis(20);
     const POLL_LIMIT: usize = 500;
@@ -1083,21 +1082,15 @@ mod tests {
     }
 
     fn context(session: Session) -> ToolContext {
-        ToolContext {
-            session,
-            ..Default::default()
-        }
-    }
-
-    fn environment() -> HashMap<String, String> {
-        HashMap::from([(
-            "PATH".to_string(),
-            std::env::var("PATH").unwrap_or_default(),
-        )])
+        ToolContext::default().with_session(session)
     }
 
     async fn spawned(session: Session, line: &str, cwd: &Path) -> JobStarted {
-        Jobs::spawn(session, &JobCommand::shell(line), cwd, &environment())
+        let context = context(session)
+            .within(cwd)
+            .with_application(application())
+            .with_environment(EnvironmentPolicy::empty().allow(["PATH"]));
+        Jobs::spawn(&JobCommand::shell(line), &context)
             .await
             .expect("the job starts")
     }
