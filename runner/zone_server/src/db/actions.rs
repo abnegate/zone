@@ -458,10 +458,12 @@ mod tests {
     /// and never came back — without a test that has to wait out a real one.
     const ABANDONED: std::time::Duration = std::time::Duration::ZERO;
 
+    fn database() -> String {
+        std::env::var("TEST_DATABASE_URL").expect("a disposable, migrated TEST_DATABASE_URL")
+    }
+
     async fn fixture() -> (PgPool, Uuid, Uuid, Uuid, Uuid) {
-        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
-            .await
-            .unwrap();
+        let pool = PgPool::connect(&database()).await.unwrap();
         let organization = Uuid::new_v4();
         let workspace = Uuid::new_v4();
         let user = Uuid::new_v4();
@@ -491,7 +493,7 @@ mod tests {
     async fn named_pool(application: &str) -> PgPool {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
-            .connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
+            .connect(&database())
             .await
             .unwrap();
         sqlx::query_scalar::<_, String>("SELECT set_config('application_name', $1, false)")
