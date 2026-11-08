@@ -28,7 +28,7 @@ use crate::services::provider::Provider;
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
-use zone_core::context::ContextUsage;
+use abnegate_agent::context::ContextUsage;
 
 use super::common::{ErrorResponse, Timestamps};
 

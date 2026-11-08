@@ -3,13 +3,18 @@
 
 use std::sync::Arc;
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Tier;
 use abnegate_secret::SecretValue;
 use abnegate_vcs::{
     ChangedFile, CommitSha, PullRequestReference, PullRequestService, RepositoryPath,
 };
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 /// Bytes of one file the reviewer may read at a time.
 const FILE_BYTES: usize = 40_000;

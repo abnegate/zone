@@ -12,11 +12,11 @@
 //! labelled as stated rather than observed wherever it is shown, and nothing
 //! here treats it as evidence.
 
+use abnegate_agent::ToolResult;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use zone_core::tools::ToolResult;
 
 use super::memory::{MEMORY_APPEND, MEMORY_DELETE, MEMORY_WRITE};
 use super::planner::FINALIZE_PROJECT;

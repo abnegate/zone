@@ -16,12 +16,18 @@
 //! cannot is stated in the prompt instead — [`rules`]'s own module doc draws
 //! that line.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::Tier;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::approval::Refusal;
 use super::tools::WorkspaceScope;
@@ -1071,10 +1077,7 @@ mod tests {
     }
 
     fn context(session: Session) -> ToolContext {
-        ToolContext {
-            session,
-            ..ToolContext::default()
-        }
+        ToolContext::default().with_session(session)
     }
 
     fn chat() -> ToolContext {
@@ -1287,7 +1290,7 @@ mod tests {
         for tool in tools() {
             assert!(
                 tool.parameters_schema()["properties"]
-                    .get(zone_core::tools::REASON_PARAM)
+                    .get(abnegate_agent::tool::REASON_PARAMETER)
                     .is_none(),
                 "{} asks for a reason",
                 tool.name()

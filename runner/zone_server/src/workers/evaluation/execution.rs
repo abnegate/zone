@@ -9,7 +9,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use zone_core::tools::routing;
 
 use super::detector::DetectedTool;
 use super::parser;
@@ -89,7 +88,7 @@ pub async fn capture(
             .with_timeout(timeout)
             .with_output_limit(settings.capture_limit)
             .with_environment(EnvironmentPolicy::inherit())
-            .with_proxy(routing::proxy()),
+            .with_proxy(zone_routing::proxy()),
     );
     // Not confined, and no longer for want of a process tree: the runner
     // now has one, and a real `cargo test` builds, links and runs its test
@@ -240,7 +239,7 @@ mod tests {
                 .args(["--exact", name, "--nocapture", "--test-threads", "1"])
                 .env_clear()
                 .env(CHILD, name)
-                .env(routing::PROXY_URL_VARIABLE, PROXY);
+                .env(zone_routing::PROXY_URL_VARIABLE, PROXY);
             for variable in ["PATH", "LLVM_PROFILE_FILE", "RUST_BACKTRACE"] {
                 if let Some(value) = std::env::var_os(variable) {
                     child.env(variable, value);
@@ -272,7 +271,7 @@ mod tests {
 
         assert_eq!(
             captured.stdout.trim(),
-            format!("{PROXY}|{}", routing::BYPASS.join(","))
+            format!("{PROXY}|{}", zone_routing::BYPASS.join(","))
         );
     }
 

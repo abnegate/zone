@@ -1,10 +1,11 @@
 //! Confirm a tool call with the user before it runs in chat.
 //!
 //! Which calls wait is the tool's own declaration: anything from
-//! [`zone_core::tools::CONFIRMED_FROM`] up, which is host writes and commands
+//! [`abnegate_agent::tool::CONFIRMED_FROM`] up, which is host writes and commands
 //! and everything that leaves the workspace. Tasks auto-approve: they run
 //! unattended in a sandboxed cwd, so nobody is there to answer.
 
+use abnegate_agent::tool::Tier;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
@@ -12,7 +13,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::oneshot;
 use uuid::Uuid;
-use zone_core::tools::Tier;
 
 pub mod refusal;
 
@@ -308,7 +308,11 @@ mod tests {
     /// silently drops a confirmation fails here rather than in production.
     #[test]
     fn the_catalog_tiers_the_calls_a_reader_has_to_see_first() {
-        use zone_core::tools::{ApplyPatchTool, ReadFileTool, RunShellTool, Tool, WriteFileTool};
+        use abnegate_agent::Tool;
+        use abnegate_agent::tool::ApplyPatchTool;
+        use abnegate_agent::tool::ReadFileTool;
+        use abnegate_agent::tool::RunShellTool;
+        use abnegate_agent::tool::WriteFileTool;
 
         assert_eq!(WriteFileTool.tier(), Tier::Host);
         assert_eq!(ApplyPatchTool.tier(), Tier::Host);

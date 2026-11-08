@@ -19,12 +19,15 @@
 //! rather than a minimal one — the saving should come from tools a turn was
 //! never going to touch, not from making every turn fetch what it always needs.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolResult;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolResult};
 
 pub const SEARCH_TOOLS: &str = "search_tools";
 pub const LOAD_TOOLS: &str = "load_tools";
@@ -276,17 +279,19 @@ impl Tool for SearchToolsTool {
         _context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let Query { query } = serde_json::from_value(params)
-            .map_err(|_| ToolError::InvalidParams("Provide a nonblank query".into()))?;
+            .map_err(|_| ToolError::InvalidParameters("Provide a nonblank query".into()))?;
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {
-            return Err(ToolError::InvalidParams("Provide a nonblank query".into()));
+            return Err(ToolError::InvalidParameters(
+                "Provide a nonblank query".into(),
+            ));
         }
         let terms: Vec<&str> = needle
             .split_whitespace()
             .filter(|term| !STOPWORDS.contains(term))
             .collect();
         if terms.is_empty() {
-            return Err(ToolError::InvalidParams(
+            return Err(ToolError::InvalidParameters(
                 "Name what the tool should do, not only articles and prepositions".into(),
             ));
         }
@@ -379,10 +384,11 @@ impl Tool for LoadToolsTool {
         params: Value,
         _context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let Names { names } = serde_json::from_value(params)
-            .map_err(|_| ToolError::InvalidParams("Provide names as an array of strings".into()))?;
+        let Names { names } = serde_json::from_value(params).map_err(|_| {
+            ToolError::InvalidParameters("Provide names as an array of strings".into())
+        })?;
         if names.is_empty() {
-            return Err(ToolError::InvalidParams(
+            return Err(ToolError::InvalidParameters(
                 "Provide at least one tool name".into(),
             ));
         }

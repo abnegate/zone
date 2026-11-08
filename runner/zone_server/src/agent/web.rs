@@ -11,7 +11,13 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::time::Duration;
 use uuid::Uuid;
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use zone_core::vpn;
 
 use super::identifier::Kind;
 use super::tools::{WorkspaceScope, truncate};
@@ -121,8 +127,8 @@ impl Tool for WebSearchTool {
     }
 
     async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        if let Some(message) = zone_core::vpn::refusal(context.offline) {
-            return Ok(ToolResult::error(message.to_string()));
+        if let Some(message) = refusal(context) {
+            return Ok(ToolResult::error(message));
         }
         let query = match params.get("query").and_then(Value::as_str) {
             Some(query) if !query.trim().is_empty() => sanitize_query(query),
@@ -209,8 +215,8 @@ impl Tool for FetchUrlTool {
     }
 
     async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
-        if let Some(message) = zone_core::vpn::refusal(context.offline) {
-            return Ok(ToolResult::error(message.to_string()));
+        if let Some(message) = refusal(context) {
+            return Ok(ToolResult::error(message));
         }
         let url = match params.get("url").and_then(Value::as_str) {
             Some(url) if !url.trim().is_empty() => url.trim(),
@@ -220,9 +226,16 @@ impl Tool for FetchUrlTool {
     }
 }
 
+fn refusal(context: &ToolContext) -> Option<String> {
+    match &context.public_web {
+        Some(gate) => gate.refusal(),
+        None => vpn::refusal(false).map(str::to_string),
+    }
+}
+
 async fn fetch_public_url(raw: &str) -> ToolResult {
-    if !zone_core::vpn::allows_public() {
-        return ToolResult::error(zone_core::vpn::OFFLINE.to_string());
+    if !vpn::allows_public() {
+        return ToolResult::error(vpn::OFFLINE.to_string());
     }
     let url = match validate_public_url(raw) {
         Ok(url) => url,
@@ -348,6 +361,10 @@ fn collapse_whitespace(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use zone_core::vpn::Offline;
+
     use super::*;
     use crate::agent::identifier;
     use crate::state::{AppState, test_config};
@@ -426,10 +443,7 @@ mod tests {
             .mount(&searxng)
             .await;
 
-        let context = ToolContext {
-            offline: true,
-            ..ToolContext::default()
-        };
+        let context = ToolContext::default().with_public_web(Arc::new(Offline::new(true)));
         let result = tool(None, searching(&searxng), NO_REGISTRY)
             .execute(json!({"query": "rust"}), &context)
             .await
@@ -441,10 +455,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_url_stays_offline_when_the_chat_is_offline() {
         let _vpn = zone_core::vpn::Hold::on();
-        let context = ToolContext {
-            offline: true,
-            ..ToolContext::default()
-        };
+        let context = ToolContext::default().with_public_web(Arc::new(Offline::new(true)));
         let result = FetchUrlTool
             .execute(json!({"url": "https://example.com"}), &context)
             .await
@@ -511,6 +522,33 @@ mod tests {
             .expect("the tool answers");
         assert!(!result.success, "{result:?}");
         assert_eq!(result.error.as_deref(), Some(zone_core::vpn::OFFLINE));
+    }
+
+    #[tokio::test]
+    async fn a_context_without_the_gate_still_refuses_while_the_vpn_is_off() {
+        let _vpn = zone_core::vpn::Hold::required_off();
+        let searxng = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"results": []})))
+            .expect(0)
+            .mount(&searxng)
+            .await;
+        let context = ToolContext::default();
+        assert!(context.public_web.is_none());
+
+        let searched = tool(None, searching(&searxng), NO_REGISTRY)
+            .execute(json!({"query": "rust"}), &context)
+            .await
+            .expect("the search tool answers");
+        let fetched = FetchUrlTool
+            .execute(json!({"url": "https://example.com"}), &context)
+            .await
+            .expect("the fetch tool answers");
+
+        for result in [searched, fetched] {
+            assert!(!result.success, "{result:?}");
+            assert_eq!(result.error.as_deref(), Some(zone_core::vpn::OFFLINE));
+        }
     }
 
     #[tokio::test]
