@@ -26,8 +26,8 @@ use zone_server::db::reminders::Sweep;
 use zone_server::db::{chats, users};
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;
-use zone_server::services::schedule::{self, Recurrence};
-use zone_server::services::time_zone::TimeZone;
+use zone_server::services::schedule;
+use zone_server::services::time_zone::{self, TimeZone};
 
 fn at(text: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(text)
@@ -36,12 +36,12 @@ fn at(text: &str) -> DateTime<Utc> {
 }
 
 fn zone(name: &str) -> TimeZone {
-    TimeZone::parse(name).expect("the fixture is an IANA zone")
+    time_zone::parse(name).expect("the fixture is an IANA zone")
 }
 
 /// Each firing after `anchor`, in order, as `rule` reads in `zone`.
 fn firings(rule: &str, anchor: &str, zone_name: &str, count: u32) -> Vec<DateTime<Utc>> {
-    let rule = Recurrence::parse(rule).expect("the rule is accepted");
+    let rule = schedule::parse(rule).expect("the rule is accepted");
     let anchor = at(anchor);
     let mut fired = Vec::new();
     let mut after = anchor;
@@ -222,7 +222,7 @@ fn a_monthly_first_at_plus_twelve_stays_on_the_first_there() {
 
 #[test]
 fn until_is_an_instant_however_the_zone_reads_it() {
-    let rule = Recurrence::parse("FREQ=DAILY;BYHOUR=9;UNTIL=20270706T210000Z").unwrap();
+    let rule = schedule::parse("FREQ=DAILY;BYHOUR=9;UNTIL=20270706T210000Z").unwrap();
     let anchor = at("2027-07-05T09:00:00+12:00");
     let auckland = zone("Pacific/Auckland");
     let second = rule.next_after(anchor, anchor, 1, auckland);
@@ -300,7 +300,7 @@ async fn fire(harness: &Harness, reminder: Uuid) -> DateTime<Utc> {
 }
 
 fn unjittered(reminder: Uuid, rule: &str, next: DateTime<Utc>) -> DateTime<Utc> {
-    next - schedule::jitter(reminder, Recurrence::parse(rule).unwrap().period())
+    next - schedule::jitter(reminder, schedule::parse(rule).unwrap().period())
 }
 
 #[tokio::test]

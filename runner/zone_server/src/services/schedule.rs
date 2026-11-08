@@ -1,18 +1,10 @@
-//! When a recurring automation fires next.
+//! Zone's limits on a recurring automation.
 //!
-//! The subset of RFC 5545 `RRULE` an automation may carry, and the arithmetic
-//! that turns one into the next instant after a given moment. Pure: it takes a
-//! rule and a clock reading and answers with an instant, so every rule in the
-//! tool's description can be tested without a database or a worker.
-//!
-//! The subset is deliberate rather than partial. `FREQ`, `INTERVAL`, `BYDAY`,
-//! `BYHOUR`, `BYMINUTE`, `BYMONTHDAY`, `UNTIL` and `COUNT` are what the
-//! automation contract needs; anything else in a rule is refused at creation
-//! rather than ignored, because a rule that silently drops a clause fires at a
-//! time nobody asked for and the owner finds out by being interrupted.
+//! The rule and its arithmetic are `abnegate_recurrence::Recurrence`; this file
+//! holds the hourly floor, the lifetime and the per-automation offset.
 
-use crate::services::time_zone::TimeZone;
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Utc, Weekday};
+pub use abnegate_recurrence::Recurrence;
+use chrono::Duration;
 use uuid::Uuid;
 
 /// The shortest period an automation may repeat on.
@@ -23,609 +15,25 @@ use uuid::Uuid;
 /// wants an event, which is what `wait_for` is for.
 pub const MIN_PERIOD: Duration = Duration::hours(1);
 
-/// How far ahead a search gives up.
+/// Reads an `RRULE` line as `abnegate_recurrence` does, and refuses one that
+/// fires faster than `MIN_PERIOD`.
 ///
-/// A rule whose clauses cannot all be satisfied — 31 February, or a `BYDAY`
-/// no month in the pattern reaches — would otherwise walk forward for ever.
-/// Four years clears every leap-year case and costs a bounded loop.
-const MAX_PERIODS: u32 = 1_500;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Frequency {
-    Hourly,
-    Daily,
-    Weekly,
-    Monthly,
-}
-
-impl Frequency {
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "HOURLY" => Some(Self::Hourly),
-            "DAILY" => Some(Self::Daily),
-            "WEEKLY" => Some(Self::Weekly),
-            "MONTHLY" => Some(Self::Monthly),
-            _ => None,
-        }
+/// The refusal names the gap it measured, because a rule that trips the floor
+/// is usually one whose clauses multiplied out further than whoever wrote it
+/// expected, and "too often" alone does not say by how much.
+pub fn parse(rule: &str) -> Result<Recurrence, String> {
+    #[expect(clippy::disallowed_methods)]
+    let recurrence = Recurrence::parse(rule).map_err(|error| error.to_string())?;
+    let shortest = recurrence.period();
+    if shortest < MIN_PERIOD {
+        return Err(format!(
+            "Two of those firings are {} minutes apart, and once an hour is the ceiling. Ask \
+             for a slower schedule, or wait on the event itself if you need to know the \
+             moment it changes.",
+            shortest.num_minutes().max(0)
+        ));
     }
-
-    /// The rule's own period at `INTERVAL=1`, used to hold a rule to
-    /// `MIN_PERIOD`. A month is measured at its shortest, because the bound
-    /// has to hold for February as well as for July.
-    fn shortest(self) -> Duration {
-        match self {
-            Self::Hourly => Duration::hours(1),
-            Self::Daily => Duration::days(1),
-            Self::Weekly => Duration::weeks(1),
-            Self::Monthly => Duration::days(28),
-        }
-    }
-}
-
-/// One accepted `RRULE`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Recurrence {
-    frequency: Frequency,
-    interval: u32,
-    by_day: Vec<Weekday>,
-    by_hour: Vec<u32>,
-    by_minute: Vec<u32>,
-    by_month_day: Vec<u32>,
-    until: Option<DateTime<Utc>>,
-    count: Option<u32>,
-}
-
-impl Recurrence {
-    /// Reads an `RRULE` line, with or without its `RRULE:` prefix.
-    ///
-    /// Every failure names the clause it read and what it wanted, because the
-    /// caller is a model composing a rule from a person's sentence and a
-    /// refusal it cannot act on costs the person another turn.
-    pub fn parse(rule: &str) -> Result<Self, String> {
-        let body = rule
-            .trim()
-            .strip_prefix("RRULE:")
-            .unwrap_or_else(|| rule.trim());
-        if body.is_empty() {
-            return Err("An rrule cannot be empty. Give at least FREQ.".to_string());
-        }
-
-        let mut frequency = None;
-        let mut interval = 1;
-        let mut by_day = Vec::new();
-        let mut by_hour = Vec::new();
-        let mut by_minute = Vec::new();
-        let mut by_month_day = Vec::new();
-        let mut until = None;
-        let mut count = None;
-
-        for part in body.split(';').filter(|part| !part.trim().is_empty()) {
-            let (name, value) = part
-                .split_once('=')
-                .ok_or_else(|| format!("\"{part}\" is not NAME=VALUE."))?;
-            let value = value.trim();
-            match name.trim().to_ascii_uppercase().as_str() {
-                "FREQ" => {
-                    frequency = Some(Frequency::parse(&value.to_ascii_uppercase()).ok_or_else(
-                        || {
-                            format!(
-                                "FREQ={value} is not supported. Use HOURLY, DAILY, WEEKLY or \
-                                 MONTHLY; HOURLY is the finest cadence a schedule can have."
-                            )
-                        },
-                    )?);
-                }
-                "INTERVAL" => {
-                    interval = value
-                        .parse::<u32>()
-                        .ok()
-                        .filter(|parsed| *parsed >= 1)
-                        .ok_or_else(|| {
-                            format!("INTERVAL={value} must be a positive whole number.")
-                        })?;
-                }
-                "BYDAY" => {
-                    by_day = list(value, |raw| weekday(raw).map(Day), "BYDAY")?
-                        .into_iter()
-                        .map(|Day(day)| day)
-                        .collect();
-                }
-                "BYHOUR" => by_hour = list(value, |raw| bounded(raw, 0, 23), "BYHOUR")?,
-                "BYMINUTE" => by_minute = list(value, |raw| bounded(raw, 0, 59), "BYMINUTE")?,
-                "BYMONTHDAY" => {
-                    by_month_day = list(value, |raw| bounded(raw, 1, 31), "BYMONTHDAY")?
-                }
-                "UNTIL" => until = Some(timestamp(value)?),
-                "COUNT" => {
-                    count = Some(
-                        value
-                            .parse::<u32>()
-                            .ok()
-                            .filter(|parsed| *parsed >= 1)
-                            .ok_or_else(|| {
-                                format!("COUNT={value} must be a positive whole number.")
-                            })?,
-                    );
-                }
-                other => {
-                    return Err(format!(
-                        "{other} is not a clause this build accepts. Use FREQ, INTERVAL, BYDAY, \
-                         BYHOUR, BYMINUTE, BYMONTHDAY, UNTIL or COUNT."
-                    ));
-                }
-            }
-        }
-
-        let frequency = frequency.ok_or_else(|| "An rrule must state FREQ.".to_string())?;
-        if until.is_some() && count.is_some() {
-            return Err("Give UNTIL or COUNT, not both.".to_string());
-        }
-        let recurrence = Self {
-            frequency,
-            interval,
-            by_day,
-            by_hour,
-            by_minute,
-            by_month_day,
-            until,
-            count,
-        };
-        recurrence.clauses_the_frequency_uses()?;
-        recurrence.within_the_floor()?;
-        Ok(recurrence)
-    }
-
-    /// Refuses a clause this frequency's arithmetic never reads.
-    ///
-    /// The module's rule is that a clause it does not implement is refused
-    /// rather than dropped, and that has to hold for a clause this build parses
-    /// but this frequency ignores. `FREQ=HOURLY;BYHOUR=9` reads as "every day
-    /// at nine" and fires twenty-four times a day; `FREQ=DAILY;BYDAY=MO,FR`
-    /// reads as "Mondays and Fridays" and fires every day. Both are worse than
-    /// a refusal, because the person finds out by being interrupted.
-    ///
-    /// Which clause each frequency actually reads is `candidates` and
-    /// `days_of`: an hourly period is its own firing and reads none of them; a
-    /// day reads the hour and the minute; a week reads those and `BYDAY`; a
-    /// month reads those and `BYMONTHDAY`.
-    fn clauses_the_frequency_uses(&self) -> Result<(), String> {
-        let ignored: Vec<&str> = [
-            (
-                "BYDAY",
-                !self.by_day.is_empty(),
-                self.frequency != Frequency::Weekly,
-            ),
-            (
-                "BYMONTHDAY",
-                !self.by_month_day.is_empty(),
-                self.frequency != Frequency::Monthly,
-            ),
-            (
-                "BYHOUR",
-                !self.by_hour.is_empty(),
-                self.frequency == Frequency::Hourly,
-            ),
-            (
-                "BYMINUTE",
-                !self.by_minute.is_empty(),
-                self.frequency == Frequency::Hourly,
-            ),
-        ]
-        .into_iter()
-        .filter(|(_, given, unread)| *given && *unread)
-        .map(|(clause, _, _)| clause)
-        .collect();
-
-        if ignored.is_empty() {
-            return Ok(());
-        }
-        Err(format!(
-            "{:?} does not use {}. Drop the clause, or state the FREQ that reads it: BYDAY needs \
-             WEEKLY, BYMONTHDAY needs MONTHLY, and BYHOUR and BYMINUTE need DAILY, WEEKLY or \
-             MONTHLY.",
-            self.frequency,
-            ignored.join(", ")
-        ))
-    }
-
-    /// The shortest gap between two firings.
-    ///
-    /// Shortest rather than average, because an average is what lets a rule
-    /// through the floor. `FREQ=DAILY;BYHOUR=0,1;BYMINUTE=0,30` fires four
-    /// times a day, so its firings average six hours apart — but three of its
-    /// gaps are half an hour and the fourth is twenty-two and a half, and the
-    /// half hours are the ones somebody is interrupted by. So the gap is
-    /// measured where it is smallest: between two times on one date, and out
-    /// of a period's last date into the next period's first.
-    ///
-    /// An hour, minute or date the rule leaves unstated is the anchor's, which
-    /// is one value rather than none. Which value it is never matters here,
-    /// because every gap is a difference and a difference survives being
-    /// shifted.
-    ///
-    /// This is also what sizes a jitter offset, and it is the right size for
-    /// that too: an offset drawn from the widest gap could push one firing
-    /// past the next.
-    pub fn period(&self) -> Duration {
-        let whole = self.frequency.shortest() * i32::try_from(self.interval).unwrap_or(i32::MAX);
-        // An hourly period is its own firing and reads no BY clause, so the
-        // interval is the whole answer.
-        if self.frequency == Frequency::Hourly {
-            return whole;
-        }
-        let times = self.times_of_day();
-        let span = match (times.first(), times.last()) {
-            (Some(first), Some(last)) => last - first,
-            _ => 0,
-        };
-        let across = self.shortest_gap_between_dates(whole) - Duration::minutes(span);
-        times
-            .windows(2)
-            .map(|pair| Duration::minutes(pair[1] - pair[0]))
-            .min()
-            .map_or(across, |within_a_date| within_a_date.min(across))
-    }
-
-    /// The minutes past midnight one selected date offers, in order.
-    ///
-    /// Midnight stands in for an hour or a minute the rule does not state,
-    /// because an unstated one is the anchor's single value and only the
-    /// distances between these are read.
-    fn times_of_day(&self) -> Vec<i64> {
-        let hours = if self.by_hour.is_empty() {
-            vec![0]
-        } else {
-            self.by_hour.clone()
-        };
-        let minutes = if self.by_minute.is_empty() {
-            vec![0]
-        } else {
-            self.by_minute.clone()
-        };
-        let mut times: Vec<i64> = hours
-            .iter()
-            .flat_map(|hour| {
-                minutes
-                    .iter()
-                    .map(move |minute| i64::from(*hour) * 60 + i64::from(*minute))
-            })
-            .collect();
-        times.sort_unstable();
-        times.dedup();
-        times
-    }
-
-    /// The shortest gap between two dates the rule selects, counting the step
-    /// out of one period's last date into the next period's first.
-    ///
-    /// A frequency that names no dates inside its period selects exactly one,
-    /// so the gap is the period itself. Two distinct dates are never less than
-    /// a day apart, which is what the floor of a day is for: a month is
-    /// measured at twenty-eight days here, and that undercounts the step out
-    /// of a longer month rather than overcounting it, so the clamp keeps the
-    /// undercount from reading as a gap no calendar could produce.
-    fn shortest_gap_between_dates(&self, whole: Duration) -> Duration {
-        let mut days: Vec<i64> = match self.frequency {
-            Frequency::Weekly => self
-                .by_day
-                .iter()
-                .map(|day| i64::from(day.num_days_from_monday()))
-                .collect(),
-            Frequency::Monthly => self
-                .by_month_day
-                .iter()
-                .map(|day| i64::from(*day))
-                .collect(),
-            Frequency::Hourly | Frequency::Daily => Vec::new(),
-        };
-        days.sort_unstable();
-        days.dedup();
-        let (Some(first), Some(last)) = (days.first(), days.last()) else {
-            return whole;
-        };
-        let Some(within_a_period) = days.windows(2).map(|pair| pair[1] - pair[0]).min() else {
-            return whole;
-        };
-        let into_the_next = whole.num_days() - (last - first);
-        Duration::days(within_a_period.min(into_the_next).max(1))
-    }
-
-    /// Refuses a rule that would fire faster than `MIN_PERIOD`.
-    ///
-    /// The refusal names the gap it measured, because a rule that trips this
-    /// is usually one whose clauses multiplied out further than whoever wrote
-    /// it expected, and "too often" alone does not say by how much.
-    fn within_the_floor(&self) -> Result<(), String> {
-        let shortest = self.period();
-        if shortest < MIN_PERIOD {
-            return Err(format!(
-                "Two of those firings are {} minutes apart, and once an hour is the ceiling. Ask \
-                 for a slower schedule, or wait on the event itself if you need to know the \
-                 moment it changes.",
-                shortest.num_minutes().max(0)
-            ));
-        }
-        Ok(())
-    }
-
-    /// Whether a schedule anchored at `instant` would fire there itself, which
-    /// is what makes it a first firing the repeats agree with. Asked of the
-    /// search rather than of the clauses, so a time the clocks skip is judged
-    /// where the schedule actually lands it.
-    pub fn fires_at(&self, instant: DateTime<Utc>, zone: TimeZone) -> bool {
-        let minute = |at: DateTime<Utc>| at.with_second(0).and_then(|at| at.with_nanosecond(0));
-        let Some(start) = minute(instant) else {
-            return false;
-        };
-        self.next_after(instant, start - Duration::minutes(1), 0, zone)
-            .and_then(minute)
-            == Some(start)
-    }
-
-    /// The first firing strictly after `after`, or `None` once the rule is
-    /// spent.
-    ///
-    /// `anchor` is the automation's first firing: it supplies whatever the
-    /// rule does not say, so `FREQ=WEEKLY` alone repeats on the anchor's own
-    /// weekday and time rather than on an arbitrary one. `fired` is how many
-    /// firings have already happened, which is what `COUNT` is measured
-    /// against.
-    ///
-    /// Every clause is read on `zone`'s wall clock, and so is the anchor, so
-    /// nine o'clock stays nine o'clock there across a daylight-saving change
-    /// and only the firing that answers is turned into UTC. An hourly rule is
-    /// the exception: it counts elapsed hours, which no clock change moves, so
-    /// it is read in UTC whatever the zone.
-    pub fn next_after(
-        &self,
-        anchor: DateTime<Utc>,
-        after: DateTime<Utc>,
-        fired: u32,
-        zone: TimeZone,
-    ) -> Option<DateTime<Utc>> {
-        if self.count.is_some_and(|count| fired >= count) {
-            return None;
-        }
-        let zone = if self.frequency == Frequency::Hourly {
-            TimeZone::UTC
-        } else {
-            zone
-        };
-        let anchor_local = zone.local(anchor);
-
-        let hours = if self.by_hour.is_empty() {
-            vec![anchor_local.hour()]
-        } else {
-            self.by_hour.clone()
-        };
-        let minutes = if self.by_minute.is_empty() {
-            vec![anchor_local.minute()]
-        } else {
-            self.by_minute.clone()
-        };
-
-        let mut period = self.period_start(anchor_local, zone.local(after));
-        for _ in 0..MAX_PERIODS {
-            for local in self.candidates(period, anchor_local, &hours, &minutes) {
-                let Some(candidate) = zone.instant(local) else {
-                    continue;
-                };
-                if candidate <= after {
-                    continue;
-                }
-                if self.until.is_some_and(|until| candidate > until) {
-                    return None;
-                }
-                return Some(candidate);
-            }
-            period = self.advance(period)?;
-        }
-        None
-    }
-
-    /// The start of the period `after` falls in, walked back to the anchor's
-    /// own phase so an `INTERVAL` counts from the automation's first firing
-    /// rather than from an arbitrary epoch.
-    fn period_start(&self, anchor: NaiveDateTime, after: NaiveDateTime) -> NaiveDateTime {
-        let mut period = anchor;
-        while period > after {
-            let Some(back) = self.retreat(period) else {
-                break;
-            };
-            period = back;
-        }
-        while self.advance(period).is_some_and(|next| next <= after) {
-            let Some(next) = self.advance(period) else {
-                break;
-            };
-            period = next;
-        }
-        period
-    }
-
-    fn advance(&self, from: NaiveDateTime) -> Option<NaiveDateTime> {
-        self.step(from, 1)
-    }
-
-    fn retreat(&self, from: NaiveDateTime) -> Option<NaiveDateTime> {
-        self.step(from, -1)
-    }
-
-    fn step(&self, from: NaiveDateTime, direction: i32) -> Option<NaiveDateTime> {
-        let interval = i32::try_from(self.interval).unwrap_or(i32::MAX) * direction;
-        match self.frequency {
-            Frequency::Hourly => from.checked_add_signed(Duration::hours(i64::from(interval))),
-            Frequency::Daily => from.checked_add_signed(Duration::days(i64::from(interval))),
-            Frequency::Weekly => from.checked_add_signed(Duration::weeks(i64::from(interval))),
-            Frequency::Monthly => months(from, interval),
-        }
-    }
-
-    /// The wall-clock times one period offers, in order.
-    ///
-    /// An hourly period *is* its firing — the hour is what the period stepped —
-    /// so it is returned whole. Every other frequency picks dates and then
-    /// crosses them with the hours and minutes the rule or the anchor gives.
-    fn candidates(
-        &self,
-        period: NaiveDateTime,
-        anchor: NaiveDateTime,
-        hours: &[u32],
-        minutes: &[u32],
-    ) -> Vec<NaiveDateTime> {
-        if self.frequency == Frequency::Hourly {
-            return period.with_second(0).into_iter().collect();
-        }
-        let mut times: Vec<NaiveDateTime> = Vec::new();
-        for day in self.days_of(period, anchor) {
-            for hour in hours {
-                for minute in minutes {
-                    times.extend(day.and_hms_opt(*hour, *minute, 0));
-                }
-            }
-        }
-        times.sort_unstable();
-        times
-    }
-
-    /// Which dates inside one period the rule selects, in order.
-    fn days_of(&self, period: NaiveDateTime, anchor: NaiveDateTime) -> Vec<NaiveDate> {
-        let date = period.date();
-        match self.frequency {
-            Frequency::Hourly | Frequency::Daily => vec![date],
-            Frequency::Weekly => {
-                let days = if self.by_day.is_empty() {
-                    vec![anchor.weekday()]
-                } else {
-                    self.by_day.clone()
-                };
-                let monday =
-                    date - Duration::days(i64::from(date.weekday().num_days_from_monday()));
-                let mut dates: Vec<NaiveDate> = days
-                    .iter()
-                    .map(|day| monday + Duration::days(i64::from(day.num_days_from_monday())))
-                    .collect();
-                dates.sort_unstable();
-                dates
-            }
-            // A day the rule names is that date or no date: BYMONTHDAY=31 asked
-            // for the 31st, and February has none, so February is skipped the
-            // way RFC 5545 skips it. A day inherited from the anchor is a
-            // different request — "each month, at this point in it" — so it
-            // clamps to the month's last day instead, and a 31 January
-            // automation lands on 28 February rather than vanishing from the
-            // shortest month of the year.
-            Frequency::Monthly => {
-                let last = last_day(date.year(), date.month());
-                let days = if self.by_month_day.is_empty() {
-                    vec![anchor.day().min(last)]
-                } else {
-                    self.by_month_day.clone()
-                };
-                let mut dates: Vec<NaiveDate> = days
-                    .iter()
-                    .filter_map(|day| NaiveDate::from_ymd_opt(date.year(), date.month(), *day))
-                    .collect();
-                dates.sort_unstable();
-                dates
-            }
-        }
-    }
-}
-
-/// Adds whole months, clamping a day the target month does not have — 31
-/// January plus one month is the last day of February, never 3 March.
-fn months(from: NaiveDateTime, count: i32) -> Option<NaiveDateTime> {
-    let zero = from.year() * 12 + i32::try_from(from.month()).ok()? - 1 + count;
-    let year = zero.div_euclid(12);
-    let month = u32::try_from(zero.rem_euclid(12) + 1).ok()?;
-    let last = last_day(year, month);
-    NaiveDate::from_ymd_opt(year, month, from.day().min(last))?.and_hms_opt(
-        from.hour(),
-        from.minute(),
-        0,
-    )
-}
-
-fn last_day(year: i32, month: u32) -> u32 {
-    let (next_year, next_month) = if month == 12 {
-        (year + 1, 1)
-    } else {
-        (year, month + 1)
-    };
-    NaiveDate::from_ymd_opt(next_year, next_month, 1)
-        .and_then(|first| first.pred_opt())
-        .map_or(28, |last| last.day())
-}
-
-/// `chrono::Weekday` has no `Ord`, and the one ordering that matters here is
-/// the week's own, so the clause reader borrows it for the length of a parse.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Day(Weekday);
-
-impl Ord for Day {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .num_days_from_monday()
-            .cmp(&other.0.num_days_from_monday())
-    }
-}
-
-impl PartialOrd for Day {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-fn list<T, F>(value: &str, read: F, clause: &str) -> Result<Vec<T>, String>
-where
-    F: Fn(&str) -> Option<T>,
-    T: Ord,
-{
-    let mut parsed = Vec::new();
-    for raw in value
-        .split(',')
-        .map(str::trim)
-        .filter(|raw| !raw.is_empty())
-    {
-        parsed.push(
-            read(raw).ok_or_else(|| format!("{clause}={raw} is not a value {clause} takes."))?,
-        );
-    }
-    if parsed.is_empty() {
-        return Err(format!("{clause} was given no values."));
-    }
-    parsed.sort_unstable();
-    parsed.dedup();
-    Ok(parsed)
-}
-
-fn bounded(raw: &str, low: u32, high: u32) -> Option<u32> {
-    raw.parse::<u32>()
-        .ok()
-        .filter(|parsed| (low..=high).contains(parsed))
-}
-
-fn weekday(raw: &str) -> Option<Weekday> {
-    match raw.to_ascii_uppercase().as_str() {
-        "MO" => Some(Weekday::Mon),
-        "TU" => Some(Weekday::Tue),
-        "WE" => Some(Weekday::Wed),
-        "TH" => Some(Weekday::Thu),
-        "FR" => Some(Weekday::Fri),
-        "SA" => Some(Weekday::Sat),
-        "SU" => Some(Weekday::Sun),
-        _ => None,
-    }
-}
-
-/// `UNTIL` in the one form RFC 5545 gives it for a UTC rule.
-fn timestamp(value: &str) -> Result<DateTime<Utc>, String> {
-    // The trailing `Z` is a literal in RFC 5545's UTC form, not an offset
-    // chrono can read, so the stamp parses naive and is declared UTC here.
-    chrono::NaiveDateTime::parse_from_str(value, "%Y%m%dT%H%M%SZ")
-        .map(|parsed| parsed.and_utc())
-        .map_err(|_| format!("UNTIL={value} must read as 20260914T090000Z."))
+    Ok(recurrence)
 }
 
 /// How long a recurring automation lives before it has to be asked for again.
@@ -651,7 +59,9 @@ const MAX_JITTER: Duration = Duration::minutes(15);
 /// Up to a tenth of the period, capped at `MAX_JITTER`: proportional so an
 /// hourly job moves by minutes and a weekly one does not move by days, and
 /// capped so no automation drifts far enough from the time the person named to
-/// read as a different time.
+/// read as a different time. The period is the rule's shortest gap rather than
+/// its widest, because an offset drawn from the widest could push one firing
+/// past the next.
 pub fn jitter(id: Uuid, period: Duration) -> Duration {
     let span = (period / 10).min(MAX_JITTER).num_seconds().max(0);
     if span == 0 {
@@ -670,6 +80,8 @@ pub fn jitter(id: Uuid, period: Duration) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::time_zone::{self, TimeZone};
+    use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
     /// The same automation always fires at the same offset, and two do not
     /// share one, which is the whole point of spreading them.
@@ -723,66 +135,6 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    /// Every clause the tool's description offers, read back as the rule the
-    /// description promises. A clause that parses to something else would send
-    /// a person a notification at an hour they did not ask for.
-    #[test]
-    fn each_accepted_clause_reads_back_as_itself() {
-        let rule = Recurrence::parse(
-            "RRULE:FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,WE;BYHOUR=9;BYMINUTE=7;COUNT=4",
-        )
-        .expect("the rule is accepted");
-
-        assert_eq!(rule.frequency, Frequency::Weekly);
-        assert_eq!(rule.interval, 2);
-        assert_eq!(rule.by_day, vec![Weekday::Mon, Weekday::Wed]);
-        assert_eq!(rule.by_hour, vec![9]);
-        assert_eq!(rule.by_minute, vec![7]);
-        assert_eq!(rule.count, Some(4));
-        assert_eq!(rule.until, None);
-    }
-
-    /// The `RRULE:` prefix is optional, because a model copying the shape out
-    /// of a calendar entry keeps it and one writing from the description does
-    /// not.
-    #[test]
-    fn the_prefix_is_optional_and_the_rule_is_the_same_either_way() {
-        assert_eq!(
-            Recurrence::parse("RRULE:FREQ=DAILY;BYHOUR=9"),
-            Recurrence::parse("FREQ=DAILY;BYHOUR=9")
-        );
-    }
-
-    /// A clause this build does not implement is refused rather than dropped:
-    /// a rule that silently loses `BYSETPOS` fires on days nobody chose.
-    #[test]
-    fn a_clause_this_build_does_not_implement_is_refused_and_not_ignored() {
-        let refused = Recurrence::parse("FREQ=MONTHLY;BYSETPOS=-1;BYDAY=FR")
-            .expect_err("an unimplemented clause is refused");
-        assert!(refused.contains("BYSETPOS"), "{refused}");
-        assert!(
-            refused.contains("FREQ"),
-            "the refusal lists what is accepted: {refused}"
-        );
-    }
-
-    #[test]
-    fn a_rule_with_no_frequency_or_a_bad_one_is_refused_by_name() {
-        for (rule, expected) in [
-            ("INTERVAL=2", "FREQ"),
-            ("FREQ=SECONDLY", "HOURLY"),
-            ("FREQ=DAILY;INTERVAL=0", "INTERVAL"),
-            ("FREQ=DAILY;BYHOUR=24", "BYHOUR"),
-            ("FREQ=DAILY;BYMINUTE=60", "BYMINUTE"),
-            ("FREQ=WEEKLY;BYDAY=FUNDAY", "BYDAY"),
-            ("FREQ=DAILY;UNTIL=tomorrow", "UNTIL"),
-            ("", "FREQ"),
-        ] {
-            let refused = Recurrence::parse(rule).expect_err(rule);
-            assert!(refused.contains(expected), "{rule}: {refused}");
-        }
-    }
-
     /// Hourly is the ceiling, counted at the shortest gap a rule's clauses
     /// produce rather than at their average.
     ///
@@ -819,7 +171,7 @@ mod tests {
                 "15",
             ),
         ] {
-            let refused = Recurrence::parse(rule).expect_err(rule);
+            let refused = parse(rule).expect_err(rule);
             assert!(refused.contains("once an hour"), "{rule}: {refused}");
             assert!(
                 refused.contains(&format!("{gap} minutes apart")),
@@ -838,301 +190,142 @@ mod tests {
             "FREQ=WEEKLY;BYDAY=MO,TU;BYHOUR=0,23",
             "FREQ=MONTHLY;BYMONTHDAY=1,2;BYHOUR=0,23",
         ] {
-            assert!(
-                Recurrence::parse(rule).is_ok(),
-                "{rule} is at or under the ceiling"
-            );
+            assert!(parse(rule).is_ok(), "{rule} is at or under the ceiling");
         }
+
+        assert_eq!(
+            parse("FREQ=DAILY;BYMINUTE=0,30"),
+            Err(
+                "Two of those firings are 30 minutes apart, and once an hour is the ceiling. Ask \
+                 for a slower schedule, or wait on the event itself if you need to know the \
+                 moment it changes."
+                    .to_string()
+            )
+        );
     }
 
-    /// `period` answers with the shortest gap between two firings, which is
-    /// what both of its readers want: the floor refuses on it, and a jitter
-    /// offset drawn from anything wider could push one firing past the next.
+    /// A clause the frequency never reads is still refused through Zone's
+    /// parse, so a crate release that loosened the check cannot reach Zone
+    /// unnoticed: `FREQ=HOURLY;BYHOUR=9` would fire every hour, not at nine.
     #[test]
-    fn a_period_is_the_shortest_gap_between_firings_not_the_average_one() {
-        for (rule, minutes) in [
-            ("FREQ=HOURLY", 60),
-            ("FREQ=HOURLY;INTERVAL=6", 360),
-            ("FREQ=DAILY", 24 * 60),
-            ("FREQ=DAILY;INTERVAL=3", 3 * 24 * 60),
-            // Nine to five is eight hours; the wait back round to nine is
-            // sixteen, and the shorter one is the answer.
-            ("FREQ=DAILY;BYHOUR=9,17", 8 * 60),
-            ("FREQ=DAILY;BYHOUR=0,23", 60),
-            ("FREQ=WEEKLY", 7 * 24 * 60),
-            ("FREQ=WEEKLY;BYDAY=MO,TU", 24 * 60),
-            // Friday to Monday is three days; Monday to Friday is four.
-            ("FREQ=WEEKLY;BYDAY=MO,FR", 3 * 24 * 60),
-            ("FREQ=WEEKLY;BYDAY=MO,TU;BYHOUR=0,23", 60),
-            // A month is measured at February's length, and the step out of
-            // one selected date into the next is clamped at a day rather than
-            // allowed to read shorter than any calendar could make it.
-            ("FREQ=MONTHLY", 28 * 24 * 60),
-            ("FREQ=MONTHLY;BYMONTHDAY=1,15", 14 * 24 * 60),
-            ("FREQ=MONTHLY;BYMONTHDAY=1,29", 24 * 60),
+    fn a_clause_the_frequency_never_reads_is_still_refused() {
+        for (rule, refusal) in [
+            (
+                "FREQ=HOURLY;BYHOUR=9",
+                "Hourly does not use BYHOUR. Drop the clause, or state the FREQ that reads it: \
+                 BYDAY needs WEEKLY, BYMONTHDAY needs MONTHLY, and BYHOUR and BYMINUTE need \
+                 DAILY, WEEKLY or MONTHLY.",
+            ),
+            (
+                "FREQ=DAILY;BYDAY=MO",
+                "Daily does not use BYDAY. Drop the clause, or state the FREQ that reads it: \
+                 BYDAY needs WEEKLY, BYMONTHDAY needs MONTHLY, and BYHOUR and BYMINUTE need \
+                 DAILY, WEEKLY or MONTHLY.",
+            ),
         ] {
-            let period = Recurrence::parse(rule).expect(rule).period();
-            assert_eq!(period.num_minutes(), minutes, "{rule}");
+            assert_eq!(parse(rule), Err(refusal.to_string()), "{rule}");
         }
     }
 
-    /// A clause this frequency's arithmetic never reads is refused, for the
-    /// same reason a clause the build does not implement is: `FREQ=HOURLY;
-    /// BYHOUR=9` reads as "every day at nine" and would fire twenty-four times
-    /// a day, and the person would find out by being interrupted.
+    /// A monthly step past the calendar has no next period, rather than
+    /// overflowing the month count, and the anchor still fires.
     #[test]
-    fn a_clause_the_frequency_never_reads_is_refused_rather_than_ignored() {
-        for (rule, clause) in [
-            ("FREQ=HOURLY;BYHOUR=9", "BYHOUR"),
-            ("FREQ=HOURLY;BYMINUTE=0,30", "BYMINUTE"),
-            ("FREQ=HOURLY;BYDAY=MO", "BYDAY"),
-            ("FREQ=DAILY;BYDAY=MO,FR", "BYDAY"),
-            ("FREQ=DAILY;BYMONTHDAY=1", "BYMONTHDAY"),
-            ("FREQ=WEEKLY;BYMONTHDAY=1", "BYMONTHDAY"),
-            ("FREQ=MONTHLY;BYDAY=FR", "BYDAY"),
-        ] {
-            let refused = Recurrence::parse(rule).expect_err(rule);
-            assert!(refused.contains(clause), "{rule}: {refused}");
-            assert!(
-                refused.contains("does not use"),
-                "the refusal must say the clause is unread, not that it is unknown: {refused}"
-            );
-        }
-    }
-
-    /// And the combinations each frequency does read stay accepted, or the
-    /// check above would have refused the schedules this feature exists for.
-    #[test]
-    fn every_clause_a_frequency_does_read_is_still_accepted() {
+    fn a_monthly_interval_past_the_calendar_fires_once_and_stops() {
+        let anchor = at_utc("2027-01-15T09:00:00Z");
         for rule in [
-            "FREQ=HOURLY",
-            "FREQ=HOURLY;INTERVAL=6",
-            "FREQ=DAILY;BYHOUR=9,17",
-            "FREQ=DAILY;BYHOUR=9;BYMINUTE=30",
-            "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9",
-            "FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=8;BYMINUTE=5",
+            "FREQ=MONTHLY;INTERVAL=2147483647",
+            "FREQ=MONTHLY;INTERVAL=4294967295",
         ] {
+            let parsed = parse(rule).expect(rule);
             assert!(
-                Recurrence::parse(rule).is_ok(),
-                "{rule} must still be accepted"
+                parsed.fires_at(anchor, TimeZone::UTC),
+                "{rule} fires at its anchor"
             );
-        }
-    }
-
-    #[test]
-    fn until_and_count_cannot_both_stop_the_same_rule() {
-        let refused = Recurrence::parse("FREQ=DAILY;UNTIL=20260101T000000Z;COUNT=3")
-            .expect_err("two stopping conditions are refused");
-        assert!(refused.contains("not both"), "{refused}");
-    }
-
-    /// What the rule does not say, the automation's first firing supplies.
-    #[test]
-    fn a_rule_that_names_no_time_repeats_at_the_anchors_own() {
-        let anchor = at_utc("2026-09-14T06:47:00Z");
-        let rule = Recurrence::parse("FREQ=DAILY").expect("accepted");
-
-        assert_eq!(
-            rule.next_after(anchor, anchor, 1, TimeZone::UTC),
-            Some(at_utc("2026-09-15T06:47:00Z"))
-        );
-    }
-
-    #[test]
-    fn a_daily_rule_walks_its_hours_in_order_and_then_the_next_day() {
-        let anchor = at_utc("2026-09-14T09:00:00Z");
-        let rule = Recurrence::parse("FREQ=DAILY;BYHOUR=9,17;BYMINUTE=3").expect("accepted");
-
-        let first = rule
-            .next_after(anchor, at_utc("2026-09-14T00:00:00Z"), 0, TimeZone::UTC)
-            .expect("a firing");
-        assert_eq!(first, at_utc("2026-09-14T09:03:00Z"));
-        assert_eq!(
-            rule.next_after(anchor, first, 1, TimeZone::UTC),
-            Some(at_utc("2026-09-14T17:03:00Z"))
-        );
-        assert_eq!(
-            rule.next_after(anchor, at_utc("2026-09-14T17:03:00Z"), 2, TimeZone::UTC),
-            Some(at_utc("2026-09-15T09:03:00Z"))
-        );
-    }
-
-    #[test]
-    fn a_weekly_rule_fires_on_each_named_day_and_then_skips_its_interval() {
-        // A Monday.
-        let anchor = at_utc("2026-09-14T09:00:00Z");
-        let rule =
-            Recurrence::parse("FREQ=WEEKLY;INTERVAL=2;BYDAY=MO,TH;BYHOUR=9").expect("accepted");
-
-        let thursday = rule
-            .next_after(anchor, anchor, 1, TimeZone::UTC)
-            .expect("a firing");
-        assert_eq!(thursday, at_utc("2026-09-17T09:00:00Z"));
-        assert_eq!(thursday.weekday(), Weekday::Thu);
-
-        // Two weeks on from the anchor's week, not one.
-        assert_eq!(
-            rule.next_after(anchor, thursday, 2, TimeZone::UTC),
-            Some(at_utc("2026-09-28T09:00:00Z"))
-        );
-    }
-
-    /// A month that has no 31st gets its last day rather than sliding into the
-    /// next month, which is the failure that turns a month-end report into a
-    /// first-of-the-month one.
-    #[test]
-    fn a_monthly_rule_clamps_a_day_the_month_does_not_have() {
-        let anchor = at_utc("2026-01-31T08:00:00Z");
-        let rule = Recurrence::parse("FREQ=MONTHLY").expect("accepted");
-
-        let february = rule
-            .next_after(anchor, anchor, 1, TimeZone::UTC)
-            .expect("a firing");
-        assert_eq!(february, at_utc("2026-02-28T08:00:00Z"));
-        assert_eq!(
-            rule.next_after(anchor, february, 2, TimeZone::UTC),
-            Some(at_utc("2026-03-31T08:00:00Z")),
-            "a clamped month must not drag the following ones back with it"
-        );
-    }
-
-    #[test]
-    fn a_monthly_rule_on_a_day_no_month_has_gives_up_rather_than_looping() {
-        let anchor = at_utc("2026-01-01T08:00:00Z");
-        let rule = Recurrence::parse("FREQ=MONTHLY;BYMONTHDAY=31;BYHOUR=8").expect("accepted");
-
-        // Only the long months, in order, and never a 31st that does not exist.
-        let march = rule.next_after(anchor, at_utc("2026-02-01T00:00:00Z"), 1, TimeZone::UTC);
-        assert_eq!(march, Some(at_utc("2026-03-31T08:00:00Z")));
-    }
-
-    #[test]
-    fn an_hourly_rule_counts_from_the_anchor_and_keeps_its_minute() {
-        let anchor = at_utc("2026-09-14T06:47:00Z");
-        let rule = Recurrence::parse("FREQ=HOURLY;INTERVAL=6").expect("accepted");
-
-        let next = rule
-            .next_after(anchor, anchor, 1, TimeZone::UTC)
-            .expect("a firing");
-        assert_eq!(next, at_utc("2026-09-14T12:47:00Z"));
-        assert_eq!(
-            rule.next_after(anchor, next, 2, TimeZone::UTC),
-            Some(at_utc("2026-09-14T18:47:00Z"))
-        );
-    }
-
-    #[test]
-    fn count_stops_the_rule_after_the_firings_it_names() {
-        let anchor = at_utc("2026-09-14T09:00:00Z");
-        let rule = Recurrence::parse("FREQ=DAILY;COUNT=3").expect("accepted");
-
-        assert!(rule.next_after(anchor, anchor, 1, TimeZone::UTC).is_some());
-        assert!(rule.next_after(anchor, anchor, 2, TimeZone::UTC).is_some());
-        assert_eq!(
-            rule.next_after(anchor, anchor, 3, TimeZone::UTC),
-            None,
-            "the third firing is the last, so a fourth is never scheduled"
-        );
-    }
-
-    #[test]
-    fn until_stops_the_rule_at_the_instant_it_names() {
-        let anchor = at_utc("2026-09-14T09:00:00Z");
-        let rule = Recurrence::parse("FREQ=DAILY;UNTIL=20260916T090000Z").expect("accepted");
-
-        assert_eq!(
-            rule.next_after(anchor, anchor, 1, TimeZone::UTC),
-            Some(at_utc("2026-09-15T09:00:00Z"))
-        );
-        assert_eq!(
-            rule.next_after(anchor, at_utc("2026-09-15T09:00:00Z"), 2, TimeZone::UTC),
-            Some(at_utc("2026-09-16T09:00:00Z")),
-            "UNTIL includes the instant it names"
-        );
-        assert_eq!(
-            rule.next_after(anchor, at_utc("2026-09-16T09:00:00Z"), 3, TimeZone::UTC),
-            None
-        );
-    }
-
-    /// A firing missed while the server was down does not replay: the next one
-    /// is the next one from now, not the one that was slept through.
-    #[test]
-    fn a_schedule_resumed_after_an_outage_fires_next_rather_than_catching_up() {
-        let anchor = at_utc("2026-09-01T09:00:00Z");
-        let rule = Recurrence::parse("FREQ=DAILY;BYHOUR=9").expect("accepted");
-
-        assert_eq!(
-            rule.next_after(anchor, at_utc("2026-09-14T06:47:00Z"), 13, TimeZone::UTC),
-            Some(at_utc("2026-09-14T09:00:00Z"))
-        );
-    }
-
-    /// A rule whose clauses can never all hold answers `None` instead of
-    /// walking forward for ever. Every February, asking for a 31st: the period
-    /// never reaches a month that has one, so only the bound ends the search.
-    #[test]
-    fn a_rule_nothing_can_satisfy_gives_up_instead_of_spinning() {
-        let february = at_utc("2026-02-01T09:00:00Z");
-        let rule =
-            Recurrence::parse("FREQ=MONTHLY;INTERVAL=12;BYMONTHDAY=31;BYHOUR=9").expect("accepted");
-
-        assert_eq!(rule.next_after(february, february, 1, TimeZone::UTC), None);
-    }
-
-    /// A first firing is one the schedule would land on itself: its clauses
-    /// select it on the zone's clock, a skipped time is accepted where the
-    /// clocks change, and the second pass of a repeated hour is not.
-    #[test]
-    fn a_first_firing_is_a_time_the_schedule_itself_would_fire_at() {
-        let london = TimeZone::parse("Europe/London").expect("a zone");
-        for (rule, due, fires) in [
-            (
-                "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9",
-                "2027-07-05T09:00:00+01:00",
-                true,
-            ),
-            (
-                "FREQ=WEEKLY;BYDAY=MO;BYHOUR=9",
-                "2027-07-06T09:00:00+01:00",
-                false,
-            ),
-            ("FREQ=WEEKLY", "2027-07-06T09:00:00+01:00", true),
-            (
-                "FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=8",
-                "2027-07-01T08:00:00+01:00",
-                true,
-            ),
-            (
-                "FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=8",
-                "2027-07-02T08:00:00+01:00",
-                false,
-            ),
-            ("FREQ=DAILY;BYHOUR=9", "2027-07-05T09:00:00Z", false),
-            ("FREQ=DAILY;BYHOUR=9", "2027-07-05T09:00:30+01:00", true),
-            ("FREQ=HOURLY", "2027-07-05T09:17:42.123456+01:00", true),
-            (
-                "FREQ=DAILY;BYHOUR=1;BYMINUTE=30",
-                "2027-03-28T02:00:00+01:00",
-                true,
-            ),
-            (
-                "FREQ=DAILY;BYHOUR=1;BYMINUTE=30",
-                "2027-10-31T01:30:00+01:00",
-                true,
-            ),
-            (
-                "FREQ=DAILY;BYHOUR=1;BYMINUTE=30",
-                "2027-10-31T01:30:00+00:00",
-                false,
-            ),
-        ] {
-            let parsed = Recurrence::parse(rule).expect(rule);
             assert_eq!(
-                parsed.fires_at(at_utc(due), london),
-                fires,
-                "{rule} at {due}"
+                parsed.next_after(anchor, anchor, 1, TimeZone::UTC),
+                None,
+                "{rule} has no second period inside the calendar"
             );
         }
+    }
+
+    /// The evening of the calendar's last day in New York is past the last
+    /// instant UTC can hold, so the period that lands on it has no firing
+    /// rather than stepping off the end of the calendar.
+    #[test]
+    fn a_daily_period_on_the_calendars_last_evening_in_new_york_is_skipped() {
+        let new_york = time_zone::parse("America/New_York").unwrap();
+        let anchor = at_utc("2027-01-16T04:00:00Z");
+        let days = (NaiveDate::MAX - NaiveDate::from_ymd_opt(2027, 1, 15).unwrap()).num_days();
+        let rule = parse(&format!("FREQ=DAILY;INTERVAL={days}")).expect("accepted");
+
+        assert!(rule.fires_at(anchor, new_york));
+        assert_eq!(rule.next_after(anchor, anchor, 1, new_york), None);
+    }
+
+    /// A weekly period in the calendar's last week keeps the days inside it
+    /// and skips the ones past its end.
+    #[test]
+    fn a_weekly_period_at_the_end_of_the_calendar_skips_the_days_past_it() {
+        let monday = at_utc("2027-01-04T09:00:00Z");
+        let sunday = at_utc("2027-01-10T09:00:00Z");
+        let weeks = (NaiveDate::MAX - monday.date_naive()).num_weeks();
+        let last = monday + Duration::weeks(weeks);
+        let rule = parse(&format!("FREQ=WEEKLY;INTERVAL={weeks};BYDAY=MO,SU")).expect("accepted");
+
+        assert_eq!(
+            rule.next_after(monday, sunday, 2, TimeZone::UTC),
+            Some(last)
+        );
+        assert_eq!(rule.next_after(monday, last, 3, TimeZone::UTC), None);
+    }
+
+    /// A weekly period that reaches back into the calendar's first week keeps
+    /// the days inside it, so an ordinary anchor still fires.
+    #[test]
+    fn a_weekly_period_at_the_start_of_the_calendar_keeps_the_days_inside_it() {
+        for day in 0..7 {
+            let anchor = at_utc("2027-01-04T09:00:00Z") + Duration::days(day);
+            let weeks = (anchor.date_naive() - NaiveDate::MIN).num_weeks();
+            for interval in [weeks - 1, weeks, weeks + 1] {
+                let rule = format!("FREQ=WEEKLY;INTERVAL={interval};BYDAY=MO,TU,WE,TH,FR,SA,SU");
+                let parsed = parse(&rule).expect(&rule);
+                assert!(
+                    parsed.fires_at(anchor, TimeZone::UTC),
+                    "{rule} fires at its anchor {anchor}"
+                );
+            }
+        }
+    }
+
+    /// An `INTERVAL` too large for an `i32` is counted in full rather than cut
+    /// to the largest one, so the period and the next firing are the ones the
+    /// rule names.
+    #[test]
+    fn an_interval_past_the_largest_i32_counts_in_full() {
+        let anchor = at_utc("2027-01-15T09:00:00Z");
+        let rule = parse("FREQ=HOURLY;INTERVAL=2147483648").expect("accepted");
+        assert_eq!(rule.period(), Duration::hours(2_147_483_648));
+        assert_eq!(
+            rule.next_after(anchor, anchor, 1, TimeZone::UTC),
+            Some(anchor + Duration::hours(2_147_483_648))
+        );
+
+        let beyond = parse("FREQ=HOURLY;INTERVAL=4294967295").expect("accepted");
+        assert_eq!(beyond.next_after(anchor, anchor, 1, TimeZone::UTC), None);
+    }
+
+    /// The calendar's last December has a 31st even though no January follows
+    /// it, so a day inherited from a 31 January anchor is kept.
+    #[test]
+    fn a_monthly_rule_reaching_the_calendars_last_december_keeps_its_31st() {
+        let anchor = at_utc("2027-01-31T09:00:00Z");
+        let months = i64::from(NaiveDate::MAX.year() - 2027) * 12 + 11;
+        let rule = parse(&format!("FREQ=MONTHLY;INTERVAL={months}")).expect("accepted");
+
+        assert_eq!(
+            rule.next_after(anchor, anchor, 1, TimeZone::UTC),
+            Some(NaiveDate::MAX.and_hms_opt(9, 0, 0).unwrap().and_utc())
+        );
     }
 }
