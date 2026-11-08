@@ -40,7 +40,7 @@ use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
 
 use crate::agent::wait::{self, Outcome, WaitSettled, Waited, Waiting};
 use crate::agent::{
-    self, ActionReceipt, AgentEvent, AgentRun, ChatTools, Citation, Question, Spend,
+    self, ActionReceipt, AgentEvent, AgentRun, ChatTools, Citation, Question, Refusal, Spend,
     ToolCallRecord, WorkspaceScope,
 };
 use crate::auth::validate_access_token;
@@ -740,6 +740,9 @@ pub enum ServerMessage {
         duration_ms: u64,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         citations: Vec<Citation>,
+        /// Why the call did not run, when the reader was asked and it was refused. Always sent,
+        /// as it is always stored, so the console labels the call from it.
+        refusal: Option<Refusal>,
     },
     /// A workspace write finished. Stored on the message so a reload still
     /// shows the action, target, actor, time, outcome, and item link.
@@ -994,6 +997,7 @@ fn trace_started(
         questions: Vec::new(),
         job: None,
         waiting: None,
+        refusal: None,
     };
     let frame = ServerMessage::ToolCall {
         message_id,
@@ -1153,6 +1157,20 @@ const AWAITING_ANSWER_DETAIL: &str = "Waiting for your answer…";
 /// what a call the turn never finished is left showing. The console writes the
 /// same string onto a call a stopped turn left open.
 const UNFINISHED_DETAIL: &str = "Did not finish";
+
+/// The outcome a call is stored with while it waits for the reader to allow it.
+const AWAITING_APPROVAL_DETAIL: &str = "Waiting for approval…";
+
+/// Leaves every call still waiting for approval when its turn ended as one the turn never
+/// finished: nobody can allow it any more, and it did not run.
+fn leave_unfinished(tool_calls: &mut [ToolCallRecord]) {
+    for call in tool_calls
+        .iter_mut()
+        .filter(|call| call.detail == AWAITING_APPROVAL_DETAIL)
+    {
+        call.detail = UNFINISHED_DETAIL.to_string();
+    }
+}
 
 /// Another writer took the chat's lease, so this turn may no longer persist.
 const OWNERSHIP_LOST: &str = "Chat generation ownership was lost";
@@ -3884,7 +3902,7 @@ async fn handle_chat_generation(
                         }
                         Some(AgentEvent::ToolApprovalRequired { id, name, arguments, reason, preview }) => {
                             if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
-                                record.detail = "Waiting for approval…".to_string();
+                                record.detail = AWAITING_APPROVAL_DETAIL.to_string();
                                 record.preview.clone_from(&preview);
                             }
                             let arguments = crate::agent::memory::trace_arguments(&name, &arguments)
@@ -3957,12 +3975,13 @@ async fn handle_chat_generation(
                             publish(stream, media_msg).await;
                             persist_now = true;
                         }
-                        Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms, citations: observed, receipt }) => {
+                        Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms, citations: observed, receipt, refusal }) => {
                             let detail = crate::agent::memory::trace_detail(&name, &detail);
                             if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
                                 record.success = success;
                                 record.detail = detail.clone();
                                 record.duration_ms = duration_ms;
+                                record.refusal = refusal;
                             }
                             crate::agent::citations::merge(&mut citations, observed.clone());
 
@@ -3974,6 +3993,7 @@ async fn handle_chat_generation(
                                 detail,
                                 duration_ms,
                                 citations: observed,
+                                refusal,
                             };
                             publish(stream, tool_msg).await;
                             if let Some(receipt) = receipt {
@@ -4379,6 +4399,7 @@ async fn handle_chat_generation(
         )
         .await;
     }
+    leave_unfinished(&mut tool_calls);
 
     // Nothing generated yet: there is no reply worth keeping. A turn that ran
     // tools or produced an image before it broke is worth keeping even with no
@@ -8349,6 +8370,7 @@ cat 'DIR/reply.jsonl'
             detail: "3 passages".to_string(),
             duration_ms: 128,
             citations: Vec::new(),
+            refusal: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"tool_result\""));
@@ -8377,6 +8399,7 @@ cat 'DIR/reply.jsonl'
             questions: Vec::new(),
             job: None,
             waiting: None,
+            refusal: None,
         }];
         let metadata = serde_json::json!({ "tool_calls": records });
 
@@ -8408,6 +8431,7 @@ cat 'DIR/reply.jsonl'
             questions: Vec::new(),
             job: None,
             waiting: None,
+            refusal: None,
         }];
 
         let merged = merge_metadata(images, &records, &[], &[], None, &[], None)
@@ -8576,6 +8600,7 @@ cat 'DIR/reply.jsonl'
             questions: Vec::new(),
             job: None,
             waiting: None,
+            refusal: None,
         }
     }
 

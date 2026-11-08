@@ -87,6 +87,12 @@ export interface ToolCallRecord {
   /** What this call is waiting for, and until when. Server-authored and persisted. */
   waiting?: Waiting;
   /**
+   * Why the call did not run, when the reader was asked and it was refused. Server-authored
+   * and persisted: `null` on a call that was not refused, and absent only on one stored
+   * before refusals were kept.
+   */
+  refusal?: Refusal | null;
+  /**
    * Client-only: how the job ended, from the live exit frame. A job dies with
    * the turn that started it, so nothing durable records the exit and a reload
    * has only the start to rebuild from.
@@ -192,8 +198,13 @@ export const PREVIEW_LABEL = 'Effect, read from the call by the server';
 /// compares rather than letting a reload relabel the same call.
 export const AWAITING_ANSWER_DETAIL = 'Waiting for your answer…';
 
-/// The approval is client-only, so once it is gone these words are what say a
-/// call was denied. Held to the server's `DENIED` by `schemas.contract.test.ts`.
+/// Why a call put to the reader did not run, as the server names it.
+export const REFUSALS = ['denied', 'timed_out', 'cancelled'] as const;
+export type Refusal = (typeof REFUSALS)[number];
+
+/// What a denied call is told. A record stored before refusals were kept says
+/// it was denied only in these words. Held to the server's `DENIED` by
+/// `schemas.contract.test.ts`.
 export const DENIED_DETAIL = 'The user denied this tool call.';
 
 /// Told to a call nobody approved in time, which is not the reader's answer.

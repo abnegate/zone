@@ -11,6 +11,7 @@ import {
   PULL_REQUEST_CONNECTIONS,
   PULL_REQUEST_MERGEABILITY,
   PULL_REQUEST_STATES,
+  REFUSALS,
 } from './types';
 
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
@@ -132,6 +133,10 @@ export const WaitSettledSchema = z.object({
   verdict: z.enum(['settled', 'timed_out', 'silent', 'unreadable']),
 });
 
+/// A value this client cannot read is dropped, so the call is labelled from its
+/// words, as one stored before refusals were kept is.
+export const RefusalSchema = z.enum(REFUSALS).nullable().optional().catch(undefined);
+
 export const ToolCallRecordSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -158,6 +163,8 @@ export const ToolCallRecordSchema = z.object({
    */
   job: JobStartedSchema.optional().catch(undefined),
   waiting: WaitingSchema.optional().catch(undefined),
+  /** Declared for the same reason, and forgiving on the terms `RefusalSchema` gives. */
+  refusal: RefusalSchema,
 });
 
 export const CitationSchema = z.object({

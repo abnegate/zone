@@ -545,6 +545,42 @@ describe('ToolTrace', () => {
     expect(screen.getByText(APPROVAL_CANCELLED_DETAIL)).toBeInTheDocument();
   });
 
+  it('labels a refused call from the refusal it was stored with, not from its words', () => {
+    const shell = { name: 'run_shell', success: false };
+    render(
+      <ToolTrace
+        calls={[
+          call({ ...shell, id: 'denied', detail: 'Refused', refusal: 'denied' }),
+          call({ ...shell, id: 'timed', detail: 'Refused', refusal: 'timed_out' }),
+          call({ ...shell, id: 'cancelled', detail: 'Refused', refusal: 'cancelled' }),
+          call({ ...shell, id: 'log', detail: `Error: ${DENIED_DETAIL}`, refusal: null }),
+        ]}
+      />
+    );
+
+    const rows = screen.getAllByTestId('tool-call');
+    expect(rows.map((row) => row.querySelector('.tool-call-name')?.textContent)).toEqual([
+      'Denied running a shell command',
+      'Approval timed out for running a shell command',
+      'Cancelled running a shell command',
+      'Failed to run a shell command',
+    ]);
+    expect(rows[3]?.querySelector('.tool-call-detail')?.textContent).toBe(
+      `Error: ${DENIED_DETAIL}`
+    );
+  });
+
+  it('keeps a refusal the schema cannot read from labelling the call', () => {
+    const parsed = ToolCallRecordSchema.parse({
+      ...call({ name: 'run_shell', success: false, detail: 'Refused' }),
+      refusal: 'vetoed',
+    });
+
+    expect(parsed.refusal).toBeUndefined();
+    expect(ToolCallRecordSchema.parse({ ...parsed, refusal: 'denied' }).refusal).toBe('denied');
+    expect(ToolCallRecordSchema.parse({ ...parsed, refusal: null }).refusal).toBeNull();
+  });
+
   it('reads a successful call as run even when its output repeats a server outcome', () => {
     render(
       <ToolTrace

@@ -22,7 +22,7 @@ use zone_core::tools::{PERMISSION_TOOL, ToolResult, content_lines};
 use super::progress::Progress;
 use super::scope::Scope;
 use crate::agent::runner::call_signature;
-use crate::agent::{AgentEvent, ChatTools, Decision};
+use crate::agent::{AgentEvent, ChatTools, Decision, Refusal};
 use crate::utils::crypto::{generate_token, hash_token};
 
 /// What a call past the turn's budget is told instead of being run.
@@ -187,14 +187,15 @@ impl Turn {
             id,
             name: asked.tool_name,
             success: refusal.is_none(),
-            detail: refusal.unwrap_or(ALLOWED).to_string(),
+            detail: refusal.map_or(ALLOWED, Refusal::told).to_string(),
             duration_ms: started.elapsed().as_millis() as u64,
             citations: Vec::new(),
             receipt: None,
+            refusal,
         });
         match refusal {
             None => verdict(Some(&asked.input), ""),
-            Some(refusal) => verdict(None, refusal),
+            Some(refusal) => verdict(None, refusal.told()),
         }
     }
 
@@ -232,9 +233,10 @@ impl Turn {
         });
 
         let started = Instant::now();
-        let result = match self.allowed(&id, name, arguments).await.refusal() {
+        let refusal = self.allowed(&id, name, arguments).await.refusal();
+        let result = match refusal {
             None => self.tools.execute(name, arguments).await,
-            Some(refusal) => ToolResult::error(refusal),
+            Some(refusal) => ToolResult::error(refusal.told()),
         };
         let receipt = self
             .tools
@@ -260,6 +262,7 @@ impl Turn {
                 false => Vec::new(),
             },
             receipt,
+            refusal,
         });
 
         let content = vec![ContentBlock::text(message)];
@@ -896,6 +899,49 @@ mod tests {
         assert!(
             !path.exists(),
             "a denied write must not have touched the filesystem"
+        );
+    }
+
+    /// Every call completed so far among `events`, with what refused it.
+    fn completed(events: &mut UnboundedReceiver<AgentEvent>) -> Vec<(String, Option<Refusal>)> {
+        let mut completed = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let AgentEvent::ToolCallCompleted { name, refusal, .. } = event {
+                completed.push((name, refusal));
+            }
+        }
+        completed
+    }
+
+    /// The completion zone records for a refused call, the agent's own or zone's, names what
+    /// refused it, so the console labels it from that rather than from its words.
+    #[tokio::test]
+    async fn a_refused_call_is_recorded_with_what_refused_it() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("refused.txt");
+        let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+        let arguments = write(&path).to_string();
+        let asking = turn.clone();
+
+        let call = tokio::spawn(async move { turn.run("write_file", &arguments).await });
+        let card = next_card(&mut opened.events).await;
+        assert!(opened.approval.decide(&card.id, false), "the denial lands");
+        call.await.expect("the call task");
+        let mut refusals = completed(&mut opened.events);
+        let asked = json!({"tool_name": "Bash", "input": {"command": "ls"}}).to_string();
+        let permission = tokio::spawn(async move { asking.run(PERMISSION_TOOL, &asked).await });
+        let card = next_card(&mut opened.events).await;
+        assert!(opened.approval.decide(&card.id, false), "the refusal lands");
+        permission.await.expect("the question is answered");
+        refusals.extend(completed(&mut opened.events));
+
+        assert_eq!(
+            refusals,
+            [
+                ("write_file".to_string(), Some(Refusal::Denied)),
+                ("Bash".to_string(), Some(Refusal::Denied)),
+            ]
         );
     }
 

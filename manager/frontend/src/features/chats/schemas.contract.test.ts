@@ -40,6 +40,7 @@ import {
   PULL_REQUEST_MERGEABILITY,
   PULL_REQUEST_STATES,
   REASONED_TOOLS,
+  REFUSALS,
   TOOL_ERROR_PREFIX,
   UNFINISHED_DETAIL,
 } from './types';
@@ -74,6 +75,11 @@ const AGENT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ag
 const RECEIPTS_RS = join(
   import.meta.dir,
   '../../../../../runner/zone_server/src/agent/receipts.rs'
+);
+
+const REFUSAL_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/agent/approval/refusal.rs'
 );
 
 const REASONED_TOOLS_RS = 'REASONED_TOOLS';
@@ -232,6 +238,14 @@ describe('a refused call keeps why it did not run after the server settles it', 
   test('the console reads the prefix the server puts in front of a failed call', () => {
     expect(TOOL_ERROR_PREFIX).toBe(
       rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'ERROR_PREFIX')
+    );
+  });
+});
+
+describe('a refused call is labelled from what refused it', () => {
+  test('the console reads every refusal the server stores', () => {
+    expect([...REFUSALS].sort()).toEqual(
+      rustVariants(readFileSync(REFUSAL_RS, 'utf8'), 'Refusal').sort()
     );
   });
 });
@@ -598,7 +612,9 @@ describe('the job and wait cards the console draws are the ones the server sent'
     expect(rust).toHaveProperty('waiting', true);
     expect(rust).not.toHaveProperty('exited');
     expect(rust).not.toHaveProperty('settled');
-    expect(zodFields(ToolCallRecordSchema)).toEqual(rust);
+    // Always written, but a record stored before refusals were kept has none.
+    expect(rust).toHaveProperty('refusal', false);
+    expect(zodFields(ToolCallRecordSchema)).toEqual({ ...rust, refusal: true });
   });
 });
 

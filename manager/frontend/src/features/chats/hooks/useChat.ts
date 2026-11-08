@@ -7,6 +7,7 @@ import {
   JobExitedSchema,
   JobStartedSchema,
   QuestionsSchema,
+  RefusalSchema,
   WaitingSchema,
   WaitSettledSchema,
 } from '../schemas';
@@ -25,6 +26,7 @@ import {
   type Question,
   type QueuedMessage,
   type ReasoningEffort,
+  type Refusal,
   type SendMessageRequest,
   type ToolCallRecord,
   UNFINISHED_DETAIL,
@@ -199,6 +201,7 @@ type ServerMessage =
       detail: string;
       duration_ms: number;
       citations?: Citation[];
+      refusal?: Refusal | null;
     }
   | {
       type: 'action_receipt';
@@ -916,6 +919,7 @@ export function useChat(
             success: payload.success,
             detail: payload.detail,
             duration_ms: payload.duration_ms,
+            refusal: RefusalSchema.parse(payload.refusal),
             pending: false,
             approval: undefined,
           });

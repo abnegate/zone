@@ -17,7 +17,7 @@ use std::time::Instant;
 use zone_core::llm::{LlmBackend, LlmClient};
 
 use super::Citation;
-use super::approval::ApprovalPolicy;
+use super::approval::{ApprovalPolicy, Refusal};
 use super::citations;
 use super::plan;
 use super::question::{self, Question};
@@ -145,6 +145,8 @@ pub enum AgentEvent {
         duration_ms: u64,
         citations: Vec<Citation>,
         receipt: Option<ActionReceipt>,
+        /// Why the call did not run, when the reader was asked and it was refused.
+        refusal: Option<Refusal>,
     },
     /// The model produced an image. Carries the raw URL from the provider;
     /// the consumer decides how to store it and whether it is a duplicate.
@@ -588,7 +590,7 @@ pub fn run_with_context(
                         let signature = signature(&call);
                         let started = Instant::now();
                         let result = match refusal {
-                            Some(refusal) => zone_core::tools::ToolResult::error(refusal),
+                            Some(refusal) => zone_core::tools::ToolResult::error(refusal.told()),
                             None => {
                                 tools
                                     .execute(&call.function.name, &call.function.arguments)
@@ -597,7 +599,13 @@ pub fn run_with_context(
                         };
                         (
                             signature,
-                            finish_tool(tools, call, result, started.elapsed().as_millis() as u64)
+                            finish_tool(
+                                tools,
+                                call,
+                                result,
+                                started.elapsed().as_millis() as u64,
+                                refusal,
+                            )
                                 .await,
                         )
                     }
@@ -650,6 +658,7 @@ pub fn run_with_context(
                         duration_ms: finished.duration_ms,
                         citations: finished.citations,
                         receipt: finished.receipt,
+                        refusal: finished.refusal,
                     };
                     if let Some((tool_call_id, park)) = park {
                         let queued = park.queued();
@@ -811,6 +820,7 @@ struct FinishedTool {
     receipt: Option<ActionReceipt>,
     images: Vec<String>,
     output: String,
+    refusal: Option<Refusal>,
 }
 
 async fn finish_tool(
@@ -818,6 +828,7 @@ async fn finish_tool(
     call: LlmToolCall,
     result: zone_core::tools::ToolResult,
     duration_ms: u64,
+    refusal: Option<Refusal>,
 ) -> FinishedTool {
     let receipt = tools
         .write_receipt(
@@ -844,6 +855,7 @@ async fn finish_tool(
         receipt,
         images: result.images,
         output,
+        refusal,
     }
 }
 

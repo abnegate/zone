@@ -8471,6 +8471,7 @@ mod cli_tests {
             duration_ms: 1,
             citations: Vec::new(),
             receipt: None,
+            refusal: None,
         };
         let (sender, mut calls) = mpsc::unbounded_channel();
         for event in [
