@@ -46,6 +46,28 @@ use zone_core::Source;
 
 const SOURCE_TYPE: &str = "github";
 
+const FORBIDDEN_MESSAGE: &str = "Access forbidden - check token permissions";
+
+const NOT_FOUND_MESSAGE: &str = "Repository not found";
+
+const UNBUILT_MESSAGE: &str = "Failed to build HTTP client";
+
+const REQUEST_FAILED_MESSAGE: &str = "Request failed";
+
+const REFUSED_MESSAGE: &str = "API error";
+
+const MISREAD_REPOSITORY_MESSAGE: &str = "Failed to parse repo info";
+
+const UNLISTED_MESSAGE: &str = "Failed to fetch tree";
+
+const MISREAD_TREE_MESSAGE: &str = "Failed to parse tree";
+
+const UNREAD_MESSAGE: &str = "Failed to fetch content";
+
+const MISREAD_CONTENT_MESSAGE: &str = "Failed to parse content";
+
+const MALFORMED_CONTENT_MESSAGE: &str = "Failed to decode base64";
+
 /// Binary file extensions to skip (same as FilesystemAdapter)
 const BINARY_EXTENSIONS: &[&str] = &[
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg", ".pdf", ".zip", ".tar",
@@ -114,9 +136,9 @@ impl TreeCache {
         }
     }
 
-    const ENTRY_KIND_BYTES: usize = 20;
+    const ENTRY_KIND_AND_OVERHEAD_BYTES: usize = 20;
 
-    const ENTRY_SIZE_BYTES: usize = 8;
+    const ENTRY_SIZE_FIELD_BYTES: usize = 8;
 
     fn estimate_tree_size(tree: &Tree) -> usize {
         let entries: usize = tree
@@ -126,8 +148,8 @@ impl TreeCache {
                 entry.path.len()
                     + entry.sha.as_str().len()
                     + entry.mode.len()
-                    + Self::ENTRY_KIND_BYTES
-                    + Self::ENTRY_SIZE_BYTES
+                    + Self::ENTRY_KIND_AND_OVERHEAD_BYTES
+                    + Self::ENTRY_SIZE_FIELD_BYTES
             })
             .sum();
 
@@ -196,6 +218,16 @@ impl TreeCache {
     }
 }
 
+enum ContentRequest<'service> {
+    Sendable {
+        service: &'service PullRequestService,
+        repository: Repository,
+        path: RepositoryPath,
+        credential: Credential,
+    },
+    Skipped(ContextError),
+}
+
 /// GitHub source adapter
 #[derive(Debug, Clone)]
 pub struct GitHubAdapter {
@@ -213,30 +245,33 @@ impl GitHubAdapter {
     /// Tree cache TTL in seconds (5 minutes)
     const TREE_CACHE_TTL_SECS: u64 = 300;
 
-    const NOT_FOUND_MESSAGE: &str = "Repository not found";
-
-    const FORBIDDEN_MESSAGE: &str = "Access forbidden - check token permissions";
-
     /// Create a new GitHub adapter reading from api.github.com
     pub fn new() -> Self {
-        let service = PullRequestService::new()
-            .map(PullRequestService::with_anonymous_reads)
-            .map_err(|error| match error {
-                PullRequestError::Http(error) => format!("Failed to build HTTP client: {error}"),
-                error => format!("Failed to build HTTP client: {error}"),
-            });
+        Self::serving(
+            PullRequestService::new()
+                .map(PullRequestService::with_anonymous_reads)
+                .map_err(Self::unbuilt),
+        )
+    }
+
+    /// Create a GitHub adapter that reads through `service`
+    pub fn with_service(service: PullRequestService) -> Self {
+        Self::serving(Ok(service))
+    }
+
+    fn serving(service: std::result::Result<PullRequestService, String>) -> Self {
         Self {
             service,
             tree_cache: TreeCache::new(Self::TREE_CACHE_TTL_SECS),
         }
     }
 
-    /// Create a GitHub adapter that reads through `service`
-    pub fn with_service(service: PullRequestService) -> Self {
-        Self {
-            service: Ok(service),
-            tree_cache: TreeCache::new(Self::TREE_CACHE_TTL_SECS),
-        }
+    fn unbuilt(error: PullRequestError) -> String {
+        let reason = match error {
+            PullRequestError::Http(error) => error.to_string(),
+            error => error.to_string(),
+        };
+        format!("{UNBUILT_MESSAGE}: {reason}")
     }
 
     fn service(&self) -> Result<&PullRequestService> {
@@ -268,64 +303,78 @@ impl GitHubAdapter {
         ContextError::adapter(SOURCE_TYPE, message)
     }
 
-    fn repository_failed(owner: &str, repo: &str, error: PullRequestError) -> ContextError {
+    fn not_found(owner: &str, repo: &str) -> ContextError {
+        ContextError::InvalidSourceConfig(format!("{NOT_FOUND_MESSAGE}: {owner}/{repo}"))
+    }
+
+    fn unlisted(status: Status) -> ContextError {
+        Self::failed(format!("{UNLISTED_MESSAGE}: {status}"))
+    }
+
+    fn unread(status: Status) -> ContextError {
+        Self::failed(format!("{UNREAD_MESSAGE}: {status}"))
+    }
+
+    fn repository_error(owner: &str, repo: &str, error: PullRequestError) -> ContextError {
         match error {
             PullRequestError::NotFound
             | PullRequestError::RepositoryNotFound
-            | PullRequestError::InvalidRepositoryName => ContextError::InvalidSourceConfig(
-                format!("{}: {owner}/{repo}", Self::NOT_FOUND_MESSAGE),
-            ),
+            | PullRequestError::InvalidRepositoryName => Self::not_found(owner, repo),
             PullRequestError::Forbidden => {
-                ContextError::PermissionDenied(Self::FORBIDDEN_MESSAGE.to_string())
+                ContextError::PermissionDenied(FORBIDDEN_MESSAGE.to_string())
             }
             PullRequestError::AuthenticationFailed => {
-                Self::failed(format!("API error: {}", Status::UNAUTHORIZED))
+                Self::failed(format!("{REFUSED_MESSAGE}: {}", Status::UNAUTHORIZED))
             }
             PullRequestError::Refused { status, .. } => {
-                Self::failed(format!("API error: {}", Status(status)))
+                Self::failed(format!("{REFUSED_MESSAGE}: {}", Status(status)))
             }
-            PullRequestError::Http(error) => Self::failed(format!("Request failed: {error}")),
+            PullRequestError::Http(error) => {
+                Self::failed(format!("{REQUEST_FAILED_MESSAGE}: {error}"))
+            }
             PullRequestError::GitHubApi(reason) => {
-                Self::failed(format!("Failed to parse repo info: {reason}"))
+                Self::failed(format!("{MISREAD_REPOSITORY_MESSAGE}: {reason}"))
             }
             PullRequestError::Parse(error) => {
-                Self::failed(format!("Failed to parse repo info: {error}"))
+                Self::failed(format!("{MISREAD_REPOSITORY_MESSAGE}: {error}"))
             }
-            error => Self::failed(format!("API error: {error}")),
+            error => Self::failed(format!("{REFUSED_MESSAGE}: {error}")),
         }
     }
 
-    fn tree_failed(error: PullRequestError) -> ContextError {
+    fn tree_error(error: PullRequestError) -> ContextError {
         if let Some(status) = Self::status(&error) {
-            return Self::failed(format!("Failed to fetch tree: {status}"));
+            return Self::unlisted(status);
         }
-        Self::failed(match error {
-            PullRequestError::Parse(ParseError::BranchName(_)) => {
-                format!("Failed to fetch tree: {}", Status::NOT_FOUND)
+        match error {
+            PullRequestError::Parse(ParseError::BranchName(_)) => Self::unlisted(Status::NOT_FOUND),
+            PullRequestError::Http(error) => {
+                Self::failed(format!("{REQUEST_FAILED_MESSAGE}: {error}"))
             }
-            PullRequestError::Http(error) => format!("Request failed: {error}"),
-            PullRequestError::GitHubApi(reason) => format!("Failed to parse tree: {reason}"),
+            PullRequestError::GitHubApi(reason) => {
+                Self::failed(format!("{MISREAD_TREE_MESSAGE}: {reason}"))
+            }
             PullRequestError::Parse(error @ ParseError::ObjectId(_)) => {
-                format!("Failed to parse tree: {error}")
+                Self::failed(format!("{MISREAD_TREE_MESSAGE}: {error}"))
             }
-            error => format!("Failed to fetch tree: {error}"),
-        })
-    }
-
-    fn content_failed(error: PullRequestError) -> ContextError {
-        if let Some(status) = Self::status(&error) {
-            return Self::failed(format!("Failed to fetch content: {status}"));
+            error => Self::failed(format!("{UNLISTED_MESSAGE}: {error}")),
         }
-        Self::failed(match error {
-            PullRequestError::Parse(ParseError::BranchName(_)) => Self::content_not_found(),
-            PullRequestError::Http(error) => format!("Request failed: {error}"),
-            PullRequestError::GitHubApi(reason) => format!("Failed to parse content: {reason}"),
-            error => format!("Failed to fetch content: {error}"),
-        })
     }
 
-    fn content_not_found() -> String {
-        format!("Failed to fetch content: {}", Status::NOT_FOUND)
+    fn content_error(error: PullRequestError) -> ContextError {
+        if let Some(status) = Self::status(&error) {
+            return Self::unread(status);
+        }
+        match error {
+            PullRequestError::Parse(ParseError::BranchName(_)) => Self::unread(Status::NOT_FOUND),
+            PullRequestError::Http(error) => {
+                Self::failed(format!("{REQUEST_FAILED_MESSAGE}: {error}"))
+            }
+            PullRequestError::GitHubApi(reason) => {
+                Self::failed(format!("{MISREAD_CONTENT_MESSAGE}: {reason}"))
+            }
+            error => Self::failed(format!("{UNREAD_MESSAGE}: {error}")),
+        }
     }
 
     fn size(entry: &TreeEntry) -> Option<usize> {
@@ -445,14 +494,14 @@ impl GitHubAdapter {
         let credential = Credential::bearer(token)?;
         let service = self.service()?;
         let repository = Repository::new(owner, repo)
-            .map_err(|error| Self::repository_failed(owner, repo, error))?;
+            .map_err(|error| Self::repository_error(owner, repo, error))?;
 
         self.rate_limit_config()
             .retried(Self::limited, || {
                 service.get_default_branch(&repository, credential.secret())
             })
             .await?
-            .map_err(|error| Self::repository_failed(owner, repo, error))
+            .map_err(|error| Self::repository_error(owner, repo, error))
     }
 
     /// Fetch Git tree (recursive)
@@ -469,14 +518,14 @@ impl GitHubAdapter {
 
         let credential = Credential::bearer(token)?;
         let service = self.service()?;
-        let repository = Repository::new(owner, repo).map_err(Self::tree_failed)?;
+        let repository = Repository::new(owner, repo).map_err(Self::tree_error)?;
 
         self.rate_limit_config()
             .retried(Self::limited, || {
                 service.fetch_tree_at(&repository, credential.secret(), branch, true)
             })
             .await?
-            .map_err(Self::tree_failed)
+            .map_err(Self::tree_error)
     }
 
     /// Get tree with caching and in-flight tracking
@@ -540,25 +589,28 @@ impl GitHubAdapter {
         branch: &str,
         path: &str,
     ) -> Result<Result<Contents>> {
-        let (service, repository, path, credential) =
-            match self.content_request(config, branch, path) {
-                Ok(request) => request,
-                Err(error) => return Ok(Err(error)),
-            };
-
-        let answer = self
-            .rate_limit_config()
-            .retried(Self::limited, || {
-                service.fetch_contents(&repository, credential.secret(), &path, branch)
-            })
-            .await?;
+        let answer = match self.content_request(config, branch, path) {
+            ContentRequest::Skipped(error) => return Ok(Err(error)),
+            ContentRequest::Sendable {
+                service,
+                repository,
+                path,
+                credential,
+            } => {
+                self.rate_limit_config()
+                    .retried(Self::limited, || {
+                        service.fetch_contents(&repository, credential.secret(), &path, branch)
+                    })
+                    .await?
+            }
+        };
 
         match answer {
             Ok(contents) => Ok(Ok(contents)),
             Err(error @ PullRequestError::MalformedContent) => Err(ContextError::Parse(format!(
-                "Failed to decode base64: {error}"
+                "{MALFORMED_CONTENT_MESSAGE}: {error}"
             ))),
-            Err(error) => Ok(Err(Self::content_failed(error))),
+            Err(error) => Ok(Err(Self::content_error(error))),
         }
     }
 
@@ -567,7 +619,17 @@ impl GitHubAdapter {
         config: &GitHubConfig,
         branch: &str,
         path: &str,
-    ) -> Result<(&PullRequestService, Repository, RepositoryPath, Credential)> {
+    ) -> ContentRequest<'_> {
+        self.sendable_content(config, branch, path)
+            .unwrap_or_else(ContentRequest::Skipped)
+    }
+
+    fn sendable_content(
+        &self,
+        config: &GitHubConfig,
+        branch: &str,
+        path: &str,
+    ) -> Result<ContentRequest<'_>> {
         Self::validate_github_identifier(&config.owner, "owner")?;
         Self::validate_github_identifier(&config.repo, "repo")?;
         Self::validate_github_identifier(branch, "branch")?;
@@ -575,11 +637,15 @@ impl GitHubAdapter {
         let credential = Credential::bearer(config.token.as_deref())?;
         let service = self.service()?;
         let repository =
-            Repository::new(&config.owner, &config.repo).map_err(Self::content_failed)?;
-        let path =
-            RepositoryPath::parse(path).map_err(|_| Self::failed(Self::content_not_found()))?;
+            Repository::new(&config.owner, &config.repo).map_err(Self::content_error)?;
+        let path = RepositoryPath::parse(path).map_err(|_| Self::unread(Status::NOT_FOUND))?;
 
-        Ok((service, repository, path, credential))
+        Ok(ContentRequest::Sendable {
+            service,
+            repository,
+            path,
+            credential,
+        })
     }
 
     /// Read file bytes as UTF-8 text, or `None` for a binary blob

@@ -55,6 +55,28 @@ const BINARY_EXTENSIONS: &[&str] = &[
 
 const SOURCE_TYPE: &str = "gitlab";
 
+const FORBIDDEN_MESSAGE: &str = "Access forbidden - check token permissions";
+
+const NOT_FOUND_MESSAGE: &str = "Project not found";
+
+const UNBUILT_MESSAGE: &str = "Failed to build HTTP client";
+
+const REQUEST_FAILED_MESSAGE: &str = "Request failed";
+
+const REFUSED_MESSAGE: &str = "API error";
+
+const MISREAD_PROJECT_MESSAGE: &str = "Failed to parse project info";
+
+const UNSET_DEFAULT_BRANCH_MESSAGE: &str = "default_branch is null";
+
+const UNLISTED_MESSAGE: &str = "Failed to fetch tree";
+
+const MISREAD_TREE_MESSAGE: &str = "Failed to parse tree";
+
+const UNREAD_MESSAGE: &str = "Failed to fetch content";
+
+const MISREAD_CONTENT_MESSAGE: &str = "Failed to parse content";
+
 /// Configuration for GitLab sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitLabConfig {
@@ -106,7 +128,7 @@ impl TreeCache {
     /// Maximum total cached size (10MB)
     const MAX_TOTAL_BYTES: usize = 10 * 1024 * 1024;
 
-    const ENTRY_OVERHEAD_BYTES: usize = 20;
+    const ENTRY_KIND_AND_OVERHEAD_BYTES: usize = 20;
 
     fn new(ttl_secs: u64) -> Self {
         Self {
@@ -125,7 +147,7 @@ impl TreeCache {
                 entry.path.len()
                     + entry.sha.as_str().len()
                     + entry.mode.len()
-                    + Self::ENTRY_OVERHEAD_BYTES
+                    + Self::ENTRY_KIND_AND_OVERHEAD_BYTES
             })
             .sum()
     }
@@ -229,10 +251,11 @@ impl GitLabAdapter {
     }
 
     fn unbuilt(error: GitLabError) -> String {
-        match error {
-            GitLabError::Http(error) => format!("Failed to build HTTP client: {error}"),
-            error => format!("Failed to build HTTP client: {error}"),
-        }
+        let reason = match error {
+            GitLabError::Http(error) => error.to_string(),
+            error => error.to_string(),
+        };
+        format!("{UNBUILT_MESSAGE}: {reason}")
     }
 
     fn service(&self) -> Result<&GitLabService> {
@@ -255,8 +278,71 @@ impl GitLabAdapter {
         }
     }
 
+    fn failed(message: String) -> ContextError {
+        ContextError::adapter(SOURCE_TYPE, message)
+    }
+
     fn not_found(project: &str) -> ContextError {
-        ContextError::InvalidSourceConfig(format!("Project not found: {project}"))
+        ContextError::InvalidSourceConfig(format!("{NOT_FOUND_MESSAGE}: {project}"))
+    }
+
+    fn unlisted(status: Status) -> ContextError {
+        Self::failed(format!("{UNLISTED_MESSAGE}: {status}"))
+    }
+
+    fn unread(status: Status) -> ContextError {
+        Self::failed(format!("{UNREAD_MESSAGE}: {status}"))
+    }
+
+    fn project_error(project: &str, error: GitLabError) -> ContextError {
+        match error {
+            GitLabError::NotFound => Self::not_found(project),
+            GitLabError::AuthenticationFailed | GitLabError::Forbidden => {
+                ContextError::PermissionDenied(FORBIDDEN_MESSAGE.to_string())
+            }
+            GitLabError::Refused { status, .. } => {
+                Self::failed(format!("{REFUSED_MESSAGE}: {}", Status(status)))
+            }
+            GitLabError::Http(error) => Self::failed(format!("{REQUEST_FAILED_MESSAGE}: {error}")),
+            GitLabError::GitLabApi(reason) => {
+                Self::failed(format!("{MISREAD_PROJECT_MESSAGE}: {reason}"))
+            }
+            GitLabError::Parse(error @ ParseError::BranchName(_)) => {
+                Self::failed(format!("{MISREAD_PROJECT_MESSAGE}: {error}"))
+            }
+            error @ GitLabError::InvalidOrigin => ContextError::Config(error.to_string()),
+            error => Self::failed(format!("{REFUSED_MESSAGE}: {error}")),
+        }
+    }
+
+    fn tree_error(error: GitLabError) -> ContextError {
+        if let Some(status) = Self::status(&error) {
+            return Self::unlisted(status);
+        }
+        match error {
+            GitLabError::Parse(ParseError::BranchName(_)) => Self::unlisted(Status::NOT_FOUND),
+            GitLabError::Http(error) => Self::failed(format!("{REQUEST_FAILED_MESSAGE}: {error}")),
+            GitLabError::GitLabApi(reason) => {
+                Self::failed(format!("{MISREAD_TREE_MESSAGE}: {reason}"))
+            }
+            GitLabError::Parse(error @ ParseError::ObjectId(_)) => {
+                Self::failed(format!("{MISREAD_TREE_MESSAGE}: {error}"))
+            }
+            error => Self::failed(format!("{UNLISTED_MESSAGE}: {error}")),
+        }
+    }
+
+    fn content_error(error: GitLabError) -> ContextError {
+        if let Some(status) = Self::status(&error) {
+            return Self::unread(status);
+        }
+        match error {
+            GitLabError::Http(error) => Self::failed(format!("{REQUEST_FAILED_MESSAGE}: {error}")),
+            GitLabError::GitLabApi(reason) => {
+                Self::failed(format!("{MISREAD_CONTENT_MESSAGE}: {reason}"))
+            }
+            error => Self::failed(format!("{UNREAD_MESSAGE}: {error}")),
+        }
     }
 
     fn project(project: &str) -> Result<Project> {
@@ -388,49 +474,17 @@ impl GitLabAdapter {
         let service = self.service()?;
         let parsed = Self::project(project)?;
 
-        let answer = self
-            .rate_limit_config()
+        self.rate_limit_config()
             .retried(Self::limited, || {
                 service.get_default_branch(&parsed, credential.secret())
             })
-            .await?;
-
-        match answer {
-            Ok(Some(branch)) => Ok(branch),
-            Ok(None) => Err(ContextError::adapter(
-                SOURCE_TYPE,
-                "Failed to parse project info: default_branch is null",
-            )),
-            Err(GitLabError::NotFound) => Err(Self::not_found(project)),
-            Err(GitLabError::AuthenticationFailed | GitLabError::Forbidden) => {
-                Err(ContextError::PermissionDenied(
-                    "Access forbidden - check token permissions".to_string(),
+            .await?
+            .map_err(|error| Self::project_error(project, error))?
+            .ok_or_else(|| {
+                Self::failed(format!(
+                    "{MISREAD_PROJECT_MESSAGE}: {UNSET_DEFAULT_BRANCH_MESSAGE}"
                 ))
-            }
-            Err(GitLabError::Refused { status, .. }) => Err(ContextError::adapter(
-                SOURCE_TYPE,
-                format!("API error: {}", Status(status)),
-            )),
-            Err(GitLabError::Http(error)) => Err(ContextError::adapter(
-                SOURCE_TYPE,
-                format!("Request failed: {error}"),
-            )),
-            Err(GitLabError::GitLabApi(reason)) => Err(ContextError::adapter(
-                SOURCE_TYPE,
-                format!("Failed to parse project info: {reason}"),
-            )),
-            Err(GitLabError::Parse(error @ ParseError::BranchName(_))) => {
-                Err(ContextError::adapter(
-                    SOURCE_TYPE,
-                    format!("Failed to parse project info: {error}"),
-                ))
-            }
-            Err(error @ GitLabError::InvalidOrigin) => Err(ContextError::Config(error.to_string())),
-            Err(error) => Err(ContextError::adapter(
-                SOURCE_TYPE,
-                format!("API error: {error}"),
-            )),
-        }
+            })
     }
 
     /// Fetch repository tree (recursive, every page)
@@ -462,29 +516,6 @@ impl GitLabAdapter {
             })
             .await?
             .map_err(Self::tree_error)
-    }
-
-    fn unlisted(status: Status) -> ContextError {
-        ContextError::adapter(SOURCE_TYPE, format!("Failed to fetch tree: {status}"))
-    }
-
-    fn tree_error(error: GitLabError) -> ContextError {
-        if let Some(status) = Self::status(&error) {
-            return Self::unlisted(status);
-        }
-        match error {
-            GitLabError::Parse(ParseError::BranchName(_)) => Self::unlisted(Status::NOT_FOUND),
-            GitLabError::Http(error) => {
-                ContextError::adapter(SOURCE_TYPE, format!("Request failed: {error}"))
-            }
-            GitLabError::GitLabApi(reason) => {
-                ContextError::adapter(SOURCE_TYPE, format!("Failed to parse tree: {reason}"))
-            }
-            GitLabError::Parse(error @ ParseError::ObjectId(_)) => {
-                ContextError::adapter(SOURCE_TYPE, format!("Failed to parse tree: {error}"))
-            }
-            error => ContextError::adapter(SOURCE_TYPE, format!("Failed to fetch tree: {error}")),
-        }
     }
 
     /// Get tree with caching and in-flight tracking
@@ -571,18 +602,6 @@ impl GitLabAdapter {
             .map_err(Self::content_error)
     }
 
-    fn content_error(error: GitLabError) -> ContextError {
-        let message = match Self::status(&error) {
-            Some(status) => format!("Failed to fetch content: {status}"),
-            None => match error {
-                GitLabError::Http(error) => format!("Request failed: {error}"),
-                GitLabError::GitLabApi(reason) => format!("Failed to parse content: {reason}"),
-                error => format!("Failed to fetch content: {error}"),
-            },
-        };
-        ContextError::adapter(SOURCE_TYPE, message)
-    }
-
     /// Create a ContentItem from a GitLab file
     fn create_content_item(
         source_id: uuid::Uuid,
@@ -647,10 +666,6 @@ impl GitLabAdapter {
         }
 
         Ok(item)
-    }
-
-    fn estimate_file_size(_entry: &TreeEntry) -> usize {
-        Self::ESTIMATED_FILE_BYTES
     }
 
     fn file_uri(project: &str, path: &str, branch: &str) -> String {
@@ -750,9 +765,7 @@ impl SourceAdapter for GitLabAdapter {
                 continue;
             }
 
-            // Estimate tokens from size (using conservative estimate)
-            let size = Self::estimate_file_size(entry);
-            total_tokens += estimate_tokens_from_bytes(size);
+            total_tokens += estimate_tokens_from_bytes(Self::ESTIMATED_FILE_BYTES);
         }
 
         Ok(total_tokens)
@@ -879,7 +892,7 @@ impl SourceAdapter for GitLabAdapter {
                         &branch,
                         &entry.path,
                         entry.sha.as_str(),
-                        Self::estimate_file_size(entry),
+                        Self::ESTIMATED_FILE_BYTES,
                         None,
                         true,
                     )?;
@@ -897,8 +910,7 @@ impl SourceAdapter for GitLabAdapter {
                 let mut budget = TokenBudget::new(max_tokens);
 
                 for (idx, entry) in files.iter().enumerate() {
-                    let estimated_tokens =
-                        estimate_tokens_from_bytes(Self::estimate_file_size(entry));
+                    let estimated_tokens = estimate_tokens_from_bytes(Self::ESTIMATED_FILE_BYTES);
 
                     if budget.can_fit(estimated_tokens) {
                         let blob = self
@@ -937,7 +949,7 @@ impl SourceAdapter for GitLabAdapter {
                 // Build priority scores
                 let paths_with_sizes: Vec<(String, Option<usize>)> = files
                     .iter()
-                    .map(|entry| (entry.path.clone(), Some(Self::estimate_file_size(entry))))
+                    .map(|entry| (entry.path.clone(), Some(Self::ESTIMATED_FILE_BYTES)))
                     .collect();
 
                 let mut prioritized = prioritize_paths(&paths_with_sizes);
