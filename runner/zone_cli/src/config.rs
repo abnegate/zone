@@ -7,9 +7,7 @@
 use abnegate_config::{Application, Error, Loader};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-
-/// Names the `~/.zone` directory and the `ZONE_CONFIG_*` variables.
-const APPLICATION: &str = "zone";
+use zone_core::application::APPLICATION;
 
 const SESSIONS: &str = "sessions";
 
