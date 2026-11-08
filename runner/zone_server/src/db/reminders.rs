@@ -3,7 +3,7 @@
 //! firing.
 use super::{DbResult, actions, users};
 use crate::services::schedule::{self, MAX_LIFETIME, Recurrence};
-use crate::services::time_zone::TimeZone;
+use crate::services::time_zone::{self, TimeZone};
 use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -94,7 +94,7 @@ fn automation(input: &Reminder) -> Result<(Option<Recurrence>, &'static str), sq
         .map(str::trim)
         .filter(|r| !r.is_empty())
     {
-        Some(rrule) => Some(Recurrence::parse(rrule).map_err(|why| actions::invalid(&why))?),
+        Some(rrule) => Some(schedule::parse(rrule).map_err(|why| actions::invalid(&why))?),
         None => None,
     };
 
@@ -238,7 +238,7 @@ pub async fn create(
         .map(str::trim)
         .filter(|name| !name.is_empty())
     {
-        Some(name) => Some(TimeZone::parse(name).map_err(|why| actions::invalid(&why))?),
+        Some(name) => Some(time_zone::parse(name).map_err(|why| actions::invalid(&why))?),
         None => None,
     };
     // The first firing is the anchor: a recurrence is measured from a fixed
@@ -416,8 +416,8 @@ fn reschedule(
     if expires_at.is_some_and(|expires| expires <= now) {
         return None;
     }
-    let rule = Recurrence::parse(rrule?).ok()?;
-    let zone = TimeZone::parse(time_zone).unwrap_or_else(|why| {
+    let rule = schedule::parse(rrule?).ok()?;
+    let zone = time_zone::parse(time_zone).unwrap_or_else(|why| {
         tracing::warn!(reminder_id = %id, %why, "Reminder zone unreadable; repeating it in UTC");
         TimeZone::UTC
     });
