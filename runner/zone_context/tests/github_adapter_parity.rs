@@ -236,6 +236,40 @@ fn adapted(error: &ContextError) -> bool {
 }
 
 #[tokio::test]
+async fn a_progressive_fetch_returns_items_in_priority_order() {
+    let server = MockServer::start().await;
+    mount_repository(&server).await;
+    mount_tree(
+        &server,
+        vec![
+            blob("README.md", 'a', 8),
+            blob("src/lib.rs", 'b', 11),
+            blob("notes.txt", 'c', 5),
+        ],
+    )
+    .await;
+    mount_file(&server, "README.md", "# Readme").await;
+    mount_file(&server, "src/lib.rs", "fn lib() {}").await;
+    mount_file(&server, "notes.txt", "notes").await;
+
+    let result = fetched(
+        &served(&server),
+        &plain(),
+        FetchStrategy::Progressive {
+            priority_order: vec![
+                "notes.txt".to_string(),
+                "*.rs".to_string(),
+                "README.md".to_string(),
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(titles(&result), ["notes.txt", "lib.rs", "README.md"]);
+}
+
+#[tokio::test]
 async fn a_contents_401_skips_the_file_and_keeps_the_rest() {
     let server = MockServer::start().await;
     mount_repository(&server).await;

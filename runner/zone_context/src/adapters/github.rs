@@ -1009,8 +1009,13 @@ impl SourceAdapter for GitHubAdapter {
                     });
                 }
 
+                let files_by_path: HashMap<&str, &&TreeEntry> = files
+                    .iter()
+                    .map(|entry| (entry.path.as_str(), entry))
+                    .collect();
+
                 for (index, priority_item) in prioritized.iter().enumerate() {
-                    if let Some(entry) = files.iter().find(|entry| entry.path == priority_item.path)
+                    if let Some(entry) = files_by_path.get(priority_item.path.as_str())
                         && let Some(item) = self
                             .fetch_file_item(source.id, &config, &branch, entry)
                             .await?

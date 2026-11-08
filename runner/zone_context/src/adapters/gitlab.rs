@@ -942,9 +942,13 @@ impl SourceAdapter for GitLabAdapter {
                     });
                 }
 
+                let files_by_path: HashMap<&str, &&TreeEntry> = files
+                    .iter()
+                    .map(|entry| (entry.path.as_str(), entry))
+                    .collect();
+
                 for (index, priority_item) in prioritized.iter().enumerate() {
-                    if let Some(entry) = files.iter().find(|entry| entry.path == priority_item.path)
-                    {
+                    if let Some(entry) = files_by_path.get(priority_item.path.as_str()) {
                         let blob = self
                             .get_blob(&config.project, entry, config.token.as_deref())
                             .await?;

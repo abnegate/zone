@@ -1121,6 +1121,45 @@ async fn a_project_answer_with_only_its_default_branch_is_read() {
     assert_eq!(titles(&result), ["README.md"]);
 }
 
+#[tokio::test]
+async fn a_progressive_fetch_returns_items_in_priority_order() {
+    let server = MockServer::start().await;
+    mount_project(&server).await;
+    mount_tree(
+        &server,
+        json!([
+            file("README.md", 'a'),
+            file("src/lib.rs", 'b'),
+            file("notes.txt", 'c'),
+        ]),
+    )
+    .await;
+    mount_blob(&server, 'a', b"# Readme").await;
+    mount_blob(&server, 'b', b"fn lib() {}").await;
+    mount_blob(&server, 'c', b"notes").await;
+
+    let result = fetched(
+        &served(&server),
+        &project(),
+        FetchStrategy::Progressive {
+            priority_order: vec![
+                "notes.txt".to_string(),
+                "*.rs".to_string(),
+                "README.md".to_string(),
+            ],
+        },
+    )
+    .await
+    .unwrap();
+
+    let ordered: Vec<&str> = result
+        .items
+        .iter()
+        .map(|item| item.title.as_str())
+        .collect();
+    assert_eq!(ordered, ["notes.txt", "lib.rs", "README.md"]);
+}
+
 async fn reported(
     server: &MockServer,
     config: &FetchConfig,
