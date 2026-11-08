@@ -224,7 +224,7 @@ async fn both_surfaces_are_told_what_to_do_when_a_call_fails() {
         prompt::task(&task_tools().await, &environment()),
     ] {
         for rule in [
-            "a denied tool call means the user declined it",
+            "a denied or timed-out call is not allowed",
             "failed two or three times, stop and report",
             "three meaningfully different approaches before escalating",
             "never fall back silently to a slower path",
