@@ -5074,7 +5074,12 @@ mod tests {
                     .expect("the chat's provider");
             }
 
+            /// Deletes the chat first, which waits for whatever its last turn is still writing,
+            /// and then the organization.
             async fn remove(&self) {
+                chats::delete_chat(&self.pool, self.chat)
+                    .await
+                    .expect("the chat to be removed");
                 sqlx::query("DELETE FROM organizations WHERE id = $1")
                     .bind(self.id)
                     .execute(&self.pool)

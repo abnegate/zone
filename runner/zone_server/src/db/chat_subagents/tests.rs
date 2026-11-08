@@ -1189,3 +1189,50 @@ async fn a_starting_turns_sweep_begun_before_a_newer_turn_took_a_subagent_leaves
         "the newer run's steps run on"
     );
 }
+
+/// A chat deleted while a write holds one of its turns waits for that write rather than
+/// deadlocking with it: the write holds the turn before it touches a subagent, so the delete
+/// takes the turn before it reaches the chat's subagents.
+#[tokio::test]
+async fn deleting_a_chat_waits_for_a_write_that_holds_its_turn() {
+    let pool = pool().await;
+    let chat_id = chat(&pool).await;
+    let held = turn(&pool, chat_id, TURN_RUNNING).await;
+    running(&pool, chat_id, "thread-1", Some(held)).await;
+    let mut writer = pool.begin().await.expect("a transaction");
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .expect("its session");
+    assert!(
+        hold_turn(&mut *writer, chat_id, held)
+            .await
+            .expect("the turn held")
+    );
+    let deleting = tokio::spawn({
+        let pool = pool.clone();
+        async move { crate::db::chats::delete_chat(&pool, chat_id).await }
+    });
+    blocking(&pool, pid).await;
+
+    let written = record(
+        &mut *writer,
+        &SubagentChange {
+            message_id: Some(held),
+            status: Some(SubagentStatus::Completed),
+            ..named(chat_id, "thread-1")
+        },
+    )
+    .await;
+    let committed = writer.commit().await;
+    let deleted = deleting.await.expect("the delete ran");
+
+    assert!(
+        written.is_ok() && committed.is_ok(),
+        "the write deadlocked with the delete: {written:?} {committed:?}"
+    );
+    assert!(
+        deleted.expect("the delete deadlocked with the write"),
+        "the chat was not deleted"
+    );
+}
