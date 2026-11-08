@@ -202,6 +202,20 @@ mod tests {
         );
     }
 
+    /// A clause the frequency never reads is still refused through Zone's
+    /// parse, so a crate release that loosened the check cannot reach Zone
+    /// unnoticed: `FREQ=HOURLY;BYHOUR=9` would fire every hour, not at nine.
+    #[test]
+    fn a_clause_the_frequency_never_reads_is_still_refused() {
+        for (rule, clause) in [
+            ("FREQ=HOURLY;BYHOUR=9", "BYHOUR"),
+            ("FREQ=DAILY;BYDAY=MO", "BYDAY"),
+        ] {
+            let refused = parse(rule).expect_err(rule);
+            assert!(refused.contains(clause), "{rule}: {refused}");
+        }
+    }
+
     /// A monthly step past the calendar has no next period, rather than
     /// overflowing the month count, and the anchor still fires.
     #[test]
