@@ -140,8 +140,8 @@ pub async fn search_messages_keyword(
     chat_id: Option<Uuid>,
     limit: usize,
 ) -> Result<Vec<MessageSearchResult>, sqlx::Error> {
-    let keyword = zone_context::rewrite_query(query).keyword;
-    let sanitized = zone_context::embeddings::sanitize_search_query(&keyword);
+    let keyword = abnegate_index::rewrite_query(query).keyword;
+    let sanitized = abnegate_index::sanitize_search_query(&keyword);
     if sanitized.trim().is_empty() {
         return Ok(Vec::new());
     }

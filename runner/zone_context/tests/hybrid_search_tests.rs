@@ -3,12 +3,13 @@
 //! These tests verify the hybrid search functionality combining keyword
 //! and semantic search using Reciprocal Rank Fusion.
 
+use abnegate_index::HybridSearchConfig;
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_context::{
-    HybridSearchConfig, embeddings::SearchFilters, hybrid_search, keyword_only_search,
-    semantic_only_search,
-};
+use zone_context::embeddings::SearchFilters;
+use zone_context::hybrid_search;
+use zone_context::keyword_only_search;
+use zone_context::semantic_only_search;
 
 // Helper to get test database URL
 fn get_test_db_url() -> String {
@@ -346,10 +347,7 @@ async fn test_hybrid_search_weighting() {
     let query_embedding = vec![0.15_f32; 1024];
 
     // Test semantic-heavy weighting
-    let semantic_config = HybridSearchConfig {
-        semantic_weight: 0.9,
-        ..Default::default()
-    };
+    let semantic_config = HybridSearchConfig::default().with_semantic_weight(0.9);
     let semantic_results = hybrid_search(
         &pool,
         query,
@@ -363,10 +361,7 @@ async fn test_hybrid_search_weighting() {
     .unwrap();
 
     // Test keyword-heavy weighting
-    let keyword_config = HybridSearchConfig {
-        semantic_weight: 0.1,
-        ..Default::default()
-    };
+    let keyword_config = HybridSearchConfig::default().with_semantic_weight(0.1);
     let keyword_results = hybrid_search(
         &pool,
         query,
@@ -504,7 +499,7 @@ async fn test_hybrid_search_source_filter() {
     // All results should be from the specified source
     for result in &results {
         assert_eq!(
-            result.source_id, source_id,
+            result.id.source_id, source_id,
             "Results should be from filtered source"
         );
     }
@@ -539,29 +534,130 @@ async fn test_hybrid_search_limit() {
     assert!(results.len() <= 2, "Should respect limit parameter");
 }
 
-#[test]
-fn test_hybrid_config_validation() {
-    let config = HybridSearchConfig {
-        semantic_weight: 0.5,
-        rrf_k: 60.0,
-        min_keyword_score: 0.1,
-        min_semantic_score: 0.6,
-    };
+const PATH_MATCHED_QUERY: &str = "where is the quartermaster ledger kept";
 
-    assert_eq!(config.semantic_weight, 0.5);
-    assert_eq!(config.rrf_k, 60.0);
-    assert_eq!(config.min_keyword_score, 0.1);
-    assert_eq!(config.min_semantic_score, 0.6);
+async fn add_path_matched_file(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> Result<(Uuid, Uuid), sqlx::Error> {
+    let source_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO sources (id, workspace_id, name, source_type, config)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(source_id)
+    .bind(workspace_id)
+    .bind(format!("Second Source {}", source_id.as_simple()))
+    .bind("text")
+    .bind(serde_json::json!({}))
+    .execute(pool)
+    .await?;
+
+    let content_item_id = Uuid::new_v4();
+    let text = "fn tally() -> u32 { 0 }";
+    sqlx::query(
+        r#"
+        INSERT INTO content_items (
+            id, source_id, workspace_id, category, uri, title, content, content_type,
+            token_count, metadata_only, content_hash, metadata, fetched_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+        "#,
+    )
+    .bind(content_item_id)
+    .bind(source_id)
+    .bind(workspace_id)
+    .bind("code")
+    .bind("src/quartermaster.rs")
+    .bind("quartermaster.rs")
+    .bind(text)
+    .bind("text/x-rust")
+    .bind(8)
+    .bind(false)
+    .bind("quartermaster_hash")
+    .bind(serde_json::json!({}))
+    .execute(pool)
+    .await?;
+
+    let chunk_id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO content_chunks (id, content_item_id, chunk_index, text, token_count, start_offset, end_offset)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "#,
+    )
+    .bind(chunk_id)
+    .bind(content_item_id)
+    .bind(0)
+    .bind(text)
+    .bind(8)
+    .bind(0)
+    .bind(text.len() as i32)
+    .execute(pool)
+    .await?;
+
+    Ok((source_id, chunk_id))
 }
 
-#[test]
-fn test_hybrid_config_default() {
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
+async fn test_hybrid_search_path_matched_file_honours_the_source_filter() {
+    let pool = PgPool::connect(&get_test_db_url()).await.unwrap();
+    let (workspace_id, source_id, _content_item_id) = setup_test_data(&pool).await.unwrap();
+    let (_second_source_id, path_matched_chunk_id) =
+        add_path_matched_file(&pool, workspace_id).await.unwrap();
+    let query_embedding = vec![0.15_f32; 1024];
     let config = HybridSearchConfig::default();
 
-    assert_eq!(config.semantic_weight, 0.7);
-    assert_eq!(config.rrf_k, 60.0);
-    assert_eq!(config.min_keyword_score, 0.0);
-    assert_eq!(config.min_semantic_score, 0.35);
+    let unfiltered = hybrid_search(
+        &pool,
+        PATH_MATCHED_QUERY,
+        &query_embedding,
+        10,
+        Some(workspace_id),
+        None,
+        &config,
+    )
+    .await
+    .unwrap();
+    let filtered = hybrid_search(
+        &pool,
+        PATH_MATCHED_QUERY,
+        &query_embedding,
+        10,
+        Some(workspace_id),
+        Some(&[source_id]),
+        &config,
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        unfiltered
+            .iter()
+            .any(|result| result.id.chunk_id == path_matched_chunk_id),
+        "an unfiltered search should expand into the path-matched file, got {:?}",
+        unfiltered
+            .iter()
+            .map(|result| &result.item_uri)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !filtered.is_empty(),
+        "the first source should still answer the filtered search"
+    );
+    for result in &filtered {
+        assert_eq!(
+            result.id.source_id, source_id,
+            "{} comes from outside the requested source",
+            result.item_uri
+        );
+    }
 }
 
 // Cleanup helper

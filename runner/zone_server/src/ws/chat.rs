@@ -3405,7 +3405,7 @@ async fn prepare_chat(
         let query_embedding = match state.embedding_service() {
             Some(embedding_service) => {
                 match embedding_service
-                    .embed(&zone_context::embed_query_text(
+                    .embed(&abnegate_index::embed_query_text(
                         embedding_service.model(),
                         content,
                     ))
