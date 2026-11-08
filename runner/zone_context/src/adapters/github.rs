@@ -1087,14 +1087,6 @@ mod tests {
         )
     }
 
-    fn assert_repository_not_found<T: std::fmt::Debug>(result: Result<T>, repository: &str) {
-        let expected = format!("Repository not found: {repository}");
-        assert!(
-            matches!(&result, Err(ContextError::InvalidSourceConfig(message)) if *message == expected),
-            "{result:?}"
-        );
-    }
-
     fn test_repository() -> Value {
         json!({
             "owner": "test-owner",
@@ -1247,75 +1239,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_github_adapter_fetch_full() {
+    async fn a_missing_repository_fails_every_strategy() {
         let mock_server = MockServer::start().await;
         let adapter = served(&mock_server);
         let source = create_test_source(test_repository());
 
-        let config = FetchConfig::default();
-        let progress = NoOpProgress;
-        let result = adapter
-            .fetch(&source, &config, FetchStrategy::Full, &progress)
-            .await;
+        for strategy in [
+            FetchStrategy::Full,
+            FetchStrategy::MetadataOnly,
+            FetchStrategy::Partial { max_tokens: 1000 },
+            FetchStrategy::Progressive {
+                priority_order: vec!["*.md".to_string()],
+            },
+        ] {
+            let error = adapter
+                .fetch(
+                    &source,
+                    &FetchConfig::default(),
+                    strategy.clone(),
+                    &NoOpProgress,
+                )
+                .await
+                .unwrap_err();
 
-        assert_repository_not_found(result, "test-owner/test-repo");
-    }
-
-    #[tokio::test]
-    async fn test_github_adapter_fetch_metadata_only() {
-        let mock_server = MockServer::start().await;
-        let adapter = served(&mock_server);
-        let source = create_test_source(test_repository());
-
-        let config = FetchConfig::default();
-        let progress = NoOpProgress;
-        let result = adapter
-            .fetch(&source, &config, FetchStrategy::MetadataOnly, &progress)
-            .await;
-
-        assert_repository_not_found(result, "test-owner/test-repo");
-    }
-
-    #[tokio::test]
-    async fn test_github_adapter_fetch_partial() {
-        let mock_server = MockServer::start().await;
-        let adapter = served(&mock_server);
-        let source = create_test_source(test_repository());
-
-        let config = FetchConfig::default();
-        let progress = NoOpProgress;
-        let result = adapter
-            .fetch(
-                &source,
-                &config,
-                FetchStrategy::Partial { max_tokens: 1000 },
-                &progress,
-            )
-            .await;
-
-        assert_repository_not_found(result, "test-owner/test-repo");
-    }
-
-    #[tokio::test]
-    async fn test_github_adapter_fetch_progressive() {
-        let mock_server = MockServer::start().await;
-        let adapter = served(&mock_server);
-        let source = create_test_source(test_repository());
-
-        let config = FetchConfig::default();
-        let progress = NoOpProgress;
-        let result = adapter
-            .fetch(
-                &source,
-                &config,
-                FetchStrategy::Progressive {
-                    priority_order: vec!["*.md".to_string()],
-                },
-                &progress,
-            )
-            .await;
-
-        assert_repository_not_found(result, "test-owner/test-repo");
+            assert_eq!(
+                error.to_string(),
+                "Invalid source configuration: Repository not found: test-owner/test-repo",
+                "{strategy:?}"
+            );
+        }
     }
 
     #[test]
@@ -1368,19 +1320,6 @@ mod tests {
         ));
 
         assert!(GitHubAdapter::should_include_file("README.md", &[], &[]));
-    }
-
-    #[tokio::test]
-    async fn test_github_adapter_handles_api_error() {
-        let mock_server = MockServer::start().await;
-        let adapter = served(&mock_server);
-        let source = create_test_source(json!({
-            "owner": "nonexistent-owner-12345",
-            "repo": "nonexistent-repo-67890"
-        }));
-
-        let result = adapter.verify(&source).await;
-        assert_repository_not_found(result, "nonexistent-owner-12345/nonexistent-repo-67890");
     }
 
     #[test]

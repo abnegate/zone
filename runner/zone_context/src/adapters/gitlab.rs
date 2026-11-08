@@ -1020,6 +1020,8 @@ mod tests {
     use wiremock::matchers::header;
     use wiremock::matchers::method;
     use wiremock::matchers::path_regex;
+    use wiremock::matchers::query_param;
+    use wiremock::matchers::query_param_is_missing;
 
     const README_SHA: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const FILE_SHA: &str = "f9e8d7c6b5a40312837f6e5d4c3b2a1098765432";
@@ -1093,7 +1095,10 @@ mod tests {
         }));
 
         let result = adapter.verify(&source).await;
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "a reachable project must verify: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -1118,7 +1123,10 @@ mod tests {
         }));
 
         let result = adapter.verify(&source).await;
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "the token must be sent as PRIVATE-TOKEN: {result:?}"
+        );
     }
 
     #[test]
@@ -1250,6 +1258,7 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path_regex(r".*/repository/tree.*"))
+            .and(query_param("ref", "feature/my-branch"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([
                 {
                     "path": "README.md",
@@ -1283,7 +1292,10 @@ mod tests {
             .fetch(&source, &config, FetchStrategy::MetadataOnly, &progress)
             .await;
 
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "the tree must be read at feature/my-branch: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -1292,6 +1304,8 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path_regex(r".*/repository/tree.*"))
+            .and(query_param("ref", "fix/bug-123&feature=new"))
+            .and(query_param_is_missing("feature"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([
                 {
                     "path": "file.txt",
@@ -1326,7 +1340,10 @@ mod tests {
             .fetch(&source, &config, FetchStrategy::MetadataOnly, &progress)
             .await;
 
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "the whole branch must reach GitLab as one ref: {result:?}"
+        );
     }
 
     fn adapter_message(error: ContextError) -> String {

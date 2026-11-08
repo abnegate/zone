@@ -663,6 +663,10 @@ async fn a_token_that_is_not_a_header_value_is_a_config_error_unsent() {
     ] {
         assert!(matches!(error, ContextError::Config(_)), "{error:?}");
         assert_eq!(error.to_string(), MALFORMED_TOKEN);
+        assert!(
+            !format!("{error} {error:?}").contains("bad"),
+            "the error leaks the token: {error:?}"
+        );
     }
     assert!(requests(&server).await.is_empty());
 }
