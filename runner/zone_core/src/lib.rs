@@ -11,10 +11,12 @@
 //! - Session management
 
 pub mod agent;
+pub mod application;
 pub mod commands;
 pub mod context;
 pub mod error;
 pub mod llm;
+pub mod local;
 pub mod mcp;
 pub mod servers;
 pub mod session;

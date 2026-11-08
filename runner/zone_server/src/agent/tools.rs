@@ -10,6 +10,9 @@
 //! File and shell operations run in the server runtime, inside the container
 //! for Docker deployments, with the server process permissions.
 
+pub mod context;
+pub mod environment;
+
 use abnegate_agent_cli::AgentKind;
 use abnegate_llm::ToolDefinition;
 use async_trait::async_trait;
