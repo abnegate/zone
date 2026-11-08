@@ -2,6 +2,8 @@ use crate::error::ContextError;
 use crate::error::Result;
 use abnegate_secret::SecretValue;
 use reqwest::header::HeaderValue;
+use sha2::Digest;
+use sha2::Sha256;
 
 const MALFORMED: &str = "Invalid authorization token format (token not logged for security)";
 
@@ -18,6 +20,16 @@ impl Credential {
 
     pub(crate) fn secret(&self) -> &SecretValue {
         &self.0
+    }
+
+    pub(crate) fn fingerprint(&self) -> String {
+        if self.0.is_empty() {
+            return String::new();
+        }
+        Sha256::digest(self.0.expose().as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 
@@ -58,6 +70,21 @@ mod tests {
         let credential = Credential::checked(Some("ghp_abc")).unwrap();
 
         assert_eq!(credential.secret().expose(), "ghp_abc");
+    }
+
+    #[test]
+    fn a_fingerprint_never_holds_the_token_and_tells_tokens_apart() {
+        let fingerprint = |token| Credential::checked(token).unwrap().fingerprint();
+
+        let first = fingerprint(Some("glpat-first"));
+        let second = fingerprint(Some("glpat-second"));
+
+        assert!(!first.contains("glpat-first"), "{first}");
+        assert!(!second.contains("glpat-second"), "{second}");
+        assert_ne!(first, second);
+        assert_eq!(first, fingerprint(Some("glpat-first")));
+        assert!(fingerprint(None).is_empty());
+        assert!(fingerprint(Some("")).is_empty());
     }
 
     #[test]

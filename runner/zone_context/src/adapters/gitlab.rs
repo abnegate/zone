@@ -108,8 +108,8 @@ struct CachedTree {
     size_bytes: usize,
 }
 
-/// Cache key for GitLab trees (project, branch)
-type TreeCacheKey = (String, String);
+/// Cache key for GitLab trees (project, branch, path, credential fingerprint)
+type TreeCacheKey = (String, String, String, String);
 
 #[derive(Debug, Clone)]
 struct TreeCache {
@@ -181,9 +181,10 @@ impl TreeCache {
                 if let Some(removed) = entries.remove(&lru_key) {
                     total_size = total_size.saturating_sub(removed.size_bytes);
                     tracing::debug!(
-                        "Evicted LRU tree cache entry: {}/{} ({} bytes)",
+                        "Evicted LRU tree cache entry: {}@{}:{} ({} bytes)",
                         lru_key.0,
                         lru_key.1,
+                        lru_key.2,
                         removed.size_bytes
                     );
                 }
@@ -510,7 +511,12 @@ impl GitLabAdapter {
         path: Option<&str>,
         token: Option<&str>,
     ) -> Result<Vec<TreeEntry>> {
-        let key = (project.to_string(), branch.to_string());
+        let key = (
+            project.to_string(),
+            branch.to_string(),
+            path.unwrap_or_default().to_string(),
+            Credential::checked(token)?.fingerprint(),
+        );
 
         if let Some(tree) = self.tree_cache.get(&key).await {
             return Ok(tree);
@@ -1029,6 +1035,57 @@ mod tests {
 
     const README_SHA: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
     const FILE_SHA: &str = "f9e8d7c6b5a40312837f6e5d4c3b2a1098765432";
+    const PROJECT_ROUTES: &str = "/projects/[^/]+$";
+    const TREE_ROUTES: &str = r".*/repository/tree.*";
+    const TREE_SUFFIX: &str = "/repository/tree";
+    const PRIVATE_TOKEN: &str = "private-token";
+    const TOKEN: &str = "glpat-cached";
+    const MISSING_TREE: &str = "Failed to fetch tree: 404 Not Found";
+
+    async fn mount_project(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path_regex(PROJECT_ROUTES))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 123,
+                "name": "test-project",
+                "default_branch": "main"
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn listing(file: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "path": file,
+                "type": "blob",
+                "mode": "100644",
+                "id": README_SHA
+            }
+        ]))
+    }
+
+    async fn titles(adapter: &GitLabAdapter, config: serde_json::Value) -> Result<Vec<String>> {
+        let result = adapter
+            .fetch(
+                &create_test_source(config),
+                &FetchConfig::default(),
+                FetchStrategy::MetadataOnly,
+                &NoOpProgress,
+            )
+            .await?;
+        Ok(result.items.into_iter().map(|item| item.title).collect())
+    }
+
+    async fn tree_requests(server: &MockServer) -> usize {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path().ends_with(TREE_SUFFIX))
+            .count()
+    }
 
     fn create_test_source(config: serde_json::Value) -> Source {
         Source {
@@ -1487,6 +1544,58 @@ mod tests {
             );
         }
         assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sources_reading_one_branch_at_different_paths_keep_their_own_trees() {
+        let server = MockServer::start().await;
+        mount_project(&server).await;
+        for (prefix, file) in [("docs", "docs/guide.md"), ("src", "src/lib.rs")] {
+            Mock::given(method("GET"))
+                .and(path_regex(TREE_ROUTES))
+                .and(query_param("path", prefix))
+                .respond_with(listing(file))
+                .mount(&server)
+                .await;
+        }
+        let adapter = served(&server);
+
+        for (prefix, title) in [("docs", "guide.md"), ("src", "lib.rs")] {
+            let read = titles(
+                &adapter,
+                json!({ "project": "test/project", "path": prefix }),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(read, [title], "{prefix}");
+        }
+        assert_eq!(tree_requests(&server).await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_tokenless_source_never_reads_the_tree_a_tokened_one_cached() {
+        let server = MockServer::start().await;
+        mount_project(&server).await;
+        Mock::given(method("GET"))
+            .and(path_regex(TREE_ROUTES))
+            .and(header(PRIVATE_TOKEN, TOKEN))
+            .respond_with(listing("README.md"))
+            .mount(&server)
+            .await;
+        let adapter = served(&server);
+
+        let tokened = titles(
+            &adapter,
+            json!({ "project": "test/project", "token": TOKEN }),
+        )
+        .await
+        .unwrap();
+        let tokenless = titles(&adapter, json!({ "project": "test/project" })).await;
+
+        assert_eq!(tokened, ["README.md"]);
+        assert_eq!(adapter_message(tokenless.unwrap_err()), MISSING_TREE);
+        assert_eq!(tree_requests(&server).await, 2);
     }
 
     #[test]
