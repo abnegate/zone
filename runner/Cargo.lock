@@ -9508,7 +9508,6 @@ dependencies = [
  "futures",
  "glob",
  "mime",
- "percent-encoding",
  "regex",
  "reqwest 0.13.5",
  "scraper",
