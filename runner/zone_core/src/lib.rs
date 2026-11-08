@@ -16,6 +16,7 @@ pub mod context;
 pub mod error;
 pub mod llm;
 pub mod mcp;
+pub mod servers;
 pub mod session;
 pub mod tools;
 pub mod types;

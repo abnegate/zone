@@ -2035,7 +2035,7 @@ Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases
 
 Zone's agent loop can attach [Model Context Protocol](https://modelcontextprotocol.io) servers as extra tools. That is how tasks and the CLI run [magents](https://github.com/abnegate/magents) — spawn or message Claude, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode sessions from an agentic run.
 
-Config uses the same JSON shape as Cursor (`mcpServers`). Tool names are prefixed with the server name, so magents' `spawn_session` becomes `magents_spawn_session`.
+Config uses the same JSON shape as Cursor (`mcpServers`). Tool names are `server__tool`: the server name, two underscores, then the tool's own name, so magents' `spawn_session` becomes `magents__spawn_session`. A name is at most 64 characters.
 
 Stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat configured servers as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
 
@@ -2043,9 +2043,13 @@ Stdio servers inherit the Zone process environment, then overlay any `env` map o
 - **Default**: `true`
 - **Description**: Master switch. `false` / `0` / `off` skips every MCP server.
 
+### `ZONE_MCP_AUTO_CONNECT`
+- **Default**: `true`
+- **Description**: When no enabled stdio server is configured and `magents` is on `PATH`, attach `magents mcp` automatically. Disabled servers and servers with only a `url` do not count as configured.
+
 ### `ZONE_MCP_AUTO_MAGENTS`
 - **Default**: `true`
-- **Description**: When no servers are configured and `magents` is on `PATH`, attach `magents mcp` automatically.
+- **Description**: The older name for `ZONE_MCP_AUTO_CONNECT`, still honoured. It can only turn the `magents mcp` fallback off: when either variable is off, the fallback is not attached, and neither turns it back on while `ZONE_MCP_ENABLED` is off.
 
 ### `ZONE_MCP_CONFIG`
 - **Default**: *empty* (falls back to `~/.zone/mcp.json` if that file exists)
@@ -2398,7 +2402,7 @@ Need to find a specific config? Quick lookup:
   COMFYUI_COMMIT
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
-- **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS
+- **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_CONNECT, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS
 - **Auto projects**: ZONE_AUTO_ENABLED, ZONE_AUTO_PARALLEL_TASKS, ZONE_AUTO_REVIEW_MODELS, ZONE_AUTO_REVIEW_BOTS, ZONE_AUTO_ADMIN_MERGE, ZONE_AUTO_*
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
