@@ -8,24 +8,16 @@ const MALFORMED: &str = "Invalid authorization token format (token not logged fo
 pub(crate) struct Credential(SecretValue);
 
 impl Credential {
-    pub(crate) fn bearer(token: Option<&str>) -> Result<Self> {
-        Self::checked(token, |token| format!("Bearer {token}"))
-    }
-
-    pub(crate) fn private(token: Option<&str>) -> Result<Self> {
-        Self::checked(token, str::to_string)
+    pub(crate) fn checked(token: Option<&str>) -> Result<Self> {
+        let token = token.unwrap_or_default();
+        if !token.is_empty() && HeaderValue::from_str(token).is_err() {
+            return Err(ContextError::Config(MALFORMED.to_string()));
+        }
+        Ok(Self(SecretValue::new(token)))
     }
 
     pub(crate) fn secret(&self) -> &SecretValue {
         &self.0
-    }
-
-    fn checked(token: Option<&str>, header: fn(&str) -> String) -> Result<Self> {
-        let token = token.unwrap_or_default();
-        if !token.is_empty() && HeaderValue::from_str(&header(token)).is_err() {
-            return Err(ContextError::Config(MALFORMED.to_string()));
-        }
-        Ok(Self(SecretValue::new(token)))
     }
 }
 
@@ -38,26 +30,39 @@ mod tests {
     }
 
     #[test]
-    fn a_token_with_a_newline_is_refused_for_either_header() {
-        assert!(refused(Credential::bearer(Some("bad\ntoken"))));
-        assert!(refused(Credential::private(Some("bad\ntoken"))));
+    fn a_token_with_a_newline_is_refused() {
+        assert!(refused(Credential::checked(Some("bad\ntoken"))));
+    }
+
+    #[test]
+    fn the_bearer_prefix_never_changes_whether_a_token_is_valid() {
+        for token in [
+            "ghp_abc",
+            "glpat-abc",
+            "tab\tinside",
+            "trailing ",
+            "bad\ntoken",
+            "na\u{ef}ve",
+            "delete\u{7f}",
+        ] {
+            assert_eq!(
+                HeaderValue::from_str(token).is_ok(),
+                HeaderValue::from_str(&format!("Bearer {token}")).is_ok(),
+                "{token:?}"
+            );
+        }
     }
 
     #[test]
     fn a_well_formed_token_is_kept() {
-        let credential = Credential::bearer(Some("ghp_abc")).unwrap();
+        let credential = Credential::checked(Some("ghp_abc")).unwrap();
 
         assert_eq!(credential.secret().expose(), "ghp_abc");
-        assert!(Credential::private(Some("glpat-abc")).is_ok());
     }
 
     #[test]
     fn an_empty_or_absent_token_is_accepted_and_sends_nothing() {
-        for credential in [
-            Credential::bearer(None),
-            Credential::bearer(Some("")),
-            Credential::private(None),
-        ] {
+        for credential in [Credential::checked(None), Credential::checked(Some(""))] {
             assert!(credential.unwrap().secret().is_empty());
         }
     }

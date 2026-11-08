@@ -475,7 +475,7 @@ impl GitHubAdapter {
         Self::validate_github_identifier(owner, "owner")?;
         Self::validate_github_identifier(repo, "repo")?;
 
-        let credential = Credential::bearer(token)?;
+        let credential = Credential::checked(token)?;
         let service = self.service()?;
         let repository = Repository::new(owner, repo)
             .map_err(|error| Self::repository_error(owner, repo, error))?;
@@ -499,7 +499,7 @@ impl GitHubAdapter {
         Self::validate_github_identifier(repo, "repo")?;
         Self::validate_github_identifier(branch, "branch")?;
 
-        let credential = Credential::bearer(token)?;
+        let credential = Credential::checked(token)?;
         let service = self.service()?;
         let repository = Repository::new(owner, repo).map_err(Self::tree_error)?;
 
@@ -609,7 +609,7 @@ impl GitHubAdapter {
         Self::validate_github_identifier(&config.repo, "repo")?;
         Self::validate_github_identifier(branch, "branch")?;
 
-        let credential = Credential::bearer(config.token.as_deref())?;
+        let credential = Credential::checked(config.token.as_deref())?;
         let service = self.service()?;
         let repository =
             Repository::new(&config.owner, &config.repo).map_err(Self::content_error)?;

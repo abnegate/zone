@@ -456,7 +456,7 @@ impl GitLabAdapter {
     ) -> Result<RemoteBranchName> {
         Self::validate_gitlab_identifier(project, "project")?;
 
-        let credential = Credential::private(token)?;
+        let credential = Credential::checked(token)?;
         let service = self.service()?;
         let parsed = Self::project(project)?;
 
@@ -487,7 +487,7 @@ impl GitLabAdapter {
             Self::validate_path(path)?;
         }
 
-        let credential = Credential::private(token)?;
+        let credential = Credential::checked(token)?;
         let service = self.service()?;
         let project = Self::project(project)?;
         let prefix = path
@@ -568,7 +568,7 @@ impl GitLabAdapter {
     ) -> Result<Blob> {
         Self::validate_gitlab_identifier(project, "project")?;
 
-        let credential = Credential::private(token)?;
+        let credential = Credential::checked(token)?;
         let service = self.service()?;
         let project = Self::project(project)?;
 
