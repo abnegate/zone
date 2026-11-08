@@ -1,6 +1,9 @@
 //! Exercise the real streaming loop against deterministic provider responses.
 use crate::common;
 
+use abnegate_agent::Tool;
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::job::{self, Jobs};
 use abnegate_llm::{LlmConfig, Message, Role, ToolCall};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -13,8 +16,6 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::LlmClient;
-use zone_core::tools::job::{self, Jobs};
-use zone_core::tools::{Session, Tool};
 use zone_core::variables::Variables;
 use zone_server::agent::approval::refusal::{APPROVAL_CANCELLED, DENIED};
 use zone_server::agent::prompt;
@@ -1096,7 +1097,7 @@ async fn the_assembled_system_prompt_reaches_the_provider_in_section_order() {
 /// pin that string beside the other three the prompt layer owns.
 #[tokio::test]
 async fn the_turn_offers_the_wait_and_carries_no_surviving_poll_instruction() {
-    /// Over `MAX_SLEEP_SECS`, so the sleep cap refuses it and the model reads
+    /// Over `MAXIMUM_SLEEP`, so the sleep cap refuses it and the model reads
     /// what it is told to do instead.
     const OVER_CAP: &str = "sleep 120";
 
@@ -1403,7 +1404,7 @@ async fn a_stated_reason_reaches_the_approval_frame_and_the_stored_record() {
 #[tokio::test]
 async fn a_side_effecting_call_omitting_its_reason_still_executes() {
     assert!(
-        zone_core::tools::WriteFileTool.parameters_schema()["required"]
+        abnegate_agent::tool::WriteFileTool.parameters_schema()["required"]
             .as_array()
             .expect("required array")
             .iter()

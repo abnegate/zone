@@ -4,6 +4,7 @@ use crate::common::{
     MEDIA, TestClient, create_test_pool, create_test_router, create_test_state, test_config,
     test_email, test_password,
 };
+use abnegate_agent::tool::job::JobStarted;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{EncodingKey, Header, encode};
@@ -26,13 +27,12 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
-use zone_core::tools::job::{JobExited, JobStarted};
 use zone_server::{
     agent::wait::{Verdict, WaitSettled, Waiting},
     auth::validate_access_token,
     config::Config,
     db::{actions, chats},
-    ws::chat::ServerMessage,
+    ws::chat::{ServerMessage, job::JobExit},
 };
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -1329,11 +1329,7 @@ async fn a_tool_call_records_where_in_the_answer_it_ran() {
 /// than that and are what the console's schemas are written against, so they
 /// are pinned here where no model is needed to read them.
 fn job_started() -> JobStarted {
-    JobStarted {
-        id: JOB_ID.to_string(),
-        pid: 4242,
-        log_path: JOB_LOG_PATH.to_string(),
-    }
+    JobStarted::new(JOB_ID, 4242, JOB_LOG_PATH)
 }
 
 #[test]
@@ -1363,7 +1359,7 @@ fn a_job_exited_frame_is_matched_by_its_job_and_omits_an_exit_code_it_never_had(
     let message = Uuid::new_v4();
     let exited = |exit_code| ServerMessage::JobExited {
         message_id: message,
-        job: JobExited {
+        job: JobExit {
             id: JOB_ID.to_string(),
             exit_code,
         },

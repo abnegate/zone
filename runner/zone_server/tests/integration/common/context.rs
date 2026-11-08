@@ -3,6 +3,7 @@
 use super::{
     TestClient, create_test_router, create_test_state, test_config, test_email, test_password,
 };
+use abnegate_agent::context::{ContextSource, ContextUsage, Policy};
 use axum::http::StatusCode;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -21,7 +22,6 @@ use wiremock::{
     Mock, MockServer, Request, ResponseTemplate,
     matchers::{method, path},
 };
-use zone_core::context::{ContextSource, ContextUsage, Policy};
 use zone_server::config::Config;
 use zone_server::db::{chats, context::Store};
 use zone_server::services::chat::session::{LEASE_LIFETIME, Settings};
@@ -33,7 +33,7 @@ pub type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// one page in the durable entry and in every request that carries it.
 pub const PAGE_CHARS: usize = 8_000;
 
-/// `zone_core` estimates one token per four UTF-8 bytes.
+/// `abnegate_agent::context` estimates one token per four UTF-8 bytes.
 const BYTES_PER_TOKEN: u64 = 4;
 
 /// Wide enough that measuring a chat's fixed prefix is never itself budget-bound.
@@ -75,11 +75,11 @@ fn page_tokens() -> u64 {
 fn window_for(budget: u64) -> u64 {
     let settings = Settings::from_env().unwrap_or_default();
     let threshold = |limit: u64| {
-        Policy {
-            limit: Some(limit),
-            reserved: settings.reserved(Some(limit)),
-            source: ContextSource::Configured,
-        }
+        Policy::new(
+            Some(limit),
+            settings.reserved(Some(limit)),
+            ContextSource::Configured,
+        )
         .threshold()
         .unwrap_or_default()
     };
