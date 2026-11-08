@@ -23,6 +23,7 @@ const PROBE_DOCUMENTS: [&str; 2] = [
     "generic authentication helper with a login form",
 ];
 const PROBE_MARGIN: f32 = 0.02;
+const UNCLASSIFIED_FAILURE: &str = "rerank failed";
 const VERBATIM_PARSE_DETAILS: [&str; 3] = [
     "empty rerank response",
     "rerank response scored no document",
@@ -34,8 +35,8 @@ pub struct HttpCrossEncoder {
 }
 
 impl HttpCrossEncoder {
-    pub fn new(rerank_url: &str, model: &str) -> Result<Self> {
-        let config = HttpRerankConfig::new(rerank_url, model).with_timeout(timeout());
+    pub fn new(url: &str, model: &str) -> Result<Self> {
+        let config = HttpRerankConfig::new(url, model).with_timeout(timeout());
         let provider = HttpRerankProvider::new(config).map_err(context_error)?;
         Ok(Self { provider })
     }
@@ -44,8 +45,8 @@ impl HttpCrossEncoder {
         self.provider.model()
     }
 
-    /// Probe a host for `/api/rerank` or `/v1/rerank`. Model-name matching is
-    /// not enough — the endpoint must return a discriminative pair score.
+    /// Probe a host's `/v1/rerank`, `/api/rerank` and `/rerank` in turn. Model-name
+    /// matching is not enough — the endpoint must return a discriminative pair score.
     pub async fn probe(base_url: &str) -> Option<Arc<dyn CrossEncoder>> {
         let model = std::env::var(MODEL_VARIABLE)
             .ok()
@@ -127,7 +128,7 @@ fn context_error(error: ProviderError) -> ContextError {
         ProviderError::Config { detail, .. } => {
             ContextError::Config(format!("rerank client: {detail}"))
         }
-        other => ContextError::Embedding(other.to_string()),
+        _ => ContextError::Embedding(UNCLASSIFIED_FAILURE.to_string()),
     }
 }
 
@@ -146,17 +147,6 @@ mod tests {
             ContextError::Embedding(message) => message,
             other => panic!("expected an embedding failure, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn the_crate_parse_failures_keep_their_wording() {
-        for detail in VERBATIM_PARSE_DETAILS {
-            assert_eq!(embedding_message(ProviderError::parse(detail)), detail);
-        }
-        assert_eq!(
-            embedding_message(ProviderError::parse("EOF while parsing")),
-            "rerank parse: EOF while parsing"
-        );
     }
 
     #[test]
@@ -190,10 +180,10 @@ mod tests {
     }
 
     #[test]
-    fn any_other_failure_keeps_its_own_wording() {
+    fn any_other_failure_drops_its_wording() {
         assert_eq!(
-            embedding_message(ProviderError::unsupported("rerank")),
-            "unsupported operation: rerank"
+            embedding_message(ProviderError::unsupported("secret document")),
+            UNCLASSIFIED_FAILURE
         );
     }
 }

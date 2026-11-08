@@ -1,18 +1,21 @@
 //! Cross-encoder rerank: joint (query, document) scoring.
 //!
-//! A lexical cross-encoder always runs in the learned ranker. Neural scores
-//! are applied only after a probe proves the scorer can order a known pair.
-//! Ollama `/api/rerank` does not exist, and generate-yes/no on a Qwen3
-//! GGUF is not a logit reranker — those paths are not attached by default.
+//! Neural scores are applied only after a probe proves the scorer can order a
+//! known pair. Ollama `/api/rerank` does not exist, and generate-yes/no on a
+//! Qwen3 GGUF is not a logit reranker — those paths are not attached by default.
 
 mod http_cross_encoder;
 
-use async_trait::async_trait;
 use std::sync::Arc;
+
+use async_trait::async_trait;
 
 pub use http_cross_encoder::HttpCrossEncoder;
 
 use crate::error::Result;
+
+const FALLBACK_SCORE: f32 = 0.4;
+const URL_VARIABLE: &str = "RERANK_URL";
 
 #[async_trait]
 pub trait CrossEncoder: Send + Sync {
@@ -21,7 +24,11 @@ pub trait CrossEncoder: Send + Sync {
     async fn score_documents(&self, query: &str, documents: &[&str]) -> Result<Vec<f32>> {
         let mut scores = Vec::with_capacity(documents.len());
         for document in documents {
-            scores.push(self.score_pair(query, document).await.unwrap_or(0.4));
+            scores.push(
+                self.score_pair(query, document)
+                    .await
+                    .unwrap_or(FALLBACK_SCORE),
+            );
         }
         Ok(scores)
     }
@@ -29,7 +36,7 @@ pub trait CrossEncoder: Send + Sync {
 
 /// Attach a neural cross-encoder only when a scorer actually ranks.
 pub async fn probe_cross_encoder(ollama_host: &str) -> Option<Arc<dyn CrossEncoder>> {
-    if let Ok(url) = std::env::var("RERANK_URL") {
+    if let Ok(url) = std::env::var(URL_VARIABLE) {
         let trimmed = url.trim().to_string();
         if !trimmed.is_empty()
             && let Some(encoder) = HttpCrossEncoder::probe_url(&trimmed, None).await
