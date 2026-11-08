@@ -7,8 +7,8 @@ use crate::adapters::ProgressCallback;
 use crate::adapters::RateLimitConfig;
 use crate::adapters::SourceAdapter;
 use crate::adapters::SyncState;
+use crate::adapters::credential::Credential;
 use crate::adapters::status::Status;
-use crate::adapters::token::Token;
 use crate::content::ContentCategory;
 use crate::content::ContentItem;
 use crate::content::ContentMetadata;
@@ -442,14 +442,14 @@ impl GitHubAdapter {
         Self::validate_github_identifier(owner, "owner")?;
         Self::validate_github_identifier(repo, "repo")?;
 
-        let token = Token::bearer(token)?;
+        let credential = Credential::bearer(token)?;
         let service = self.service()?;
         let repository = Repository::new(owner, repo)
             .map_err(|error| Self::repository_failed(owner, repo, error))?;
 
         self.rate_limit_config()
             .retried(Self::limited, || {
-                service.get_default_branch(&repository, token.secret())
+                service.get_default_branch(&repository, credential.secret())
             })
             .await?
             .map_err(|error| Self::repository_failed(owner, repo, error))
@@ -467,13 +467,13 @@ impl GitHubAdapter {
         Self::validate_github_identifier(repo, "repo")?;
         Self::validate_github_identifier(branch, "branch")?;
 
-        let token = Token::bearer(token)?;
+        let credential = Credential::bearer(token)?;
         let service = self.service()?;
         let repository = Repository::new(owner, repo).map_err(Self::tree_failed)?;
 
         self.rate_limit_config()
             .retried(Self::limited, || {
-                service.fetch_tree_at(&repository, token.secret(), branch, true)
+                service.fetch_tree_at(&repository, credential.secret(), branch, true)
             })
             .await?
             .map_err(Self::tree_failed)
@@ -540,15 +540,16 @@ impl GitHubAdapter {
         branch: &str,
         path: &str,
     ) -> Result<Result<Contents>> {
-        let (service, repository, path, token) = match self.content_request(config, branch, path) {
-            Ok(request) => request,
-            Err(error) => return Ok(Err(error)),
-        };
+        let (service, repository, path, credential) =
+            match self.content_request(config, branch, path) {
+                Ok(request) => request,
+                Err(error) => return Ok(Err(error)),
+            };
 
         let answer = self
             .rate_limit_config()
             .retried(Self::limited, || {
-                service.fetch_contents(&repository, token.secret(), &path, branch)
+                service.fetch_contents(&repository, credential.secret(), &path, branch)
             })
             .await?;
 
@@ -566,19 +567,19 @@ impl GitHubAdapter {
         config: &GitHubConfig,
         branch: &str,
         path: &str,
-    ) -> Result<(&PullRequestService, Repository, RepositoryPath, Token)> {
+    ) -> Result<(&PullRequestService, Repository, RepositoryPath, Credential)> {
         Self::validate_github_identifier(&config.owner, "owner")?;
         Self::validate_github_identifier(&config.repo, "repo")?;
         Self::validate_github_identifier(branch, "branch")?;
 
-        let token = Token::bearer(config.token.as_deref())?;
+        let credential = Credential::bearer(config.token.as_deref())?;
         let service = self.service()?;
         let repository =
             Repository::new(&config.owner, &config.repo).map_err(Self::content_failed)?;
         let path =
             RepositoryPath::parse(path).map_err(|_| Self::failed(Self::content_not_found()))?;
 
-        Ok((service, repository, path, token))
+        Ok((service, repository, path, credential))
     }
 
     /// Read file bytes as UTF-8 text, or `None` for a binary blob

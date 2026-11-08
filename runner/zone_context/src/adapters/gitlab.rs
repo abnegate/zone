@@ -7,8 +7,8 @@ use crate::adapters::ProgressCallback;
 use crate::adapters::RateLimitConfig;
 use crate::adapters::SourceAdapter;
 use crate::adapters::SyncState;
+use crate::adapters::credential::Credential;
 use crate::adapters::status::Status;
-use crate::adapters::token::Token;
 use crate::content::ContentCategory;
 use crate::content::ContentItem;
 use crate::content::ContentMetadata;
@@ -384,14 +384,14 @@ impl GitLabAdapter {
     ) -> Result<RemoteBranchName> {
         Self::validate_gitlab_identifier(project, "project")?;
 
-        let token = Token::private(token)?;
+        let credential = Credential::private(token)?;
         let service = self.service()?;
         let parsed = Self::project(project)?;
 
         let answer = self
             .rate_limit_config()
             .retried(Self::limited, || {
-                service.get_default_branch(&parsed, token.secret())
+                service.get_default_branch(&parsed, credential.secret())
             })
             .await?;
 
@@ -448,7 +448,7 @@ impl GitLabAdapter {
             Self::validate_path(path)?;
         }
 
-        let token = Token::private(token)?;
+        let credential = Credential::private(token)?;
         let service = self.service()?;
         let project = Self::project(project)?;
         let prefix = path
@@ -458,7 +458,7 @@ impl GitLabAdapter {
 
         self.rate_limit_config()
             .retried(Self::limited, || {
-                service.fetch_tree_at(&project, token.secret(), branch, prefix.as_ref())
+                service.fetch_tree_at(&project, credential.secret(), branch, prefix.as_ref())
             })
             .await?
             .map_err(Self::tree_error)
@@ -559,13 +559,13 @@ impl GitLabAdapter {
     ) -> Result<Blob> {
         Self::validate_gitlab_identifier(project, "project")?;
 
-        let token = Token::private(token)?;
+        let credential = Credential::private(token)?;
         let service = self.service()?;
         let project = Self::project(project)?;
 
         self.rate_limit_config()
             .retried(Self::limited, || {
-                service.fetch_blob(&project, token.secret(), &entry.sha, usize::MAX)
+                service.fetch_blob(&project, credential.secret(), &entry.sha, usize::MAX)
             })
             .await?
             .map_err(Self::content_error)

@@ -3,6 +3,7 @@
 //! This module provides the `SourceAdapter` trait and implementations for
 //! fetching content from various source types.
 
+mod credential;
 mod filesystem;
 mod github;
 mod gitlab;
@@ -10,7 +11,6 @@ mod notion;
 mod registry;
 mod status;
 mod text;
-mod token;
 mod web;
 
 pub use filesystem::FilesystemAdapter;

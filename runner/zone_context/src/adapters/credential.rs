@@ -5,9 +5,9 @@ use reqwest::header::HeaderValue;
 
 const MALFORMED: &str = "Invalid authorization token format (token not logged for security)";
 
-pub(crate) struct Token(SecretValue);
+pub(crate) struct Credential(SecretValue);
 
-impl Token {
+impl Credential {
     pub(crate) fn bearer(token: Option<&str>) -> Result<Self> {
         Self::checked(token, |token| format!("Bearer {token}"))
     }
@@ -33,32 +33,32 @@ impl Token {
 mod tests {
     use super::*;
 
-    fn refused(token: Result<Token>) -> bool {
-        matches!(token, Err(ContextError::Config(message)) if message == MALFORMED)
+    fn refused(credential: Result<Credential>) -> bool {
+        matches!(credential, Err(ContextError::Config(message)) if message == MALFORMED)
     }
 
     #[test]
     fn a_token_with_a_newline_is_refused_for_either_header() {
-        assert!(refused(Token::bearer(Some("bad\ntoken"))));
-        assert!(refused(Token::private(Some("bad\ntoken"))));
+        assert!(refused(Credential::bearer(Some("bad\ntoken"))));
+        assert!(refused(Credential::private(Some("bad\ntoken"))));
     }
 
     #[test]
     fn a_well_formed_token_is_kept() {
-        let token = Token::bearer(Some("ghp_abc")).unwrap();
+        let credential = Credential::bearer(Some("ghp_abc")).unwrap();
 
-        assert_eq!(token.secret().expose(), "ghp_abc");
-        assert!(Token::private(Some("glpat-abc")).is_ok());
+        assert_eq!(credential.secret().expose(), "ghp_abc");
+        assert!(Credential::private(Some("glpat-abc")).is_ok());
     }
 
     #[test]
     fn an_empty_or_absent_token_is_accepted_and_sends_nothing() {
-        for token in [
-            Token::bearer(None),
-            Token::bearer(Some("")),
-            Token::private(None),
+        for credential in [
+            Credential::bearer(None),
+            Credential::bearer(Some("")),
+            Credential::private(None),
         ] {
-            assert!(token.unwrap().secret().is_empty());
+            assert!(credential.unwrap().secret().is_empty());
         }
     }
 }
