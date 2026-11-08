@@ -94,7 +94,7 @@ pub const TRACE_DETAIL: &str = "Private to the person it belongs to; not shown h
 
 /// The outcome line the trace shows for a finished call.
 pub fn trace_detail(name: &str, detail: &str) -> String {
-    if is_private(name) {
+    if is_private(name) && !zone_core::tools::is_refusal(detail) {
         TRACE_DETAIL.to_string()
     } else {
         detail.to_string()
@@ -816,6 +816,19 @@ mod tests {
             trace_detail("read_file", "fn main() {} (12 lines)"),
             "fn main() {} (12 lines)"
         );
+    }
+
+    /// An approval's outcome is one of a few fixed sentences that name nothing
+    /// remembered, so hiding it would only hide why the call did not run.
+    #[test]
+    fn a_memory_call_keeps_why_its_approval_did_not_go_through() {
+        use zone_core::tools::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
+
+        for refusal in [DENIED, APPROVAL_TIMED_OUT, APPROVAL_CANCELLED] {
+            let failed = format!("Error: {refusal}");
+            assert_eq!(trace_detail(MEMORY_WRITE, refusal), refusal);
+            assert_eq!(trace_detail(MEMORY_WRITE, &failed), failed);
+        }
     }
 
     /// PR 6's rule for its timeout strings, carried over: a refusal a model

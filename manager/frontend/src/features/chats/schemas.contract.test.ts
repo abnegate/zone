@@ -32,11 +32,16 @@ import {
 } from './schemas';
 import {
   ACTION_TARGETS,
+  APPROVAL_CANCELLED_DETAIL,
+  APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_ANSWER_DETAIL,
+  DENIED_DETAIL,
   PULL_REQUEST_CHECKS,
   PULL_REQUEST_MERGEABILITY,
   PULL_REQUEST_STATES,
   REASONED_TOOLS,
+  TOOL_ERROR_PREFIX,
+  UNFINISHED_DETAIL,
 } from './types';
 
 const CITATIONS_RS = join(
@@ -57,6 +62,8 @@ const QUESTION_RS = join(
 );
 
 const CHAT_WS_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ws/chat.rs');
+
+const TOOLS_MOD_RS = join(import.meta.dir, '../../../../../runner/zone_core/src/tools/mod.rs');
 
 const JOB_RS = join(import.meta.dir, '../../../../../runner/zone_core/src/tools/job.rs');
 
@@ -89,7 +96,7 @@ function rustStringArray(source: string, constantName: string): string[] {
 
 /// Reads the value of a `const NAME: &str = ".."` literal.
 function rustStringConstant(source: string, constantName: string): string {
-  const value = source.match(new RegExp(`const ${constantName}: &str = "([^"]*)";`))?.[1];
+  const value = source.match(new RegExp(`const ${constantName}: &str =\\s*"([^"]*)";`))?.[1];
   if (value === undefined) throw new Error(`${constantName} not found in the Rust source`);
   return value;
 }
@@ -197,6 +204,42 @@ describe('a question call is labelled the same live as it is after a reload', ()
   test('the console writes the detail the server persists, ellipsis included', () => {
     expect(AWAITING_ANSWER_DETAIL).toBe(
       rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'AWAITING_ANSWER_DETAIL')
+    );
+  });
+});
+
+/**
+ * The approval a reader gave is client-only, so after the result settles a
+ * call, or after a reload, the server's words are all that say it was denied.
+ */
+describe('a refused call keeps why it did not run after the server settles it', () => {
+  test('the console reads the words the server tells a denied call', () => {
+    expect(DENIED_DETAIL).toBe(rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'DENIED'));
+  });
+
+  test('the console reads the words the server tells a call nobody approved in time', () => {
+    expect(APPROVAL_TIMED_OUT_DETAIL).toBe(
+      rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'APPROVAL_TIMED_OUT')
+    );
+  });
+
+  test('the console reads the words the server tells a call its stopped turn cancelled', () => {
+    expect(APPROVAL_CANCELLED_DETAIL).toBe(
+      rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'APPROVAL_CANCELLED')
+    );
+  });
+
+  test('the console reads the prefix the server puts in front of a failed call', () => {
+    expect(TOOL_ERROR_PREFIX).toBe(
+      rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'ERROR_PREFIX')
+    );
+  });
+});
+
+describe('a call a stopped turn left open is labelled the same live as after a reload', () => {
+  test('the console writes the detail the server stores an unfinished call with', () => {
+    expect(UNFINISHED_DETAIL).toBe(
+      rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'UNFINISHED_DETAIL')
     );
   });
 });

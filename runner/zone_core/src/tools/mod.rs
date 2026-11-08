@@ -59,6 +59,26 @@ pub const MAX_TOOL_MESSAGE_CHARS: usize = MAX_TOOL_OUTPUT_CHARS + TOOL_FRAMING_C
 /// model reads is longer than the cap it asked for.
 pub(crate) const ERROR_PREFIX: &str = "Error: ";
 
+/// What a call the reader did not allow is told, wherever it was asked. The
+/// console reads a denial back from these words once the approval is gone.
+pub const DENIED: &str = "The user denied this tool call.";
+
+/// What a call is told when nobody answered its approval in time. Not the
+/// reader's answer, so it reads apart from [`DENIED`].
+pub const APPROVAL_TIMED_OUT: &str =
+    "Nobody answered the approval request in time, so this tool call did not run.";
+
+/// What a call is told when its turn stopped while it waited for approval.
+pub const APPROVAL_CANCELLED: &str =
+    "The turn stopped before this tool call was approved, so it did not run.";
+
+/// Whether a call's outcome line is one of the fixed refusals above, as a
+/// permission card states it or as a failed call's error.
+pub fn is_refusal(detail: &str) -> bool {
+    let bare = detail.strip_prefix(ERROR_PREFIX).unwrap_or(detail);
+    [DENIED, APPROVAL_TIMED_OUT, APPROVAL_CANCELLED].contains(&bare)
+}
+
 /// Longest a rendered approval preview may run.
 ///
 /// The reader is deciding, not reading. A preview past a screenful is one

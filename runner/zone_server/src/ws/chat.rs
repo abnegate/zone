@@ -984,7 +984,7 @@ fn trace_started(
         name: name.clone(),
         arguments: shown.clone(),
         success: false,
-        detail: "Did not finish".to_string(),
+        detail: UNFINISHED_DETAIL.to_string(),
         duration_ms: 0,
         at: Some(at),
         reasoning: reasoning.clone(),
@@ -1148,6 +1148,11 @@ const STOPPED_AFTER_WAITING: &str = "[Stopped while waiting]";
 /// string the console writes on the live frame, so a reload does not relabel
 /// the same call.
 const AWAITING_ANSWER_DETAIL: &str = "Waiting for your answer…";
+
+/// The outcome a call is stored with until its result replaces it, so it is
+/// what a call the turn never finished is left showing. The console writes the
+/// same string onto a call a stopped turn left open.
+const UNFINISHED_DETAIL: &str = "Did not finish";
 
 /// Another writer took the chat's lease, so this turn may no longer persist.
 const OWNERSHIP_LOST: &str = "Chat generation ownership was lost";

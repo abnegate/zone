@@ -854,6 +854,112 @@ test.describe('Chats Page', () => {
       );
     });
 
+    test('labels each tool call by its state and shows no bare stream label', async ({
+      page,
+    }, testInfo) => {
+      const agentChat = generateMockChat('chat-1', 'Agent Chat', 'llama3.2', false, {
+        agent_enabled: true,
+      });
+      const shell = { arguments: '{"command":"ls"}', duration_ms: 40 };
+      await mockChatRoutes(page, agentChat, [
+        generateMockMessage('msg-user', 'chat-1', 'user', 'Tidy the repository'),
+        {
+          ...generateMockMessage('msg-asst', 'chat-1', 'assistant', 'I tried two things.'),
+          metadata: {
+            tool_calls: [
+              { ...shell, id: 'call_ran', name: 'run_shell', success: true, detail: 'stdout:' },
+              {
+                ...shell,
+                id: 'call_denied',
+                name: 'write_file',
+                success: false,
+                detail: 'Error: The user denied this tool call.',
+              },
+              {
+                ...shell,
+                id: 'call_timed_out',
+                name: 'apply_patch',
+                success: false,
+                detail:
+                  'Error: Nobody answered the approval request in time, so this tool call did not run.',
+              },
+              {
+                ...shell,
+                id: 'call_cancelled',
+                name: 'run_command',
+                success: false,
+                detail:
+                  'Error: The turn stopped before this tool call was approved, so it did not run.',
+              },
+            ],
+          },
+        },
+      ]);
+      await page.routeWebSocket(/\/ws\/chats\//, (ws) => {
+        ws.onMessage((message) => {
+          const payload = JSON.parse(typeof message === 'string' ? message : message.toString());
+          if (payload.type === 'auth') {
+            ws.send(JSON.stringify({ type: 'init', chat_id: 'chat-1', status: 'connected' }));
+            return;
+          }
+          if (payload.type !== 'send') return;
+          const frames = [
+            { type: 'message_saved', message_id: 'msg-next', role: 'user', content: payload.content },
+            { type: 'message_start', message_id: 'msg-live', role: 'assistant' },
+            {
+              type: 'tool_call',
+              message_id: 'msg-live',
+              tool_call_id: 'call_running',
+              name: 'run_command',
+              arguments: '{"command":"cargo","args":["test"]}',
+            },
+            {
+              type: 'tool_call',
+              message_id: 'msg-live',
+              tool_call_id: 'call_waiting',
+              name: 'run_shell',
+              arguments: '{"command":"rm -rf target"}',
+            },
+            {
+              type: 'tool_approval_required',
+              message_id: 'msg-live',
+              tool_call_id: 'call_waiting',
+              name: 'run_shell',
+              arguments: '{"command":"rm -rf target"}',
+            },
+          ];
+          for (const frame of frames) ws.send(JSON.stringify(frame));
+        });
+      });
+      await page.reload();
+      await page.click('.chat-item');
+
+      const stored = page.getByTestId('tool-trace').first().getByTestId('tool-call');
+      await expect(stored).toHaveCount(4);
+      await page.fill('.message-form textarea', 'Clean the build output too');
+      await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
+      const live = page.getByTestId('tool-trace').nth(1).getByTestId('tool-call');
+      await expect(live).toHaveCount(2);
+      await expect(page.getByTestId('tool-approve')).toBeVisible();
+      await page
+        .locator('.messages-container')
+        .screenshot({ path: testInfo.outputPath('tool-trace-states.png'), animations: 'disabled' });
+
+      await expect(stored.nth(0).locator('.tool-call-name')).toHaveText('Ran a shell command');
+      await expect(stored.nth(0).locator('.tool-call-detail')).toHaveText('');
+      await expect(stored.nth(1).locator('.tool-call-name')).toHaveText('Denied writing a file');
+      await expect(stored.nth(2).locator('.tool-call-name')).toHaveText(
+        'Approval timed out for patching a file'
+      );
+      await expect(stored.nth(3).locator('.tool-call-name')).toHaveText(
+        'Cancelled running a command'
+      );
+      await expect(live.nth(0).locator('.tool-call-name')).toHaveText('Running a command');
+      await expect(live.nth(1).locator('.tool-call-name')).toHaveText(
+        'Waiting to run a shell command'
+      );
+    });
+
     test('draws each tool call after the text written before it, live and after reload', async ({
       page,
     }, testInfo) => {
