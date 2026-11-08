@@ -48,10 +48,7 @@ impl HttpCrossEncoder {
     /// Probe a host's `/v1/rerank`, `/api/rerank` and `/rerank` in turn. Model-name
     /// matching is not enough — the endpoint must return a discriminative pair score.
     pub async fn probe(base_url: &str) -> Option<Arc<dyn CrossEncoder>> {
-        let model = std::env::var(MODEL_VARIABLE)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| DEFAULT_MODEL.into());
+        let model = model(None);
         let base = base_url.trim_end_matches('/');
         for path in PROBE_PATHS {
             if let Some(encoder) = Self::probe_url(&format!("{base}{path}"), Some(&model)).await {
@@ -62,10 +59,7 @@ impl HttpCrossEncoder {
     }
 
     pub async fn probe_url(url: &str, model: Option<&str>) -> Option<Arc<dyn CrossEncoder>> {
-        let model = model
-            .map(str::to_string)
-            .or_else(|| std::env::var(MODEL_VARIABLE).ok())
-            .unwrap_or_else(|| DEFAULT_MODEL.into());
+        let model = self::model(model);
         let encoder = Self::new(url, &model).ok()?;
         let scores = encoder
             .score_documents(PROBE_QUERY, &PROBE_DOCUMENTS)
@@ -99,6 +93,17 @@ impl CrossEncoder for HttpCrossEncoder {
             .await
             .map_err(context_error)
     }
+}
+
+fn model(explicit: Option<&str>) -> String {
+    resolve_model(explicit, std::env::var(MODEL_VARIABLE).ok())
+}
+
+fn resolve_model(explicit: Option<&str>, environment: Option<String>) -> String {
+    explicit
+        .map(str::to_string)
+        .or_else(|| environment.filter(|value| !value.trim().is_empty()))
+        .unwrap_or_else(|| DEFAULT_MODEL.into())
 }
 
 fn timeout() -> Duration {
@@ -177,6 +182,34 @@ mod tests {
                 if message == "rerank client: invalid base URL: relative URL"),
             "{error:?}"
         );
+    }
+
+    #[test]
+    fn an_explicit_model_wins() {
+        assert_eq!(
+            resolve_model(Some("explicit"), Some("environment".into())),
+            "explicit"
+        );
+    }
+
+    #[test]
+    fn the_environment_model_fills_in_for_a_missing_argument() {
+        assert_eq!(
+            resolve_model(None, Some("environment".into())),
+            "environment"
+        );
+        assert_eq!(resolve_model(None, None), DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn a_blank_environment_model_is_absent() {
+        for blank in ["", "   ", "\t\n"] {
+            assert_eq!(
+                resolve_model(None, Some(blank.into())),
+                DEFAULT_MODEL,
+                "{blank:?}"
+            );
+        }
     }
 
     #[test]
