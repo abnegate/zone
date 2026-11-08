@@ -169,8 +169,8 @@ mod tests {
         assert!(exact > fixture, "exact={exact} fixture={fixture}");
         let mention = score_hit(
             query,
-            "github://abnegate/zone/runner/zone_context/src/embeddings/query.rs@main",
-            "query.rs",
+            "github://abnegate/zone/runner/zone_context/src/embeddings/eval.rs@main",
+            "eval.rs",
             "assert!(rewritten.identifiers.iter().any(|i| i == \"should_skip_blob\"));",
             Some(0.66),
             Some(0.08),
