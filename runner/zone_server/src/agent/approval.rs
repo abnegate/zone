@@ -118,8 +118,7 @@ impl ApprovalPolicy {
         let Some(receiver) = pending else {
             return Decision::Approved;
         };
-        if self.is_auto() {
-            let _ = self.decide(id, true);
+        if self.is_auto() && self.decide(id, true) {
             return Decision::Approved;
         }
         match self.gate.settle(id, APPROVAL_TIMEOUT, receiver).await {
@@ -388,6 +387,26 @@ mod tests {
         policy.deny_all();
         policy.set_auto(true);
         assert_eq!(wait.await.unwrap(), Decision::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn a_decision_delivered_before_the_wait_starts_survives_auto_turning_on() {
+        let policy = ApprovalPolicy::required(ApprovalGate::new());
+
+        let cancelled = policy.expect_decision("call_cancelled");
+        policy.deny_all();
+        let denied = policy.expect_decision("call_denied");
+        assert!(policy.decide("call_denied", false));
+        policy.set_auto(true);
+
+        assert_eq!(
+            policy.awaited_decision("call_cancelled", cancelled).await,
+            Decision::Cancelled
+        );
+        assert_eq!(
+            policy.awaited_decision("call_denied", denied).await,
+            Decision::Denied
+        );
     }
 
     #[tokio::test]
