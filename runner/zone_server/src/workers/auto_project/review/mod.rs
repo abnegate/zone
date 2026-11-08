@@ -254,6 +254,7 @@ fn context() -> ToolContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_agent::Tool;
     use abnegate_agent::ToolError;
     use abnegate_agent::tool::RunCommandTool;
     use abnegate_agent_cli::AgentKind;
