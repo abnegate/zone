@@ -212,7 +212,7 @@ describe('a question call is labelled the same live as it is after a reload', ()
  * The approval a reader gave is client-only, so after the result settles a
  * call, or after a reload, the server's words are all that say it was denied.
  */
-describe('a denied call stays labelled denied after the server settles it', () => {
+describe('a refused call keeps why it did not run after the server settles it', () => {
   test('the console reads the words the server tells a denied call', () => {
     expect(DENIED_DETAIL).toBe(rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'DENIED'));
   });

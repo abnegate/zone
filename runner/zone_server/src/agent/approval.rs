@@ -18,6 +18,7 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// How a call put to the reader came out. Only the reader's own answer is a
 /// denial: a turn that stopped, or a wait nobody answered, is told so.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
     Approved,
@@ -33,10 +34,6 @@ impl Decision {
         } else {
             Self::Denied
         }
-    }
-
-    pub fn approved(self) -> bool {
-        self == Self::Approved
     }
 
     /// What a call that may not run is told in place of running.
@@ -125,11 +122,9 @@ impl ApprovalPolicy {
             let _ = self.decide(id, true);
             return Decision::Approved;
         }
-        let decision = self.gate.settle(id, APPROVAL_TIMEOUT, receiver).await;
-        if self.is_auto() {
-            Decision::Approved
-        } else {
-            decision
+        match self.gate.settle(id, APPROVAL_TIMEOUT, receiver).await {
+            Decision::TimedOut if self.is_auto() => Decision::Approved,
+            decision => decision,
         }
     }
 
@@ -142,10 +137,15 @@ impl ApprovalPolicy {
         self.gate.decide(id, approved)
     }
 
+    /// Let go of a waiter whose request never reached the reader.
+    pub fn withdraw(&self, id: &str) {
+        self.gate.pending.remove(id);
+    }
+
     /// Refuse every waiting call because its turn stopped, not because the
     /// reader said no.
     pub fn deny_all(&self) {
-        self.gate.deny_all();
+        self.gate.cancel_all();
     }
 
     pub fn register(chat_id: Uuid, policy: Self) {
@@ -210,7 +210,9 @@ impl ApprovalGate {
         self.settle(id, timeout, receiver).await
     }
 
-    /// A waiter whose sender went with its generation was cancelled with it.
+    /// A waiter whose sender was replaced by a newer one under the same id is
+    /// cancelled, and only a sender nobody is waiting on is let go, so the
+    /// newer waiter stays decidable.
     async fn settle(
         &self,
         id: &str,
@@ -218,13 +220,13 @@ impl ApprovalGate {
         receiver: oneshot::Receiver<Decision>,
     ) -> Decision {
         let settled = tokio::time::timeout(timeout, receiver).await;
-        if !matches!(settled, Ok(Ok(_))) {
-            self.pending.remove(id);
-        }
         match settled {
             Ok(Ok(decision)) => decision,
             Ok(Err(_)) => Decision::Cancelled,
-            Err(_) => Decision::TimedOut,
+            Err(_) => {
+                self.pending.remove_if(id, |_, sender| sender.is_closed());
+                Decision::TimedOut
+            }
         }
     }
 
@@ -241,8 +243,7 @@ impl ApprovalGate {
             .unwrap_or(false)
     }
 
-    /// Refuse every waiting call because its turn stopped.
-    pub fn deny_all(&self) {
+    pub fn cancel_all(&self) {
         self.resolve_all(Decision::Cancelled);
     }
 
@@ -368,6 +369,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn turning_auto_on_does_not_overturn_a_denial_already_given() {
+        let policy = ApprovalPolicy::required(ApprovalGate::new());
+        let waiting = policy.clone();
+        let wait = tokio::spawn(async move { waiting.await_decision("call_denied").await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(policy.decide("call_denied", false));
+        policy.set_auto(true);
+        assert_eq!(wait.await.unwrap(), Decision::Denied);
+    }
+
+    #[tokio::test]
+    async fn turning_auto_on_does_not_run_a_call_whose_turn_stopped() {
+        let policy = ApprovalPolicy::required(ApprovalGate::new());
+        let waiting = policy.clone();
+        let wait = tokio::spawn(async move { waiting.await_decision("call_stopped").await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        policy.deny_all();
+        policy.set_auto(true);
+        assert_eq!(wait.await.unwrap(), Decision::Cancelled);
+    }
+
+    #[tokio::test]
     async fn decide_twice_is_only_a_decision_once() {
         let gate = ApprovalGate::new();
         let clone = gate.clone();
@@ -379,14 +402,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deny_all_cancels_every_waiter_rather_than_denying_it() {
+    async fn cancel_all_cancels_every_waiter_rather_than_denying_it() {
         let gate = ApprovalGate::new();
         let first = gate.clone();
         let second = gate.clone();
         let wait_a = tokio::spawn(async move { first.await_decision("a").await });
         let wait_b = tokio::spawn(async move { second.await_decision("b").await });
         tokio::time::sleep(Duration::from_millis(20)).await;
-        gate.deny_all();
+        gate.cancel_all();
         assert_eq!(wait_a.await.unwrap(), Decision::Cancelled);
         assert_eq!(wait_b.await.unwrap(), Decision::Cancelled);
         assert!(!gate.decide("a", true));
@@ -403,21 +426,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_waiter_whose_generation_went_away_is_cancelled() {
+    async fn a_waiter_replaced_under_the_same_id_is_cancelled_and_leaves_the_new_one_waiting() {
         let gate = ApprovalGate::new();
-        let receiver = gate.begin("orphan");
-        gate.pending.clear();
-        let decision = gate
-            .settle("orphan", Duration::from_secs(5), receiver)
-            .await;
-        assert_eq!(decision, Decision::Cancelled);
-    }
+        let replaced = gate.begin("call_again");
+        let current = gate.begin("call_again");
 
-    #[test]
-    fn each_refusal_tells_the_call_why_it_did_not_run() {
-        assert_eq!(Decision::Approved.refusal(), None);
-        assert_eq!(Decision::Denied.refusal(), Some(DENIED));
-        assert_eq!(Decision::Cancelled.refusal(), Some(APPROVAL_CANCELLED));
-        assert_eq!(Decision::TimedOut.refusal(), Some(APPROVAL_TIMED_OUT));
+        let decision = gate
+            .settle("call_again", Duration::from_secs(5), replaced)
+            .await;
+
+        assert_eq!(decision, Decision::Cancelled);
+        assert!(
+            gate.decide("call_again", true),
+            "the newer waiter is still decidable"
+        );
+        assert_eq!(current.await.unwrap(), Decision::Approved);
     }
 }

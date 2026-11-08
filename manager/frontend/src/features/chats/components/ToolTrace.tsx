@@ -157,7 +157,7 @@ const REFUSALS = new Map<string, Refusal>(
   ])
 );
 
-const REFUSED: ReadonlySet<ToolState> = new Set<Refusal>(['denied', 'timed_out', 'cancelled']);
+const REFUSED: ReadonlySet<ToolState> = new Set(REFUSALS.values());
 
 function toolState(call: ToolCallRecord): ToolState {
   if (call.approval === 'pending') return 'approval';

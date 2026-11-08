@@ -179,7 +179,7 @@ impl Turn {
             preview: None,
         });
         if !raised {
-            approval.decide(&id, false);
+            approval.withdraw(&id);
             return verdict(None, UNATTENDED);
         }
         let refusal = approval.awaited_decision(&id, pending).await.refusal();
@@ -289,8 +289,8 @@ impl Turn {
             preview: self.tools.effect(name, arguments),
         });
         if !raised {
-            approval.decide(id, false);
-            return Decision::Denied;
+            approval.withdraw(id);
+            return Decision::Cancelled;
         }
         approval.awaited_decision(id, pending).await
     }
@@ -928,7 +928,10 @@ mod tests {
         .await
         .expect("a call nobody can answer must not hold for the approval timeout");
 
+        let told = format!("{:?}", result.content);
         assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert!(told.contains(APPROVAL_CANCELLED), "{told}");
+        assert!(!told.contains(DENIED), "nobody denied it: {told}");
         assert!(!path.exists());
     }
 
