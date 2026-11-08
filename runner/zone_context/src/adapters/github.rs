@@ -377,7 +377,6 @@ impl GitHubAdapter {
             .map(|size| usize::try_from(size).unwrap_or(usize::MAX))
     }
 
-    /// Validate GitHub identifier (owner, repo, branch) to prevent URL injection
     fn validate_github_identifier(identifier: &str, field_name: &str) -> Result<()> {
         if identifier.is_empty() {
             return Err(ContextError::InvalidSourceConfig(format!(
@@ -416,7 +415,6 @@ impl GitHubAdapter {
         }
     }
 
-    /// Map file extension to content type (same as FilesystemAdapter)
     fn get_content_type(path: &str) -> String {
         if let Some(extension_start) = path.rfind('.') {
             let extension = &path[extension_start + 1..].to_lowercase();
@@ -468,7 +466,6 @@ impl GitHubAdapter {
         true
     }
 
-    /// Read the repository's default branch, checking it is accessible
     async fn get_default_branch(
         &self,
         owner: &str,
@@ -626,7 +623,6 @@ impl GitHubAdapter {
         })
     }
 
-    /// Read file bytes as UTF-8 text, or `None` for a binary blob
     fn decode_text_content(content: Vec<u8>) -> Option<String> {
         String::from_utf8(content).ok()
     }
@@ -749,9 +745,8 @@ impl SourceAdapter for GitHubAdapter {
     }
 
     fn rate_limit_config(&self) -> RateLimitConfig {
-        // GitHub rate limits: 5000/hr authenticated, 60/hr unauthenticated
         RateLimitConfig {
-            requests_per_second: 1.0, // Conservative: ~3600/hr
+            requests_per_second: 1.0,
             burst_size: 10,
             retry_after_429: true,
             max_retries: 3,

@@ -108,7 +108,7 @@ struct CachedTree {
     size_bytes: usize,
 }
 
-/// Cache key for GitLab trees (project_id, branch)
+/// Cache key for GitLab trees (project, branch)
 type TreeCacheKey = (String, String);
 
 #[derive(Debug, Clone)]
@@ -346,7 +346,6 @@ impl GitLabAdapter {
         Project::parse(project).map_err(|_| Self::not_found(project))
     }
 
-    /// Validate GitLab identifier to prevent URL injection
     fn validate_gitlab_identifier(identifier: &str, field_name: &str) -> Result<()> {
         if identifier.is_empty() {
             return Err(ContextError::InvalidSourceConfig(format!(
@@ -369,7 +368,6 @@ impl GitLabAdapter {
         Ok(())
     }
 
-    /// Validate path to prevent path traversal attacks
     fn validate_path(path: &str) -> Result<()> {
         if path.contains("..") {
             return Err(ContextError::InvalidSourceConfig(
@@ -475,7 +473,6 @@ impl GitLabAdapter {
             })
     }
 
-    /// Fetch repository tree (recursive, every page)
     async fn get_tree(
         &self,
         project: &str,
@@ -563,7 +560,6 @@ impl GitLabAdapter {
         Ok(tree)
     }
 
-    /// Fetch a file's bytes by its blob sha
     async fn get_blob(
         &self,
         project: &str,
@@ -679,7 +675,6 @@ impl SourceAdapter for GitLabAdapter {
     }
 
     fn rate_limit_config(&self) -> RateLimitConfig {
-        // GitLab rate limits: varies by plan, but conservative default
         RateLimitConfig {
             requests_per_second: 1.0,
             burst_size: 10,

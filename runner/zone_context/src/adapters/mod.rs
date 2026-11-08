@@ -59,13 +59,9 @@ const RETRY_AFTER_SECONDS: u64 = 60;
 
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
-    /// Requests per second limit
     pub requests_per_second: f64,
-    /// Maximum burst size
     pub burst_size: u32,
-    /// Whether to automatically retry on 429
     pub retry_after_429: bool,
-    /// Maximum number of retries
     pub max_retries: u32,
     /// Base delay for exponential backoff (ms)
     pub backoff_base_ms: u64,
@@ -117,7 +113,6 @@ impl RateLimitConfig {
 #[derive(Debug, Clone, Default)]
 pub struct SyncState {
     pub source_id: uuid::Uuid,
-    /// Last sync timestamp
     pub last_sync_at: Option<DateTime<Utc>>,
     /// Continuation cursor (source-specific)
     pub cursor: Option<String>,
