@@ -99,8 +99,29 @@ pub fn split_for_embedding(text: &str, max_chars: usize) -> Vec<String> {
         .min(max_tokens.saturating_sub(1));
     chunk_text(text, max_tokens, overlap)
         .into_iter()
-        .map(|chunk| chunk.text)
+        .flat_map(|chunk| within_budget(chunk.text, max_chars))
         .collect()
+}
+
+/// `chunk_text` windows are whole tokens of four characters and may run one
+/// character past a paragraph break, so a window can overshoot `max_chars` by a
+/// few characters; such a piece is cut into near-equal parts that each fit.
+fn within_budget(piece: String, max_chars: usize) -> Vec<String> {
+    let characters: Vec<char> = piece.chars().collect();
+    if characters.len() <= max_chars {
+        return vec![piece];
+    }
+    let parts = characters.len().div_ceil(max_chars);
+    let shortest = characters.len() / parts;
+    let longer = characters.len() % parts;
+    let mut pieces = Vec::with_capacity(parts);
+    let mut start = 0;
+    for part in 0..parts {
+        let length = shortest + usize::from(part < longer);
+        pieces.push(characters[start..start + length].iter().collect());
+        start += length;
+    }
+    pieces
 }
 
 #[cfg(test)]
@@ -154,6 +175,68 @@ mod tests {
         assert!(pieces.iter().all(|p| p.chars().count() <= 220));
         let joined: String = pieces.concat();
         assert!(joined.contains("word"));
+    }
+
+    const FIRST_IDEOGRAPH: u32 = 0x4E00;
+
+    const BUDGETS: [usize; 6] = [200, 201, 202, 203, 1534, 3000];
+
+    fn distinct_ideographs(count: u32) -> String {
+        (FIRST_IDEOGRAPH..FIRST_IDEOGRAPH + count)
+            .filter_map(char::from_u32)
+            .collect()
+    }
+
+    fn assert_within_budget(pieces: &[String], budget: usize) {
+        assert!(pieces.len() > 1, "{budget}: expected a split");
+        for piece in pieces {
+            assert!(
+                piece.chars().count() <= budget,
+                "{budget}: a piece of {} characters exceeds the budget",
+                piece.chars().count()
+            );
+        }
+    }
+
+    fn assert_covers(text: &str, pieces: &[String], budget: usize) {
+        let mut covered = 0;
+        for piece in pieces {
+            let start = text
+                .find(piece.as_str())
+                .expect("every piece is in the text");
+            assert!(start <= covered, "{budget}: text before {start} is dropped");
+            covered = covered.max(start + piece.len());
+        }
+        assert_eq!(covered, text.len(), "{budget}: the tail is dropped");
+    }
+
+    #[test]
+    fn a_long_identifier_splits_within_the_budget() {
+        let identifier = "should_skip_blob".repeat(400);
+        for budget in BUDGETS {
+            assert_within_budget(&split_for_embedding(&identifier, budget), budget);
+        }
+    }
+
+    #[test]
+    fn a_long_identifier_splits_without_dropping_text() {
+        let identifier = distinct_ideographs(5_000);
+        for budget in BUDGETS {
+            let pieces = split_for_embedding(&identifier, budget);
+            assert_within_budget(&pieces, budget);
+            assert_covers(&identifier, &pieces, budget);
+        }
+    }
+
+    #[test]
+    fn a_paragraph_break_at_the_window_edge_stays_within_the_budget() {
+        let budget = 200;
+        let text = format!("{}\n\n{}", "a".repeat(budget - 1), distinct_ideographs(400));
+
+        let pieces = split_for_embedding(&text, budget);
+
+        assert_within_budget(&pieces, budget);
+        assert_covers(&text, &pieces, budget);
     }
 
     #[test]
