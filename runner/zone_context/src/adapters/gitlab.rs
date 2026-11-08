@@ -29,6 +29,7 @@ use abnegate_vcs::RemoteBranchName;
 use abnegate_vcs::RepositoryPath;
 use abnegate_vcs::TreeEntry;
 use abnegate_vcs::TreeEntryKind;
+use abnegate_vcs::gitlab::GitLabResult;
 use async_trait::async_trait;
 use chrono::Utc;
 use glob::Pattern;
@@ -44,6 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::RwLock;
+use url::Url;
 use zone_core::Source;
 
 /// Binary file extensions to skip (same as GitHub/Filesystem)
@@ -78,6 +80,14 @@ const UNREAD_MESSAGE: &str = "Failed to fetch content";
 
 const MISREAD_CONTENT_MESSAGE: &str = "Failed to parse content";
 
+const INVALID_CONFIG_MESSAGE: &str = "Invalid GitLab config";
+
+const DEFAULT_HOST: &str = "gitlab.com";
+
+const HTTPS_SCHEME: &str = "https";
+
+const API_PATH: &str = "/api/v4";
+
 /// Configuration for GitLab sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitLabConfig {
@@ -94,8 +104,8 @@ pub struct GitLabConfig {
     /// GitLab API token (optional)
     #[serde(default)]
     pub token: Option<String>,
-    /// Base URL for self-hosted GitLab (defaults to gitlab.com; the console's
-    /// wizard stores it as `host`)
+    /// HTTPS URL of a self-hosted GitLab instance, or of its `/api/v4` base
+    /// (defaults to gitlab.com; the console's wizard stores it as `host`)
     #[serde(default, alias = "host")]
     pub base_url: Option<String>,
 }
@@ -108,8 +118,9 @@ struct CachedTree {
     size_bytes: usize,
 }
 
-/// Cache key for GitLab trees (project, branch, path, credential fingerprint)
-type TreeCacheKey = (String, String, String, String);
+/// Cache key for GitLab trees (instance, project, branch, path, credential
+/// fingerprint)
+type TreeCacheKey = (String, String, String, String, String);
 
 #[derive(Debug, Clone)]
 struct TreeCache {
@@ -181,10 +192,11 @@ impl TreeCache {
                 if let Some(removed) = entries.remove(&lru_key) {
                     total_size = total_size.saturating_sub(removed.size_bytes);
                     tracing::debug!(
-                        "Evicted LRU tree cache entry: {}@{}:{} ({} bytes)",
+                        "Evicted LRU tree cache entry: {} {}@{}:{} ({} bytes)",
                         lru_key.0,
                         lru_key.1,
                         lru_key.2,
+                        lru_key.3,
                         removed.size_bytes
                     );
                 }
@@ -212,6 +224,7 @@ impl TreeCache {
 #[derive(Debug, Clone)]
 pub struct GitLabAdapter {
     service: std::result::Result<GitLabService, String>,
+    connect: fn(&str) -> GitLabResult<GitLabService>,
     tree_cache: TreeCache,
 }
 
@@ -227,25 +240,42 @@ impl GitLabAdapter {
     /// Estimated size of a file, since GitLab's tree lists none
     const ESTIMATED_FILE_BYTES: usize = 2048;
 
-    /// Create a new GitLab adapter reading from gitlab.com
+    /// Create a new GitLab adapter reading from gitlab.com, or from the
+    /// instance a source names
     pub fn new() -> Self {
         Self::serving(
             GitLabService::new()
-                .map(GitLabService::with_anonymous_reads)
+                .map(Self::opened)
                 .map_err(Self::unbuilt),
         )
     }
 
-    /// Create a GitLab adapter that reads through `service`
+    /// Create a GitLab adapter that reads through `service` wherever a source
+    /// names no instance of its own
     pub fn with_service(service: GitLabService) -> Self {
-        Self::serving(Ok(service))
+        Self::serving(Ok(Self::opened(service)))
+    }
+
+    /// Reach an `http://` instance a source names over plain HTTP, as a mock
+    /// instance in a test needs; no production configuration permits it
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn allowing_http(self) -> Self {
+        Self {
+            connect: GitLabService::configured_allowing_http,
+            ..self
+        }
     }
 
     fn serving(service: std::result::Result<GitLabService, String>) -> Self {
         Self {
             service,
+            connect: GitLabService::configured,
             tree_cache: TreeCache::new(Self::TREE_CACHE_TTL),
         }
+    }
+
+    fn opened(service: GitLabService) -> GitLabService {
+        service.with_anonymous_reads()
     }
 
     fn unbuilt(error: GitLabError) -> String {
@@ -256,10 +286,72 @@ impl GitLabAdapter {
         format!("{UNBUILT_MESSAGE}: {reason}")
     }
 
+    fn misconfigured(error: GitLabError) -> ContextError {
+        match error {
+            error @ GitLabError::InvalidOrigin => {
+                ContextError::InvalidSourceConfig(format!("{INVALID_CONFIG_MESSAGE}: {error}"))
+            }
+            error => ContextError::Config(Self::unbuilt(error)),
+        }
+    }
+
     fn service(&self) -> Result<&GitLabService> {
         self.service
             .as_ref()
             .map_err(|message| ContextError::Config(message.clone()))
+    }
+
+    /// The service for the instance `config` names, and the instance's name
+    /// in the tree cache, which is empty for gitlab.com
+    fn service_for(&self, config: &GitLabConfig) -> Result<(GitLabService, String)> {
+        let Some(instance) = Self::instance(config) else {
+            return Ok((self.service()?.clone(), String::new()));
+        };
+        let service = (self.connect)(instance)
+            .map(Self::opened)
+            .map_err(Self::misconfigured)?;
+        let url =
+            Url::parse(instance).map_err(|_| Self::misconfigured(GitLabError::InvalidOrigin))?;
+        Ok((service, Self::instance_key(&url)))
+    }
+
+    /// The instance `config` names, trimmed, or `None` where it names
+    /// gitlab.com or nothing
+    fn instance(config: &GitLabConfig) -> Option<&str> {
+        let instance = config
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|instance| !instance.is_empty())?;
+        match Url::parse(instance) {
+            Ok(url) if Self::names_default_host(&url) => None,
+            _ => Some(instance),
+        }
+    }
+
+    fn names_default_host(url: &Url) -> bool {
+        url.scheme() == HTTPS_SCHEME
+            && url.host_str() == Some(DEFAULT_HOST)
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && matches!(url.path().trim_end_matches('/'), "" | API_PATH)
+    }
+
+    fn instance_key(url: &Url) -> String {
+        let path = url.path().trim_end_matches('/');
+        let path = path.strip_suffix(API_PATH).unwrap_or(path);
+        let port = url
+            .port()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default();
+        format!(
+            "{}://{}{port}{path}",
+            url.scheme(),
+            url.host_str().unwrap_or_default()
+        )
     }
 
     fn limited(error: &GitLabError) -> bool {
@@ -385,7 +477,7 @@ impl GitLabAdapter {
 
     fn parse_config(&self, source: &Source) -> Result<GitLabConfig> {
         serde_json::from_value(source.config.clone()).map_err(|error| {
-            ContextError::InvalidSourceConfig(format!("Invalid GitLab config: {}", error))
+            ContextError::InvalidSourceConfig(format!("{INVALID_CONFIG_MESSAGE}: {error}"))
         })
     }
 
@@ -452,13 +544,10 @@ impl GitLabAdapter {
 
     async fn get_default_branch(
         &self,
+        service: &GitLabService,
         project: &str,
-        token: Option<&str>,
+        credential: &Credential,
     ) -> Result<RemoteBranchName> {
-        Self::validate_gitlab_identifier(project, "project")?;
-
-        let credential = Credential::checked(token)?;
-        let service = self.service()?;
         let parsed = Self::project(project)?;
 
         self.rate_limit_config()
@@ -476,10 +565,11 @@ impl GitLabAdapter {
 
     async fn get_tree(
         &self,
+        service: &GitLabService,
         project: &str,
         branch: &str,
         path: Option<&str>,
-        token: Option<&str>,
+        credential: &Credential,
     ) -> Result<Vec<TreeEntry>> {
         Self::validate_gitlab_identifier(project, "project")?;
         Self::validate_gitlab_identifier(branch, "branch")?;
@@ -488,8 +578,6 @@ impl GitLabAdapter {
             Self::validate_path(path)?;
         }
 
-        let credential = Credential::checked(token)?;
-        let service = self.service()?;
         let project = Self::project(project)?;
         let prefix = path
             .map(RepositoryPath::parse)
@@ -506,16 +594,19 @@ impl GitLabAdapter {
 
     async fn get_tree_cached(
         &self,
-        project: &str,
+        service: &GitLabService,
+        instance: &str,
+        config: &GitLabConfig,
         branch: &str,
-        path: Option<&str>,
-        token: Option<&str>,
+        credential: &Credential,
     ) -> Result<Vec<TreeEntry>> {
+        let path = config.path.as_deref();
         let key = (
-            project.to_string(),
+            instance.to_string(),
+            config.project.clone(),
             branch.to_string(),
             path.unwrap_or_default().to_string(),
-            Credential::checked(token)?.fingerprint(),
+            credential.fingerprint(),
         );
 
         if let Some(tree) = self.tree_cache.get(&key).await {
@@ -552,7 +643,9 @@ impl GitLabAdapter {
             }
         }
 
-        let fetch_result = self.get_tree(project, branch, path, token).await;
+        let fetch_result = self
+            .get_tree(service, &config.project, branch, path, credential)
+            .await;
 
         {
             let mut in_flight = self.tree_cache.in_flight.write().await;
@@ -568,14 +661,13 @@ impl GitLabAdapter {
 
     async fn get_blob(
         &self,
+        service: &GitLabService,
         project: &str,
         entry: &TreeEntry,
-        token: Option<&str>,
+        credential: &Credential,
     ) -> Result<Blob> {
         Self::validate_gitlab_identifier(project, "project")?;
 
-        let credential = Credential::checked(token)?;
-        let service = self.service()?;
         let project = Self::project(project)?;
 
         self.rate_limit_config()
@@ -703,8 +795,10 @@ impl SourceAdapter for GitLabAdapter {
         if let Some(ref branch) = config.branch {
             Self::validate_gitlab_identifier(branch, "branch")?;
         }
+        let credential = Credential::checked(config.token.as_deref())?;
+        let (service, _) = self.service_for(&config)?;
 
-        self.get_default_branch(&config.project, config.token.as_deref())
+        self.get_default_branch(&service, &config.project, &credential)
             .await?;
 
         Ok(())
@@ -712,20 +806,18 @@ impl SourceAdapter for GitLabAdapter {
 
     async fn estimate_tokens(&self, source: &Source) -> Result<usize> {
         let config = self.parse_config(source)?;
+        Self::validate_gitlab_identifier(&config.project, "project")?;
+        let credential = Credential::checked(config.token.as_deref())?;
+        let (service, instance) = self.service_for(&config)?;
 
         let default_branch = self
-            .get_default_branch(&config.project, config.token.as_deref())
+            .get_default_branch(&service, &config.project, &credential)
             .await?;
 
         let branch = config.branch.as_deref().unwrap_or(default_branch.as_str());
 
         let tree = self
-            .get_tree_cached(
-                &config.project,
-                branch,
-                config.path.as_deref(),
-                config.token.as_deref(),
-            )
+            .get_tree_cached(&service, &instance, &config, branch, &credential)
             .await?;
 
         let mut total_tokens = 0;
@@ -760,9 +852,12 @@ impl SourceAdapter for GitLabAdapter {
         progress: &dyn ProgressCallback,
     ) -> Result<FetchResult> {
         let config = self.parse_config(source)?;
+        Self::validate_gitlab_identifier(&config.project, "project")?;
+        let credential = Credential::checked(config.token.as_deref())?;
+        let (service, instance) = self.service_for(&config)?;
 
         let default_branch = self
-            .get_default_branch(&config.project, config.token.as_deref())
+            .get_default_branch(&service, &config.project, &credential)
             .await?;
 
         let branch = config
@@ -772,12 +867,7 @@ impl SourceAdapter for GitLabAdapter {
             .to_string();
 
         let tree = self
-            .get_tree_cached(
-                &config.project,
-                &branch,
-                config.path.as_deref(),
-                config.token.as_deref(),
-            )
+            .get_tree_cached(&service, &instance, &config, &branch, &credential)
             .await?;
 
         let files: Vec<&TreeEntry> = tree
@@ -831,7 +921,7 @@ impl SourceAdapter for GitLabAdapter {
                 ));
                 for (index, entry) in to_fetch.iter().enumerate() {
                     let blob = self
-                        .get_blob(&config.project, entry, config.token.as_deref())
+                        .get_blob(&service, &config.project, entry, &credential)
                         .await?;
                     let size = blob.content.len();
                     let Ok(text) = String::from_utf8(blob.content) else {
@@ -890,7 +980,7 @@ impl SourceAdapter for GitLabAdapter {
 
                     if budget.can_fit(estimated_tokens) {
                         let blob = self
-                            .get_blob(&config.project, entry, config.token.as_deref())
+                            .get_blob(&service, &config.project, entry, &credential)
                             .await?;
                         let size = blob.content.len();
                         let Ok(text) = String::from_utf8(blob.content) else {
@@ -956,7 +1046,7 @@ impl SourceAdapter for GitLabAdapter {
                 for (index, priority_item) in prioritized.iter().enumerate() {
                     if let Some(entry) = files_by_path.get(priority_item.path.as_str()) {
                         let blob = self
-                            .get_blob(&config.project, entry, config.token.as_deref())
+                            .get_blob(&service, &config.project, entry, &credential)
                             .await?;
                         let size = blob.content.len();
                         let Ok(text) = String::from_utf8(blob.content) else {
@@ -992,20 +1082,18 @@ impl SourceAdapter for GitLabAdapter {
 
     async fn get_sync_state(&self, source: &Source) -> Result<SyncState> {
         let config = self.parse_config(source)?;
+        Self::validate_gitlab_identifier(&config.project, "project")?;
+        let credential = Credential::checked(config.token.as_deref())?;
+        let (service, instance) = self.service_for(&config)?;
 
         let default_branch = self
-            .get_default_branch(&config.project, config.token.as_deref())
+            .get_default_branch(&service, &config.project, &credential)
             .await?;
 
         let branch = config.branch.as_deref().unwrap_or(default_branch.as_str());
 
         let tree = self
-            .get_tree_cached(
-                &config.project,
-                branch,
-                config.path.as_deref(),
-                config.token.as_deref(),
-            )
+            .get_tree_cached(&service, &instance, &config, branch, &credential)
             .await?;
 
         Ok(SyncState {
@@ -1029,6 +1117,7 @@ mod tests {
     use wiremock::ResponseTemplate;
     use wiremock::matchers::header;
     use wiremock::matchers::method;
+    use wiremock::matchers::path;
     use wiremock::matchers::path_regex;
     use wiremock::matchers::query_param;
     use wiremock::matchers::query_param_is_missing;
@@ -1041,6 +1130,54 @@ mod tests {
     const PRIVATE_TOKEN: &str = "private-token";
     const TOKEN: &str = "glpat-cached";
     const MISSING_TREE: &str = "Failed to fetch tree: 404 Not Found";
+    const PROJECT: &str = "group/project";
+    const PROJECT_ROUTE: &str = "/api/v4/projects/group%2Fproject";
+    const INSTANCE_KEYS: [&str; 2] = ["host", "base_url"];
+    const MALFORMED_TOKEN: &str =
+        "Configuration error: Invalid authorization token format (token not logged for security)";
+    const INVALID_INSTANCE: &str = "Invalid source configuration: Invalid GitLab config: Invalid GitLab origin: expected an HTTPS (or opted-in HTTP) URL with no query, fragment or credentials, outside link-local and metadata addresses";
+
+    async fn mount_instance(server: &MockServer, prefix: &str, file: &str) {
+        let project = format!("{prefix}{PROJECT_ROUTE}");
+        Mock::given(method("GET"))
+            .and(path(project.as_str()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": 123,
+                "name": "project",
+                "default_branch": "main"
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{project}{TREE_SUFFIX}")))
+            .respond_with(listing(file))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("{project}/repository/blobs/{README_SHA}/raw")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(format!("# {file}")))
+            .mount(server)
+            .await;
+    }
+
+    async fn contents(
+        adapter: &GitLabAdapter,
+        config: serde_json::Value,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let result = adapter
+            .fetch(
+                &create_test_source(config),
+                &FetchConfig::default(),
+                FetchStrategy::Full,
+                &NoOpProgress,
+            )
+            .await?;
+        Ok(result
+            .items
+            .into_iter()
+            .map(|item| (item.title, item.content))
+            .collect())
+    }
 
     async fn mount_project(server: &MockServer) {
         Mock::given(method("GET"))
@@ -1511,39 +1648,259 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_malformed_token_is_a_configuration_error_at_every_read() {
-        let mock_server = MockServer::start().await;
-        let adapter = served(&mock_server);
-        let entry = TreeEntry::new(
-            "README.md",
-            "100644",
-            TreeEntryKind::Blob,
-            ObjectId::parse(README_SHA).unwrap(),
-        );
-        let malformed = Some("bad\ntoken");
+    async fn a_malformed_token_is_reported_before_the_instance_it_names() {
+        let decoy = MockServer::start().await;
+        let adapter = served(&decoy).allowing_http();
 
-        let errors = [
-            adapter
-                .get_default_branch("group/project", malformed)
-                .await
-                .unwrap_err(),
-            adapter
-                .get_tree("group/project", "main", None, malformed)
-                .await
-                .unwrap_err(),
-            adapter
-                .get_blob("group/project", &entry, malformed)
-                .await
-                .unwrap_err(),
-        ];
+        for instance in ["not a url", "https://169.254.169.254"] {
+            let source = create_test_source(json!({
+                "project": PROJECT,
+                "host": instance,
+                "token": "bad\ntoken"
+            }));
 
-        for error in errors {
-            assert!(
-                matches!(&error, ContextError::Config(message) if message == "Invalid authorization token format (token not logged for security)"),
-                "{error:?}"
+            let errors = [
+                adapter.verify(&source).await.unwrap_err(),
+                adapter.estimate_tokens(&source).await.unwrap_err(),
+                adapter
+                    .fetch(
+                        &source,
+                        &FetchConfig::default(),
+                        FetchStrategy::MetadataOnly,
+                        &NoOpProgress,
+                    )
+                    .await
+                    .unwrap_err(),
+                adapter.get_sync_state(&source).await.unwrap_err(),
+            ];
+
+            for error in errors {
+                assert_eq!(error.to_string(), MALFORMED_TOKEN, "{instance}");
+            }
+        }
+        assert!(decoy.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_configured_host_or_base_url_is_read_at_its_own_origin() {
+        let decoy = MockServer::start().await;
+        for key in INSTANCE_KEYS {
+            let instance = MockServer::start().await;
+            mount_instance(&instance, "", "README.md").await;
+            let uri = instance.uri();
+
+            for form in [
+                uri.clone(),
+                format!("{uri}/"),
+                format!("{uri}/api/v4"),
+                format!("{uri}/api/v4/"),
+                format!("  {uri}  "),
+            ] {
+                let adapter = served(&decoy).allowing_http();
+
+                let read = contents(&adapter, json!({ "project": PROJECT, key: form }))
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    read,
+                    [("README.md".to_string(), Some("# README.md".to_string()))],
+                    "{key} {form}"
+                );
+            }
+        }
+        assert!(decoy.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_instance_under_a_path_prefix_is_read_beneath_it() {
+        let decoy = MockServer::start().await;
+        let instance = MockServer::start().await;
+        mount_instance(&instance, "/gitlab", "README.md").await;
+        let uri = instance.uri();
+
+        for form in [format!("{uri}/gitlab"), format!("{uri}/gitlab/api/v4/")] {
+            let adapter = served(&decoy).allowing_http();
+
+            let read = contents(&adapter, json!({ "project": PROJECT, "base_url": form }))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                read,
+                [("README.md".to_string(), Some("# README.md".to_string()))],
+                "{form}"
             );
         }
-        assert!(mock_server.received_requests().await.unwrap().is_empty());
+        assert!(decoy.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_link_local_or_metadata_instance_is_refused_unsent_even_over_http() {
+        let decoy = MockServer::start().await;
+        let adapter = served(&decoy).allowing_http();
+
+        for key in INSTANCE_KEYS {
+            for instance in [
+                "http://169.254.169.254",
+                "http://metadata.google.internal",
+                "http://[fe80::1]",
+                "http://100.100.100.200",
+                "http://[fd00:ec2::254]",
+            ] {
+                let source = create_test_source(json!({ "project": PROJECT, key: instance }));
+
+                let error = adapter.verify(&source).await.unwrap_err();
+
+                assert!(
+                    matches!(error, ContextError::InvalidSourceConfig(_)),
+                    "{error:?}"
+                );
+                assert_eq!(error.to_string(), INVALID_INSTANCE, "{key} {instance}");
+            }
+        }
+        assert!(decoy.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn instances_sharing_a_project_and_branch_keep_their_own_trees() {
+        let decoy = MockServer::start().await;
+        let first = MockServer::start().await;
+        let second = MockServer::start().await;
+        mount_instance(&first, "", "first.md").await;
+        mount_instance(&second, "", "second.md").await;
+        let adapter = served(&decoy).allowing_http();
+
+        for (instance, title) in [(&first, "first.md"), (&second, "second.md")] {
+            let read = titles(
+                &adapter,
+                json!({ "project": PROJECT, "host": instance.uri() }),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(read, [title]);
+        }
+        assert_eq!(tree_requests(&first).await, 1);
+        assert_eq!(tree_requests(&second).await, 1);
+    }
+
+    #[tokio::test]
+    async fn one_instance_spelled_several_ways_shares_its_cached_tree() {
+        let decoy = MockServer::start().await;
+        let instance = MockServer::start().await;
+        mount_instance(&instance, "", "README.md").await;
+        let adapter = served(&decoy).allowing_http();
+        let uri = instance.uri();
+
+        for form in [
+            format!("{uri}/"),
+            format!("{uri}/api/v4"),
+            uri.to_uppercase(),
+        ] {
+            let read = titles(&adapter, json!({ "project": PROJECT, "host": form }))
+                .await
+                .unwrap();
+
+            assert_eq!(read, ["README.md"], "{form}");
+        }
+        assert_eq!(tree_requests(&instance).await, 1);
+    }
+
+    #[test]
+    fn an_instance_is_named_alike_in_the_cache_however_its_url_is_spelled() {
+        let key = |instance: &str| GitLabAdapter::instance_key(&Url::parse(instance).unwrap());
+
+        for spelled in [
+            "https://GitLab.example.com/",
+            "https://gitlab.example.com",
+            "https://gitlab.example.com/api/v4",
+            "https://gitlab.example.com/api/v4/",
+            "HTTPS://gitlab.example.com:443/",
+        ] {
+            assert_eq!(key(spelled), "https://gitlab.example.com", "{spelled}");
+        }
+
+        let distinct = [
+            "https://gitlab.example.com",
+            "https://gitlab.example.com:8443",
+            "https://example.com",
+            "https://example.com/gitlab",
+            "https://example.com/gitlab/api/v4/api/v4",
+            "https://example.com/a//api/v4",
+            "https://example.com/a/api/v4",
+            "https://[::1]:8443",
+        ];
+        let keys: HashSet<String> = distinct.iter().map(|instance| key(instance)).collect();
+        assert_eq!(keys.len(), distinct.len(), "{keys:?}");
+    }
+
+    #[test]
+    fn only_an_https_gitlab_com_with_nothing_else_is_the_default_instance() {
+        let naming = |instance: Option<&str>| GitLabConfig {
+            project: PROJECT.to_string(),
+            branch: None,
+            path: None,
+            token: None,
+            base_url: instance.map(str::to_string),
+        };
+
+        for default in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("https://gitlab.com"),
+            Some("https://gitlab.com/"),
+            Some("https://gitlab.com/api/v4"),
+            Some("https://gitlab.com/api/v4/"),
+            Some("https://GITLAB.COM"),
+            Some("https://gitlab.com:443"),
+            Some(" https://gitlab.com "),
+        ] {
+            assert_eq!(
+                GitLabAdapter::instance(&naming(default)),
+                None,
+                "{default:?}"
+            );
+        }
+
+        for named in [
+            "http://gitlab.com",
+            "https://gitlab.com:8443",
+            "https://user@gitlab.com",
+            "https://user:password@gitlab.com",
+            "https://gitlab.com/?private_token=x",
+            "https://gitlab.com/#x",
+            "https://gitlab.com/group",
+            "https://gitlab.example.com",
+            "gitlab.com",
+            "not a url",
+        ] {
+            assert_eq!(
+                GitLabAdapter::instance(&naming(Some(named))),
+                Some(named),
+                "{named}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_consoles_default_host_and_an_empty_one_both_read_gitlab_com() {
+        let decoy = MockServer::start().await;
+        mount_project(&decoy).await;
+        let adapter = served(&decoy);
+        let hosts = ["https://gitlab.com", "https://gitlab.com/", "", "   "];
+
+        for host in hosts {
+            let verified = adapter
+                .verify(&create_test_source(
+                    json!({ "project": PROJECT, "host": host }),
+                ))
+                .await;
+
+            assert!(verified.is_ok(), "{host:?}: {verified:?}");
+        }
+        assert_eq!(decoy.received_requests().await.unwrap().len(), hosts.len());
     }
 
     #[tokio::test]

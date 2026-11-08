@@ -52,6 +52,9 @@ const MISSING_TREE: &str = "Adapter error for gitlab: Failed to fetch tree: 404 
 const UNREADABLE_TREE: &str = "Adapter error for gitlab: Failed to parse tree: GitLab answered in a form this crate cannot read";
 const REPEATED_TREE: &str = "Adapter error for gitlab: Failed to parse tree: GitLab linked a tree's next page to one already read";
 const EMPTY_PAGE_TREE: &str = "Adapter error for gitlab: Failed to parse tree: GitLab linked an empty page of a tree to a next one";
+const INVALID_INSTANCE: &str = "Invalid source configuration: Invalid GitLab config: Invalid GitLab origin: expected an HTTPS (or opted-in HTTP) URL with no query, fragment or credentials, outside link-local and metadata addresses";
+const PASSWORD: &str = "hunter2";
+const INSTANCE_KEYS: [&str; 2] = ["host", "base_url"];
 
 fn source(config: Value) -> Source {
     Source {
@@ -963,25 +966,65 @@ async fn a_token_is_sent_as_the_private_token_header() {
     assert_eq!(content(&result, "README.md"), Some("# Readme"));
 }
 
-#[tokio::test]
-async fn a_configured_host_or_base_url_is_ignored() {
-    for key in ["host", "base_url"] {
-        let server = MockServer::start().await;
-        mount_project(&server).await;
-        mount_tree(&server, json!([file("README.md", 'a')])).await;
-        let mut config = json!({ "project": PROJECT });
-        config[key] = json!("http://127.0.0.1:9");
+fn naming(key: &str, instance: &str) -> Source {
+    let mut config = json!({ "project": PROJECT });
+    config[key] = json!(instance);
+    source(config)
+}
 
-        let result = fetched(
-            &served(&server),
-            &source(config),
-            FetchStrategy::MetadataOnly,
-        )
-        .await
-        .unwrap();
+async fn assert_refused_unsent(instances: &[&str]) {
+    let decoy = MockServer::start().await;
+    mount_project(&decoy).await;
+    mount_tree(&decoy, json!([file("README.md", 'a')])).await;
+    let adapter = served(&decoy);
 
-        assert_eq!(titles(&result), ["README.md"], "{key}");
+    for &key in &INSTANCE_KEYS {
+        for &instance in instances {
+            let configured = naming(key, instance);
+
+            let verified = adapter.verify(&configured).await.unwrap_err();
+            let fetched = fetched(&adapter, &configured, FetchStrategy::MetadataOnly)
+                .await
+                .unwrap_err();
+
+            for error in [&verified, &fetched] {
+                assert_invalid_source(error, INVALID_INSTANCE);
+                assert!(
+                    !format!("{error} {error:?}").contains(PASSWORD),
+                    "{key} {instance}"
+                );
+            }
+        }
     }
+    assert!(received(&decoy).await.is_empty());
+}
+
+#[tokio::test]
+async fn an_instance_that_is_not_an_https_url_is_invalid_and_unsent() {
+    assert_refused_unsent(&[
+        "gitlab.example.com",
+        "not a url",
+        "ftp://gitlab.example.com",
+        "http://127.0.0.1:9",
+        "http://gitlab.com",
+        "https://gitlab.example.com/?private_token=x",
+        "https://gitlab.example.com/#x",
+        "https://user:hunter2@gitlab.example.com",
+        "https://user:hunter2@gitlab.com",
+    ])
+    .await;
+}
+
+#[tokio::test]
+async fn a_link_local_or_metadata_instance_is_refused_unsent() {
+    assert_refused_unsent(&[
+        "https://169.254.169.254",
+        "https://metadata.google.internal",
+        "https://[fe80::1]",
+        "https://100.100.100.200",
+        "https://[fd00:ec2::254]",
+    ])
+    .await;
 }
 
 #[tokio::test]
