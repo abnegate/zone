@@ -1,0 +1,89 @@
+# Zone Infrastructure - Values
+# PostgreSQL (CNPG) and Valkey configuration
+
+global:
+  namespace: zone
+
+# PostgreSQL via CloudNativePG
+postgres:
+  enabled: true
+
+  instances: 1
+  # Official CNPG image already ships pgvector. Build postgres/cnpg/Dockerfile
+  # if you need a newer extension build.
+  image: ghcr.io/cloudnative-pg/postgresql:16.15@sha256:34cd4159d07b3410a1b29da35072e2e927a0905e717a61afa3814624a2e8859a
+
+  # Application role created by initdb. Credentials come from secrets.existingSecret
+  # (must contain username + password).
+  database: litellm
+  owner: zone
+
+  extraDatabases:
+    - manager
+
+  sharedPreloadLibraries: []
+
+  postInitTemplateSQL:
+    - CREATE EXTENSION IF NOT EXISTS vector
+    - CREATE EXTENSION IF NOT EXISTS pg_trgm
+
+  superuser:
+    create: false
+    secretName: zone-postgres-superuser
+    username: postgres
+    password: ""
+
+  storage:
+    size: 10Gi
+    storageClass: ""
+
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+
+  monitoring:
+    enabled: false
+
+# Valkey (Redis-compatible cache)
+valkey:
+  enabled: true
+
+  image:
+    repository: valkey/valkey
+    tag: "8.1.10-alpine@sha256:b21fd94099dcd4bc6b2b9230daef69b6558b887ad4a2a1afe56ff6e745a88cdb"
+    pullPolicy: IfNotPresent
+
+  maxMemory: "256mb"
+  maxMemoryPolicy: "allkeys-lru"
+
+  auth:
+    enabled: true
+    existingSecret: ""
+    secretKey: "valkey-password"
+
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    fsGroup: 999
+
+# Existing Secret used by CNPG (username/password) and Valkey (valkey-password).
+# Created by scripts/tilt-up.sh for Kind, or by the operator for other environments.
+secrets:
+  existingSecret: "zone-secrets"
