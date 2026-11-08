@@ -620,7 +620,7 @@ pub async fn search(
     let results_vec = match search_mode.as_str() {
         "hybrid" => {
             // Build hybrid search config
-            let mut hybrid_config = zone_context::HybridSearchConfig::for_query(trimmed_query);
+            let mut hybrid_config = abnegate_index::HybridSearchConfig::for_query(trimmed_query);
             if let Some(weight) = query.semantic_weight {
                 hybrid_config.semantic_weight = weight.clamp(0.0, 1.0);
             }
@@ -1343,7 +1343,7 @@ pub async fn create_knowledge(
     }
 
     // Calculate token count with safe conversion
-    let token_count: i32 = zone_context::content::estimate_tokens(&final_content)
+    let token_count: i32 = abnegate_index::estimate_tokens(&final_content)
         .try_into()
         .unwrap_or(i32::MAX);
 

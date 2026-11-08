@@ -3,12 +3,13 @@
 //! These tests verify the hybrid search functionality combining keyword
 //! and semantic search using Reciprocal Rank Fusion.
 
+use abnegate_index::HybridSearchConfig;
 use sqlx::PgPool;
 use uuid::Uuid;
-use zone_context::{
-    HybridSearchConfig, embeddings::SearchFilters, hybrid_search, keyword_only_search,
-    semantic_only_search,
-};
+use zone_context::embeddings::SearchFilters;
+use zone_context::hybrid_search;
+use zone_context::keyword_only_search;
+use zone_context::semantic_only_search;
 
 // Helper to get test database URL
 fn get_test_db_url() -> String {

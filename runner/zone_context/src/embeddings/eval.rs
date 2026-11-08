@@ -1,8 +1,7 @@
 //! Offline retrieval eval: rewrite coverage plus graded ranking metrics.
 
+use abnegate_index::rewrite_query;
 use serde::Deserialize;
-
-use super::rewrite_query;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Judgment {

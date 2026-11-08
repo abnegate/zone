@@ -193,7 +193,7 @@ impl KnowledgeEntry {
     /// Create a new knowledge entry
     pub fn new(workspace_id: Uuid, title: impl Into<String>, content: impl Into<String>) -> Self {
         let content = content.into();
-        let token_count = crate::content::estimate_tokens(&content);
+        let token_count = abnegate_index::estimate_tokens(&content);
         Self {
             id: Uuid::new_v4(),
             workspace_id,

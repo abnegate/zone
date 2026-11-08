@@ -16,10 +16,6 @@ pub mod ranker;
 pub mod rerank;
 pub mod serving;
 
-pub use abnegate_index::HybridSearchConfig;
-pub use abnegate_index::embed_query_text;
-pub use abnegate_index::rewrite_query;
-pub use abnegate_index::sanitize_search_query;
 pub use embed_cache::embed_cached;
 pub use hybrid::Id;
 pub use hybrid::hybrid_search;
@@ -38,8 +34,10 @@ pub use serving::configure_ann_connection;
 pub use serving::keyword_candidate_limit;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::DateTime;
+use chrono::Utc;
+use serde::Deserialize;
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::error::Result;

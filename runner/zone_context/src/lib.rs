@@ -43,44 +43,43 @@ pub mod error;
 pub mod heuristics;
 pub mod stream;
 
-// Re-export commonly used types
-pub use error::{ContextError, Result};
-
-// Content types
-pub use content::{
-    ContentCategory, ContentChunk, ContentItem, ContentMetadata, FetchConfig, FetchResult,
-    FetchStats, FetchStrategy,
-};
-
-// Adapter types
-pub use adapters::{AdapterRegistry, ProgressCallback, SourceAdapter, TextAdapter};
-
-// Embedding types
+pub use adapters::AdapterRegistry;
+pub use adapters::ProgressCallback;
+pub use adapters::SourceAdapter;
+pub use adapters::TextAdapter;
+pub use content::ContentCategory;
+pub use content::ContentChunk;
+pub use content::ContentItem;
+pub use content::ContentMetadata;
+pub use content::FetchConfig;
+pub use content::FetchResult;
+pub use content::FetchStats;
+pub use content::FetchStrategy;
+pub use context::AssembledContext;
+pub use context::ContextBuilder;
+pub use context::ContextConfig;
 pub use embeddings::CrossEncoder;
 pub use embeddings::Embedding;
 pub use embeddings::EmbeddingService;
-pub use embeddings::HybridSearchConfig;
 pub use embeddings::VectorStore;
 pub use embeddings::ann_candidate_limit;
 pub use embeddings::configure_ann_connection;
 pub use embeddings::default_ranker;
-pub use embeddings::embed_query_text;
 pub use embeddings::hybrid_search;
 pub use embeddings::hybrid_search_filtered;
 pub use embeddings::keyword_only_search;
 pub use embeddings::probe_cross_encoder;
-pub use embeddings::rewrite_query;
 pub use embeddings::score_hit;
 pub use embeddings::semantic_only_search;
-
-// Heuristics types
-pub use heuristics::{
-    ActionabilityScore, ContentCategorization, ExtractedEntities, HeuristicAnalysis, Priority,
-    QualityScore, RelevanceScore, Sentiment, Topic,
-};
-
-// Context types
-pub use context::{AssembledContext, ContextBuilder, ContextConfig};
-
-// Streaming types
+pub use error::ContextError;
+pub use error::Result;
+pub use heuristics::ActionabilityScore;
+pub use heuristics::ContentCategorization;
+pub use heuristics::ExtractedEntities;
+pub use heuristics::HeuristicAnalysis;
+pub use heuristics::Priority;
+pub use heuristics::QualityScore;
+pub use heuristics::RelevanceScore;
+pub use heuristics::Sentiment;
+pub use heuristics::Topic;
 pub use stream::GatheringEvent;

@@ -2,9 +2,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use abnegate_index::smart_chunk;
 use zone_context::content::CHUNK_OVERLAP_TOKENS;
 use zone_context::content::MAX_CHUNK_TOKENS;
-use zone_context::content::smart_chunk;
 
 const DEADLINE: Duration = Duration::from_secs(60);
 const NESTING: usize = 600;
