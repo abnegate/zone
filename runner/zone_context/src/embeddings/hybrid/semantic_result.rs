@@ -17,11 +17,7 @@ pub(super) struct SemanticResult {
 
 impl SemanticResult {
     pub(super) fn id(&self) -> Id {
-        Id {
-            chunk_id: self.chunk_id,
-            content_item_id: self.content_item_id,
-            source_id: self.source_id,
-        }
+        Id::new(self.chunk_id, self.content_item_id, self.source_id)
     }
 
     pub(super) fn into_candidate(self) -> Candidate<Id> {

@@ -58,9 +58,9 @@ pub use id::Id;
 use keyword_result::KeywordResult;
 use semantic_result::SemanticResult;
 
-const CANDIDATE_POOL_FACTOR: usize = 4;
+pub(crate) const CANDIDATE_POOL_FACTOR: usize = 4;
 
-const MINIMUM_CANDIDATE_POOL: usize = 32;
+pub(crate) const MINIMUM_CANDIDATE_POOL: usize = 32;
 
 const LEG_OVERFETCH_FACTOR: usize = 2;
 
@@ -73,6 +73,10 @@ const MAXIMUM_FILES_TO_EXPAND: usize = 20;
 const PATH_MATCHED_FILES: usize = 6;
 
 const SAME_FILE_CHUNKS_PER_FILE: usize = 28;
+
+const VECTOR_BRACKETS_LENGTH: usize = 2;
+
+const ESTIMATED_VECTOR_VALUE_LENGTH: usize = 9;
 
 /// Perform hybrid search combining keyword and semantic retrieval
 ///
@@ -151,7 +155,7 @@ pub async fn hybrid_search_filtered(
         ),
     );
 
-    let combined = fused(
+    let combined = fuse(
         keyword_raw?,
         semantic_raw?,
         fetch_limit,
@@ -162,7 +166,7 @@ pub async fn hybrid_search_filtered(
     Ok(finalize_ranking(default_ranker(), combined, query, limit))
 }
 
-fn fused(
+fn fuse(
     keyword: Vec<KeywordResult>,
     semantic: Vec<SemanticResult>,
     limit: usize,
@@ -515,7 +519,7 @@ fn vector_to_pg_string(vector: &[f32]) -> Result<String, &'static str> {
         return Err("Vector contains non-finite values (NaN or Infinity)");
     }
 
-    let estimated_capacity = 2 + vector.len() * 9;
+    let estimated_capacity = VECTOR_BRACKETS_LENGTH + vector.len() * ESTIMATED_VECTOR_VALUE_LENGTH;
     let mut result = String::with_capacity(estimated_capacity);
     result.push('[');
 
@@ -655,11 +659,11 @@ mod tests {
     const LEG_SIZE: u128 = 10;
 
     fn id(chunk: u128) -> Id {
-        Id {
-            chunk_id: Uuid::from_u128(chunk),
-            content_item_id: Uuid::from_u128(chunk + 1_000),
-            source_id: Uuid::from_u128(1),
-        }
+        Id::new(
+            Uuid::from_u128(chunk),
+            Uuid::from_u128(chunk + 1_000),
+            Uuid::from_u128(1),
+        )
     }
 
     fn keyword_row(chunk: u128, text: &str, score: f32) -> KeywordResult {
@@ -699,7 +703,7 @@ mod tests {
             .collect();
         let config = HybridSearchConfig::default().with_semantic_weight(0.5);
 
-        let results = fused(keyword, semantic, LEG_SIZE as usize, &[], &config);
+        let results = fuse(keyword, semantic, LEG_SIZE as usize, &[], &config);
 
         let expected: Vec<Id> = (1..=LEG_SIZE)
             .flat_map(|rank| [id(rank), id(rank + 100)])
@@ -716,7 +720,7 @@ mod tests {
         let keyword = vec![keyword_row(7, "fn restock() { keyword }", 0.4)];
         let semantic = vec![semantic_row(7, "fn restock() { semantic }", 0.6)];
 
-        let results = fused(keyword, semantic, 1, &[], &HybridSearchConfig::default());
+        let results = fuse(keyword, semantic, 1, &[], &HybridSearchConfig::default());
 
         assert_eq!(results.len(), 1);
         let result = &results[0];

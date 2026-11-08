@@ -3,35 +3,53 @@
 //! The ContextService integrates all components to provide a complete
 //! content gathering, analysis, embedding, and search solution.
 
+use std::sync::Arc;
+
+use abnegate_index::HybridSearchConfig;
 use abnegate_index::HybridSearchResult;
 use abnegate_index::cap_per_file;
 use abnegate_index::first_stage_answered;
+use abnegate_index::rewrite_query;
 use chrono::Utc;
 use sqlx::PgPool;
-use std::sync::Arc;
 use uuid::Uuid;
+use zone_core::Source;
 
-use crate::adapters::{AdapterRegistry, ProgressCallback};
-use crate::content::{
-    CHUNK_OVERLAP_TOKENS, ContentChunk, ContentItem, FetchConfig, MAX_CHUNK_TOKENS,
-    embed_char_budget, smart_chunk, split_for_embedding,
-};
-use crate::context::{AssembledContext, ContextBuilder, ContextConfig};
+use crate::adapters::AdapterRegistry;
+use crate::adapters::ProgressCallback;
+use crate::content::CHUNK_OVERLAP_TOKENS;
+use crate::content::ContentChunk;
+use crate::content::ContentItem;
+use crate::content::FetchConfig;
+use crate::content::MAX_CHUNK_TOKENS;
+use crate::content::embed_char_budget;
+use crate::content::smart_chunk;
+use crate::content::split_for_embedding;
+use crate::context::AssembledContext;
+use crate::context::ContextBuilder;
+use crate::context::ContextConfig;
 use crate::embeddings::CrossEncoder;
 use crate::embeddings::Embedding;
 use crate::embeddings::EmbeddingService;
-use crate::embeddings::HybridSearchConfig;
 use crate::embeddings::Id;
 use crate::embeddings::PgVectorStore;
 use crate::embeddings::SearchFilters;
 use crate::embeddings::VectorStore;
 use crate::embeddings::embed_cached;
+use crate::embeddings::hybrid::CANDIDATE_POOL_FACTOR;
+use crate::embeddings::hybrid::MINIMUM_CANDIDATE_POOL;
+use crate::embeddings::hybrid_search_filtered;
 use crate::embeddings::keyword_only_search;
 use crate::embeddings::semantic_only_search;
-use crate::error::{ContextError, Result};
-use crate::heuristics::{HeuristicAnalysis, HeuristicAnalyzer};
-use crate::stream::{AnalysisStage, GatheringCallback, GatheringEvent};
-use zone_core::Source;
+use crate::error::ContextError;
+use crate::error::Result;
+use crate::heuristics::HeuristicAnalysis;
+use crate::heuristics::HeuristicAnalyzer;
+use crate::stream::AnalysisStage;
+use crate::stream::GatheringCallback;
+use crate::stream::GatheringEvent;
+
+const MAXIMUM_CHUNKS_PER_FILE: usize = 2;
 
 /// Result of a gathering operation
 #[derive(Debug, Clone, Default)]
@@ -474,12 +492,12 @@ impl ContextService {
         config: Option<HybridSearchConfig>,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
         let hybrid_config = config.unwrap_or_else(|| HybridSearchConfig::for_query(query));
-        let rewritten = crate::embeddings::rewrite_query(query);
+        let rewritten = rewrite_query(query);
         if !rewritten.identifiers.is_empty() {
             let keyword = keyword_only_search(
                 &self.pool,
                 query,
-                (limit * 4).max(32),
+                (limit * CANDIDATE_POOL_FACTOR).max(MINIMUM_CANDIDATE_POOL),
                 filters.clone(),
                 hybrid_config.minimum_keyword_score,
             )
@@ -521,10 +539,10 @@ impl ContextService {
         config: Option<HybridSearchConfig>,
     ) -> Result<Vec<SearchResultWithAnalysis>> {
         let hybrid_config = config.unwrap_or_else(|| HybridSearchConfig::for_query(query));
-        let candidate_limit = (limit * 4).max(32);
+        let candidate_limit = (limit * CANDIDATE_POOL_FACTOR).max(MINIMUM_CANDIDATE_POOL);
         let results = match query_embedding {
             Some(embedding) => {
-                crate::embeddings::hybrid_search_filtered(
+                hybrid_search_filtered(
                     &self.pool,
                     query,
                     embedding,
@@ -849,7 +867,7 @@ fn assemble_hybrid_results(
     used_embedding: bool,
     limit: usize,
 ) -> Vec<SearchResultWithAnalysis> {
-    cap_per_file(results, 2, limit, query)
+    cap_per_file(results, MAXIMUM_CHUNKS_PER_FILE, limit, query)
         .into_iter()
         .map(|result| SearchResultWithAnalysis::from_hybrid(result, used_embedding))
         .collect()

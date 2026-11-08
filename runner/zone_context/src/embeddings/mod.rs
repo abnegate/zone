@@ -17,7 +17,6 @@ pub mod rerank;
 pub mod serving;
 
 pub use abnegate_index::HybridSearchConfig;
-pub use abnegate_index::RewrittenQuery;
 pub use abnegate_index::embed_query_text;
 pub use abnegate_index::rewrite_query;
 pub use abnegate_index::sanitize_search_query;

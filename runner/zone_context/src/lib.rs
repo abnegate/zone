@@ -60,8 +60,6 @@ pub use embeddings::CrossEncoder;
 pub use embeddings::Embedding;
 pub use embeddings::EmbeddingService;
 pub use embeddings::HybridSearchConfig;
-pub use embeddings::Id;
-pub use embeddings::RewrittenQuery;
 pub use embeddings::VectorStore;
 pub use embeddings::ann_candidate_limit;
 pub use embeddings::configure_ann_connection;
