@@ -145,7 +145,6 @@ pub enum AgentEvent {
         duration_ms: u64,
         citations: Vec<Citation>,
         receipt: Option<ActionReceipt>,
-        /// Why the call did not run, when the reader was asked and it was refused.
         refusal: Option<Refusal>,
     },
     /// The model produced an image. Carries the raw URL from the provider;
@@ -590,7 +589,7 @@ pub fn run_with_context(
                         let signature = signature(&call);
                         let started = Instant::now();
                         let result = match refusal {
-                            Some(refusal) => zone_core::tools::ToolResult::error(refusal.told()),
+                            Some(refusal) => zone_core::tools::ToolResult::error(refusal.message()),
                             None => {
                                 tools
                                     .execute(&call.function.name, &call.function.arguments)

@@ -8,17 +8,14 @@ use zone_core::tools::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Refusal {
-    /// The reader said no.
     Denied,
-    /// Nobody answered in time.
     TimedOut,
-    /// The turn stopped first.
     Cancelled,
 }
 
 impl Refusal {
     /// What the call is told in place of running.
-    pub const fn told(self) -> &'static str {
+    pub const fn message(self) -> &'static str {
         match self {
             Self::Denied => DENIED,
             Self::TimedOut => APPROVAL_TIMED_OUT,

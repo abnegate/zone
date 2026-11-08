@@ -198,6 +198,11 @@ export const PREVIEW_LABEL = 'Effect, read from the call by the server';
 /// compares rather than letting a reload relabel the same call.
 export const AWAITING_ANSWER_DETAIL = 'Waiting for your answer…';
 
+/// What a call waiting for the reader to allow it is stored with. A record a
+/// stopped server left like that can no longer be allowed. Held to the
+/// server's `AWAITING_APPROVAL_DETAIL` by `schemas.contract.test.ts`.
+export const AWAITING_APPROVAL_DETAIL = 'Waiting for approval…';
+
 /// Why a call put to the reader did not run, as the server names it.
 export const REFUSALS = ['denied', 'timed_out', 'cancelled'] as const;
 export type Refusal = (typeof REFUSALS)[number];

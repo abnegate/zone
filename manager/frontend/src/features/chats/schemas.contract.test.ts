@@ -35,6 +35,7 @@ import {
   APPROVAL_CANCELLED_DETAIL,
   APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_ANSWER_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
   DENIED_DETAIL,
   PULL_REQUEST_CHECKS,
   PULL_REQUEST_MERGEABILITY,
@@ -251,6 +252,12 @@ describe('a refused call is labelled from what refused it', () => {
 });
 
 describe('a call a stopped turn left open is labelled the same live as after a reload', () => {
+  test('the console writes the detail the server stores a call awaiting approval with', () => {
+    expect(AWAITING_APPROVAL_DETAIL).toBe(
+      rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'AWAITING_APPROVAL_DETAIL')
+    );
+  });
+
   test('the console writes the detail the server stores an unfinished call with', () => {
     expect(UNFINISHED_DETAIL).toBe(
       rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'UNFINISHED_DETAIL')

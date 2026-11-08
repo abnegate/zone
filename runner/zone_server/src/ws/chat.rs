@@ -740,8 +740,7 @@ pub enum ServerMessage {
         duration_ms: u64,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         citations: Vec<Citation>,
-        /// Why the call did not run, when the reader was asked and it was refused. Always sent,
-        /// as it is always stored, so the console labels the call from it.
+        /// Always sent, as it is always stored on the record.
         refusal: Option<Refusal>,
     },
     /// A workspace write finished. Stored on the message so a reload still
@@ -1161,8 +1160,8 @@ const UNFINISHED_DETAIL: &str = "Did not finish";
 /// The outcome a call is stored with while it waits for the reader to allow it.
 const AWAITING_APPROVAL_DETAIL: &str = "Waiting for approval…";
 
-/// Leaves every call still waiting for approval when its turn ended as one the turn never
-/// finished: nobody can allow it any more, and it did not run.
+/// Leaves every call that was put to the reader and has no result when its turn ends as one the
+/// turn never finished, whether it was still waiting or had been allowed and was running.
 fn leave_unfinished(tool_calls: &mut [ToolCallRecord]) {
     for call in tool_calls
         .iter_mut()

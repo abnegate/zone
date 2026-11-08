@@ -14,6 +14,7 @@ import {
 import {
   type ActionReceipt,
   AWAITING_ANSWER_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
   type ChatCharacter,
   type ChatWithMessages,
   type Citation,
@@ -881,7 +882,7 @@ export function useChat(
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
             arguments: payload.arguments,
-            detail: 'Waiting for approval…',
+            detail: AWAITING_APPROVAL_DETAIL,
             pending: true,
             approval: 'pending',
             reason: payload.reason,

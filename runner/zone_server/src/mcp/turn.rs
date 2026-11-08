@@ -187,7 +187,7 @@ impl Turn {
             id,
             name: asked.tool_name,
             success: refusal.is_none(),
-            detail: refusal.map_or(ALLOWED, Refusal::told).to_string(),
+            detail: refusal.map_or(ALLOWED, Refusal::message).to_string(),
             duration_ms: started.elapsed().as_millis() as u64,
             citations: Vec::new(),
             receipt: None,
@@ -195,7 +195,7 @@ impl Turn {
         });
         match refusal {
             None => verdict(Some(&asked.input), ""),
-            Some(refusal) => verdict(None, refusal.told()),
+            Some(refusal) => verdict(None, refusal.message()),
         }
     }
 
@@ -236,7 +236,7 @@ impl Turn {
         let refusal = self.allowed(&id, name, arguments).await.refusal();
         let result = match refusal {
             None => self.tools.execute(name, arguments).await,
-            Some(refusal) => ToolResult::error(refusal.told()),
+            Some(refusal) => ToolResult::error(refusal.message()),
         };
         let receipt = self
             .tools
@@ -966,6 +966,10 @@ mod tests {
         assert!(told.contains(APPROVAL_CANCELLED), "{told}");
         assert!(!told.contains(DENIED), "nobody denied it: {told}");
         assert!(!path.exists());
+        assert_eq!(
+            completed(&mut opened.events),
+            [("write_file".to_string(), Some(Refusal::Cancelled))]
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -985,6 +989,10 @@ mod tests {
         assert!(told.contains(APPROVAL_TIMED_OUT), "{told}");
         assert!(!told.contains(DENIED), "nobody denied it: {told}");
         assert!(!path.exists());
+        assert_eq!(
+            completed(&mut opened.events),
+            [("write_file".to_string(), Some(Refusal::TimedOut))]
+        );
     }
 
     #[tokio::test]

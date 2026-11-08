@@ -3,6 +3,7 @@ import {
   type Answer,
   APPROVAL_CANCELLED_DETAIL,
   APPROVAL_TIMED_OUT_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
   DENIED_DETAIL,
   PREVIEW_LABEL,
   REASON_MISSING,
@@ -165,7 +166,9 @@ function toolState(call: ToolCallRecord): ToolState {
   if (call.pending) return 'pending';
   if (call.approval === 'denied' && call.detail !== UNFINISHED_DETAIL) return 'denied';
   if (call.success) return 'ok';
-  if (call.detail === UNFINISHED_DETAIL) return 'stopped';
+  if (call.detail === UNFINISHED_DETAIL || call.detail === AWAITING_APPROVAL_DETAIL) {
+    return 'stopped';
+  }
   if (call.refusal !== undefined) return call.refusal ?? 'failed';
   return WORDED_REFUSALS.get(call.detail) ?? 'failed';
 }
