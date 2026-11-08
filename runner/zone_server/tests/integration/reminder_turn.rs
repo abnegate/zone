@@ -13,28 +13,16 @@ use crate::common;
 
 use crate::common::context::{Harness, answer, calls, successful, tool};
 use serde_json::{Value, json};
-use sqlx::Connection;
 use std::time::Duration;
 use uuid::Uuid;
+use zone_server::db::reminders::Queue;
 
-/// The key `db::actions`'s dispatching tests take, taken here for the same
-/// reason: the claim is global, so two tests that both have a firing due steal
-/// each other's. In the database rather than in the process, because CI runs
-/// these under `cargo nextest`, which gives every test a process of its own.
-const DISPATCH: i64 = 0x7A6F_6E65_5245_4D44;
-
-/// Held for the length of the test, on a connection of its own so that
-/// returning it to a pool cannot return the lock with it.
-pub(crate) async fn dispatching() -> sqlx::PgConnection {
-    let mut connection = sqlx::PgConnection::connect(&common::context_database_url())
-        .await
-        .expect("a connection of its own to hold the dispatch lock");
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(DISPATCH)
-        .execute(&mut connection)
-        .await
-        .expect("the dispatch lock is takeable");
-    connection
+/// The production worker, sweeping only the harness's own workspace.
+pub(crate) fn dispatcher(harness: &Harness) -> tokio::task::JoinHandle<()> {
+    zone_server::workers::reminders::spawn(
+        common::create_test_state(harness.config.clone(), harness.pool.clone()),
+        Queue::Workspace(harness.workspace),
+    )
 }
 
 /// Every message the chat holds, oldest first.
@@ -142,7 +130,6 @@ async fn baseline(harness: &Harness, reminder: Uuid) -> Option<String> {
 /// that the second firing's *user message* contains the first firing's answer.
 #[tokio::test]
 async fn a_watch_hands_its_next_firing_the_reading_the_last_one_took() {
-    let _dispatch = dispatching().await;
     let harness = Harness::new(
         Some(32_768),
         false,
@@ -186,10 +173,7 @@ async fn a_watch_hands_its_next_firing_the_reading_the_last_one_took() {
     );
 
     make_due(&harness, reminder).await;
-    let worker = zone_server::workers::reminders::spawn(common::create_test_state(
-        harness.config.clone(),
-        harness.pool.clone(),
-    ));
+    let worker = dispatcher(&harness);
 
     let stored = until_stored(&harness, reminder, 2).await;
     let (role, first_turn, _) = &stored[0];
@@ -245,7 +229,6 @@ async fn a_watch_hands_its_next_firing_the_reading_the_last_one_took() {
 /// delivery, with the fixed content nowhere in the chat.
 #[tokio::test]
 async fn a_due_prompt_is_answered_in_its_chat_by_the_worker_that_claimed_it() {
-    let _dispatch = dispatching().await;
     let harness = Harness::new(
         Some(32_768),
         false,
@@ -288,10 +271,7 @@ async fn a_due_prompt_is_answered_in_its_chat_by_the_worker_that_claimed_it() {
     // A second instance of the server, which is what a worker is: it shares the
     // database and the provider and knows nothing about the socket the harness
     // would use.
-    let worker = zone_server::workers::reminders::spawn(common::create_test_state(
-        harness.config.clone(),
-        harness.pool.clone(),
-    ));
+    let worker = dispatcher(&harness);
 
     let stored = until_finished(&harness, reminder).await;
     worker.abort();
@@ -367,7 +347,6 @@ fn filing(id: &str) -> wiremock::ResponseTemplate {
 /// turn is the member's.
 #[tokio::test]
 async fn a_task_a_firing_files_is_recorded_as_the_reminders() {
-    let _dispatch = dispatching().await;
     let harness = Harness::new(
         Some(200_000),
         true,
@@ -406,10 +385,7 @@ async fn a_task_a_firing_files_is_recorded_as_the_reminders() {
     harness.script.push(answer("Filed another."));
     make_due(&harness, reminder).await;
 
-    let worker = zone_server::workers::reminders::spawn(common::create_test_state(
-        harness.config.clone(),
-        harness.pool.clone(),
-    ));
+    let worker = dispatcher(&harness);
     until_stored(&harness, reminder, 4).await;
     worker.abort();
 
