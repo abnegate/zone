@@ -138,7 +138,6 @@ enum StoreOutcome {
 
 /// Context service that orchestrates the full pipeline
 pub struct ContextService {
-    #[allow(dead_code)] // Used for future database operations
     pool: PgPool,
     adapter_registry: Arc<AdapterRegistry>,
     embedding_service: Arc<dyn EmbeddingService>,

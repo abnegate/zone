@@ -22,12 +22,33 @@ pub const MAX_EMBED_CHARS: usize = 3000;
 /// Overlap between chunks in tokens
 pub const CHUNK_OVERLAP_TOKENS: usize = 50;
 
+const BYTES_PER_TOKEN: usize = 4;
+
+const CHARACTERS_PER_TOKEN: usize = 4;
+
+const SPLIT_OVERLAP_DIVISOR: usize = 10;
+
+const DENSITY_SCALE: usize = 10;
+
+const CODE_DENSITY: usize = 9;
+
+const MARKUP_DENSITY: usize = 6;
+
+const JSON_DENSITY: usize = 7;
+
+/// Identifier-heavy code averages about two characters per token, so 3/2
+/// leaves 25% headroom.
+const EMBED_CHARACTERS_PER_TOKEN_NUMERATOR: usize = 3;
+
+const EMBED_CHARACTERS_PER_TOKEN_DENOMINATOR: usize = 2;
+
+const MINIMUM_EMBED_CHARACTERS: usize = 512;
+
 /// Estimate tokens from byte size (for pre-fetch estimation)
 ///
 /// Used when we know the file size but haven't fetched content yet.
 pub fn estimate_tokens_from_bytes(bytes: usize) -> usize {
-    // Assume UTF-8, mostly ASCII content
-    bytes.div_ceil(4)
+    bytes.div_ceil(BYTES_PER_TOKEN)
 }
 
 /// Content-type aware token estimation
@@ -35,34 +56,22 @@ pub fn estimate_tokens_from_bytes(bytes: usize) -> usize {
 /// Adjusts the estimate based on content type characteristics.
 pub fn estimate_tokens_for_type(content: &str, content_type: &str) -> usize {
     let base = estimate_tokens(content);
-
-    // Adjust based on content type
     match content_type {
         t if t.contains("code") || t.ends_with("/rust") || t.ends_with("/python") => {
-            // Code is slightly denser
-            base * 9 / 10
+            base * CODE_DENSITY / DENSITY_SCALE
         }
-        t if t.contains("html") || t.contains("xml") => {
-            // HTML/XML has lots of tags
-            base * 6 / 10
-        }
-        t if t.contains("json") => {
-            // JSON has structural overhead
-            base * 7 / 10
-        }
-        t if t.contains("markdown") => {
-            // Markdown is close to plain text
-            base
-        }
+        t if t.contains("html") || t.contains("xml") => base * MARKUP_DENSITY / DENSITY_SCALE,
+        t if t.contains("json") => base * JSON_DENSITY / DENSITY_SCALE,
         _ => base,
     }
 }
 
 /// Character budget for one embedding request
 pub fn embed_char_budget(model_max_tokens: usize) -> usize {
-    // 1.5 chars per token: identifier-heavy code averages ~2, less 25% headroom
-    let conservative = model_max_tokens.saturating_mul(3).saturating_div(2);
-    conservative.clamp(512, MAX_EMBED_CHARS)
+    let conservative = model_max_tokens
+        .saturating_mul(EMBED_CHARACTERS_PER_TOKEN_NUMERATOR)
+        .saturating_div(EMBED_CHARACTERS_PER_TOKEN_DENOMINATOR);
+    conservative.clamp(MINIMUM_EMBED_CHARACTERS, MAX_EMBED_CHARS)
 }
 
 /// Truncate `text` to `max_chars` on a char boundary
@@ -84,8 +93,10 @@ pub fn split_for_embedding(text: &str, max_chars: usize) -> Vec<String> {
     if text.chars().count() <= max_chars {
         return vec![text.to_string()];
     }
-    let max_tokens = max_chars.div_ceil(4).max(1);
-    let overlap = (max_tokens / 10).max(1).min(max_tokens.saturating_sub(1));
+    let max_tokens = max_chars.div_ceil(CHARACTERS_PER_TOKEN).max(1);
+    let overlap = (max_tokens / SPLIT_OVERLAP_DIVISOR)
+        .max(1)
+        .min(max_tokens.saturating_sub(1));
     chunk_text(text, max_tokens, overlap)
         .into_iter()
         .map(|chunk| chunk.text)
@@ -107,9 +118,10 @@ mod tests {
         let html = "<html><body><p>Hello world</p></body></html>";
         let plain_estimate = estimate_tokens(html);
         let html_estimate = estimate_tokens_for_type(html, "text/html");
-
-        // HTML estimate should be lower due to tag overhead
-        assert!(html_estimate < plain_estimate);
+        assert!(
+            html_estimate < plain_estimate,
+            "markup should estimate fewer tokens than plain text"
+        );
     }
 
     #[test]

@@ -749,7 +749,6 @@ mod tests {
             "[-0.5,0.5,-1]"
         );
 
-        // Test NaN rejection
         assert!(vector_to_pg_string(&[f32::NAN]).is_err());
         assert!(vector_to_pg_string(&[f32::INFINITY]).is_err());
         assert!(vector_to_pg_string(&[f32::NEG_INFINITY]).is_err());
