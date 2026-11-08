@@ -758,6 +758,25 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_embedding_source_still_fuses_on_the_chunk() {
+        let keyword = vec![keyword_row(7, "fn restock() { keyword }", 0.4)];
+        let mut stale = semantic_row(7, "fn restock() { semantic }", 0.6);
+        stale.source_id = Uuid::from_u128(2);
+        stale.content_item_id = Uuid::from_u128(2_000);
+
+        let results = fuse(keyword, vec![stale], 1, &[], &HybridSearchConfig::default());
+
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(result.id.chunk_id, Uuid::from_u128(7));
+        assert_eq!(result.id.content_item_id, Uuid::from_u128(1_007));
+        assert_eq!(result.id.source_id, Uuid::from_u128(1));
+        assert_eq!(result.chunk_text, "fn restock() { keyword }");
+        assert_eq!(result.keyword_rank, Some(1));
+        assert_eq!(result.semantic_rank, Some(1));
+    }
+
+    #[test]
     fn test_vector_to_pg_string() {
         assert_eq!(vector_to_pg_string(&[]).unwrap(), "[]");
         assert_eq!(vector_to_pg_string(&[1.5]).unwrap(), "[1.5]");
