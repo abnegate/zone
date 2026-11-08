@@ -448,7 +448,8 @@ mod tests {
     use crate::db::reminders;
     use crate::db::reminders::Delivered;
     use crate::db::reminders::Sweep;
-    use chrono::{Duration, Utc};
+    use chrono::Duration;
+    use chrono::Utc;
 
     /// Long enough that a claimed turn stays claimed for the length of a test,
     /// which is what a real lease is for.
