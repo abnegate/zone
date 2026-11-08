@@ -112,6 +112,7 @@ impl Environment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::time_zone;
 
     fn fixed() -> Environment {
         Environment::at(
@@ -151,7 +152,8 @@ mod tests {
 
     #[test]
     fn a_person_s_zone_restates_the_same_instant_on_their_clock() {
-        let environment = fixed().with_time_zone(TimeZone::parse("Europe/London").expect("a zone"));
+        let environment =
+            fixed().with_time_zone(time_zone::parse("Europe/London").expect("a zone"));
         assert_eq!(environment.timezone, "Europe/London");
         assert_eq!(
             environment.now.to_rfc3339(),

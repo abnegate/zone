@@ -198,6 +198,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "abnegate-recurrence"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9a75cf93bfc1fe297b68d4cd61346ce88f1029aab4dd8ef494b082403d306ff"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "abnegate-search"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9629,6 +9640,7 @@ dependencies = [
  "abnegate-learn",
  "abnegate-llm",
  "abnegate-notify",
+ "abnegate-recurrence",
  "abnegate-search",
  "abnegate-secret",
  "abnegate-vcs",
@@ -9640,7 +9652,6 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "chrono",
- "chrono-tz",
  "dashmap",
  "futures",
  "futures-util",
