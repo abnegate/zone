@@ -50,9 +50,14 @@ const SHORT_CHAT_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long the test waits for the spawned agent to report how it was invoked.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long Stop has to end a turn, far past what a turn at rest takes and far
-/// short of the walk [`fanned_out`] sends a tool on.
+/// How long Stop has to end a turn, far past what a turn at rest takes.
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How many directories each one in [`sprawling`] holds.
+const FAN_OUT: usize = 10;
+
+/// How deep [`sprawling`] nests them: 111,110 directories in all.
+const LEVELS: usize = 5;
 
 const ANSWER: &str = "Written.";
 
@@ -328,19 +333,27 @@ async fn gone(pid: &str) -> bool {
     false
 }
 
-/// A tree of `depth` levels with two links from each to the next, which a walk
-/// that follows links reads `2^depth` times over: one a real walk of a host's
-/// projects takes minutes over, from next to nothing on disk.
-fn fanned_out(root: &Path, depth: usize) {
-    for level in 0..depth {
-        let directory = root.join(level.to_string());
-        std::fs::create_dir_all(&directory).expect("a level of the tree");
-        for link in ["a", "b"] {
-            std::os::unix::fs::symlink(root.join((level + 1).to_string()), directory.join(link))
-                .expect("a link to the next level");
+/// A tree of real directories wider than a walk reads before it gives up.
+/// Walks follow no links, so only entries on disk keep one going, and a walk
+/// through this many takes seconds.
+fn sprawling(root: &Path) {
+    std::fs::create_dir(root).expect("the root of the tree");
+    std::thread::scope(|scope| {
+        for branch in 0..FAN_OUT {
+            let branch = root.join(branch.to_string());
+            scope.spawn(move || grow(&branch, LEVELS - 1));
         }
+    });
+}
+
+fn grow(directory: &Path, levels: usize) {
+    std::fs::create_dir(directory).expect("a directory of the tree");
+    if levels == 0 {
+        return;
     }
-    std::fs::create_dir_all(root.join(depth.to_string())).expect("the last level of the tree");
+    for child in 0..FAN_OUT {
+        grow(&directory.join(child.to_string()), levels - 1);
+    }
 }
 
 /// The MCP server definition zone passed on the command line, as the agent
@@ -829,7 +842,7 @@ async fn stop_reaches_a_cli_turn_while_a_tool_it_called_walks_a_huge_tree() {
     let harness = Harness::start(true, true).await;
     let processes = harness.agent.forking();
     let tree = harness._directory.path().join("tree");
-    fanned_out(&tree, 18);
+    sprawling(&tree);
     let mut socket = harness.socket().await;
     send(
         &mut socket,
