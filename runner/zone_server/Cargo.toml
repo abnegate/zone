@@ -101,6 +101,7 @@ rmcp = { workspace = true, default-features = false }
 aiusg = { version = "=0.5.0", default-features = false }
 
 # Internal
+abnegate-agent = { workspace = true, features = ["mcp"] }
 abnegate-agent-cli = { workspace = true, features = ["login"] }
 abnegate-comfy = { workspace = true }
 abnegate-exec = { workspace = true }
@@ -115,6 +116,7 @@ abnegate-vcs = { workspace = true, features = ["github", "github-app"] }
 zone_chat = { path = "../zone_chat" }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
+zone_routing = { path = "../zone_routing" }
 
 [dev-dependencies]
 zone_server = { path = ".", default-features = false, features = ["testing"] }
