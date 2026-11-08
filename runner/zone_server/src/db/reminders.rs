@@ -426,8 +426,9 @@ fn reschedule(
     // shares the transaction that is delivering it -- so the delivery in hand
     // is added here. Without it COUNT=1 schedules a second firing, and every
     // finite rule delivers one more than it was asked for.
-    let next = rule.next_after(anchor.unwrap_or(due_at), now, fired.saturating_add(1), zone)?
-        + schedule::jitter(id, rule.period());
+    let next = rule
+        .next_after(anchor.unwrap_or(due_at), now, fired.saturating_add(1), zone)?
+        .checked_add_signed(schedule::jitter(id, rule.period()))?;
     // A firing past the lifetime is not scheduled at all, rather than scheduled
     // and then refused when it arrives.
     if expires_at.is_some_and(|expires| next > expires) {
@@ -752,7 +753,7 @@ pub async fn record_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Duration, Timelike};
+    use chrono::{Datelike, Duration, NaiveDate, Timelike};
     use sqlx::postgres::PgPoolOptions;
 
     /// Validation answers before the pool is touched, so a pool nothing listens
@@ -787,6 +788,31 @@ mod tests {
     fn midday_offset() -> FixedOffset {
         FixedOffset::east_opt((12 - Utc::now().hour() as i32) * 3600)
             .expect("twelve hours either side of UTC is an offset")
+    }
+
+    /// A firing in the calendar's last minute, nudged by a jitter that runs past
+    /// the calendar's end, is dropped rather than overflowing in the worker.
+    #[test]
+    fn a_firing_whose_jitter_would_pass_the_calendars_end_is_dropped() {
+        let anchor = "2025-01-31T23:59:00Z".parse::<DateTime<Utc>>().unwrap();
+        let months = i64::from(NaiveDate::MAX.year() - 2025) * 12 + 11;
+        let rule = format!("FREQ=MONTHLY;INTERVAL={months}");
+        let id = Uuid::from_u128(1);
+        let recurrence = schedule::parse(&rule).expect("accepted");
+        assert_eq!(
+            recurrence.next_after(anchor, Utc::now(), 1, TimeZone::UTC),
+            Some(NaiveDate::MAX.and_hms_opt(23, 59, 0).unwrap().and_utc()),
+            "the next firing is the calendar's last minute"
+        );
+        assert!(
+            schedule::jitter(id, recurrence.period()) > Duration::minutes(1),
+            "the jitter carries the firing past the calendar's end"
+        );
+
+        assert_eq!(
+            reschedule(id, Some(&rule), Some(anchor), anchor, None, 0, "UTC"),
+            None
+        );
     }
 
     #[test]
