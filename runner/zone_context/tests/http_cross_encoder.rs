@@ -201,6 +201,18 @@ async fn an_unparsable_answer_is_a_parse_error() {
 }
 
 #[tokio::test]
+async fn a_misshapen_answer_does_not_echo_its_content() {
+    let server =
+        endpoint(ResponseTemplate::new(200).set_body_json(json!({ "results": "secret document" })))
+            .await;
+
+    let message = embedding_failure(scores(&server).await);
+
+    assert_eq!(message, "rerank parse: invalid response");
+    assert!(!message.contains("secret"), "{message}");
+}
+
+#[tokio::test]
 async fn an_unreachable_endpoint_is_a_request_error() {
     let message = embedding_failure(
         encoder(&closed_url())

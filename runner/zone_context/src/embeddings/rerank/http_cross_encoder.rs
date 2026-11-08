@@ -26,6 +26,7 @@ const PROBE_DOCUMENTS: [&str; 2] = [
 const PROBE_MARGIN: f32 = 0.02;
 const UNCLASSIFIED_FAILURE: &str = "rerank failed";
 const UNPARSABLE_URL: &str = "<unparsable URL>";
+const INVALID_RESPONSE: &str = "rerank parse: invalid response";
 const VERBATIM_PARSE_DETAILS: [&str; 3] = [
     "empty rerank response",
     "rerank response scored no document",
@@ -146,9 +147,7 @@ fn context_error(error: ProviderError) -> ContextError {
         {
             ContextError::Embedding(detail)
         }
-        ProviderError::Parse { detail, .. } => {
-            ContextError::Embedding(format!("rerank parse: {detail}"))
-        }
+        ProviderError::Parse { .. } => ContextError::Embedding(INVALID_RESPONSE.to_string()),
         ProviderError::Config { detail, .. } => {
             ContextError::Config(format!("rerank client: {detail}"))
         }
