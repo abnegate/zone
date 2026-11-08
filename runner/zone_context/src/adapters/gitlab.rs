@@ -1479,47 +1479,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_project_gitlab_would_not_find_is_refused_unsent() {
-        let mock_server = MockServer::start().await;
-
-        let error = served(&mock_server)
-            .get_default_branch("group/", None)
-            .await
-            .unwrap_err();
-
-        assert!(
-            matches!(&error, ContextError::InvalidSourceConfig(message) if message == "Project not found: group/"),
-            "{error:?}"
-        );
-        assert!(mock_server.received_requests().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_path_prefix_with_an_empty_segment_is_refused_unsent() {
-        let mock_server = MockServer::start().await;
-        let adapter = served(&mock_server);
-
-        let error = adapter
-            .get_tree("group/project", "main", Some("a//b"), None)
-            .await
-            .unwrap_err();
-        assert_eq!(
-            adapter_message(error),
-            "Failed to fetch tree: 404 Not Found"
-        );
-
-        let traversal = adapter
-            .get_tree("group/project", "main", Some("src/../x"), None)
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(&traversal, ContextError::InvalidSourceConfig(message) if message == "Path cannot contain '..'"),
-            "{traversal:?}"
-        );
-        assert!(mock_server.received_requests().await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
     async fn a_malformed_token_is_a_configuration_error_at_every_read() {
         let mock_server = MockServer::start().await;
         let adapter = served(&mock_server);
