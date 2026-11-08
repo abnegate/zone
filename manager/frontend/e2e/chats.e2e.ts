@@ -875,6 +875,22 @@ test.describe('Chats Page', () => {
                 success: false,
                 detail: 'Error: The user denied this tool call.',
               },
+              {
+                ...shell,
+                id: 'call_timed_out',
+                name: 'apply_patch',
+                success: false,
+                detail:
+                  'Error: Nobody answered the approval request in time, so this tool call did not run.',
+              },
+              {
+                ...shell,
+                id: 'call_cancelled',
+                name: 'run_command',
+                success: false,
+                detail:
+                  'Error: The turn stopped before this tool call was approved, so it did not run.',
+              },
             ],
           },
         },
@@ -919,7 +935,7 @@ test.describe('Chats Page', () => {
       await page.click('.chat-item');
 
       const stored = page.getByTestId('tool-trace').first().getByTestId('tool-call');
-      await expect(stored).toHaveCount(2);
+      await expect(stored).toHaveCount(4);
       await page.fill('.message-form textarea', 'Clean the build output too');
       await page.locator('.message-form').getByRole('button', { name: 'Send' }).click();
       const live = page.getByTestId('tool-trace').nth(1).getByTestId('tool-call');
@@ -932,6 +948,12 @@ test.describe('Chats Page', () => {
       await expect(stored.nth(0).locator('.tool-call-name')).toHaveText('Ran a shell command');
       await expect(stored.nth(0).locator('.tool-call-detail')).toHaveText('');
       await expect(stored.nth(1).locator('.tool-call-name')).toHaveText('Denied writing a file');
+      await expect(stored.nth(2).locator('.tool-call-name')).toHaveText(
+        'Approval timed out for patching a file'
+      );
+      await expect(stored.nth(3).locator('.tool-call-name')).toHaveText(
+        'Cancelled running a command'
+      );
       await expect(live.nth(0).locator('.tool-call-name')).toHaveText('Running a command');
       await expect(live.nth(1).locator('.tool-call-name')).toHaveText(
         'Waiting to run a shell command'

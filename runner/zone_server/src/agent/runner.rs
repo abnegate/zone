@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
-use zone_core::tools::{DENIED, Session, content_lines, is_vision_url};
+use zone_core::tools::{Session, content_lines, is_vision_url};
 
 /// What the calls queued behind a turn-ending question are told.
 ///
@@ -542,7 +542,7 @@ pub fn run_with_context(
                     };
                 }
                 let call = &batch[0];
-                let denied = if approval.confirms(tier) {
+                let refusal = if approval.confirms(tier) {
                     // Register before the request goes out: a client that
                     // answers immediately would otherwise be told the call
                     // is not waiting for approval.
@@ -554,9 +554,9 @@ pub fn run_with_context(
                         reason: super::reason(&call.function.arguments),
                         preview: tools.effect(&call.function.name, &call.function.arguments),
                     };
-                    !approval.awaited_decision(&call.id, pending).await
+                    approval.awaited_decision(&call.id, pending).await.refusal()
                 } else {
-                    false
+                    None
                 };
                 // A fresh acknowledgement boundary after potentially long approval waits.
                 yield AgentEvent::Context(context.usage(&model, definitions));
@@ -573,12 +573,13 @@ pub fn run_with_context(
                     async move {
                         let signature = signature(&call);
                         let started = Instant::now();
-                        let result = if denied {
-                            zone_core::tools::ToolResult::error(DENIED)
-                        } else {
-                            tools
-                                .execute(&call.function.name, &call.function.arguments)
-                                .await
+                        let result = match refusal {
+                            Some(refusal) => zone_core::tools::ToolResult::error(refusal),
+                            None => {
+                                tools
+                                    .execute(&call.function.name, &call.function.arguments)
+                                    .await
+                            }
                         };
                         (
                             signature,

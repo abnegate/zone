@@ -63,6 +63,15 @@ pub(crate) const ERROR_PREFIX: &str = "Error: ";
 /// console reads a denial back from these words once the approval is gone.
 pub const DENIED: &str = "The user denied this tool call.";
 
+/// What a call is told when nobody answered its approval in time. Not the
+/// reader's answer, so it reads apart from [`DENIED`].
+pub const APPROVAL_TIMED_OUT: &str =
+    "Nobody answered the approval request in time, so this tool call did not run.";
+
+/// What a call is told when its turn stopped while it waited for approval.
+pub const APPROVAL_CANCELLED: &str =
+    "The turn stopped before this tool call was approved, so it did not run.";
+
 /// Longest a rendered approval preview may run.
 ///
 /// The reader is deciding, not reading. A preview past a screenful is one

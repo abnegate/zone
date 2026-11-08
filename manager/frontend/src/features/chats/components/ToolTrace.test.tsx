@@ -2,6 +2,8 @@ import { describe, expect, it } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { ToolCallRecordSchema } from '../schemas';
 import {
+  APPROVAL_CANCELLED_DETAIL,
+  APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_ANSWER_DETAIL,
   DENIED_DETAIL,
   type JobStarted,
@@ -499,6 +501,48 @@ describe('ToolTrace', () => {
 
     expect(screen.getByText('Bash')).toBeInTheDocument();
     expect(screen.getByText(DENIED_DETAIL)).toBeInTheDocument();
+  });
+
+  it('labels a call whose approval timed out or was cancelled apart from a denial', () => {
+    const shell = { name: 'run_shell', success: false };
+    render(
+      <ToolTrace
+        calls={[
+          call({ ...shell, id: 'chat', detail: `Error: ${APPROVAL_TIMED_OUT_DETAIL}` }),
+          call({ ...shell, id: 'agent', detail: APPROVAL_TIMED_OUT_DETAIL }),
+          call({ ...shell, id: 'stopped', detail: `Error: ${APPROVAL_CANCELLED_DETAIL}` }),
+          call({ ...shell, id: 'asked', detail: APPROVAL_CANCELLED_DETAIL }),
+        ]}
+      />
+    );
+
+    const rows = screen.getAllByTestId('tool-call');
+    expect(rows.map((row) => row.querySelector('.tool-call-name')?.textContent)).toEqual([
+      'Approval timed out for running a shell command',
+      'Approval timed out for running a shell command',
+      'Cancelled running a shell command',
+      'Cancelled running a shell command',
+    ]);
+    expect(rows.map((row) => row.querySelector('.tool-call-detail')?.textContent)).toEqual([
+      '',
+      '',
+      '',
+      '',
+    ]);
+  });
+
+  it('keeps why the call did not run in the detail of a tool whose label cannot say it', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({ id: 'a', name: 'Bash', success: false, detail: APPROVAL_TIMED_OUT_DETAIL }),
+          call({ id: 'b', name: 'Bash', success: false, detail: APPROVAL_CANCELLED_DETAIL }),
+        ]}
+      />
+    );
+
+    expect(screen.getByText(APPROVAL_TIMED_OUT_DETAIL)).toBeInTheDocument();
+    expect(screen.getByText(APPROVAL_CANCELLED_DETAIL)).toBeInTheDocument();
   });
 
   it('reads a successful call as run even when its output repeats a server outcome', () => {

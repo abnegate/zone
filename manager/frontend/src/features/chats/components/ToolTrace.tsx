@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import {
   type Answer,
+  APPROVAL_CANCELLED_DETAIL,
+  APPROVAL_TIMED_OUT_DETAIL,
   DENIED_DETAIL,
   PREVIEW_LABEL,
   REASON_MISSING,
@@ -128,9 +130,34 @@ function humanise(name: string): string {
   );
 }
 
-type ToolState = 'approval' | 'pending' | 'stopped' | 'denied' | 'ok' | 'failed';
+type ToolState =
+  | 'approval'
+  | 'pending'
+  | 'stopped'
+  | 'denied'
+  | 'timed_out'
+  | 'cancelled'
+  | 'ok'
+  | 'failed';
 
-const DENIED_DETAILS = new Set([DENIED_DETAIL, `${TOOL_ERROR_PREFIX}${DENIED_DETAIL}`]);
+type Refusal = Extract<ToolState, 'denied' | 'timed_out' | 'cancelled'>;
+
+/// A refused call's record keeps only the server's words for why, written bare
+/// on an agent's own permission card and behind the error prefix otherwise.
+const REFUSALS = new Map<string, Refusal>(
+  (
+    [
+      [DENIED_DETAIL, 'denied'],
+      [APPROVAL_TIMED_OUT_DETAIL, 'timed_out'],
+      [APPROVAL_CANCELLED_DETAIL, 'cancelled'],
+    ] as const
+  ).flatMap(([detail, refusal]) => [
+    [detail, refusal],
+    [`${TOOL_ERROR_PREFIX}${detail}`, refusal],
+  ])
+);
+
+const REFUSED: ReadonlySet<ToolState> = new Set<Refusal>(['denied', 'timed_out', 'cancelled']);
 
 function toolState(call: ToolCallRecord): ToolState {
   if (call.approval === 'pending') return 'approval';
@@ -138,7 +165,7 @@ function toolState(call: ToolCallRecord): ToolState {
   if (call.approval === 'denied' && call.detail !== UNFINISHED_DETAIL) return 'denied';
   if (call.success) return 'ok';
   if (call.detail === UNFINISHED_DETAIL) return 'stopped';
-  return DENIED_DETAILS.has(call.detail) ? 'denied' : 'failed';
+  return REFUSALS.get(call.detail) ?? 'failed';
 }
 
 function toolLabel(name: string, state: ToolState): string {
@@ -155,6 +182,10 @@ function toolLabel(name: string, state: ToolState): string {
       return capitalise(`${gerund} ${object}`);
     case 'stopped':
       return `Stopped ${gerund} ${object}`;
+    case 'timed_out':
+      return `Approval timed out for ${gerund} ${object}`;
+    case 'cancelled':
+      return `Cancelled ${gerund} ${object}`;
     case 'denied':
       return `Denied ${gerund} ${object}`;
     case 'failed':
@@ -302,9 +333,9 @@ const BARE_STREAM_LABEL = /^std(?:out|err):(?:\s*\(\d+ lines\))?$/;
 /// A failed call's detail is its error and a waiting call's is its state, and
 /// both are the server's words about this call rather than a preamble. A JSON
 /// record nothing here can summarise is left out rather than shown as braces,
-/// and a denial the label already states is not said twice.
+/// and why a call did not run is not said twice when its label says it.
 function toolDetail(call: ToolCallRecord, state: ToolState, titles: Titles): string {
-  if (state === 'denied' && call.name in TOOL_ACTIONS) return '';
+  if (REFUSED.has(state) && call.name in TOOL_ACTIONS) return '';
   if (!call.success || call.pending || call.approval === 'pending') return call.detail;
   const derive = DETAIL_FROM_ARGUMENTS[call.name];
   const args = derive ? parseArguments(call.arguments) : null;
@@ -381,7 +412,7 @@ function ToolTraceRow({
   const [expanded, setExpanded] = useState(false);
   const args = formatArguments(call.arguments);
   const state = toolState(call);
-  const status = state === 'denied' || state === 'stopped' ? 'failed' : state;
+  const status = REFUSED.has(state) || state === 'stopped' ? 'failed' : state;
 
   return (
     <li className={`tool-call tool-call--${status}`}>

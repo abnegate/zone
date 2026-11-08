@@ -17,12 +17,12 @@ use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, Toolset};
-use zone_core::tools::{DENIED, PERMISSION_TOOL, ToolResult, content_lines};
+use zone_core::tools::{PERMISSION_TOOL, ToolResult, content_lines};
 
 use super::progress::Progress;
 use super::scope::Scope;
 use crate::agent::runner::call_signature;
-use crate::agent::{AgentEvent, ChatTools};
+use crate::agent::{AgentEvent, ChatTools, Decision};
 use crate::utils::crypto::{generate_token, hash_token};
 
 /// What a call past the turn's budget is told instead of being run.
@@ -182,19 +182,19 @@ impl Turn {
             approval.decide(&id, false);
             return verdict(None, UNATTENDED);
         }
-        let allowed = approval.awaited_decision(&id, pending).await;
+        let refusal = approval.awaited_decision(&id, pending).await.refusal();
         self.publish(AgentEvent::ToolCallCompleted {
             id,
             name: asked.tool_name,
-            success: allowed,
-            detail: if allowed { ALLOWED } else { DENIED }.to_string(),
+            success: refusal.is_none(),
+            detail: refusal.unwrap_or(ALLOWED).to_string(),
             duration_ms: started.elapsed().as_millis() as u64,
             citations: Vec::new(),
             receipt: None,
         });
-        match allowed {
-            true => verdict(Some(&asked.input), ""),
-            false => verdict(None, DENIED),
+        match refusal {
+            None => verdict(Some(&asked.input), ""),
+            Some(refusal) => verdict(None, refusal),
         }
     }
 
@@ -232,10 +232,9 @@ impl Turn {
         });
 
         let started = Instant::now();
-        let result = if self.allowed(&id, name, arguments).await {
-            self.tools.execute(name, arguments).await
-        } else {
-            ToolResult::error(DENIED)
+        let result = match self.allowed(&id, name, arguments).await.refusal() {
+            None => self.tools.execute(name, arguments).await,
+            Some(refusal) => ToolResult::error(refusal),
         };
         let receipt = self
             .tools
@@ -275,11 +274,11 @@ impl Turn {
     ///
     /// A console that is no longer listening refuses the call rather than
     /// holding it for the approval timeout nobody is there to answer.
-    async fn allowed(&self, id: &str, name: &str, arguments: &str) -> bool {
+    async fn allowed(&self, id: &str, name: &str, arguments: &str) -> Decision {
         let tier = self.tools.tier(name);
         let approval = &self.scope.approval;
         if !approval.confirms(tier) {
-            return true;
+            return Decision::Approved;
         }
         let pending = approval.expect_decision(id);
         let raised = self.publish(AgentEvent::ToolApprovalRequired {
@@ -291,7 +290,7 @@ impl Turn {
         });
         if !raised {
             approval.decide(id, false);
-            return false;
+            return Decision::Denied;
         }
         approval.awaited_decision(id, pending).await
     }
@@ -563,8 +562,8 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
     use zone_core::llm::provider::DEFAULT_TIMEOUT;
-    use zone_core::tools::Session;
     use zone_core::tools::job::{JobCommand, Jobs};
+    use zone_core::tools::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED, Session};
 
     #[tokio::test]
     async fn what_the_agent_wrote_is_yielded_before_a_call_that_arrived_with_it() {
@@ -870,6 +869,48 @@ mod tests {
             !path.exists(),
             "a denied write must not have touched the filesystem"
         );
+    }
+
+    #[tokio::test]
+    async fn a_call_whose_turn_stops_while_it_waits_is_told_it_was_cancelled() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("cancelled.txt");
+        let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+        let arguments = write(&path).to_string();
+
+        let call = tokio::spawn(async move { turn.run("write_file", &arguments).await });
+        wait_for_card(&mut opened.events).await;
+        opened.approval.deny_all();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), call)
+            .await
+            .expect("a cancelled call returns at once")
+            .expect("the call task");
+        let told = format!("{:?}", result.content);
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert!(told.contains(APPROVAL_CANCELLED), "{told}");
+        assert!(!told.contains(DENIED), "nobody denied it: {told}");
+        assert!(!path.exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_nobody_answers_is_told_its_approval_timed_out() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("unanswered.txt");
+        let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
+        let turn = Turn::find(&opened.token).expect("the turn");
+        let arguments = write(&path).to_string();
+
+        let call = tokio::spawn(async move { turn.run("write_file", &arguments).await });
+        wait_for_card(&mut opened.events).await;
+
+        let result = call.await.expect("the call task");
+        let told = format!("{:?}", result.content);
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert!(told.contains(APPROVAL_TIMED_OUT), "{told}");
+        assert!(!told.contains(DENIED), "nobody denied it: {told}");
+        assert!(!path.exists());
     }
 
     #[tokio::test]

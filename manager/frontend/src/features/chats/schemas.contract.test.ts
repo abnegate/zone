@@ -32,6 +32,8 @@ import {
 } from './schemas';
 import {
   ACTION_TARGETS,
+  APPROVAL_CANCELLED_DETAIL,
+  APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_ANSWER_DETAIL,
   DENIED_DETAIL,
   PULL_REQUEST_CHECKS,
@@ -94,7 +96,7 @@ function rustStringArray(source: string, constantName: string): string[] {
 
 /// Reads the value of a `const NAME: &str = ".."` literal.
 function rustStringConstant(source: string, constantName: string): string {
-  const value = source.match(new RegExp(`const ${constantName}: &str = "([^"]*)";`))?.[1];
+  const value = source.match(new RegExp(`const ${constantName}: &str =\\s*"([^"]*)";`))?.[1];
   if (value === undefined) throw new Error(`${constantName} not found in the Rust source`);
   return value;
 }
@@ -213,6 +215,18 @@ describe('a question call is labelled the same live as it is after a reload', ()
 describe('a denied call stays labelled denied after the server settles it', () => {
   test('the console reads the words the server tells a denied call', () => {
     expect(DENIED_DETAIL).toBe(rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'DENIED'));
+  });
+
+  test('the console reads the words the server tells a call nobody approved in time', () => {
+    expect(APPROVAL_TIMED_OUT_DETAIL).toBe(
+      rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'APPROVAL_TIMED_OUT')
+    );
+  });
+
+  test('the console reads the words the server tells a call its stopped turn cancelled', () => {
+    expect(APPROVAL_CANCELLED_DETAIL).toBe(
+      rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'APPROVAL_CANCELLED')
+    );
   });
 
   test('the console reads the prefix the server puts in front of a failed call', () => {

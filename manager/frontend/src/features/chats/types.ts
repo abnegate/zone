@@ -196,6 +196,16 @@ export const AWAITING_ANSWER_DETAIL = 'Waiting for your answer…';
 /// call was denied. Held to the server's `DENIED` by `schemas.contract.test.ts`.
 export const DENIED_DETAIL = 'The user denied this tool call.';
 
+/// Told to a call nobody approved in time, which is not the reader's answer.
+/// Held to the server's `APPROVAL_TIMED_OUT` by `schemas.contract.test.ts`.
+export const APPROVAL_TIMED_OUT_DETAIL =
+  'Nobody answered the approval request in time, so this tool call did not run.';
+
+/// Told to a call whose turn stopped while it waited for approval. Held to the
+/// server's `APPROVAL_CANCELLED` by `schemas.contract.test.ts`.
+export const APPROVAL_CANCELLED_DETAIL =
+  'The turn stopped before this tool call was approved, so it did not run.';
+
 /// Held to the server's `ERROR_PREFIX` by `schemas.contract.test.ts`.
 export const TOOL_ERROR_PREFIX = 'Error: ';
 
