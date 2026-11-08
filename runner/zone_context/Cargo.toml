@@ -80,7 +80,7 @@ dirs = { workspace = true, optional = true }
 # Internal
 abnegate-http = { workspace = true }
 abnegate-index = { workspace = true, features = ["code-chunking"] }
-abnegate-llm = { workspace = true, features = ["ollama", "openai-compatible"] }
+abnegate-llm = { workspace = true, features = ["ollama", "openai-compatible", "rerank"] }
 zone_core = { path = "../zone_core" }
 
 [dev-dependencies]
