@@ -1,6 +1,3 @@
-//! GitLab adapter parity and regression tests, read through abnegate-vcs
-//! against a local GitLab stand-in.
-
 use abnegate_vcs::GitLabService;
 use chrono::Utc;
 use serde_json::Value;
