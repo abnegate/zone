@@ -508,13 +508,14 @@ fn every_generated_password_meets_the_registration_rules() {
         0x11111111_1111_4111_a111_111111111111,
         0xaaaaaaaa_aaaa_4aaa_aaaa_aaaaaaaaaaaa,
     ] {
-        let password = password(uuid::Uuid::from_u128(id));
+        let id = uuid::Uuid::from_u128(id);
+        let password = password(id);
         assert!(
             password.len() >= 8
                 && password.chars().any(char::is_uppercase)
                 && password.chars().any(char::is_lowercase)
                 && password.chars().any(|character| character.is_ascii_digit()),
-            "{password} is refused by registration"
+            "the password built from {id} is refused by registration"
         );
     }
 }
