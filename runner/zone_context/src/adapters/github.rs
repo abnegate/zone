@@ -1032,6 +1032,7 @@ impl SourceAdapter for GitHubAdapter {
 mod tests {
     use super::*;
     use crate::adapters::NoOpProgress;
+    use abnegate_vcs::ObjectId;
     use chrono::Utc;
     use serde_json::Value;
     use serde_json::json;
@@ -1047,6 +1048,13 @@ mod tests {
     const LIB_SHA: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
 
     const README_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    const TREE_SHA: &str = "6367c48dd193d56ea7b0baad25b19455e529f5ee";
+
+    const MALFORMED_TOKEN: &str = "bad\ntoken";
+
+    const MALFORMED_TOKEN_MESSAGE: &str =
+        "Invalid authorization token format (token not logged for security)";
 
     fn served(server: &MockServer) -> GitHubAdapter {
         GitHubAdapter::with_service(
@@ -1145,24 +1153,68 @@ mod tests {
         assert!(result.is_ok(), "{result:?}");
     }
 
+    async fn mount_listing(server: &MockServer, entries: Value) {
+        Mock::given(method("GET"))
+            .and(path("/repos/test-owner/test-repo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "test-repo",
+                "default_branch": "main"
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/test-owner/test-repo/git/trees/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "sha": TREE_SHA,
+                "tree": entries,
+                "truncated": false
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn listed_blob(file: &str, size: usize) -> Value {
+        json!({
+            "path": file,
+            "mode": "100644",
+            "type": "blob",
+            "sha": LIB_SHA,
+            "size": size
+        })
+    }
+
     #[tokio::test]
     async fn test_github_adapter_estimate_tokens_empty_repo() {
         let mock_server = MockServer::start().await;
+        mount_listing(&mock_server, json!([])).await;
         let adapter = served(&mock_server);
         let source = create_test_source(test_repository());
 
         let result = adapter.estimate_tokens(&source).await;
-        assert_repository_not_found(result, "test-owner/test-repo");
+        assert!(matches!(result, Ok(0)), "{result:?}");
     }
 
     #[tokio::test]
     async fn test_github_adapter_estimate_tokens_with_files() {
         let mock_server = MockServer::start().await;
+        mount_listing(
+            &mock_server,
+            json!([
+                listed_blob("README.md", 400),
+                listed_blob("src/lib.rs", 1200),
+                listed_blob("logo.png", 4000),
+                listed_blob("data.txt", MAX_FILE_SIZE_BYTES + 1),
+            ]),
+        )
+        .await;
         let adapter = served(&mock_server);
         let source = create_test_source(test_repository());
 
-        let result = adapter.estimate_tokens(&source).await;
-        assert_repository_not_found(result, "test-owner/test-repo");
+        let estimated = adapter.estimate_tokens(&source).await.unwrap();
+        assert_eq!(
+            estimated,
+            estimate_tokens_from_bytes(400) + estimate_tokens_from_bytes(1200)
+        );
     }
 
     #[test]
@@ -1377,5 +1429,43 @@ mod tests {
         assert!(item.content.is_none());
         assert!(item.metadata_only);
         assert_eq!(item.token_count, 0);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_token_fails_the_tree_and_skips_the_contents_unsent() {
+        let mock_server = MockServer::start().await;
+        let adapter = served(&mock_server);
+        let config = GitHubConfig {
+            owner: "test-owner".to_string(),
+            repo: "test-repo".to_string(),
+            branch: None,
+            path: None,
+            token: Some(MALFORMED_TOKEN.to_string()),
+        };
+        let entry = TreeEntry::new(
+            "README.md",
+            "100644",
+            TreeEntryKind::Blob,
+            ObjectId::parse(README_SHA).unwrap(),
+        );
+
+        let tree = adapter
+            .get_tree("test-owner", "test-repo", "main", Some(MALFORMED_TOKEN))
+            .await;
+        let contents = adapter.get_file_content(&config, "main", "README.md").await;
+        let item = adapter
+            .fetch_file_item(Uuid::new_v4(), &config, "main", &entry)
+            .await;
+
+        assert!(
+            matches!(&tree, Err(ContextError::Config(message)) if message == MALFORMED_TOKEN_MESSAGE),
+            "{tree:?}"
+        );
+        assert!(
+            matches!(&contents, Ok(Err(ContextError::Config(message))) if message == MALFORMED_TOKEN_MESSAGE),
+            "{contents:?}"
+        );
+        assert!(matches!(item, Ok(None)), "{item:?}");
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
     }
 }

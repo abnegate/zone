@@ -4,7 +4,12 @@ use base64::engine::general_purpose::STANDARD;
 use chrono::Utc;
 use serde_json::Value;
 use serde_json::json;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Write;
 use std::net::TcpListener;
+use std::net::TcpStream;
+use std::thread;
 use uuid::Uuid;
 use wiremock::Mock;
 use wiremock::MockBuilder;
@@ -29,7 +34,9 @@ use zone_core::Source;
 use zone_core::SourceCategory;
 use zone_core::SourceType;
 
+const LOOPBACK: &str = "127.0.0.1:0";
 const REPOSITORY: &str = "/repos/o/r";
+const CONTENTS: &str = "/repos/o/r/contents/";
 const MAIN: &str = "main";
 const MALFORMED_TOKEN: &str =
     "Configuration error: Invalid authorization token format (token not logged for security)";
@@ -70,6 +77,44 @@ fn served(server: &MockServer) -> GitHubAdapter {
     addressed(&server.uri())
 }
 
+fn dropping() -> String {
+    let listener = TcpListener::bind(LOOPBACK).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || listener.incoming().for_each(drop));
+    origin
+}
+
+fn answering(answer: fn(&str) -> Option<Value>) -> String {
+    let listener = TcpListener::bind(LOOPBACK).unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            if let Some(body) = requested(&stream).as_deref().and_then(answer) {
+                let body = body.to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        }
+    });
+    origin
+}
+
+fn requested(stream: &TcpStream) -> Option<String> {
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line).ok()?;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).ok()? == 0 || line == "\r\n" {
+            break;
+        }
+    }
+    request_line.split(' ').nth(1).map(str::to_string)
+}
+
 fn object(digit: char) -> String {
     std::iter::repeat_n(digit, 40).collect()
 }
@@ -88,23 +133,31 @@ fn blob(file: &str, digit: char, size: u64) -> Value {
     })
 }
 
-fn repository(default_branch: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_json(json!({
+fn repository_body(default_branch: &str) -> Value {
+    json!({
         "name": "r",
         "default_branch": default_branch
-    }))
+    })
 }
 
-fn tree(entries: Vec<Value>) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_json(json!({
+fn repository(default_branch: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(repository_body(default_branch))
+}
+
+fn tree_body(entries: Vec<Value>) -> Value {
+    json!({
         "sha": object('a'),
         "tree": entries,
         "truncated": false
-    }))
+    })
 }
 
-fn file(text: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_json(json!({
+fn tree(entries: Vec<Value>) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(tree_body(entries))
+}
+
+fn file_body(text: &str) -> Value {
+    json!({
         "name": "file",
         "path": "file",
         "sha": object('f'),
@@ -112,7 +165,11 @@ fn file(text: &str) -> ResponseTemplate {
         "type": "file",
         "content": encoded(text),
         "encoding": "base64"
-    }))
+    })
+}
+
+fn file(text: &str) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(file_body(text))
 }
 
 fn repository_request() -> MockBuilder {
@@ -416,15 +473,8 @@ async fn a_repository_answer_that_is_not_json_is_unreadable_repo_info() {
 }
 
 #[tokio::test]
-async fn an_origin_that_refuses_connections_is_a_request_failure() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
-
-    let error = addressed(&format!("http://{address}"))
-        .verify(&plain())
-        .await
-        .unwrap_err();
+async fn an_origin_that_drops_the_connection_is_a_request_failure() {
+    let error = addressed(&dropping()).verify(&plain()).await.unwrap_err();
 
     assert!(
         matches!(
@@ -795,4 +845,123 @@ async fn a_path_that_names_a_directory_skips_the_file_and_keeps_the_rest() {
         .unwrap();
 
     assert_eq!(titles(&result), ["lib.rs"]);
+}
+
+#[tokio::test]
+async fn a_contents_rate_limit_aborts_the_fetch_once_its_retries_run_out() {
+    let server = MockServer::start().await;
+    mount_repository(&server).await;
+    mount_tree(
+        &server,
+        vec![blob("README.md", 'b', 10), blob("src/lib.rs", 'c', 10)],
+    )
+    .await;
+    contents_request("README.md", MAIN)
+        .respond_with(ResponseTemplate::new(429))
+        .expect(RETRIED_ATTEMPTS)
+        .mount(&server)
+        .await;
+    mount_file(&server, "src/lib.rs", "pub fn lib() {}").await;
+
+    let error = fetched(&served(&server), &plain(), FetchStrategy::Full)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            ContextError::RateLimited {
+                retry_after_secs: 60
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(error.to_string(), RATE_LIMITED);
+}
+
+#[tokio::test]
+async fn a_tree_path_the_crate_refuses_skips_the_file_unsent() {
+    let server = MockServer::start().await;
+    mount_repository(&server).await;
+    mount_tree(
+        &server,
+        vec![
+            blob("%2e%2e/x", 'b', 10),
+            blob("src\tlib.rs", 'd', 10),
+            blob("src/lib.rs", 'c', 10),
+        ],
+    )
+    .await;
+    mount_file(&server, "src/lib.rs", "pub fn lib() {}").await;
+    Mock::given(path_regex(format!("^{CONTENTS}")))
+        .respond_with(file("refused"))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let result = fetched(&served(&server), &plain(), FetchStrategy::Full)
+        .await
+        .unwrap();
+
+    assert_eq!(titles(&result), ["lib.rs"]);
+    assert_eq!(result.items[0].content.as_deref(), Some("pub fn lib() {}"));
+}
+
+#[tokio::test]
+async fn a_refused_contents_read_skips_the_file_and_keeps_the_rest() {
+    for status in [403, 404, 500] {
+        let server = MockServer::start().await;
+        mount_repository(&server).await;
+        mount_tree(
+            &server,
+            vec![blob("README.md", 'b', 10), blob("src/lib.rs", 'c', 10)],
+        )
+        .await;
+        contents_request("README.md", MAIN)
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        mount_file(&server, "src/lib.rs", "pub fn lib() {}").await;
+
+        let result = fetched(&served(&server), &plain(), FetchStrategy::Full)
+            .await
+            .unwrap();
+
+        assert_eq!(titles(&result), ["lib.rs"], "{status}");
+        assert_eq!(
+            result.items[0].content.as_deref(),
+            Some("pub fn lib() {}"),
+            "{status}"
+        );
+    }
+}
+
+fn answering_all_but_the_readme(target: &str) -> Option<Value> {
+    let route = target.split('?').next()?;
+    if route == REPOSITORY {
+        return Some(repository_body(MAIN));
+    }
+    if route == format!("{REPOSITORY}/git/trees/{MAIN}") {
+        return Some(tree_body(vec![
+            blob("README.md", 'b', 10),
+            blob("src/lib.rs", 'c', 10),
+        ]));
+    }
+    if route == format!("{CONTENTS}src/lib.rs") {
+        return Some(file_body("pub fn lib() {}"));
+    }
+    None
+}
+
+#[tokio::test]
+async fn a_contents_read_whose_connection_drops_skips_the_file_and_keeps_the_rest() {
+    let origin = answering(answering_all_but_the_readme);
+
+    let result = fetched(&addressed(&origin), &plain(), FetchStrategy::Full)
+        .await
+        .unwrap();
+
+    assert_eq!(titles(&result), ["lib.rs"]);
+    assert_eq!(result.items[0].content.as_deref(), Some("pub fn lib() {}"));
 }
