@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::DbResult;
-use crate::services::time_zone::TimeZone;
+use crate::services::time_zone::{self, TimeZone};
 
 /// User row from database
 #[derive(Debug, Clone)]
@@ -310,7 +310,7 @@ pub async fn time_zone(
         .fetch_optional(executor)
         .await?
         .flatten();
-    Ok(stored.and_then(|name| TimeZone::parse(&name).ok()))
+    Ok(stored.and_then(|name| time_zone::parse(&name).ok()))
 }
 
 pub async fn set_time_zone(pool: &PgPool, user_id: Uuid, zone: TimeZone) -> DbResult<()> {
