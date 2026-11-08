@@ -3,11 +3,11 @@
 //! This module provides the core types for representing content gathered from sources,
 //! along with utilities for tokenization, chunking, and intelligent sizing.
 
-mod code_chunker;
 mod sizing;
 mod tokenizer;
 
-pub use code_chunker::*;
+pub use abnegate_index::estimate_tokens;
+pub use abnegate_index::smart_chunk;
 pub use sizing::*;
 pub use tokenizer::*;
 
