@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zone_chat::history::{NewEntry, ReplayMessage};
 use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
-use zone_core::tools::{Session, is_vision_url};
+use zone_core::tools::{Session, content_lines, is_vision_url};
 
 /// What the calls queued behind a turn-ending question are told.
 ///
@@ -542,7 +542,7 @@ pub fn run_with_context(
                     };
                 }
                 let call = &batch[0];
-                let denied = if approval.confirms(tier) {
+                let refusal = if approval.confirms(tier) {
                     // Register before the request goes out: a client that
                     // answers immediately would otherwise be told the call
                     // is not waiting for approval.
@@ -554,9 +554,9 @@ pub fn run_with_context(
                         reason: super::reason(&call.function.arguments),
                         preview: tools.effect(&call.function.name, &call.function.arguments),
                     };
-                    !approval.awaited_decision(&call.id, pending).await
+                    approval.awaited_decision(&call.id, pending).await.refusal()
                 } else {
-                    false
+                    None
                 };
                 // A fresh acknowledgement boundary after potentially long approval waits.
                 yield AgentEvent::Context(context.usage(&model, definitions));
@@ -573,12 +573,13 @@ pub fn run_with_context(
                     async move {
                         let signature = signature(&call);
                         let started = Instant::now();
-                        let result = if denied {
-                            zone_core::tools::ToolResult::error("The user denied this tool call.")
-                        } else {
-                            tools
-                                .execute(&call.function.name, &call.function.arguments)
-                                .await
+                        let result = match refusal {
+                            Some(refusal) => zone_core::tools::ToolResult::error(refusal),
+                            None => {
+                                tools
+                                    .execute(&call.function.name, &call.function.arguments)
+                                    .await
+                            }
                         };
                         (
                             signature,
@@ -813,6 +814,7 @@ async fn finish_tool(
         )
         .await;
     let output = result.to_message();
+    let detail = summarize(&call.function.name, &result, &output);
     let citations = if result.success {
         citations::from_tool(&call.function.name, &output)
     } else {
@@ -822,7 +824,7 @@ async fn finish_tool(
         id: call.id,
         name: call.function.name,
         success: result.success,
-        detail: summarize(&result, &output),
+        detail,
         duration_ms,
         citations,
         receipt,
@@ -887,19 +889,18 @@ pub(crate) fn call_signature(name: &str, arguments: &str) -> (String, String) {
 const DETAIL_CHARS: usize = 240;
 
 /// One line describing how a tool call went, for the UI rather than the model.
-fn summarize(result: &zone_core::tools::ToolResult, output: &str) -> String {
+fn summarize(tool: &str, result: &zone_core::tools::ToolResult, output: &str) -> String {
     if !result.success {
         return output.lines().next().unwrap_or("Failed").to_string();
     }
-    let line_count = output.lines().filter(|l| !l.trim().is_empty()).count();
-    let first = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let summary = match line_count {
-        0 => "No output".to_string(),
-        1 => first.to_string(),
-        n => format!("{} ({} lines)", first, n),
+    let lines: Vec<&str> = content_lines(tool, output).collect();
+    let summary = match lines.as_slice() {
+        [] => "No output".to_string(),
+        [only] => only.to_string(),
+        [first, ..] => format!("{first} ({} lines)", lines.len()),
     };
     match summary.char_indices().nth(DETAIL_CHARS) {
-        Some((byte_idx, _)) => format!("{}…", &summary[..byte_idx]),
+        Some((cut, _)) => format!("{}…", &summary[..cut]),
         None => summary,
     }
 }
@@ -1581,7 +1582,7 @@ mod tests {
         let result = ToolResult::error("The knowledge base search failed.");
         let output = result.to_message();
         assert_eq!(
-            summarize(&result, &output),
+            summarize("search_knowledge", &result, &output),
             "Error: The knowledge base search failed."
         );
     }
@@ -1590,14 +1591,51 @@ mod tests {
     fn summarize_counts_multi_line_output() {
         let result = ToolResult::success("first hit\nsecond hit\nthird hit");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "first hit (3 lines)");
+        assert_eq!(
+            summarize("search_knowledge", &result, &output),
+            "first hit (3 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_shows_a_command_output_rather_than_its_stream_label() {
+        let result = ToolResult::success("stdout:\nhello");
+        let output = result.to_message();
+        assert_eq!(summarize("run_shell", &result, &output), "hello");
+
+        let result = ToolResult::success("stdout:\nfirst\nsecond\n\nstderr:\nwarning");
+        let output = result.to_message();
+        assert_eq!(
+            summarize("run_command", &result, &output),
+            "first (3 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_keeps_a_stream_label_another_tool_returned() {
+        let result = ToolResult::success("stdout:\nreal");
+        let output = result.to_message();
+        assert_eq!(
+            summarize("read_file", &result, &output),
+            "stdout: (2 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_shows_no_bare_label_when_a_stream_held_only_whitespace() {
+        let result = ToolResult::success("stdout:\n\n");
+        let output = result.to_message();
+        assert_eq!(summarize("run_shell", &result, &output), "No output");
     }
 
     #[test]
     fn summarize_passes_through_single_lines() {
         let result = ToolResult::success("This workspace has no tasks.");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "This workspace has no tasks.");
+        assert_eq!(
+            summarize("search_knowledge", &result, &output),
+            "This workspace has no tasks."
+        );
     }
 
     #[test]
@@ -1623,7 +1661,9 @@ mod tests {
         let result = ToolResult::success("x".repeat(DETAIL_CHARS * 2));
         let output = result.to_message();
         assert_eq!(
-            summarize(&result, &output).chars().count(),
+            summarize("search_knowledge", &result, &output)
+                .chars()
+                .count(),
             DETAIL_CHARS + 1
         );
     }

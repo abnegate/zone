@@ -37,7 +37,7 @@ pub mod verification;
 pub mod wait;
 pub mod web;
 
-pub use approval::{ApprovalGate, ApprovalPolicy};
+pub use approval::{ApprovalGate, ApprovalPolicy, Decision};
 pub use citations::{Citation, CitationKind, CitationOutcome};
 pub use prompt::{Environment, Surface, Vcs, Verbosity};
 pub use question::{ASK_USER, Answer, Choice, Question};
