@@ -301,31 +301,22 @@ impl GitLabAdapter {
             .map_err(|message| ContextError::Config(message.clone()))
     }
 
-    /// The service for the instance `config` names, and the instance's name
-    /// in the tree cache, which is empty for gitlab.com
     fn service_for(&self, config: &GitLabConfig) -> Result<(GitLabService, String)> {
-        let Some(instance) = Self::instance(config) else {
+        let Some((origin, key)) = Self::instance(config.base_url.as_deref()) else {
             return Ok((self.service()?.clone(), String::new()));
         };
-        let service = (self.connect)(instance)
+        let service = (self.connect)(origin)
             .map(Self::opened)
             .map_err(Self::misconfigured)?;
-        let url =
-            Url::parse(instance).map_err(|_| Self::misconfigured(GitLabError::InvalidOrigin))?;
-        Ok((service, Self::instance_key(&url)))
+        Ok((service, key))
     }
 
-    /// The instance `config` names, trimmed, or `None` where it names
-    /// gitlab.com or nothing
-    fn instance(config: &GitLabConfig) -> Option<&str> {
-        let instance = config
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|instance| !instance.is_empty())?;
-        match Url::parse(instance) {
+    fn instance(named: Option<&str>) -> Option<(&str, String)> {
+        let origin = named.map(str::trim).filter(|origin| !origin.is_empty())?;
+        match Url::parse(origin) {
             Ok(url) if Self::names_default_host(&url) => None,
-            _ => Some(instance),
+            Ok(url) => Some((origin, Self::instance_key(&url))),
+            Err(_) => Some((origin, origin.to_string())),
         }
     }
 
@@ -1837,13 +1828,7 @@ mod tests {
 
     #[test]
     fn only_an_https_gitlab_com_with_nothing_else_is_the_default_instance() {
-        let naming = |instance: Option<&str>| GitLabConfig {
-            project: PROJECT.to_string(),
-            branch: None,
-            path: None,
-            token: None,
-            base_url: instance.map(str::to_string),
-        };
+        let origin = |named| GitLabAdapter::instance(named).map(|(origin, _)| origin);
 
         for default in [
             None,
@@ -1857,11 +1842,7 @@ mod tests {
             Some("https://gitlab.com:443"),
             Some(" https://gitlab.com "),
         ] {
-            assert_eq!(
-                GitLabAdapter::instance(&naming(default)),
-                None,
-                "{default:?}"
-            );
+            assert_eq!(origin(default), None, "{default:?}");
         }
 
         for named in [
@@ -1876,11 +1857,7 @@ mod tests {
             "gitlab.com",
             "not a url",
         ] {
-            assert_eq!(
-                GitLabAdapter::instance(&naming(Some(named))),
-                Some(named),
-                "{named}"
-            );
+            assert_eq!(origin(Some(named)), Some(named), "{named}");
         }
     }
 
