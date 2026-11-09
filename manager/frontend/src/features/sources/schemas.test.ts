@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { parse } from '../../validation';
+import { getErrors, parse } from '../../validation';
 import {
   CreateSourceRequestSchema,
   SourceResponseSchema,
@@ -161,5 +161,54 @@ describe('GitHub installation fields', () => {
       github_installation_id: null,
     });
     expect(UpdateSourceRequestSchema.parse({})).toEqual({});
+  });
+});
+
+describe('GitLab host', () => {
+  const HTTPS_ONLY = 'GitLab host must be an https:// URL';
+  const gitlabConfig = (host: string) => ({ project_id: 'group/project', host, branch: 'main' });
+  const creating = (host: string) => ({
+    name: 'project',
+    source_type: 'gitlab',
+    config: gitlabConfig(host),
+    credentials: 'glpat-throwaway',
+  });
+
+  it('accepts an https instance on a create or update request', () => {
+    for (const host of ['https://gitlab.com', 'https://gitlab.example.com/gitlab']) {
+      expect(CreateSourceRequestSchema.safeParse(creating(host)).success).toBe(true);
+      expect(UpdateSourceRequestSchema.safeParse({ config: gitlabConfig(host) }).success).toBe(
+        true
+      );
+    }
+  });
+
+  it('refuses a bare or http instance on a create or update request', () => {
+    for (const host of ['http://gitlab.example.com', 'gitlab.example.com', 'ftp://gitlab.com']) {
+      expect(getErrors(CreateSourceRequestSchema, creating(host))).toEqual({
+        'config.host': HTTPS_ONLY,
+      });
+      expect(getErrors(UpdateSourceRequestSchema, { config: gitlabConfig(host) })).toEqual({
+        'config.host': HTTPS_ONLY,
+      });
+    }
+  });
+
+  it('still reads a stored source whose host predates the https rule', () => {
+    const source = parse(SourceSchema, {
+      id: 'src-1',
+      name: 'project',
+      source_type: 'gitlab',
+      config: gitlabConfig('http://gitlab.example.com'),
+      description: null,
+      url: null,
+      is_active: true,
+      last_verified_at: null,
+      last_error: null,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    });
+
+    expect(source.url).toBe('http://gitlab.example.com/group/project');
   });
 });

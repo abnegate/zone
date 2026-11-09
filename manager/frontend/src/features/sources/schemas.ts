@@ -28,6 +28,15 @@ export const GitLabConfigSchema = z.object({
   base_path: z.string().optional(),
 });
 
+export const GitLabHostSchema = z.url({
+  protocol: /^https$/,
+  error: 'GitLab host must be an https:// URL',
+});
+
+export const GitLabConfigRequestSchema = GitLabConfigSchema.extend({
+  host: GitLabHostSchema.optional(),
+});
+
 export const FilesystemConfigSchema = z.object({
   base_path: z.string().min(1, 'Base path is required'),
   allow_writes: z.boolean().optional(),
@@ -66,9 +75,7 @@ export const TextConfigSchema = z.object({
   label: z.string().optional(),
 });
 
-export const SourceConfigSchema = z.union([
-  GitHubConfigSchema,
-  GitLabConfigSchema,
+const OtherConfigSchemas = [
   FilesystemConfigSchema,
   ICalConfigSchema,
   IMAPConfigSchema,
@@ -76,6 +83,19 @@ export const SourceConfigSchema = z.union([
   SlackConfigSchema,
   WebConfigSchema,
   TextConfigSchema,
+] as const;
+
+export const SourceConfigSchema = z.union([
+  GitHubConfigSchema,
+  GitLabConfigSchema,
+  ...OtherConfigSchemas,
+]);
+
+// Stored GitLab hosts predate the https rule, so only what is sent is held to it.
+export const SourceConfigRequestSchema = z.union([
+  GitHubConfigSchema,
+  GitLabConfigRequestSchema,
+  ...OtherConfigSchemas,
 ]);
 
 const SOURCE_TYPE_CATEGORY: Record<
@@ -155,7 +175,7 @@ export const SourceSchema = z
 export const CreateSourceRequestSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   source_type: SourceTypeSchema,
-  config: SourceConfigSchema,
+  config: SourceConfigRequestSchema,
   credentials: z.string().optional(),
   github_installation_id: z.string().optional(),
   description: z.string().optional(),
@@ -164,7 +184,7 @@ export const CreateSourceRequestSchema = z.object({
 
 export const UpdateSourceRequestSchema = z.object({
   name: z.string().min(1).optional(),
-  config: SourceConfigSchema.optional(),
+  config: SourceConfigRequestSchema.optional(),
   credentials: z.string().optional(),
   github_installation_id: z.string().nullable().optional(),
   description: z.string().optional(),
