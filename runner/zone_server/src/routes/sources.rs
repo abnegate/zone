@@ -26,10 +26,18 @@ use crate::db::github_installations;
 use crate::db::github_installations::InstallationStatus;
 use crate::db::github_installations::InstallationSummary;
 use crate::db::sources;
+use crate::db::sources::DISCORD;
+use crate::db::sources::FILESYSTEM;
 use crate::db::sources::GITHUB;
 use crate::db::sources::GITLAB;
+use crate::db::sources::ICAL;
+use crate::db::sources::IMAP;
+use crate::db::sources::NOTION;
+use crate::db::sources::SLACK;
 use crate::db::sources::SourceChanges;
+use crate::db::sources::TEXT;
 use crate::db::sources::UpdateError;
+use crate::db::sources::WEB;
 use crate::error::ServerError;
 use crate::services::github_app;
 use crate::services::github_app::Failure;
@@ -59,8 +67,6 @@ const UNREACHABLE: &str = "Zone can't reach this repository through that GitHub 
 const GITHUB_UNAVAILABLE: &str = "GitHub could not be reached.";
 
 const APP_REJECTED: &str = "The GitHub App connection is broken. Reconnect GitHub.";
-
-const NOTION: &str = "notion";
 
 const TOKEN_FIELD: &str = "token";
 
@@ -385,12 +391,12 @@ async fn check_workspace_write_access(
 /// Category for a persisted source_type string
 fn category_for_source_type(source_type: &str) -> &'static str {
     match source_type {
-        GITHUB | GITLAB | "filesystem" => "file",
-        "ical" => "calendar",
-        "imap" => "mail",
-        "discord" | "slack" => "chat",
-        "web" => "web",
-        "text" => "text",
+        GITHUB | GITLAB | FILESYSTEM => "file",
+        ICAL => "calendar",
+        IMAP => "mail",
+        DISCORD | SLACK => "chat",
+        WEB => "web",
+        TEXT => "text",
         _ => "file",
     }
 }
@@ -430,7 +436,7 @@ fn derive_source_url(
                 .trim_end_matches('/');
             Some(format!("{}/{}", host, project_id))
         }
-        "web" | "ical" => config
+        WEB | ICAL => config
             .get("url")
             .and_then(|value| value.as_str())
             .filter(|value| !value.is_empty())
@@ -973,10 +979,10 @@ pub async fn verify(
     let source_type = match source_row.source_type.as_str() {
         GITHUB => zone_core::SourceType::GitHub,
         GITLAB => zone_core::SourceType::GitLab,
-        "filesystem" => zone_core::SourceType::Filesystem,
+        FILESYSTEM => zone_core::SourceType::Filesystem,
         NOTION => zone_core::SourceType::Notion,
-        "text" => zone_core::SourceType::Text,
-        "web" => zone_core::SourceType::Web,
+        TEXT => zone_core::SourceType::Text,
+        WEB => zone_core::SourceType::Web,
         _ => {
             let error_msg = format!("Unknown source type: {}", source_row.source_type);
             if let Err(db_err) =
@@ -1197,7 +1203,7 @@ fn describe_kind(kind: &str) -> SourceTypeInfo {
                 "required": ["project_id"]
             }),
         ),
-        "filesystem" => (
+        FILESYSTEM => (
             "Local Directory",
             "file",
             "Local filesystem (self-hosted only)",
@@ -1210,7 +1216,7 @@ fn describe_kind(kind: &str) -> SourceTypeInfo {
                 "required": ["base_path"]
             }),
         ),
-        "web" => (
+        WEB => (
             "Web URL",
             "web",
             "Fetch content from a URL",
@@ -1222,7 +1228,7 @@ fn describe_kind(kind: &str) -> SourceTypeInfo {
                 "required": ["url"]
             }),
         ),
-        "text" => (
+        TEXT => (
             "Text",
             "text",
             "Inline text content",

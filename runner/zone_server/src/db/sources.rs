@@ -17,6 +17,26 @@ pub const GITHUB: &str = "github";
 
 pub const GITLAB: &str = "gitlab";
 
+pub const FILESYSTEM: &str = "filesystem";
+
+pub const ICAL: &str = "ical";
+
+pub const IMAP: &str = "imap";
+
+pub const DISCORD: &str = "discord";
+
+pub const SLACK: &str = "slack";
+
+pub const WEB: &str = "web";
+
+pub const TEXT: &str = "text";
+
+pub const NOTION: &str = "notion";
+
+pub const GOOGLE_CALENDAR: &str = "google_calendar";
+
+pub const GOOGLE_MAIL: &str = "google_mail";
+
 const INSTANCE_NEEDS_TOKEN: &str =
     "Re-enter the access token to read this source from another GitLab instance.";
 

@@ -396,15 +396,15 @@ pub(crate) async fn core_source_from_row(
     db_source: sources::SourceRow,
 ) -> Option<Source> {
     let source_type = match db_source.source_type.as_str() {
-        "text" => zone_core::SourceType::Text,
-        "filesystem" => zone_core::SourceType::Filesystem,
+        sources::TEXT => zone_core::SourceType::Text,
+        sources::FILESYSTEM => zone_core::SourceType::Filesystem,
         sources::GITHUB => zone_core::SourceType::GitHub,
-        "gitlab" => zone_core::SourceType::GitLab,
-        "google_calendar" => zone_core::SourceType::GoogleCalendar,
-        "google_mail" => zone_core::SourceType::GoogleMail,
-        "notion" => zone_core::SourceType::Notion,
-        "slack" => zone_core::SourceType::Slack,
-        "web" => zone_core::SourceType::Web,
+        sources::GITLAB => zone_core::SourceType::GitLab,
+        sources::GOOGLE_CALENDAR => zone_core::SourceType::GoogleCalendar,
+        sources::GOOGLE_MAIL => zone_core::SourceType::GoogleMail,
+        sources::NOTION => zone_core::SourceType::Notion,
+        sources::SLACK => zone_core::SourceType::Slack,
+        sources::WEB => zone_core::SourceType::Web,
         _ => {
             tracing::warn!("Unknown source type: {}", db_source.source_type);
             return None;
