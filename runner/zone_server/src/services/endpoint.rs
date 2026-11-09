@@ -6,11 +6,11 @@
 
 use std::fmt;
 
+use abnegate_agent::chat::{ChatError, Resolver};
 use abnegate_http::metadata;
 use abnegate_llm::{Dialect, LlmConfig, Trust};
 use abnegate_secret::{REDACTED, SecretValue, conceal, redact};
 use reqwest::Url;
-use zone_chat::capacity::Resolver;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
 use zone_core::llm::{self, LlmBackend, LlmClient};
 
@@ -204,14 +204,18 @@ impl Endpoint {
     /// metadata, so its models are given the configured context, and it must
     /// never be sent an Ollama `num_ctx`.
     pub fn capacity(&self, config: &Config) -> Resolver {
+        let configured = Some(config.chat.context);
         match self.origin {
-            Origin::Instance => Resolver::with_context(
-                &self.url,
-                self.key.expose(),
-                &config.ollama_host,
-                Some(config.chat.context),
+            Origin::Instance => or_undisclosed(
+                Resolver::with_context(
+                    &self.url,
+                    self.key.expose(),
+                    &config.ollama_host,
+                    configured,
+                ),
+                configured,
             ),
-            Origin::Settings => Resolver::undisclosed(Some(config.chat.context)),
+            Origin::Settings => Resolver::undisclosed(configured),
         }
     }
 
@@ -333,6 +337,15 @@ fn same_origin(url: &Url, instance: &str) -> bool {
         .is_ok_and(|instance| instance.origin().is_tuple() && instance.origin() == url.origin())
 }
 
+/// `built`, or, when no client could be built to read the deployment's
+/// metadata, a resolver that asks nothing and assumes `configured`.
+fn or_undisclosed(built: Result<Resolver, ChatError>, configured: Option<u64>) -> Resolver {
+    built.unwrap_or_else(|error| {
+        tracing::warn!(%error, "Could not build the deployment metadata client; assuming the configured context");
+        Resolver::undisclosed(configured)
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::{Endpoint, Origin};
@@ -379,13 +392,17 @@ pub(crate) mod testing {
 mod tests {
     use super::testing::settings;
     use super::*;
-    use wiremock::matchers::any;
+    use abnegate_agent::context::ContextSource;
+    use reqwest::Client;
+    use wiremock::matchers::{any, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-    use zone_chat::capacity::Source;
     use zone_context::embeddings::providers::PROVIDER_BEDROCK;
 
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
+    use crate::services::chat::session::{policy, sees_images};
 
+    const ASSUMED: &str =
+        "The endpoint publishes no deployment metadata, so the configured context is assumed.";
     const INSTANCE_HOST: &str = "http://litellm:4000";
     const INSTANCE_KEY: &str = "sk-instance-key-0123456789";
     const SAVED_KEY: &str = "sk-saved-key-abcdefghijkl";
@@ -1238,16 +1255,34 @@ mod tests {
 
         assert!(catalog.models.is_empty());
         assert_eq!(catalog.agent, None);
-        assert_eq!(capacity.source, Source::Configured);
+        assert_eq!(capacity.source, ContextSource::Configured);
         assert_eq!(capacity.limit, Some(config.chat.context));
         assert_eq!(capacity.ollama, None, "no num_ctx may reach a third party");
         assert!(
-            crate::services::chat::session::policy(&config.chat, &capacity)
-                .threshold()
-                .is_some(),
+            policy(&config.chat, &capacity).threshold().is_some(),
             "a saved endpoint's history is never compacted"
         );
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_chats_window_on_a_settings_endpoint_keeps_the_assumed_context_note() {
+        let config = config();
+        let mut settings = settings(PROVIDER_SELF_HOSTED);
+        settings.litellm_host = Some("http://gateway.example:4000".into());
+        settings.litellm_key = Some(SecretValue::new(SAVED_KEY));
+        let endpoint = Endpoint::resolve(&config, &settings);
+        assert_eq!(endpoint.origin(), Origin::Settings);
+
+        let capacity = endpoint
+            .capacity(&config)
+            .resolve("gpt-4o")
+            .await
+            .with_request(Some(8_192));
+
+        assert_eq!(capacity.limit, Some(8_192));
+        assert_eq!(capacity.source, ContextSource::Configured);
+        assert_eq!(capacity.reason.as_deref(), Some(ASSUMED));
     }
 
     #[tokio::test]
@@ -1269,8 +1304,66 @@ mod tests {
             .resolve("alias")
             .await;
 
-        assert_eq!(capacity.source, Source::Unknown);
+        assert_eq!(capacity.source, ContextSource::Unknown);
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_the_resolver_rejects_is_undisclosed() {
+        let configured = Some(8_192);
+
+        let unbuildable = Client::new()
+            .get("not a url")
+            .build()
+            .expect_err("a relative URL builds no request");
+
+        let capacity = or_undisclosed(Err(ChatError::Http(unbuildable)), configured)
+            .resolve("alias")
+            .await;
+
+        assert_eq!(capacity.source, ContextSource::Configured);
+        assert_eq!(capacity.limit, configured);
+        assert_eq!(capacity.ollama, None, "no num_ctx may reach it");
+        assert_eq!(capacity.reason.as_deref(), Some(ASSUMED));
+    }
+
+    #[tokio::test]
+    async fn a_provider_route_reports_whether_it_reads_images() {
+        for (supports, vision, sees) in [
+            (Some(true), Some(true), true),
+            (Some(false), Some(false), false),
+            (None, None, true),
+        ] {
+            let server = MockServer::start().await;
+            let mut information = serde_json::json!({"max_input_tokens": 128_000});
+            if let Some(supports) = supports {
+                information["supports_vision"] = supports.into();
+            }
+            Mock::given(path("/v2/model/info"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{
+                        "model_name": "remote",
+                        "litellm_params": {"model": "openai/remote"},
+                        "model_info": information
+                    }]
+                })))
+                .mount(&server)
+                .await;
+            let config = Config {
+                litellm_host: server.uri(),
+                ollama_host: server.uri(),
+                ..config()
+            };
+
+            let capacity = Endpoint::instance(&config)
+                .capacity(&config)
+                .resolve("remote")
+                .await;
+
+            assert_eq!(capacity.source, ContextSource::Provider, "{supports:?}");
+            assert_eq!(capacity.vision, vision, "{supports:?}");
+            assert_eq!(sees_images("remote", capacity.vision), sees, "{supports:?}");
+        }
     }
 
     #[test]

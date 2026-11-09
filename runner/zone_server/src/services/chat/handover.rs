@@ -17,13 +17,13 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use abnegate_agent::chat::NewEntry;
 use abnegate_agent::context::Entry;
 use abnegate_agent_cli::AgentKind;
 use abnegate_agent_cli::Session;
 use abnegate_llm::Message;
 use chrono::Utc;
 use uuid::Uuid;
-use zone_chat::history::NewEntry;
 use zone_core::llm::LlmBackend;
 
 use super::session::RunContext;
@@ -281,10 +281,11 @@ pub async fn opening(
 /// The text a turn wrote on a login before it left, as the assistant entry the chat keeps of it.
 /// Nothing when it wrote none.
 pub fn partial(text: &str) -> Option<NewEntry> {
-    (!text.trim().is_empty()).then(|| NewEntry {
-        id: Uuid::new_v4().to_string(),
-        message: (&Message::assistant(text)).into(),
-        mutations: Vec::new(),
+    (!text.trim().is_empty()).then(|| {
+        NewEntry::new(
+            Uuid::new_v4().to_string(),
+            (&Message::assistant(text)).into(),
+        )
     })
 }
 

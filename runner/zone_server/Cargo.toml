@@ -112,7 +112,6 @@ abnegate-recurrence = { workspace = true }
 abnegate-search = { workspace = true }
 abnegate-secret = { workspace = true, features = ["derivation", "sqlx"] }
 abnegate-vcs = { workspace = true, features = ["github", "github-app"] }
-zone_chat = { path = "../zone_chat" }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
 zone_routing = { path = "../zone_routing" }
@@ -121,7 +120,6 @@ zone_routing = { path = "../zone_routing" }
 zone_server = { path = ".", default-features = false, features = ["testing"] }
 abnegate-notify = { workspace = true, features = ["testing"] }
 abnegate-vcs = { workspace = true, features = ["github", "github-app", "testing"] }
-zone_chat = { path = "../zone_chat" }
 zone_core = { path = "../zone_core", features = ["sqlx", "test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 http-body-util = "=0.1.5"

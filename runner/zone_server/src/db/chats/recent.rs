@@ -72,10 +72,10 @@ where
 mod tests {
     use std::time::Duration;
 
+    use abnegate_agent::chat::ReplayMessage;
     use abnegate_llm::Message;
     use serde_json::{Value, json};
     use sqlx::PgPool;
-    use zone_chat::history::ReplayMessage;
 
     use super::*;
     use crate::db::chats::provider::{self, Choice};
