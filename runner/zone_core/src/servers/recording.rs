@@ -15,6 +15,9 @@ pub const PROXY: &str = "http://127.0.0.1:28888";
 /// override.
 pub const WRONG_PROXY: &str = "http://wrong:8888";
 
+/// The name [`document`] configures its stand-in server under.
+pub const RECORDER: &str = "recorder";
+
 const PROXY_VARIABLES: [&str; 6] = [
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -32,7 +35,7 @@ const EVERY_HOST: &str = "*";
 /// environment to `path` and exits without answering, its own `env` routing
 /// it through [`WRONG_PROXY`] and bypassing every host.
 pub fn document(path: &Path) -> String {
-    json!({"mcpServers": {"recorder": {
+    json!({"mcpServers": {RECORDER: {
         "command": "sh",
         "args": ["-c", format!("env > '{}'", path.display())],
         "env": {

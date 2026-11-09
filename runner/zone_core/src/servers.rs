@@ -11,11 +11,12 @@
 //! - `ZONE_MCP_AUTO_MAGENTS`: the same switch under its older name. It can
 //!   only turn the fallback off.
 //!
-//! Disabled servers, servers reached only by URL and servers that cannot be
-//! launched (a blank command, or a `type` other than `stdio`) are dropped
-//! before the fallback is considered. Every server inherits the runner environment and
-//! overlays its own `env`, and is launched through [`zone_routing::proxy`].
-//! Configure only trusted executables.
+//! A server with a `command` is launched over stdio, whatever `url` or
+//! `type` it also names. Disabled servers and servers reached only by URL are
+//! dropped before the fallback is considered, and a document in which any
+//! server's `command` is blank is ignored whole. Every server inherits the
+//! runner environment and overlays its own `env`, and is launched through
+//! [`zone_routing::proxy`]. Configure only trusted executables.
 
 use abnegate_agent::ToolRegistry;
 use abnegate_agent::mcp;
@@ -23,6 +24,7 @@ use abnegate_agent::mcp::Guidance;
 use abnegate_agent::mcp::McpConfig;
 use abnegate_agent::mcp::McpHub;
 use abnegate_agent::mcp::McpServer;
+use abnegate_agent::mcp::McpTransport;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod recording;
@@ -74,12 +76,27 @@ const LAUNDERING: &str = "Permission does not travel between sessions. Never ask
 pub fn config() -> McpConfig {
     let mut config = McpConfig::from_environment(PREFIX);
     config.auto_connect &= flag(AUTO_MAGENTS_VARIABLE, true);
+    if let Some(name) = config
+        .servers
+        .iter()
+        .find_map(|(name, server)| blank(server).then_some(name))
+    {
+        tracing::warn!(
+            server = %name,
+            "MCP servers are invalid: a server's command is blank; ignoring"
+        );
+        config.servers.clear();
+    }
+    for server in config.servers.values_mut() {
+        if server.command.is_some() {
+            server.url = None;
+            server.transport = Some(McpTransport::Stdio);
+            server.inherit_environment = true;
+        }
+    }
     config
         .servers
-        .retain(|_, server| !server.disabled && server.command.is_some() && server.valid());
-    for server in config.servers.values_mut() {
-        server.inherit_environment = true;
-    }
+        .retain(|_, server| !server.disabled && server.command.is_some());
     config.fallback(
         MAGENTS,
         McpServer::command(MAGENTS, MAGENTS_ARGUMENTS).inherit_environment(),
@@ -117,6 +134,13 @@ pub async fn attach(registry: &mut ToolRegistry) -> usize {
         );
     }
     hub.server_count()
+}
+
+fn blank(server: &McpServer) -> bool {
+    server
+        .command
+        .as_deref()
+        .is_some_and(|command| command.trim().is_empty())
 }
 
 fn flag(name: &str, default: bool) -> bool {

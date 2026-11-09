@@ -849,12 +849,12 @@ async fn stopping_a_codex_turn_kills_its_agent_and_everything_it_forked() {
     stop_ends_the_turn_and_its_processes(AgentKind::Codex).await;
 }
 
-/// A zone tool the agent called is exactly when a reader reaches for Stop, and
-/// the slowest are the ones that walk a directory tree. A call that keeps its
-/// worker also keeps the turn, whose task the call has just woken on that
-/// worker, however many others are idle: the reader is shown nothing and Stop
-/// goes unread until the call ends. The call here reads a pipe the test holds,
-/// so it is still running when Stop arrives on any host.
+/// A reader reaches for Stop while a zone tool the agent called still runs. A
+/// call that keeps its worker also keeps the turn, whose task the call has
+/// just woken on that worker, however many others are idle: the reader is
+/// shown nothing and Stop goes unread until the call ends. The call here is a
+/// `run_command` of `cat` on a pipe the test holds open, so it is still
+/// running when Stop arrives on any host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stop_reaches_a_cli_turn_while_a_tool_it_called_still_runs() {
     let held = Held::new();
@@ -902,8 +902,7 @@ async fn stop_reaches_a_cli_turn_while_a_tool_it_called_still_runs() {
     };
     assert!(
         !call.is_finished(),
-        "the call finished before the reader was shown it, so its walk held the runtime: \
-         {started}"
+        "the call finished while the test still held its pipe open: {started}"
     );
 
     send(&mut socket, json!({"type": "cancel"})).await;
