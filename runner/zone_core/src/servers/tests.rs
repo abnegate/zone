@@ -182,18 +182,50 @@ fn a_url_only_config_still_gets_the_magents_fallback() {
 fn a_config_whose_only_server_is_disabled_gets_the_magents_fallback() {
     let home = TempDir::new().unwrap();
     let mut variables = isolated(&home);
+    variables.set(
+        SERVERS,
+        r#"{"mcpServers": {"docs": {"command": "docs-server", "disabled": true}}}"#,
+    );
+
+    let config = config();
+
+    assert_eq!(names(&config), [MAGENTS]);
+    assert!(!config.servers[MAGENTS].disabled);
+}
+
+#[test]
+fn a_disabled_magents_server_stays_detached() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
 
     for document in [
-        r#"{"mcpServers": {"docs": {"command": "docs-server", "disabled": true}}}"#,
         r#"{"mcpServers": {"magents": {"command": "magents", "args": ["mcp"], "disabled": true}}}"#,
+        r#"{"mcpServers": {"magents": {"url": "http://localhost:3000/mcp", "disabled": true}}}"#,
+        r#"{"mcpServers": {"magents": {"command": "magents", "disabled": true}, "docs": {"command": "docs-server", "disabled": true}}}"#,
+        r#"{"mcpServers": {"magents": {"command": "magents", "disabled": true}, "docs": {"command": ""}}}"#,
     ] {
         variables.set(SERVERS, document);
 
         let config = config();
 
-        assert_eq!(names(&config), [MAGENTS], "{document}");
-        assert!(!config.servers[MAGENTS].disabled, "{document}");
+        assert!(
+            config.servers.is_empty(),
+            "{document}: {:?}",
+            names(&config)
+        );
     }
+}
+
+#[test]
+fn a_disabled_magents_server_leaves_the_other_servers_attached() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    variables.set(
+        SERVERS,
+        r#"{"mcpServers": {"magents": {"command": "magents", "disabled": true}, "docs": {"command": "docs-server"}}}"#,
+    );
+
+    assert_eq!(names(&config()), ["docs"]);
 }
 
 #[test]

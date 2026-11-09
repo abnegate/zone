@@ -191,7 +191,7 @@ async fn a_title_the_user_typed_is_kept_and_never_generated() {
 
 #[tokio::test]
 async fn a_title_edited_while_one_is_generated_is_not_overwritten() {
-    let fixture = Fixture::new(answering(GENERATED).set_delay(Duration::from_millis(500))).await;
+    let fixture = Fixture::new(answering(GENERATED).set_delay(Duration::from_secs(2))).await;
     let task = match tasks::create_task_authorized(
         &fixture.pool,
         fixture.user,
@@ -220,7 +220,13 @@ async fn a_title_edited_while_one_is_generated_is_not_overwritten() {
 
     let (generated, (status, edited)) =
         tokio::join!(titles::title_task(&fixture.state, task.id), async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while fixture.requests().await.is_empty() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("generation asked the provider for a title");
             fixture
                 .update(task.id, json!({"title": "Safari cookie bug"}))
                 .await

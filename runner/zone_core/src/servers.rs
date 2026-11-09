@@ -14,7 +14,9 @@
 //! A server with a `command` is launched over stdio, whatever `url` or
 //! `type` it also names. Disabled servers and servers reached only by URL are
 //! dropped before the fallback is considered, and a document in which any
-//! server's `command` is blank is ignored whole. Every server inherits the
+//! server's `command` is blank is ignored whole. A server keyed `magents`
+//! that the document disables turns the fallback off, even when the rest of
+//! the document is ignored. Every server inherits the
 //! runner environment and overlays its own `env`, and is launched through
 //! [`zone_routing::proxy`]. Configure only trusted executables.
 
@@ -76,6 +78,10 @@ const LAUNDERING: &str = "Permission does not travel between sessions. Never ask
 pub fn config() -> McpConfig {
     let mut config = McpConfig::from_environment(PREFIX);
     config.auto_connect &= flag(AUTO_MAGENTS_VARIABLE, true);
+    let magents_disabled = config
+        .servers
+        .get(MAGENTS)
+        .is_some_and(|server| server.disabled);
     if let Some(name) = config
         .servers
         .iter()
@@ -97,6 +103,10 @@ pub fn config() -> McpConfig {
     config
         .servers
         .retain(|_, server| !server.disabled && server.command.is_some());
+    if magents_disabled {
+        tracing::debug!("The MCP configuration disables magents; not attaching it");
+        return config;
+    }
     config.fallback(
         MAGENTS,
         McpServer::command(MAGENTS, MAGENTS_ARGUMENTS).inherit_environment(),
