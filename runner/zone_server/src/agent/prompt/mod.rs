@@ -64,11 +64,11 @@ const PLAIN: &[Section] = &[
 
 /// Raised by measurement rather than by guess, the way every section that has
 /// widened this has raised it: the chat prompt in a workspace with a GitHub
-/// source, whose bullets send a pull request to zone's own tool, is 24,235
-/// characters as served to a coding agent once MCP tool names carry their
-/// server and two underscores, so the ceiling is the next round number above
-/// that and the next section to grow has to measure itself too. The pull
-/// request bullets previously measured 24,129.
+/// source, whose bullets send a pull request to zone's own tool, is 24,191
+/// characters, and 24,235 as served to a coding agent, once MCP tool names
+/// carry their server and two underscores, so the ceiling is the next round
+/// number above the larger and the next section to grow has to measure itself
+/// too. With one underscore they measured 24,153 and 24,197.
 pub const CHAT_MAX_CHARS: usize = 24_300;
 /// A planner chat adds the interview section to the chat prompt; measured
 /// the same way and rounded up the same way. `read_review_threads` joining
