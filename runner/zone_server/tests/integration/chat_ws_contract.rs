@@ -127,6 +127,9 @@ async fn authenticate(address: &str, chat: Uuid, token: &str) -> Socket {
 /// Mirrors AUTH_RECHECK_INTERVAL in the server, which is private to it.
 const AUTH_RECHECK: Duration = Duration::from_secs(10);
 
+/// How long a step of the clock is given to deliver what it sends
+const STEP_READ: Duration = Duration::from_millis(250);
+
 async fn next_json(socket: &mut Socket) -> Option<Value> {
     loop {
         let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
@@ -146,34 +149,28 @@ async fn assert_error(socket: &mut Socket, expected: &str) {
     assert_eq!(frame, json!({"type": "error", "message": expected}));
 }
 
-async fn periodic_error(socket: &mut Socket, count: usize) -> Option<String> {
-    let mut pong = true;
-    for _ in 0..count {
-        tokio::time::advance(Duration::from_secs(30)).await;
-        for _ in 0..3 {
-            tokio::task::yield_now().await;
-        }
-        let frame = socket.next().await?.ok()?;
-        match frame {
-            WsMessage::Ping(data) if pong => {
-                // The server closes the moment it reports, so this pong can
-                // find a broken pipe. Keep reading rather than giving up: the
-                // error frame it sent before closing is still on its way.
-                if socket.send(WsMessage::Pong(data)).await.is_err() {
-                    pong = false;
+/// Steps the paused clock one authorization recheck at a time, reading what
+/// each step sends on the real clock, until the server reports an error.
+/// Reading a ping owes the server a pong, which tungstenite sends before any
+/// later read and which fails once the server has closed. The report lands
+/// MAX_CONSECUTIVE_ERRORS rechecks in, never on a ping's step, so every pong
+/// is sent while the server still reads.
+async fn periodic_error(socket: &mut Socket, steps: usize) -> Option<String> {
+    for _ in 0..steps {
+        tokio::time::pause();
+        tokio::time::advance(AUTH_RECHECK).await;
+        tokio::time::resume();
+        while let Ok(frame) = tokio::time::timeout(STEP_READ, socket.next()).await {
+            match frame?.ok()? {
+                WsMessage::Text(text) => {
+                    let frame: Value = serde_json::from_str(&text).ok()?;
+                    if frame["type"] == "error" {
+                        return frame["message"].as_str().map(str::to_string);
+                    }
                 }
+                WsMessage::Close(_) => return None,
+                _ => {}
             }
-            WsMessage::Text(text) => {
-                let frame: Value = serde_json::from_str(&text).ok()?;
-                if frame["type"] == "error" {
-                    return frame["message"].as_str().map(str::to_string);
-                }
-            }
-            WsMessage::Close(_) => return None,
-            _ => {}
-        }
-        for _ in 0..3 {
-            tokio::task::yield_now().await;
         }
     }
     None
@@ -728,12 +725,10 @@ async fn repeated_authorization_database_errors_close_an_unstable_connection() {
     let mut socket = authenticate(&address, chat, &token).await;
     pool.close().await;
 
-    tokio::time::pause();
     // Every recheck against the closed pool is an error, so the report is
-    // MAX_CONSECUTIVE_ERRORS authorization ticks away. The bound is patience,
-    // not arithmetic -- the loop returns as soon as the error lands.
+    // MAX_CONSECUTIVE_ERRORS rechecks away. The bound is patience, not
+    // arithmetic -- the loop returns as soon as the error lands.
     let reported = periodic_error(&mut socket, 32).await;
-    tokio::time::resume();
     assert_eq!(
         reported.as_deref(),
         Some("Connection unstable, please reconnect")
