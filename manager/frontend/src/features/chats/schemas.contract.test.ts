@@ -598,9 +598,11 @@ describe('the job and wait cards the console draws are the ones the server sent'
   const wait = readFileSync(WAIT_RS, 'utf8');
   const agent = readFileSync(AGENT_RS, 'utf8');
 
-  test('JobStarted carries the same fields on both sides', () => {
+  test('JobStarted carries the same fields on both sides, optional where the contract says', () => {
     expect(zodFields(JobStartedSchema)).toEqual(
-      Object.fromEntries(jobs.job_started_fields.map((field) => [field, false]))
+      Object.fromEntries(
+        Object.entries(jobs.job_started_fields).map(([field, { optional }]) => [field, optional])
+      )
     );
   });
 

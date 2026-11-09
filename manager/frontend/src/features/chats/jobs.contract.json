@@ -1,3 +1,7 @@
 {
-  "job_started_fields": ["id", "log_path", "pid"]
+  "job_started_fields": {
+    "id": { "optional": false },
+    "log_path": { "optional": false },
+    "pid": { "optional": false }
+  }
 }
