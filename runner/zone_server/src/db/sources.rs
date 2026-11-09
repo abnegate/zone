@@ -14,6 +14,8 @@ use super::github_installations::UNATTACHABLE;
 
 pub const GITHUB: &str = "github";
 
+pub const GITLAB: &str = "gitlab";
+
 /// Source row from database
 #[derive(Clone, sqlx::FromRow)]
 pub struct SourceRow {

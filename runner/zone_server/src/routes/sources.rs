@@ -2,24 +2,37 @@
 
 use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
-use abnegate_vcs::pull_request::{ApplicationError, PullRequestError, Repository};
-use axum::{
-    Json,
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
-use serde::{Deserialize, Serialize};
+use abnegate_vcs::pull_request::ApplicationError;
+use abnegate_vcs::pull_request::PullRequestError;
+use abnegate_vcs::pull_request::Repository;
+use axum::Json;
+use axum::extract::Path;
+use axum::extract::Query;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::response::Response;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use uuid::Uuid;
+use zone_context::adapters::GitLabAdapter;
 
 use super::common::Timestamps;
 use super::error::ErrorResponse;
 use crate::auth::AuthUser;
-use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
-use crate::db::sources::{self, GITHUB, SourceChanges, UpdateError};
+use crate::db::github_installations;
+use crate::db::github_installations::InstallationStatus;
+use crate::db::github_installations::InstallationSummary;
+use crate::db::sources;
+use crate::db::sources::GITHUB;
+use crate::db::sources::GITLAB;
+use crate::db::sources::SourceChanges;
+use crate::db::sources::SourceRow;
+use crate::db::sources::UpdateError;
 use crate::error::ServerError;
-use crate::services::github_app::{self, Failure};
+use crate::services::github_app;
+use crate::services::github_app::Failure;
 use crate::state::AppState;
 
 /// Maximum name length
@@ -46,6 +59,9 @@ const UNREACHABLE: &str = "Zone can't reach this repository through that GitHub 
 const GITHUB_UNAVAILABLE: &str = "GitHub could not be reached.";
 
 const APP_REJECTED: &str = "The GitHub App connection is broken. Reconnect GitHub.";
+
+const GITLAB_INSTANCE_NEEDS_TOKEN: &str =
+    "Re-enter the access token to read this source from another GitLab instance.";
 
 const NOTION: &str = "notion";
 
@@ -98,6 +114,25 @@ async fn validate_installation(
             Err(internal())
         }
     }
+}
+
+/// Refuses a GitLab instance change that keeps the stored token, which would
+/// otherwise be sent to an instance it was never entered for.
+fn validate_instance(
+    previous: &SourceRow,
+    config: &serde_json::Value,
+    with_credentials: bool,
+) -> Result<(), ServerError> {
+    let reuses_stored_token = !with_credentials && previous.credentials_encrypted.is_some();
+    if previous.source_type == GITLAB
+        && reuses_stored_token
+        && GitLabAdapter::instance_of(&previous.config) != GitLabAdapter::instance_of(config)
+    {
+        return Err(ServerError::BadRequest(
+            GITLAB_INSTANCE_NEEDS_TOKEN.to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Refuses an installation whose token cannot read the repository `config` names.
@@ -358,7 +393,7 @@ async fn check_workspace_write_access(
 /// Category for a persisted source_type string
 fn category_for_source_type(source_type: &str) -> &'static str {
     match source_type {
-        GITHUB | "gitlab" | "filesystem" => "file",
+        GITHUB | GITLAB | "filesystem" => "file",
         "ical" => "calendar",
         "imap" => "mail",
         "discord" | "slack" => "chat",
@@ -390,7 +425,7 @@ fn derive_source_url(
                 .filter(|value| !value.is_empty())?;
             Some(format!("https://github.com/{}/{}", owner, repo))
         }
-        "gitlab" => {
+        GITLAB => {
             let project_id = config
                 .get("project_id")?
                 .as_str()
@@ -773,6 +808,10 @@ pub async fn update(
         })?
         .ok_or_else(not_found)?;
 
+    if let Some(config) = &request.config {
+        validate_instance(&previous, config, request.credentials.is_some())?;
+    }
+
     if let Some(Some(installation)) = request.github_installation_id {
         validate_installation(
             &state,
@@ -938,7 +977,7 @@ pub async fn verify(
     // We need to parse the source_type string into zone_core::SourceType enum
     let source_type = match source_row.source_type.as_str() {
         GITHUB => zone_core::SourceType::GitHub,
-        "gitlab" => zone_core::SourceType::GitLab,
+        GITLAB => zone_core::SourceType::GitLab,
         "filesystem" => zone_core::SourceType::Filesystem,
         NOTION => zone_core::SourceType::Notion,
         "text" => zone_core::SourceType::Text,
@@ -1149,7 +1188,7 @@ fn describe_kind(kind: &str) -> SourceTypeInfo {
                 "required": ["owner", "repo"]
             }),
         ),
-        "gitlab" => (
+        GITLAB => (
             "GitLab",
             "file",
             "GitLab project integration",

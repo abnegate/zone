@@ -88,6 +88,10 @@ const HTTPS_SCHEME: &str = "https";
 
 const API_PATH: &str = "/api/v4";
 
+const BASE_URL_FIELD: &str = "base_url";
+
+const HOST_FIELD: &str = "host";
+
 /// Configuration for GitLab sources
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitLabConfig {
@@ -299,6 +303,16 @@ impl GitLabAdapter {
         self.service
             .as_ref()
             .map_err(|message| ContextError::Config(message.clone()))
+    }
+
+    /// The instance a GitLab source's `config` reads from, keyed so that every
+    /// spelling of one instance compares equal; `None` for gitlab.com
+    pub fn instance_of(config: &serde_json::Value) -> Option<String> {
+        let named = [BASE_URL_FIELD, HOST_FIELD]
+            .into_iter()
+            .filter_map(|field| config.get(field))
+            .find_map(serde_json::Value::as_str);
+        Self::instance(named).map(|(_, key)| key)
     }
 
     fn service_for(&self, config: &GitLabConfig) -> Result<(GitLabService, String)> {
@@ -1859,6 +1873,60 @@ mod tests {
         ] {
             assert_eq!(origin(Some(named)), Some(named), "{named}");
         }
+    }
+
+    #[test]
+    fn a_configs_instance_is_keyed_as_its_reads_are() {
+        for key in INSTANCE_KEYS {
+            for (spelled, keyed) in [
+                (
+                    "https://GitLab.example.com/",
+                    Some("https://gitlab.example.com"),
+                ),
+                (
+                    "https://gitlab.example.com/api/v4",
+                    Some("https://gitlab.example.com"),
+                ),
+                (
+                    " https://gitlab.example.com:8443 ",
+                    Some("https://gitlab.example.com:8443"),
+                ),
+                (
+                    "https://example.com/gitlab/",
+                    Some("https://example.com/gitlab"),
+                ),
+                (
+                    "http://gitlab.example.com",
+                    Some("http://gitlab.example.com"),
+                ),
+                ("gitlab.example.com", Some("gitlab.example.com")),
+                ("https://gitlab.com/api/v4", None),
+                ("", None),
+            ] {
+                assert_eq!(
+                    GitLabAdapter::instance_of(&json!({ "project": PROJECT, key: spelled })),
+                    keyed.map(str::to_string),
+                    "{key} {spelled}"
+                );
+            }
+        }
+
+        for unnamed in [
+            json!({ "project": PROJECT }),
+            json!({ "project": PROJECT, "host": null }),
+            json!({ "project": PROJECT, "host": 1 }),
+            json!([]),
+        ] {
+            assert_eq!(GitLabAdapter::instance_of(&unnamed), None, "{unnamed}");
+        }
+
+        assert_eq!(
+            GitLabAdapter::instance_of(&json!({
+                "base_url": "https://first.example",
+                "host": "https://second.example"
+            })),
+            Some("https://first.example".to_string())
+        );
     }
 
     #[tokio::test]
