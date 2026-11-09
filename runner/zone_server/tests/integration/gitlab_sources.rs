@@ -39,7 +39,8 @@ const NON_STRING_NAMED: &str =
 const INSTANCE_MOVED: &str =
     "The source reads from another GitLab instance now. Reload it and re-enter the access token.";
 const UNREADABLE_NEEDS_TOKEN: &str = "The stored configuration names no readable GitLab instance. Re-enter the access token to change it.";
-const UNNAMED_TOKEN_INSTANCE: &str = "Name the GitLab instance this access token is for.";
+const UNNAMED_TOKEN_INSTANCE: &str =
+    "Send `instance`, the GitLab instance this access token is for.";
 const UNREADABLE_TOKEN_INSTANCE: &str =
     "Name the GitLab instance this access token is for as a URL a source can read from.";
 const STORED_LINK: &str = "https://127.0.0.1:9/group/project";

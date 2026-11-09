@@ -12,7 +12,8 @@ const UNREADABLE_INSTANCE_NEEDS_TOKEN: &str = "The stored configuration names no
 const INSTANCE_MOVED: &str =
     "The source reads from another GitLab instance now. Reload it and re-enter the access token.";
 
-const UNNAMED_TOKEN_INSTANCE: &str = "Name the GitLab instance this access token is for.";
+const UNNAMED_TOKEN_INSTANCE: &str =
+    "Send `instance`, the GitLab instance this access token is for.";
 
 const UNREADABLE_TOKEN_INSTANCE: &str =
     "Name the GitLab instance this access token is for as a URL a source can read from.";
