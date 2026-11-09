@@ -60,7 +60,7 @@ pub struct ChatRow {
 
 /// A stored message. The shape is the conversation store's, not Postgres's,
 /// so a row and what the trait returns cannot drift apart.
-pub use zone_chat::StoredMessage as MessageRow;
+pub use abnegate_agent::chat::StoredMessage as MessageRow;
 
 /// Helper macro to map a row to ChatRow
 macro_rules! map_chat_row {
@@ -104,7 +104,7 @@ pub async fn list_chats(
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
+            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
         }
         (Some(wid), None) => {
             let rows = sqlx::query!(
@@ -118,7 +118,7 @@ pub async fn list_chats(
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
+            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
         }
         (None, Some(a)) => {
             let rows = sqlx::query!(
@@ -132,7 +132,7 @@ pub async fn list_chats(
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
+            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
         }
         (None, None) => {
             let rows = sqlx::query!(
@@ -144,7 +144,7 @@ pub async fn list_chats(
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
+            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
         }
     }
 }
@@ -421,7 +421,7 @@ pub async fn archive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> 
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_chat_row!(r)))
+    Ok(row.map(|row| map_chat_row!(row)))
 }
 
 /// Unarchive a chat
@@ -439,7 +439,7 @@ pub async fn unarchive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_chat_row!(r)))
+    Ok(row.map(|row| map_chat_row!(row)))
 }
 
 /// List messages for a chat
@@ -458,14 +458,11 @@ pub async fn list_messages(pool: &PgPool, chat_id: Uuid) -> DbResult<Vec<Message
 
     Ok(rows
         .into_iter()
-        .map(|r| MessageRow {
-            title_claimed: false,
-            id: r.id,
-            chat_id: r.chat_id,
-            role: r.role,
-            content: r.content,
-            metadata: r.metadata,
-            created_at: r.created_at,
+        .map(|row| {
+            let mut message = MessageRow::new(row.id, row.chat_id, row.role, row.content);
+            message.metadata = row.metadata;
+            message.created_at = row.created_at;
+            message
         })
         .collect())
 }
@@ -574,15 +571,10 @@ pub async fn create_message_with_id(
 
     transaction.commit().await?;
 
-    Ok(MessageRow {
-        title_claimed,
-        id: row.0,
-        chat_id: row.1,
-        role: row.2,
-        content: row.3,
-        metadata: row.4,
-        created_at: row.5,
-    })
+    let mut message = MessageRow::new(row.0, row.1, row.2, row.3).with_title_claimed(title_claimed);
+    message.metadata = row.4;
+    message.created_at = row.5;
+    Ok(message)
 }
 
 /// Create a message with background embedding generation

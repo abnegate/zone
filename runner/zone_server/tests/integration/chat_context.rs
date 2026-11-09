@@ -111,6 +111,56 @@ async fn a_chat_context_choice_caps_ollama_below_native() {
     assert_eq!(inference[0]["num_ctx"], 8192);
 }
 
+async fn choose_window(harness: &Harness, tokens: i64) {
+    sqlx::query("UPDATE chats SET context_tokens = $2 WHERE id = $1")
+        .bind(harness.chat)
+        .bind(tokens)
+        .execute(&harness.pool)
+        .await
+        .expect("the chat keeps its chosen window");
+}
+
+#[tokio::test]
+async fn a_chat_context_choice_keeps_the_reason_its_capacity_was_resolved_with() {
+    let harness = Harness::new(None, false, vec![answer("Done")]).await;
+    choose_window(&harness, 8192).await;
+
+    let response = harness.preview("Ordinary draft", None).await;
+    response.assert_status(StatusCode::OK);
+    let context = usage(&response.json_value()["context"]);
+
+    assert_eq!(context.limit, Some(8192));
+    assert_eq!(context.source, ContextSource::Configured);
+    assert!(!context.incomplete, "{context:?}");
+    assert_eq!(
+        context.reason.as_deref(),
+        Some("The selected alias has no verified deployment route."),
+        "a chosen window that is not cut keeps the note its capacity was resolved with"
+    );
+}
+
+#[tokio::test]
+async fn a_chat_context_choice_cut_by_the_resolved_capacity_says_what_bounded_it() {
+    let harness = Harness::new(Some(32768), false, vec![answer("Done")]).await;
+    choose_window(&harness, 65536).await;
+
+    let response = harness.preview("Ordinary draft", None).await;
+    response.assert_status(StatusCode::OK);
+    let context = usage(&response.json_value()["context"]);
+
+    assert_eq!(context.limit, Some(32768));
+    assert_eq!(context.source, ContextSource::Configured);
+    assert!(!context.incomplete, "{context:?}");
+    assert_eq!(
+        context.reason.as_deref(),
+        Some(
+            "The requested context allocation is bounded by the capacity resolved for this \
+             deployment."
+        ),
+        "a route's own num_ctx is a configured capacity, not the model's native one"
+    );
+}
+
 #[tokio::test]
 async fn cold_text_history_compacts_before_inference_with_bounded_batched_summaries() {
     let harness = Harness::new(Some(4096), false, vec![answer("Done")]).await;

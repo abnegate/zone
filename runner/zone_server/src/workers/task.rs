@@ -5305,6 +5305,7 @@ mod retry_tests {
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+    use abnegate_agent::chat::NewEntry;
     use abnegate_llm::Role as LlmRole;
     use std::sync::Mutex;
 
@@ -6366,12 +6367,8 @@ mod watchdog_tests {
         );
     }
 
-    fn canonical(id: &str, message: LlmMessage) -> zone_chat::history::NewEntry {
-        zone_chat::history::NewEntry {
-            id: id.to_string(),
-            message: (&message).into(),
-            mutations: Vec::new(),
-        }
+    fn canonical(id: &str, message: LlmMessage) -> NewEntry {
+        NewEntry::new(id, (&message).into())
     }
 
     #[test]

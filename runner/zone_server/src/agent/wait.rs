@@ -12,6 +12,7 @@
 //! timeout and a commit nothing is reporting on both have to be unphrasable as
 //! a pass, or a model reads "no news" as "green".
 
+use abnegate_agent::chat::NewEntry;
 use abnegate_agent::context::Entry;
 use abnegate_agent::tool::job::{JobExited, Jobs};
 use abnegate_agent::tool::{Session, Tier};
@@ -30,7 +31,6 @@ use std::time::Duration;
 use tokio::sync::{Mutex, broadcast};
 use tokio::time::Instant;
 use uuid::Uuid;
-use zone_chat::history;
 
 use super::integrations::{Configuration, SETTLED_ASSESSMENTS, authenticated};
 use super::tools::WorkspaceScope;
@@ -752,7 +752,7 @@ pub fn resume_with_outcome(
     waited: &Waited,
     outcome: String,
     waits: &mut Vec<String>,
-) -> [history::NewEntry; 2] {
+) -> [NewEntry; 2] {
     for entry in &mut context.entries {
         if waits.contains(&entry.id) {
             entry.preserve = false;
@@ -767,11 +767,8 @@ pub fn resume_with_outcome(
         arguments,
     )]);
     let result = LlmMessage::tool_result(call, outcome);
-    let pair = [envelope, result].map(|message| history::NewEntry {
-        id: Uuid::new_v4().to_string(),
-        message: (&message).into(),
-        mutations: Vec::new(),
-    });
+    let pair = [envelope, result]
+        .map(|message| NewEntry::new(Uuid::new_v4().to_string(), (&message).into()));
     for entry in &pair {
         context.entries.push(
             Entry::new(entry.id.clone(), entry.message.clone().into_message()).with_preserve(true),

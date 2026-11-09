@@ -8,6 +8,7 @@ pub mod tail;
 pub use generation::Generation;
 pub use pinned::Pinned;
 
+use abnegate_agent::chat::{self, Capacity, History, NewEntry, ReplayMessage};
 use abnegate_agent::context::{
     self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary,
 };
@@ -34,7 +35,6 @@ use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
 use crate::services::project_directory::{self, Start};
 use crate::state::AppState;
-use zone_chat::{capacity, history};
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
 /// The id of the system entry a turn's context opens with.
@@ -187,7 +187,7 @@ impl RunContext {
         }
     }
 
-    pub fn append(&mut self, entry: &history::NewEntry) {
+    pub fn append(&mut self, entry: &NewEntry) {
         self.entries.push(Entry::new(
             entry.id.clone(),
             entry.message.clone().into_message(),
@@ -623,7 +623,7 @@ pub async fn build(
 
 /// The content of the newest canonical user turn, read before `history.entries`
 /// is moved into the projection.
-fn latest_user(history: &history::History) -> Option<String> {
+fn latest_user(history: &History) -> Option<String> {
     let id = history.latest_user.as_ref()?;
     history
         .entries
@@ -632,16 +632,11 @@ fn latest_user(history: &history::History) -> Option<String> {
         .and_then(|entry| entry.message.content.clone())
 }
 
-pub fn policy(settings: &Settings, capacity: &capacity::Capacity) -> Policy {
+pub fn policy(settings: &Settings, capacity: &Capacity) -> Policy {
     Policy::new(
         capacity.limit,
         settings.reserved(capacity.limit),
-        match capacity.source {
-            capacity::Source::Runtime => ContextSource::Runtime,
-            capacity::Source::Configured => ContextSource::Configured,
-            capacity::Source::Provider => ContextSource::Provider,
-            capacity::Source::Unknown => ContextSource::Unknown,
-        },
+        capacity.source,
     )
 }
 
@@ -742,20 +737,20 @@ pub fn images(metadata: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
-pub fn core_summary(summary: history::Summary) -> Summary {
+pub fn core_summary(summary: chat::Summary) -> Summary {
     Summary::new(
         summary.content,
         Coverage::new(summary.entries, summary.fingerprint),
         summary.revision,
     )
 }
-pub fn stored_summary(summary: &Summary) -> history::Summary {
-    history::Summary {
-        content: summary.content.clone(),
-        entries: summary.coverage.entries.clone(),
-        fingerprint: summary.coverage.fingerprint.clone(),
-        revision: summary.revision,
-    }
+pub fn stored_summary(summary: &Summary) -> chat::Summary {
+    chat::Summary::new(
+        summary.content.clone(),
+        summary.coverage.entries.clone(),
+        summary.coverage.fingerprint.clone(),
+        summary.revision,
+    )
 }
 
 pub struct Session {
@@ -793,7 +788,7 @@ impl Session {
         &self,
         content: Option<&str>,
         metadata: Option<Value>,
-        partial: Option<&history::ReplayMessage>,
+        partial: Option<&ReplayMessage>,
     ) -> Result<bool, Error> {
         self.store
             .settle(self.turn, content, metadata, partial)
