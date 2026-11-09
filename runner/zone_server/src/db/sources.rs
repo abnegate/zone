@@ -374,7 +374,7 @@ async fn lock_source<'e>(
                github_installation_id
         FROM sources
         WHERE id = $1 AND workspace_id = $2
-        FOR UPDATE
+        FOR NO KEY UPDATE
         "#,
     )
     .bind(id)

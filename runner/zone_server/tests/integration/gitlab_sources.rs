@@ -196,23 +196,24 @@ impl Harness {
             .await
     }
 
-    async fn wait_until_blocked_by(&self, backend: i32) {
-        let blocked = async {
-            loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
-                )
-                .bind(backend)
-                .fetch_one(self.pool())
-                .await
-                .expect("the lock table is readable");
-                if waiting {
-                    return;
-                }
-                tokio::time::sleep(LOCK_POLL).await;
+    async fn blocked_by(&self, backend: i32) {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(backend)
+            .fetch_one(self.pool())
+            .await
+            .expect("the lock table is readable");
+            if waiting {
+                return;
             }
-        };
-        tokio::time::timeout(LOCK_WAIT, blocked)
+            tokio::time::sleep(LOCK_POLL).await;
+        }
+    }
+
+    async fn wait_until_blocked_by(&self, backend: i32) {
+        tokio::time::timeout(LOCK_WAIT, self.blocked_by(backend))
             .await
             .expect("the update waits on the row the concurrent write holds");
     }
@@ -567,6 +568,45 @@ async fn an_instance_named_by_anything_but_a_string_is_refused_unwritten() {
             }
         }
     }
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn content_stored_for_a_source_never_blocks_its_update() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let source = harness
+        .source(
+            &tenant,
+            config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            Some(STORED_TOKEN),
+        )
+        .await;
+    let mut indexing = harness.pool().begin().await.expect("a transaction");
+    let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *indexing)
+        .await
+        .expect("the backend is named");
+    sqlx::query(
+        "INSERT INTO content_items (source_id, category, uri, title, content_hash) VALUES ($1, 'file', 'README.md', 'README.md', 'held')",
+    )
+    .bind(source.id)
+    .execute(&mut *indexing)
+    .await
+    .expect("the content is stored");
+    let branched = config(HOST_FIELD, Some(STORED_INSTANCE), "develop");
+
+    let updated = tokio::select! {
+        updated = harness.update(&tenant, source.id, json!({ "config": branched })) => updated,
+        () = harness.blocked_by(backend) => {
+            panic!("the update waits on the lock the content's foreign key holds")
+        }
+    };
+    indexing.rollback().await.expect("the content is discarded");
+
+    updated.assert_status(StatusCode::OK);
+    assert_eq!(harness.stored(&tenant, source.id).await.config, branched);
 
     harness.discard(&tenant).await;
 }
