@@ -1038,9 +1038,10 @@ impl SourceAdapter for GitLabAdapter {
                             false,
                         )?;
 
-                        budget.try_add(&entry.path, item.token_count);
-                        progress.on_item(&item);
-                        result.add_item(item);
+                        if budget.try_add(&entry.path, item.token_count) {
+                            progress.on_item(&item);
+                            result.add_item(item);
+                        }
                     } else {
                         break;
                     }
@@ -2203,6 +2204,47 @@ mod tests {
             config.base_url.as_deref(),
             Some("https://gitlab.example.com")
         );
+    }
+
+    #[tokio::test]
+    async fn a_partial_fetch_never_emits_a_file_past_its_budget() {
+        let max_tokens = 600;
+        let server = MockServer::start().await;
+        mount_project(&server).await;
+        Mock::given(method("GET"))
+            .and(path_regex(TREE_ROUTES))
+            .respond_with(listing("README.md"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(format!(
+                r".*/repository/blobs/{README_SHA}/raw$"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_string("word ".repeat(2000)))
+            .mount(&server)
+            .await;
+        let adapter = served(&server);
+
+        let fetched = adapter
+            .fetch(
+                &create_test_source(json!({ "project": PROJECT })),
+                &FetchConfig::default(),
+                FetchStrategy::Partial { max_tokens },
+                &NoOpProgress,
+            )
+            .await
+            .unwrap();
+
+        let emitted: Vec<&str> = fetched
+            .items
+            .iter()
+            .map(|item| item.title.as_str())
+            .collect();
+        assert!(
+            emitted.is_empty(),
+            "a file the budget refused is emitted: {emitted:?}"
+        );
+        assert!(fetched.stats.total_tokens <= max_tokens);
     }
 
     async fn tree_requested(server: &MockServer) {

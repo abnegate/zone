@@ -970,8 +970,8 @@ impl SourceAdapter for GitHubAdapter {
                     if let Some(item) = self
                         .fetch_file_item(source.id, &config, &branch, entry)
                         .await?
+                        && budget.try_add(&entry.path, item.token_count)
                     {
-                        budget.try_add(&entry.path, item.token_count);
                         progress.on_item(&item);
                         result.add_item(item);
                     }
@@ -1059,6 +1059,8 @@ mod tests {
     use super::*;
     use crate::adapters::NoOpProgress;
     use abnegate_vcs::ObjectId;
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
     use chrono::Utc;
     use serde_json::Value;
     use serde_json::json;
@@ -1488,6 +1490,44 @@ mod tests {
         );
         assert!(matches!(item, Ok(None)), "{item:?}");
         assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_partial_fetch_never_emits_a_file_past_its_budget() {
+        let max_tokens = 100;
+        let mock_server = MockServer::start().await;
+        mount_listing(&mock_server, json!([listed_blob("lib.rs", 40)])).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/test-owner/test-repo/contents/lib.rs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "file",
+                "encoding": "base64",
+                "content": BASE64_STANDARD.encode("fn grown() {}\n".repeat(400))
+            })))
+            .mount(&mock_server)
+            .await;
+        let adapter = served(&mock_server);
+
+        let fetched = adapter
+            .fetch(
+                &create_test_source(test_repository()),
+                &FetchConfig::default(),
+                FetchStrategy::Partial { max_tokens },
+                &NoOpProgress,
+            )
+            .await
+            .unwrap();
+
+        let emitted: Vec<&str> = fetched
+            .items
+            .iter()
+            .map(|item| item.title.as_str())
+            .collect();
+        assert!(
+            emitted.is_empty(),
+            "a file the budget refused is emitted: {emitted:?}"
+        );
+        assert!(fetched.stats.total_tokens <= max_tokens);
     }
 
     fn tree_key(branch: &str) -> TreeKey {
