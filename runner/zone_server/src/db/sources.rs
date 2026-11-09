@@ -7,16 +7,18 @@ use chrono::NaiveDateTime;
 use serde::Serialize;
 use sqlx::PgExecutor;
 use sqlx::PgPool;
-use thiserror::Error;
 use uuid::Uuid;
 use zone_context::adapters::GitLabAdapter;
 
 use super::DbResult;
-use super::github_installations::UNATTACHABLE;
 
 mod create_error;
+mod link;
+mod update_error;
 
 pub use create_error::CreateError;
+pub use link::derived_link;
+pub use update_error::UpdateError;
 
 pub const GITHUB: &str = "github";
 
@@ -42,10 +44,7 @@ pub const GOOGLE_CALENDAR: &str = "google_calendar";
 
 pub const GOOGLE_MAIL: &str = "google_mail";
 
-const INSTANCE_NEEDS_TOKEN: &str =
-    "Re-enter the access token to read this source from another GitLab instance.";
-
-const UNREADABLE_INSTANCE_NEEDS_TOKEN: &str = "The stored configuration names no readable GitLab instance. Re-enter the access token to change it.";
+const BASE_URL_FIELD: &str = "base_url";
 
 /// Source row from database
 #[derive(Clone, sqlx::FromRow)]
@@ -291,12 +290,15 @@ pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<Sourc
     .bind(source.github_installation_id)
     .fetch_optional(pool)
     .await
-    .map_err(refused_creation)?
+    .map_err(refused_installation)?
     .ok_or(CreateError::Unattachable)
 }
 
-/// What an update changes; a field left `None` keeps its stored value.
+/// What an update changes; a field left `None` keeps its stored value, except
+/// that a config change moves a link derived from the stored config.
 /// `github_installation_id` is `Some(None)` to detach the installation.
+/// `instance` is the GitLab instance the caller last saw the source read
+/// from; the update is refused once it reads from another.
 #[derive(Default)]
 pub struct SourceChanges<'a> {
     pub name: Option<&'a str>,
@@ -306,45 +308,21 @@ pub struct SourceChanges<'a> {
     pub is_active: Option<bool>,
     pub github_installation_id: Option<Option<Uuid>>,
     pub credentials_encrypted: Option<&'a str>,
+    pub instance: Option<&'a str>,
 }
 
-#[derive(Debug, Error)]
-pub enum UpdateError {
-    #[error("The source does not exist in this workspace.")]
-    NotFound,
-    #[error("{UNATTACHABLE}")]
-    Unattachable,
-    #[error("{INSTANCE_NEEDS_TOKEN}")]
-    InstanceNeedsToken,
-    #[error("{UNREADABLE_INSTANCE_NEEDS_TOKEN}")]
-    UnreadableInstanceNeedsToken,
-    #[error(transparent)]
-    Database(#[from] sqlx::Error),
-}
-
-fn names_refused_installation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(database) if database.is_foreign_key_violation())
-}
-
-fn refused_creation(error: sqlx::Error) -> CreateError {
-    if names_refused_installation(&error) {
-        CreateError::Unattachable
-    } else {
-        CreateError::Database(error)
+fn refused_installation(error: sqlx::Error) -> CreateError {
+    match error {
+        sqlx::Error::Database(database) if database.is_foreign_key_violation() => {
+            CreateError::Unattachable
+        }
+        error => CreateError::Database(error),
     }
 }
 
-fn refused_installation(error: sqlx::Error) -> UpdateError {
-    if names_refused_installation(&error) {
-        UpdateError::Unattachable
-    } else {
-        UpdateError::Database(error)
-    }
-}
-
-/// Apply every change to a source or none of them. A GitLab source holding a
-/// token moves to another instance only with a token entered for it, judged
-/// against the row as it is locked for the write.
+/// Apply every change to a source or none of them, each judged against the
+/// row as it is locked for the write. A GitLab source holding a token moves
+/// to another instance only with a token entered for it.
 pub async fn update_source(
     pool: &PgPool,
     id: Uuid,
@@ -356,13 +334,23 @@ pub async fn update_source(
     let locked = lock_source(&mut *transaction, id, workspace_id)
         .await?
         .ok_or(UpdateError::NotFound)?;
-    if let Some(refusal) = stored_token_refusal(&locked, &changes) {
+    if let Some(refusal) = instance_refusal(&locked, &changes) {
         return Err(refusal);
     }
+    let link = changes
+        .url
+        .map(ToString::to_string)
+        .or_else(|| relinked(&locked, &changes));
 
-    let mut current = update_fields(&mut *transaction, id, workspace_id, &changes)
-        .await?
-        .ok_or(UpdateError::NotFound)?;
+    let mut current = update_fields(
+        &mut *transaction,
+        id,
+        workspace_id,
+        &changes,
+        link.as_deref(),
+    )
+    .await?
+    .ok_or(UpdateError::NotFound)?;
 
     if let Some(installation) = changes.github_installation_id {
         // The row is locked, so no row here means the installation was refused.
@@ -403,11 +391,22 @@ async fn lock_source<'e>(
     .await
 }
 
+fn instance_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    if stored.source_type != GITLAB {
+        return None;
+    }
+    moved_refusal(stored, changes).or_else(|| stored_token_refusal(stored, changes))
+}
+
+fn moved_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    let seen = changes.instance?;
+    let current = GitLabAdapter::instance_of(&stored.config).ok()?;
+    let expected = GitLabAdapter::instance_of(&serde_json::json!({ BASE_URL_FIELD: seen })).ok()?;
+    (current != expected).then_some(UpdateError::InstanceMoved)
+}
+
 fn stored_token_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
-    if stored.source_type != GITLAB
-        || stored.credentials_encrypted.is_none()
-        || changes.credentials_encrypted.is_some()
-    {
+    if stored.credentials_encrypted.is_none() || changes.credentials_encrypted.is_some() {
         return None;
     }
     let changed = changes.config.as_ref()?;
@@ -421,11 +420,24 @@ fn stored_token_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Opti
     }
 }
 
+/// The link a config change moves the source to, when its stored link is the
+/// one its stored config derives, or it has none
+fn relinked(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<String> {
+    let config = changes.config.as_ref()?;
+    let link = stored.url.as_deref().filter(|link| !link.is_empty());
+    let derived = derived_link(&stored.source_type, &stored.config);
+    if link.is_some() && link != derived.as_deref() {
+        return None;
+    }
+    derived_link(&stored.source_type, config)
+}
+
 async fn update_fields<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
     changes: &SourceChanges<'_>,
+    link: Option<&str>,
 ) -> DbResult<Option<SourceRow>> {
     sqlx::query_as::<_, SourceRow>(
         r#"
@@ -447,7 +459,7 @@ async fn update_fields<'e>(
     .bind(changes.name)
     .bind(changes.config.as_ref())
     .bind(changes.description)
-    .bind(changes.url)
+    .bind(link)
     .bind(changes.is_active)
     .fetch_optional(executor)
     .await
@@ -490,7 +502,7 @@ pub async fn update_verification(
 }
 
 /// Store a personal access token, detaching any GitHub installation
-pub async fn update_credentials<'e>(
+async fn update_credentials<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
@@ -518,7 +530,7 @@ pub async fn update_credentials<'e>(
 /// Attach a GitHub installation, dropping any stored token, or detach one.
 /// An installation outside the workspace's organization, revoked or
 /// suspended, attaches nothing and returns no row.
-pub async fn set_github_installation<'e>(
+async fn set_github_installation<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
@@ -1311,7 +1323,7 @@ mod tests {
             "Source should have workspace_id set"
         );
         assert_eq!(source.name, unique_name);
-        assert_eq!(source.source_type, "github");
+        assert_eq!(source.source_type, GITHUB);
     }
 
     #[tokio::test]

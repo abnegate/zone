@@ -408,30 +408,10 @@ fn derive_source_url(
     config: &serde_json::Value,
     explicit: Option<&str>,
 ) -> Option<String> {
-    if let Some(url) = explicit.filter(|value| !value.is_empty()) {
-        return Some(url.to_string());
-    }
-
-    match source_type {
-        GITHUB => {
-            let owner = config
-                .get("owner")?
-                .as_str()
-                .filter(|value| !value.is_empty())?;
-            let repo = config
-                .get("repo")?
-                .as_str()
-                .filter(|value| !value.is_empty())?;
-            Some(format!("https://github.com/{}/{}", owner, repo))
-        }
-        GITLAB => GitLabAdapter::web_url(config),
-        WEB | ICAL => config
-            .get("url")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string),
-        _ => None,
-    }
+    explicit
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| sources::derived_link(source_type, config))
 }
 
 /// Source response
@@ -600,6 +580,9 @@ impl std::fmt::Debug for CreateSourceRequest {
 
 /// Update source request. `github_installation_id` is absent to leave the
 /// source as it is, `null` to detach the installation, or an id to attach it.
+/// `instance` names the GitLab instance the client last saw the source read
+/// from, so that a token entered for it is refused once the source reads from
+/// another.
 #[derive(Deserialize)]
 pub struct UpdateSourceRequest {
     name: Option<String>,
@@ -610,6 +593,7 @@ pub struct UpdateSourceRequest {
     credentials: Option<String>,
     #[serde(default, deserialize_with = "crate::db::actions::patch")]
     github_installation_id: Option<Option<Uuid>>,
+    instance: Option<String>,
 }
 
 impl std::fmt::Debug for UpdateSourceRequest {
@@ -625,6 +609,7 @@ impl std::fmt::Debug for UpdateSourceRequest {
                 &self.credentials.as_ref().map(|_| "[REDACTED]"),
             )
             .field("github_installation_id", &self.github_installation_id)
+            .field("instance", &self.instance)
             .finish()
     }
 }
@@ -825,13 +810,6 @@ pub async fn update(
         .map(|credentials| encrypt_credentials(&state, credentials))
         .transpose()?;
 
-    let url = request.url.clone().or_else(|| {
-        request
-            .config
-            .as_ref()
-            .and_then(|config| derive_source_url(&previous.source_type, config, None))
-    });
-
     let current = sources::update_source(
         state.db(),
         id,
@@ -840,10 +818,11 @@ pub async fn update(
             name: request.name.as_deref(),
             config: request.config.clone(),
             description: request.description.as_deref(),
-            url: url.as_deref(),
+            url: request.url.as_deref(),
             is_active: request.is_active,
             github_installation_id: request.github_installation_id,
             credentials_encrypted: credentials_encrypted.as_deref(),
+            instance: request.instance.as_deref(),
         },
     )
     .await
@@ -853,6 +832,7 @@ pub async fn update(
         error @ (UpdateError::InstanceNeedsToken | UpdateError::UnreadableInstanceNeedsToken) => {
             ServerError::BadRequest(error.to_string())
         }
+        error @ UpdateError::InstanceMoved => ServerError::Conflict(error.to_string()),
         UpdateError::Database(error) => {
             tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
             internal()
@@ -1276,15 +1256,22 @@ mod tests {
 
     use axum::http::StatusCode;
 
-    use super::{
-        APP_REJECTED, CONNECTION_LOST, CREDENTIALS_UNREADABLE, GITHUB_UNAVAILABLE, INTERNAL_ERROR,
-        UNREACHABLE, UpdateSourceRequest, configured_repository, installation_refusal,
-        repository_refusal, verification_refusal,
-    };
+    use super::APP_REJECTED;
+    use super::CONNECTION_LOST;
+    use super::CREDENTIALS_UNREADABLE;
+    use super::GITHUB_UNAVAILABLE;
+    use super::INTERNAL_ERROR;
+    use super::UNREACHABLE;
+    use super::UpdateSourceRequest;
+    use super::configured_repository;
+    use super::installation_refusal;
+    use super::repository_refusal;
+    use super::verification_refusal;
     use crate::db::github_installations::UNATTACHABLE;
     use crate::error::ServerError;
     use crate::services::github_app;
-    use abnegate_vcs::pull_request::{ApplicationError, PullRequestError};
+    use abnegate_vcs::pull_request::ApplicationError;
+    use abnegate_vcs::pull_request::PullRequestError;
 
     fn installation_of(body: serde_json::Value) -> Option<Option<Uuid>> {
         serde_json::from_value::<UpdateSourceRequest>(body)

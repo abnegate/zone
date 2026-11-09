@@ -14,6 +14,8 @@ use axum::http::StatusCode;
 use serde_json::Value;
 use serde_json::json;
 use sqlx::PgPool;
+use sqlx::Postgres;
+use sqlx::Transaction;
 use std::time::Duration;
 use uuid::Uuid;
 use zone_server::db::sources;
@@ -34,6 +36,8 @@ const INVALID_INSTANCE: &str = "Invalid source configuration: Invalid GitLab con
 const BOTH_NAMED: &str = "Invalid source configuration: Invalid GitLab config: name the instance as host or base_url, not both";
 const NON_STRING_NAMED: &str =
     "Invalid source configuration: Invalid GitLab config: name the instance as a URL string";
+const INSTANCE_MOVED: &str =
+    "The source reads from another GitLab instance now. Reload it and re-enter the access token.";
 const UNREADABLE_NEEDS_TOKEN: &str = "The stored configuration names no readable GitLab instance. Re-enter the access token to change it.";
 const STORED_LINK: &str = "https://127.0.0.1:9/group/project";
 const OTHER_LINK: &str = "https://localhost:9/group/project";
@@ -200,6 +204,31 @@ impl Harness {
             .await
     }
 
+    /// Writes `config` and `sealed` to the source in a transaction left open,
+    /// so the row stays locked until the caller commits it.
+    async fn concurrent(
+        &self,
+        id: Uuid,
+        config: Option<&Value>,
+        sealed: Option<&str>,
+    ) -> (Transaction<'static, Postgres>, i32) {
+        let mut concurrent = self.pool().begin().await.expect("a transaction");
+        let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *concurrent)
+            .await
+            .expect("the backend is named");
+        sqlx::query(
+            "UPDATE sources SET config = COALESCE($2, config), credentials_encrypted = COALESCE($3, credentials_encrypted) WHERE id = $1",
+        )
+        .bind(id)
+        .bind(config)
+        .bind(sealed)
+        .execute(&mut *concurrent)
+        .await
+        .expect("the concurrent write lands");
+        (concurrent, backend)
+    }
+
     async fn blocked_by(&self, backend: i32) {
         loop {
             let waiting: bool = sqlx::query_scalar(
@@ -316,9 +345,9 @@ async fn moving_a_source_to_another_instance_with_a_new_token_is_accepted() {
     accepted.assert_status(StatusCode::OK);
     let stored = harness.stored(&tenant, source.id).await;
     assert_eq!(stored.config, moved);
-    assert!(stored.credentials_encrypted.is_some());
-    assert_ne!(
-        stored.credentials_encrypted, source.credentials_encrypted,
+    assert_eq!(
+        harness.open(stored.credentials_encrypted.as_deref().expect("a token")),
+        SENT_TOKEN,
         "the new token replaces the stored one"
     );
 
@@ -430,17 +459,7 @@ async fn a_token_stored_while_the_move_waits_is_never_paired_with_the_new_instan
         )
         .await;
     let sealed = harness.seal(STORED_TOKEN);
-    let mut concurrent = harness.pool().begin().await.expect("a transaction");
-    let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-        .fetch_one(&mut *concurrent)
-        .await
-        .expect("the backend is named");
-    sqlx::query("UPDATE sources SET credentials_encrypted = $2 WHERE id = $1")
-        .bind(source.id)
-        .bind(&sealed)
-        .execute(&mut *concurrent)
-        .await
-        .expect("the concurrent token is written");
+    let (concurrent, backend) = harness.concurrent(source.id, None, Some(&sealed)).await;
 
     let (moved, ()) = tokio::join!(
         harness.update(
@@ -465,6 +484,147 @@ async fn a_token_stored_while_the_move_waits_is_never_paired_with_the_new_instan
         stored.credentials_encrypted.as_deref(),
         Some(sealed.as_str())
     );
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn an_edit_waiting_on_a_move_is_judged_against_the_moved_instance() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let source = harness
+        .source(
+            &tenant,
+            config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            Some(STORED_TOKEN),
+        )
+        .await;
+    let moved = config(HOST_FIELD, Some(OTHER_INSTANCE), "main");
+    let sealed = harness.seal(SENT_TOKEN);
+    let (concurrent, backend) = harness
+        .concurrent(source.id, Some(&moved), Some(&sealed))
+        .await;
+
+    let (edited, ()) = tokio::join!(
+        harness.update(
+            &tenant,
+            source.id,
+            json!({ "config": config(HOST_FIELD, Some(STORED_INSTANCE), "develop") }),
+        ),
+        async {
+            harness.wait_until_blocked_by(backend).await;
+            concurrent
+                .commit()
+                .await
+                .expect("the concurrent move commits");
+        },
+    );
+
+    edited.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(edited.json_value()["error"].as_str(), Some(NEEDS_TOKEN));
+    let stored = harness.stored(&tenant, source.id).await;
+    assert_eq!(
+        stored.config, moved,
+        "the edit did not move the source back"
+    );
+    assert_eq!(
+        harness.open(stored.credentials_encrypted.as_deref().expect("a token")),
+        SENT_TOKEN,
+        "the moved instance's token is never paired with the old instance"
+    );
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_token_entered_for_an_instance_the_source_left_is_refused_unstored() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let source = harness
+        .source(
+            &tenant,
+            config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            None,
+        )
+        .await;
+    let moved = config(HOST_FIELD, Some(OTHER_INSTANCE), "main");
+    let (concurrent, backend) = harness.concurrent(source.id, Some(&moved), None).await;
+
+    let (entered, ()) = tokio::join!(
+        harness.update(
+            &tenant,
+            source.id,
+            json!({ "credentials": SENT_TOKEN, "instance": STORED_INSTANCE }),
+        ),
+        async {
+            harness.wait_until_blocked_by(backend).await;
+            concurrent
+                .commit()
+                .await
+                .expect("the concurrent move commits");
+        },
+    );
+
+    entered.assert_status(StatusCode::CONFLICT);
+    assert_eq!(entered.json_value()["error"].as_str(), Some(INSTANCE_MOVED));
+    let stored = harness.stored(&tenant, source.id).await;
+    assert_eq!(stored.config, moved);
+    assert_eq!(
+        stored.credentials_encrypted, None,
+        "the token entered for the old instance is never paired with the new one"
+    );
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_token_is_stored_only_while_the_source_reads_from_the_instance_it_names() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+
+    for (stored, named, accepted) in [
+        (Some(STORED_INSTANCE), STORED_INSTANCE, true),
+        (Some(STORED_INSTANCE), "https://127.0.0.1:9/api/v4/", true),
+        (None, GITLAB_COM, true),
+        (Some(GITLAB_COM), "", true),
+        (Some(STORED_INSTANCE), OTHER_INSTANCE, false),
+        (Some(STORED_INSTANCE), GITLAB_COM, false),
+        (None, OTHER_INSTANCE, false),
+    ] {
+        let source = harness
+            .source(
+                &tenant,
+                config(HOST_FIELD, stored, "main"),
+                Some(STORED_TOKEN),
+            )
+            .await;
+
+        let response = harness
+            .update(
+                &tenant,
+                source.id,
+                json!({ "credentials": SENT_TOKEN, "instance": named }),
+            )
+            .await;
+
+        let after = harness.stored(&tenant, source.id).await;
+        if accepted {
+            response.assert_status(StatusCode::OK);
+            assert_eq!(
+                harness.open(after.credentials_encrypted.as_deref().expect("a token")),
+                SENT_TOKEN,
+                "{stored:?} {named}"
+            );
+        } else {
+            response.assert_status(StatusCode::CONFLICT);
+            assert_eq!(
+                response.json_value()["error"].as_str(),
+                Some(INSTANCE_MOVED),
+                "{stored:?} {named}"
+            );
+            assert_unchanged(&source, &after);
+        }
+    }
 
     harness.discard(&tenant).await;
 }
@@ -631,7 +791,7 @@ async fn a_stored_config_naming_no_readable_instance_changes_only_with_a_new_tok
 }
 
 #[tokio::test]
-async fn content_stored_for_a_source_never_blocks_its_update() {
+async fn content_stored_for_a_source_never_blocks_a_config_update() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let source = harness
@@ -655,12 +815,16 @@ async fn content_stored_for_a_source_never_blocks_its_update() {
     .expect("the content is stored");
     let branched = config(HOST_FIELD, Some(STORED_INSTANCE), "develop");
 
-    let updated = tokio::select! {
-        updated = harness.update(&tenant, source.id, json!({ "config": branched })) => updated,
-        () = harness.blocked_by(backend) => {
-            panic!("the update waits on the lock the content's foreign key holds")
+    let updated = tokio::time::timeout(LOCK_WAIT, async {
+        tokio::select! {
+            updated = harness.update(&tenant, source.id, json!({ "config": branched })) => updated,
+            () = harness.blocked_by(backend) => {
+                panic!("the update waits on the lock the content's foreign key holds")
+            }
         }
-    };
+    })
+    .await
+    .expect("the update finishes");
     indexing.rollback().await.expect("the content is discarded");
 
     updated.assert_status(StatusCode::OK);
@@ -707,7 +871,7 @@ async fn a_created_sources_link_is_at_its_instances_web_origin() {
 }
 
 #[tokio::test]
-async fn moving_a_source_moves_its_link_unless_the_update_names_one() {
+async fn moving_a_source_moves_its_link_unless_one_was_named() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let (id, _) = harness
@@ -741,6 +905,14 @@ async fn moving_a_source_moves_its_link_unless_the_update_names_one() {
             }),
             EXPLICIT_LINK,
         ),
+        (
+            json!({ "config": config(HOST_FIELD, Some(STORED_INSTANCE), "develop") }),
+            EXPLICIT_LINK,
+        ),
+        (
+            json!({ "config": config(HOST_FIELD, Some(OTHER_INSTANCE), "develop") }),
+            EXPLICIT_LINK,
+        ),
     ] {
         let updated = harness.update(&tenant, id, body.clone()).await;
 
@@ -756,6 +928,36 @@ async fn moving_a_source_moves_its_link_unless_the_update_names_one() {
             "{body}"
         );
     }
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_source_stored_without_a_link_is_linked_by_its_next_config_edit() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let source = harness
+        .source(
+            &tenant,
+            config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            None,
+        )
+        .await;
+    assert_eq!(source.url, None);
+
+    let updated = harness
+        .update(
+            &tenant,
+            source.id,
+            json!({ "config": config(HOST_FIELD, Some(OTHER_INSTANCE), "main") }),
+        )
+        .await;
+
+    updated.assert_status(StatusCode::OK);
+    assert_eq!(
+        harness.stored(&tenant, source.id).await.url.as_deref(),
+        Some(OTHER_LINK)
+    );
 
     harness.discard(&tenant).await;
 }

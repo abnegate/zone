@@ -515,6 +515,7 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
+    use crate::db::sources::GITHUB;
     use crate::secret::fixture::seal;
     use crate::secret::fixture::seal_legacy;
     use crate::services::github_app::Failure;
@@ -702,7 +703,7 @@ mod tests {
         SourceRow {
             id: Uuid::new_v4(),
             name: REPOSITORY.to_string(),
-            source_type: "github".to_string(),
+            source_type: GITHUB.to_string(),
             config: json!({}),
             credentials_encrypted,
             description: None,

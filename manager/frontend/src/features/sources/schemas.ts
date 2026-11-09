@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { GitHubInstallationStatusSchema } from '../github/installationStatus';
-import { gitLabProjectUrl } from './utils/gitLabProjectUrl';
+import { gitLabSourceUrl } from './utils/gitLabSourceUrl';
 
 export const SourceCategorySchema = z.enum(['file', 'calendar', 'mail', 'chat', 'web', 'text']);
 export const SourceTypeSchema = z.enum([
@@ -144,11 +144,8 @@ function deriveSourceUrl(
   ) {
     return `https://github.com/${fields.owner}/${fields.repo}`;
   }
-  if (sourceType === 'gitlab' && typeof fields.project_id === 'string') {
-    const instance = [fields.host, fields.base_url].find(
-      (named): named is string => typeof named === 'string'
-    );
-    return gitLabProjectUrl(instance, fields.project_id) ?? '';
+  if (sourceType === 'gitlab') {
+    return gitLabSourceUrl(fields) ?? '';
   }
   if ((sourceType === 'web' || sourceType === 'ical') && typeof fields.url === 'string') {
     return fields.url;
@@ -207,6 +204,7 @@ const UpdateSourceRequestFieldsSchema = z.object({
   description: z.string().optional(),
   is_active: z.boolean().optional(),
   url: z.string().optional(),
+  instance: z.string().optional(),
 });
 
 export function updateSourceRequestSchema(sourceType: z.infer<typeof SourceTypeSchema>) {
