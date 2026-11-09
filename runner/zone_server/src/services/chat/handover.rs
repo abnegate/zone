@@ -437,7 +437,7 @@ fn standing(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
 
     use abnegate_agent::context::project;
     use abnegate_agent_cli::CliSettings;
@@ -449,6 +449,7 @@ mod tests {
     use chrono::{DateTime, SecondsFormat, TimeDelta, TimeZone};
     use sqlx::PgPool;
     use tempfile::TempDir;
+    use tokio::runtime::{Builder, Runtime};
 
     use super::*;
     use crate::config::AgentConfig;
@@ -1093,8 +1094,27 @@ mod tests {
         assert!(!left.join(format!("{SESSION}.jsonl")).exists());
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn settling_a_handover_relocates_off_the_runtime() {
+    /// A current-thread runtime whose blocking threads start their work only once `progress` is
+    /// set, or after [`TIMEOUT`], so work sent off the runtime cannot finish before the runtime's
+    /// own thread has moved on.
+    fn gated(progress: &Arc<(Mutex<bool>, Condvar)>) -> Runtime {
+        let progress = Arc::clone(progress);
+        Builder::new_current_thread()
+            .on_thread_start(move || {
+                let (made, signal) = &*progress;
+                let made = made.lock().expect("the progress flag");
+                drop(
+                    signal
+                        .wait_timeout_while(made, TIMEOUT, |made| !*made)
+                        .expect("the progress flag"),
+                );
+            })
+            .build()
+            .expect("a current-thread runtime")
+    }
+
+    #[test]
+    fn settling_a_handover_relocates_off_the_runtime() {
         let agents = TempDir::new().expect("an agent state root");
         let config = configured(agents.path());
         let organization = Uuid::new_v4();
@@ -1118,15 +1138,22 @@ mod tests {
             ),
             login: Some(login),
         };
-        let elsewhere = AtomicBool::new(false);
+        let progress = Arc::new((Mutex::new(false), Condvar::new()));
 
-        let (overlapped, ()) = tokio::join!(
-            async {
-                settle(&config, organization, &resolved).await;
-                elsewhere.load(Ordering::SeqCst)
-            },
-            async { elsewhere.store(true, Ordering::SeqCst) },
-        );
+        let overlapped = gated(&progress).block_on(async {
+            let (made, signal) = &*progress;
+            let (overlapped, ()) = tokio::join!(
+                async {
+                    settle(&config, organization, &resolved).await;
+                    *made.lock().expect("the progress flag")
+                },
+                async {
+                    *made.lock().expect("the progress flag") = true;
+                    signal.notify_all();
+                },
+            );
+            overlapped
+        });
 
         assert!(
             overlapped,
