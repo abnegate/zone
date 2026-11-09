@@ -96,11 +96,7 @@ impl ProgressCallback for RecordedProgress {
 }
 
 fn addressed(origin: &str) -> GitLabAdapter {
-    GitLabAdapter::with_service(
-        GitLabService::configured_allowing_http(origin)
-            .unwrap()
-            .with_anonymous_reads(),
-    )
+    GitLabAdapter::with_service(GitLabService::configured_allowing_http(origin).unwrap())
 }
 
 fn served(server: &MockServer) -> GitLabAdapter {

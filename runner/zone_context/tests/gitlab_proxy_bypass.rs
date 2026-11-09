@@ -84,9 +84,7 @@ async fn the_gitlab_client_ignores_the_environment_proxy_that_github_honours() {
     }
 
     let gitlab = GitLabAdapter::with_service(
-        GitLabService::configured_allowing_http(&target.uri())
-            .unwrap()
-            .with_anonymous_reads(),
+        GitLabService::configured_allowing_http(&target.uri()).unwrap(),
     );
     let github = GitHubAdapter::with_service(
         PullRequestService::standing_in_for("github.com", &target.uri())

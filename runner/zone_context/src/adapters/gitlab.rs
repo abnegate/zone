@@ -227,7 +227,7 @@ impl TreeCache {
 #[derive(Debug, Clone)]
 pub struct GitLabAdapter {
     service: std::result::Result<GitLabService, String>,
-    connect: fn(&str) -> GitLabResult<GitLabService>,
+    configure: fn(&str) -> GitLabResult<GitLabService>,
     tree_cache: TreeCache,
 }
 
@@ -248,23 +248,22 @@ impl GitLabAdapter {
     pub fn new() -> Self {
         Self::serving(
             GitLabService::new()
-                .map(Self::opened)
+                .map(Self::anonymously_readable)
                 .map_err(Self::unbuilt),
         )
     }
 
     /// Create a GitLab adapter that reads through `service` wherever a source
-    /// names no instance of its own
+    /// names no instance of its own, with anonymous reads applied to it as to
+    /// every service the adapter configures
     pub fn with_service(service: GitLabService) -> Self {
-        Self::serving(Ok(Self::opened(service)))
+        Self::serving(Ok(Self::anonymously_readable(service)))
     }
 
-    /// Reach an `http://` instance a source names over plain HTTP, as a mock
-    /// instance in a test needs; no production configuration permits it
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn allowing_http(self) -> Self {
+    #[cfg(test)]
+    fn allowing_http(self) -> Self {
         Self {
-            connect: GitLabService::configured_allowing_http,
+            configure: GitLabService::configured_allowing_http,
             ..self
         }
     }
@@ -272,12 +271,12 @@ impl GitLabAdapter {
     fn serving(service: std::result::Result<GitLabService, String>) -> Self {
         Self {
             service,
-            connect: GitLabService::configured,
+            configure: GitLabService::configured,
             tree_cache: TreeCache::new(Self::TREE_CACHE_TTL),
         }
     }
 
-    fn opened(service: GitLabService) -> GitLabService {
+    fn anonymously_readable(service: GitLabService) -> GitLabService {
         service.with_anonymous_reads()
     }
 
@@ -318,8 +317,8 @@ impl GitLabAdapter {
         let Some((origin, key)) = Self::instance(config.base_url.as_deref()) else {
             return Ok((self.service()?.clone(), String::new()));
         };
-        let service = (self.connect)(origin)
-            .map(Self::opened)
+        let service = (self.configure)(origin)
+            .map(Self::anonymously_readable)
             .map_err(Self::misconfigured)?;
         Ok((service, key))
     }
@@ -1243,11 +1242,7 @@ mod tests {
     }
 
     fn served(server: &MockServer) -> GitLabAdapter {
-        GitLabAdapter::with_service(
-            GitLabService::configured_allowing_http(&server.uri())
-                .unwrap()
-                .with_anonymous_reads(),
-        )
+        GitLabAdapter::with_service(GitLabService::configured_allowing_http(&server.uri()).unwrap())
     }
 
     #[test]

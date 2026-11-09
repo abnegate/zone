@@ -1140,7 +1140,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_resolutions_share_one_failed_mint() {
+    async fn concurrent_mints_share_one_failure() {
         let server = MockServer::start().await;
         let connected = Connected::new(&server).await;
         Mock::given(method("POST"))
@@ -1202,7 +1202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_resolutions_share_one_confirmed_refusal() {
+    async fn concurrent_mints_share_one_confirmed_refusal() {
         let server = MockServer::start().await;
         let connected = Connected::new(&server).await;
         Mock::given(method("POST"))
