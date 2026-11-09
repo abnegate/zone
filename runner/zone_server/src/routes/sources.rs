@@ -1276,15 +1276,22 @@ mod tests {
 
     use axum::http::StatusCode;
 
-    use super::{
-        APP_REJECTED, CONNECTION_LOST, CREDENTIALS_UNREADABLE, GITHUB_UNAVAILABLE, INTERNAL_ERROR,
-        UNREACHABLE, UpdateSourceRequest, configured_repository, installation_refusal,
-        repository_refusal, verification_refusal,
-    };
+    use super::APP_REJECTED;
+    use super::CONNECTION_LOST;
+    use super::CREDENTIALS_UNREADABLE;
+    use super::GITHUB_UNAVAILABLE;
+    use super::INTERNAL_ERROR;
+    use super::UNREACHABLE;
+    use super::UpdateSourceRequest;
+    use super::configured_repository;
+    use super::installation_refusal;
+    use super::repository_refusal;
+    use super::verification_refusal;
     use crate::db::github_installations::UNATTACHABLE;
     use crate::error::ServerError;
     use crate::services::github_app;
-    use abnegate_vcs::pull_request::{ApplicationError, PullRequestError};
+    use abnegate_vcs::pull_request::ApplicationError;
+    use abnegate_vcs::pull_request::PullRequestError;
 
     fn installation_of(body: serde_json::Value) -> Option<Option<Uuid>> {
         serde_json::from_value::<UpdateSourceRequest>(body)

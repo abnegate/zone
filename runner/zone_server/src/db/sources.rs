@@ -7,16 +7,16 @@ use chrono::NaiveDateTime;
 use serde::Serialize;
 use sqlx::PgExecutor;
 use sqlx::PgPool;
-use thiserror::Error;
 use uuid::Uuid;
 use zone_context::adapters::GitLabAdapter;
 
 use super::DbResult;
-use super::github_installations::UNATTACHABLE;
 
 mod create_error;
+mod update_error;
 
 pub use create_error::CreateError;
+pub use update_error::UpdateError;
 
 pub const GITHUB: &str = "github";
 
@@ -41,11 +41,6 @@ pub const NOTION: &str = "notion";
 pub const GOOGLE_CALENDAR: &str = "google_calendar";
 
 pub const GOOGLE_MAIL: &str = "google_mail";
-
-const INSTANCE_NEEDS_TOKEN: &str =
-    "Re-enter the access token to read this source from another GitLab instance.";
-
-const UNREADABLE_INSTANCE_NEEDS_TOKEN: &str = "The stored configuration names no readable GitLab instance. Re-enter the access token to change it.";
 
 /// Source row from database
 #[derive(Clone, sqlx::FromRow)]
@@ -291,7 +286,7 @@ pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<Sourc
     .bind(source.github_installation_id)
     .fetch_optional(pool)
     .await
-    .map_err(refused_creation)?
+    .map_err(refused_installation)?
     .ok_or(CreateError::Unattachable)
 }
 
@@ -308,37 +303,12 @@ pub struct SourceChanges<'a> {
     pub credentials_encrypted: Option<&'a str>,
 }
 
-#[derive(Debug, Error)]
-pub enum UpdateError {
-    #[error("The source does not exist in this workspace.")]
-    NotFound,
-    #[error("{UNATTACHABLE}")]
-    Unattachable,
-    #[error("{INSTANCE_NEEDS_TOKEN}")]
-    InstanceNeedsToken,
-    #[error("{UNREADABLE_INSTANCE_NEEDS_TOKEN}")]
-    UnreadableInstanceNeedsToken,
-    #[error(transparent)]
-    Database(#[from] sqlx::Error),
-}
-
-fn names_refused_installation(error: &sqlx::Error) -> bool {
-    matches!(error, sqlx::Error::Database(database) if database.is_foreign_key_violation())
-}
-
-fn refused_creation(error: sqlx::Error) -> CreateError {
-    if names_refused_installation(&error) {
-        CreateError::Unattachable
-    } else {
-        CreateError::Database(error)
-    }
-}
-
-fn refused_installation(error: sqlx::Error) -> UpdateError {
-    if names_refused_installation(&error) {
-        UpdateError::Unattachable
-    } else {
-        UpdateError::Database(error)
+fn refused_installation(error: sqlx::Error) -> CreateError {
+    match error {
+        sqlx::Error::Database(database) if database.is_foreign_key_violation() => {
+            CreateError::Unattachable
+        }
+        error => CreateError::Database(error),
     }
 }
 
@@ -490,7 +460,7 @@ pub async fn update_verification(
 }
 
 /// Store a personal access token, detaching any GitHub installation
-pub async fn update_credentials<'e>(
+async fn update_credentials<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
@@ -518,7 +488,7 @@ pub async fn update_credentials<'e>(
 /// Attach a GitHub installation, dropping any stored token, or detach one.
 /// An installation outside the workspace's organization, revoked or
 /// suspended, attaches nothing and returns no row.
-pub async fn set_github_installation<'e>(
+async fn set_github_installation<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
@@ -1311,7 +1281,7 @@ mod tests {
             "Source should have workspace_id set"
         );
         assert_eq!(source.name, unique_name);
-        assert_eq!(source.source_type, "github");
+        assert_eq!(source.source_type, GITHUB);
     }
 
     #[tokio::test]
