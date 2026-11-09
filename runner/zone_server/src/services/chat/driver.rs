@@ -75,7 +75,7 @@ impl Driver {
 
 #[cfg(test)]
 mod tests {
-    use abnegate_agent::context::ContextSource as Source;
+    use abnegate_agent::context::ContextSource;
     use abnegate_agent_cli::CliSettings;
 
     use super::*;
@@ -97,7 +97,7 @@ mod tests {
         (pool, chat_id)
     }
 
-    fn known(capacity: &(Capacity, Option<u64>)) -> (Option<u64>, Source, Option<u64>) {
+    fn known(capacity: &(Capacity, Option<u64>)) -> (Option<u64>, ContextSource, Option<u64>) {
         (capacity.0.limit, capacity.0.source, capacity.1)
     }
 
@@ -117,7 +117,7 @@ mod tests {
         let capacity = Capacity::reported(MODEL, 0);
 
         assert_eq!(capacity.limit, None);
-        assert_eq!(capacity.source, Source::Unknown);
+        assert_eq!(capacity.source, ContextSource::Unknown);
         assert_eq!(
             capacity.reason.as_deref(),
             Some("The deployment's server reported no context window.")
@@ -140,9 +140,12 @@ mod tests {
             .await;
         let after = claude.capacity(&pool, chat_id).await;
 
-        assert_eq!(known(&before), (None, Source::Unknown, None));
+        assert_eq!(known(&before), (None, ContextSource::Unknown, None));
         assert_eq!(before.0.reason.as_deref(), Some(UNREPORTED));
-        assert_eq!(known(&after), (Some(WINDOW), Source::Runtime, Some(USED)));
+        assert_eq!(
+            known(&after),
+            (Some(WINDOW), ContextSource::Runtime, Some(USED))
+        );
         assert_eq!(after.0.identity, MODEL);
     }
 
@@ -163,7 +166,7 @@ mod tests {
         ] {
             assert_eq!(
                 known(&other.capacity(&pool, chat_id).await),
-                (None, Source::Unknown, None),
+                (None, ContextSource::Unknown, None),
                 "{other:?}"
             );
         }
@@ -192,11 +195,11 @@ mod tests {
 
         assert_eq!(
             known(&codex.capacity(&pool, chat_id).await),
-            (Some(WINDOW * 2), Source::Runtime, None)
+            (Some(WINDOW * 2), ContextSource::Runtime, None)
         );
         assert_eq!(
             known(&claude.capacity(&pool, chat_id).await),
-            (None, Source::Unknown, None),
+            (None, ContextSource::Unknown, None),
             "a report belongs to the agent that made it"
         );
     }

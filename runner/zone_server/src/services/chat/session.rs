@@ -8,7 +8,7 @@ pub mod tail;
 pub use generation::Generation;
 pub use pinned::Pinned;
 
-use abnegate_agent::chat;
+use abnegate_agent::chat::{self, Capacity, History, NewEntry, ReplayMessage};
 use abnegate_agent::context::{
     self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary,
 };
@@ -187,7 +187,7 @@ impl RunContext {
         }
     }
 
-    pub fn append(&mut self, entry: &chat::NewEntry) {
+    pub fn append(&mut self, entry: &NewEntry) {
         self.entries.push(Entry::new(
             entry.id.clone(),
             entry.message.clone().into_message(),
@@ -623,7 +623,7 @@ pub async fn build(
 
 /// The content of the newest canonical user turn, read before `history.entries`
 /// is moved into the projection.
-fn latest_user(history: &chat::History) -> Option<String> {
+fn latest_user(history: &History) -> Option<String> {
     let id = history.latest_user.as_ref()?;
     history
         .entries
@@ -632,7 +632,7 @@ fn latest_user(history: &chat::History) -> Option<String> {
         .and_then(|entry| entry.message.content.clone())
 }
 
-pub fn policy(settings: &Settings, capacity: &chat::Capacity) -> Policy {
+pub fn policy(settings: &Settings, capacity: &Capacity) -> Policy {
     Policy::new(
         capacity.limit,
         settings.reserved(capacity.limit),
@@ -788,7 +788,7 @@ impl Session {
         &self,
         content: Option<&str>,
         metadata: Option<Value>,
-        partial: Option<&chat::ReplayMessage>,
+        partial: Option<&ReplayMessage>,
     ) -> Result<bool, Error> {
         self.store
             .settle(self.turn, content, metadata, partial)

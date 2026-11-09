@@ -104,7 +104,7 @@ pub async fn list_chats(
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
+            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
         }
         (Some(wid), None) => {
             let rows = sqlx::query!(
@@ -118,7 +118,7 @@ pub async fn list_chats(
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
+            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
         }
         (None, Some(a)) => {
             let rows = sqlx::query!(
@@ -132,7 +132,7 @@ pub async fn list_chats(
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
+            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
         }
         (None, None) => {
             let rows = sqlx::query!(
@@ -144,7 +144,7 @@ pub async fn list_chats(
             )
             .fetch_all(pool)
             .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
+            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
         }
     }
 }
@@ -421,7 +421,7 @@ pub async fn archive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> 
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_chat_row!(r)))
+    Ok(row.map(|row| map_chat_row!(row)))
 }
 
 /// Unarchive a chat
@@ -439,7 +439,7 @@ pub async fn unarchive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_chat_row!(r)))
+    Ok(row.map(|row| map_chat_row!(row)))
 }
 
 /// List messages for a chat
@@ -458,10 +458,10 @@ pub async fn list_messages(pool: &PgPool, chat_id: Uuid) -> DbResult<Vec<Message
 
     Ok(rows
         .into_iter()
-        .map(|r| {
-            let mut message = MessageRow::new(r.id, r.chat_id, r.role, r.content);
-            message.metadata = r.metadata;
-            message.created_at = r.created_at;
+        .map(|row| {
+            let mut message = MessageRow::new(row.id, row.chat_id, row.role, row.content);
+            message.metadata = row.metadata;
+            message.created_at = row.created_at;
             message
         })
         .collect())

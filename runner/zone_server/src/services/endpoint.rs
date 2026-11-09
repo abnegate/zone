@@ -337,6 +337,15 @@ fn same_origin(url: &Url, instance: &str) -> bool {
         .is_ok_and(|instance| instance.origin().is_tuple() && instance.origin() == url.origin())
 }
 
+/// `built`, or, when no client could be built to read the deployment's
+/// metadata, a resolver that asks nothing and assumes `configured`.
+fn or_undisclosed(built: Result<Resolver, ChatError>, configured: Option<u64>) -> Resolver {
+    built.unwrap_or_else(|error| {
+        tracing::warn!(%error, "Could not build the deployment metadata client; assuming the configured context");
+        Resolver::undisclosed(configured)
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod testing {
     use super::{Endpoint, Origin};
@@ -379,26 +388,21 @@ pub(crate) mod testing {
     }
 }
 
-/// `built`, or, when no client could be built to read the deployment's
-/// metadata, a resolver that asks nothing and assumes `configured`.
-fn or_undisclosed(built: Result<Resolver, ChatError>, configured: Option<u64>) -> Resolver {
-    built.unwrap_or_else(|error| {
-        tracing::warn!(%error, "Could not build the deployment metadata client; assuming the configured context");
-        Resolver::undisclosed(configured)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::testing::settings;
     use super::*;
-    use abnegate_agent::context::ContextSource as Source;
+    use abnegate_agent::context::ContextSource;
+    use reqwest::Client;
     use wiremock::matchers::{any, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use zone_context::embeddings::providers::PROVIDER_BEDROCK;
 
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
+    use crate::services::chat::session::{policy, sees_images};
 
+    const ASSUMED: &str =
+        "The endpoint publishes no deployment metadata, so the configured context is assumed.";
     const INSTANCE_HOST: &str = "http://litellm:4000";
     const INSTANCE_KEY: &str = "sk-instance-key-0123456789";
     const SAVED_KEY: &str = "sk-saved-key-abcdefghijkl";
@@ -1251,13 +1255,11 @@ mod tests {
 
         assert!(catalog.models.is_empty());
         assert_eq!(catalog.agent, None);
-        assert_eq!(capacity.source, Source::Configured);
+        assert_eq!(capacity.source, ContextSource::Configured);
         assert_eq!(capacity.limit, Some(config.chat.context));
         assert_eq!(capacity.ollama, None, "no num_ctx may reach a third party");
         assert!(
-            crate::services::chat::session::policy(&config.chat, &capacity)
-                .threshold()
-                .is_some(),
+            policy(&config.chat, &capacity).threshold().is_some(),
             "a saved endpoint's history is never compacted"
         );
         server.verify().await;
@@ -1279,13 +1281,8 @@ mod tests {
             .with_request(Some(8_192));
 
         assert_eq!(capacity.limit, Some(8_192));
-        assert_eq!(capacity.source, Source::Configured);
-        assert_eq!(
-            capacity.reason.as_deref(),
-            Some(
-                "The endpoint publishes no deployment metadata, so the configured context is assumed."
-            )
-        );
+        assert_eq!(capacity.source, ContextSource::Configured);
+        assert_eq!(capacity.reason.as_deref(), Some(ASSUMED));
     }
 
     #[tokio::test]
@@ -1307,7 +1304,7 @@ mod tests {
             .resolve("alias")
             .await;
 
-        assert_eq!(capacity.source, Source::Unknown);
+        assert_eq!(capacity.source, ContextSource::Unknown);
         server.verify().await;
     }
 
@@ -1315,19 +1312,19 @@ mod tests {
     async fn an_endpoint_the_resolver_rejects_is_undisclosed() {
         let configured = Some(8_192);
 
-        let capacity = or_undisclosed(Err(ChatError::Backend("no TLS backend".into())), configured)
+        let unbuildable = Client::new()
+            .get("not a url")
+            .build()
+            .expect_err("a relative URL builds no request");
+
+        let capacity = or_undisclosed(Err(ChatError::Http(unbuildable)), configured)
             .resolve("alias")
             .await;
 
-        assert_eq!(capacity.source, Source::Configured);
+        assert_eq!(capacity.source, ContextSource::Configured);
         assert_eq!(capacity.limit, configured);
         assert_eq!(capacity.ollama, None, "no num_ctx may reach it");
-        assert_eq!(
-            capacity.reason.as_deref(),
-            Some(
-                "The endpoint publishes no deployment metadata, so the configured context is assumed."
-            )
-        );
+        assert_eq!(capacity.reason.as_deref(), Some(ASSUMED));
     }
 
     #[tokio::test]
@@ -1363,13 +1360,9 @@ mod tests {
                 .resolve("remote")
                 .await;
 
-            assert_eq!(capacity.source, Source::Provider, "{supports:?}");
+            assert_eq!(capacity.source, ContextSource::Provider, "{supports:?}");
             assert_eq!(capacity.vision, vision, "{supports:?}");
-            assert_eq!(
-                crate::services::chat::session::sees_images("remote", capacity.vision),
-                sees,
-                "{supports:?}"
-            );
+            assert_eq!(sees_images("remote", capacity.vision), sees, "{supports:?}");
         }
     }
 
