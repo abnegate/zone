@@ -1,6 +1,5 @@
 # Cargo audit configuration
 
 [advisories]
-# libsqlite3-sys is locked only through sqlx-macros-core's optional sqlite
-# backend, which no feature enables; sqlx 0.9.0 caps it below the fix.
+# See docs/DEPENDENCIES.md, "Locked but unbuilt libsqlite3-sys".
 ignore = ["RUSTSEC-2026-0459"]

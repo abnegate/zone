@@ -119,15 +119,16 @@ async fn dispatch(turn: &Turn, method: &str, params: Option<Value>) -> Result<Va
     }
 }
 
-/// Answer the handshake in the version the client opened it in, so a client
-/// pinned to an older revision of the protocol is not told to speak a newer
-/// one it does not know.
+/// Answer the handshake in the version the client opened it in when that is a
+/// known revision with a handshake, so a client pinned to an older revision is
+/// not told to speak a newer one; otherwise answer in the newest such revision.
 fn initialize(params: Option<&Value>) -> Value {
+    let supported = ProtocolVersion::known_up_to(&ProtocolVersion::LATEST_WITH_INITIALIZE);
     let version = params
         .and_then(|params| params.get("protocolVersion"))
         .cloned()
         .and_then(|version| serde_json::from_value::<ProtocolVersion>(version).ok())
-        .filter(ProtocolVersion::has_initialize)
+        .filter(|version| supported.contains(version))
         .unwrap_or(ProtocolVersion::LATEST_WITH_INITIALIZE);
 
     json!({
@@ -297,25 +298,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_handshake_never_names_a_revision_that_has_no_handshake() {
+    async fn a_handshake_names_only_a_known_revision_that_has_a_handshake() {
         let opened = open(ApprovalPolicy::auto()).await;
 
-        for offered in [
-            json!({"capabilities": {}}),
-            json!({"protocolVersion": 20250618, "capabilities": {}}),
-            json!({"protocolVersion": ProtocolVersion::NO_INITIALIZE, "capabilities": {}}),
-            json!({"protocolVersion": "2027-01-01", "capabilities": {}}),
+        for (offered, answered) in [
+            (json!("2024-11-05"), "2024-11-05"),
+            (json!("2025-03-26"), "2025-03-26"),
+            (json!("2025-06-18"), "2025-06-18"),
+            (json!("2025-11-25"), "2025-11-25"),
+            (json!(null), "2025-11-25"),
+            (json!(20250618), "2025-11-25"),
+            (json!(""), "2025-11-25"),
+            (json!("1.0"), "2025-11-25"),
+            (json!("2025-07-01"), "2025-11-25"),
+            (json!("2026-07-28"), "2025-11-25"),
+            (json!("2027-01-01"), "2025-11-25"),
         ] {
             let (status, answer) = post(
                 Some(&opened.token),
-                rpc(1, protocol::INITIALIZE, offered.clone()),
+                rpc(
+                    1,
+                    protocol::INITIALIZE,
+                    json!({"protocolVersion": offered, "capabilities": {}}),
+                ),
             )
             .await;
 
             assert_eq!(status, StatusCode::OK, "{offered}");
             assert_eq!(
-                answer["result"]["protocolVersion"],
-                ProtocolVersion::LATEST_WITH_INITIALIZE.as_str(),
+                answer["result"]["protocolVersion"], answered,
                 "offered {offered}, answered {answer}"
             );
         }

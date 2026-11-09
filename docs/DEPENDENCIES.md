@@ -53,6 +53,23 @@ reviewed name/version/license passes, while a new version, another package,
 another license and absent licensing all fail. The full workspace scan separately
 checks the actual dependency graph.
 
+## Locked but unbuilt libsqlite3-sys
+
+`runner/.cargo/audit.toml` ignores RUSTSEC-2026-0459 (libsqlite3-sys before
+0.39.0). libsqlite3-sys 0.37.0 is in Cargo.lock only through the optional sqlite
+backend of sqlx-macros-core, which no feature in this workspace enables, and
+sqlx 0.9.0 caps it below 0.38.0, so it cannot move to the fixed release.
+cargo-audit reads the lockfile and can ignore only by advisory ID; cargo-deny
+walks the built graph and needs no exception, so the Dependency Check job fails
+if sqlite is ever enabled. Check from `runner` that it stays unbuilt:
+
+```sh
+cargo tree --workspace --all-features --target all -e all -i libsqlite3-sys
+```
+
+It prints nothing. Remove the ignore once a sqlx release accepts libsqlite3-sys
+0.39.0 or later.
+
 ## jsonwebtoken crypto backend
 
 `jsonwebtoken` 11.0.0 is built with `aws_lc_rs` only, the same aws-lc-rs that
