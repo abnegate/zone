@@ -537,16 +537,19 @@ impl GitHubAdapter {
         let _claim = match self.tree_cache.in_flight.claim(&key) {
             Some(claim) => Some(claim),
             None => {
-                for _ in 0..TreeCache::WAIT_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(
-                        TreeCache::WAIT_INTERVAL_MILLISECONDS,
-                    ))
+                let claim = self
+                    .tree_cache
+                    .in_flight
+                    .claim_when_released(
+                        &key,
+                        TreeCache::WAIT_ATTEMPTS,
+                        Duration::from_millis(TreeCache::WAIT_INTERVAL_MILLISECONDS),
+                    )
                     .await;
-                    if let Some(tree) = self.tree_cache.get(&key).await {
-                        return Ok(tree);
-                    }
+                if let Some(tree) = self.tree_cache.get(&key).await {
+                    return Ok(tree);
                 }
-                self.tree_cache.in_flight.claim(&key)
+                claim
             }
         };
 
@@ -1559,6 +1562,42 @@ mod tests {
             "a file the budget refused is emitted: {emitted:?}"
         );
         assert!(fetched.stats.total_tokens <= max_tokens);
+    }
+
+    const FAILED_CLAIMANT_MILLISECONDS: u64 = 50;
+
+    #[tokio::test]
+    async fn a_waiter_reads_the_tree_soon_after_its_claimant_fails() {
+        let mock_server = MockServer::start().await;
+        mount_repository(&mock_server).await;
+        Mock::given(method("GET"))
+            .and(path(TREE_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "sha": TREE_SHA,
+                "tree": [listed_blob("README.md", 8)],
+                "truncated": false
+            })))
+            .mount(&mock_server)
+            .await;
+        let adapter = served(&mock_server);
+        let source = create_test_source(test_repository());
+        let claimant = adapter.tree_cache.in_flight.claim(&tree_key("main"));
+        let started = Instant::now();
+
+        let (estimated, ()) = tokio::join!(adapter.estimate_tokens(&source), async {
+            tokio::time::sleep(Duration::from_millis(FAILED_CLAIMANT_MILLISECONDS)).await;
+            drop(claimant);
+        });
+
+        assert!(estimated.is_ok(), "{estimated:?}");
+        assert!(
+            started.elapsed()
+                < Duration::from_millis(
+                    TreeCache::WAIT_ATTEMPTS * TreeCache::WAIT_INTERVAL_MILLISECONDS / 2
+                ),
+            "waited {:?}",
+            started.elapsed()
+        );
     }
 
     fn tree_key(branch: &str) -> TreeKey {

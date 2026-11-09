@@ -685,26 +685,26 @@ impl GitLabAdapter {
         }
 
         let _claim = match self.tree_cache.in_flight.claim(&key) {
-            Some(claim) => Some(claim),
+            Some(claim) => claim,
             None => {
-                for _ in 0..TreeCache::WAIT_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(
-                        TreeCache::WAIT_INTERVAL_MILLISECONDS,
-                    ))
-                    .await;
-                    if let Some(tree) = self.tree_cache.get(&key).await {
-                        return Ok(tree);
-                    }
-                }
-
-                if self.tree_cache.in_flight.contains(&key) {
-                    return Err(ContextError::Timeout {
+                let claim = self
+                    .tree_cache
+                    .in_flight
+                    .claim_when_released(
+                        &key,
+                        TreeCache::WAIT_ATTEMPTS,
+                        Duration::from_millis(TreeCache::WAIT_INTERVAL_MILLISECONDS),
+                    )
+                    .await
+                    .ok_or_else(|| ContextError::Timeout {
                         operation: "tree cache wait".to_string(),
                         timeout_ms: TreeCache::WAIT_ATTEMPTS
                             * TreeCache::WAIT_INTERVAL_MILLISECONDS,
-                    });
+                    })?;
+                if let Some(tree) = self.tree_cache.get(&key).await {
+                    return Ok(tree);
                 }
-                self.tree_cache.in_flight.claim(&key)
+                claim
             }
         };
 
@@ -1174,6 +1174,7 @@ impl SourceAdapter for GitLabAdapter {
 mod tests {
     use super::*;
     use crate::adapters::NoOpProgress;
+    use crate::adapters::in_flight::Claim;
     use abnegate_vcs::ObjectId;
     use serde_json::json;
     use std::collections::HashSet;
@@ -2439,6 +2440,71 @@ mod tests {
 
         assert_eq!(read.unwrap(), ["README.md"]);
         assert_eq!(tree_requests(&server).await, 2);
+    }
+
+    const FAILED_CLAIMANT_MILLISECONDS: u64 = 50;
+
+    const SLOW_TREE_MILLISECONDS: u64 = 300;
+
+    fn half_the_wait() -> Duration {
+        Duration::from_millis(TreeCache::WAIT_ATTEMPTS * TreeCache::WAIT_INTERVAL_MILLISECONDS / 2)
+    }
+
+    async fn fail_claimant(claimant: Option<Claim<TreeKey>>) {
+        tokio::time::sleep(Duration::from_millis(FAILED_CLAIMANT_MILLISECONDS)).await;
+        drop(claimant);
+    }
+
+    #[tokio::test]
+    async fn a_waiter_reads_the_tree_soon_after_its_claimant_fails() {
+        let server = MockServer::start().await;
+        mount_project(&server).await;
+        Mock::given(method("GET"))
+            .and(path_regex(TREE_ROUTES))
+            .respond_with(listing("README.md"))
+            .mount(&server)
+            .await;
+        let adapter = served(&server);
+        let claimant = adapter.tree_cache.in_flight.claim(&tree_key("main"));
+        let started = Instant::now();
+
+        let (read, ()) = tokio::join!(
+            titles(&adapter, json!({ "project": PROJECT })),
+            fail_claimant(claimant)
+        );
+
+        assert_eq!(read.unwrap(), ["README.md"]);
+        assert!(
+            started.elapsed() < half_the_wait(),
+            "waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn waiters_on_a_failed_claimant_share_one_tree_read() {
+        let server = MockServer::start().await;
+        mount_project(&server).await;
+        Mock::given(method("GET"))
+            .and(path_regex(TREE_ROUTES))
+            .respond_with(
+                listing("README.md").set_delay(Duration::from_millis(SLOW_TREE_MILLISECONDS)),
+            )
+            .mount(&server)
+            .await;
+        let adapter = served(&server);
+        let config = json!({ "project": PROJECT });
+        let claimant = adapter.tree_cache.in_flight.claim(&tree_key("main"));
+
+        let (first, second, ()) = tokio::join!(
+            titles(&adapter, config.clone()),
+            titles(&adapter, config.clone()),
+            fail_claimant(claimant)
+        );
+
+        assert_eq!(first.unwrap(), ["README.md"]);
+        assert_eq!(second.unwrap(), ["README.md"]);
+        assert_eq!(tree_requests(&server).await, 1);
     }
 
     fn tree_key(branch: &str) -> TreeKey {

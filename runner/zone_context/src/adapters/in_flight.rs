@@ -7,6 +7,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::time::Duration;
 
 #[derive(Debug)]
 pub(crate) struct InFlight<Key: Eq + Hash> {
@@ -39,6 +40,24 @@ impl<Key: Clone + Eq + Hash> InFlight<Key> {
         claimed.then(|| Claim::new(Arc::clone(&self.keys), key.clone()))
     }
 
+    /// Claims `key` as soon as the read holding it lets go, trying once every
+    /// `interval` up to `attempts` times; `None` while it is still held
+    pub(crate) async fn claim_when_released(
+        &self,
+        key: &Key,
+        attempts: u64,
+        interval: Duration,
+    ) -> Option<Claim<Key>> {
+        for _ in 0..attempts {
+            tokio::time::sleep(interval).await;
+            if let Some(claim) = self.claim(key) {
+                return Some(claim);
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
     pub(crate) fn contains(&self, key: &Key) -> bool {
         self.keys
             .lock()
@@ -85,6 +104,59 @@ mod tests {
         assert!(!in_flight.contains(&"tree"));
     }
 
+    const ATTEMPTS: u64 = 10;
+
+    const INTERVAL: Duration = Duration::from_millis(100);
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiter_claims_a_key_at_its_first_try_after_the_holder_lets_go() {
+        let in_flight = InFlight::new();
+        let held = in_flight.claim(&"tree");
+        let started = tokio::time::Instant::now();
+
+        let (claimed, ()) = tokio::join!(
+            in_flight.claim_when_released(&"tree", ATTEMPTS, INTERVAL),
+            async {
+                tokio::time::sleep(INTERVAL * 3 / 2).await;
+                drop(held);
+            }
+        );
+
+        assert!(claimed.is_some());
+        assert_eq!(started.elapsed(), INTERVAL * 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_waiter_gives_up_while_the_key_stays_held() {
+        let in_flight = InFlight::new();
+        let _held = in_flight.claim(&"tree");
+        let started = tokio::time::Instant::now();
+
+        let claimed = in_flight
+            .claim_when_released(&"tree", ATTEMPTS, INTERVAL)
+            .await;
+
+        assert!(claimed.is_none());
+        assert_eq!(started.elapsed(), INTERVAL * ATTEMPTS as u32);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_one_waiter_claims_a_released_key() {
+        let in_flight = InFlight::new();
+        let held = in_flight.claim(&"tree");
+
+        let (first, second, ()) = tokio::join!(
+            in_flight.claim_when_released(&"tree", ATTEMPTS, INTERVAL),
+            in_flight.claim_when_released(&"tree", ATTEMPTS, INTERVAL),
+            async {
+                tokio::time::sleep(INTERVAL / 2).await;
+                drop(held);
+            }
+        );
+
+        assert!(first.is_some() != second.is_some());
+    }
+
     #[tokio::test]
     async fn a_cancelled_read_releases_its_key() {
         let in_flight = InFlight::new();
@@ -96,7 +168,7 @@ mod tests {
             }
         };
 
-        let cancelled = tokio::time::timeout(std::time::Duration::from_millis(10), reading).await;
+        let cancelled = tokio::time::timeout(Duration::from_millis(10), reading).await;
 
         assert!(cancelled.is_err());
         assert!(!in_flight.contains(&"tree"));
