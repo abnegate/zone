@@ -153,6 +153,15 @@ async fn bodies(server: &MockServer) -> Vec<Value> {
 
 /// The agent `zone run` builds against `server`, without MCP servers.
 fn local(server: &MockServer, working_directory: &Path) -> Agent {
+    limited(
+        server,
+        working_directory,
+        Config::default().max_iterations as usize,
+    )
+}
+
+/// [`local`], given at most `maximum_iterations` model rounds.
+fn limited(server: &MockServer, working_directory: &Path, maximum_iterations: usize) -> Agent {
     let config = Config {
         llm_base_url: Some(server.uri()),
         model: MODEL.to_string(),
@@ -162,7 +171,7 @@ fn local(server: &MockServer, working_directory: &Path) -> Agent {
         LlmClient::new(llm_config(&config).expect("an endpoint")),
         registry(),
         0,
-        config.max_iterations as usize,
+        maximum_iterations,
         working_directory,
     )
 }
@@ -306,6 +315,42 @@ async fn a_cli_turn_retries_an_empty_answer() {
 
     assert!(matches!(error, abnegate_agent::RunError::Empty), "{error}");
     assert_eq!(bodies(&server).await.len(), 3);
+}
+
+#[tokio::test]
+async fn a_provider_failure_reads_as_a_provider_error() {
+    let directory = TempDir::new().unwrap();
+    let server = replying(vec![
+        ResponseTemplate::new(400).set_body_string("bad request"),
+    ])
+    .await;
+
+    let error = local(&server, directory.path())
+        .run("Say hello", &CliCallback::new(false))
+        .await
+        .expect_err("a refused request fails the turn");
+
+    let message = RunError::from(error).to_string();
+    assert!(
+        message.starts_with("Agent error: Provider error: "),
+        "{message}"
+    );
+}
+
+#[tokio::test]
+async fn a_turn_past_its_iterations_reads_as_maximum_iterations_exceeded() {
+    let directory = project();
+    let server = replying(vec![reading_notes("call_one"), reading_notes("call_two")]).await;
+
+    let error = limited(&server, directory.path(), 1)
+        .run("Read the notes", &CliCallback::new(false))
+        .await
+        .expect_err("a turn that never answers fails");
+
+    assert_eq!(
+        RunError::from(error).to_string(),
+        "Agent error: Maximum iterations exceeded"
+    );
 }
 
 #[tokio::test]
