@@ -256,6 +256,10 @@ impl GitLabAdapter {
     /// Estimated size of a file, since GitLab's tree lists none
     const ESTIMATED_FILE_BYTES: usize = 2048;
 
+    /// Blobs a partial fetch reads in a row that its budget refuses before it
+    /// stops, since the estimate above cannot tell which files are too large
+    const MAXIMUM_CONSECUTIVE_REFUSALS: usize = 3;
+
     /// Create a new GitLab adapter reading from gitlab.com, or from the
     /// instance a source names
     pub fn new() -> Self {
@@ -1028,11 +1032,14 @@ impl SourceAdapter for GitLabAdapter {
                     max_tokens
                 ));
                 let mut budget = TokenBudget::new(max_tokens);
+                let mut refusals = 0;
 
                 for (index, entry) in files.iter().enumerate() {
                     let estimated_tokens = estimate_tokens_from_bytes(Self::ESTIMATED_FILE_BYTES);
 
-                    if budget.can_fit(estimated_tokens) {
+                    if refusals < Self::MAXIMUM_CONSECUTIVE_REFUSALS
+                        && budget.can_fit(estimated_tokens)
+                    {
                         let blob = self
                             .get_blob(&service, &config.project, entry, &credential)
                             .await?;
@@ -1054,8 +1061,11 @@ impl SourceAdapter for GitLabAdapter {
                         )?;
 
                         if budget.try_add(&entry.path, item.token_count) {
+                            refusals = 0;
                             progress.on_item(&item);
                             result.add_item(item);
+                        } else {
+                            refusals += 1;
                         }
                     } else {
                         break;
@@ -2300,6 +2310,99 @@ mod tests {
             "a file the budget refused is emitted: {emitted:?}"
         );
         assert!(fetched.stats.total_tokens <= max_tokens);
+    }
+
+    const BLOB_ROUTES: &str = r".*/repository/blobs/[0-9a-f]+/raw$";
+
+    const LARGE_FILE_WORDS: usize = 2000;
+
+    fn blob_id(index: usize) -> String {
+        format!("{:040x}", index + 1)
+    }
+
+    async fn mount_files(server: &MockServer, words: &[usize]) {
+        let entries: Vec<serde_json::Value> = words
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                json!({
+                    "path": format!("file{index}.md"),
+                    "type": "blob",
+                    "mode": "100644",
+                    "id": blob_id(index)
+                })
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path_regex(TREE_ROUTES))
+            .respond_with(ResponseTemplate::new(200).set_body_json(entries))
+            .mount(server)
+            .await;
+        for (index, count) in words.iter().enumerate() {
+            Mock::given(method("GET"))
+                .and(path_regex(format!(
+                    r".*/repository/blobs/{}/raw$",
+                    blob_id(index)
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_string("word ".repeat(*count)))
+                .mount(server)
+                .await;
+        }
+    }
+
+    async fn partial_titles(server: &MockServer, max_tokens: usize) -> Vec<String> {
+        served(server)
+            .fetch(
+                &create_test_source(json!({ "project": PROJECT })),
+                &FetchConfig::default(),
+                FetchStrategy::Partial { max_tokens },
+                &NoOpProgress,
+            )
+            .await
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| item.title)
+            .collect()
+    }
+
+    async fn blob_requests(server: &MockServer) -> usize {
+        let blob_route = regex::Regex::new(BLOB_ROUTES).unwrap();
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| blob_route.is_match(request.url.path()))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_partial_fetch_stops_reading_blobs_the_budget_keeps_refusing() {
+        let server = MockServer::start().await;
+        mount_project(&server).await;
+        mount_files(&server, &[LARGE_FILE_WORDS; 50]).await;
+
+        let emitted = partial_titles(&server, 600).await;
+
+        assert!(emitted.is_empty(), "{emitted:?}");
+        assert_eq!(
+            blob_requests(&server).await,
+            GitLabAdapter::MAXIMUM_CONSECUTIVE_REFUSALS
+        );
+    }
+
+    #[tokio::test]
+    async fn a_partial_fetch_still_reads_a_file_that_fits_after_a_few_refused() {
+        let server = MockServer::start().await;
+        mount_project(&server).await;
+        let mut words = vec![LARGE_FILE_WORDS; GitLabAdapter::MAXIMUM_CONSECUTIVE_REFUSALS - 1];
+        words.push(10);
+        mount_files(&server, &words).await;
+
+        let emitted = partial_titles(&server, 600).await;
+
+        assert_eq!(emitted, [format!("file{}.md", words.len() - 1)]);
     }
 
     async fn tree_requested(server: &MockServer) {
