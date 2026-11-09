@@ -192,16 +192,18 @@ async fn the_gitlab_com_default_is_tunnelled_through_the_proxy() {
     let (proxy, request_line) = tunnelling().await;
     route(&mut variables, SECURE_PROXIES, PLAIN_PROXIES, &proxy);
 
-    let verified = GitLabAdapter::new()
-        .verify(&source(SourceType::GitLab, json!({ "project": PROJECT })))
-        .await;
+    let verified = tokio::time::timeout(
+        ASKED_WITHIN,
+        GitLabAdapter::new().verify(&source(SourceType::GitLab, json!({ "project": PROJECT }))),
+    )
+    .await;
 
     assert_eq!(
         asked(request_line).await,
         "CONNECT gitlab.com:443 HTTP/1.1\r\n"
     );
     assert!(
-        verified.is_err(),
+        matches!(verified, Ok(Err(_))),
         "the stand-in drops the tunnel it is asked for: {verified:?}"
     );
 }
