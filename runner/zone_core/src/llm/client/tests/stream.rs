@@ -4,8 +4,8 @@
 use abnegate_agent_cli::DEFAULT_TOOL_OUTPUT_LIMIT;
 use abnegate_secret::REDACTED;
 
+use super::logs::captured_logs;
 use super::*;
-use crate::tools::test_support::captured_logs;
 
 const SUBAGENTS: &str = include_str!("../fixtures/claude/subagents.jsonl");
 

@@ -1,11 +1,16 @@
 //! ComfyUI generate/edit as ordinary tools so the model can stay in the loop.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Tier;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::config::ComfyUiConfig;

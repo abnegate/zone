@@ -39,7 +39,7 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 
 | Area | Where | Status for this design |
 |---|---|---|
-| Agent loop with file + command tools | `runner/zone_core/src/tools/mod.rs:163` (`Tool` trait: `name/description/parameters_schema/execute/timeout/mutating`), `command.rs`, `file.rs` | Reuse. Shell + files is the universal primitive; generation needs no template system |
+| Agent loop with file + command tools | `abnegate-agent` (abnegate/crates) `src/tool/mod.rs:86` (`Tool` trait: `name/description/parameters_schema/execute/timeout/tier`), `src/tool/command/`, `src/tool/file/`; Zone's set in `runner/zone_core/src/commands.rs` `registry` | Reuse. Shell + files is the universal primitive; generation needs no template system |
 | Tool-family registration pattern | `runner/zone_server/src/agent/actions.rs:11-47` (enum-discriminated struct, `pub fn register(registry, &WorkspaceScope)`) | Copy for `agent/deploy.rs` |
 | `WorkspaceScope { state, workspace_id, chat_id, user_id }` | `runner/zone_server/src/agent/tools.rs:48` | Extend: tasks have no scope today (`ChatTools::for_task(state, cwd)`) |
 | Chat approval gate | `runner/zone_server/src/agent/approval.rs` — `ApprovalPolicy` + `ApprovalGate` (DashMap of oneshots), `APPROVAL_TIMEOUT = 300s` = denial, `requires_approval` hardcoded to `write_file\|apply_patch\|run_command\|run_shell` at :206; ws `ApproveTool{id,approved}` in `ws/chat.rs` | Reuse the *shape*; the gate is in-memory and per-chat. Tasks use `ApprovalPolicy::auto()` (`workers/task.rs:522`) |
@@ -66,7 +66,7 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 - The task workspace directory is never created and the repo is never cloned (`workers/task.rs:271-278`). Tasks without a repo run in the server's own cwd.
 - `tasks.status` never advances during a run; `tasks.created_by` (migration 006) is never written.
 - The prod image installs only `curl ca-certificates libssl3t64 libstdc++6` (`manager/Dockerfile:50`): no `git` (the PR worker is broken in prod), no `docker`, `kubectl`, `helm`. No docker socket on `manager`. Helm runs the server with `readOnlyRootFilesystem`.
-- No container registry anywhere; CI publishes binaries, never images. No `kube-rs`/`bollard`. `run_command`'s allowlist (`zone_core/src/tools/command.rs:96-108`) has no deploy tooling and rejects `| > && ;`.
+- No container registry anywhere; CI publishes binaries, never images. No `kube-rs`/`bollard`. `run_command`'s allowlist (`abnegate-agent` `DEFAULT_COMMANDS` in `src/tool/command/run/mod.rs:55` plus `EXTRA_COMMANDS` in `runner/zone_core/src/commands.rs:20`) has no deploy tooling and rejects `| > && ;`.
 
 ## 3. What we take from Imagine
 

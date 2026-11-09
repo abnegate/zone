@@ -1,8 +1,8 @@
 //! A turn read whole: the events a streamed turn reads, folded into one
 //! answer, with everyone a streamed turn tells told of them too.
 
+use super::logs::captured_logs;
 use super::*;
-use crate::tools::test_support::captured_logs;
 
 /// What zone logs when a turn runs on usage credits.
 const ON_CREDITS: &str = "the turn runs on usage credits past the plan's limit";

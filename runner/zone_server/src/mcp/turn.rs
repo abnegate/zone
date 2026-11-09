@@ -7,6 +7,7 @@
 //! `tools/list`, and its own [`crate::agent::ApprovalPolicy`] decides each
 //! `tools/call` before the registry runs it.
 
+use abnegate_agent::ToolResult;
 use dashmap::DashMap;
 use futures::{Stream, StreamExt};
 use once_cell::sync::Lazy;
@@ -17,11 +18,11 @@ use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, Toolset};
-use zone_core::tools::{PERMISSION_TOOL, ToolResult, content_lines};
 
 use super::progress::Progress;
 use super::scope::Scope;
 use crate::agent::runner::call_signature;
+use crate::agent::trace::content_lines;
 use crate::agent::{AgentEvent, ChatTools, Decision, Refusal};
 use crate::utils::crypto::{generate_token, hash_token};
 
@@ -119,7 +120,7 @@ impl Turn {
     /// Whether a call to `name` is answered here: a tool this turn serves, or
     /// the question an agent asks before running one of its own.
     pub(crate) fn answers(&self, name: &str) -> bool {
-        name == PERMISSION_TOOL || self.serves(name)
+        name == Toolset::PERMISSION || self.serves(name)
     }
 
     pub(crate) fn find(token: &str) -> Option<Arc<Self>> {
@@ -202,7 +203,7 @@ impl Turn {
     /// Run one tool call for this turn, gated by the chat's approval policy
     /// and held to the turn's budget and to making progress.
     pub(crate) async fn run(&self, name: &str, arguments: &str) -> CallToolResult {
-        if name == PERMISSION_TOOL {
+        if name == Toolset::PERMISSION {
             return self.permission(arguments).await;
         }
         let made = self.made.fetch_add(1, Ordering::Relaxed);
@@ -442,7 +443,7 @@ mod permission_tests {
         let opened = open(ApprovalPolicy::auto()).await;
         let turn = Turn::find(&opened.token).expect("the turn");
 
-        let answer = turn.run(PERMISSION_TOOL, &asked()).await;
+        let answer = turn.run(Toolset::PERMISSION, &asked()).await;
 
         assert_eq!(
             answer.is_error,
@@ -457,7 +458,7 @@ mod permission_tests {
         let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
         let turn = Turn::find(&opened.token).expect("the turn");
 
-        let asking = tokio::spawn(async move { turn.run(PERMISSION_TOOL, &asked()).await });
+        let asking = tokio::spawn(async move { turn.run(Toolset::PERMISSION, &asked()).await });
 
         let card = next_card(&mut opened.events).await;
         assert_eq!(
@@ -481,7 +482,7 @@ mod permission_tests {
             json!({"input": {"command": "ls"}}).to_string(),
             "not json".to_string(),
         ] {
-            let answer = turn.run(PERMISSION_TOOL, &unreadable).await;
+            let answer = turn.run(Toolset::PERMISSION, &unreadable).await;
             assert_eq!(
                 body(&answer)["behavior"],
                 "deny",
@@ -497,7 +498,7 @@ mod permission_tests {
             let mut opened = open(ApprovalPolicy::required(ApprovalGate::new())).await;
             let turn = Turn::find(&opened.token).expect("the turn");
 
-            let asking = tokio::spawn(async move { turn.run(PERMISSION_TOOL, &asked()).await });
+            let asking = tokio::spawn(async move { turn.run(Toolset::PERMISSION, &asked()).await });
 
             let card = next_card(&mut opened.events).await;
             assert!(opened.approval.decide(&card.id, approved));
@@ -532,7 +533,7 @@ mod permission_tests {
         let turn = Turn::find(&opened.token).expect("the turn");
         drop(opened.events);
 
-        let answer = turn.run(PERMISSION_TOOL, &asked()).await;
+        let answer = turn.run(Toolset::PERMISSION, &asked()).await;
 
         assert_eq!(body(&answer)["behavior"], "deny", "{:?}", answer.content);
     }
@@ -543,7 +544,7 @@ mod permission_tests {
         let turn = Turn::find(&opened.token).expect("the turn");
 
         for _ in 0..3 {
-            turn.run(PERMISSION_TOOL, &asked()).await;
+            turn.run(Toolset::PERMISSION, &asked()).await;
         }
 
         assert_eq!(
@@ -558,15 +559,17 @@ mod permission_tests {
 mod tests {
     use super::super::testing::{drain, next_card, open, scope, tools, wait_for_card, write};
     use super::*;
+    use crate::agent::approval::refusal::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
     use crate::agent::wait::{self, WAIT_FOR};
     use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy};
+    use abnegate_agent::ToolContext;
+    use abnegate_agent::tool::job::{JobCommand, Jobs};
+    use abnegate_agent::tool::{EnvironmentPolicy, Session};
     use serde_json::json;
-    use std::collections::HashMap;
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
+    use zone_core::application::application;
     use zone_core::llm::cli::TURN_TIMEOUT;
-    use zone_core::tools::job::{JobCommand, Jobs};
-    use zone_core::tools::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED, Session};
 
     #[tokio::test]
     async fn what_the_agent_wrote_is_yielded_before_a_call_that_arrived_with_it() {
@@ -930,7 +933,7 @@ mod tests {
         call.await.expect("the call task");
         let mut refusals = completed(&mut opened.events);
         let asked = json!({"tool_name": "Bash", "input": {"command": "ls"}}).to_string();
-        let permission = tokio::spawn(async move { asking.run(PERMISSION_TOOL, &asked).await });
+        let permission = tokio::spawn(async move { asking.run(Toolset::PERMISSION, &asked).await });
         let card = next_card(&mut opened.events).await;
         assert!(opened.approval.decide(&card.id, false), "the refusal lands");
         permission.await.expect("the question is answered");
@@ -1051,18 +1054,14 @@ mod tests {
         let mut opened = open(ApprovalPolicy::auto()).await;
         let turn = Turn::find(&opened.token).expect("the turn");
         let session = Session::Chat(opened.chat);
-        let environment = HashMap::from([(
-            "PATH".to_string(),
-            std::env::var("PATH").unwrap_or_default(),
-        )]);
-        let job = Jobs::spawn(
-            session,
-            &JobCommand::shell("sleep 30"),
-            directory.path(),
-            &environment,
-        )
-        .await
-        .expect("the job starts");
+        let context = ToolContext::default()
+            .within(directory.path())
+            .with_session(session)
+            .with_application(application())
+            .with_environment(EnvironmentPolicy::empty().allow(["PATH"]));
+        let job = Jobs::spawn(&JobCommand::shell("sleep 30"), &context)
+            .await
+            .expect("the job starts");
         let question = json!({"questions": [{
             "header": "Scope",
             "question": "Which scope?",

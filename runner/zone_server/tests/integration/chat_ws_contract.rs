@@ -4,6 +4,12 @@ use crate::common::{
     MEDIA, TestClient, create_test_pool, create_test_router, create_test_state, test_config,
     test_email, test_password,
 };
+use abnegate_agent::tool::MAXIMUM_SLEEP;
+use abnegate_agent::tool::RunShellTool;
+use abnegate_agent::tool::Tool;
+use abnegate_agent::tool::ToolContext;
+use abnegate_agent::tool::job::JobStarted;
+use abnegate_agent::tool::job::started_text;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{EncodingKey, Header, encode};
@@ -26,13 +32,12 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
-use zone_core::tools::job::{JobExited, JobStarted};
 use zone_server::{
     agent::wait::{Verdict, WaitSettled, Waiting},
     auth::validate_access_token,
     config::Config,
     db::{actions, chats},
-    ws::chat::ServerMessage,
+    ws::chat::{ServerMessage, job::JobExit},
 };
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -1329,11 +1334,7 @@ async fn a_tool_call_records_where_in_the_answer_it_ran() {
 /// than that and are what the console's schemas are written against, so they
 /// are pinned here where no model is needed to read them.
 fn job_started() -> JobStarted {
-    JobStarted {
-        id: JOB_ID.to_string(),
-        pid: 4242,
-        log_path: JOB_LOG_PATH.to_string(),
-    }
+    JobStarted::new(JOB_ID, 4242, JOB_LOG_PATH)
 }
 
 #[test]
@@ -1363,7 +1364,7 @@ fn a_job_exited_frame_is_matched_by_its_job_and_omits_an_exit_code_it_never_had(
     let message = Uuid::new_v4();
     let exited = |exit_code| ServerMessage::JobExited {
         message_id: message,
-        job: JobExited {
+        job: JobExit {
             id: JOB_ID.to_string(),
             exit_code,
         },
@@ -1488,9 +1489,10 @@ const POLLING: [&str; 5] = [
     "monitor start_task progress",
 ];
 
-/// One of the six strings, where it lives, how to find it, and the name it has
-/// to point at now. The two schema strings interpolate the tool's name from a
-/// constant, which `WAIT_FOR_BINDING` holds to `wait_for` separately.
+/// One of the four strings Zone still owns, where it lives, how to find it, and
+/// the name it has to point at now. The shell tool's two strings and the spawn
+/// receipt belong to abnegate-agent, so they are read from the tools Zone links
+/// rather than from a source file.
 struct Rewritten {
     file: &'static str,
     opens: &'static str,
@@ -1499,15 +1501,10 @@ struct Rewritten {
 }
 
 const WAIT_FOR: &str = "wait_for";
-const WAIT_FOR_PLACEHOLDER: &str = "{WAIT_FOR_TOOL}";
-const WAIT_FOR_BINDING: &str = "const WAIT_FOR_TOOL: &str = \"wait_for\";";
-const COMMAND_RS: &str = "runner/zone_core/src/tools/command.rs";
-const JOB_RS: &str = "runner/zone_core/src/tools/job.rs";
 const ACTIONS_RS: &str = "runner/zone_server/src/agent/actions.rs";
 const LITERAL_END: &str = "\";";
-const FORMAT_END: &str = ")";
 
-const REWRITTEN: [Rewritten; 6] = [
+const REWRITTEN: [Rewritten; 4] = [
     Rewritten {
         file: "runner/zone_server/src/agent/prompt/section/workspace.rs",
         opens: "const START_TASK: &str = ",
@@ -1531,18 +1528,6 @@ const REWRITTEN: [Rewritten; 6] = [
         opens: "const RUNNER_STARTED: &str = ",
         closes: LITERAL_END,
         names: WAIT_FOR,
-    },
-    Rewritten {
-        file: COMMAND_RS,
-        opens: "\"Shell command to run",
-        closes: FORMAT_END,
-        names: WAIT_FOR_PLACEHOLDER,
-    },
-    Rewritten {
-        file: COMMAND_RS,
-        opens: "\"This command sleeps for",
-        closes: FORMAT_END,
-        names: WAIT_FOR_PLACEHOLDER,
     },
 ];
 
@@ -1617,8 +1602,8 @@ fn nothing_still_tells_the_model_to_sample_a_status_in_a_loop() {
     assert!(swept > 0, "the sweep walked nothing");
 }
 
-#[test]
-fn every_rewritten_string_points_the_model_at_the_wait_tool() {
+#[tokio::test]
+async fn every_rewritten_string_points_the_model_at_the_wait_tool() {
     let repository = repository();
 
     for rewritten in REWRITTEN {
@@ -1649,17 +1634,54 @@ fn every_rewritten_string_points_the_model_at_the_wait_tool() {
         );
     }
 
-    let command = fs::read_to_string(repository.join(COMMAND_RS)).expect("command.rs is readable");
+    let schema = RunShellTool.parameters_schema();
+    let command = schema["properties"]["command"]["description"]
+        .as_str()
+        .expect("run_shell describes its command");
     assert!(
-        command.contains(WAIT_FOR_BINDING),
-        "the two schema strings name the tool through a constant, and that constant is what \
-         binds the placeholder to {WAIT_FOR}"
+        command.contains(WAIT_FOR),
+        "run_shell's command tells the model how to wait longer without naming {WAIT_FOR}: \
+         {command}"
     );
 
-    let job = fs::read_to_string(repository.join(JOB_RS)).expect("job.rs is readable");
+    let refusal = RunShellTool
+        .execute(
+            json!({
+                "command": format!("sleep {}", MAXIMUM_SLEEP.as_secs() + 1),
+                "reason": "Wait for the deploy."
+            }),
+            &ToolContext::default(),
+        )
+        .await
+        .expect_err("a sleep past the cap is refused")
+        .to_string();
     assert!(
-        job.contains(WAIT_FOR_BINDING),
-        "the spawn receipt points the model at the tool through a second copy of the constant, \
-         and that copy binds it to {WAIT_FOR} too"
+        refusal.contains(WAIT_FOR),
+        "run_shell refuses a long sleep without naming {WAIT_FOR}: {refusal}"
     );
+
+    let receipt = started_text(&JobStarted::new(
+        "job_0123456789ab",
+        48213,
+        "/tmp/job_0123456789ab.log",
+    ));
+    assert!(
+        receipt.contains(WAIT_FOR),
+        "the spawn receipt points the model at the job without naming {WAIT_FOR}: {receipt}"
+    );
+
+    for (string, text) in [
+        ("run_shell's command", command),
+        ("run_shell's refusal", refusal.as_str()),
+        ("the spawn receipt", receipt.as_str()),
+    ] {
+        let lowered = text.to_lowercase();
+        for needle in POLLING {
+            assert!(
+                !lowered.contains(needle),
+                "{string} still says {needle:?}, which sends the model round the loop to look \
+                 again: {text}"
+            );
+        }
+    }
 }

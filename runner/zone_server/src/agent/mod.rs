@@ -33,6 +33,7 @@ pub mod skills;
 pub(crate) mod testing;
 pub mod toolbox;
 pub mod tools;
+pub(crate) mod trace;
 pub mod verification;
 pub mod wait;
 pub mod web;
@@ -47,18 +48,11 @@ pub use runner::{
 };
 pub use tools::{ChatTools, ToolProfile, WorkspaceScope};
 
+use abnegate_agent::tool::REASON_PARAMETER;
+use abnegate_agent::tool::job::JobStarted;
 use serde::{Deserialize, Serialize};
-use zone_core::tools::REASON_PARAM;
-use zone_core::tools::job::JobStarted;
 
 use wait::Waiting;
-
-/// How much of a title an approval preview quotes.
-pub(crate) const PREVIEW_TITLE_CHARS: usize = 80;
-
-/// How much of a body an approval preview quotes: enough to recognise the
-/// message being sent without reprinting it.
-pub(crate) const PREVIEW_BODY_CHARS: usize = 200;
 
 /// The model's stated reason for a call, read out of the call's own arguments.
 ///
@@ -68,7 +62,7 @@ pub(crate) const PREVIEW_BODY_CHARS: usize = 200;
 pub fn reason(arguments: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(arguments.trim())
         .ok()?
-        .get(REASON_PARAM)?
+        .get(REASON_PARAMETER)?
         .as_str()
         .map(str::trim)
         .filter(|stated| !stated.is_empty())

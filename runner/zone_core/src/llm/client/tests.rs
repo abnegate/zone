@@ -23,6 +23,7 @@ mod buffered;
 mod environment;
 mod images;
 mod isolation;
+mod logs;
 mod models;
 mod occupancy;
 mod stand_in;

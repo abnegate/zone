@@ -8,6 +8,9 @@ pub mod tail;
 pub use generation::Generation;
 pub use pinned::Pinned;
 
+use abnegate_agent::context::{
+    self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary,
+};
 use abnegate_llm::{Message, ReasoningEffort, Role};
 use abnegate_search::SearchContext;
 use base64::Engine;
@@ -15,7 +18,6 @@ use serde_json::Value;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
-use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
 use zone_core::llm::LlmClient;
 
 use crate::agent::prompt::Environment;
@@ -136,19 +138,15 @@ impl RunContext {
             entries: messages
                 .into_iter()
                 .enumerate()
-                .map(|(index, message)| Entry {
-                    id: Uuid::new_v4().to_string(),
-                    preserve: message.role == Role::System || Some(index) == latest,
-                    message,
-                    consumed: true,
+                .map(|(index, message)| {
+                    let preserve = message.role == Role::System || Some(index) == latest;
+                    Entry::new(Uuid::new_v4().to_string(), message)
+                        .with_preserve(preserve)
+                        .with_consumed(true)
                 })
                 .collect(),
             summary: None,
-            policy: Policy {
-                limit: None,
-                reserved: 4096,
-                source: ContextSource::Unknown,
-            },
+            policy: Policy::new(None, 4096, ContextSource::Unknown),
             reason: None,
             incomplete: false,
             artifacts: None,
@@ -190,23 +188,18 @@ impl RunContext {
     }
 
     pub fn append(&mut self, entry: &history::NewEntry) {
-        self.entries.push(Entry {
-            id: entry.id.clone(),
-            message: entry.message.clone().into_message(),
-            preserve: false,
-            consumed: false,
-        });
+        self.entries.push(Entry::new(
+            entry.id.clone(),
+            entry.message.clone().into_message(),
+        ));
     }
 
     /// Request-local search data stays below trusted instructions and outside durable
     /// coverage. Replacing it cannot change which canonical user entry is protected.
     pub fn search(&mut self, search: &SearchContext) {
-        let supplement = Entry {
-            id: SEARCH.into(),
-            message: Message::user(search.prompt()),
-            preserve: true,
-            consumed: true,
-        };
+        let supplement = Entry::new(SEARCH, Message::user(search.prompt()))
+            .with_preserve(true)
+            .with_consumed(true);
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == SEARCH) {
             *entry = supplement;
         } else {
@@ -501,38 +494,35 @@ pub async fn build(
     } else {
         String::new()
     };
-    let mut entries = vec![Entry {
-        id: INSTRUCTIONS.into(),
-        message: Message::system(system_prompt(
-            chat,
-            &tools,
-            agentic,
-            &SearchContext::new(&state.config().web_search).capability(),
-            &environment,
-            &memory,
-            &skills,
-        )),
-        preserve: true,
-        consumed: true,
-    }];
-    entries.extend(history.entries.into_iter().map(|entry| Entry {
-        preserve: pending.is_none() && history.latest_user.as_ref() == Some(&entry.id)
-            || entry.message.role == Role::System,
-        id: entry.id,
-        message: entry.message.into_message(),
-        consumed: entry.consumed,
+    let mut entries = vec![
+        Entry::new(
+            INSTRUCTIONS,
+            Message::system(system_prompt(
+                chat,
+                &tools,
+                agentic,
+                &SearchContext::new(&state.config().web_search).capability(),
+                &environment,
+                &memory,
+                &skills,
+            )),
+        )
+        .with_preserve(true)
+        .with_consumed(true),
+    ];
+    entries.extend(history.entries.into_iter().map(|entry| {
+        let preserve = pending.is_none() && history.latest_user.as_ref() == Some(&entry.id)
+            || entry.message.role == Role::System;
+        Entry::new(entry.id, entry.message.into_message())
+            .with_preserve(preserve)
+            .with_consumed(entry.consumed)
     }));
     let mut incomplete = history.incomplete;
     let mut reason = capacity.reason;
     if let Some((content, metadata)) = pending {
         let mut message = Message::user(content);
         message.images = images(metadata);
-        entries.push(Entry {
-            id: "draft".into(),
-            message,
-            preserve: true,
-            consumed: false,
-        });
+        entries.push(Entry::new("draft", message).with_preserve(true));
         if state.config().web_search.requested_for(content, metadata) {
             incomplete = true;
             reason =
@@ -542,7 +532,7 @@ pub async fn build(
     if matches!(mode, Mode::Preview)
         && agentic
         && state.existing_mcp().is_none()
-        && !zone_core::mcp::McpConfig::from_env().servers.is_empty()
+        && !zone_core::servers::config().is_empty()
     {
         incomplete = true;
         reason = Some(
@@ -643,16 +633,16 @@ fn latest_user(history: &history::History) -> Option<String> {
 }
 
 pub fn policy(settings: &Settings, capacity: &capacity::Capacity) -> Policy {
-    Policy {
-        limit: capacity.limit,
-        reserved: settings.reserved(capacity.limit),
-        source: match capacity.source {
+    Policy::new(
+        capacity.limit,
+        settings.reserved(capacity.limit),
+        match capacity.source {
             capacity::Source::Runtime => ContextSource::Runtime,
             capacity::Source::Configured => ContextSource::Configured,
             capacity::Source::Provider => ContextSource::Provider,
             capacity::Source::Unknown => ContextSource::Unknown,
         },
-    }
+    )
 }
 
 /// The whole system entry: a character card if there is one, the built prompt
@@ -753,14 +743,11 @@ pub fn images(metadata: Option<&Value>) -> Vec<String> {
 }
 
 pub fn core_summary(summary: history::Summary) -> Summary {
-    Summary {
-        content: summary.content,
-        coverage: Coverage {
-            entries: summary.entries,
-            fingerprint: summary.fingerprint,
-        },
-        revision: summary.revision,
-    }
+    Summary::new(
+        summary.content,
+        Coverage::new(summary.entries, summary.fingerprint),
+        summary.revision,
+    )
 }
 pub fn stored_summary(summary: &Summary) -> history::Summary {
     history::Summary {
@@ -900,11 +887,11 @@ mod tests {
         assert_eq!(settings.reserved(Some(4096)), 1024);
         assert_eq!(settings.reserved(Some(32768)), 4096);
         assert_eq!(settings.reserved(None), 4096);
-        let policy = Policy {
-            limit: Some(4096),
-            reserved: settings.reserved(Some(4096)),
-            source: ContextSource::Runtime,
-        };
+        let policy = Policy::new(
+            Some(4096),
+            settings.reserved(Some(4096)),
+            ContextSource::Runtime,
+        );
         assert_eq!(policy.limit.unwrap() - u64::from(policy.reserved), 3072);
     }
 

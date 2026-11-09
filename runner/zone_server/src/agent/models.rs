@@ -1,6 +1,5 @@
 //! Catalog, install, and train as ordinary chat tools.
 
-use super::PREVIEW_TITLE_CHARS;
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
 use crate::auth::permission::{self, Permission};
 use crate::db::workspace_members::{self, WorkspaceRole};
@@ -21,7 +20,14 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, excerpt};
+
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Rendering;
+use abnegate_agent::tool::Tier;
 
 const LIST_CAP: usize = 25;
 const START_TIMEOUT_SECS: u64 = 600;
@@ -264,31 +270,23 @@ impl Tool for ModelTool {
         }
     }
 
-    fn preview(&self, params: &Value) -> Option<String> {
-        match self.operation {
-            Operation::Install => Some(format!(
-                "Install model {}.",
-                excerpt(params["name"].as_str()?, PREVIEW_TITLE_CHARS)
-            )),
-            Operation::CancelInstall => Some(format!(
-                "Cancel install of {}.",
-                excerpt(params["name"].as_str()?, PREVIEW_TITLE_CHARS)
-            )),
-            Operation::Delete => Some(format!(
-                "Delete model {}.",
-                excerpt(params["name"].as_str()?, PREVIEW_TITLE_CHARS)
-            )),
-            Operation::StartTrain => {
-                let name = excerpt(params["name"].as_str()?, PREVIEW_TITLE_CHARS);
-                let base = excerpt(params["base"].as_str()?, PREVIEW_TITLE_CHARS);
-                let count = params["paths"].as_array().map(Vec::len).unwrap_or(0);
-                Some(format!(
-                    "Start training {name} on {base} from {count} path(s)."
-                ))
+    fn preview(&self, params: &Value) -> Option<Rendering> {
+        let text = match self.operation {
+            Operation::Install => format!("Install model {}.", params["name"].as_str()?),
+            Operation::CancelInstall => {
+                format!("Cancel install of {}.", params["name"].as_str()?)
             }
-            Operation::DismissTrain => Some("Dismiss the finished training job.".to_string()),
-            _ => None,
-        }
+            Operation::Delete => format!("Delete model {}.", params["name"].as_str()?),
+            Operation::StartTrain => {
+                let name = params["name"].as_str()?;
+                let base = params["base"].as_str()?;
+                let count = params["paths"].as_array().map(Vec::len).unwrap_or(0);
+                format!("Start training {name} on {base} from {count} path(s).")
+            }
+            Operation::DismissTrain => "Dismiss the finished training job.".to_string(),
+            _ => return None,
+        };
+        Some(Rendering::from(text))
     }
 
     fn timeout(&self, _: &ToolContext) -> Duration {
@@ -349,7 +347,9 @@ impl ModelTool {
             Operation::Delete => delete(&self.scope.state, params).await,
             Operation::ListBases => list_bases(&self.scope.state).await,
             Operation::GetTrain => get_train(&self.scope.state),
-            Operation::StartTrain => start_train(&self.scope, params, &context.cwd).await,
+            Operation::StartTrain => {
+                start_train(&self.scope, params, &context.working_directory).await
+            }
             Operation::DismissTrain => dismiss_train(&self.scope.state),
         }
     }
@@ -531,7 +531,11 @@ fn dismiss_train(state: &AppState) -> ToolResult {
     }
 }
 
-async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> ToolResult {
+async fn start_train(
+    scope: &WorkspaceScope,
+    params: &Value,
+    working_directory: &Path,
+) -> ToolResult {
     let name = match string_arg(params, "name") {
         Ok(name) => name.to_string(),
         Err(error) => return error,
@@ -568,7 +572,7 @@ async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> Tool
     if paths.is_empty() {
         return ToolResult::error(empty_paths_message(subject));
     }
-    let images = match load_training_paths(&scope.state, cwd, &paths, subject).await {
+    let images = match load_training_paths(&scope.state, working_directory, &paths, subject).await {
         Ok(images) => images,
         Err(error) => return ToolResult::error(error),
     };
@@ -663,7 +667,7 @@ fn string_list(params: &Value, key: &str) -> Result<Vec<String>, ToolResult> {
 
 async fn load_training_paths(
     state: &AppState,
-    cwd: &Path,
+    working_directory: &Path,
     paths: &[String],
     subject: Subject,
 ) -> Result<Vec<TrainImage>, String> {
@@ -671,7 +675,10 @@ async fn load_training_paths(
         .config()
         .train_upload_limit_mb
         .saturating_mul(1024 * 1024);
-    let resolved: Vec<PathBuf> = paths.iter().map(|path| resolve_path(cwd, path)).collect();
+    let resolved: Vec<PathBuf> = paths
+        .iter()
+        .map(|path| resolve_path(working_directory, path))
+        .collect();
     let mut used = 0u64;
     for path in &resolved {
         let meta =
@@ -735,12 +742,12 @@ fn is_clip(filename: &str) -> bool {
         })
 }
 
-fn resolve_path(cwd: &Path, given: &str) -> PathBuf {
+fn resolve_path(working_directory: &Path, given: &str) -> PathBuf {
     let path = Path::new(given);
     if path.is_absolute() {
         path.to_path_buf()
     } else {
-        cwd.join(path)
+        working_directory.join(path)
     }
 }
 
@@ -800,8 +807,8 @@ mod tests {
     use crate::services::comfy::policy;
     use crate::state::test_config;
     use crate::train_jobs::TrainJobStatus;
+    use abnegate_agent::tool::MAXIMUM_PREVIEW_CHARACTERS;
     use uuid::Uuid;
-    use zone_core::tools::ToolRegistry;
 
     const PIXEL: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
@@ -896,6 +903,32 @@ mod tests {
             Some("Install model llama3.2:3b.".into())
         );
         assert!(!install.description().contains("wait_for"));
+    }
+
+    #[tokio::test]
+    async fn a_long_card_is_cut_in_the_middle_keeping_whitespace() {
+        let mut registry = ToolRegistry::new();
+        register(&mut registry, &scope());
+        let name = format!(
+            "first   word{}last  word",
+            "x".repeat(MAXIMUM_PREVIEW_CHARACTERS)
+        );
+
+        let preview = registry
+            .preview("install_model", &json!({ "name": name }).to_string())
+            .expect("install_model has a card");
+
+        assert!(preview.truncated, "{preview:?}");
+        assert!(
+            preview.text.starts_with("Install model first   word"),
+            "{preview:?}"
+        );
+        assert!(preview.text.ends_with("last  word."), "{preview:?}");
+        assert!(preview.text.contains(" characters hidden"), "{preview:?}");
+        assert!(
+            preview.text.chars().count() <= MAXIMUM_PREVIEW_CHARACTERS,
+            "{preview:?}"
+        );
     }
 
     #[tokio::test]

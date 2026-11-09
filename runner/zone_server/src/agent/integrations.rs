@@ -1,5 +1,15 @@
 //! Live GitHub observations and writes using an authorized workspace source.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::MAXIMUM_TOOL_MESSAGE_CHARACTERS;
+use abnegate_agent::tool::REASON_PARAMETER;
+use abnegate_agent::tool::Rendering;
+use abnegate_agent::tool::Tier;
+use abnegate_agent::tool::reason_property;
 use abnegate_secret::SecretValue;
 use abnegate_vcs::BranchName;
 use abnegate_vcs::CheckRun;
@@ -45,19 +55,6 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
 use uuid::Uuid;
-use zone_core::tools::MAX_TOOL_MESSAGE_CHARS;
-use zone_core::tools::REASON_PARAM;
-use zone_core::tools::Tier;
-use zone_core::tools::Tool;
-use zone_core::tools::ToolContext;
-use zone_core::tools::ToolError;
-use zone_core::tools::ToolRegistry;
-use zone_core::tools::ToolResult;
-use zone_core::tools::excerpt;
-use zone_core::tools::reason_property;
-
-use super::PREVIEW_BODY_CHARS;
-use super::PREVIEW_TITLE_CHARS;
 
 use super::readiness;
 use super::readiness::CheckEvidence;
@@ -539,8 +536,8 @@ impl Tool for Integration {
             required.extend(["number", "body"]);
         }
         if self.tier().mutating() {
-            properties[REASON_PARAM] = reason_property();
-            required.push(REASON_PARAM);
+            properties[REASON_PARAMETER] = reason_property();
+            required.push(REASON_PARAMETER);
         }
         json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
     }
@@ -573,25 +570,25 @@ impl Tool for Integration {
         }
     }
 
-    fn preview(&self, params: &Value) -> Option<String> {
+    fn preview(&self, params: &Value) -> Option<Rendering> {
         match self.operation {
             Operation::CreatePull => {
                 let base = params["base"].as_str().unwrap_or("the default branch");
                 let body = params["body"]
                     .as_str()
                     .map_or(0, |body| body.chars().count());
-                Some(format!(
+                Some(Rendering::from(format!(
                     "Open a pull request titled \"{}\", merging {} into {base}, with a \
                      {body}-character description.",
-                    excerpt(params["title"].as_str()?, PREVIEW_TITLE_CHARS),
+                    params["title"].as_str()?,
                     params["head"].as_str()?
-                ))
+                )))
             }
-            Operation::Comment => Some(format!(
+            Operation::Comment => Some(Rendering::from(format!(
                 "Comment on #{}: \"{}\"",
                 params["number"].as_u64()?,
-                excerpt(params["body"].as_str()?, PREVIEW_BODY_CHARS)
-            )),
+                params["body"].as_str()?
+            ))),
             _ => None,
         }
     }
@@ -1466,7 +1463,7 @@ impl Github {
             "total": total,
             "complete": false,
         });
-        let room = MAX_TOOL_MESSAGE_CHARS
+        let room = MAXIMUM_TOOL_MESSAGE_CHARACTERS
             .saturating_sub(RESULT_ENVELOPE_CHARS)
             .saturating_sub(json_chars(&page));
         let rest = &body[byte_at(body, offset as usize)..];
@@ -1851,7 +1848,7 @@ impl Github {
             .limit
             .unwrap_or(LOG_EXCERPT_CHARS)
             .clamp(LOG_EXCERPT_FLOOR_CHARS, LOG_EXCERPT_CHARS);
-        let envelope = MAX_TOOL_MESSAGE_CHARS.saturating_sub(RESULT_ENVELOPE_CHARS);
+        let envelope = MAXIMUM_TOOL_MESSAGE_CHARACTERS.saturating_sub(RESULT_ENVELOPE_CHARS);
         loop {
             let result = log.result(&lines, budget);
             if json_chars(&result) <= envelope || budget <= LOG_EXCERPT_FLOOR_CHARS {
@@ -2129,7 +2126,7 @@ fn review_thread_page(
     (start, mut first): (usize, usize),
     mut used: usize,
 ) -> Result<(Vec<Value>, Option<u64>), String> {
-    let budget = MAX_TOOL_MESSAGE_CHARS.saturating_sub(RESULT_ENVELOPE_CHARS);
+    let budget = MAXIMUM_TOOL_MESSAGE_CHARACTERS.saturating_sub(RESULT_ENVELOPE_CHARS);
     let mut rows = Vec::new();
     let mut last = None;
     for thread in &threads[start..] {
@@ -2904,6 +2901,7 @@ mod tests {
     use crate::agent::testing::STORED_TOKEN;
     use crate::agent::testing::number;
     use crate::services::github_app::testing::issuing;
+    use abnegate_agent::tool::REASON_DESCRIPTION;
     use abnegate_vcs::RateLimit;
     use chrono::DateTime;
     use std::time::Instant;
@@ -2915,7 +2913,6 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::matchers::path;
     use wiremock::matchers::query_param;
-    use zone_core::tools::REASON_DESCRIPTION;
 
     const PAGE_SIZE: usize = PER_PAGE.get() as usize;
     const RETRY_AFTER_HEADER: &str = "Retry-After";
@@ -3037,24 +3034,24 @@ mod tests {
         ] {
             let schema = tool(operation).parameters_schema();
             assert_eq!(
-                schema["properties"][REASON_PARAM]["description"],
+                schema["properties"][REASON_PARAMETER]["description"],
                 REASON_DESCRIPTION
             );
             assert!(
                 schema["required"]
                     .as_array()
                     .expect("required is a list")
-                    .contains(&json!(REASON_PARAM)),
+                    .contains(&json!(REASON_PARAMETER)),
                 "reason must be advertised as required: {schema}"
             );
-            call[REASON_PARAM] = json!(WHY);
+            call[REASON_PARAMETER] = json!(WHY);
             let given: Arguments = serde_json::from_value(call.clone())
                 .expect("deny_unknown_fields must accept every property the schema advertises");
             assert_eq!(given.reason.as_deref(), Some(WHY));
 
             call.as_object_mut()
                 .expect("a call is an object")
-                .remove(REASON_PARAM);
+                .remove(REASON_PARAMETER);
             let omitted: Arguments =
                 serde_json::from_value(call).expect("a missing reason must never fail the call");
             assert!(omitted.reason.is_none(), "an absent reason stays absent");
@@ -3077,7 +3074,7 @@ mod tests {
             let tool = tool(operation);
             let schema = tool.parameters_schema();
             assert!(
-                schema["properties"].get(REASON_PARAM).is_none(),
+                schema["properties"].get(REASON_PARAMETER).is_none(),
                 "{} must not ask for a reason: {schema}",
                 tool.name()
             );
@@ -4781,7 +4778,7 @@ mod tests {
             after = read["next_after"].as_u64();
             let size = delivered(read, github);
             assert!(
-                size <= MAX_TOOL_MESSAGE_CHARS,
+                size <= MAXIMUM_TOOL_MESSAGE_CHARACTERS,
                 "a page must survive the transcript cap whole, got {size}"
             );
             pages += 1;
@@ -4903,7 +4900,7 @@ mod tests {
 
         let size = delivered(read, &github(&server));
         assert!(
-            size <= MAX_TOOL_MESSAGE_CHARS,
+            size <= MAXIMUM_TOOL_MESSAGE_CHARACTERS,
             "a body that escapes to six times its length must still fit, got {size}"
         );
     }
@@ -4942,7 +4939,7 @@ mod tests {
             offset = page["next"].as_u64();
             let size = delivered(page, &github);
             assert!(
-                size <= MAX_TOOL_MESSAGE_CHARS,
+                size <= MAXIMUM_TOOL_MESSAGE_CHARACTERS,
                 "an escaped page must survive the transcript cap whole, got {size}"
             );
             pages += 1;
@@ -6628,7 +6625,7 @@ mod tests {
         assert_eq!(result["ref"], "feature");
         assert_eq!(result["pull_request"]["number"], 7);
         assert_eq!(result["job"]["conclusion"], "failure");
-        assert!(json_chars(&result) <= MAX_TOOL_MESSAGE_CHARS);
+        assert!(json_chars(&result) <= MAXIMUM_TOOL_MESSAGE_CHARACTERS);
     }
 
     #[tokio::test]

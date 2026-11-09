@@ -22,6 +22,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 anyhow = "=1.0.104"
+async-trait = { workspace = true }
 
 # CLI
 clap = { workspace = true }
@@ -31,6 +32,7 @@ console = "=0.16.4"
 rand = { workspace = true }
 
 # Config & storage
+abnegate-agent = { workspace = true, features = ["mcp"] }
 abnegate-config = { workspace = true, features = ["keyring"] }
 abnegate-llm = { workspace = true }
 abnegate-secret = { workspace = true }
@@ -43,6 +45,8 @@ zone_core = { path = "../zone_core" }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "=3.27.0"
 toml = { workspace = true }
+wiremock = "=0.6.5"
+zone_core = { path = "../zone_core", features = ["test-support"] }
 
 # The platform keychain initialises without a Secret Service only on macOS,
 # so the test that reads an earlier CLI's entries runs there.

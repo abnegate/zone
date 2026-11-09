@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 
 import { rustVariants, structFields } from '../../test/rust';
+import jobs from './jobs.contract.json';
 import {
   ActionReceiptSchema,
   ChatTaskPublicationSchema,
@@ -65,9 +66,7 @@ const QUESTION_RS = join(
 
 const CHAT_WS_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ws/chat.rs');
 
-const TOOLS_MOD_RS = join(import.meta.dir, '../../../../../runner/zone_core/src/tools/mod.rs');
-
-const JOB_RS = join(import.meta.dir, '../../../../../runner/zone_core/src/tools/job.rs');
+const JOB_EXIT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ws/chat/job.rs');
 
 const WAIT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/agent/wait.rs');
 
@@ -221,24 +220,24 @@ describe('a question call is labelled the same live as it is after a reload', ()
  */
 describe('a refused call keeps why it did not run after the server settles it', () => {
   test('the console reads the words the server tells a denied call', () => {
-    expect(DENIED_DETAIL).toBe(rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'DENIED'));
+    expect(DENIED_DETAIL).toBe(rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'DENIED'));
   });
 
   test('the console reads the words the server tells a call nobody approved in time', () => {
     expect(APPROVAL_TIMED_OUT_DETAIL).toBe(
-      rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'APPROVAL_TIMED_OUT')
+      rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'APPROVAL_TIMED_OUT')
     );
   });
 
   test('the console reads the words the server tells a call its stopped turn cancelled', () => {
     expect(APPROVAL_CANCELLED_DETAIL).toBe(
-      rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'APPROVAL_CANCELLED')
+      rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'APPROVAL_CANCELLED')
     );
   });
 
   test('the console reads the prefix the server puts in front of a failed call', () => {
     expect(TOOL_ERROR_PREFIX).toBe(
-      rustStringConstant(readFileSync(TOOLS_MOD_RS, 'utf8'), 'ERROR_PREFIX')
+      rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'ERROR_PREFIX')
     );
   });
 });
@@ -589,19 +588,26 @@ describe('the question card the console draws is the one the server sent', () =>
  *
  * Each of the four travels as a named Rust struct rather than inside an enum
  * variant precisely so `structFields` can read it; an enum payload would be
- * unreadable here and so unpinned.
+ * unreadable here and so unpinned. The started job is `abnegate-agent`'s,
+ * whose source is not in this repository, so `jobs.contract.json` stands
+ * between them: `ws/chat/job.rs` holds the crate's type to that file, and this
+ * test holds the console to it.
  */
 describe('the job and wait cards the console draws are the ones the server sent', () => {
-  const job = readFileSync(JOB_RS, 'utf8');
+  const exit = readFileSync(JOB_EXIT_RS, 'utf8');
   const wait = readFileSync(WAIT_RS, 'utf8');
   const agent = readFileSync(AGENT_RS, 'utf8');
 
-  test('JobStarted carries the same fields on both sides', () => {
-    expect(zodFields(JobStartedSchema)).toEqual(rustStructFields(job, 'JobStarted'));
+  test('JobStarted carries the same fields on both sides, optional where the contract says', () => {
+    expect(zodFields(JobStartedSchema)).toEqual(
+      Object.fromEntries(
+        Object.entries(jobs.job_started_fields).map(([field, { optional }]) => [field, optional])
+      )
+    );
   });
 
   test('JobExited carries the same fields on both sides, optional where serde may omit', () => {
-    expect(zodFields(JobExitedSchema)).toEqual(rustStructFields(job, 'JobExited'));
+    expect(zodFields(JobExitedSchema)).toEqual(rustStructFields(exit, 'JobExit'));
   });
 
   test('Waiting carries the same fields on both sides, optional where serde may omit', () => {

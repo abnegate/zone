@@ -13,11 +13,16 @@ mod lighthouse;
 mod run;
 mod setup;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use clap::Subcommand;
 use console::style;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::auth::AuthManager;
+
+const VERBOSE_FILTER: &str = "zone_cli=debug,zone_core=debug,abnegate_agent=debug";
+const QUIET_FILTER: &str = "zone_cli=info";
 
 #[derive(Parser)]
 #[command(name = "zone")]
@@ -112,16 +117,10 @@ enum Commands {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing
-    let filter = if cli.verbose {
-        "zone_cli=debug,zone_core=debug"
-    } else {
-        "zone_cli=info"
-    };
-
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| log_filter(cli.verbose).into()),
         )
         .with(tracing_subscriber::fmt::layer().without_time())
         .init();
@@ -249,4 +248,33 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// The log directives used when `RUST_LOG` is unset.
+fn log_filter(verbose: bool) -> &'static str {
+    if verbose {
+        VERBOSE_FILTER
+    } else {
+        QUIET_FILTER
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing::Level;
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    use super::log_filter;
+
+    #[test]
+    fn verbose_logging_keeps_the_agent_crates_debug_logs() {
+        let subscriber = tracing_subscriber::registry().with(EnvFilter::new(log_filter(true)));
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(tracing::enabled!(target: "abnegate_agent::mcp::hub", Level::DEBUG));
+            assert!(tracing::enabled!(target: "zone_core::servers", Level::DEBUG));
+            assert!(tracing::enabled!(target: "zone_cli::run", Level::DEBUG));
+        });
+    }
 }

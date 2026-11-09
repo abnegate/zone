@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use abnegate_agent::ToolResult;
 use abnegate_secret::{REDACTED, SecretValue};
 use abnegate_vcs::RepositoryUrl;
 use nix::fcntl::{Flock, FlockArg};
@@ -15,7 +16,6 @@ use sqlx::PgPool;
 use tempfile::TempDir;
 use uuid::Uuid;
 use zone_core::llm::LlmBackend;
-use zone_core::tools::ToolResult;
 use zone_server::db::projects::{self, NewProject};
 use zone_server::db::{chats, organizations, sources, workspace_host_directories, workspaces};
 use zone_server::services::chat::session::{self, Mode, Preparation};

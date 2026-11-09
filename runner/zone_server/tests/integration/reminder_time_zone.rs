@@ -13,12 +13,12 @@
 //! An hourly rule counts elapsed hours, which no clock change moves.
 use crate::common::context::Harness;
 use crate::common::{TestClient, test_email, test_password};
+use abnegate_agent::context;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, FixedOffset, NaiveTime, Timelike, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zone_core::context;
 use zone_server::db::reminders;
 use zone_server::db::reminders::Delivered;
 use zone_server::db::reminders::Reminder;
