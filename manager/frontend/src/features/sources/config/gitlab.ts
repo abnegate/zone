@@ -58,7 +58,7 @@ export const gitlabSource: SourceDefinition = {
     const gitlab = config as GitLabConfig;
     return {
       glProjectId: gitlab.project_id,
-      glHost: gitlab.host || 'https://gitlab.com',
+      glHost: gitlab.host || gitlab.base_url || 'https://gitlab.com',
       glBranch: gitlab.branch || 'main',
     };
   },

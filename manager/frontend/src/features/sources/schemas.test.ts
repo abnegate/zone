@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { getErrors, parse } from '../../validation';
+import { formStateFromConfig } from './config';
 import {
   CreateSourceRequestSchema,
   SourceResponseSchema,
@@ -192,6 +193,30 @@ describe('GitLab host', () => {
         'config.host': HTTPS_ONLY,
       });
     }
+  });
+
+  it('keeps the base_url an API-created source was stored with', () => {
+    const source = parse(SourceSchema, {
+      id: 'src-1',
+      name: 'project',
+      source_type: 'gitlab',
+      config: {
+        project_id: 'group/project',
+        base_url: 'https://gitlab.example.com',
+        branch: 'main',
+      },
+      description: null,
+      url: null,
+      is_active: true,
+      last_verified_at: null,
+      last_error: null,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    });
+
+    expect(formStateFromConfig(source.source_type, source.config).glHost).toBe(
+      'https://gitlab.example.com'
+    );
   });
 
   it('still reads a stored source whose host predates the https rule', () => {

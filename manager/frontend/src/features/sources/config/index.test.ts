@@ -327,6 +327,45 @@ describe('Individual Source Definitions', () => {
 
       expect(name).toBe('mygroup/myproject');
     });
+
+    it('loads a source stored with base_url at its own instance', () => {
+      const state = formStateFromConfig('gitlab', {
+        project_id: 'mygroup/myproject',
+        base_url: 'https://gitlab.example.com/api/v4',
+        branch: 'main',
+      });
+
+      expect(state.glHost).toBe('https://gitlab.example.com/api/v4');
+    });
+
+    it('saves an edit to a base_url source without moving its instance', () => {
+      const state = formStateFromConfig('gitlab', {
+        project_id: 'mygroup/myproject',
+        base_url: 'https://gitlab.example.com',
+        branch: 'main',
+      });
+
+      const config = gitlab.buildConfig({ ...state, glBranch: 'develop' });
+
+      expect(config).toEqual({
+        project_id: 'mygroup/myproject',
+        host: 'https://gitlab.example.com',
+        branch: 'develop',
+      });
+    });
+
+    it('prefers host and falls back to gitlab.com', () => {
+      expect(
+        formStateFromConfig('gitlab', {
+          project_id: 'mygroup/myproject',
+          host: 'https://first.example.com',
+          base_url: 'https://second.example.com',
+        }).glHost
+      ).toBe('https://first.example.com');
+      expect(formStateFromConfig('gitlab', { project_id: 'mygroup/myproject' }).glHost).toBe(
+        'https://gitlab.com'
+      );
+    });
   });
 
   describe('Filesystem Source', () => {

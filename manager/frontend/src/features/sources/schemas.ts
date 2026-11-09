@@ -24,6 +24,7 @@ export const GitHubConfigSchema = z.object({
 export const GitLabConfigSchema = z.object({
   project_id: z.string().min(1, 'Project ID is required'),
   host: z.string().optional(),
+  base_url: z.string().optional(),
   branch: z.string().optional(),
   base_path: z.string().optional(),
 });
