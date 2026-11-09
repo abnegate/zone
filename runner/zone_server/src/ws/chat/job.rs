@@ -78,23 +78,43 @@ mod tests {
     #[test]
     fn a_started_job_carries_the_contract_fields() {
         let contract: Value = serde_json::from_str(JOBS_CONTRACT).expect("the contract is JSON");
-        let mut expected: Vec<&str> = contract["job_started_fields"]
-            .as_array()
-            .expect("the contract lists the started job's fields")
-            .iter()
-            .map(|field| field.as_str().expect("a field name"))
-            .collect();
+        let fields = contract["job_started_fields"]
+            .as_object()
+            .expect("the contract maps the started job's fields");
         let started = serde_json::to_value(JobStarted::new("job_x", 1, "/l"))
             .expect("a started job serialises");
-        let mut sent: Vec<&str> = started
-            .as_object()
-            .expect("a started job is an object")
-            .keys()
-            .map(String::as_str)
-            .collect();
-        expected.sort_unstable();
-        sent.sort_unstable();
+        let sent = started.as_object().expect("a started job is an object");
 
-        assert_eq!(sent, expected);
+        for field in sent.keys() {
+            assert!(
+                fields.contains_key(field),
+                "the server sends {field}, which the contract does not list"
+            );
+        }
+        for (field, terms) in fields {
+            let optional = terms["optional"]
+                .as_bool()
+                .unwrap_or_else(|| panic!("the contract says whether {field} is optional"));
+            let mut without = sent.clone();
+            without.remove(field);
+            let read = serde_json::from_value::<JobStarted>(Value::Object(without));
+            if optional {
+                assert!(
+                    read.is_ok(),
+                    "a started job without {field}, which the contract makes optional, is \
+                     unreadable: {read:?}"
+                );
+            } else {
+                assert!(
+                    sent.contains_key(field),
+                    "the server omits {field}, which the contract requires"
+                );
+                assert!(
+                    read.is_err(),
+                    "a started job without {field} reads, so the server may omit what the \
+                     contract requires"
+                );
+            }
+        }
     }
 }

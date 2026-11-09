@@ -164,13 +164,12 @@ impl AgentCallback for CliCallback {
     }
 }
 
-/// Truncate a string to a maximum length
+/// Truncate a string to a maximum number of characters
 fn truncate(text: &str, maximum_length: usize) -> String {
     let text = text.replace('\n', " ");
-    if text.len() > maximum_length {
-        format!("{}...", &text[..maximum_length])
-    } else {
-        text
+    match text.char_indices().nth(maximum_length) {
+        Some((cut, _)) => format!("{}...", &text[..cut]),
+        None => text,
     }
 }
 
@@ -527,6 +526,13 @@ mod tests {
     #[test]
     fn test_truncate_empty() {
         assert_eq!(truncate("", 10), "");
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_character() {
+        let text = format!("a{}", "é".repeat(80));
+
+        assert_eq!(truncate(&text, 80), format!("a{}...", "é".repeat(79)));
     }
 
     #[test]

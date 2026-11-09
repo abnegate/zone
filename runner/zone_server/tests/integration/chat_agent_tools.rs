@@ -20,8 +20,14 @@ use crate::common::{
 use abnegate_agent_cli::Occupancy;
 use abnegate_agent_cli::{AgentKind, CliSettings};
 use axum::http::StatusCode;
+use nix::errno::Errno;
+use nix::fcntl::OFlag;
+use nix::sys::stat;
+use nix::unistd::mkfifo;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -52,12 +58,6 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long Stop has to end a turn, far past what a turn at rest takes.
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// How many directories each one in [`sprawling`] holds.
-const FAN_OUT: usize = 10;
-
-/// How deep [`sprawling`] nests them: 111,110 directories in all.
-const LEVELS: usize = 5;
 
 const ANSWER: &str = "Written.";
 
@@ -333,26 +333,43 @@ async fn gone(pid: &str) -> bool {
     false
 }
 
-/// A tree of real directories wider than a walk reads before it gives up.
-/// Walks follow no links, so only entries on disk keep one going, and a walk
-/// through this many takes seconds.
-fn sprawling(root: &Path) {
-    std::fs::create_dir(root).expect("the root of the tree");
-    std::thread::scope(|scope| {
-        for branch in 0..FAN_OUT {
-            let branch = root.join(branch.to_string());
-            scope.spawn(move || grow(&branch, LEVELS - 1));
-        }
-    });
+/// A pipe only the test writes to. A tool that reads it waits there until the
+/// test lets it go, however fast the host's disk is.
+struct Held {
+    path: PathBuf,
+    _directory: TempDir,
 }
 
-fn grow(directory: &Path, levels: usize) {
-    std::fs::create_dir(directory).expect("a directory of the tree");
-    if levels == 0 {
-        return;
+impl Held {
+    fn new() -> Self {
+        let directory = TempDir::new().expect("a directory for the held pipe");
+        let path = directory.path().join("held");
+        mkfifo(&path, stat::Mode::S_IRUSR | stat::Mode::S_IWUSR).expect("the held pipe");
+        Self {
+            path,
+            _directory: directory,
+        }
     }
-    for child in 0..FAN_OUT {
-        grow(&directory.join(child.to_string()), levels - 1);
+
+    /// Wait until a tool opens the pipe to read it, and hand back its
+    /// writing end: the reader waits for as long as the test keeps that open,
+    /// and is let go once it is dropped.
+    async fn reached(&self) -> Option<File> {
+        let deadline = Instant::now() + SPAWN_TIMEOUT;
+        while Instant::now() < deadline {
+            match OpenOptions::new()
+                .write(true)
+                .custom_flags(OFlag::O_NONBLOCK.bits())
+                .open(&self.path)
+            {
+                Ok(writer) => return Some(writer),
+                Err(error) if error.raw_os_error() == Some(Errno::ENXIO as i32) => {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => panic!("the held pipe could not be opened: {error}"),
+            }
+        }
+        None
     }
 }
 
@@ -833,34 +850,35 @@ async fn stopping_a_codex_turn_kills_its_agent_and_everything_it_forked() {
 }
 
 /// A zone tool the agent called is exactly when a reader reaches for Stop, and
-/// the slowest are the ones that walk a directory tree. A walk that keeps its
+/// the slowest are the ones that walk a directory tree. A call that keeps its
 /// worker also keeps the turn, whose task the call has just woken on that
 /// worker, however many others are idle: the reader is shown nothing and Stop
-/// goes unread until the walk ends.
+/// goes unread until the call ends. The call here reads a pipe the test holds,
+/// so it is still running when Stop arrives on any host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stop_reaches_a_cli_turn_while_a_tool_it_called_walks_a_huge_tree() {
+async fn stop_reaches_a_cli_turn_while_a_tool_it_called_still_runs() {
+    let held = Held::new();
     let harness = Harness::start(true, true).await;
     let processes = harness.agent.forking();
-    let tree = harness._directory.path().join("tree");
-    sprawling(&tree);
     let mut socket = harness.socket().await;
     send(
         &mut socket,
-        json!({"type": "send", "content": "List everything."}),
+        json!({"type": "send", "content": "Read the pipe."}),
     )
     .await;
     let [leader, forked] = processes.pids().await;
     let (arguments, token) = harness.agent.spawned().await;
     let (endpoint, _) = served(&arguments);
 
-    let call = tokio::spawn(async move {
+    let pipe = held.path.to_string_lossy().into_owned();
+    let mut call = tokio::spawn(async move {
         rpc(
             &endpoint,
             &token,
             "tools/call",
             json!({
-                "name": "list_files",
-                "arguments": {"path": tree.to_string_lossy(), "recursive": true},
+                "name": "run_command",
+                "arguments": {"command": "cat", "args": [pipe], "reason": "Read the pipe."},
             }),
         )
         .await
@@ -868,13 +886,20 @@ async fn stop_reaches_a_cli_turn_while_a_tool_it_called_walks_a_huge_tree() {
     let started = tokio::time::timeout(SPAWN_TIMEOUT, async {
         loop {
             let frame = next(&mut socket).await;
-            if frame["type"] == "tool_call" && frame["name"] == "list_files" {
+            if frame["type"] == "tool_call" && frame["name"] == "run_command" {
                 return frame;
             }
         }
     })
     .await
     .expect("the reader must be shown the call while it runs");
+    let Some(release) = held.reached().await else {
+        let answered = match call.is_finished() {
+            true => format!("{:?}", (&mut call).await),
+            false => "nothing".to_string(),
+        };
+        panic!("the call never read the held pipe, so nothing kept it running: {answered}");
+    };
     assert!(
         !call.is_finished(),
         "the call finished before the reader was shown it, so its walk held the runtime: \
@@ -897,7 +922,8 @@ async fn stop_reaches_a_cli_turn_while_a_tool_it_called_walks_a_huge_tree() {
     );
     assert!(gone(&leader).await, "the agent outlived Stop");
     assert!(gone(&forked).await, "the agent's child outlived Stop");
-    call.abort();
+    drop(release);
+    let _ = tokio::time::timeout(STOP_TIMEOUT, call).await;
 }
 
 /// A chat whose agent the reader turned off gets no tools, and neither does
