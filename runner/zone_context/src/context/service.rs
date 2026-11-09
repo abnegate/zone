@@ -299,27 +299,18 @@ impl ContextService {
 
             result.items_gathered += fetch_result.items.len();
             result.items_unchanged += fetch_result.stats.items_skipped;
-            if source_fetch_config.index_mode {
-                let uris = if fetch_result.live_uris.is_empty() {
-                    fetch_result
-                        .items
-                        .iter()
-                        .map(|item| item.uri.clone())
-                        .collect()
-                } else {
-                    fetch_result.live_uris.clone()
-                };
-                if let Err(e) = self
+            if source_fetch_config.index_mode
+                && let Some(uris) = fetch_result.retained_uris()
+                && let Err(error) = self
                     .vector_store
                     .retain_content_uris(source.id, &uris)
                     .await
-                {
-                    tracing::warn!(
-                        "Failed to drop stale indexed files for source {}: {}",
-                        source.id,
-                        e
-                    );
-                }
+            {
+                tracing::warn!(
+                    "Failed to drop stale indexed files for source {}: {}",
+                    source.id,
+                    error
+                );
             }
             if let Some(version) = fetch_result.version.clone()
                 && let Err(e) = self

@@ -355,6 +355,9 @@ pub struct FetchResult {
     pub stats: FetchStats,
     /// Every live file URI in the source (used to retain the index)
     pub live_uris: Vec<String>,
+    /// Whether the source cut its listing short, so that `live_uris` may miss
+    /// live files and the index must keep the records it holds
+    pub truncated: bool,
     /// Provider version after this fetch (tree SHA / fingerprint)
     pub version: Option<String>,
 }
@@ -370,8 +373,23 @@ impl FetchResult {
             fetched_at: Utc::now(),
             stats: FetchStats::default(),
             live_uris: Vec::new(),
+            truncated: false,
             version: None,
         }
+    }
+
+    /// The URIs the index keeps for this source, dropping every other record:
+    /// the live URIs, or the fetched items' when the adapter lists none.
+    /// `None` when the listing was truncated, since a file it left out cannot
+    /// be told from one deleted.
+    pub fn retained_uris(&self) -> Option<Vec<String>> {
+        if self.truncated {
+            return None;
+        }
+        if self.live_uris.is_empty() {
+            return Some(self.items.iter().map(|item| item.uri.clone()).collect());
+        }
+        Some(self.live_uris.clone())
     }
 
     /// Add an item to the result
@@ -566,6 +584,36 @@ mod tests {
 
         assert_eq!(result.stats.items_fetched, 1);
         assert!(result.stats.total_tokens > 0);
+    }
+
+    #[test]
+    fn the_index_keeps_the_live_uris_or_else_the_fetched_ones() {
+        let source_id = Uuid::new_v4();
+        let mut result = FetchResult::new(source_id, false);
+        result.add_item(ContentItem::new(
+            source_id,
+            ContentCategory::File,
+            "/fetched.rs",
+            "fetched.rs",
+        ));
+
+        assert_eq!(
+            result.retained_uris(),
+            Some(vec!["/fetched.rs".to_string()])
+        );
+
+        result.live_uris = vec!["/fetched.rs".to_string(), "/unchanged.rs".to_string()];
+
+        assert_eq!(result.retained_uris(), Some(result.live_uris.clone()));
+    }
+
+    #[test]
+    fn a_truncated_listing_retains_every_indexed_record() {
+        let mut result = FetchResult::new(Uuid::new_v4(), false);
+        result.live_uris = vec!["/listed.rs".to_string()];
+        result.truncated = true;
+
+        assert_eq!(result.retained_uris(), None);
     }
 
     #[test]

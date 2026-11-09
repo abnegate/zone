@@ -886,6 +886,15 @@ impl SourceAdapter for GitHubAdapter {
         let total_files = files.len();
         let mut result = FetchResult::new(source.id, fetch_config.last_version.is_some());
         result.version = Some(tree.sha.as_str().to_string());
+        result.truncated = tree.truncated;
+        if tree.truncated {
+            tracing::warn!(
+                owner = %config.owner,
+                repo = %config.repo,
+                branch = %branch,
+                "GitHub truncated the tree, so the index keeps the files it left out"
+            );
+        }
         result.live_uris = files
             .iter()
             .map(|entry| Self::file_uri(&config.owner, &config.repo, &entry.path, &branch))
@@ -1578,6 +1587,51 @@ mod tests {
             })))
             .mount(server)
             .await;
+    }
+
+    #[tokio::test]
+    async fn a_truncated_tree_keeps_the_index_records_of_the_files_it_left_out() {
+        let listed = "github://test-owner/test-repo/README.md@main".to_string();
+        for (truncated, retained) in [(false, Some(vec![listed])), (true, None)] {
+            let mock_server = MockServer::start().await;
+            mount_repository(&mock_server).await;
+            Mock::given(method("GET"))
+                .and(path(TREE_ROUTE))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "sha": TREE_SHA,
+                    "tree": [listed_blob("README.md", 8)],
+                    "truncated": truncated
+                })))
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/repos/test-owner/test-repo/contents/README.md"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "type": "file",
+                    "encoding": "base64",
+                    "content": BASE64_STANDARD.encode("# README")
+                })))
+                .mount(&mock_server)
+                .await;
+
+            let fetched = served(&mock_server)
+                .fetch(
+                    &create_test_source(test_repository()),
+                    &FetchConfig::default(),
+                    FetchStrategy::Full,
+                    &NoOpProgress,
+                )
+                .await
+                .unwrap();
+
+            let titles: Vec<&str> = fetched
+                .items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect();
+            assert_eq!(titles, ["README.md"], "truncated: {truncated}");
+            assert_eq!(fetched.retained_uris(), retained, "truncated: {truncated}");
+        }
     }
 
     async fn tree_requested(server: &MockServer) {
