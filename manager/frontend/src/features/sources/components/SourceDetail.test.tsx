@@ -616,6 +616,7 @@ describe('SourceDetail field styling', () => {
 
 describe('SourceDetail saving a GitLab source', () => {
   const INSTANCE = 'https://gitlab.example.com';
+  const GITLAB_COM = 'https://gitlab.com';
   const EXPLICIT_LINK = 'https://docs.example.test/project';
 
   function gitLabSource(overrides: Partial<Source> = {}): Source {
@@ -643,6 +644,29 @@ describe('SourceDetail saving a GitLab source', () => {
     });
 
     expect(await saved()).toEqual({ credentials: 'glpat-throwaway', instance: INSTANCE });
+  });
+
+  it('names gitlab.com for a new token on a source that names no instance', async () => {
+    renderDetail(gitLabSource({ config: { project_id: 'group/project', branch: 'main' } }));
+
+    fireEvent.change(screen.getByLabelText(/^Access Token/), {
+      target: { value: 'glpat-throwaway' },
+    });
+
+    expect(await saved()).toEqual({ credentials: 'glpat-throwaway', instance: GITLAB_COM });
+  });
+
+  it('names the base_url a source reads from for a new token', async () => {
+    const baseUrl = `${INSTANCE}/api/v4`;
+    renderDetail(
+      gitLabSource({ config: { project_id: 'group/project', base_url: baseUrl, branch: 'main' } })
+    );
+
+    fireEvent.change(screen.getByLabelText(/^Access Token/), {
+      target: { value: 'glpat-throwaway' },
+    });
+
+    expect(await saved()).toEqual({ credentials: 'glpat-throwaway', instance: baseUrl });
   });
 
   it('names the instance the token was entered against, not the one the form moves to', async () => {

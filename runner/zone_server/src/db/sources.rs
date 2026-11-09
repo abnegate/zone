@@ -298,7 +298,9 @@ pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<Sourc
 /// that a config change moves a link derived from the stored config.
 /// `github_installation_id` is `Some(None)` to detach the installation.
 /// `instance` is the GitLab instance the caller last saw the source read
-/// from; the update is refused once it reads from another.
+/// from; the update is refused once it reads from another. A GitLab token
+/// sent without a config names it, so the token is never stored for an
+/// instance its sender did not see.
 #[derive(Default)]
 pub struct SourceChanges<'a> {
     pub name: Option<&'a str>,
@@ -395,14 +397,30 @@ fn instance_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<U
     if stored.source_type != GITLAB {
         return None;
     }
-    moved_refusal(stored, changes).or_else(|| stored_token_refusal(stored, changes))
+    unnamed_refusal(changes)
+        .or_else(|| moved_refusal(stored, changes))
+        .or_else(|| stored_token_refusal(stored, changes))
+}
+
+fn unnamed_refusal(changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    let unnamed = changes.credentials_encrypted.is_some()
+        && changes.config.is_none()
+        && changes.instance.is_none();
+    unnamed.then_some(UpdateError::UnnamedTokenInstance)
 }
 
 fn moved_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
     let seen = changes.instance?;
+    let Ok(expected) = GitLabAdapter::instance_of(&token_instance(seen)) else {
+        return Some(UpdateError::UnreadableTokenInstance);
+    };
     let current = GitLabAdapter::instance_of(&stored.config).ok()?;
-    let expected = GitLabAdapter::instance_of(&serde_json::json!({ BASE_URL_FIELD: seen })).ok()?;
     (current != expected).then_some(UpdateError::InstanceMoved)
+}
+
+/// The config naming only `instance`, the GitLab instance a token is for
+pub fn token_instance(instance: &str) -> serde_json::Value {
+    serde_json::json!({ BASE_URL_FIELD: instance })
 }
 
 fn stored_token_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
@@ -1159,6 +1177,52 @@ mod tests {
         assert_eq!(moved_with_token.config, moved);
         assert_eq!(
             moved_with_token.credentials_encrypted.as_deref(),
+            Some("ENC[v1:other]")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gitlab_token_sent_without_a_config_names_its_instance() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let source = instance(&pool, installation.workspace, "https://first.example").await;
+
+        let refused = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                credentials_encrypted: Some("ENC[v1:other]"),
+                ..SourceChanges::default()
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(refused, Err(UpdateError::UnnamedTokenInstance)),
+            "a token naming no instance must be refused, got {refused:?}"
+        );
+        let unchanged = stored(&pool, &source).await;
+        assert_eq!(
+            unchanged.credentials_encrypted,
+            source.credentials_encrypted
+        );
+        assert_eq!(unchanged.updated_at, source.updated_at);
+
+        let named = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                credentials_encrypted: Some("ENC[v1:other]"),
+                instance: Some("https://first.example"),
+                ..SourceChanges::default()
+            },
+        )
+        .await
+        .expect("a token naming the source's instance is stored");
+        assert_eq!(
+            named.credentials_encrypted.as_deref(),
             Some("ENC[v1:other]")
         );
     }

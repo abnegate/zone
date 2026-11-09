@@ -1,5 +1,6 @@
 //! Source endpoints
 
+use abnegate_secret::REDACTED;
 use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
 use abnegate_vcs::pull_request::ApplicationError;
@@ -132,6 +133,18 @@ fn validate_instance(source_type: &str, config: &serde_json::Value) -> Result<()
             internal()
         }
     })
+}
+
+/// Refuses the instance a GitLab token is sent for when no source could read from it
+fn validate_token_instance(source_type: &str, instance: &str) -> Result<(), ServerError> {
+    validate_instance(source_type, &sources::token_instance(instance)).map_err(
+        |error| match error {
+            ServerError::BadRequest(_) => {
+                ServerError::BadRequest(UpdateError::UnreadableTokenInstance.to_string())
+            }
+            error => error,
+        },
+    )
 }
 
 /// Refuses an installation whose token cannot read the repository `config` names.
@@ -569,10 +582,7 @@ impl std::fmt::Debug for CreateSourceRequest {
             .field("config", &self.config)
             .field("description", &self.description)
             .field("url", &self.url)
-            .field(
-                "credentials",
-                &self.credentials.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("credentials", &self.credentials.as_ref().map(|_| REDACTED))
             .field("github_installation_id", &self.github_installation_id)
             .finish()
     }
@@ -582,7 +592,8 @@ impl std::fmt::Debug for CreateSourceRequest {
 /// source as it is, `null` to detach the installation, or an id to attach it.
 /// `instance` names the GitLab instance the client last saw the source read
 /// from, so that a token entered for it is refused once the source reads from
-/// another.
+/// another. A GitLab update carrying `credentials` names it unless it also
+/// carries the `config` the token is for.
 #[derive(Deserialize)]
 pub struct UpdateSourceRequest {
     name: Option<String>,
@@ -604,10 +615,7 @@ impl std::fmt::Debug for UpdateSourceRequest {
             .field("description", &self.description)
             .field("url", &self.url)
             .field("is_active", &self.is_active)
-            .field(
-                "credentials",
-                &self.credentials.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("credentials", &self.credentials.as_ref().map(|_| REDACTED))
             .field("github_installation_id", &self.github_installation_id)
             .field("instance", &self.instance)
             .finish()
@@ -786,6 +794,10 @@ pub async fn update(
         validate_instance(&previous.source_type, config)?;
     }
 
+    if let Some(instance) = &request.instance {
+        validate_token_instance(&previous.source_type, instance)?;
+    }
+
     if let Some(Some(installation)) = request.github_installation_id {
         validate_installation(
             &state,
@@ -829,9 +841,10 @@ pub async fn update(
     .map_err(|error| match error {
         UpdateError::NotFound => not_found(),
         UpdateError::Unattachable => unattachable(),
-        error @ (UpdateError::InstanceNeedsToken | UpdateError::UnreadableInstanceNeedsToken) => {
-            ServerError::BadRequest(error.to_string())
-        }
+        error @ (UpdateError::InstanceNeedsToken
+        | UpdateError::UnreadableInstanceNeedsToken
+        | UpdateError::UnnamedTokenInstance
+        | UpdateError::UnreadableTokenInstance) => ServerError::BadRequest(error.to_string()),
         error @ UpdateError::InstanceMoved => ServerError::Conflict(error.to_string()),
         UpdateError::Database(error) => {
             tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
