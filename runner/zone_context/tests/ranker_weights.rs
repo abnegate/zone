@@ -5,23 +5,23 @@ const TRAINED_ABSOLUTE_TOLERANCE: f32 = 1e-7;
 const STRICT: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
 const WEIGHT_BITS: [u32; 15] = [
-    0xbf16_6acc,
-    0x402b_26f6,
+    0xbf1a_0d9d,
+    0x402d_9075,
     0x0000_0000,
-    0x4019_30de,
-    0x3d9b_0d4e,
-    0x3d9b_0d4e,
+    0x4018_c4a3,
+    0x3d9f_3a2d,
+    0x3d9f_3a2d,
     0x0000_0000,
-    0x3e3b_bed5,
-    0x3e20_6d68,
-    0x3f51_f17c,
-    0x3c62_9d1c,
-    0xba34_d78a,
-    0xbe8f_add7,
-    0x4014_da89,
+    0x3e62_216e,
+    0x3e2d_2cd6,
+    0x3f55_08cc,
+    0x3c67_f61e,
+    0xba41_7ed1,
+    0xbe93_055e,
+    0x4014_22f3,
     0x0000_0000,
 ];
-const BIAS_BITS: u32 = 0x3ee5_035a;
+const BIAS_BITS: u32 = 0x3eea_0fd5;
 
 fn within_trained_tolerance(actual: f32, expected: f32) -> bool {
     actual.to_bits() == expected.to_bits()
@@ -45,7 +45,7 @@ fn mismatch(field: &str, actual: f32, expected_bits: u32) -> Option<String> {
 }
 
 #[test]
-fn default_ranker_matches_the_weights_trained_before_the_crate_switch() {
+fn default_ranker_matches_the_weights_trained_on_the_retrieval_eval() {
     let ranker = default_ranker();
     assert_eq!(
         ranker.weights.len(),
@@ -64,7 +64,7 @@ fn default_ranker_matches_the_weights_trained_before_the_crate_switch() {
     mismatches.extend(mismatch("bias", ranker.bias, BIAS_BITS));
     assert!(
         mismatches.is_empty(),
-        "the default ranker drifted from its pre-switch training ({}):\n{}",
+        "the default ranker drifted from its pinned training ({}):\n{}",
         if STRICT {
             "bit-exact on the capture platform"
         } else {
