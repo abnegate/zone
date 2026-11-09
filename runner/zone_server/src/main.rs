@@ -276,7 +276,7 @@ fn dimension_label(width: usize) -> String {
 const USAGE: &str =
     "Usage: zone-server [--migrate-only | --seal-secrets [--dry-run] --backup <path>]";
 const DEFAULT_FILTER: &str =
-    "zone_server=debug,abnegate_agent=debug,zone_core=debug,zone_context=debug,tower_http=debug";
+    "zone_server=debug,zone_core=debug,abnegate_agent=debug,zone_context=debug,tower_http=debug";
 const DATABASE_URL: &str = "DATABASE_URL";
 const MIGRATE_ONLY: &str = "--migrate-only";
 const SEAL_SECRETS: &str = "--seal-secrets";
@@ -439,6 +439,7 @@ mod tests {
             assert!(tracing::enabled!(target: "abnegate_agent::mcp::hub", Level::DEBUG));
             assert!(tracing::enabled!(target: "abnegate_agent::mcp::hub", Level::WARN));
             assert!(tracing::enabled!(target: "abnegate_agent_cli::provider", Level::DEBUG));
+            assert!(tracing::enabled!(target: "abnegate_agent::chat::guard", Level::DEBUG));
             assert!(tracing::enabled!(target: "zone_core::servers", Level::DEBUG));
         });
     }
