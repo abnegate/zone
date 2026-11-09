@@ -3,10 +3,13 @@ use std::fs;
 use std::iter;
 use std::os::unix::fs::PermissionsExt;
 
+use serde_json::Value;
+use serde_json::json;
 use tempfile::TempDir;
 use zone_routing::PROXY_URL_VARIABLE;
 
 use super::recording::PROXY;
+use super::recording::RECORDER;
 use super::recording::assert_routed;
 use super::recording::document;
 use super::*;
@@ -194,19 +197,60 @@ fn a_config_whose_only_server_is_disabled_gets_the_magents_fallback() {
 }
 
 #[test]
-fn an_unlaunchable_server_still_gets_the_magents_fallback() {
+fn a_server_with_a_command_and_a_url_launches_over_stdio() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    variables.set(
+        SERVERS,
+        r#"{"mcpServers": {"both": {"command": "docs-server", "url": "http://localhost:3000/mcp"}}}"#,
+    );
+
+    let config = config();
+
+    assert_eq!(names(&config), ["both"]);
+    assert_launched_over_stdio(&config.servers["both"]);
+}
+
+#[test]
+fn a_server_with_a_command_and_any_type_launches_over_stdio() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+
+    for transport in ["http", "sse", "ws"] {
+        variables.set(
+            SERVERS,
+            json!({"mcpServers": {"typed": {"command": "docs-server", "type": transport}}})
+                .to_string(),
+        );
+
+        let config = config();
+
+        assert_eq!(names(&config), ["typed"], "{transport}");
+        assert_launched_over_stdio(&config.servers["typed"]);
+    }
+}
+
+#[test]
+fn a_blank_command_discards_the_whole_document_for_the_magents_fallback() {
     let home = TempDir::new().unwrap();
     let mut variables = isolated(&home);
 
     for document in [
         r#"{"mcpServers": {"blank": {"command": "  "}}}"#,
-        r#"{"mcpServers": {"typed": {"command": "docs-server", "type": "http"}}}"#,
-        r#"{"mcpServers": {"both": {"command": "docs-server", "url": "http://localhost:3000/mcp"}}}"#,
+        r#"{"mcpServers": {"blank": {"command": ""}, "docs": {"command": "docs-server"}}}"#,
+        r#"{"mcpServers": {"blank": {"command": " ", "disabled": true}, "docs": {"command": "docs-server"}}}"#,
+        r#"{"mcpServers": {"blank": {"command": " ", "url": "http://localhost:3000/mcp"}, "docs": {"command": "docs-server"}}}"#,
     ] {
         variables.set(SERVERS, document);
 
         assert_eq!(names(&config()), [MAGENTS], "{document}");
     }
+}
+
+fn assert_launched_over_stdio(server: &McpServer) {
+    assert_eq!(server.url, None);
+    assert_eq!(server.transport, Some(McpTransport::Stdio));
+    assert!(server.valid());
 }
 
 #[test]
@@ -331,4 +375,24 @@ async fn attached_servers_route_through_zones_proxy_over_their_own() {
 
     assert_eq!(connected, 0, "the recorder exits without answering");
     assert_routed(&recorded);
+}
+
+#[tokio::test]
+async fn a_server_with_a_command_and_a_url_or_a_type_is_launched_as_a_command() {
+    for (field, value) in [("url", "http://localhost:3000/mcp"), ("type", "http")] {
+        let home = TempDir::new().unwrap();
+        let mut variables = isolated(&home);
+        let recorded = home.path().join("environment");
+        let mut configured: Value = serde_json::from_str(&document(&recorded)).unwrap();
+        configured["mcpServers"][RECORDER][field] = json!(value);
+        variables.set(SERVERS, configured.to_string());
+        variables.set(PROXY_URL_VARIABLE, PROXY);
+        let mut registry = commands::registry(Shell::Excluded);
+
+        attach(&mut registry).await;
+        drop(variables);
+
+        assert!(recorded.is_file(), "{field}: the recorder was not started");
+        assert_routed(&recorded);
+    }
 }
