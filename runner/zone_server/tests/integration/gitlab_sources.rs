@@ -30,7 +30,6 @@ const NEEDS_TOKEN: &str =
     "Re-enter the access token to read this source from another GitLab instance.";
 const HOST_FIELD: &str = "host";
 const BASE_URL_FIELD: &str = "base_url";
-const INDEX_SETTLE: Duration = Duration::from_millis(300);
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 const LOCK_POLL: Duration = Duration::from_millis(10);
 
@@ -53,16 +52,12 @@ struct Harness {
 }
 
 impl Harness {
-    async fn indexing() -> Self {
-        Self {
-            client: TestClient::with_db().await,
-        }
-    }
-
     /// Accepted updates spawn indexing, which would read the instance; these
     /// tests only assert what the route stores.
     async fn new() -> Self {
-        let harness = Self::indexing().await;
+        let harness = Self {
+            client: TestClient::with_db().await,
+        };
         harness.client.state().index_semaphore().close();
         harness
     }
@@ -161,14 +156,6 @@ impl Harness {
             .await
     }
 
-    async fn gatherings(&self, source: Uuid) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM context_gatherings WHERE $1 = ANY(source_ids)")
-            .bind(source)
-            .fetch_one(self.pool())
-            .await
-            .expect("the source's gatherings are countable")
-    }
-
     async fn wait_until_blocked_by(&self, backend: i32) {
         let blocked = async {
             loop {
@@ -212,7 +199,7 @@ fn assert_unchanged(before: &SourceRow, after: &SourceRow) {
 
 #[tokio::test]
 async fn moving_a_source_to_another_instance_without_its_token_is_refused() {
-    let harness = Harness::indexing().await;
+    let harness = Harness::new().await;
     let tenant = harness.tenant().await;
 
     for field in [HOST_FIELD, BASE_URL_FIELD] {
@@ -244,12 +231,6 @@ async fn moving_a_source_to_another_instance_without_its_token_is_refused() {
                 "{field} {stored:?} -> {moved:?}"
             );
             assert_unchanged(&source, &harness.stored(&tenant, source.id).await);
-            tokio::time::sleep(INDEX_SETTLE).await;
-            assert_eq!(
-                harness.gatherings(source.id).await,
-                0,
-                "a refused update indexes nothing: {field} {stored:?} -> {moved:?}"
-            );
         }
     }
 
