@@ -16,7 +16,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use uuid::Uuid;
-use zone_context::adapters::GitLabAdapter;
 
 use super::common::Timestamps;
 use super::error::ErrorResponse;
@@ -28,7 +27,6 @@ use crate::db::sources;
 use crate::db::sources::GITHUB;
 use crate::db::sources::GITLAB;
 use crate::db::sources::SourceChanges;
-use crate::db::sources::SourceRow;
 use crate::db::sources::UpdateError;
 use crate::error::ServerError;
 use crate::services::github_app;
@@ -59,9 +57,6 @@ const UNREACHABLE: &str = "Zone can't reach this repository through that GitHub 
 const GITHUB_UNAVAILABLE: &str = "GitHub could not be reached.";
 
 const APP_REJECTED: &str = "The GitHub App connection is broken. Reconnect GitHub.";
-
-const GITLAB_INSTANCE_NEEDS_TOKEN: &str =
-    "Re-enter the access token to read this source from another GitLab instance.";
 
 const NOTION: &str = "notion";
 
@@ -114,25 +109,6 @@ async fn validate_installation(
             Err(internal())
         }
     }
-}
-
-/// Refuses a GitLab instance change that keeps the stored token, which would
-/// otherwise be sent to an instance it was never entered for.
-fn validate_instance(
-    previous: &SourceRow,
-    config: &serde_json::Value,
-    with_credentials: bool,
-) -> Result<(), ServerError> {
-    let reuses_stored_token = !with_credentials && previous.credentials_encrypted.is_some();
-    if previous.source_type == GITLAB
-        && reuses_stored_token
-        && GitLabAdapter::instance_of(&previous.config) != GitLabAdapter::instance_of(config)
-    {
-        return Err(ServerError::BadRequest(
-            GITLAB_INSTANCE_NEEDS_TOKEN.to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// Refuses an installation whose token cannot read the repository `config` names.
@@ -748,7 +724,7 @@ pub async fn create(
     .await
     .map_err(|error| match error {
         UpdateError::Unattachable => unattachable(),
-        UpdateError::NotFound | UpdateError::Database(_) => {
+        UpdateError::NotFound | UpdateError::InstanceNeedsToken | UpdateError::Database(_) => {
             tracing::error!(workspace_id = %workspace_id, name = %request.name, source_type = %request.source_type, error = %error, "Database error creating source");
             internal()
         }
@@ -808,10 +784,6 @@ pub async fn update(
         })?
         .ok_or_else(not_found)?;
 
-    if let Some(config) = &request.config {
-        validate_instance(&previous, config, request.credentials.is_some())?;
-    }
-
     if let Some(Some(installation)) = request.github_installation_id {
         validate_installation(
             &state,
@@ -854,6 +826,7 @@ pub async fn update(
     .map_err(|error| match error {
         UpdateError::NotFound => not_found(),
         UpdateError::Unattachable => unattachable(),
+        error @ UpdateError::InstanceNeedsToken => ServerError::BadRequest(error.to_string()),
         UpdateError::Database(error) => {
             tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
             internal()

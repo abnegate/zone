@@ -31,6 +31,8 @@ const NEEDS_TOKEN: &str =
 const HOST_FIELD: &str = "host";
 const BASE_URL_FIELD: &str = "base_url";
 const INDEX_SETTLE: Duration = Duration::from_millis(300);
+const LOCK_WAIT: Duration = Duration::from_secs(10);
+const LOCK_POLL: Duration = Duration::from_millis(10);
 
 fn config(field: &str, instance: Option<&str>, branch: &str) -> Value {
     let mut config = json!({ "project_id": PROJECT, "branch": branch });
@@ -118,11 +120,13 @@ impl Harness {
         }
     }
 
+    fn seal(&self, token: &str) -> String {
+        encrypt_value(&SecretValue::new(token), self.client.state().master_key())
+            .expect("the token seals")
+    }
+
     async fn source(&self, tenant: &Tenant, config: Value, token: Option<&str>) -> SourceRow {
-        let sealed = token.map(|token| {
-            encrypt_value(&SecretValue::new(token), self.client.state().master_key())
-                .expect("the token seals")
-        });
+        let sealed = token.map(|token| self.seal(token));
         sources::create_source(
             self.pool(),
             NewSource {
@@ -163,6 +167,27 @@ impl Harness {
             .fetch_one(self.pool())
             .await
             .expect("the source's gatherings are countable")
+    }
+
+    async fn wait_until_blocked_by(&self, backend: i32) {
+        let blocked = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted AND $1 = ANY(pg_blocking_pids(pid)))",
+                )
+                .bind(backend)
+                .fetch_one(self.pool())
+                .await
+                .expect("the lock table is readable");
+                if waiting {
+                    return;
+                }
+                tokio::time::sleep(LOCK_POLL).await;
+            }
+        };
+        tokio::time::timeout(LOCK_WAIT, blocked)
+            .await
+            .expect("the update waits on the row the concurrent write holds");
     }
 
     async fn discard(&self, tenant: &Tenant) {
@@ -353,6 +378,57 @@ async fn a_source_with_no_stored_token_may_move_to_another_instance() {
     let stored = harness.stored(&tenant, source.id).await;
     assert_eq!(stored.config, moved);
     assert_eq!(stored.credentials_encrypted, None);
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_token_stored_while_the_move_waits_is_never_paired_with_the_new_instance() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let source = harness
+        .source(
+            &tenant,
+            config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            None,
+        )
+        .await;
+    let sealed = harness.seal(STORED_TOKEN);
+    let mut concurrent = harness.pool().begin().await.expect("a transaction");
+    let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *concurrent)
+        .await
+        .expect("the backend is named");
+    sqlx::query("UPDATE sources SET credentials_encrypted = $2 WHERE id = $1")
+        .bind(source.id)
+        .bind(&sealed)
+        .execute(&mut *concurrent)
+        .await
+        .expect("the concurrent token is written");
+
+    let (moved, ()) = tokio::join!(
+        harness.update(
+            &tenant,
+            source.id,
+            json!({ "config": config(HOST_FIELD, Some(OTHER_INSTANCE), "main") }),
+        ),
+        async {
+            harness.wait_until_blocked_by(backend).await;
+            concurrent
+                .commit()
+                .await
+                .expect("the concurrent token commits");
+        },
+    );
+
+    moved.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(moved.json_value()["error"].as_str(), Some(NEEDS_TOKEN));
+    let stored = harness.stored(&tenant, source.id).await;
+    assert_eq!(stored.config, source.config, "the instance did not move");
+    assert_eq!(
+        stored.credentials_encrypted.as_deref(),
+        Some(sealed.as_str())
+    );
 
     harness.discard(&tenant).await;
 }

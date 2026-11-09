@@ -8,6 +8,7 @@ use serde::Serialize;
 use sqlx::{PgExecutor, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
+use zone_context::adapters::GitLabAdapter;
 
 use super::DbResult;
 use super::github_installations::UNATTACHABLE;
@@ -15,6 +16,9 @@ use super::github_installations::UNATTACHABLE;
 pub const GITHUB: &str = "github";
 
 pub const GITLAB: &str = "gitlab";
+
+const INSTANCE_NEEDS_TOKEN: &str =
+    "Re-enter the access token to read this source from another GitLab instance.";
 
 /// Source row from database
 #[derive(Clone, sqlx::FromRow)]
@@ -283,6 +287,8 @@ pub enum UpdateError {
     NotFound,
     #[error("{UNATTACHABLE}")]
     Unattachable,
+    #[error("{INSTANCE_NEEDS_TOKEN}")]
+    InstanceNeedsToken,
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
@@ -296,7 +302,9 @@ fn refused_installation(error: sqlx::Error) -> UpdateError {
     }
 }
 
-/// Apply every change to a source or none of them.
+/// Apply every change to a source or none of them. A GitLab source holding a
+/// token moves to another instance only with a token entered for it, judged
+/// against the row as it is locked for the write.
 pub async fn update_source(
     pool: &PgPool,
     id: Uuid,
@@ -305,12 +313,19 @@ pub async fn update_source(
 ) -> Result<SourceRow, UpdateError> {
     let mut transaction = pool.begin().await?;
 
+    let locked = lock_source(&mut *transaction, id, workspace_id)
+        .await?
+        .ok_or(UpdateError::NotFound)?;
+    if moves_stored_token(&locked, &changes) {
+        return Err(UpdateError::InstanceNeedsToken);
+    }
+
     let mut current = update_fields(&mut *transaction, id, workspace_id, &changes)
         .await?
         .ok_or(UpdateError::NotFound)?;
 
     if let Some(installation) = changes.github_installation_id {
-        // update_fields holds the row's lock, so no row here means the installation was refused.
+        // The row is locked, so no row here means the installation was refused.
         current = set_github_installation(&mut *transaction, id, workspace_id, installation)
             .await
             .map_err(refused_installation)?
@@ -325,6 +340,36 @@ pub async fn update_source(
 
     transaction.commit().await?;
     Ok(current)
+}
+
+async fn lock_source<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+    workspace_id: Uuid,
+) -> DbResult<Option<SourceRow>> {
+    sqlx::query_as::<_, SourceRow>(
+        r#"
+        SELECT id, name, source_type, config, credentials_encrypted, description, url,
+               is_active, last_verified_at, last_error, created_at, updated_at, workspace_id,
+               github_installation_id
+        FROM sources
+        WHERE id = $1 AND workspace_id = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .fetch_optional(executor)
+    .await
+}
+
+fn moves_stored_token(stored: &SourceRow, changes: &SourceChanges<'_>) -> bool {
+    stored.source_type == GITLAB
+        && stored.credentials_encrypted.is_some()
+        && changes.credentials_encrypted.is_none()
+        && changes.config.as_ref().is_some_and(|config| {
+            GitLabAdapter::instance_of(&stored.config) != GitLabAdapter::instance_of(config)
+        })
 }
 
 async fn update_fields<'e>(
@@ -991,6 +1036,70 @@ mod tests {
                 "{reason} installation created a source"
             );
         }
+    }
+
+    async fn instance(pool: &PgPool, workspace_id: Uuid, host: &str) -> SourceRow {
+        create_source(
+            pool,
+            NewSource {
+                workspace_id,
+                name: &format!("project-{}", Uuid::new_v4()),
+                source_type: GITLAB,
+                config: serde_json::json!({ "project_id": "group/project", "host": host }),
+                description: None,
+                url: None,
+                credentials_encrypted: Some("ENC[v1:token]"),
+                github_installation_id: None,
+            },
+        )
+        .await
+        .expect("a source")
+    }
+
+    #[tokio::test]
+    async fn a_gitlab_source_holding_a_token_moves_instance_only_with_a_new_one() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let source = instance(&pool, installation.workspace, "https://first.example").await;
+        let moved =
+            serde_json::json!({ "project_id": "group/project", "host": "https://second.example" });
+
+        let refused = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                config: Some(moved.clone()),
+                ..SourceChanges::default()
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(refused, Err(UpdateError::InstanceNeedsToken)),
+            "the stored token must not follow the source, got {refused:?}"
+        );
+        let unchanged = stored(&pool, &source).await;
+        assert_eq!(unchanged.config, source.config);
+        assert_eq!(unchanged.updated_at, source.updated_at);
+
+        let moved_with_token = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                config: Some(moved.clone()),
+                credentials_encrypted: Some("ENC[v1:other]"),
+                ..SourceChanges::default()
+            },
+        )
+        .await
+        .expect("a new token moves the source");
+        assert_eq!(moved_with_token.config, moved);
+        assert_eq!(
+            moved_with_token.credentials_encrypted.as_deref(),
+            Some("ENC[v1:other]")
+        );
     }
 
     #[tokio::test]
