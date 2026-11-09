@@ -1,4 +1,5 @@
 use thiserror::Error;
+use zone_context::error::ContextError;
 
 use crate::db::github_installations::UNATTACHABLE;
 use crate::db::sources::CreateError;
@@ -32,6 +33,8 @@ pub enum UpdateError {
     UnnamedTokenInstance,
     #[error("{UNREADABLE_TOKEN_INSTANCE}")]
     UnreadableTokenInstance,
+    #[error(transparent)]
+    Adapter(ContextError),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }

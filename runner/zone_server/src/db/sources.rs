@@ -9,6 +9,7 @@ use sqlx::PgExecutor;
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_context::adapters::GitLabAdapter;
+use zone_context::error::ContextError;
 
 use super::DbResult;
 
@@ -411,16 +412,20 @@ fn unnamed_refusal(changes: &SourceChanges<'_>) -> Option<UpdateError> {
 }
 
 fn moved_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
-    let seen = changes.instance?;
-    let Ok(expected) = GitLabAdapter::instance_of(&token_instance(seen)) else {
-        return Some(UpdateError::UnreadableTokenInstance);
-    };
+    let seen = token_instance(changes.instance?);
+    if let Err(error) = GitLabAdapter::check_instance(&seen) {
+        return Some(match error {
+            ContextError::InvalidSourceConfig(_) => UpdateError::UnreadableTokenInstance,
+            error => UpdateError::Adapter(error),
+        });
+    }
+    let expected = GitLabAdapter::instance_of(&seen).ok()?;
     let current = GitLabAdapter::instance_of(&stored.config).ok()?;
     (current != expected).then_some(UpdateError::InstanceMoved)
 }
 
 /// The config naming only `instance`, the GitLab instance a token is for
-pub fn token_instance(instance: &str) -> serde_json::Value {
+fn token_instance(instance: &str) -> serde_json::Value {
     serde_json::json!({ BASE_URL_FIELD: instance })
 }
 
@@ -1237,6 +1242,42 @@ mod tests {
             named.credentials_encrypted.as_deref(),
             Some("ENC[v1:other]")
         );
+    }
+
+    #[tokio::test]
+    async fn a_token_naming_an_instance_no_source_reads_from_is_refused_unstored() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let source = instance(&pool, installation.workspace, "https://first.example").await;
+
+        for named in [
+            "not a url",
+            "http://first.example",
+            "https://first.example/#fragment",
+        ] {
+            let refused = update_source(
+                &pool,
+                source.id,
+                installation.workspace,
+                SourceChanges {
+                    credentials_encrypted: Some("ENC[v1:other]"),
+                    instance: Some(named),
+                    ..SourceChanges::default()
+                },
+            )
+            .await;
+
+            assert!(
+                matches!(refused, Err(UpdateError::UnreadableTokenInstance)),
+                "a token for {named} must be refused, got {refused:?}"
+            );
+            let unchanged = stored(&pool, &source).await;
+            assert_eq!(
+                unchanged.credentials_encrypted,
+                source.credentials_encrypted
+            );
+            assert_eq!(unchanged.updated_at, source.updated_at);
+        }
     }
 
     #[tokio::test]
