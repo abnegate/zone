@@ -18,6 +18,7 @@ mod update_error;
 
 pub use create_error::CreateError;
 pub use link::derived_link;
+use link::legacy_link;
 pub use update_error::UpdateError;
 
 pub const GITHUB: &str = "github";
@@ -438,16 +439,27 @@ fn stored_token_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Opti
     }
 }
 
-/// The link a config change moves the source to, when its stored link is the
-/// one its stored config derives, or it has none
+/// The link a config change moves the source to, when its stored link is one
+/// its stored config derives, or it has none
 fn relinked(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<String> {
     let config = changes.config.as_ref()?;
     let link = stored.url.as_deref().filter(|link| !link.is_empty());
-    let derived = derived_link(&stored.source_type, &stored.config);
-    if link.is_some() && link != derived.as_deref() {
+    if link.is_some_and(|link| !derives(stored, link)) {
         return None;
     }
     derived_link(&stored.source_type, config)
+}
+
+/// Whether `link` is the one the stored config derives, or the one released
+/// code derived from it
+fn derives(stored: &SourceRow, link: &str) -> bool {
+    let legacy = (stored.source_type == GITLAB)
+        .then(|| legacy_link(&stored.config))
+        .flatten();
+    [derived_link(&stored.source_type, &stored.config), legacy]
+        .into_iter()
+        .flatten()
+        .any(|derived| derived == link)
 }
 
 async fn update_fields<'e>(
