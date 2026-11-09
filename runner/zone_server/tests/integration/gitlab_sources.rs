@@ -28,6 +28,8 @@ const OTHER_INSTANCE: &str = "https://localhost:9";
 const GITLAB_COM: &str = "https://gitlab.com";
 const NEEDS_TOKEN: &str =
     "Re-enter the access token to read this source from another GitLab instance.";
+const INVALID_INSTANCE: &str = "Invalid source configuration: Invalid GitLab config: Invalid GitLab origin: expected an HTTPS (or opted-in HTTP) URL with no query, fragment or credentials, outside link-local and metadata addresses";
+const BOTH_NAMED: &str = "Invalid source configuration: Invalid GitLab config: name the instance as host or base_url, not both";
 const HOST_FIELD: &str = "host";
 const BASE_URL_FIELD: &str = "base_url";
 const LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -146,6 +148,23 @@ impl Harness {
             .expect("the source exists")
     }
 
+    async fn create(&self, tenant: &Tenant, body: Value) -> TestResponse {
+        self.client
+            .post_json_auth(
+                &format!("/api/workspaces/{}/sources", tenant.workspace),
+                &body,
+                &tenant.token,
+            )
+            .await
+    }
+
+    async fn count(&self, tenant: &Tenant) -> usize {
+        sources::list_sources(self.pool(), tenant.workspace, None, None, 100, 0)
+            .await
+            .expect("the sources are listable")
+            .len()
+    }
+
     async fn update(&self, tenant: &Tenant, id: Uuid, body: Value) -> TestResponse {
         self.client
             .put_json_auth(
@@ -210,7 +229,6 @@ async fn moving_a_source_to_another_instance_without_its_token_is_refused() {
             (Some(STORED_INSTANCE), None),
             (Some(STORED_INSTANCE), Some(GITLAB_COM)),
             (Some(STORED_INSTANCE), Some("https://127.0.0.1:9/gitlab")),
-            (Some(STORED_INSTANCE), Some("http://127.0.0.1:9")),
         ] {
             let source = harness
                 .source(&tenant, config(field, stored, "main"), Some(STORED_TOKEN))
@@ -410,6 +428,134 @@ async fn a_token_stored_while_the_move_waits_is_never_paired_with_the_new_instan
         stored.credentials_encrypted.as_deref(),
         Some(sealed.as_str())
     );
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn an_instance_the_adapter_refuses_is_refused_unwritten() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+
+    for field in [HOST_FIELD, BASE_URL_FIELD] {
+        for refused in [
+            "http://127.0.0.1:9",
+            "https://user:password@127.0.0.1:9",
+            "https://127.0.0.1:9/?private_token=glpat-throwaway-query",
+        ] {
+            for credentials in [None, Some(SENT_TOKEN)] {
+                let source = harness
+                    .source(
+                        &tenant,
+                        config(field, Some(STORED_INSTANCE), "main"),
+                        Some(STORED_TOKEN),
+                    )
+                    .await;
+                let mut body = json!({ "config": config(field, Some(refused), "main") });
+                if let Some(credentials) = credentials {
+                    body["credentials"] = json!(credentials);
+                }
+
+                let response = harness.update(&tenant, source.id, body).await;
+
+                response.assert_status(StatusCode::BAD_REQUEST);
+                let error = response.json_value()["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                assert_eq!(error, INVALID_INSTANCE, "{field} {credentials:?}");
+                assert_unchanged(&source, &harness.stored(&tenant, source.id).await);
+            }
+        }
+    }
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_config_naming_both_host_and_base_url_is_refused_unwritten() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+
+    for (host, base_url) in [
+        (STORED_INSTANCE, STORED_INSTANCE),
+        (STORED_INSTANCE, OTHER_INSTANCE),
+        (OTHER_INSTANCE, STORED_INSTANCE),
+    ] {
+        for credentials in [None, Some(SENT_TOKEN)] {
+            let source = harness
+                .source(
+                    &tenant,
+                    config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+                    Some(STORED_TOKEN),
+                )
+                .await;
+            let mut named = config(HOST_FIELD, Some(host), "main");
+            named[BASE_URL_FIELD] = json!(base_url);
+            let mut body = json!({ "config": named });
+            if let Some(credentials) = credentials {
+                body["credentials"] = json!(credentials);
+            }
+
+            let response = harness.update(&tenant, source.id, body).await;
+
+            response.assert_status(StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.json_value()["error"].as_str(),
+                Some(BOTH_NAMED),
+                "{host} {base_url} {credentials:?}"
+            );
+            assert_unchanged(&source, &harness.stored(&tenant, source.id).await);
+        }
+    }
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn creating_a_source_at_an_instance_the_adapter_refuses_stores_nothing() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+
+    for (instance, error) in [
+        (
+            json!({ HOST_FIELD: "http://127.0.0.1:9" }),
+            INVALID_INSTANCE,
+        ),
+        (
+            json!({ BASE_URL_FIELD: "https://127.0.0.1:9/?private_token=glpat-throwaway-query" }),
+            INVALID_INSTANCE,
+        ),
+        (
+            json!({ HOST_FIELD: STORED_INSTANCE, BASE_URL_FIELD: STORED_INSTANCE }),
+            BOTH_NAMED,
+        ),
+    ] {
+        let mut named = config(HOST_FIELD, None, "main");
+        for (field, value) in instance.as_object().expect("an instance") {
+            named[field] = value.clone();
+        }
+
+        let response = harness
+            .create(
+                &tenant,
+                json!({
+                    "name": "project",
+                    "source_type": GITLAB,
+                    "config": named,
+                    "credentials": SENT_TOKEN,
+                }),
+            )
+            .await;
+
+        response.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.json_value()["error"].as_str(),
+            Some(error),
+            "{instance}"
+        );
+    }
+    assert_eq!(harness.count(&tenant).await, 0);
 
     harness.discard(&tenant).await;
 }

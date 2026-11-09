@@ -16,6 +16,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use uuid::Uuid;
+use zone_context::adapters::GitLabAdapter;
+use zone_context::error::ContextError;
 
 use super::common::Timestamps;
 use super::error::ErrorResponse;
@@ -109,6 +111,20 @@ async fn validate_installation(
             Err(internal())
         }
     }
+}
+
+/// Refuses a GitLab config naming an instance the adapter would never read from.
+fn validate_instance(source_type: &str, config: &serde_json::Value) -> Result<(), ServerError> {
+    if source_type != GITLAB {
+        return Ok(());
+    }
+    GitLabAdapter::check_instance(config).map_err(|error| match error {
+        error @ ContextError::InvalidSourceConfig(_) => ServerError::BadRequest(error.to_string()),
+        error => {
+            tracing::error!(error = %error, "The GitLab client could not be built");
+            internal()
+        }
+    })
 }
 
 /// Refuses an installation whose token cannot read the repository `config` names.
@@ -685,6 +701,8 @@ pub async fn create(
         )));
     }
 
+    validate_instance(&request.source_type, &request.config)?;
+
     if let Some(installation) = request.github_installation_id {
         validate_installation(
             &state,
@@ -783,6 +801,10 @@ pub async fn update(
             internal()
         })?
         .ok_or_else(not_found)?;
+
+    if let Some(config) = &request.config {
+        validate_instance(&previous.source_type, config)?;
+    }
 
     if let Some(Some(installation)) = request.github_installation_id {
         validate_installation(

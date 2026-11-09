@@ -85,6 +85,8 @@ const MISREAD_CONTENT_MESSAGE: &str = "Failed to parse content";
 
 const INVALID_CONFIG_MESSAGE: &str = "Invalid GitLab config";
 
+const BOTH_INSTANCES_MESSAGE: &str = "name the instance as host or base_url, not both";
+
 const DEFAULT_HOST: &str = "gitlab.com";
 
 const HTTPS_SCHEME: &str = "https";
@@ -304,13 +306,36 @@ impl GitLabAdapter {
     }
 
     /// The instance a GitLab source's `config` reads from, keyed so that every
-    /// spelling of one instance compares equal; `None` for gitlab.com
-    pub fn instance_of(config: &serde_json::Value) -> Option<String> {
-        let named = [BASE_URL_FIELD, HOST_FIELD]
+    /// spelling of one instance compares equal; `None` for gitlab.com. A
+    /// config naming both `host` and `base_url` is read from neither and is
+    /// refused here as its reads refuse it.
+    pub fn instance_of(config: &serde_json::Value) -> Result<Option<String>> {
+        Ok(Self::instance(Self::named_instance(config)?).map(|(_, key)| key))
+    }
+
+    /// Refuses a GitLab source's `config` whose instance the adapter would
+    /// never read from, without echoing the instance it names
+    pub fn check_instance(config: &serde_json::Value) -> Result<()> {
+        match Self::instance(Self::named_instance(config)?) {
+            Some((origin, _)) => GitLabService::configured(origin)
+                .map(drop)
+                .map_err(Self::misconfigured),
+            None => Ok(()),
+        }
+    }
+
+    fn named_instance(config: &serde_json::Value) -> Result<Option<&str>> {
+        let named: Vec<&serde_json::Value> = [BASE_URL_FIELD, HOST_FIELD]
             .into_iter()
             .filter_map(|field| config.get(field))
-            .find_map(serde_json::Value::as_str);
-        Self::instance(named).map(|(_, key)| key)
+            .collect();
+        match named.as_slice() {
+            [named] => Ok(named.as_str()),
+            [] => Ok(None),
+            _ => Err(ContextError::InvalidSourceConfig(format!(
+                "{INVALID_CONFIG_MESSAGE}: {BOTH_INSTANCES_MESSAGE}"
+            ))),
+        }
     }
 
     fn service_for(&self, config: &GitLabConfig) -> Result<(GitLabService, String)> {
@@ -1138,6 +1163,7 @@ mod tests {
     const INSTANCE_KEYS: [&str; 2] = ["host", "base_url"];
     const MALFORMED_TOKEN: &str =
         "Configuration error: Invalid authorization token format (token not logged for security)";
+    const BOTH_INSTANCES: &str = "Invalid source configuration: Invalid GitLab config: name the instance as host or base_url, not both";
     const INVALID_INSTANCE: &str = "Invalid source configuration: Invalid GitLab config: Invalid GitLab origin: expected an HTTPS (or opted-in HTTP) URL with no query, fragment or credentials, outside link-local and metadata addresses";
 
     async fn mount_instance(server: &MockServer, prefix: &str, file: &str) {
@@ -1898,7 +1924,8 @@ mod tests {
                 ("", None),
             ] {
                 assert_eq!(
-                    GitLabAdapter::instance_of(&json!({ "project": PROJECT, key: spelled })),
+                    GitLabAdapter::instance_of(&json!({ "project": PROJECT, key: spelled }))
+                        .unwrap(),
                     keyed.map(str::to_string),
                     "{key} {spelled}"
                 );
@@ -1911,15 +1938,74 @@ mod tests {
             json!({ "project": PROJECT, "host": 1 }),
             json!([]),
         ] {
-            assert_eq!(GitLabAdapter::instance_of(&unnamed), None, "{unnamed}");
+            assert_eq!(
+                GitLabAdapter::instance_of(&unnamed).unwrap(),
+                None,
+                "{unnamed}"
+            );
         }
 
+        let adapter = GitLabAdapter::new();
+        for both in [
+            json!({ "project": PROJECT, "base_url": "https://first.example", "host": "https://second.example" }),
+            json!({ "project": PROJECT, "base_url": "https://first.example", "host": "https://first.example" }),
+            json!({ "project": PROJECT, "base_url": "https://first.example", "host": null }),
+        ] {
+            let read = adapter.parse_config(&create_test_source(both.clone()));
+            let keyed = GitLabAdapter::instance_of(&both);
+
+            assert!(read.is_err(), "the adapter reads {both}");
+            assert_eq!(keyed.unwrap_err().to_string(), BOTH_INSTANCES, "{both}");
+        }
+    }
+
+    #[test]
+    fn an_instance_the_adapter_never_reads_from_is_refused_without_naming_it() {
+        for key in INSTANCE_KEYS {
+            for refused in [
+                "http://gitlab.example.com",
+                "https://user:secret-password@gitlab.example.com",
+                "https://gitlab.example.com/?private_token=secret-query",
+                "https://gitlab.example.com/#secret-fragment",
+                "https://169.254.169.254",
+                "gitlab.example.com",
+            ] {
+                let error =
+                    GitLabAdapter::check_instance(&json!({ "project": PROJECT, key: refused }))
+                        .unwrap_err();
+
+                assert!(
+                    matches!(error, ContextError::InvalidSourceConfig(_)),
+                    "{key} {refused}: {error:?}"
+                );
+                assert_eq!(error.to_string(), INVALID_INSTANCE, "{key} {refused}");
+            }
+
+            for read in [
+                "https://gitlab.example.com",
+                "https://gitlab.example.com:8443/gitlab/api/v4/",
+                "https://127.0.0.1:9",
+                "https://gitlab.com",
+                "",
+            ] {
+                assert!(
+                    GitLabAdapter::check_instance(&json!({ "project": PROJECT, key: read }))
+                        .is_ok(),
+                    "{key} {read}"
+                );
+            }
+        }
+
+        assert!(GitLabAdapter::check_instance(&json!({ "project": PROJECT })).is_ok());
         assert_eq!(
-            GitLabAdapter::instance_of(&json!({
-                "base_url": "https://first.example",
-                "host": "https://second.example"
-            })),
-            Some("https://first.example".to_string())
+            GitLabAdapter::check_instance(&json!({
+                "project": PROJECT,
+                "base_url": "https://gitlab.example.com",
+                "host": "https://gitlab.example.com"
+            }))
+            .unwrap_err()
+            .to_string(),
+            BOTH_INSTANCES
         );
     }
 

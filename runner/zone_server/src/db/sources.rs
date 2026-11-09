@@ -368,7 +368,13 @@ fn moves_stored_token(stored: &SourceRow, changes: &SourceChanges<'_>) -> bool {
         && stored.credentials_encrypted.is_some()
         && changes.credentials_encrypted.is_none()
         && changes.config.as_ref().is_some_and(|config| {
-            GitLabAdapter::instance_of(&stored.config) != GitLabAdapter::instance_of(config)
+            !matches!(
+                (
+                    GitLabAdapter::instance_of(&stored.config),
+                    GitLabAdapter::instance_of(config),
+                ),
+                (Ok(stored), Ok(changed)) if stored == changed
+            )
         })
 }
 
