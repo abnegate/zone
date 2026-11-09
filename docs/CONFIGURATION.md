@@ -2053,7 +2053,7 @@ Stdio servers inherit the Zone process environment, then overlay any `env` map o
 
 ### `ZONE_MCP_AUTO_CONNECT`
 - **Default**: `true`
-- **Description**: When no enabled stdio server is configured and `magents` is on `PATH`, attach `magents mcp` automatically. Disabled servers and servers with only a `url` do not count as configured.
+- **Description**: When no enabled stdio server is configured and `magents` is on `PATH`, attach `magents mcp` automatically. Disabled servers, servers with only a `url`, and servers Zone cannot launch (a blank `command`, both a `command` and a `url`, or a `type` other than `stdio`) do not count as configured.
 
 ### `ZONE_MCP_AUTO_MAGENTS`
 - **Default**: `true`
