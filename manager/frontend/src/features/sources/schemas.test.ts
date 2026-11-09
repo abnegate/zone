@@ -243,6 +243,34 @@ describe('GitLab host', () => {
     }
   });
 
+  it('links a source the server links nothing for at nothing either', () => {
+    for (const config of [
+      {
+        project_id: 'group/project',
+        host: 'https://gitlab.example.com',
+        base_url: 'https://other.example.com',
+      },
+      { project_id: 'group/project', host: '', base_url: 'https://gitlab.example.com' },
+      { project_id: 'group/project', host: 'ftp://gitlab.example.com' },
+    ]) {
+      const source = parse(SourceSchema, {
+        id: 'src-1',
+        name: 'project',
+        source_type: 'gitlab',
+        config,
+        description: null,
+        url: null,
+        is_active: true,
+        last_verified_at: null,
+        last_error: null,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+      });
+
+      expect(source.url).toBe('');
+    }
+  });
+
   it('still reads a stored source whose host predates the https rule', () => {
     const source = parse(SourceSchema, {
       id: 'src-1',
