@@ -4,7 +4,11 @@ use std::iter;
 use std::os::unix::fs::PermissionsExt;
 
 use tempfile::TempDir;
+use zone_routing::PROXY_URL_VARIABLE;
 
+use super::recording::PROXY;
+use super::recording::assert_routed;
+use super::recording::document;
 use super::*;
 use crate::commands;
 use crate::commands::Shell;
@@ -280,4 +284,20 @@ async fn attach_with_mcp_disabled_adds_nothing() {
     assert_eq!(connected, 0);
     assert_eq!(after, before);
     assert!(!registry.has_mcp());
+}
+
+#[tokio::test]
+async fn attached_servers_route_through_zones_proxy_over_their_own() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    let recorded = home.path().join("environment");
+    variables.set(SERVERS, document(&recorded));
+    variables.set(PROXY_URL_VARIABLE, PROXY);
+    let mut registry = commands::registry(Shell::Excluded);
+
+    let connected = attach(&mut registry).await;
+    drop(variables);
+
+    assert_eq!(connected, 0, "the recorder exits without answering");
+    assert_routed(&recorded);
 }

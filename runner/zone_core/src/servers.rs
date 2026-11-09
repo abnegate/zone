@@ -23,6 +23,8 @@ use abnegate_agent::mcp::McpConfig;
 use abnegate_agent::mcp::McpHub;
 use abnegate_agent::mcp::McpServer;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod recording;
 #[cfg(test)]
 mod tests;
 
