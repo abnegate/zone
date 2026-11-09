@@ -345,9 +345,9 @@ async fn moving_a_source_to_another_instance_with_a_new_token_is_accepted() {
     accepted.assert_status(StatusCode::OK);
     let stored = harness.stored(&tenant, source.id).await;
     assert_eq!(stored.config, moved);
-    assert!(stored.credentials_encrypted.is_some());
-    assert_ne!(
-        stored.credentials_encrypted, source.credentials_encrypted,
+    assert_eq!(
+        harness.open(stored.credentials_encrypted.as_deref().expect("a token")),
+        SENT_TOKEN,
         "the new token replaces the stored one"
     );
 
@@ -483,6 +483,54 @@ async fn a_token_stored_while_the_move_waits_is_never_paired_with_the_new_instan
     assert_eq!(
         stored.credentials_encrypted.as_deref(),
         Some(sealed.as_str())
+    );
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn an_edit_waiting_on_a_move_is_judged_against_the_moved_instance() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let source = harness
+        .source(
+            &tenant,
+            config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            Some(STORED_TOKEN),
+        )
+        .await;
+    let moved = config(HOST_FIELD, Some(OTHER_INSTANCE), "main");
+    let sealed = harness.seal(SENT_TOKEN);
+    let (concurrent, backend) = harness
+        .concurrent(source.id, Some(&moved), Some(&sealed))
+        .await;
+
+    let (edited, ()) = tokio::join!(
+        harness.update(
+            &tenant,
+            source.id,
+            json!({ "config": config(HOST_FIELD, Some(STORED_INSTANCE), "develop") }),
+        ),
+        async {
+            harness.wait_until_blocked_by(backend).await;
+            concurrent
+                .commit()
+                .await
+                .expect("the concurrent move commits");
+        },
+    );
+
+    edited.assert_status(StatusCode::BAD_REQUEST);
+    assert_eq!(edited.json_value()["error"].as_str(), Some(NEEDS_TOKEN));
+    let stored = harness.stored(&tenant, source.id).await;
+    assert_eq!(
+        stored.config, moved,
+        "the edit did not move the source back"
+    );
+    assert_eq!(
+        harness.open(stored.credentials_encrypted.as_deref().expect("a token")),
+        SENT_TOKEN,
+        "the moved instance's token is never paired with the old instance"
     );
 
     harness.discard(&tenant).await;
@@ -743,7 +791,7 @@ async fn a_stored_config_naming_no_readable_instance_changes_only_with_a_new_tok
 }
 
 #[tokio::test]
-async fn content_stored_for_a_source_never_blocks_its_update() {
+async fn content_stored_for_a_source_never_blocks_a_config_update() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let source = harness
@@ -767,12 +815,16 @@ async fn content_stored_for_a_source_never_blocks_its_update() {
     .expect("the content is stored");
     let branched = config(HOST_FIELD, Some(STORED_INSTANCE), "develop");
 
-    let updated = tokio::select! {
-        updated = harness.update(&tenant, source.id, json!({ "config": branched })) => updated,
-        () = harness.blocked_by(backend) => {
-            panic!("the update waits on the lock the content's foreign key holds")
+    let updated = tokio::time::timeout(LOCK_WAIT, async {
+        tokio::select! {
+            updated = harness.update(&tenant, source.id, json!({ "config": branched })) => updated,
+            () = harness.blocked_by(backend) => {
+                panic!("the update waits on the lock the content's foreign key holds")
+            }
         }
-    };
+    })
+    .await
+    .expect("the update finishes");
     indexing.rollback().await.expect("the content is discarded");
 
     updated.assert_status(StatusCode::OK);
