@@ -3,11 +3,15 @@
 //! This module provides the core types for representing content gathered from sources,
 //! along with utilities for tokenization, chunking, and intelligent sizing.
 
+mod retention;
 mod sizing;
 mod tokenizer;
+mod uri_namespace;
 
+pub use retention::Retention;
 pub use sizing::*;
 pub use tokenizer::*;
+pub use uri_namespace::UriNamespace;
 
 use std::collections::HashMap;
 
@@ -355,9 +359,9 @@ pub struct FetchResult {
     pub stats: FetchStats,
     /// Every live file URI in the source (used to retain the index)
     pub live_uris: Vec<String>,
-    /// Whether the source cut its listing short, so that `live_uris` may miss
-    /// live files and the index must keep the records it holds
-    pub truncated: bool,
+    /// The namespace of a listing the source cut short: `live_uris` may miss
+    /// live files in it, so the index keeps every record it holds there
+    pub truncated: Option<UriNamespace>,
     /// Provider version after this fetch (tree SHA / fingerprint)
     pub version: Option<String>,
 }
@@ -373,23 +377,22 @@ impl FetchResult {
             fetched_at: Utc::now(),
             stats: FetchStats::default(),
             live_uris: Vec::new(),
-            truncated: false,
+            truncated: None,
             version: None,
         }
     }
 
-    /// The URIs the index keeps for this source, dropping every other record:
-    /// the live URIs, or the fetched items' when the adapter lists none.
-    /// `None` when the listing was truncated, since a file it left out cannot
-    /// be told from one deleted.
-    pub fn retained_uris(&self) -> Option<Vec<String>> {
-        if self.truncated {
-            return None;
+    /// The records the index keeps for this source: the namespace a truncated
+    /// listing covers, else the live URIs, or the fetched items' when the
+    /// adapter lists none
+    pub fn retention(&self) -> Retention {
+        if let Some(namespace) = &self.truncated {
+            return Retention::Namespace(namespace.clone());
         }
         if self.live_uris.is_empty() {
-            return Some(self.items.iter().map(|item| item.uri.clone()).collect());
+            return Retention::Exact(self.items.iter().map(|item| item.uri.clone()).collect());
         }
-        Some(self.live_uris.clone())
+        Retention::Exact(self.live_uris.clone())
     }
 
     /// Add an item to the result
@@ -598,22 +601,26 @@ mod tests {
         ));
 
         assert_eq!(
-            result.retained_uris(),
-            Some(vec!["/fetched.rs".to_string()])
+            result.retention(),
+            Retention::Exact(vec!["/fetched.rs".to_string()])
         );
 
         result.live_uris = vec!["/fetched.rs".to_string(), "/unchanged.rs".to_string()];
 
-        assert_eq!(result.retained_uris(), Some(result.live_uris.clone()));
+        assert_eq!(
+            result.retention(),
+            Retention::Exact(result.live_uris.clone())
+        );
     }
 
     #[test]
-    fn a_truncated_listing_retains_every_indexed_record() {
+    fn a_truncated_listing_retains_the_namespace_it_covers() {
+        let namespace = UriNamespace::new("github://owner/repo/", "@main");
         let mut result = FetchResult::new(Uuid::new_v4(), false);
-        result.live_uris = vec!["/listed.rs".to_string()];
-        result.truncated = true;
+        result.live_uris = vec!["github://owner/repo/listed.rs@main".to_string()];
+        result.truncated = Some(namespace.clone());
 
-        assert_eq!(result.retained_uris(), None);
+        assert_eq!(result.retention(), Retention::Namespace(namespace));
     }
 
     #[test]

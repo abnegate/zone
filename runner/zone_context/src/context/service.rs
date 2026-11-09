@@ -300,10 +300,9 @@ impl ContextService {
             result.items_gathered += fetch_result.items.len();
             result.items_unchanged += fetch_result.stats.items_skipped;
             if source_fetch_config.index_mode
-                && let Some(uris) = fetch_result.retained_uris()
                 && let Err(error) = self
                     .vector_store
-                    .retain_content_uris(source.id, &uris)
+                    .retain(source.id, &fetch_result.retention())
                     .await
             {
                 tracing::warn!(

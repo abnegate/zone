@@ -19,6 +19,7 @@ use crate::content::FetchConfig;
 use crate::content::FetchResult;
 use crate::content::FetchStrategy;
 use crate::content::TokenBudget;
+use crate::content::UriNamespace;
 use crate::content::estimate_tokens_from_bytes;
 use crate::content::prioritize_paths;
 use crate::error::ContextError;
@@ -727,7 +728,12 @@ impl GitHubAdapter {
     }
 
     fn file_uri(owner: &str, repo: &str, path: &str, branch: &str) -> String {
-        format!("github://{owner}/{repo}/{path}@{branch}")
+        let namespace = Self::uri_namespace(owner, repo, branch);
+        format!("{}{path}{}", namespace.prefix, namespace.suffix)
+    }
+
+    fn uri_namespace(owner: &str, repo: &str, branch: &str) -> UriNamespace {
+        UriNamespace::new(format!("github://{owner}/{repo}/"), format!("@{branch}"))
     }
 
     fn priority(priority_order: &[String], path: &str) -> Option<usize> {
@@ -887,14 +893,14 @@ impl SourceAdapter for GitHubAdapter {
         let total_files = files.len();
         let mut result = FetchResult::new(source.id, fetch_config.last_version.is_some());
         result.version = Some(tree.sha.as_str().to_string());
-        result.truncated = tree.truncated;
         if tree.truncated {
             tracing::warn!(
                 owner = %config.owner,
                 repo = %config.repo,
                 branch = %branch,
-                "GitHub truncated the tree, so the index keeps the files it left out"
+                "GitHub truncated the tree, so the index keeps every file of this branch"
             );
+            result.truncated = Some(Self::uri_namespace(&config.owner, &config.repo, &branch));
         }
         result.live_uris = files
             .iter()
@@ -1068,6 +1074,7 @@ impl SourceAdapter for GitHubAdapter {
 mod tests {
     use super::*;
     use crate::adapters::NoOpProgress;
+    use crate::content::Retention;
     use abnegate_vcs::ObjectId;
     use base64::Engine;
     use base64::prelude::BASE64_STANDARD;
@@ -1605,9 +1612,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_truncated_tree_keeps_the_index_records_of_the_files_it_left_out() {
+    async fn a_truncated_tree_keeps_the_index_records_of_its_branch() {
         let listed = "github://test-owner/test-repo/README.md@main".to_string();
-        for (truncated, retained) in [(false, Some(vec![listed])), (true, None)] {
+        let branch = UriNamespace::new("github://test-owner/test-repo/", "@main");
+        for (truncated, retained) in [
+            (false, Retention::Exact(vec![listed])),
+            (true, Retention::Namespace(branch)),
+        ] {
             let mock_server = MockServer::start().await;
             mount_repository(&mock_server).await;
             Mock::given(method("GET"))
@@ -1645,7 +1656,7 @@ mod tests {
                 .map(|item| item.title.as_str())
                 .collect();
             assert_eq!(titles, ["README.md"], "truncated: {truncated}");
-            assert_eq!(fetched.retained_uris(), retained, "truncated: {truncated}");
+            assert_eq!(fetched.retention(), retained, "truncated: {truncated}");
         }
     }
 
