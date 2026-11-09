@@ -424,19 +424,7 @@ fn derive_source_url(
                 .filter(|value| !value.is_empty())?;
             Some(format!("https://github.com/{}/{}", owner, repo))
         }
-        GITLAB => {
-            let project_id = config
-                .get("project_id")?
-                .as_str()
-                .filter(|value| !value.is_empty())?;
-            let host = config
-                .get("host")
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty())
-                .unwrap_or("https://gitlab.com")
-                .trim_end_matches('/');
-            Some(format!("{}/{}", host, project_id))
-        }
+        GITLAB => GitLabAdapter::web_url(config),
         WEB | ICAL => config
             .get("url")
             .and_then(|value| value.as_str())
@@ -837,6 +825,13 @@ pub async fn update(
         .map(|credentials| encrypt_credentials(&state, credentials))
         .transpose()?;
 
+    let url = request.url.clone().or_else(|| {
+        request
+            .config
+            .as_ref()
+            .and_then(|config| derive_source_url(&previous.source_type, config, None))
+    });
+
     let current = sources::update_source(
         state.db(),
         id,
@@ -845,7 +840,7 @@ pub async fn update(
             name: request.name.as_deref(),
             config: request.config.clone(),
             description: request.description.as_deref(),
-            url: request.url.as_deref(),
+            url: url.as_deref(),
             is_active: request.is_active,
             github_installation_id: request.github_installation_id,
             credentials_encrypted: credentials_encrypted.as_deref(),

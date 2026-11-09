@@ -338,6 +338,16 @@ describe('Individual Source Definitions', () => {
       expect(state.glHost).toBe('https://gitlab.example.com/api/v4');
     });
 
+    it('links an edited base_url source at its web origin, not its API base', () => {
+      const state = formStateFromConfig('gitlab', {
+        project_id: 'mygroup/myproject',
+        base_url: 'https://gitlab.example.com/api/v4/',
+        branch: 'main',
+      });
+
+      expect(gitlab.getUrl?.(state)).toBe('https://gitlab.example.com/mygroup/myproject');
+    });
+
     it('saves an edit to a base_url source without moving its instance', () => {
       const state = formStateFromConfig('gitlab', {
         project_id: 'mygroup/myproject',

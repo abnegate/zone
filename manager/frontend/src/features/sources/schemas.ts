@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { GitHubInstallationStatusSchema } from '../github/installationStatus';
+import { gitLabProjectUrl } from './utils/gitLabProjectUrl';
 
 export const SourceCategorySchema = z.enum(['file', 'calendar', 'mail', 'chat', 'web', 'text']);
 export const SourceTypeSchema = z.enum([
@@ -144,11 +145,10 @@ function deriveSourceUrl(
     return `https://github.com/${fields.owner}/${fields.repo}`;
   }
   if (sourceType === 'gitlab' && typeof fields.project_id === 'string') {
-    const host =
-      typeof fields.host === 'string' && fields.host
-        ? fields.host.replace(/\/$/, '')
-        : 'https://gitlab.com';
-    return `${host}/${fields.project_id}`;
+    const instance = [fields.host, fields.base_url].find(
+      (named): named is string => typeof named === 'string'
+    );
+    return gitLabProjectUrl(instance, fields.project_id) ?? '';
   }
   if ((sourceType === 'web' || sourceType === 'ical') && typeof fields.url === 'string') {
     return fields.url;

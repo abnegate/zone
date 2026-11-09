@@ -1,4 +1,5 @@
 import type { GitLabConfig } from '../types';
+import { gitLabProjectUrl } from '../utils/gitLabProjectUrl';
 import { GitLabIcon } from './icons';
 import type { SourceDefinition } from './types';
 
@@ -68,8 +69,7 @@ export const gitlabSource: SourceDefinition = {
   getUrl: (state) => {
     const project = state.glProjectId as string;
     if (!project) return undefined;
-    const host = ((state.glHost as string) || 'https://gitlab.com').replace(/\/$/, '');
-    return `${host}/${project}`;
+    return gitLabProjectUrl(state.glHost as string, project);
   },
 
   getFieldIds: () => ['glHost', 'glProjectId', 'glBranch'],

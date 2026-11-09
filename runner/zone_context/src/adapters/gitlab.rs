@@ -324,6 +324,22 @@ impl GitLabAdapter {
         }
     }
 
+    /// The web page of the project a GitLab source's `config` reads, at its
+    /// instance's web origin with any `/api/v4` base stripped; `None` for a
+    /// config the adapter would not read or whose instance is no URL
+    pub fn web_url(config: &serde_json::Value) -> Option<String> {
+        let config = GitLabConfig::deserialize(config).ok()?;
+        let project = config.project.trim();
+        if project.is_empty() {
+            return None;
+        }
+        let origin = match Self::instance(config.base_url.as_deref()) {
+            Some((origin, _)) => Self::instance_key(&Url::parse(origin).ok()?),
+            None => format!("{HTTPS_SCHEME}://{DEFAULT_HOST}"),
+        };
+        Some(format!("{origin}/{project}"))
+    }
+
     fn named_instance(config: &serde_json::Value) -> Result<Option<&str>> {
         let named: Vec<&serde_json::Value> = [BASE_URL_FIELD, HOST_FIELD]
             .into_iter()
@@ -1993,6 +2009,66 @@ mod tests {
                     assert_eq!(error.to_string(), NON_STRING_INSTANCE, "{config}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn a_projects_link_is_at_its_instances_web_origin() {
+        for key in INSTANCE_KEYS {
+            for (named, linked) in [
+                ("https://gitlab.example.com", "https://gitlab.example.com"),
+                ("https://gitlab.example.com/", "https://gitlab.example.com"),
+                (
+                    "https://gitlab.example.com/api/v4",
+                    "https://gitlab.example.com",
+                ),
+                (
+                    "https://gitlab.example.com/api/v4/",
+                    "https://gitlab.example.com",
+                ),
+                (
+                    " https://GitLab.example.com:8443/gitlab/api/v4 ",
+                    "https://gitlab.example.com:8443/gitlab",
+                ),
+                (
+                    "https://user:secret@gitlab.example.com/?private_token=secret#x",
+                    "https://gitlab.example.com",
+                ),
+                ("http://gitlab.example.com", "http://gitlab.example.com"),
+                ("https://gitlab.com/api/v4", "https://gitlab.com"),
+                ("", "https://gitlab.com"),
+            ] {
+                assert_eq!(
+                    GitLabAdapter::web_url(&json!({ "project_id": PROJECT, key: named })),
+                    Some(format!("{linked}/{PROJECT}")),
+                    "{key} {named}"
+                );
+            }
+        }
+
+        for (config, linked) in [
+            (json!({ "project": PROJECT }), Some("https://gitlab.com")),
+            (
+                json!({ "project_id": PROJECT, "host": null }),
+                Some("https://gitlab.com"),
+            ),
+            (
+                json!({ "project_id": PROJECT, "host": "gitlab.example.com" }),
+                None,
+            ),
+            (json!({ "project_id": PROJECT, "host": 1 }), None),
+            (
+                json!({ "project_id": PROJECT, "host": "https://a.example", "base_url": "https://a.example" }),
+                None,
+            ),
+            (json!({ "project_id": "  " }), None),
+            (json!({ "host": "https://gitlab.example.com" }), None),
+        ] {
+            assert_eq!(
+                GitLabAdapter::web_url(&config),
+                linked.map(|origin| format!("{origin}/{PROJECT}")),
+                "{config}"
+            );
         }
     }
 

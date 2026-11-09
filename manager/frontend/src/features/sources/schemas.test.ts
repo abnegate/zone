@@ -223,6 +223,26 @@ describe('GitLab host', () => {
     );
   });
 
+  it('links an API-created source at its base_url, never at gitlab.com', () => {
+    for (const base_url of ['https://gitlab.example.com', 'https://gitlab.example.com/api/v4']) {
+      const source = parse(SourceSchema, {
+        id: 'src-1',
+        name: 'project',
+        source_type: 'gitlab',
+        config: { project_id: 'group/project', base_url, branch: 'main' },
+        description: null,
+        url: null,
+        is_active: true,
+        last_verified_at: null,
+        last_error: null,
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+      });
+
+      expect(source.url).toBe('https://gitlab.example.com/group/project');
+    }
+  });
+
   it('still reads a stored source whose host predates the https rule', () => {
     const source = parse(SourceSchema, {
       id: 'src-1',

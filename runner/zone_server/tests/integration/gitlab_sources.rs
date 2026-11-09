@@ -1,6 +1,6 @@
 //! A GitLab source's stored access token is only ever sent to the instance it
 //! was entered for: moving the source to another instance needs the token
-//! again.
+//! again. Its link points at the web page of that instance, never another.
 
 use crate::common;
 use crate::common::TestClient;
@@ -35,6 +35,9 @@ const BOTH_NAMED: &str = "Invalid source configuration: Invalid GitLab config: n
 const NON_STRING_NAMED: &str =
     "Invalid source configuration: Invalid GitLab config: name the instance as a URL string";
 const UNREADABLE_NEEDS_TOKEN: &str = "The stored configuration names no readable GitLab instance. Re-enter the access token to change it.";
+const STORED_LINK: &str = "https://127.0.0.1:9/group/project";
+const OTHER_LINK: &str = "https://localhost:9/group/project";
+const EXPLICIT_LINK: &str = "https://docs.example.test/project";
 const HOST_FIELD: &str = "host";
 const BASE_URL_FIELD: &str = "base_url";
 const LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -217,6 +220,17 @@ impl Harness {
         tokio::time::timeout(LOCK_WAIT, self.blocked_by(backend))
             .await
             .expect("the update waits on the row the concurrent write holds");
+    }
+
+    async fn created(&self, tenant: &Tenant, body: Value) -> (Uuid, Value) {
+        let response = self.create(tenant, body).await;
+        response.assert_status(StatusCode::CREATED);
+        let source = response.json_value()["source"].clone();
+        let id = source["id"]
+            .as_str()
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("create returns the source, got {source}"));
+        (id, source)
     }
 
     async fn discard(&self, tenant: &Tenant) {
@@ -651,6 +665,97 @@ async fn content_stored_for_a_source_never_blocks_its_update() {
 
     updated.assert_status(StatusCode::OK);
     assert_eq!(harness.stored(&tenant, source.id).await.config, branched);
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_created_sources_link_is_at_its_instances_web_origin() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+
+    for (field, instance) in [
+        (BASE_URL_FIELD, "https://127.0.0.1:9/api/v4"),
+        (BASE_URL_FIELD, STORED_INSTANCE),
+        (HOST_FIELD, "https://127.0.0.1:9/api/v4/"),
+    ] {
+        let (id, created) = harness
+            .created(
+                &tenant,
+                json!({
+                    "name": format!("Project {}", Uuid::new_v4()),
+                    "source_type": GITLAB,
+                    "config": config(field, Some(instance), "main"),
+                    "credentials": SENT_TOKEN,
+                }),
+            )
+            .await;
+
+        assert_eq!(
+            created["url"].as_str(),
+            Some(STORED_LINK),
+            "{field} {instance}"
+        );
+        assert_eq!(
+            harness.stored(&tenant, id).await.url.as_deref(),
+            Some(STORED_LINK),
+            "{field} {instance}"
+        );
+    }
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn moving_a_source_moves_its_link_unless_the_update_names_one() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let (id, _) = harness
+        .created(
+            &tenant,
+            json!({
+                "name": format!("Project {}", Uuid::new_v4()),
+                "source_type": GITLAB,
+                "config": config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            }),
+        )
+        .await;
+    assert_eq!(
+        harness.stored(&tenant, id).await.url.as_deref(),
+        Some(STORED_LINK)
+    );
+
+    for (body, linked) in [
+        (
+            json!({ "config": config(BASE_URL_FIELD, Some("https://localhost:9/api/v4"), "main") }),
+            OTHER_LINK,
+        ),
+        (
+            json!({ "name": format!("Renamed {}", Uuid::new_v4()) }),
+            OTHER_LINK,
+        ),
+        (
+            json!({
+                "config": config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+                "url": EXPLICIT_LINK,
+            }),
+            EXPLICIT_LINK,
+        ),
+    ] {
+        let updated = harness.update(&tenant, id, body.clone()).await;
+
+        updated.assert_status(StatusCode::OK);
+        assert_eq!(
+            updated.json_value()["source"]["url"].as_str(),
+            Some(linked),
+            "{body}"
+        );
+        assert_eq!(
+            harness.stored(&tenant, id).await.url.as_deref(),
+            Some(linked),
+            "{body}"
+        );
+    }
 
     harness.discard(&tenant).await;
 }
