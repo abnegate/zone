@@ -44,6 +44,8 @@ pub const GOOGLE_CALENDAR: &str = "google_calendar";
 
 pub const GOOGLE_MAIL: &str = "google_mail";
 
+const BASE_URL_FIELD: &str = "base_url";
+
 /// Source row from database
 #[derive(Clone, sqlx::FromRow)]
 pub struct SourceRow {
@@ -295,6 +297,8 @@ pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<Sourc
 /// What an update changes; a field left `None` keeps its stored value, except
 /// that a config change moves a link derived from the stored config.
 /// `github_installation_id` is `Some(None)` to detach the installation.
+/// `instance` is the GitLab instance the caller last saw the source read
+/// from; the update is refused once it reads from another.
 #[derive(Default)]
 pub struct SourceChanges<'a> {
     pub name: Option<&'a str>,
@@ -304,6 +308,7 @@ pub struct SourceChanges<'a> {
     pub is_active: Option<bool>,
     pub github_installation_id: Option<Option<Uuid>>,
     pub credentials_encrypted: Option<&'a str>,
+    pub instance: Option<&'a str>,
 }
 
 fn refused_installation(error: sqlx::Error) -> CreateError {
@@ -329,7 +334,7 @@ pub async fn update_source(
     let locked = lock_source(&mut *transaction, id, workspace_id)
         .await?
         .ok_or(UpdateError::NotFound)?;
-    if let Some(refusal) = stored_token_refusal(&locked, &changes) {
+    if let Some(refusal) = instance_refusal(&locked, &changes) {
         return Err(refusal);
     }
     let link = changes
@@ -386,11 +391,22 @@ async fn lock_source<'e>(
     .await
 }
 
+fn instance_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    if stored.source_type != GITLAB {
+        return None;
+    }
+    moved_refusal(stored, changes).or_else(|| stored_token_refusal(stored, changes))
+}
+
+fn moved_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    let seen = changes.instance?;
+    let current = GitLabAdapter::instance_of(&stored.config).ok()?;
+    let expected = GitLabAdapter::instance_of(&serde_json::json!({ BASE_URL_FIELD: seen })).ok()?;
+    (current != expected).then_some(UpdateError::InstanceMoved)
+}
+
 fn stored_token_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
-    if stored.source_type != GITLAB
-        || stored.credentials_encrypted.is_none()
-        || changes.credentials_encrypted.is_some()
-    {
+    if stored.credentials_encrypted.is_none() || changes.credentials_encrypted.is_some() {
         return None;
     }
     let changed = changes.config.as_ref()?;

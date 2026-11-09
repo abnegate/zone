@@ -114,6 +114,7 @@ export interface UpdateSourceRequest {
   description?: string;
   is_active?: boolean;
   url?: string;
+  instance?: string;
 }
 
 export interface SourceType_Info {

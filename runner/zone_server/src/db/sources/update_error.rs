@@ -8,6 +8,9 @@ const INSTANCE_NEEDS_TOKEN: &str =
 
 const UNREADABLE_INSTANCE_NEEDS_TOKEN: &str = "The stored configuration names no readable GitLab instance. Re-enter the access token to change it.";
 
+const INSTANCE_MOVED: &str =
+    "The source reads from another GitLab instance now. Reload it and re-enter the access token.";
+
 #[derive(Debug, Error)]
 pub enum UpdateError {
     #[error("The source does not exist in this workspace.")]
@@ -18,6 +21,8 @@ pub enum UpdateError {
     InstanceNeedsToken,
     #[error("{UNREADABLE_INSTANCE_NEEDS_TOKEN}")]
     UnreadableInstanceNeedsToken,
+    #[error("{INSTANCE_MOVED}")]
+    InstanceMoved,
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }

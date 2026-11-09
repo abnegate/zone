@@ -635,6 +635,33 @@ describe('SourceDetail saving a GitLab source', () => {
     return updateSource.mock.calls[0][0];
   }
 
+  it('names the instance a new token was entered for', async () => {
+    renderDetail(gitLabSource());
+
+    fireEvent.change(screen.getByLabelText(/^Access Token/), {
+      target: { value: 'glpat-throwaway' },
+    });
+
+    expect(await saved()).toEqual({ credentials: 'glpat-throwaway', instance: INSTANCE });
+  });
+
+  it('names the instance the token was entered against, not the one the form moves to', async () => {
+    renderDetail(gitLabSource());
+
+    fireEvent.change(screen.getByLabelText(/^GitLab Host/), {
+      target: { value: 'https://other.example.com' },
+    });
+    fireEvent.change(screen.getByLabelText(/^Access Token/), {
+      target: { value: 'glpat-throwaway' },
+    });
+
+    expect(await saved()).toMatchObject({
+      config: { host: 'https://other.example.com' },
+      credentials: 'glpat-throwaway',
+      instance: INSTANCE,
+    });
+  });
+
   it('leaves the link to the server, so an edit keeps a link the source was given', async () => {
     renderDetail(gitLabSource({ url: EXPLICIT_LINK }));
 
@@ -643,5 +670,16 @@ describe('SourceDetail saving a GitLab source', () => {
     const request = await saved();
     expect(request.config).toMatchObject({ branch: 'develop' });
     expect(request).not.toHaveProperty('url');
+    expect(request).not.toHaveProperty('instance');
+  });
+
+  it('names no instance for a source type with none', async () => {
+    renderDetail(gitHubSource({ github_installation_id: null, has_credentials: true }));
+
+    fireEvent.change(screen.getByLabelText(/^Access Token/), {
+      target: { value: 'ghp_throwaway' },
+    });
+
+    expect(await saved()).toEqual({ credentials: 'ghp_throwaway' });
   });
 });

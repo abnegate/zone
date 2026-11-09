@@ -207,6 +207,7 @@ const UpdateSourceRequestFieldsSchema = z.object({
   description: z.string().optional(),
   is_active: z.boolean().optional(),
   url: z.string().optional(),
+  instance: z.string().optional(),
 });
 
 export function updateSourceRequestSchema(sourceType: z.infer<typeof SourceTypeSchema>) {
