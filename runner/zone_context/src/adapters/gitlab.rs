@@ -242,6 +242,8 @@ impl Default for GitLabAdapter {
 }
 
 impl GitLabAdapter {
+    const PRODUCTION_CONFIGURE: fn(&str) -> GitLabResult<GitLabService> = GitLabService::configured;
+
     const TREE_CACHE_TTL: Duration = Duration::from_secs(300);
 
     /// Estimated size of a file, since GitLab's tree lists none
@@ -275,7 +277,7 @@ impl GitLabAdapter {
     fn serving(service: std::result::Result<GitLabService, String>) -> Self {
         Self {
             service,
-            configure: GitLabService::configured,
+            configure: Self::PRODUCTION_CONFIGURE,
             tree_cache: TreeCache::new(Self::TREE_CACHE_TTL),
         }
     }
@@ -317,7 +319,7 @@ impl GitLabAdapter {
     /// never read from, without echoing the instance it names
     pub fn check_instance(config: &serde_json::Value) -> Result<()> {
         match Self::instance(Self::named_instance(config)?) {
-            Some((origin, _)) => GitLabService::configured(origin)
+            Some((origin, _)) => (Self::PRODUCTION_CONFIGURE)(origin)
                 .map(drop)
                 .map_err(Self::misconfigured),
             None => Ok(()),
