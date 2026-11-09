@@ -275,8 +275,7 @@ fn dimension_label(width: usize) -> String {
 
 const USAGE: &str =
     "Usage: zone-server [--migrate-only | --seal-secrets [--dry-run] --backup <path>]";
-const DEFAULT_FILTER: &str =
-    "zone_server=debug,zone_chat=debug,zone_core=debug,zone_context=debug,tower_http=debug";
+const DEFAULT_FILTER: &str = "zone_server=debug,zone_chat=debug,zone_core=debug,abnegate_agent=debug,zone_context=debug,tower_http=debug";
 const DATABASE_URL: &str = "DATABASE_URL";
 const MIGRATE_ONLY: &str = "--migrate-only";
 const SEAL_SECRETS: &str = "--seal-secrets";
@@ -409,8 +408,12 @@ fn forbid_dumping() {
 mod tests {
     use std::path::PathBuf;
 
+    use tracing::Level;
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::layer::SubscriberExt;
     use zone_server::db::sealing::Options;
 
+    use super::DEFAULT_FILTER;
     use super::DIMENSION_LEARNED_ON_FIRST_EMBED;
     use super::Mode;
     use super::dimension_label;
@@ -425,6 +428,19 @@ mod tests {
 
     fn sealing(dry_run: bool) -> Mode {
         Mode::SealSecrets(Options::new(dry_run, PathBuf::from("/backups/zone.dump")))
+    }
+
+    #[test]
+    fn the_default_filter_keeps_the_agent_crates_logs() {
+        let subscriber = tracing_subscriber::registry().with(EnvFilter::new(DEFAULT_FILTER));
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(tracing::enabled!(target: "abnegate_agent::mcp::hub", Level::DEBUG));
+            assert!(tracing::enabled!(target: "abnegate_agent::mcp::hub", Level::WARN));
+            assert!(tracing::enabled!(target: "abnegate_agent_cli::provider", Level::DEBUG));
+            assert!(tracing::enabled!(target: "zone_chat", Level::DEBUG));
+            assert!(tracing::enabled!(target: "zone_core::servers", Level::DEBUG));
+        });
     }
 
     #[test]
