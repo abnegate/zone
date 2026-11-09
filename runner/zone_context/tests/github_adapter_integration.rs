@@ -20,6 +20,8 @@ use zone_core::SourceType;
 
 const GITHUB_HOST: &str = "github.com";
 
+const LARGE_CONTENTS_ROUTE: &str = "/repos/testowner/testrepo/contents/large.rs";
+
 fn create_test_source(
     owner: &str,
     repo: &str,
@@ -688,7 +690,7 @@ async fn test_github_adapter_max_file_size() {
                     "sha": "0b3d8b29493059afd7f9912106279c4643ac4939"
                 },
                 {
-                    "path": "large.bin",
+                    "path": "large.rs",
                     "type": "blob",
                     "mode": "100644",
                     "size": large_file_size,
@@ -715,6 +717,16 @@ async fn test_github_adapter_max_file_size() {
         .mount(&mock_server)
         .await;
 
+    Mock::given(method("GET"))
+        .and(path(LARGE_CONTENTS_ROUTE))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "type": "file",
+            "content": base64::engine::general_purpose::STANDARD.encode("fn large() {}"),
+            "encoding": "base64"
+        })))
+        .mount(&mock_server)
+        .await;
+
     let source = create_test_source("testowner", "testrepo", None, None, None);
     let adapter = served(&mock_server);
     let config = FetchConfig::default();
@@ -728,4 +740,11 @@ async fn test_github_adapter_max_file_size() {
     let fetch_result = result.unwrap();
     assert_eq!(fetch_result.items.len(), 1);
     assert_eq!(fetch_result.items[0].title, "small.rs");
+    let requested = mock_server.received_requests().await.unwrap();
+    assert!(
+        !requested
+            .iter()
+            .any(|request| request.url.path() == LARGE_CONTENTS_ROUTE),
+        "a file the tree lists past the size limit is never read"
+    );
 }
