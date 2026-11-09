@@ -127,7 +127,8 @@ fn initialize(params: Option<&Value>) -> Value {
         .and_then(|params| params.get("protocolVersion"))
         .cloned()
         .and_then(|version| serde_json::from_value::<ProtocolVersion>(version).ok())
-        .unwrap_or_default();
+        .filter(ProtocolVersion::has_initialize)
+        .unwrap_or(ProtocolVersion::LATEST_WITH_INITIALIZE);
 
     json!({
         "protocolVersion": version,
@@ -293,6 +294,31 @@ mod tests {
             answer["result"]["capabilities"]["tools"].is_object(),
             "{answer}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_handshake_never_names_a_revision_that_has_no_handshake() {
+        let opened = open(ApprovalPolicy::auto()).await;
+
+        for offered in [
+            json!({"capabilities": {}}),
+            json!({"protocolVersion": 20250618, "capabilities": {}}),
+            json!({"protocolVersion": ProtocolVersion::NO_INITIALIZE, "capabilities": {}}),
+            json!({"protocolVersion": "2027-01-01", "capabilities": {}}),
+        ] {
+            let (status, answer) = post(
+                Some(&opened.token),
+                rpc(1, protocol::INITIALIZE, offered.clone()),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK, "{offered}");
+            assert_eq!(
+                answer["result"]["protocolVersion"],
+                ProtocolVersion::LATEST_WITH_INITIALIZE.as_str(),
+                "offered {offered}, answered {answer}"
+            );
+        }
     }
 
     #[tokio::test]
