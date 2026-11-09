@@ -202,6 +202,7 @@ fn a_disabled_magents_server_stays_detached() {
         r#"{"mcpServers": {"magents": {"command": "magents", "args": ["mcp"], "disabled": true}}}"#,
         r#"{"mcpServers": {"magents": {"url": "http://localhost:3000/mcp", "disabled": true}}}"#,
         r#"{"mcpServers": {"magents": {"command": "magents", "disabled": true}, "docs": {"command": "docs-server", "disabled": true}}}"#,
+        r#"{"mcpServers": {"magents": {"command": "magents", "disabled": true}, "docs": {"command": ""}}}"#,
     ] {
         variables.set(SERVERS, document);
 
