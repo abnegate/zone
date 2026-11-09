@@ -7,6 +7,7 @@ mod credential;
 mod filesystem;
 mod github;
 mod gitlab;
+mod in_flight;
 mod notion;
 mod registry;
 mod status;

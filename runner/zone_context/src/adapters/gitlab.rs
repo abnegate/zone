@@ -10,6 +10,7 @@ use crate::adapters::RateLimitConfig;
 use crate::adapters::SourceAdapter;
 use crate::adapters::SyncState;
 use crate::adapters::credential::Credential;
+use crate::adapters::in_flight::InFlight;
 use crate::adapters::status::Status;
 use crate::content::ContentCategory;
 use crate::content::ContentItem;
@@ -41,7 +42,6 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -132,7 +132,7 @@ struct CachedTree {
 #[derive(Debug, Clone)]
 struct TreeCache {
     entries: Arc<RwLock<HashMap<TreeKey, CachedTree>>>,
-    in_flight: Arc<RwLock<HashSet<TreeKey>>>,
+    in_flight: InFlight<TreeKey>,
     ttl: Duration,
     max_entries: usize,
     max_total_bytes: usize,
@@ -152,7 +152,7 @@ impl TreeCache {
     fn new(ttl: Duration) -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
-            in_flight: Arc::new(RwLock::new(HashSet::new())),
+            in_flight: InFlight::new(),
             ttl,
             max_entries: Self::MAX_ENTRIES,
             max_total_bytes: Self::MAX_TOTAL_BYTES,
@@ -662,11 +662,9 @@ impl GitLabAdapter {
             return Ok(tree);
         }
 
-        {
-            let mut in_flight = self.tree_cache.in_flight.write().await;
-            if in_flight.contains(&key) {
-                drop(in_flight);
-
+        let _claim = match self.tree_cache.in_flight.claim(&key) {
+            Some(claim) => Some(claim),
+            None => {
                 for _ in 0..TreeCache::WAIT_ATTEMPTS {
                     tokio::time::sleep(Duration::from_millis(
                         TreeCache::WAIT_INTERVAL_MILLISECONDS,
@@ -677,31 +675,20 @@ impl GitLabAdapter {
                     }
                 }
 
-                {
-                    let in_flight = self.tree_cache.in_flight.read().await;
-                    if in_flight.contains(&key) {
-                        return Err(ContextError::Timeout {
-                            operation: "tree cache wait".to_string(),
-                            timeout_ms: TreeCache::WAIT_ATTEMPTS
-                                * TreeCache::WAIT_INTERVAL_MILLISECONDS,
-                        });
-                    }
+                if self.tree_cache.in_flight.contains(&key) {
+                    return Err(ContextError::Timeout {
+                        operation: "tree cache wait".to_string(),
+                        timeout_ms: TreeCache::WAIT_ATTEMPTS
+                            * TreeCache::WAIT_INTERVAL_MILLISECONDS,
+                    });
                 }
-            } else {
-                in_flight.insert(key.clone());
+                self.tree_cache.in_flight.claim(&key)
             }
-        }
+        };
 
-        let fetch_result = self
+        let tree = self
             .get_tree(service, &config.project, branch, path, credential)
-            .await;
-
-        {
-            let mut in_flight = self.tree_cache.in_flight.write().await;
-            in_flight.remove(&key);
-        }
-
-        let tree = fetch_result?;
+            .await?;
 
         self.tree_cache.insert(key, tree.clone()).await;
 
@@ -1160,6 +1147,7 @@ mod tests {
     use crate::adapters::NoOpProgress;
     use abnegate_vcs::ObjectId;
     use serde_json::json;
+    use std::collections::HashSet;
     use uuid::Uuid;
     use wiremock::Mock;
     use wiremock::MockServer;
@@ -2212,5 +2200,41 @@ mod tests {
             config.base_url.as_deref(),
             Some("https://gitlab.example.com")
         );
+    }
+
+    async fn tree_requested(server: &MockServer) {
+        while tree_requests(server).await == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_tree_read_never_holds_back_the_next_one() {
+        let server = MockServer::start().await;
+        mount_project(&server).await;
+        Mock::given(method("GET"))
+            .and(path_regex(TREE_ROUTES))
+            .respond_with(listing("README.md").set_delay(Duration::from_secs(60)))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(TREE_ROUTES))
+            .respond_with(listing("README.md"))
+            .mount(&server)
+            .await;
+        let adapter = served(&server);
+        let config = json!({ "project": PROJECT });
+
+        let mut cancelled = Box::pin(titles(&adapter, config.clone()));
+        tokio::select! {
+            read = &mut cancelled => panic!("the stalled tree was answered: {read:?}"),
+            () = tree_requested(&server) => {}
+        }
+        drop(cancelled);
+        let read = titles(&adapter, config).await;
+
+        assert_eq!(read.unwrap(), ["README.md"]);
+        assert_eq!(tree_requests(&server).await, 2);
     }
 }

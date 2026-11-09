@@ -10,6 +10,7 @@ use crate::adapters::RateLimitConfig;
 use crate::adapters::SourceAdapter;
 use crate::adapters::SyncState;
 use crate::adapters::credential::Credential;
+use crate::adapters::in_flight::InFlight;
 use crate::adapters::status::Status;
 use crate::content::ContentCategory;
 use crate::content::ContentItem;
@@ -39,7 +40,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,7 +112,7 @@ struct CachedTree {
 #[derive(Debug, Clone)]
 struct TreeCache {
     entries: Arc<RwLock<HashMap<TreeKey, CachedTree>>>,
-    in_flight: Arc<RwLock<HashSet<TreeKey>>>,
+    in_flight: InFlight<TreeKey>,
     ttl: Duration,
     max_entries: usize,
     max_total_bytes: usize,
@@ -134,7 +134,7 @@ impl TreeCache {
     fn new(ttl: Duration) -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
-            in_flight: Arc::new(RwLock::new(HashSet::new())),
+            in_flight: InFlight::new(),
             ttl,
             max_entries: Self::MAX_ENTRIES,
             max_total_bytes: Self::MAX_TOTAL_BYTES,
@@ -529,11 +529,9 @@ impl GitHubAdapter {
             return Ok(tree);
         }
 
-        {
-            let mut in_flight = self.tree_cache.in_flight.write().await;
-            if in_flight.contains(&key) {
-                drop(in_flight);
-
+        let _claim = match self.tree_cache.in_flight.claim(&key) {
+            Some(claim) => Some(claim),
+            None => {
                 for _ in 0..TreeCache::WAIT_ATTEMPTS {
                     tokio::time::sleep(Duration::from_millis(
                         TreeCache::WAIT_INTERVAL_MILLISECONDS,
@@ -543,19 +541,11 @@ impl GitHubAdapter {
                         return Ok(tree);
                     }
                 }
-            } else {
-                in_flight.insert(key.clone());
+                self.tree_cache.in_flight.claim(&key)
             }
-        }
+        };
 
-        let fetch_result = self.get_tree(owner, repo, branch, token).await;
-
-        {
-            let mut in_flight = self.tree_cache.in_flight.write().await;
-            in_flight.remove(&key);
-        }
-
-        let tree = fetch_result?;
+        let tree = self.get_tree(owner, repo, branch, token).await?;
 
         self.tree_cache.insert(key, tree.clone()).await;
 
@@ -1495,5 +1485,65 @@ mod tests {
         );
         assert!(matches!(item, Ok(None)), "{item:?}");
         assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    fn tree_key(branch: &str) -> TreeKey {
+        TreeKey {
+            owner: "test-owner".to_string(),
+            repo: "test-repo".to_string(),
+            branch: branch.to_string(),
+            fingerprint: None,
+        }
+    }
+
+    async fn mount_repository(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path(REPOSITORY_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "test-repo",
+                "default_branch": "main"
+            })))
+            .mount(server)
+            .await;
+    }
+
+    async fn tree_requested(server: &MockServer) {
+        while !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path() == TREE_ROUTE)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_tree_read_releases_its_claim() {
+        let mock_server = MockServer::start().await;
+        mount_repository(&mock_server).await;
+        Mock::given(method("GET"))
+            .and(path(TREE_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
+            .mount(&mock_server)
+            .await;
+        let adapter = served(&mock_server);
+        let source = create_test_source(test_repository());
+
+        let mut cancelled = Box::pin(adapter.estimate_tokens(&source));
+        tokio::select! {
+            estimated = &mut cancelled => panic!("the stalled tree was answered: {estimated:?}"),
+            () = tree_requested(&mock_server) => {}
+        }
+        drop(cancelled);
+
+        assert!(
+            adapter
+                .tree_cache
+                .in_flight
+                .claim(&tree_key("main"))
+                .is_some()
+        );
     }
 }
