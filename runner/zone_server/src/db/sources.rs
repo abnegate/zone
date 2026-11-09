@@ -44,6 +44,8 @@ pub const GOOGLE_MAIL: &str = "google_mail";
 const INSTANCE_NEEDS_TOKEN: &str =
     "Re-enter the access token to read this source from another GitLab instance.";
 
+const UNREADABLE_INSTANCE_NEEDS_TOKEN: &str = "The stored configuration names no readable GitLab instance. Re-enter the access token to change it.";
+
 /// Source row from database
 #[derive(Clone, sqlx::FromRow)]
 pub struct SourceRow {
@@ -313,6 +315,8 @@ pub enum UpdateError {
     Unattachable,
     #[error("{INSTANCE_NEEDS_TOKEN}")]
     InstanceNeedsToken,
+    #[error("{UNREADABLE_INSTANCE_NEEDS_TOKEN}")]
+    UnreadableInstanceNeedsToken,
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }
@@ -351,8 +355,8 @@ pub async fn update_source(
     let locked = lock_source(&mut *transaction, id, workspace_id)
         .await?
         .ok_or(UpdateError::NotFound)?;
-    if moves_stored_token(&locked, &changes) {
-        return Err(UpdateError::InstanceNeedsToken);
+    if let Some(refusal) = stored_token_refusal(&locked, &changes) {
+        return Err(refusal);
     }
 
     let mut current = update_fields(&mut *transaction, id, workspace_id, &changes)
@@ -398,19 +402,22 @@ async fn lock_source<'e>(
     .await
 }
 
-fn moves_stored_token(stored: &SourceRow, changes: &SourceChanges<'_>) -> bool {
-    stored.source_type == GITLAB
-        && stored.credentials_encrypted.is_some()
-        && changes.credentials_encrypted.is_none()
-        && changes.config.as_ref().is_some_and(|config| {
-            !matches!(
-                (
-                    GitLabAdapter::instance_of(&stored.config),
-                    GitLabAdapter::instance_of(config),
-                ),
-                (Ok(stored), Ok(changed)) if stored == changed
-            )
-        })
+fn stored_token_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    if stored.source_type != GITLAB
+        || stored.credentials_encrypted.is_none()
+        || changes.credentials_encrypted.is_some()
+    {
+        return None;
+    }
+    let changed = changes.config.as_ref()?;
+    match (
+        GitLabAdapter::instance_of(&stored.config),
+        GitLabAdapter::instance_of(changed),
+    ) {
+        (Ok(before), Ok(after)) if before == after => None,
+        (Err(_), _) => Some(UpdateError::UnreadableInstanceNeedsToken),
+        _ => Some(UpdateError::InstanceNeedsToken),
+    }
 }
 
 async fn update_fields<'e>(

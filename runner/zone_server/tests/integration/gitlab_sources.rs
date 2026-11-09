@@ -34,6 +34,7 @@ const INVALID_INSTANCE: &str = "Invalid source configuration: Invalid GitLab con
 const BOTH_NAMED: &str = "Invalid source configuration: Invalid GitLab config: name the instance as host or base_url, not both";
 const NON_STRING_NAMED: &str =
     "Invalid source configuration: Invalid GitLab config: name the instance as a URL string";
+const UNREADABLE_NEEDS_TOKEN: &str = "The stored configuration names no readable GitLab instance. Re-enter the access token to change it.";
 const HOST_FIELD: &str = "host";
 const BASE_URL_FIELD: &str = "base_url";
 const LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -568,6 +569,49 @@ async fn an_instance_named_by_anything_but_a_string_is_refused_unwritten() {
             }
         }
     }
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_stored_config_naming_no_readable_instance_changes_only_with_a_new_token() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let mut unreadable = config(HOST_FIELD, Some(STORED_INSTANCE), "main");
+    unreadable[BASE_URL_FIELD] = json!(OTHER_INSTANCE);
+    let source = harness
+        .source(&tenant, unreadable, Some(STORED_TOKEN))
+        .await;
+
+    for changed in [
+        config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+        config(BASE_URL_FIELD, Some(OTHER_INSTANCE), "main"),
+        config(HOST_FIELD, None, "main"),
+    ] {
+        let refused = harness
+            .update(&tenant, source.id, json!({ "config": changed }))
+            .await;
+
+        refused.assert_status(StatusCode::BAD_REQUEST);
+        assert_eq!(
+            refused.json_value()["error"].as_str(),
+            Some(UNREADABLE_NEEDS_TOKEN),
+            "{changed}"
+        );
+        assert_unchanged(&source, &harness.stored(&tenant, source.id).await);
+    }
+
+    let repaired = config(HOST_FIELD, Some(STORED_INSTANCE), "main");
+    let accepted = harness
+        .update(
+            &tenant,
+            source.id,
+            json!({ "config": repaired, "credentials": SENT_TOKEN }),
+        )
+        .await;
+
+    accepted.assert_status(StatusCode::OK);
+    assert_eq!(harness.stored(&tenant, source.id).await.config, repaired);
 
     harness.discard(&tenant).await;
 }

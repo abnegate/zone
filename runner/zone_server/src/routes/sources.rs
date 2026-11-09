@@ -855,7 +855,9 @@ pub async fn update(
     .map_err(|error| match error {
         UpdateError::NotFound => not_found(),
         UpdateError::Unattachable => unattachable(),
-        error @ UpdateError::InstanceNeedsToken => ServerError::BadRequest(error.to_string()),
+        error @ (UpdateError::InstanceNeedsToken | UpdateError::UnreadableInstanceNeedsToken) => {
+            ServerError::BadRequest(error.to_string())
+        }
         UpdateError::Database(error) => {
             tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
             internal()
