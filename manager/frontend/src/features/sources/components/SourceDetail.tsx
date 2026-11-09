@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { getErrors } from '../../../validation';
 import { formStateFromConfig, GITHUB_SOURCE_TYPE, getSourceById, getSourceLabel } from '../config';
-import { type SourceVerifyResponse, UpdateSourceRequestSchema } from '../schemas';
+import { type SourceVerifyResponse, updateSourceRequestSchema } from '../schemas';
 import type { Source, UpdateSourceRequest } from '../types';
 import { isAppBacked } from '../utils';
 import { FormFieldRenderer, FormFieldsRenderer } from './FormFields';
@@ -79,7 +79,7 @@ export function SourceDetail({
     }
     if (credentials !== '') request.credentials = credentials;
 
-    const errors = getErrors(UpdateSourceRequestSchema, request);
+    const errors = getErrors(updateSourceRequestSchema(source.source_type), request);
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
       return;

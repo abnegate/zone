@@ -5,7 +5,7 @@ import {
   CreateSourceRequestSchema,
   SourceResponseSchema,
   SourceSchema,
-  UpdateSourceRequestSchema,
+  updateSourceRequestSchema,
 } from './schemas';
 
 const githubConfig = { owner: 'acme', repo: 'zone', branch: 'main' };
@@ -155,13 +155,15 @@ describe('GitHub installation fields', () => {
   });
 
   it('accepts setting or clearing the installation on an update request', () => {
-    expect(UpdateSourceRequestSchema.parse({ github_installation_id: 'installation-1' })).toEqual({
+    expect(
+      updateSourceRequestSchema('github').parse({ github_installation_id: 'installation-1' })
+    ).toEqual({
       github_installation_id: 'installation-1',
     });
-    expect(UpdateSourceRequestSchema.parse({ github_installation_id: null })).toEqual({
+    expect(updateSourceRequestSchema('github').parse({ github_installation_id: null })).toEqual({
       github_installation_id: null,
     });
-    expect(UpdateSourceRequestSchema.parse({})).toEqual({});
+    expect(updateSourceRequestSchema('github').parse({})).toEqual({});
   });
 });
 
@@ -178,9 +180,9 @@ describe('GitLab host', () => {
   it('accepts an https instance on a create or update request', () => {
     for (const host of ['https://gitlab.com', 'https://gitlab.example.com/gitlab']) {
       expect(CreateSourceRequestSchema.safeParse(creating(host)).success).toBe(true);
-      expect(UpdateSourceRequestSchema.safeParse({ config: gitlabConfig(host) }).success).toBe(
-        true
-      );
+      expect(
+        updateSourceRequestSchema('gitlab').safeParse({ config: gitlabConfig(host) }).success
+      ).toBe(true);
     }
   });
 
@@ -189,7 +191,9 @@ describe('GitLab host', () => {
       expect(getErrors(CreateSourceRequestSchema, creating(host))).toEqual({
         'config.host': HTTPS_ONLY,
       });
-      expect(getErrors(UpdateSourceRequestSchema, { config: gitlabConfig(host) })).toEqual({
+      expect(
+        getErrors(updateSourceRequestSchema('gitlab'), { config: gitlabConfig(host) })
+      ).toEqual({
         'config.host': HTTPS_ONLY,
       });
     }
@@ -235,5 +239,54 @@ describe('GitLab host', () => {
     });
 
     expect(source.url).toBe('http://gitlab.example.com/group/project');
+  });
+});
+
+describe('a source request config', () => {
+  const HTTPS_ONLY = 'GitLab host must be an https:// URL';
+  const disguised = {
+    project_id: 'group/project',
+    host: 'http://gitlab.example.com',
+    url: 'https://gitlab.example.com',
+    content: 'a text source',
+  };
+
+  it('is held to the schema of its own source type on create', () => {
+    const errors = getErrors(CreateSourceRequestSchema, {
+      name: 'project',
+      source_type: 'gitlab',
+      config: disguised,
+      credentials: 'glpat-throwaway',
+    });
+
+    expect(errors).toEqual({ 'config.host': HTTPS_ONLY });
+  });
+
+  it('is held to the schema of the edited source type on update', () => {
+    expect(getErrors(updateSourceRequestSchema('gitlab'), { config: disguised })).toEqual({
+      'config.host': HTTPS_ONLY,
+    });
+  });
+
+  it("refuses another type's config", () => {
+    expect(
+      CreateSourceRequestSchema.safeParse({
+        name: 'repo',
+        source_type: 'github',
+        config: { project_id: 'group/project', host: 'https://gitlab.example.com' },
+      }).success
+    ).toBe(false);
+    expect(
+      updateSourceRequestSchema('github').safeParse({
+        config: { project_id: 'group/project' },
+      }).success
+    ).toBe(false);
+  });
+
+  it('accepts a config its own type reads', () => {
+    expect(
+      updateSourceRequestSchema('web').safeParse({ config: { url: 'https://example.com' } }).success
+    ).toBe(true);
+    expect(updateSourceRequestSchema('gitlab').safeParse({}).success).toBe(true);
   });
 });

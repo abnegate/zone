@@ -76,7 +76,9 @@ export const TextConfigSchema = z.object({
   label: z.string().optional(),
 });
 
-const OtherConfigSchemas = [
+export const StoredSourceConfigSchema = z.union([
+  GitHubConfigSchema,
+  GitLabConfigSchema,
   FilesystemConfigSchema,
   ICalConfigSchema,
   IMAPConfigSchema,
@@ -84,20 +86,32 @@ const OtherConfigSchemas = [
   SlackConfigSchema,
   WebConfigSchema,
   TextConfigSchema,
-] as const;
-
-export const SourceConfigSchema = z.union([
-  GitHubConfigSchema,
-  GitLabConfigSchema,
-  ...OtherConfigSchemas,
 ]);
 
-// Stored GitLab hosts predate the https rule, so only what is sent is held to it.
-export const SourceConfigRequestSchema = z.union([
-  GitHubConfigSchema,
-  GitLabConfigRequestSchema,
-  ...OtherConfigSchemas,
-]);
+const SOURCE_CONFIG_REQUEST: Record<z.infer<typeof SourceTypeSchema>, z.ZodType> = {
+  github: GitHubConfigSchema,
+  gitlab: GitLabConfigRequestSchema,
+  filesystem: FilesystemConfigSchema,
+  ical: ICalConfigSchema,
+  imap: IMAPConfigSchema,
+  discord: DiscordConfigSchema,
+  slack: SlackConfigSchema,
+  web: WebConfigSchema,
+  text: TextConfigSchema,
+};
+
+const SourceConfigRequestSchema = z.record(z.string(), z.unknown());
+
+function refineConfig(
+  sourceType: z.infer<typeof SourceTypeSchema>,
+  config: unknown,
+  context: z.RefinementCtx
+): void {
+  const result = SOURCE_CONFIG_REQUEST[sourceType].safeParse(config);
+  for (const issue of result.error?.issues ?? []) {
+    context.addIssue({ code: 'custom', message: issue.message, path: ['config', ...issue.path] });
+  }
+}
 
 const SOURCE_TYPE_CATEGORY: Record<
   z.infer<typeof SourceTypeSchema>,
@@ -150,7 +164,7 @@ export const SourceSchema = z
     name: z.string(),
     source_type: SourceTypeSchema,
     category: SourceCategorySchema.optional(),
-    config: SourceConfigSchema,
+    config: StoredSourceConfigSchema,
     description: z.string().nullable().optional(),
     url: z.string().nullable().optional(),
     is_active: z.boolean(),
@@ -173,17 +187,19 @@ export const SourceSchema = z
     last_error: source.last_error ?? null,
   }));
 
-export const CreateSourceRequestSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  source_type: SourceTypeSchema,
-  config: SourceConfigRequestSchema,
-  credentials: z.string().optional(),
-  github_installation_id: z.string().optional(),
-  description: z.string().optional(),
-  url: z.string().optional(),
-});
+export const CreateSourceRequestSchema = z
+  .object({
+    name: z.string().min(1, 'Name is required'),
+    source_type: SourceTypeSchema,
+    config: SourceConfigRequestSchema,
+    credentials: z.string().optional(),
+    github_installation_id: z.string().optional(),
+    description: z.string().optional(),
+    url: z.string().optional(),
+  })
+  .superRefine((request, context) => refineConfig(request.source_type, request.config, context));
 
-export const UpdateSourceRequestSchema = z.object({
+const UpdateSourceRequestFieldsSchema = z.object({
   name: z.string().min(1).optional(),
   config: SourceConfigRequestSchema.optional(),
   credentials: z.string().optional(),
@@ -192,6 +208,12 @@ export const UpdateSourceRequestSchema = z.object({
   is_active: z.boolean().optional(),
   url: z.string().optional(),
 });
+
+export function updateSourceRequestSchema(sourceType: z.infer<typeof SourceTypeSchema>) {
+  return UpdateSourceRequestFieldsSchema.superRefine((request, context) => {
+    if (request.config !== undefined) refineConfig(sourceType, request.config, context);
+  });
+}
 
 export const SourcesResponseSchema = z.object({
   success: z.boolean().optional(),
@@ -316,7 +338,7 @@ export type SourceZ = z.infer<typeof SourceSchema>;
 export type SourceCategoryZ = z.infer<typeof SourceCategorySchema>;
 export type SourceTypeZ = z.infer<typeof SourceTypeSchema>;
 export type CreateSourceRequestZ = z.infer<typeof CreateSourceRequestSchema>;
-export type UpdateSourceRequestZ = z.infer<typeof UpdateSourceRequestSchema>;
+export type UpdateSourceRequestZ = z.infer<typeof UpdateSourceRequestFieldsSchema>;
 export type SourcesResponse = z.infer<typeof SourcesResponseSchema>;
 export type SourceResponse = z.infer<typeof SourceResponseSchema>;
 export type SourceVerifyResponse = z.infer<typeof SourceVerifyResponseSchema>;
