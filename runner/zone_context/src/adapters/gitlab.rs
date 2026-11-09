@@ -93,6 +93,10 @@ const DEFAULT_HOST: &str = "gitlab.com";
 
 const HTTPS_SCHEME: &str = "https";
 
+const HTTP_SCHEME: &str = "http";
+
+const PROJECTS_PATH: &str = "projects";
+
 const API_PATH: &str = "/api/v4";
 
 const BASE_URL_FIELD: &str = "base_url";
@@ -329,9 +333,13 @@ impl GitLabAdapter {
         }
     }
 
-    /// The web page of the project a GitLab source's `config` reads, at its
-    /// instance's web origin with any `/api/v4` base stripped; `None` for a
-    /// config the adapter would not read or whose instance is no URL
+    /// The web page of the project a GitLab source's `config` names, at its
+    /// instance's web origin with any `/api/v4` base stripped, and at
+    /// `/projects/{id}` for a numeric project id, which GitLab redirects to
+    /// the project. `None` when the config names no project, or an instance
+    /// that is not an `http` or `https` URL. It does not run
+    /// [`Self::check_instance`], which builds an HTTP client: nothing is read
+    /// from the link, and the server checks every config it stores.
     pub fn web_url(config: &serde_json::Value) -> Option<String> {
         let config = GitLabConfig::deserialize(config).ok()?;
         let project = config.project.trim();
@@ -339,10 +347,17 @@ impl GitLabAdapter {
             return None;
         }
         let origin = match Self::instance(config.base_url.as_deref()) {
-            Some((origin, _)) => Self::instance_key(&Url::parse(origin).ok()?),
+            Some((origin, _)) => Self::web_origin(&Url::parse(origin).ok()?)?,
             None => format!("{HTTPS_SCHEME}://{DEFAULT_HOST}"),
         };
+        if project.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Some(format!("{origin}/{PROJECTS_PATH}/{project}"));
+        }
         Some(format!("{origin}/{project}"))
+    }
+
+    fn web_origin(url: &Url) -> Option<String> {
+        matches!(url.scheme(), HTTPS_SCHEME | HTTP_SCHEME).then(|| Self::instance_key(url))
     }
 
     fn named_instance(config: &serde_json::Value) -> Result<Option<&str>> {
@@ -2204,6 +2219,46 @@ mod tests {
             config.base_url.as_deref(),
             Some("https://gitlab.example.com")
         );
+    }
+
+    #[test]
+    fn a_numeric_project_id_links_to_the_page_gitlab_redirects_it_to() {
+        for (config, linked) in [
+            (
+                json!({ "project_id": "4242" }),
+                "https://gitlab.com/projects/4242",
+            ),
+            (
+                json!({ "project_id": " 4242 ", "host": "https://gitlab.example.com/api/v4" }),
+                "https://gitlab.example.com/projects/4242",
+            ),
+            (
+                json!({ "project": "group/4242" }),
+                "https://gitlab.com/group/4242",
+            ),
+        ] {
+            assert_eq!(
+                GitLabAdapter::web_url(&config).as_deref(),
+                Some(linked),
+                "{config}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_instance_outside_http_is_never_linked() {
+        for key in INSTANCE_KEYS {
+            for named in [
+                "javascript:alert(1)",
+                "ftp://gitlab.example.com",
+                "file:///etc/gitlab",
+                "data:text/html,gitlab",
+            ] {
+                let config = json!({ "project": PROJECT, key: named });
+
+                assert_eq!(GitLabAdapter::web_url(&config), None, "{config}");
+            }
+        }
     }
 
     #[tokio::test]
