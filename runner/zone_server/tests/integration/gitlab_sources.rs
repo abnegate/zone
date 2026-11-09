@@ -8,6 +8,7 @@ use crate::common::TestResponse;
 use crate::common::test_email;
 use crate::common::test_password;
 use abnegate_secret::SecretValue;
+use abnegate_secret::decrypt_value;
 use abnegate_secret::encrypt_value;
 use axum::http::StatusCode;
 use serde_json::Value;
@@ -16,6 +17,7 @@ use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
 use zone_server::db::sources;
+use zone_server::db::sources::GITHUB;
 use zone_server::db::sources::GITLAB;
 use zone_server::db::sources::NewSource;
 use zone_server::db::sources::SourceRow;
@@ -122,14 +124,31 @@ impl Harness {
             .expect("the token seals")
     }
 
+    fn open(&self, sealed: &str) -> String {
+        decrypt_value(sealed, self.client.state().master_key())
+            .expect("the token opens")
+            .expose()
+            .to_string()
+    }
+
     async fn source(&self, tenant: &Tenant, config: Value, token: Option<&str>) -> SourceRow {
+        self.typed_source(tenant, GITLAB, config, token).await
+    }
+
+    async fn typed_source(
+        &self,
+        tenant: &Tenant,
+        source_type: &str,
+        config: Value,
+        token: Option<&str>,
+    ) -> SourceRow {
         let sealed = token.map(|token| self.seal(token));
         sources::create_source(
             self.pool(),
             NewSource {
                 workspace_id: tenant.workspace,
                 name: &format!("Project {}", Uuid::new_v4()),
-                source_type: GITLAB,
+                source_type,
                 config,
                 description: None,
                 url: None,
@@ -556,6 +575,98 @@ async fn creating_a_source_at_an_instance_the_adapter_refuses_stores_nothing() {
         );
     }
     assert_eq!(harness.count(&tenant).await, 0);
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_new_token_alone_is_accepted() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let source = harness
+        .source(
+            &tenant,
+            config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            Some(STORED_TOKEN),
+        )
+        .await;
+
+    let accepted = harness
+        .update(&tenant, source.id, json!({ "credentials": SENT_TOKEN }))
+        .await;
+
+    accepted.assert_status(StatusCode::OK);
+    let stored = harness.stored(&tenant, source.id).await;
+    assert_eq!(stored.config, source.config);
+    assert_eq!(
+        harness.open(stored.credentials_encrypted.as_deref().expect("a token")),
+        SENT_TOKEN
+    );
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_github_source_naming_a_host_is_not_held_to_the_gitlab_rule() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let repository = |host: &str| json!({ "owner": "acme", "repo": "widgets", HOST_FIELD: host });
+    let source = harness
+        .typed_source(
+            &tenant,
+            GITHUB,
+            repository(STORED_INSTANCE),
+            Some(STORED_TOKEN),
+        )
+        .await;
+    let moved = repository(OTHER_INSTANCE);
+
+    let accepted = harness
+        .update(&tenant, source.id, json!({ "config": moved }))
+        .await;
+
+    accepted.assert_status(StatusCode::OK);
+    let stored = harness.stored(&tenant, source.id).await;
+    assert_eq!(stored.config, moved);
+    assert_eq!(stored.credentials_encrypted, source.credentials_encrypted);
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn an_empty_token_replaces_the_stored_one_so_the_source_may_move() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let source = harness
+        .source(
+            &tenant,
+            config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            Some(STORED_TOKEN),
+        )
+        .await;
+    let moved = config(HOST_FIELD, Some(OTHER_INSTANCE), "main");
+
+    let accepted = harness
+        .update(
+            &tenant,
+            source.id,
+            json!({ "config": moved, "credentials": "" }),
+        )
+        .await;
+
+    accepted.assert_status(StatusCode::OK);
+    let stored = harness.stored(&tenant, source.id).await;
+    assert_eq!(stored.config, moved);
+    assert_eq!(
+        harness.open(
+            stored
+                .credentials_encrypted
+                .as_deref()
+                .expect("a credential")
+        ),
+        "",
+        "the stored token does not follow the source to the new instance"
+    );
 
     harness.discard(&tenant).await;
 }
