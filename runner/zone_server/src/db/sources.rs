@@ -5,7 +5,8 @@ use std::fmt;
 use abnegate_secret::REDACTED;
 use chrono::NaiveDateTime;
 use serde::Serialize;
-use sqlx::{PgExecutor, PgPool};
+use sqlx::PgExecutor;
+use sqlx::PgPool;
 use thiserror::Error;
 use uuid::Uuid;
 use zone_context::adapters::GitLabAdapter;
@@ -1293,7 +1294,7 @@ mod tests {
             NewSource {
                 workspace_id,
                 name: &unique_name,
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo"}),
                 description: Some("Test description"),
                 url: Some("https://github.com/test/repo"),
@@ -1341,7 +1342,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &format!("Source 1 {}", unique_id),
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo1"}),
                 description: None,
                 url: None,
@@ -1358,7 +1359,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id2,
                 name: &format!("Source 2 {}", unique_id),
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo2"}),
                 description: None,
                 url: None,
@@ -1407,7 +1408,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &unique_name,
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo"}),
                 description: None,
                 url: None,
@@ -1465,7 +1466,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &unique_name,
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo"}),
                 description: None,
                 url: None,
@@ -1536,7 +1537,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &unique_name,
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo"}),
                 description: None,
                 url: None,
@@ -1600,7 +1601,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &format!("Source 1 {}", unique_id),
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo1"}),
                 description: None,
                 url: None,
@@ -1616,7 +1617,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id2,
                 name: &format!("Source 2 {}", unique_id),
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo2"}),
                 description: None,
                 url: None,

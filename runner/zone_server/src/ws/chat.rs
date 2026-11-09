@@ -5916,8 +5916,11 @@ cat 'DIR/reply.jsonl'
 
                 /// Puts the chat in a new project whose source is the folder `path`.
                 async fn in_project(&self, path: &std::path::Path) {
-                    self.sourced("filesystem", serde_json::json!({"base_path": path}))
-                        .await;
+                    self.sourced(
+                        db::sources::FILESYSTEM,
+                        serde_json::json!({"base_path": path}),
+                    )
+                    .await;
                 }
 
                 /// Puts the chat in a new project whose source is `kind` with `config`.
@@ -6420,7 +6423,7 @@ cat 'DIR/reply.jsonl'
                 std::fs::write(&file, "").expect("a file where the clones would go");
                 let chat = Chat::cloning_under(file.join("clones")).await;
                 chat.sourced(
-                    "github",
+                    db::sources::GITHUB,
                     serde_json::json!({"owner": "owner", "repo": "repository"}),
                 )
                 .await;
@@ -6441,7 +6444,7 @@ cat 'DIR/reply.jsonl'
                 std::fs::write(&file, "").expect("a file where the clones would go");
                 let chat = Chat::cloning_under(file.join("clones")).await;
                 chat.sourced(
-                    "github",
+                    db::sources::GITHUB,
                     serde_json::json!({"owner": "owner", "repo": "repository"}),
                 )
                 .await;
