@@ -67,7 +67,7 @@ if sqlite is ever enabled. Check from `runner` that it stays unbuilt:
 cargo tree --workspace --all-features --target all -e all -i libsqlite3-sys
 ```
 
-It prints nothing. Remove the ignore once a sqlx release accepts libsqlite3-sys
+It reports nothing to print. Remove the ignore once a sqlx release accepts libsqlite3-sys
 0.39.0 or later.
 
 ## jsonwebtoken crypto backend
