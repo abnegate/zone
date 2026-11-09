@@ -66,11 +66,13 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use abnegate_agent::Tool;
+    use abnegate_agent::tool::job::{JobCommand, Jobs};
     use abnegate_agent::tool::{SearchCodeTool, Session};
+    use abnegate_agent::{Tool, ToolContext};
     use abnegate_exec::{PROXY_BYPASS_VARIABLE, PROXY_URL_VARIABLE};
     use serde_json::json;
     use tempfile::tempdir;
+    use uuid::Uuid;
     use zone_core::llm::Toolset;
 
     use super::*;
@@ -179,6 +181,10 @@ mod tests {
     /// The file a stand-in records its environment in.
     const RECORD: &str = "environment";
 
+    /// A repository the copy's environment names, which git is never asked
+    /// about even when the operator passes it through.
+    const REPOSITORY: (&str, &str) = ("GIT_DIR", "/notreal/repository.git");
+
     fn variables(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
             .iter()
@@ -255,7 +261,7 @@ mod tests {
     }
 
     fn recorded(directory: &Path) -> Vec<(String, String)> {
-        let record = std::fs::read(directory.join(RECORD)).expect("the stand-in for rg ran");
+        let record = std::fs::read(directory.join(RECORD)).expect("the stand-in ran");
         String::from_utf8_lossy(&record)
             .split_terminator('\0')
             .filter_map(|entry| entry.split_once('='))
@@ -263,69 +269,88 @@ mod tests {
             .collect()
     }
 
-    /// Run in a copy of this binary whose environment holds the server's
-    /// secrets, with a stand-in for `rg` first on its `PATH`, since setting
-    /// them here would race every other test that starts a child.
-    #[tokio::test]
-    async fn search_hands_rg_the_tool_environment() {
-        const TEST: &str = "agent::tools::environment::tests::search_hands_rg_the_tool_environment";
-        if let Some(directory) = std::env::var_os(COPY) {
-            let directory = PathBuf::from(directory);
-            let checkout = tempdir().unwrap();
-            let context = super::super::context::build(
-                checkout.path().to_path_buf(),
-                Session::Detached,
-                Vec::new(),
-                true,
-                super::super::MAX_TOOL_FILE_BYTES,
-                Duration::from_secs(super::super::TOOL_COMMAND_TIMEOUT_SECS),
-                false,
-            );
-            SearchCodeTool
-                .execute(json!({"pattern": "anything"}), &context)
-                .await
-                .expect("a search");
+    fn copied(directory: &Path, session: Session) -> ToolContext {
+        let checkout = directory.join("checkout");
+        std::fs::create_dir(&checkout).expect("the copy's checkout");
+        super::super::context::build(super::super::context::Config {
+            working_directory: checkout,
+            session,
+            denied: Vec::new(),
+            unrestricted: true,
+            maximum_file_size: super::super::MAX_TOOL_FILE_BYTES,
+            command_timeout: Duration::from_secs(super::super::TOOL_COMMAND_TIMEOUT_SECS),
+            chat_offline: false,
+        })
+    }
 
-            let recorded = recorded(&directory);
-            let names: BTreeSet<&str> = recorded.iter().map(|(name, _)| name.as_str()).collect();
-            let policy: BTreeSet<String> = context
-                .environment
-                .inherited()
-                .into_keys()
-                .filter_map(|name| name.into_string().ok())
-                .collect();
-            for name in &policy {
-                assert!(names.contains(name.as_str()), "rg was not handed {name}");
-            }
-            for name in &names {
+    /// That `program`, as the stand-in recorded it, was handed `context`'s
+    /// environment, less `withheld`, and nothing else a tool may not see.
+    fn assert_handed_the_tool_environment(
+        program: &str,
+        directory: &Path,
+        context: &ToolContext,
+        withheld: &[&str],
+    ) {
+        let recorded = recorded(directory);
+        let names: BTreeSet<&str> = recorded.iter().map(|(name, _)| name.as_str()).collect();
+        let policy: BTreeSet<String> = context
+            .environment
+            .inherited()
+            .into_keys()
+            .filter_map(|name| name.into_string().ok())
+            .collect();
+        for name in withheld {
+            assert!(policy.contains(*name), "the policy never hands {name}");
+        }
+        for name in &policy {
+            if withheld.contains(&name.as_str()) {
                 assert!(
-                    policy.contains(*name) || ROUTED.contains(name) || SHELL_OWN.contains(name),
-                    "rg was handed {name}, which the policy refuses"
+                    !names.contains(name.as_str()),
+                    "{program} was handed {name}"
+                );
+            } else {
+                assert!(
+                    names.contains(name.as_str()),
+                    "{program} was not handed {name}"
                 );
             }
-            for (name, _) in SERVER_SECRETS {
-                assert!(!names.contains(name), "rg was handed {name}");
-            }
-            for name in GAINED_BY_SEARCH.into_iter().chain([PASSED_THROUGH.0]) {
-                assert!(names.contains(name), "rg was not handed {name}");
-            }
-            return;
         }
+        for name in &names {
+            assert!(
+                policy.contains(*name) || ROUTED.contains(name) || SHELL_OWN.contains(name),
+                "{program} was handed {name}, which the policy refuses"
+            );
+        }
+        for (name, _) in SERVER_SECRETS {
+            assert!(!names.contains(name), "{program} was handed {name}");
+        }
+        for name in GAINED_BY_SEARCH.into_iter().chain([PASSED_THROUGH.0]) {
+            assert!(names.contains(name), "{program} was not handed {name}");
+        }
+    }
 
+    /// Run `test` in a copy of this binary whose environment holds the
+    /// server's secrets and a repository of its own, with a stand-in for
+    /// `program` first on its `PATH`, since setting them here would race
+    /// every other test that starts a child.
+    async fn in_a_copy(test: &str, program: &str) {
         let directory = tempdir().unwrap();
-        stand_in(directory.path(), "rg");
+        stand_in(directory.path(), program);
         let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf()).chain(
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
         ))
         .expect("a PATH with the stand-in first");
         let output =
             tokio::process::Command::new(std::env::current_exe().expect("this test binary"))
-                .args(["--exact", TEST, "--nocapture"])
+                .args(["--exact", test, "--nocapture"])
                 .env(COPY, directory.path())
                 .envs(SERVER_SECRETS)
                 .envs(LOCALES)
-                .env(cli::PASSTHROUGH, PASSED_THROUGH.0)
-                .env(PASSED_THROUGH.0, PASSED_THROUGH.1)
+                .env(
+                    cli::PASSTHROUGH,
+                    format!("{},{}", PASSED_THROUGH.0, REPOSITORY.0),
+                )
+                .envs([PASSED_THROUGH, REPOSITORY])
                 .env(zone_routing::PROXY_URL_VARIABLE, PROXY)
                 .env("PATH", path)
                 .output()
@@ -342,6 +367,39 @@ mod tests {
             printed.contains("1 passed"),
             "the copy ran no test: {printed}"
         );
+    }
+
+    #[tokio::test]
+    async fn search_hands_rg_the_tool_environment() {
+        const TEST: &str = "agent::tools::environment::tests::search_hands_rg_the_tool_environment";
+        let Some(directory) = std::env::var_os(COPY).map(PathBuf::from) else {
+            return in_a_copy(TEST, "rg").await;
+        };
+        let context = copied(&directory, Session::Detached);
+
+        SearchCodeTool
+            .execute(json!({"pattern": "anything"}), &context)
+            .await
+            .expect("a search");
+
+        assert_handed_the_tool_environment("rg", &directory, &context, &[]);
+    }
+
+    #[tokio::test]
+    async fn a_run_asks_git_for_its_exclude_in_the_tool_environment() {
+        const TEST: &str = "agent::tools::environment::tests::a_run_asks_git_for_its_exclude_in_the_tool_environment";
+        let Some(directory) = std::env::var_os(COPY).map(PathBuf::from) else {
+            return in_a_copy(TEST, "git").await;
+        };
+        let session = Session::Task(Uuid::new_v4());
+        let context = copied(&directory, session);
+
+        Jobs::spawn(&JobCommand::new("true", Vec::new()), &context)
+            .await
+            .expect("a job keyed to the run");
+        Jobs::kill_session(session).await;
+
+        assert_handed_the_tool_environment("git", &directory, &context, &[REPOSITORY.0]);
     }
 
     /// Set on the copy of this binary that reads its own environment.

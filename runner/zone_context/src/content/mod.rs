@@ -3,17 +3,19 @@
 //! This module provides the core types for representing content gathered from sources,
 //! along with utilities for tokenization, chunking, and intelligent sizing.
 
-mod code_chunker;
 mod sizing;
 mod tokenizer;
 
-pub use code_chunker::*;
+pub(crate) use abnegate_index::estimate_tokens;
 pub use sizing::*;
 pub use tokenizer::*;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use chrono::DateTime;
+use chrono::Utc;
+use serde::Deserialize;
+use serde::Serialize;
 use uuid::Uuid;
 
 // Re-export SourceCategory as ContentCategory for domain clarity
@@ -75,7 +77,7 @@ impl ContentItem {
     /// Set the content and update token count
     pub fn with_content(mut self, content: impl Into<String>) -> Self {
         let content = content.into();
-        self.token_count = estimate_tokens(&content);
+        self.token_count = abnegate_index::estimate_tokens(&content);
         self.content = Some(content);
         self.metadata_only = false;
         self
@@ -196,7 +198,7 @@ impl ContentChunk {
         end_offset: usize,
     ) -> Self {
         let text = text.into();
-        let token_count = estimate_tokens(&text);
+        let token_count = abnegate_index::estimate_tokens(&text);
         Self {
             id: Uuid::new_v4(),
             content_item_id,

@@ -2,9 +2,8 @@
 //!
 //! Provides fast token counting for content sizing decisions.
 
-use super::code_chunker::{
-    ChunkConfig, CodeLanguage, chunk_code_with_config, code_chunk_to_text_chunk,
-};
+use abnegate_index::chunk_text;
+use abnegate_index::estimate_tokens;
 
 /// Default token budget for `TokenBudget` / Partial adapter walks.
 /// This is not a source-index or fetch-size cap.
@@ -23,27 +22,33 @@ pub const MAX_EMBED_CHARS: usize = 3000;
 /// Overlap between chunks in tokens
 pub const CHUNK_OVERLAP_TOKENS: usize = 50;
 
-/// Estimate token count from text (fast heuristic)
-///
-/// Uses a simple character-based estimation that works well for mixed
-/// English/code content. More accurate than character count alone.
-///
-/// # Algorithm
-/// - GPT-4 tokenizer averages ~4 chars per token for English text
-/// - Code tends to be ~3.5 chars per token due to shorter identifiers
-/// - We use 4 chars per token as a conservative estimate
-pub fn estimate_tokens(text: &str) -> usize {
-    // Simple heuristic: ~4 characters per token
-    // This is conservative and works well for mixed content
-    text.len().saturating_add(3) / 4
-}
+const BYTES_PER_TOKEN: usize = 4;
+
+const CHARACTERS_PER_TOKEN: usize = 4;
+
+const SPLIT_OVERLAP_DIVISOR: usize = 10;
+
+const DENSITY_SCALE: usize = 10;
+
+const CODE_DENSITY: usize = 9;
+
+const MARKUP_DENSITY: usize = 6;
+
+const JSON_DENSITY: usize = 7;
+
+/// Identifier-heavy code averages about two characters per token, so 3/2
+/// leaves 25% headroom.
+const EMBED_CHARACTERS_PER_TOKEN_NUMERATOR: usize = 3;
+
+const EMBED_CHARACTERS_PER_TOKEN_DENOMINATOR: usize = 2;
+
+const MINIMUM_EMBED_CHARACTERS: usize = 512;
 
 /// Estimate tokens from byte size (for pre-fetch estimation)
 ///
 /// Used when we know the file size but haven't fetched content yet.
 pub fn estimate_tokens_from_bytes(bytes: usize) -> usize {
-    // Assume UTF-8, mostly ASCII content
-    bytes.div_ceil(4)
+    bytes.div_ceil(BYTES_PER_TOKEN)
 }
 
 /// Content-type aware token estimation
@@ -51,170 +56,22 @@ pub fn estimate_tokens_from_bytes(bytes: usize) -> usize {
 /// Adjusts the estimate based on content type characteristics.
 pub fn estimate_tokens_for_type(content: &str, content_type: &str) -> usize {
     let base = estimate_tokens(content);
-
-    // Adjust based on content type
     match content_type {
         t if t.contains("code") || t.ends_with("/rust") || t.ends_with("/python") => {
-            // Code is slightly denser
-            base * 9 / 10
+            base * CODE_DENSITY / DENSITY_SCALE
         }
-        t if t.contains("html") || t.contains("xml") => {
-            // HTML/XML has lots of tags
-            base * 6 / 10
-        }
-        t if t.contains("json") => {
-            // JSON has structural overhead
-            base * 7 / 10
-        }
-        t if t.contains("markdown") => {
-            // Markdown is close to plain text
-            base
-        }
+        t if t.contains("html") || t.contains("xml") => base * MARKUP_DENSITY / DENSITY_SCALE,
+        t if t.contains("json") => base * JSON_DENSITY / DENSITY_SCALE,
         _ => base,
     }
 }
 
-/// Split text into chunks suitable for embedding
-///
-/// Creates overlapping chunks to preserve context across chunk boundaries.
-pub fn chunk_text(text: &str, max_tokens: usize, overlap_tokens: usize) -> Vec<TextChunk> {
-    // Validate inputs
-    if max_tokens == 0 || overlap_tokens >= max_tokens {
-        return vec![TextChunk {
-            index: 0,
-            text: text.to_string(),
-            start_offset: 0,
-            end_offset: text.len(),
-        }];
-    }
-
-    let mut chunks = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
-    let total_chars = chars.len();
-
-    if total_chars == 0 {
-        return chunks;
-    }
-
-    // Estimate chars per token
-    let chars_per_token = 4;
-    let max_chars = max_tokens * chars_per_token;
-    let overlap_chars = overlap_tokens * chars_per_token;
-
-    let mut start = 0;
-    let mut chunk_index = 0;
-
-    while start < total_chars {
-        let mut end = (start + max_chars).min(total_chars);
-
-        // Try to break at a natural boundary (newline, sentence end, word boundary)
-        if end < total_chars {
-            end = find_break_point(&chars, start, end);
-        }
-
-        let chunk_text: String = chars[start..end].iter().collect();
-        let byte_start = text.char_indices().nth(start).map(|(i, _)| i).unwrap_or(0);
-        let byte_end = if end >= total_chars {
-            text.len()
-        } else {
-            text.char_indices()
-                .nth(end)
-                .map(|(i, _)| i)
-                .unwrap_or(text.len())
-        };
-
-        chunks.push(TextChunk {
-            index: chunk_index,
-            text: chunk_text,
-            start_offset: byte_start,
-            end_offset: byte_end,
-        });
-
-        chunk_index += 1;
-
-        // Move start, accounting for overlap
-        let advance = if end - start > overlap_chars {
-            end - start - overlap_chars
-        } else {
-            end - start
-        };
-
-        start += advance;
-
-        // Prevent infinite loop
-        if advance == 0 {
-            break;
-        }
-    }
-
-    chunks
-}
-
-/// A text chunk with position information
-#[derive(Debug, Clone)]
-pub struct TextChunk {
-    /// Index of this chunk (0-based)
-    pub index: usize,
-    /// The chunk text
-    pub text: String,
-    /// Start byte offset in original text
-    pub start_offset: usize,
-    /// End byte offset in original text
-    pub end_offset: usize,
-}
-
-impl TextChunk {
-    /// Estimate token count for this chunk
-    pub fn token_count(&self) -> usize {
-        estimate_tokens(&self.text)
-    }
-}
-
-/// Find a natural break point for chunking
-fn find_break_point(chars: &[char], start: usize, max_end: usize) -> usize {
-    // Look backwards from max_end for a good break point
-    let search_start = if max_end > start + 100 {
-        max_end - 100
-    } else {
-        start
-    };
-
-    // Priority: paragraph break > sentence end > line break > word boundary
-    for i in (search_start..max_end).rev() {
-        if chars[i] == '\n' && i + 1 < chars.len() && chars[i + 1] == '\n' {
-            return i + 2; // Paragraph break
-        }
-    }
-
-    for i in (search_start..max_end).rev() {
-        if (chars[i] == '.' || chars[i] == '!' || chars[i] == '?')
-            && i + 1 < chars.len()
-            && chars[i + 1].is_whitespace()
-        {
-            return i + 1; // Sentence end
-        }
-    }
-
-    for i in (search_start..max_end).rev() {
-        if chars[i] == '\n' {
-            return i + 1; // Line break
-        }
-    }
-
-    for i in (search_start..max_end).rev() {
-        if chars[i].is_whitespace() {
-            return i + 1; // Word boundary
-        }
-    }
-
-    max_end
-}
-
 /// Character budget for one embedding request
 pub fn embed_char_budget(model_max_tokens: usize) -> usize {
-    // Assume ~2 chars/token for identifier-heavy code and keep 25% headroom
-    let conservative = model_max_tokens.saturating_mul(3).saturating_div(2);
-    conservative.clamp(512, MAX_EMBED_CHARS)
+    let conservative = model_max_tokens
+        .saturating_mul(EMBED_CHARACTERS_PER_TOKEN_NUMERATOR)
+        .saturating_div(EMBED_CHARACTERS_PER_TOKEN_DENOMINATOR);
+    conservative.clamp(MINIMUM_EMBED_CHARACTERS, MAX_EMBED_CHARS)
 }
 
 /// Truncate `text` to `max_chars` on a char boundary
@@ -236,77 +93,40 @@ pub fn split_for_embedding(text: &str, max_chars: usize) -> Vec<String> {
     if text.chars().count() <= max_chars {
         return vec![text.to_string()];
     }
-    let max_tokens = max_chars.div_ceil(4).max(1);
-    let overlap = (max_tokens / 10).max(1).min(max_tokens.saturating_sub(1));
+    let max_tokens = max_chars.div_ceil(CHARACTERS_PER_TOKEN).max(1);
+    let overlap = (max_tokens / SPLIT_OVERLAP_DIVISOR)
+        .max(1)
+        .min(max_tokens.saturating_sub(1));
     chunk_text(text, max_tokens, overlap)
         .into_iter()
-        .map(|chunk| chunk.text)
+        .flat_map(|chunk| within_budget(chunk.text, max_chars))
         .collect()
 }
 
-/// Smart chunking that uses code-aware chunking for code files
-/// and text-based chunking for other content
-///
-/// This function detects the content type and applies the appropriate chunking strategy:
-/// - For code files with recognized extensions, uses tree-sitter based semantic chunking
-/// - For other content, falls back to text-based chunking with natural boundaries
-pub fn smart_chunk(
-    content: &str,
-    content_type: &str,
-    extension: Option<&str>,
-    file_path: Option<&str>,
-    max_tokens: usize,
-    overlap_tokens: usize,
-) -> Vec<TextChunk> {
-    let language = if let Some(ext) = extension {
-        CodeLanguage::from_extension(ext)
-    } else {
-        CodeLanguage::from_content_type(content_type)
-    };
-
-    match language {
-        CodeLanguage::Unknown => chunk_text(content, max_tokens, overlap_tokens),
-        _ => {
-            let code_chunks = chunk_code_with_config(
-                content,
-                language,
-                &ChunkConfig {
-                    max_tokens,
-                    file_path: file_path.map(str::to_string),
-                    ..ChunkConfig::default()
-                },
-            );
-            code_chunks
-                .into_iter()
-                .map(code_chunk_to_text_chunk)
-                .collect()
-        }
+/// `chunk_text` windows are whole tokens of four characters and may run one
+/// character past a paragraph break, so a window can overshoot `max_chars` by a
+/// few characters; such a piece is cut into near-equal parts that each fit.
+fn within_budget(piece: String, max_chars: usize) -> Vec<String> {
+    let characters: Vec<char> = piece.chars().collect();
+    if characters.len() <= max_chars {
+        return vec![piece];
     }
+    let parts = characters.len().div_ceil(max_chars);
+    let shortest = characters.len() / parts;
+    let longer = characters.len() % parts;
+    let mut pieces = Vec::with_capacity(parts);
+    let mut start = 0;
+    for part in 0..parts {
+        let length = shortest + usize::from(part < longer);
+        pieces.push(characters[start..start + length].iter().collect());
+        start += length;
+    }
+    pieces
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_estimate_tokens_empty() {
-        assert_eq!(estimate_tokens(""), 0);
-    }
-
-    #[test]
-    fn test_estimate_tokens_short() {
-        // "hello" = 5 chars, should be ~1-2 tokens
-        let tokens = estimate_tokens("hello");
-        assert!((1..=2).contains(&tokens));
-    }
-
-    #[test]
-    fn test_estimate_tokens_longer() {
-        // 100 chars should be ~25 tokens
-        let text = "a".repeat(100);
-        let tokens = estimate_tokens(&text);
-        assert_eq!(tokens, 25); // (100 + 3) / 4 = 25
-    }
 
     #[test]
     fn test_estimate_tokens_from_bytes() {
@@ -319,77 +139,10 @@ mod tests {
         let html = "<html><body><p>Hello world</p></body></html>";
         let plain_estimate = estimate_tokens(html);
         let html_estimate = estimate_tokens_for_type(html, "text/html");
-
-        // HTML estimate should be lower due to tag overhead
-        assert!(html_estimate < plain_estimate);
-    }
-
-    #[test]
-    fn test_chunk_text_empty() {
-        let chunks = chunk_text("", 100, 10);
-        assert!(chunks.is_empty());
-    }
-
-    #[test]
-    fn test_chunk_text_small() {
-        let text = "Hello world";
-        let chunks = chunk_text(text, 100, 10);
-
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].text, text);
-        assert_eq!(chunks[0].start_offset, 0);
-        assert_eq!(chunks[0].end_offset, text.len());
-    }
-
-    #[test]
-    fn test_chunk_text_multiple() {
-        // Create text that needs multiple chunks
-        let text = "This is sentence one. This is sentence two. This is sentence three. This is sentence four.";
-        let chunks = chunk_text(text, 10, 2); // ~40 chars per chunk
-
-        assert!(chunks.len() > 1);
-
-        // First chunk should start at 0
-        assert_eq!(chunks[0].start_offset, 0);
-
-        // All text should be covered
-        let total_covered: usize = chunks.iter().map(|c| c.text.len()).sum();
-        // Due to overlap, total covered will be >= original length
-        assert!(total_covered >= text.len());
-    }
-
-    #[test]
-    fn test_chunk_text_break_at_sentence() {
-        let text = "First sentence. Second sentence. Third sentence.";
-        let chunks = chunk_text(text, 8, 1); // ~32 chars
-
-        // Should break at sentence boundaries
-        for chunk in &chunks {
-            // Chunks should end at natural boundaries (period + space or end)
-            let text = &chunk.text;
-            if !text.is_empty() && chunk.end_offset < 48 {
-                // Check it ends cleanly
-                assert!(
-                    text.ends_with(". ") || text.ends_with('.') || text.ends_with(' '),
-                    "Chunk should end at boundary: '{}'",
-                    text
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_text_chunk_token_count() {
-        let chunk = TextChunk {
-            index: 0,
-            text: "Hello world this is a test".to_string(),
-            start_offset: 0,
-            end_offset: 26,
-        };
-
-        let tokens = chunk.token_count();
-        assert!(tokens > 0);
-        assert_eq!(tokens, estimate_tokens(&chunk.text));
+        assert!(
+            html_estimate < plain_estimate,
+            "markup should estimate fewer tokens than plain text"
+        );
     }
 
     #[test]
@@ -424,75 +177,72 @@ mod tests {
         assert!(joined.contains("word"));
     }
 
+    const FIRST_IDEOGRAPH: u32 = 0x4E00;
+
+    const BUDGETS: [usize; 6] = [200, 201, 202, 203, 1534, 3000];
+
+    fn distinct_ideographs(count: u32) -> String {
+        (FIRST_IDEOGRAPH..FIRST_IDEOGRAPH + count)
+            .filter_map(char::from_u32)
+            .collect()
+    }
+
+    fn assert_within_budget(pieces: &[String], budget: usize) {
+        assert!(pieces.len() > 1, "{budget}: expected a split");
+        for piece in pieces {
+            assert!(
+                piece.chars().count() <= budget,
+                "{budget}: a piece of {} characters exceeds the budget",
+                piece.chars().count()
+            );
+        }
+    }
+
+    fn assert_covers(text: &str, pieces: &[String], budget: usize) {
+        let mut covered = 0;
+        for piece in pieces {
+            let start = text
+                .find(piece.as_str())
+                .expect("every piece is in the text");
+            assert!(start <= covered, "{budget}: text before {start} is dropped");
+            covered = covered.max(start + piece.len());
+        }
+        assert_eq!(covered, text.len(), "{budget}: the tail is dropped");
+    }
+
+    #[test]
+    fn a_long_identifier_splits_within_the_budget() {
+        let identifier = "should_skip_blob".repeat(400);
+        for budget in BUDGETS {
+            assert_within_budget(&split_for_embedding(&identifier, budget), budget);
+        }
+    }
+
+    #[test]
+    fn a_long_identifier_splits_without_dropping_text() {
+        let identifier = distinct_ideographs(5_000);
+        for budget in BUDGETS {
+            let pieces = split_for_embedding(&identifier, budget);
+            assert_within_budget(&pieces, budget);
+            assert_covers(&identifier, &pieces, budget);
+        }
+    }
+
+    #[test]
+    fn a_paragraph_break_at_the_window_edge_stays_within_the_budget() {
+        let budget = 200;
+        let text = format!("{}\n\n{}", "a".repeat(budget - 1), distinct_ideographs(400));
+
+        let pieces = split_for_embedding(&text, budget);
+
+        assert_within_budget(&pieces, budget);
+        assert_covers(&text, &pieces, budget);
+    }
+
     #[test]
     fn test_embed_char_budget_clamps() {
         assert_eq!(embed_char_budget(128), 512);
         assert_eq!(embed_char_budget(8192), MAX_EMBED_CHARS);
         assert_eq!(embed_char_budget(1024), 1536);
-    }
-
-    #[test]
-    fn test_smart_chunk_with_rust_extension() {
-        let code = r#"
-fn hello() {
-    println!("Hello");
-}
-
-fn world() {
-    println!("World");
-}
-"#;
-        let chunks = smart_chunk(code, "text/plain", Some("rs"), Some("src/lib.rs"), 512, 50);
-
-        // Should use code-aware chunking and produce at least one chunk
-        // Note: Small functions may be merged together per Rule 4
-        assert!(!chunks.is_empty());
-    }
-
-    #[test]
-    fn test_smart_chunk_with_python_extension() {
-        let code = r#"
-def hello():
-    print("Hello")
-
-def world():
-    print("World")
-"#;
-        let chunks = smart_chunk(code, "text/plain", Some("py"), Some("app.py"), 512, 50);
-
-        // Should use code-aware chunking
-        assert!(!chunks.is_empty());
-    }
-
-    #[test]
-    fn test_smart_chunk_with_content_type() {
-        let code = r#"
-function hello() {
-    console.log("Hello");
-}
-"#;
-        let chunks = smart_chunk(code, "text/javascript", None, Some("index.js"), 512, 50);
-
-        // Should detect JavaScript from content type
-        assert!(!chunks.is_empty());
-    }
-
-    #[test]
-    fn test_smart_chunk_fallback_to_text() {
-        let text = "This is plain text. It should use text-based chunking.";
-        let chunks = smart_chunk(text, "text/plain", None, None, 512, 50);
-
-        // Should fall back to text chunking
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].text, text);
-    }
-
-    #[test]
-    fn test_smart_chunk_unknown_extension() {
-        let text = "Some content with unknown extension.";
-        let chunks = smart_chunk(text, "text/plain", Some("xyz"), None, 512, 50);
-
-        // Should fall back to text chunking
-        assert_eq!(chunks.len(), 1);
     }
 }

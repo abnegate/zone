@@ -1,51 +1,46 @@
 //! The tool context every chat and task run on the server works in.
 
-use std::path::PathBuf;
+mod config;
+
 use std::sync::Arc;
-use std::time::Duration;
 
 use abnegate_agent::ToolContext;
-use abnegate_agent::tool::Session;
 use zone_core::application::application;
 use zone_core::vpn::Offline;
+use zone_core::walk;
+
+pub use config::Config;
 
 use super::environment;
 
-/// A context rooted at `working_directory` for `session`, withholding
-/// `denied` from the file tools and reaching outside `working_directory`
-/// only when `unrestricted`. Every child it starts is given the
+/// A context built from `config`. Every child it starts is given the
 /// [`environment::policy`] and routed through Zone's proxy, its files are
-/// kept under `.zone/`, and `curl` and `wget` are held to the VPN gate, and
-/// refused outright when `chat_offline`.
-pub fn build(
-    working_directory: PathBuf,
-    session: Session,
-    denied: Vec<PathBuf>,
-    unrestricted: bool,
-    maximum_file_size: usize,
-    command_timeout: Duration,
-    chat_offline: bool,
-) -> ToolContext {
+/// kept under `.zone/`, its walks have Zone's [`walk::BUDGET`], and `curl`
+/// and `wget` are held to the VPN gate.
+pub fn build(config: Config) -> ToolContext {
     let mut context = ToolContext::default()
-        .within(working_directory)
-        .with_session(session)
-        .with_denied(denied)
+        .within(config.working_directory)
+        .with_session(config.session)
+        .with_denied(config.denied)
         .with_application(application())
         .with_environment(environment::policy())
         .with_proxy(zone_routing::proxy())
-        .with_public_web(Arc::new(Offline::new(chat_offline)));
-    context.unrestricted = unrestricted;
-    context.maximum_file_size = maximum_file_size;
-    context.command_timeout = command_timeout;
+        .with_public_web(Arc::new(Offline::new(config.chat_offline)))
+        .with_search_timeout(walk::BUDGET);
+    context.unrestricted = config.unrestricted;
+    context.maximum_file_size = config.maximum_file_size;
+    context.command_timeout = config.command_timeout;
     context
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     use abnegate_agent::tool::job::{JobCommand, Jobs};
-    use abnegate_agent::tool::{OFF_LIMITS, ReadFileTool, RunCommandTool, SearchCodeTool};
+    use abnegate_agent::tool::{OFF_LIMITS, ReadFileTool, RunCommandTool, SearchCodeTool, Session};
     use abnegate_agent::{Tool, ToolError, ToolResult};
     use serde_json::{Value, json};
     use tempfile::tempdir;
@@ -66,16 +61,19 @@ mod tests {
         "all_proxy",
     ];
 
-    fn chat(working_directory: &Path, denied: Vec<PathBuf>, offline: bool) -> ToolContext {
-        build(
-            working_directory.to_path_buf(),
-            Session::Chat(Uuid::new_v4()),
+    /// The file a stand-in for `rg` records its arguments in.
+    const ARGUMENTS: &str = "arguments";
+
+    fn chat(working_directory: &Path, denied: Vec<PathBuf>, chat_offline: bool) -> ToolContext {
+        build(Config {
+            working_directory: working_directory.to_path_buf(),
+            session: Session::Chat(Uuid::new_v4()),
             denied,
-            true,
-            MAX_TOOL_FILE_BYTES,
-            Duration::from_secs(TOOL_COMMAND_TIMEOUT_SECS),
-            offline,
-        )
+            unrestricted: true,
+            maximum_file_size: MAX_TOOL_FILE_BYTES,
+            command_timeout: Duration::from_secs(TOOL_COMMAND_TIMEOUT_SECS),
+            chat_offline,
+        })
     }
 
     async fn run(
@@ -94,15 +92,15 @@ mod tests {
         let session = Session::Task(Uuid::new_v4());
         let denied = vec![directory.path().join("state")];
 
-        let context = build(
-            directory.path().to_path_buf(),
+        let context = build(Config {
+            working_directory: directory.path().to_path_buf(),
             session,
-            denied.clone(),
-            false,
-            42,
-            Duration::from_secs(7),
-            false,
-        );
+            denied: denied.clone(),
+            unrestricted: false,
+            maximum_file_size: 42,
+            command_timeout: Duration::from_secs(7),
+            chat_offline: false,
+        });
 
         assert_eq!(context.working_directory, directory.path());
         assert_eq!(context.session, session);
@@ -198,8 +196,95 @@ mod tests {
             .output
             .unwrap();
 
-        assert!(found.starts_with("No matches found so far\n"), "{found}");
-        assert!(found.contains("[search stopped early: "), "{found}");
+        assert_eq!(
+            found,
+            "No matches found so far\n[search stopped early: out of time]"
+        );
+    }
+
+    #[test]
+    fn a_zone_context_walks_for_zones_twenty_five_seconds() {
+        let directory = tempdir().unwrap();
+
+        let context = chat(directory.path(), Vec::new(), false);
+
+        assert_eq!(context.search_timeout, Duration::from_secs(25));
+    }
+
+    /// A stand-in for `rg` under `directory` that records the arguments it
+    /// was started with, and the context that finds it first on its `PATH`.
+    fn recording_rg(directory: &Path, checkout: &Path) -> ToolContext {
+        let bin = directory.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let script = bin.join("rg");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\0' \"$@\" > '{}'\n",
+                directory.join(ARGUMENTS).display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .unwrap();
+        let mut context = chat(checkout, Vec::new(), false);
+        context
+            .environment
+            .set("PATH", path.into_string().expect("a UTF-8 PATH"));
+        context
+    }
+
+    #[tokio::test]
+    async fn search_hands_rg_the_crates_flags() {
+        let directory = tempdir().unwrap();
+        let checkout = directory.path().join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        let context = recording_rg(directory.path(), &checkout);
+
+        SearchCodeTool
+            .execute(json!({"pattern": "needle"}), &context)
+            .await
+            .expect("a search");
+
+        let recorded = std::fs::read_to_string(directory.path().join(ARGUMENTS))
+            .expect("the stand-in for rg ran");
+        let arguments: Vec<&str> = recorded.split_terminator('\0').collect();
+        for flag in [
+            "--no-config",
+            "--no-ignore-parent",
+            "--no-ignore-global",
+            "--max-columns-preview",
+        ] {
+            assert!(arguments.contains(&flag), "{flag}: {arguments:?}");
+        }
+        for pair in [["--max-columns", "400"], ["--glob", "!node_modules/**"]] {
+            assert!(
+                arguments.windows(2).any(|window| window == pair),
+                "{pair:?}: {arguments:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_file_only_a_parent_ignore_file_names_is_searched() {
+        let directory = tempdir().unwrap();
+        let checkout = directory.path().join("checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(directory.path().join(".ignore"), "ignored.rs\n").unwrap();
+        std::fs::write(checkout.join("ignored.rs"), "let needle = 1;\n").unwrap();
+        let context = chat(&checkout, Vec::new(), false);
+
+        let found = SearchCodeTool
+            .execute(json!({"pattern": "needle"}), &context)
+            .await
+            .expect("a search")
+            .output
+            .unwrap();
+
+        assert!(found.contains("ignored.rs:1: let needle = 1;"), "{found}");
     }
 
     #[tokio::test]
@@ -231,5 +316,72 @@ mod tests {
             matches!(&live, Err(ToolError::Execution(message)) if message == OFFLINE),
             "{live:?}"
         );
+    }
+
+    /// Filling a tree past the cap is cheap on Linux and slow on APFS, so the
+    /// cap is pinned on Linux.
+    #[cfg(target_os = "linux")]
+    mod entry_cap {
+        use abnegate_agent::tool::ListFilesTool;
+
+        use super::*;
+
+        /// Most entries one crate walk looks at before it stops, as
+        /// `abnegate_agent`'s private `MAXIMUM_WALK_ENTRIES` sets it.
+        const MAXIMUM_WALK_ENTRIES: usize = 100_000;
+
+        /// How many directories the tree past [`MAXIMUM_WALK_ENTRIES`] is
+        /// spread over, so they can be filled side by side.
+        const BRANCHES: usize = 16;
+
+        fn sprawl(root: &Path) {
+            let leaves = MAXIMUM_WALK_ENTRIES / BRANCHES + 1;
+            std::thread::scope(|scope| {
+                for branch in 0..BRANCHES {
+                    scope.spawn(move || {
+                        let directory = root.join(branch.to_string());
+                        std::fs::create_dir(&directory).unwrap();
+                        for leaf in 0..leaves {
+                            std::fs::File::create(directory.join(leaf.to_string())).unwrap();
+                        }
+                    });
+                }
+            });
+        }
+
+        fn prune(root: &Path) {
+            std::thread::scope(|scope| {
+                for branch in 0..BRANCHES {
+                    scope.spawn(move || std::fs::remove_dir_all(root.join(branch.to_string())));
+                }
+            });
+        }
+
+        #[tokio::test]
+        async fn a_listing_past_the_crates_entry_cap_stops_early() {
+            let directory = tempdir().unwrap();
+            let root = directory.path().to_path_buf();
+            tokio::task::spawn_blocking(move || sprawl(&root))
+                .await
+                .expect("the sprawling tree");
+            let context = chat(directory.path(), Vec::new(), false);
+
+            let listed = ListFilesTool
+                .execute(json!({"path": ".", "recursive": true}), &context)
+                .await
+                .expect("a listing past the cap still answers")
+                .output
+                .unwrap();
+            let root = directory.path().to_path_buf();
+            tokio::task::spawn_blocking(move || prune(&root))
+                .await
+                .expect("the sprawling tree is pruned");
+
+            let tail = &listed[listed.len().saturating_sub(200)..];
+            assert!(
+                listed.ends_with("\n[listing stopped early: too many entries]"),
+                "{tail}"
+            );
+        }
     }
 }

@@ -344,6 +344,14 @@ keeps only `zone_server`, such as `warn,zone_server=info`, hides it; add
 directory as `directory` when the turn names none; `abnegate_agent_cli=info`
 keeps it.
 
+The agent loop, its tools, its MCP servers and context compaction log under
+`abnegate_agent`, not `zone_core`, so a `RUST_LOG` that names `zone_core` but
+not `abnegate_agent` drops their lines, warnings included, such as "Connected
+MCP server" and "MCP server unavailable"; add `abnegate_agent=info`. A
+directive covers every target whose name starts with it, so `abnegate_agent`
+also keeps `abnegate_agent_cli`. Without `RUST_LOG`, `zone-server` and
+`zone run -v` log `abnegate_agent` at debug.
+
 The account's owner stops this by turning usage credits off, or bounds it by
 setting a monthly cap, at claude.ai/settings/usage.
 
@@ -2045,7 +2053,7 @@ Stdio servers inherit the Zone process environment, then overlay any `env` map o
 
 ### `ZONE_MCP_AUTO_CONNECT`
 - **Default**: `true`
-- **Description**: When no enabled stdio server is configured and `magents` is on `PATH`, attach `magents mcp` automatically. Disabled servers and servers with only a `url` do not count as configured.
+- **Description**: When no enabled stdio server is configured and `magents` is on `PATH`, attach `magents mcp` automatically. Disabled servers, servers with only a `url`, and servers Zone cannot launch (a blank `command`, both a `command` and a `url`, or a `type` other than `stdio`) do not count as configured.
 
 ### `ZONE_MCP_AUTO_MAGENTS`
 - **Default**: `true`

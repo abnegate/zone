@@ -207,7 +207,7 @@ impl ContextBuilder {
             }
 
             // Estimate tokens for this result
-            let tokens = crate::content::estimate_tokens(&result.chunk_text);
+            let tokens = abnegate_index::estimate_tokens(&result.chunk_text);
 
             // Check budget
             if used_tokens + tokens > self.config.token_budget {

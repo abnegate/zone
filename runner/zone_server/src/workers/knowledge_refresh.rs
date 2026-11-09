@@ -366,7 +366,7 @@ pub async fn refresh_entry(
             state.db(),
             entry.id,
             &content,
-            zone_context::content::estimate_tokens(&content) as i32,
+            abnegate_index::estimate_tokens(&content) as i32,
             &new_hash,
         )
         .await
@@ -384,7 +384,7 @@ pub async fn refresh_entry(
     );
 
     // Calculate token count
-    let token_count = zone_context::content::estimate_tokens(&content) as i32;
+    let token_count = abnegate_index::estimate_tokens(&content) as i32;
 
     // Update content in database
     if let Err(e) =
