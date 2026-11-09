@@ -3,6 +3,8 @@
 //! Provides intelligent repository traversal with pattern matching,
 //! binary file detection, and progressive fetching strategies.
 
+mod tree_key;
+
 use crate::adapters::ProgressCallback;
 use crate::adapters::RateLimitConfig;
 use crate::adapters::SourceAdapter;
@@ -43,6 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::RwLock;
+use tree_key::TreeKey;
 use zone_core::Source;
 
 const SOURCE_TYPE: &str = "github";
@@ -106,13 +109,10 @@ struct CachedTree {
     size_bytes: usize,
 }
 
-/// Cache key for GitHub trees (owner, repo, branch, credential fingerprint)
-type TreeCacheKey = (String, String, String, String);
-
 #[derive(Debug, Clone)]
 struct TreeCache {
-    entries: Arc<RwLock<HashMap<TreeCacheKey, CachedTree>>>,
-    in_flight: Arc<RwLock<HashSet<TreeCacheKey>>>,
+    entries: Arc<RwLock<HashMap<TreeKey, CachedTree>>>,
+    in_flight: Arc<RwLock<HashSet<TreeKey>>>,
     ttl: Duration,
     max_entries: usize,
     max_total_bytes: usize,
@@ -157,7 +157,7 @@ impl TreeCache {
         entries + tree.sha.as_str().len()
     }
 
-    async fn get(&self, key: &TreeCacheKey) -> Option<Tree> {
+    async fn get(&self, key: &TreeKey) -> Option<Tree> {
         let mut entries = self.entries.write().await;
         entries.get_mut(key).and_then(|entry| {
             if entry.cached_at.elapsed() < self.ttl {
@@ -169,7 +169,7 @@ impl TreeCache {
         })
     }
 
-    async fn insert(&self, key: TreeCacheKey, tree: Tree) {
+    async fn insert(&self, key: TreeKey, tree: Tree) {
         let mut entries = self.entries.write().await;
         let tree_size = Self::estimate_tree_size(&tree);
 
@@ -186,11 +186,11 @@ impl TreeCache {
                 if let Some(removed) = entries.remove(&lru_key) {
                     total_size = total_size.saturating_sub(removed.size_bytes);
                     tracing::debug!(
-                        "Evicted LRU tree cache entry: {}/{}/{} ({} bytes)",
-                        lru_key.0,
-                        lru_key.1,
-                        lru_key.2,
-                        removed.size_bytes
+                        owner = %lru_key.owner,
+                        repo = %lru_key.repo,
+                        branch = %lru_key.branch,
+                        bytes = removed.size_bytes,
+                        "Evicted LRU tree cache entry"
                     );
                 }
             } else {
@@ -518,12 +518,12 @@ impl GitHubAdapter {
         branch: &str,
         token: Option<&str>,
     ) -> Result<Tree> {
-        let key = (
-            owner.to_string(),
-            repo.to_string(),
-            branch.to_string(),
-            Credential::checked(token)?.fingerprint(),
-        );
+        let key = TreeKey {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            branch: branch.to_string(),
+            fingerprint: Credential::checked(token)?.fingerprint(),
+        };
 
         if let Some(tree) = self.tree_cache.get(&key).await {
             return Ok(tree);

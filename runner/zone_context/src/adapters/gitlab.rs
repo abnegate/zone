@@ -3,6 +3,8 @@
 //! Provides intelligent repository traversal with pattern matching,
 //! binary file detection, and progressive fetching strategies.
 
+mod tree_key;
+
 use crate::adapters::ProgressCallback;
 use crate::adapters::RateLimitConfig;
 use crate::adapters::SourceAdapter;
@@ -45,6 +47,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use tokio::sync::RwLock;
+use tree_key::TreeKey;
 use url::Url;
 use zone_core::Source;
 
@@ -122,14 +125,10 @@ struct CachedTree {
     size_bytes: usize,
 }
 
-/// Cache key for GitLab trees (instance, project, branch, path, credential
-/// fingerprint)
-type TreeCacheKey = (String, String, String, String, String);
-
 #[derive(Debug, Clone)]
 struct TreeCache {
-    entries: Arc<RwLock<HashMap<TreeCacheKey, CachedTree>>>,
-    in_flight: Arc<RwLock<HashSet<TreeCacheKey>>>,
+    entries: Arc<RwLock<HashMap<TreeKey, CachedTree>>>,
+    in_flight: Arc<RwLock<HashSet<TreeKey>>>,
     ttl: Duration,
     max_entries: usize,
     max_total_bytes: usize,
@@ -167,7 +166,7 @@ impl TreeCache {
             .sum()
     }
 
-    async fn get(&self, key: &TreeCacheKey) -> Option<Vec<TreeEntry>> {
+    async fn get(&self, key: &TreeKey) -> Option<Vec<TreeEntry>> {
         let mut entries = self.entries.write().await;
         entries.get_mut(key).and_then(|entry| {
             if entry.cached_at.elapsed() < self.ttl {
@@ -179,7 +178,7 @@ impl TreeCache {
         })
     }
 
-    async fn insert(&self, key: TreeCacheKey, tree: Vec<TreeEntry>) {
+    async fn insert(&self, key: TreeKey, tree: Vec<TreeEntry>) {
         let mut entries = self.entries.write().await;
         let tree_size = Self::estimate_tree_size(&tree);
 
@@ -196,12 +195,12 @@ impl TreeCache {
                 if let Some(removed) = entries.remove(&lru_key) {
                     total_size = total_size.saturating_sub(removed.size_bytes);
                     tracing::debug!(
-                        "Evicted LRU tree cache entry: {} {}@{}:{} ({} bytes)",
-                        lru_key.0,
-                        lru_key.1,
-                        lru_key.2,
-                        lru_key.3,
-                        removed.size_bytes
+                        instance = %lru_key.instance,
+                        project = %lru_key.project,
+                        branch = %lru_key.branch,
+                        path = %lru_key.path,
+                        bytes = removed.size_bytes,
+                        "Evicted LRU tree cache entry"
                     );
                 }
             } else {
@@ -606,13 +605,13 @@ impl GitLabAdapter {
         credential: &Credential,
     ) -> Result<Vec<TreeEntry>> {
         let path = config.path.as_deref();
-        let key = (
-            instance.to_string(),
-            config.project.clone(),
-            branch.to_string(),
-            path.unwrap_or_default().to_string(),
-            credential.fingerprint(),
-        );
+        let key = TreeKey {
+            instance: instance.to_string(),
+            project: config.project.clone(),
+            branch: branch.to_string(),
+            path: path.unwrap_or_default().to_string(),
+            fingerprint: credential.fingerprint(),
+        };
 
         if let Some(tree) = self.tree_cache.get(&key).await {
             return Ok(tree);

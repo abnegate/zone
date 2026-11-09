@@ -22,14 +22,11 @@ impl Credential {
         &self.0
     }
 
-    pub(crate) fn fingerprint(&self) -> String {
+    pub(crate) fn fingerprint(&self) -> Option<[u8; 32]> {
         if self.0.is_empty() {
-            return String::new();
+            return None;
         }
-        Sha256::digest(self.0.expose().as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
+        Some(Sha256::digest(self.0.expose().as_bytes()).into())
     }
 }
 
@@ -73,18 +70,17 @@ mod tests {
     }
 
     #[test]
-    fn a_fingerprint_never_holds_the_token_and_tells_tokens_apart() {
+    fn a_fingerprint_is_the_tokens_digest_and_tells_tokens_apart() {
         let fingerprint = |token| Credential::checked(token).unwrap().fingerprint();
 
         let first = fingerprint(Some("glpat-first"));
         let second = fingerprint(Some("glpat-second"));
 
-        assert!(!first.contains("glpat-first"), "{first}");
-        assert!(!second.contains("glpat-second"), "{second}");
+        assert_eq!(first, Some(Sha256::digest(b"glpat-first").into()));
         assert_ne!(first, second);
         assert_eq!(first, fingerprint(Some("glpat-first")));
-        assert!(fingerprint(None).is_empty());
-        assert!(fingerprint(Some("")).is_empty());
+        assert_eq!(fingerprint(None), None);
+        assert_eq!(fingerprint(Some("")), None);
     }
 
     #[test]
