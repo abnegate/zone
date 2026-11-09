@@ -707,7 +707,7 @@ async fn a_created_sources_link_is_at_its_instances_web_origin() {
 }
 
 #[tokio::test]
-async fn moving_a_source_moves_its_link_unless_the_update_names_one() {
+async fn moving_a_source_moves_its_link_unless_one_was_named() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let (id, _) = harness
@@ -741,6 +741,14 @@ async fn moving_a_source_moves_its_link_unless_the_update_names_one() {
             }),
             EXPLICIT_LINK,
         ),
+        (
+            json!({ "config": config(HOST_FIELD, Some(STORED_INSTANCE), "develop") }),
+            EXPLICIT_LINK,
+        ),
+        (
+            json!({ "config": config(HOST_FIELD, Some(OTHER_INSTANCE), "develop") }),
+            EXPLICIT_LINK,
+        ),
     ] {
         let updated = harness.update(&tenant, id, body.clone()).await;
 
@@ -756,6 +764,36 @@ async fn moving_a_source_moves_its_link_unless_the_update_names_one() {
             "{body}"
         );
     }
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_source_stored_without_a_link_is_linked_by_its_next_config_edit() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let source = harness
+        .source(
+            &tenant,
+            config(HOST_FIELD, Some(STORED_INSTANCE), "main"),
+            None,
+        )
+        .await;
+    assert_eq!(source.url, None);
+
+    let updated = harness
+        .update(
+            &tenant,
+            source.id,
+            json!({ "config": config(HOST_FIELD, Some(OTHER_INSTANCE), "main") }),
+        )
+        .await;
+
+    updated.assert_status(StatusCode::OK);
+    assert_eq!(
+        harness.stored(&tenant, source.id).await.url.as_deref(),
+        Some(OTHER_LINK)
+    );
 
     harness.discard(&tenant).await;
 }

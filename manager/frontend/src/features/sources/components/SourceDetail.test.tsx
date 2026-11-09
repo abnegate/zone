@@ -613,3 +613,35 @@ describe('SourceDetail field styling', () => {
     expect(unstyled).toEqual([]);
   });
 });
+
+describe('SourceDetail saving a GitLab source', () => {
+  const INSTANCE = 'https://gitlab.example.com';
+  const EXPLICIT_LINK = 'https://docs.example.test/project';
+
+  function gitLabSource(overrides: Partial<Source> = {}): Source {
+    return gitHubSource({
+      name: 'group/project',
+      source_type: 'gitlab',
+      config: { project_id: 'group/project', host: INSTANCE, branch: 'main' },
+      url: `${INSTANCE}/group/project`,
+      has_credentials: true,
+      ...overrides,
+    });
+  }
+
+  async function saved(): Promise<UpdateSourceRequest> {
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(updateSource).toHaveBeenCalledTimes(1));
+    return updateSource.mock.calls[0][0];
+  }
+
+  it('leaves the link to the server, so an edit keeps a link the source was given', async () => {
+    renderDetail(gitLabSource({ url: EXPLICIT_LINK }));
+
+    fireEvent.change(screen.getByLabelText(/^Branch/), { target: { value: 'develop' } });
+
+    const request = await saved();
+    expect(request.config).toMatchObject({ branch: 'develop' });
+    expect(request).not.toHaveProperty('url');
+  });
+});

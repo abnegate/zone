@@ -408,30 +408,10 @@ fn derive_source_url(
     config: &serde_json::Value,
     explicit: Option<&str>,
 ) -> Option<String> {
-    if let Some(url) = explicit.filter(|value| !value.is_empty()) {
-        return Some(url.to_string());
-    }
-
-    match source_type {
-        GITHUB => {
-            let owner = config
-                .get("owner")?
-                .as_str()
-                .filter(|value| !value.is_empty())?;
-            let repo = config
-                .get("repo")?
-                .as_str()
-                .filter(|value| !value.is_empty())?;
-            Some(format!("https://github.com/{}/{}", owner, repo))
-        }
-        GITLAB => GitLabAdapter::web_url(config),
-        WEB | ICAL => config
-            .get("url")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string),
-        _ => None,
-    }
+    explicit
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| sources::derived_link(source_type, config))
 }
 
 /// Source response
@@ -825,13 +805,6 @@ pub async fn update(
         .map(|credentials| encrypt_credentials(&state, credentials))
         .transpose()?;
 
-    let url = request.url.clone().or_else(|| {
-        request
-            .config
-            .as_ref()
-            .and_then(|config| derive_source_url(&previous.source_type, config, None))
-    });
-
     let current = sources::update_source(
         state.db(),
         id,
@@ -840,7 +813,7 @@ pub async fn update(
             name: request.name.as_deref(),
             config: request.config.clone(),
             description: request.description.as_deref(),
-            url: url.as_deref(),
+            url: request.url.as_deref(),
             is_active: request.is_active,
             github_installation_id: request.github_installation_id,
             credentials_encrypted: credentials_encrypted.as_deref(),

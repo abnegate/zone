@@ -13,9 +13,11 @@ use zone_context::adapters::GitLabAdapter;
 use super::DbResult;
 
 mod create_error;
+mod link;
 mod update_error;
 
 pub use create_error::CreateError;
+pub use link::derived_link;
 pub use update_error::UpdateError;
 
 pub const GITHUB: &str = "github";
@@ -290,7 +292,8 @@ pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<Sourc
     .ok_or(CreateError::Unattachable)
 }
 
-/// What an update changes; a field left `None` keeps its stored value.
+/// What an update changes; a field left `None` keeps its stored value, except
+/// that a config change moves a link derived from the stored config.
 /// `github_installation_id` is `Some(None)` to detach the installation.
 #[derive(Default)]
 pub struct SourceChanges<'a> {
@@ -312,9 +315,9 @@ fn refused_installation(error: sqlx::Error) -> CreateError {
     }
 }
 
-/// Apply every change to a source or none of them. A GitLab source holding a
-/// token moves to another instance only with a token entered for it, judged
-/// against the row as it is locked for the write.
+/// Apply every change to a source or none of them, each judged against the
+/// row as it is locked for the write. A GitLab source holding a token moves
+/// to another instance only with a token entered for it.
 pub async fn update_source(
     pool: &PgPool,
     id: Uuid,
@@ -329,10 +332,20 @@ pub async fn update_source(
     if let Some(refusal) = stored_token_refusal(&locked, &changes) {
         return Err(refusal);
     }
+    let link = changes
+        .url
+        .map(ToString::to_string)
+        .or_else(|| relinked(&locked, &changes));
 
-    let mut current = update_fields(&mut *transaction, id, workspace_id, &changes)
-        .await?
-        .ok_or(UpdateError::NotFound)?;
+    let mut current = update_fields(
+        &mut *transaction,
+        id,
+        workspace_id,
+        &changes,
+        link.as_deref(),
+    )
+    .await?
+    .ok_or(UpdateError::NotFound)?;
 
     if let Some(installation) = changes.github_installation_id {
         // The row is locked, so no row here means the installation was refused.
@@ -391,11 +404,24 @@ fn stored_token_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Opti
     }
 }
 
+/// The link a config change moves the source to, when its stored link is the
+/// one its stored config derives, or it has none
+fn relinked(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<String> {
+    let config = changes.config.as_ref()?;
+    let link = stored.url.as_deref().filter(|link| !link.is_empty());
+    let derived = derived_link(&stored.source_type, &stored.config);
+    if link.is_some() && link != derived.as_deref() {
+        return None;
+    }
+    derived_link(&stored.source_type, config)
+}
+
 async fn update_fields<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
     changes: &SourceChanges<'_>,
+    link: Option<&str>,
 ) -> DbResult<Option<SourceRow>> {
     sqlx::query_as::<_, SourceRow>(
         r#"
@@ -417,7 +443,7 @@ async fn update_fields<'e>(
     .bind(changes.name)
     .bind(changes.config.as_ref())
     .bind(changes.description)
-    .bind(changes.url)
+    .bind(link)
     .bind(changes.is_active)
     .fetch_optional(executor)
     .await
