@@ -4,6 +4,7 @@ use crate::common::{
     MEDIA, TestClient, create_test_pool, create_test_router, create_test_state, test_config,
     test_email, test_password,
 };
+use abnegate_agent::tool::MAXIMUM_SLEEP;
 use abnegate_agent::tool::RunShellTool;
 use abnegate_agent::tool::Tool;
 use abnegate_agent::tool::ToolContext;
@@ -1646,7 +1647,7 @@ async fn every_rewritten_string_points_the_model_at_the_wait_tool() {
     let refusal = RunShellTool
         .execute(
             json!({
-                "command": "sleep 600",
+                "command": format!("sleep {}", MAXIMUM_SLEEP.as_secs() + 1),
                 "reason": "Wait for the deploy."
             }),
             &ToolContext::default(),
@@ -1668,4 +1669,19 @@ async fn every_rewritten_string_points_the_model_at_the_wait_tool() {
         receipt.contains(WAIT_FOR),
         "the spawn receipt points the model at the job without naming {WAIT_FOR}: {receipt}"
     );
+
+    for (string, text) in [
+        ("run_shell's command", command),
+        ("run_shell's refusal", refusal.as_str()),
+        ("the spawn receipt", receipt.as_str()),
+    ] {
+        let lowered = text.to_lowercase();
+        for needle in POLLING {
+            assert!(
+                !lowered.contains(needle),
+                "{string} still says {needle:?}, which sends the model round the loop to look \
+                 again: {text}"
+            );
+        }
+    }
 }
