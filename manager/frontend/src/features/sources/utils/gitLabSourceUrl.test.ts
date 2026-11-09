@@ -42,8 +42,23 @@ describe('gitLabSourceUrl', () => {
     }
   });
 
+  it('links the project a config names as project, as the server reads that alias', () => {
+    expect(gitLabSourceUrl({ project: PROJECT, host: INSTANCE })).toBe(`${INSTANCE}/${PROJECT}`);
+  });
+
+  it('links nothing for a config naming both project and project_id, as the server reads neither', () => {
+    for (const [project, project_id] of [
+      [PROJECT, PROJECT],
+      [PROJECT, 'other/project'],
+      [null, PROJECT],
+      [PROJECT, null],
+    ]) {
+      expect(gitLabSourceUrl({ project, project_id, host: INSTANCE })).toBeUndefined();
+    }
+  });
+
   it('links nothing for a config naming no project', () => {
-    for (const config of [{}, { project_id: 42 }, { project_id: '  ' }]) {
+    for (const config of [{}, { project_id: 42 }, { project_id: '  ' }, { project: 42 }]) {
       expect(gitLabSourceUrl({ ...config, host: INSTANCE })).toBeUndefined();
     }
   });

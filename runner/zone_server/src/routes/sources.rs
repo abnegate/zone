@@ -135,18 +135,6 @@ fn validate_instance(source_type: &str, config: &serde_json::Value) -> Result<()
     })
 }
 
-/// Refuses the instance a GitLab token is sent for when no source could read from it
-fn validate_token_instance(source_type: &str, instance: &str) -> Result<(), ServerError> {
-    validate_instance(source_type, &sources::token_instance(instance)).map_err(
-        |error| match error {
-            ServerError::BadRequest(_) => {
-                ServerError::BadRequest(UpdateError::UnreadableTokenInstance.to_string())
-            }
-            error => error,
-        },
-    )
-}
-
 /// Refuses an installation whose token cannot read the repository `config` names.
 async fn validate_reachable(
     state: &AppState,
@@ -794,10 +782,6 @@ pub async fn update(
         validate_instance(&previous.source_type, config)?;
     }
 
-    if let Some(instance) = &request.instance {
-        validate_token_instance(&previous.source_type, instance)?;
-    }
-
     if let Some(Some(installation)) = request.github_installation_id {
         validate_installation(
             &state,
@@ -846,6 +830,10 @@ pub async fn update(
         | UpdateError::UnnamedTokenInstance
         | UpdateError::UnreadableTokenInstance) => ServerError::BadRequest(error.to_string()),
         error @ UpdateError::InstanceMoved => ServerError::Conflict(error.to_string()),
+        UpdateError::Adapter(error) => {
+            tracing::error!(error = %error, "The GitLab client could not be built");
+            internal()
+        }
         UpdateError::Database(error) => {
             tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
             internal()

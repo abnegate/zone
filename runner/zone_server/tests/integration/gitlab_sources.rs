@@ -39,12 +39,15 @@ const NON_STRING_NAMED: &str =
 const INSTANCE_MOVED: &str =
     "The source reads from another GitLab instance now. Reload it and re-enter the access token.";
 const UNREADABLE_NEEDS_TOKEN: &str = "The stored configuration names no readable GitLab instance. Re-enter the access token to change it.";
-const UNNAMED_TOKEN_INSTANCE: &str = "Name the GitLab instance this access token is for.";
+const UNNAMED_TOKEN_INSTANCE: &str =
+    "Send `instance`, the GitLab instance this access token is for.";
 const UNREADABLE_TOKEN_INSTANCE: &str =
     "Name the GitLab instance this access token is for as a URL a source can read from.";
 const STORED_LINK: &str = "https://127.0.0.1:9/group/project";
 const OTHER_LINK: &str = "https://localhost:9/group/project";
 const EXPLICIT_LINK: &str = "https://docs.example.test/project";
+const GITLAB_COM_LINK: &str = "https://gitlab.com/group/project";
+const NUMERIC_PROJECT: &str = "42";
 const HOST_FIELD: &str = "host";
 const BASE_URL_FIELD: &str = "base_url";
 const LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -166,6 +169,26 @@ impl Harness {
                 description: None,
                 url: None,
                 credentials_encrypted: sealed.as_deref(),
+                github_installation_id: None,
+            },
+        )
+        .await
+        .expect("the source is stored")
+    }
+
+    /// A source stored with `link`, as released code stored the link it
+    /// derived at creation
+    async fn linked(&self, tenant: &Tenant, config: Value, link: &str) -> SourceRow {
+        sources::create_source(
+            self.pool(),
+            NewSource {
+                workspace_id: tenant.workspace,
+                name: &format!("Project {}", Uuid::new_v4()),
+                source_type: GITLAB,
+                config,
+                description: None,
+                url: Some(link),
+                credentials_encrypted: None,
                 github_installation_id: None,
             },
         )
@@ -961,6 +984,80 @@ async fn a_source_stored_without_a_link_is_linked_by_its_next_config_edit() {
         harness.stored(&tenant, source.id).await.url.as_deref(),
         Some(OTHER_LINK)
     );
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
+async fn a_link_released_code_derived_moves_with_the_next_config_edit() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+    let api_host = "https://127.0.0.1:9/api/v4/";
+    let uppercase_host = "HTTPS://LOCALHOST:9";
+    let numeric = |branch: &str| json!({ "project_id": NUMERIC_PROJECT, "host": STORED_INSTANCE, "branch": branch });
+
+    for (case, config_before, link_before, config_after, link_after) in [
+        (
+            "a self-hosted base_url, which released code linked at gitlab.com",
+            config(BASE_URL_FIELD, Some(STORED_INSTANCE), "main"),
+            GITLAB_COM_LINK.to_string(),
+            config(BASE_URL_FIELD, Some(STORED_INSTANCE), "develop"),
+            STORED_LINK.to_string(),
+        ),
+        (
+            "an /api/v4 host, which released code kept in the link",
+            config(HOST_FIELD, Some(api_host), "main"),
+            format!("https://127.0.0.1:9/api/v4/{PROJECT}"),
+            config(HOST_FIELD, Some(api_host), "develop"),
+            STORED_LINK.to_string(),
+        ),
+        (
+            "an /api/v4 host moved to another instance",
+            config(HOST_FIELD, Some(api_host), "main"),
+            format!("https://127.0.0.1:9/api/v4/{PROJECT}"),
+            config(HOST_FIELD, Some(OTHER_INSTANCE), "main"),
+            OTHER_LINK.to_string(),
+        ),
+        (
+            "an uppercase host, which released code kept as spelled",
+            config(HOST_FIELD, Some(uppercase_host), "main"),
+            format!("{uppercase_host}/{PROJECT}"),
+            config(HOST_FIELD, Some(uppercase_host), "develop"),
+            OTHER_LINK.to_string(),
+        ),
+        (
+            "a numeric project id, which released code linked without /projects",
+            numeric("main"),
+            format!("{STORED_INSTANCE}/{NUMERIC_PROJECT}"),
+            numeric("develop"),
+            format!("{STORED_INSTANCE}/projects/{NUMERIC_PROJECT}"),
+        ),
+        (
+            "a link its creator named",
+            config(BASE_URL_FIELD, Some(STORED_INSTANCE), "main"),
+            EXPLICIT_LINK.to_string(),
+            config(BASE_URL_FIELD, Some(OTHER_INSTANCE), "develop"),
+            EXPLICIT_LINK.to_string(),
+        ),
+    ] {
+        let source = harness.linked(&tenant, config_before, &link_before).await;
+
+        let updated = harness
+            .update(&tenant, source.id, json!({ "config": config_after }))
+            .await;
+
+        updated.assert_status(StatusCode::OK);
+        assert_eq!(
+            updated.json_value()["source"]["url"].as_str(),
+            Some(link_after.as_str()),
+            "{case}"
+        );
+        assert_eq!(
+            harness.stored(&tenant, source.id).await.url,
+            Some(link_after),
+            "{case}"
+        );
+    }
 
     harness.discard(&tenant).await;
 }
