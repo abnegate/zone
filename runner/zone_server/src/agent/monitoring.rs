@@ -1,11 +1,15 @@
 //! Query the Zone Prometheus and Grafana instances from the chat loop.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
 use async_trait::async_trait;
 use reqwest::{Client, Url};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg, truncate};
 use crate::config::MonitoringConfig;

@@ -2,6 +2,7 @@
 
 pub(super) mod provider;
 pub(super) mod pull_requests;
+mod snippet;
 pub(super) mod subagents;
 pub(super) mod tasks;
 
@@ -27,7 +28,7 @@ use crate::services::provider::Provider;
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
-use zone_core::context::ContextUsage;
+use abnegate_agent::context::ContextUsage;
 
 use super::common::{ErrorResponse, Timestamps};
 
@@ -1139,7 +1140,7 @@ impl MessageSearchResponse {
             chat_title,
             similarity: result.similarity,
             relevance_score: result.similarity.clamp(0.0, 1.0),
-            snippet: zone_core::tools::excerpt(&result.content, SEARCH_SNIPPET_CHARS),
+            snippet: snippet::excerpt(&result.content, SEARCH_SNIPPET_CHARS),
             role: result.role,
             content: result.content,
             timestamps: Timestamps::from_naive(Some(result.created_at), Some(result.created_at)),

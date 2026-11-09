@@ -509,10 +509,10 @@ mod tests {
     use futures::future::join_all;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{LazyLock, Mutex};
+    use std::sync::{LazyLock, Mutex, mpsc};
     use std::time::Duration;
     use wiremock::matchers::{header, header_exists, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
     use crate::secret::fixture::seal;
@@ -813,11 +813,6 @@ mod tests {
         async fn status(&self) -> InstallationStatus {
             self.row().await.status()
         }
-
-        async fn minted(&self, row: &InstallationCredential) -> Result<Credential, Error> {
-            let scope = self.scope().expect("a workspace scope");
-            self.provider.minted(&self.pool, scope, row).await
-        }
     }
 
     fn tokens_path(number: u64) -> String {
@@ -831,6 +826,62 @@ mod tests {
             .expect(calls)
             .mount(server)
             .await;
+    }
+
+    /// Answers once the test releases it, or once the test lets go of the
+    /// release without sending.
+    struct Held {
+        answer: ResponseTemplate,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl Respond for Held {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let _released = self
+                .release
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv();
+            self.answer.clone()
+        }
+    }
+
+    /// GitHub answers the one exchange for installation `number` with
+    /// `answer` only when the returned sender releases it.
+    async fn holding(
+        server: &MockServer,
+        number: u64,
+        answer: ResponseTemplate,
+    ) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        Mock::given(method("POST"))
+            .and(path(tokens_path(number)))
+            .respond_with(Held {
+                answer,
+                release: Mutex::new(held),
+            })
+            .expect(1)
+            .mount(server)
+            .await;
+        release
+    }
+
+    async fn released_once_boarded(
+        connected: &Connected,
+        passengers: usize,
+        release: mpsc::Sender<()>,
+    ) {
+        let installation = InstallationId::new(connected.number);
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while connected.provider.flights.boarded(installation) < passengers {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("every resolution boards the one flight");
+        release
+            .send(())
+            .expect("the held exchange is still waiting");
     }
 
     fn issued(token: &str) -> ResponseTemplate {
@@ -1140,22 +1191,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_mints_share_one_failure() {
+    async fn concurrent_resolutions_share_one_failed_mint() {
         let server = MockServer::start().await;
         let connected = Connected::new(&server).await;
-        Mock::given(method("POST"))
-            .and(path(tokens_path(connected.number)))
-            .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_millis(300)))
-            .expect(1)
-            .mount(&server)
-            .await;
+        let release = holding(&server, connected.number, ResponseTemplate::new(500)).await;
 
-        let row = connected.row().await;
-
-        let (first, second, third) = tokio::join!(
-            connected.minted(&row),
-            connected.minted(&row),
-            connected.minted(&row)
+        let (first, second, third, ()) = tokio::join!(
+            connected.resolve(),
+            connected.resolve(),
+            connected.resolve(),
+            released_once_boarded(&connected, 3, release)
         );
 
         for outcome in [first, second, third] {
@@ -1202,19 +1247,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_mints_share_one_confirmed_refusal() {
+    async fn concurrent_resolutions_share_one_confirmed_refusal() {
         let server = MockServer::start().await;
         let connected = Connected::new(&server).await;
-        Mock::given(method("POST"))
-            .and(path(tokens_path(connected.number)))
-            .respond_with(ResponseTemplate::new(404).set_delay(Duration::from_millis(300)))
-            .expect(1)
-            .mount(&server)
-            .await;
+        let release = holding(&server, connected.number, ResponseTemplate::new(404)).await;
         uninstalled(&server, connected.number).await;
-        let row = connected.row().await;
 
-        let (first, second) = tokio::join!(connected.minted(&row), connected.minted(&row));
+        let (first, second, ()) = tokio::join!(
+            connected.resolve(),
+            connected.resolve(),
+            released_once_boarded(&connected, 2, release)
+        );
 
         for outcome in [first, second] {
             let error = outcome.expect_err("GitHub no longer knows the installation");

@@ -13,6 +13,13 @@
 
 mod grant;
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Rendering;
+use abnegate_agent::tool::Tier;
 use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
 use abnegate_vcs::{GitService, PullRequestError, RepositoryUrl};
@@ -21,7 +28,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 use super::WorkspaceScope;
 use super::integrations::source_token;
@@ -422,7 +428,7 @@ impl Tool for CreateRepositoryTool {
     }
 
     /// The one line the approval card shows: owner, name and visibility.
-    fn preview(&self, params: &Value) -> Option<String> {
+    fn preview(&self, params: &Value) -> Option<Rendering> {
         let name = params["name"].as_str()?;
         let owner = params["owner"].as_str().unwrap_or("the source's owner");
         let visibility = if params["private"].as_bool().unwrap_or(true) {
@@ -430,9 +436,9 @@ impl Tool for CreateRepositoryTool {
         } else {
             "public"
         };
-        Some(format!(
+        Some(Rendering::from(format!(
             "Create the {visibility} GitHub repository {owner}/{name} with an initial commit"
-        ))
+        )))
     }
 
     /// Create the repository through the source's credential and report its URL.
@@ -610,12 +616,12 @@ impl Tool for FinalizeProjectTool {
     }
 
     /// The one line the receipt shows: the project and how many tasks it creates.
-    fn preview(&self, params: &Value) -> Option<String> {
+    fn preview(&self, params: &Value) -> Option<Rendering> {
         let name = params["name"].as_str()?;
         let tasks = params["tasks"].as_array().map_or(0, Vec::len);
-        Some(format!(
+        Some(Rendering::from(format!(
             "Create project «{name}» with {tasks} tasks and start it"
-        ))
+        )))
     }
 
     /// Validate the blueprint, create the project and its tasks in one transaction, and wake the driver.

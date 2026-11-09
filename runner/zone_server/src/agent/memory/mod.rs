@@ -16,13 +16,20 @@
 //! cannot is stated in the prompt instead — [`rules`]'s own module doc draws
 //! that line.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::Tier;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
+use super::approval::Refusal;
 use super::tools::WorkspaceScope;
 use crate::db::memory::{
     self, MAX_FACTS, MAX_NAME_CHARS, MemoryCategory, MemoryIndexRow, MemoryOutcome, MemoryRow,
@@ -94,7 +101,7 @@ pub const TRACE_DETAIL: &str = "Private to the person it belongs to; not shown h
 
 /// The outcome line the trace shows for a finished call.
 pub fn trace_detail(name: &str, detail: &str) -> String {
-    if is_private(name) && !zone_core::tools::is_refusal(detail) {
+    if is_private(name) && Refusal::worded(detail).is_none() {
         TRACE_DETAIL.to_string()
     } else {
         detail.to_string()
@@ -822,7 +829,7 @@ mod tests {
     /// remembered, so hiding it would only hide why the call did not run.
     #[test]
     fn a_memory_call_keeps_why_its_approval_did_not_go_through() {
-        use zone_core::tools::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
+        use crate::agent::approval::refusal::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
 
         for refusal in [DENIED, APPROVAL_TIMED_OUT, APPROVAL_CANCELLED] {
             let failed = format!("Error: {refusal}");
@@ -1070,10 +1077,7 @@ mod tests {
     }
 
     fn context(session: Session) -> ToolContext {
-        ToolContext {
-            session,
-            ..ToolContext::default()
-        }
+        ToolContext::default().with_session(session)
     }
 
     fn chat() -> ToolContext {
@@ -1286,7 +1290,7 @@ mod tests {
         for tool in tools() {
             assert!(
                 tool.parameters_schema()["properties"]
-                    .get(zone_core::tools::REASON_PARAM)
+                    .get(abnegate_agent::tool::REASON_PARAMETER)
                     .is_none(),
                 "{} asks for a reason",
                 tool.name()

@@ -42,4 +42,11 @@ impl<Key: Copy + Eq + Hash, Outcome> Flights<Key, Outcome> {
     pub(super) fn len(&self) -> usize {
         self.lock().len()
     }
+
+    #[cfg(test)]
+    pub(super) fn boarded(&self, key: Key) -> usize {
+        self.lock()
+            .get(&key)
+            .map_or(0, |outcome| Arc::strong_count(outcome) - 1)
+    }
 }

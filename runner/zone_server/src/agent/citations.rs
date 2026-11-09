@@ -1329,7 +1329,7 @@ mod tests {
     #[test]
     fn an_unrecognised_tool_cannot_certify_itself() {
         let supplied = citations(
-            "magents_spawn_session",
+            "magents__spawn_session",
             json!({
                 "citations": [{
                     "kind": "github_build",

@@ -7,12 +7,17 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
 use uuid::Uuid;
-use zone_core::tools::{
-    REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, WaitFor, excerpt,
-    reason_property,
-};
 
-use super::PREVIEW_BODY_CHARS;
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::REASON_PARAMETER;
+use abnegate_agent::tool::Rendering;
+use abnegate_agent::tool::Tier;
+use abnegate_agent::tool::WaitFor;
+use abnegate_agent::tool::reason_property;
 
 /// What `create_reminder` offers and what it refuses, in the tool's own words.
 ///
@@ -281,8 +286,8 @@ impl Tool for WorkspaceAction {
         }
     }
 
-    fn preview(&self, params: &Value) -> Option<String> {
-        let content = excerpt(params["content"].as_str()?, PREVIEW_BODY_CHARS);
+    fn preview(&self, params: &Value) -> Option<Rendering> {
+        let content = params["content"].as_str()?;
         match self.action {
             Action::SendMessage => {
                 let mentioned = params["mentions"].as_array().map_or(0, Vec::len);
@@ -290,15 +295,15 @@ impl Tool for WorkspaceAction {
                     0 => String::new(),
                     named => format!(", mentioning {named}"),
                 };
-                Some(format!(
+                Some(Rendering::from(format!(
                     "Post to chat {}{mentions}: \"{content}\"",
                     params["chat_id"].as_str().unwrap_or("unnamed")
-                ))
+                )))
             }
-            Action::CreateReminder => Some(format!(
+            Action::CreateReminder => Some(Rendering::from(format!(
                 "Message this chat at {}: \"{content}\"",
                 params["due_at"].as_str().unwrap_or("an unstated time")
-            )),
+            ))),
             _ => None,
         }
     }
@@ -318,8 +323,8 @@ impl Tool for WorkspaceAction {
                 json!(["task_id"]),
             ),
             Action::SendMessage => (
-                json!({"chat_id":identifier,"content":{"type":"string","minLength":1},"mentions":{"type":"array","items":identifier},REASON_PARAM: reason_property()}),
-                json!(["chat_id", "content", REASON_PARAM]),
+                json!({"chat_id":identifier,"content":{"type":"string","minLength":1},"mentions":{"type":"array","items":identifier},REASON_PARAMETER: reason_property()}),
+                json!(["chat_id", "content", REASON_PARAMETER]),
             ),
             Action::CreateReminder => (
                 json!({
@@ -378,8 +383,8 @@ impl WorkspaceAction {
     /// `offered` for a turn that has wait_for, `withheld` for one that does not.
     fn told(&self, offered: &'static str, withheld: &'static str) -> &'static str {
         match self.wait_for {
-            WaitFor::Offered => offered,
             WaitFor::Withheld => withheld,
+            _ => offered,
         }
     }
 
@@ -518,7 +523,7 @@ mod tests {
     use super::*;
     use crate::agent::wait::WAIT_FOR;
     use crate::state::AppState;
-    use zone_core::tools::REASON_DESCRIPTION;
+    use abnegate_agent::tool::REASON_DESCRIPTION;
 
     const WHY: &str = "The user asked for the team to be told.";
 
@@ -590,21 +595,21 @@ mod tests {
     async fn send_message_asks_for_a_reason_the_message_accepts() {
         let schema = tool(Action::SendMessage).parameters_schema();
         assert_eq!(
-            schema["properties"][REASON_PARAM]["description"],
+            schema["properties"][REASON_PARAMETER]["description"],
             REASON_DESCRIPTION
         );
         assert!(
             schema["required"]
                 .as_array()
                 .expect("required is a list")
-                .contains(&json!(REASON_PARAM)),
+                .contains(&json!(REASON_PARAMETER)),
             "reason must be advertised as required: {schema}"
         );
         let message: actions::Message = serde_json::from_value(json!({
             "chat_id": Uuid::new_v4(),
             "content": "Shipped",
             "mentions": [],
-            REASON_PARAM: WHY,
+            REASON_PARAMETER: WHY,
         }))
         .expect("deny_unknown_fields must accept every property the schema advertises");
         assert_eq!(message.reason.as_deref(), Some(WHY));
@@ -685,7 +690,7 @@ mod tests {
             let tool = tool(action);
             let schema = tool.parameters_schema();
             assert!(
-                schema["properties"].get(REASON_PARAM).is_none(),
+                schema["properties"].get(REASON_PARAMETER).is_none(),
                 "{} must not ask for a reason: {schema}",
                 tool.name()
             );

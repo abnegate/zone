@@ -1,5 +1,6 @@
 //! Application state
 
+use abnegate_agent::McpHub;
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
 use dashmap::DashMap;
@@ -14,7 +15,7 @@ use zone_context::adapters::{
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
 use zone_core::llm::{LlmBackend, cli};
-use zone_core::mcp::McpHub;
+use zone_core::servers;
 
 use crate::cache::Cache;
 #[cfg(test)]
@@ -319,7 +320,12 @@ impl AppState {
 
     /// MCP servers for this process. Connected once on first chat or task use.
     pub async fn mcp_hub(&self) -> &McpHub {
-        self.inner.mcp.get_or_init(McpHub::connect_from_env).await
+        self.inner
+            .mcp
+            .get_or_init(|| async {
+                McpHub::connect_through(&servers::config(), &zone_routing::proxy()).await
+            })
+            .await
     }
 
     /// Terminal frames for task runs. A waiter subscribes here; the writers
@@ -497,9 +503,12 @@ mod tests {
     use std::num::{NonZeroU8, NonZeroU32};
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
+    use zone_core::servers::recording;
     use zone_core::variables::Variables;
 
     const REDIS_URL: &str = "REDIS_URL";
+    const MCP_ENABLED: &str = "ZONE_MCP_ENABLED";
+    const MCP_SERVERS: &str = "ZONE_MCP_SERVERS";
     const REFUSED_REDIS_URL: &str = "redis://127.0.0.1:1";
 
     fn test_cache_url() -> Option<String> {
@@ -821,6 +830,24 @@ mod tests {
         assert!(Arc::ptr_eq(with_mail.mail().unwrap(), &mail));
         assert_eq!(with_mail.train_semaphore().available_permits(), 1);
         assert_eq!(with_mail.frame_semaphore().available_permits(), 4);
+    }
+
+    #[tokio::test]
+    async fn the_mcp_hub_routes_its_servers_through_zones_proxy_over_their_own() {
+        let directory = tempfile::tempdir().expect("a directory for the recording");
+        let recorded = directory.path().join("environment");
+        let mut environment = Variables::isolated(&[MCP_ENABLED]);
+        environment.set(MCP_SERVERS, recording::document(&recorded));
+        environment.set(zone_routing::PROXY_URL_VARIABLE, recording::PROXY);
+        let pool = PgPool::connect_lazy("postgres://localhost/state-mcp")
+            .expect("a lazy pool needs no server");
+        let state = AppState::new(test_config(), pool, None);
+
+        let connected = state.mcp_hub().await.server_count();
+        drop(environment);
+
+        assert_eq!(connected, 0, "the recorder exits without answering");
+        recording::assert_routed(&recorded);
     }
 
     #[tokio::test]

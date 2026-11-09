@@ -12,7 +12,6 @@ use rmcp::model::{CallToolRequestParams, ErrorCode, ErrorData, ProtocolVersion, 
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 use zone_core::llm::Toolset;
-use zone_core::tools::PERMISSION_TOOL;
 
 use super::protocol::{self, Request, Response};
 use super::turn::Turn;
@@ -160,7 +159,7 @@ fn permission_tool() -> McpTool {
     let schema: Map<String, Value> = serde_json::from_str(PERMISSION_SCHEMA)
         .expect("the permission tool's schema is valid JSON");
     McpTool::new(
-        PERMISSION_TOOL,
+        Toolset::PERMISSION,
         "Ask zone whether one of your own tools may run. Zone answers under this chat's approval policy: allowed at once when the chat auto-approves, otherwise once the reader has answered. Answers with an allow or deny envelope; a deny is a refusal to respect, not an error to retry.",
         Arc::new(schema),
     )
@@ -323,12 +322,12 @@ mod tests {
             .map(|tool| tool["name"].as_str().expect("a tool name"))
             .collect();
         assert!(
-            listed.contains(&PERMISSION_TOOL),
+            listed.contains(&Toolset::PERMISSION),
             "the agent can find the tool its command line tells it to ask: {listed:?}"
         );
         let served: Vec<&str> = listed
             .into_iter()
-            .filter(|name| *name != PERMISSION_TOOL)
+            .filter(|name| *name != Toolset::PERMISSION)
             .collect();
         let registered: Vec<&str> = opened
             .tools
@@ -438,7 +437,7 @@ mod tests {
         assert_eq!(
             listed
                 .iter()
-                .filter(|name| **name != PERMISSION_TOOL)
+                .filter(|name| **name != Toolset::PERMISSION)
                 .count(),
             lease.toolset().tools.len(),
             "the agent is allowed exactly the tools this endpoint lists"
@@ -465,7 +464,7 @@ mod tests {
                 15,
                 protocol::TOOLS_CALL,
                 call_of(
-                    PERMISSION_TOOL,
+                    Toolset::PERMISSION,
                     json!({
                         "tool_name": "Bash",
                         "input": {"command": "ls"},

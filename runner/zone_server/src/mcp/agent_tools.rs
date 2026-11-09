@@ -72,9 +72,9 @@ mod tests {
     use crate::agent::question::ASK_USER;
     use crate::agent::wait::WAIT_FOR;
     use crate::agent::{ToolProfile, WorkspaceScope};
+    use abnegate_agent::tool::WaitFor;
     use abnegate_agent_cli::{AgentKind, CliSettings};
     use uuid::Uuid;
-    use zone_core::tools::WaitFor;
 
     const ENDPOINT: &str = "http://127.0.0.1:8421/mcp";
 

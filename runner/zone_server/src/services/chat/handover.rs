@@ -16,12 +16,12 @@ pub use switch::Switch;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use abnegate_agent::context::Entry;
 use abnegate_agent_cli::{AgentKind, Session};
 use abnegate_llm::Message;
 use chrono::Utc;
 use uuid::Uuid;
 use zone_chat::history::NewEntry;
-use zone_core::context::Entry;
 use zone_core::llm::LlmBackend;
 
 use super::session::RunContext;
@@ -308,12 +308,9 @@ pub fn carried(whole: &RunContext) -> RunContext {
 /// [`CONTINUE`], from the user so it follows the answer rather than opening the transcript with
 /// the instructions, and consumed already so it is never written to the chat.
 fn instruction() -> Entry {
-    Entry {
-        id: INSTRUCTION.into(),
-        message: Message::user(CONTINUE),
-        preserve: true,
-        consumed: true,
-    }
+    Entry::new(INSTRUCTION, Message::user(CONTINUE))
+        .with_preserve(true)
+        .with_consumed(true)
 }
 
 /// Moves the session `resolved` is about to resume to where its agent will look for it from the
@@ -440,10 +437,9 @@ fn standing(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
-    use std::sync::mpsc;
+    use std::sync::{Arc, Condvar, Mutex};
 
+    use abnegate_agent::context::project;
     use abnegate_agent_cli::CliSettings;
     use abnegate_agent_cli::SessionError;
     use abnegate_agent_cli::login::claude::Tokens;
@@ -453,7 +449,7 @@ mod tests {
     use chrono::{DateTime, SecondsFormat, TimeDelta, TimeZone};
     use sqlx::PgPool;
     use tempfile::TempDir;
-    use zone_core::context::project;
+    use tokio::runtime::{Builder, Runtime};
 
     use super::*;
     use crate::config::AgentConfig;
@@ -1098,14 +1094,27 @@ mod tests {
         assert!(!left.join(format!("{SESSION}.jsonl")).exists());
     }
 
+    /// A current-thread runtime whose blocking threads start their work only once `progress` is
+    /// set, or after [`TIMEOUT`], so work sent off the runtime cannot finish before the runtime's
+    /// own thread has moved on.
+    fn gated(progress: &Arc<(Mutex<bool>, Condvar)>) -> Runtime {
+        let progress = Arc::clone(progress);
+        Builder::new_current_thread()
+            .on_thread_start(move || {
+                let (made, signal) = &*progress;
+                let made = made.lock().expect("the progress flag");
+                drop(
+                    signal
+                        .wait_timeout_while(made, TIMEOUT, |made| !*made)
+                        .expect("the progress flag"),
+                );
+            })
+            .build()
+            .expect("a current-thread runtime")
+    }
+
     #[test]
     fn settling_a_handover_relocates_off_the_runtime() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .max_blocking_threads(1)
-            .build()
-            .expect("a runtime with one blocking thread");
-        let (release, held) = mpsc::channel::<()>();
-        runtime.spawn_blocking(move || held.recv());
         let agents = TempDir::new().expect("an agent state root");
         let config = configured(agents.path());
         let organization = Uuid::new_v4();
@@ -1129,18 +1138,18 @@ mod tests {
             ),
             login: Some(login),
         };
-        let elsewhere = AtomicBool::new(false);
+        let progress = Arc::new((Mutex::new(false), Condvar::new()));
 
-        let overlapped = runtime.block_on(async {
+        let overlapped = gated(&progress).block_on(async {
+            let (made, signal) = &*progress;
             let (overlapped, ()) = tokio::join!(
-                biased;
                 async {
                     settle(&config, organization, &resolved).await;
-                    elsewhere.load(Ordering::SeqCst)
+                    *made.lock().expect("the progress flag")
                 },
                 async {
-                    elsewhere.store(true, Ordering::SeqCst);
-                    release.send(()).expect("the blocking thread waits");
+                    *made.lock().expect("the progress flag") = true;
+                    signal.notify_all();
                 },
             );
             overlapped

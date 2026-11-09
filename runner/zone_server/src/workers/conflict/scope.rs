@@ -8,11 +8,16 @@
 
 use std::sync::Arc;
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Rendering;
+use abnegate_agent::tool::Tier;
 use abnegate_llm::ToolDefinition;
 use abnegate_vcs::conflict::{Conflict, ConflictedPath};
 use async_trait::async_trait;
 use serde_json::Value;
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolResult};
 
 /// The parameter every file tool names its target with.
 const PATH: &str = "path";
@@ -109,7 +114,7 @@ impl Tool for Scoped {
         self.inner.tier()
     }
 
-    fn preview(&self, params: &Value) -> Option<String> {
+    fn preview(&self, params: &Value) -> Option<Rendering> {
         self.inner.preview(params)
     }
 
@@ -119,7 +124,7 @@ impl Tool for Scoped {
 
     async fn execute(&self, params: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
         let Some(candidate) = params.get(PATH).and_then(Value::as_str) else {
-            return Err(ToolError::InvalidParams(format!(
+            return Err(ToolError::InvalidParameters(format!(
                 "{} requires a {PATH} naming one of the conflicted files",
                 self.inner.name()
             )));
@@ -266,7 +271,7 @@ mod tests {
             .await
             .expect_err("a file tool with no path cannot be scoped and must not run");
 
-        assert!(matches!(failure, ToolError::InvalidParams(_)));
+        assert!(matches!(failure, ToolError::InvalidParameters(_)));
     }
 
     #[test]

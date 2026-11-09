@@ -17,10 +17,15 @@
 //! so a reviewer can read what was agreed to after the question that carried
 //! it has been answered and cleared.
 use crate::agent::question::{self, Question};
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Tier;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 pub const SUBMIT_PLAN: &str = "submit_plan";
 

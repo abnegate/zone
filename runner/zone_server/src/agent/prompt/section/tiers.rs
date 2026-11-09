@@ -7,7 +7,7 @@
 //! outward tier, which no other section covers.
 
 use crate::agent::prompt::{Context, Surface};
-use zone_core::tools::Tier;
+use abnegate_agent::tool::Tier;
 
 const HEADING: &str = "Action tiers:";
 

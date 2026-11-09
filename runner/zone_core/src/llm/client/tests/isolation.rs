@@ -5,7 +5,6 @@ use abnegate_agent_cli::{CodexSandbox, Session};
 
 use super::*;
 use crate::llm::cli::confined;
-use crate::tools::PERMISSION_TOOL;
 
 const ENDPOINT: &str = "http://127.0.0.1:8421/mcp";
 const THREAD: &str = "019b2c41-0000-7000-8000-000000000001";
@@ -280,7 +279,7 @@ async fn zone_passes_the_agent_no_arguments_of_its_own() {
     ];
     let prompted = ["--model", "sonnet", "--print"];
     let zones_tool = AgentKind::Claude.tool(Toolset::SERVER, "read_file");
-    let permission_tool = AgentKind::Claude.tool(Toolset::SERVER, PERMISSION_TOOL);
+    let permission_tool = AgentKind::Claude.tool(Toolset::SERVER, Toolset::PERMISSION);
     let attached = ["--mcp-config", RENDERED, "--strict-mcp-config"];
 
     for (served, expected) in [
