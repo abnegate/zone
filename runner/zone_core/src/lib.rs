@@ -17,6 +17,7 @@ pub mod types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod variables;
 pub mod vpn;
+pub mod walk;
 
 pub use error::CoreError;
 pub use llm::LlmClient;

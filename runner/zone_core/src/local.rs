@@ -8,10 +8,12 @@ use abnegate_agent::ToolContext;
 
 use crate::application::application;
 use crate::vpn::Offline;
+use crate::walk;
 
 /// A context rooted at `working_directory` that hands every child this
 /// process's whole environment, routes it through Zone's proxy, keeps its
-/// files under `.zone/`, and holds `curl` and `wget` to the VPN gate.
+/// files under `.zone/`, walks for Zone's [`walk::BUDGET`], and holds `curl`
+/// and `wget` to the VPN gate.
 pub fn context(working_directory: impl Into<PathBuf>) -> ToolContext {
     ToolContext::default()
         .within(working_directory)
@@ -19,10 +21,13 @@ pub fn context(working_directory: impl Into<PathBuf>) -> ToolContext {
         .inherit_environment()
         .with_proxy(zone_routing::proxy())
         .with_public_web(Arc::new(Offline::new(false)))
+        .with_search_timeout(walk::BUDGET)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use abnegate_agent::tool::RunCommandTool;
     use abnegate_agent::tool::job::log_path;
     use abnegate_agent::{Tool, ToolError, ToolResult};
@@ -103,6 +108,16 @@ mod tests {
         assert_eq!(
             log_path(&context.working_directory, &context.application, "job_x"),
             directory.path().join(".zone/jobs/job_x.log")
+        );
+    }
+
+    #[test]
+    fn a_local_run_walks_for_zones_twenty_five_seconds() {
+        let directory = tempdir().unwrap();
+
+        assert_eq!(
+            context(directory.path()).search_timeout,
+            Duration::from_secs(25)
         );
     }
 

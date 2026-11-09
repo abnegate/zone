@@ -3,6 +3,11 @@
 //! Pre-turn SearXNG injection still runs when the server selects a lookup.
 //! These tools let the model refine a query or read a cited page afterwards.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
 use abnegate_http::{public_client_builder, read_capped, validate_public_url};
 use abnegate_search::{
     SearchHit, SearxngClient, TimeRange, WebSearchConfig, format_search_context, sanitize_query,
@@ -11,12 +16,6 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::time::Duration;
 use uuid::Uuid;
-
-use abnegate_agent::Tool;
-use abnegate_agent::ToolContext;
-use abnegate_agent::ToolError;
-use abnegate_agent::ToolRegistry;
-use abnegate_agent::ToolResult;
 use zone_core::vpn;
 
 use super::identifier::Kind;
@@ -363,17 +362,17 @@ fn collapse_whitespace(text: &str) -> String {
 mod tests {
     use std::sync::Arc;
 
-    use zone_core::vpn::Offline;
-
-    use super::*;
-    use crate::agent::identifier;
-    use crate::state::{AppState, test_config};
     use chrono::Utc;
     use sqlx::postgres::PgPoolOptions;
     use tokio::net::TcpListener;
     use tokio::time::timeout;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zone_core::vpn::Offline;
+
+    use super::*;
+    use crate::agent::identifier;
+    use crate::state::{AppState, test_config};
 
     /// Nothing listens here, which is all a test that never reaches the
     /// registry needs of it.

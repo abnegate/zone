@@ -3,19 +3,19 @@
 /// What a line break inside a snippet reads as.
 pub(crate) const LINE_BREAK: &str = " ⏎ ";
 
-/// Collapse `text` onto one line and cut it to `max_chars`.
+/// Collapse `text` onto one line and cut it to `maximum_characters`.
 ///
 /// A message body arrives with newlines and runs of whitespace that would push
 /// the part worth reading off the result. Runs of blank space within a line
 /// go; a line break becomes [`LINE_BREAK`], so the lines stay apart.
-pub(crate) fn excerpt(text: &str, max_chars: usize) -> String {
+pub(crate) fn excerpt(text: &str, maximum_characters: usize) -> String {
     let collapsed = text
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<&str>>().join(" "))
         .filter(|line| !line.is_empty())
         .collect::<Vec<String>>()
         .join(LINE_BREAK);
-    match collapsed.char_indices().nth(max_chars) {
+    match collapsed.char_indices().nth(maximum_characters) {
         Some((byte_index, _)) => format!("{}…", &collapsed[..byte_index]),
         None => collapsed,
     }

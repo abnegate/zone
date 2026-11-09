@@ -25,6 +25,7 @@ use async_trait::async_trait;
 use zone_core::application::application;
 use zone_core::llm::LlmClient;
 use zone_core::vpn::Offline;
+use zone_core::walk;
 
 use super::scope::{RepairScope, Scoped};
 
@@ -148,7 +149,8 @@ fn isolated(working_directory: &Path, environment: HashMap<String, String>) -> T
         .with_environment(policy)
         .with_application(application())
         .with_proxy(zone_routing::proxy())
-        .with_public_web(Arc::new(Offline::new(false)));
+        .with_public_web(Arc::new(Offline::new(false)))
+        .with_search_timeout(walk::BUDGET);
     context.maximum_file_size = MAXIMUM_FILE_SIZE;
     context.command_timeout = COMMAND_TIMEOUT;
     context
@@ -271,6 +273,13 @@ mod tests {
         assert_eq!(context.maximum_file_size, 10 * 1024 * 1024);
         assert_eq!(context.application, application());
         assert!(context.proxy.is_some());
+    }
+
+    #[test]
+    fn a_repair_walks_for_zones_twenty_five_seconds() {
+        let context = isolated(Path::new("/checkout"), HashMap::new());
+
+        assert_eq!(context.search_timeout, Duration::from_secs(25));
     }
 
     #[tokio::test]

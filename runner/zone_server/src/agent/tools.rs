@@ -20,8 +20,6 @@ use abnegate_agent_cli::AgentKind;
 use abnegate_llm::ToolDefinition;
 use async_trait::async_trait;
 use serde_json::{Value, json};
-#[cfg(test)]
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -142,17 +140,17 @@ fn context(
     working_directory: PathBuf,
     session: Session,
     denied: Vec<PathBuf>,
-    offline: bool,
+    chat_offline: bool,
 ) -> ToolContext {
-    context::build(
+    context::build(context::Config {
         working_directory,
         session,
         denied,
-        profile == ToolProfile::Chat,
-        MAX_TOOL_FILE_BYTES,
-        Duration::from_secs(TOOL_COMMAND_TIMEOUT_SECS),
-        offline,
-    )
+        unrestricted: profile == ToolProfile::Chat,
+        maximum_file_size: MAX_TOOL_FILE_BYTES,
+        command_timeout: Duration::from_secs(TOOL_COMMAND_TIMEOUT_SECS),
+        chat_offline,
+    })
 }
 
 /// Which surface is assembling the shared tool set.
@@ -247,7 +245,7 @@ pub struct ChatTools {
     /// Tiers for a catalog assembled by name rather than from tools, so a
     /// prompt test is answered by the same declaration production reads.
     #[cfg(test)]
-    tiers: HashMap<String, Tier>,
+    tiers: std::collections::HashMap<String, Tier>,
     /// Frozen at assembly, like the catalog, so a prompt built from a
     /// hand-written catalog still carries the guidance it was handed.
     mcp_guidance: Option<String>,
@@ -362,7 +360,7 @@ impl ChatTools {
             toolbox: Arc::new(Toolbox::default()),
             remote: HashSet::new(),
             #[cfg(test)]
-            tiers: HashMap::new(),
+            tiers: Default::default(),
             mcp_guidance: None,
             lease: None,
             plan_hold: false,
@@ -416,7 +414,7 @@ impl ChatTools {
     fn from_names(
         profile: ToolProfile,
         names: &[&str],
-        tiers: HashMap<String, Tier>,
+        tiers: std::collections::HashMap<String, Tier>,
         mcp_guidance: Option<String>,
     ) -> Self {
         let mut sorted: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
@@ -455,7 +453,7 @@ impl ChatTools {
             .copied()
             .chain(deferred.iter().map(|(name, _)| *name))
             .collect();
-        let mut built = Self::from_names(profile, &every, HashMap::new(), None);
+        let mut built = Self::from_names(profile, &every, Default::default(), None);
         built.core = core.iter().map(|name| (*name).to_string()).collect();
         built.remote = remote.iter().map(|name| (*name).to_string()).collect();
         built.toolbox.publish(
@@ -753,7 +751,7 @@ impl ChatTools {
 
         let mut assembled = Self {
             #[cfg(test)]
-            tiers: HashMap::new(),
+            tiers: Default::default(),
             registry,
             context,
             scope,
@@ -1098,9 +1096,9 @@ pub(super) fn optional_string_arg<'a>(params: &'a Value, key: &str) -> Option<&'
 }
 
 /// Truncate on a character boundary, marking that we cut.
-pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
-    match text.char_indices().nth(max_chars) {
-        Some((byte_idx, _)) => format!("{}…", &text[..byte_idx]),
+pub(crate) fn truncate(text: &str, maximum_characters: usize) -> String {
+    match text.char_indices().nth(maximum_characters) {
+        Some((byte_index, _)) => format!("{}…", &text[..byte_index]),
         None => text.to_string(),
     }
 }
