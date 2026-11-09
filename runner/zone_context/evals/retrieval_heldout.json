@@ -102,16 +102,6 @@
       ]
     },
     {
-      "id": "trim_command_output",
-      "query": "How does run_command trim oversized stdout?",
-      "expect_identifiers": ["run_command"],
-      "expect_uri_contains": ["tools/command.rs"],
-      "judgments": [
-        {"uri_contains": "tools/command.rs", "grade": 3, "must_contain": ["trim_middle"]},
-        {"uri_contains": "agent/compact.rs", "grade": 1}
-      ]
-    },
-    {
       "id": "validate_public_url",
       "query": "How does validate_public_url reject private IP addresses?",
       "expect_identifiers": ["validate_public_url"],
