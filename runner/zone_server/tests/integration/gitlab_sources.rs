@@ -32,6 +32,8 @@ const NEEDS_TOKEN: &str =
     "Re-enter the access token to read this source from another GitLab instance.";
 const INVALID_INSTANCE: &str = "Invalid source configuration: Invalid GitLab config: Invalid GitLab origin: expected an HTTPS (or opted-in HTTP) URL with no query, fragment or credentials, outside link-local and metadata addresses";
 const BOTH_NAMED: &str = "Invalid source configuration: Invalid GitLab config: name the instance as host or base_url, not both";
+const NON_STRING_NAMED: &str =
+    "Invalid source configuration: Invalid GitLab config: name the instance as a URL string";
 const HOST_FIELD: &str = "host";
 const BASE_URL_FIELD: &str = "base_url";
 const LOCK_WAIT: Duration = Duration::from_secs(10);
@@ -532,6 +534,44 @@ async fn a_config_naming_both_host_and_base_url_is_refused_unwritten() {
 }
 
 #[tokio::test]
+async fn an_instance_named_by_anything_but_a_string_is_refused_unwritten() {
+    let harness = Harness::new().await;
+    let tenant = harness.tenant().await;
+
+    for field in [HOST_FIELD, BASE_URL_FIELD] {
+        for named in [json!(1), json!(true), json!({ "url": OTHER_INSTANCE })] {
+            for credentials in [None, Some(SENT_TOKEN)] {
+                let source = harness
+                    .source(
+                        &tenant,
+                        config(field, Some(STORED_INSTANCE), "main"),
+                        Some(STORED_TOKEN),
+                    )
+                    .await;
+                let mut changed = config(field, None, "main");
+                changed[field] = named.clone();
+                let mut body = json!({ "config": changed });
+                if let Some(credentials) = credentials {
+                    body["credentials"] = json!(credentials);
+                }
+
+                let response = harness.update(&tenant, source.id, body).await;
+
+                response.assert_status(StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    response.json_value()["error"].as_str(),
+                    Some(NON_STRING_NAMED),
+                    "{field} {named} {credentials:?}"
+                );
+                assert_unchanged(&source, &harness.stored(&tenant, source.id).await);
+            }
+        }
+    }
+
+    harness.discard(&tenant).await;
+}
+
+#[tokio::test]
 async fn creating_a_source_at_an_instance_the_adapter_refuses_stores_nothing() {
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
@@ -549,6 +589,8 @@ async fn creating_a_source_at_an_instance_the_adapter_refuses_stores_nothing() {
             json!({ HOST_FIELD: STORED_INSTANCE, BASE_URL_FIELD: STORED_INSTANCE }),
             BOTH_NAMED,
         ),
+        (json!({ HOST_FIELD: 1 }), NON_STRING_NAMED),
+        (json!({ BASE_URL_FIELD: true }), NON_STRING_NAMED),
     ] {
         let mut named = config(HOST_FIELD, None, "main");
         for (field, value) in instance.as_object().expect("an instance") {

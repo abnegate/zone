@@ -87,6 +87,8 @@ const INVALID_CONFIG_MESSAGE: &str = "Invalid GitLab config";
 
 const BOTH_INSTANCES_MESSAGE: &str = "name the instance as host or base_url, not both";
 
+const NON_STRING_INSTANCE_MESSAGE: &str = "name the instance as a URL string";
+
 const DEFAULT_HOST: &str = "gitlab.com";
 
 const HTTPS_SCHEME: &str = "https";
@@ -292,9 +294,7 @@ impl GitLabAdapter {
 
     fn misconfigured(error: GitLabError) -> ContextError {
         match error {
-            error @ GitLabError::InvalidOrigin => {
-                ContextError::InvalidSourceConfig(format!("{INVALID_CONFIG_MESSAGE}: {error}"))
-            }
+            error @ GitLabError::InvalidOrigin => Self::invalid_config(&error.to_string()),
             error => ContextError::Config(Self::unbuilt(error)),
         }
     }
@@ -330,12 +330,15 @@ impl GitLabAdapter {
             .filter_map(|field| config.get(field))
             .collect();
         match named.as_slice() {
-            [named] => Ok(named.as_str()),
-            [] => Ok(None),
-            _ => Err(ContextError::InvalidSourceConfig(format!(
-                "{INVALID_CONFIG_MESSAGE}: {BOTH_INSTANCES_MESSAGE}"
-            ))),
+            [] | [serde_json::Value::Null] => Ok(None),
+            [serde_json::Value::String(named)] => Ok(Some(named)),
+            [_] => Err(Self::invalid_config(NON_STRING_INSTANCE_MESSAGE)),
+            _ => Err(Self::invalid_config(BOTH_INSTANCES_MESSAGE)),
         }
+    }
+
+    fn invalid_config(reason: &str) -> ContextError {
+        ContextError::InvalidSourceConfig(format!("{INVALID_CONFIG_MESSAGE}: {reason}"))
     }
 
     fn service_for(&self, config: &GitLabConfig) -> Result<(GitLabService, String)> {
@@ -1164,6 +1167,8 @@ mod tests {
     const MALFORMED_TOKEN: &str =
         "Configuration error: Invalid authorization token format (token not logged for security)";
     const BOTH_INSTANCES: &str = "Invalid source configuration: Invalid GitLab config: name the instance as host or base_url, not both";
+    const NON_STRING_INSTANCE: &str =
+        "Invalid source configuration: Invalid GitLab config: name the instance as a URL string";
     const INVALID_INSTANCE: &str = "Invalid source configuration: Invalid GitLab config: Invalid GitLab origin: expected an HTTPS (or opted-in HTTP) URL with no query, fragment or credentials, outside link-local and metadata addresses";
 
     async fn mount_instance(server: &MockServer, prefix: &str, file: &str) {
@@ -1935,7 +1940,7 @@ mod tests {
         for unnamed in [
             json!({ "project": PROJECT }),
             json!({ "project": PROJECT, "host": null }),
-            json!({ "project": PROJECT, "host": 1 }),
+            json!({ "project": PROJECT, "base_url": null }),
             json!([]),
         ] {
             assert_eq!(
@@ -1956,6 +1961,38 @@ mod tests {
 
             assert!(read.is_err(), "the adapter reads {both}");
             assert_eq!(keyed.unwrap_err().to_string(), BOTH_INSTANCES, "{both}");
+        }
+    }
+
+    #[test]
+    fn an_instance_named_by_anything_but_a_string_is_refused_without_echoing_it() {
+        let adapter = GitLabAdapter::new();
+        for key in INSTANCE_KEYS {
+            for named in [
+                json!(1),
+                json!(true),
+                json!(["https://secret-array.example"]),
+                json!({ "url": "https://secret-object.example" }),
+            ] {
+                let config = json!({ "project": PROJECT, key: named });
+
+                let keyed = GitLabAdapter::instance_of(&config).unwrap_err();
+                let checked = GitLabAdapter::check_instance(&config).unwrap_err();
+
+                assert!(
+                    adapter
+                        .parse_config(&create_test_source(config.clone()))
+                        .is_err(),
+                    "the adapter reads {config}"
+                );
+                for error in [keyed, checked] {
+                    assert!(
+                        matches!(error, ContextError::InvalidSourceConfig(_)),
+                        "{config}: {error:?}"
+                    );
+                    assert_eq!(error.to_string(), NON_STRING_INSTANCE, "{config}");
+                }
+            }
         }
     }
 
