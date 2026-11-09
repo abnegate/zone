@@ -29,6 +29,7 @@ use thiserror::Error;
 use zone_core::application::application;
 use zone_core::llm::LlmBackend;
 use zone_core::vpn::Offline;
+use zone_core::walk;
 
 use crate::db::auto_projects::{Finding, ReviewRow};
 use crate::db::tasks::TaskRow;
@@ -249,6 +250,7 @@ fn context() -> ToolContext {
         .with_application(application())
         .with_proxy(zone_routing::proxy())
         .with_public_web(Arc::new(Offline::new(false)))
+        .with_search_timeout(walk::BUDGET)
 }
 
 #[cfg(test)]
@@ -906,6 +908,11 @@ mod tests {
         assert!(!recorded.contains(KEY), "{recorded}");
         assert!(!recorded.contains("sk-org****e19b"), "{recorded}");
     }
+    #[test]
+    fn a_review_walks_for_zones_twenty_five_seconds() {
+        assert_eq!(context().search_timeout, Duration::from_secs(25));
+    }
+
     #[tokio::test]
     async fn a_review_context_inherits_the_environment_and_the_gate() {
         let context = context();
