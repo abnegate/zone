@@ -170,9 +170,12 @@ impl TreeCache {
     }
 
     async fn insert(&self, key: TreeKey, tree: Tree) {
-        let mut entries = self.entries.write().await;
         let tree_size = Self::estimate_tree_size(&tree);
+        if tree_size > self.max_total_bytes {
+            return;
+        }
 
+        let mut entries = self.entries.write().await;
         let mut total_size: usize = entries.values().map(|entry| entry.size_bytes).sum();
 
         while (entries.len() >= self.max_entries || total_size + tree_size > self.max_total_bytes)
@@ -1494,6 +1497,36 @@ mod tests {
             branch: branch.to_string(),
             fingerprint: None,
         }
+    }
+
+    fn listed_tree(files: usize) -> Tree {
+        Tree::new(
+            ObjectId::parse(TREE_SHA).unwrap(),
+            (0..files)
+                .map(|file| {
+                    TreeEntry::new(
+                        format!("src/file{file}.rs"),
+                        "100644",
+                        TreeEntryKind::Blob,
+                        ObjectId::parse(LIB_SHA).unwrap(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_tree_larger_than_the_cache_never_evicts_the_trees_it_holds() {
+        let cached = listed_tree(1);
+        let oversized = listed_tree(10);
+        let mut cache = TreeCache::new(GitHubAdapter::TREE_CACHE_TTL);
+        cache.max_total_bytes = TreeCache::estimate_tree_size(&oversized) - 1;
+
+        cache.insert(tree_key("main"), cached).await;
+        cache.insert(tree_key("develop"), oversized).await;
+
+        assert!(cache.get(&tree_key("main")).await.is_some());
+        assert!(cache.get(&tree_key("develop")).await.is_none());
     }
 
     async fn mount_repository(server: &MockServer) {
