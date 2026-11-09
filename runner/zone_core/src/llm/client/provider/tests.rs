@@ -1,3 +1,6 @@
+use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
+
 use abnegate_agent::context;
 use abnegate_agent::context::ContextError;
 use abnegate_agent::context::ContextSource;
@@ -5,28 +8,41 @@ use abnegate_agent::context::ContextStatus;
 use abnegate_agent::context::Entry;
 use abnegate_agent::context::Policy;
 use abnegate_agent::context::Prepared;
+use abnegate_agent_cli::AgentKind;
+use abnegate_llm::Completion;
 use abnegate_llm::CompletionProvider;
 use abnegate_llm::CompletionRequest;
 use abnegate_llm::Effort;
 use abnegate_llm::LlmConfig;
 use abnegate_llm::Message;
+use abnegate_llm::ProviderError;
 use abnegate_llm::RequestOptions;
+use abnegate_llm::ToolDefinition;
+use abnegate_llm::Usage;
 use abnegate_llm::finish_reason;
 use serde_json::Value;
 use serde_json::json;
+use tempfile::TempDir;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::Request;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 
+use super::NO_CHOICES;
+use crate::llm::LlmBackend;
 use crate::llm::LlmClient;
+use crate::llm::cli::settings;
 
 const MODEL: &str = "test";
 
 const STOPS: [&str; 2] = ["}", "<|end|>"];
 
 const RESERVED: u32 = 1024;
+
+const PASSWORD: &str = "hunter2";
+
+const PATIENCE: Duration = Duration::from_secs(20);
 
 fn structured() -> String {
     json!({
@@ -102,6 +118,38 @@ async fn ask(provider: &dyn CompletionProvider, temperature: Option<f32>) {
         None => request,
     };
     provider.complete(request).await.expect("a completion");
+}
+
+async fn completed(provider: &dyn CompletionProvider) -> Result<Completion, ProviderError> {
+    let messages = [Message::user("hello")];
+    provider
+        .complete(CompletionRequest::new(
+            MODEL,
+            &messages,
+            RequestOptions::new(64),
+        ))
+        .await
+}
+
+/// `url` with a user and [`PASSWORD`] in its userinfo.
+fn with_password(url: &str) -> String {
+    url.replacen("://", &format!("://user:{PASSWORD}@"), 1)
+}
+
+/// A Claude CLI on a stand-in that runs `script`, kept alive by the
+/// returned directory.
+fn cli(script: &str) -> (LlmClient, TempDir) {
+    let directory = TempDir::new().expect("a directory for the stand-in");
+    let executable = directory.path().join("claude");
+    std::fs::write(&executable, format!("#!/bin/sh\n{script}\n")).expect("the stand-in");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+        .expect("an executable stand-in");
+    let settings = settings()
+        .with_executable(executable)
+        .with_timeout(PATIENCE);
+    let client = LlmClient::new(LlmConfig::default())
+        .with_backend(LlmBackend::cli(AgentKind::Claude, settings));
+    (client, directory)
 }
 
 fn policy() -> Policy {
@@ -269,4 +317,124 @@ async fn a_compaction_the_endpoint_refuses_never_reports_its_key() {
     assert!(!error.contains(KEY), "{error}");
     assert!(!error.contains("wxyz"), "{error}");
     assert!(!error.contains("sk-proj-AbCd"), "{error}");
+}
+
+#[tokio::test]
+async fn a_completion_carries_the_usage_the_endpoint_reported() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "completion",
+            "object": "chat.completion",
+            "created": 0,
+            "model": MODEL,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "done"},
+                "finish_reason": finish_reason::STOP
+            }],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 20}
+        })))
+        .mount(&server)
+        .await;
+
+    let completion = completed(&client(&server, "")).await.expect("a completion");
+
+    assert_eq!(completion.usage, Some(Usage::new(11, 7).with_total(20)));
+    assert_eq!(
+        completion.finish_reason.as_deref(),
+        Some(finish_reason::STOP)
+    );
+}
+
+#[tokio::test]
+async fn an_answer_without_choices_is_an_agent_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "completion",
+            "object": "chat.completion",
+            "created": 0,
+            "model": MODEL,
+            "choices": []
+        })))
+        .mount(&server)
+        .await;
+
+    let error = completed(&client(&server, ""))
+        .await
+        .expect_err("an answer with nothing in it");
+
+    assert!(
+        matches!(&error, ProviderError::Agent { message, .. } if message == NO_CHOICES),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_endpoint_failure_never_reports_a_password_in_a_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(format!(
+            "{} refused the request",
+            with_password("http://upstream.example")
+        )))
+        .mount(&server)
+        .await;
+    let echoed = client(&server, "");
+    let configured = LlmClient::new(
+        LlmConfig::new(with_password(&server.uri()), MODEL, "").with_maximum_tokens(RESERVED),
+    );
+
+    for (llm, status) in [(echoed, Some("500")), (configured, None)] {
+        let error = completed(&llm).await.expect_err("a failed request");
+
+        assert!(matches!(error, ProviderError::Http { .. }), "{error:?}");
+        let reported = error.to_string();
+        assert!(!reported.contains(PASSWORD), "{reported}");
+        if let Some(status) = status {
+            assert!(reported.contains(status), "{reported}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_cli_failure_is_the_agents_own_and_never_reports_a_password() {
+    let (llm, _directory) = cli(&format!(
+        "cat > /dev/null\necho 'Not logged in behind {}' >&2\nexit 1",
+        with_password("http://proxy.example")
+    ));
+
+    let error = completed(&llm).await.expect_err("a failed agent");
+
+    assert!(
+        matches!(&error, ProviderError::Agent { provider, .. } if provider == AgentKind::Claude.as_str()),
+        "{error:?}"
+    );
+    let reported = error.to_string();
+    assert!(reported.contains("Not logged in"), "{reported}");
+    assert!(!reported.contains(PASSWORD), "{reported}");
+    let named = format!("{}: ", AgentKind::Claude.as_str());
+    assert!(!reported.contains(&named.repeat(2)), "{reported}");
+}
+
+#[tokio::test]
+async fn a_cli_offered_tools_is_misconfigured_rather_than_failed() {
+    let (llm, _directory) = cli("exit 0");
+    let messages = [Message::user("hello")];
+    let tools = [ToolDefinition::function(
+        "list",
+        "List a directory",
+        json!({"type": "object"}),
+    )];
+
+    let error = llm
+        .complete(
+            CompletionRequest::new(MODEL, &messages, RequestOptions::new(64)).with_tools(&tools),
+        )
+        .await
+        .expect_err("a CLI runs its own tools");
+
+    assert!(matches!(error, ProviderError::Config { .. }), "{error:?}");
+    assert!(!error.recoverable(), "{error:?}");
 }

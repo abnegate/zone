@@ -11,8 +11,9 @@
 //! - `ZONE_MCP_AUTO_MAGENTS`: the same switch under its older name. It can
 //!   only turn the fallback off.
 //!
-//! Disabled servers and servers reached only by URL are dropped before the
-//! fallback is considered. Every server inherits the runner environment and
+//! Disabled servers, servers reached only by URL and servers that cannot be
+//! launched (a blank command, or a `type` other than `stdio`) are dropped
+//! before the fallback is considered. Every server inherits the runner environment and
 //! overlays its own `env`, and is launched through [`zone_routing::proxy`].
 //! Configure only trusted executables.
 
@@ -23,11 +24,16 @@ use abnegate_agent::mcp::McpConfig;
 use abnegate_agent::mcp::McpHub;
 use abnegate_agent::mcp::McpServer;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod recording;
 #[cfg(test)]
 mod tests;
 
 /// The server Zone attaches when none is configured.
 pub const MAGENTS: &str = "magents";
+
+/// The arguments that start magents as an MCP server.
+const MAGENTS_ARGUMENTS: [&str; 1] = ["mcp"];
 
 const PREFIX: &str = "ZONE";
 
@@ -70,13 +76,13 @@ pub fn config() -> McpConfig {
     config.auto_connect &= flag(AUTO_MAGENTS_VARIABLE, true);
     config
         .servers
-        .retain(|_, server| !server.disabled && server.command.is_some());
+        .retain(|_, server| !server.disabled && server.command.is_some() && server.valid());
     for server in config.servers.values_mut() {
         server.inherit_environment = true;
     }
     config.fallback(
         MAGENTS,
-        McpServer::command(MAGENTS, ["mcp"]).inherit_environment(),
+        McpServer::command(MAGENTS, MAGENTS_ARGUMENTS).inherit_environment(),
     )
 }
 

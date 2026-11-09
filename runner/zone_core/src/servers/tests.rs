@@ -4,7 +4,11 @@ use std::iter;
 use std::os::unix::fs::PermissionsExt;
 
 use tempfile::TempDir;
+use zone_routing::PROXY_URL_VARIABLE;
 
+use super::recording::PROXY;
+use super::recording::assert_routed;
+use super::recording::document;
 use super::*;
 use crate::commands;
 use crate::commands::Shell;
@@ -190,6 +194,37 @@ fn a_config_whose_only_server_is_disabled_gets_the_magents_fallback() {
 }
 
 #[test]
+fn an_unlaunchable_server_still_gets_the_magents_fallback() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+
+    for document in [
+        r#"{"mcpServers": {"blank": {"command": "  "}}}"#,
+        r#"{"mcpServers": {"typed": {"command": "docs-server", "type": "http"}}}"#,
+        r#"{"mcpServers": {"both": {"command": "docs-server", "url": "http://localhost:3000/mcp"}}}"#,
+    ] {
+        variables.set(SERVERS, document);
+
+        assert_eq!(names(&config()), [MAGENTS], "{document}");
+    }
+}
+
+#[test]
+fn parse_flag_keeps_default_for_empty_and_unknown() {
+    assert!(parse_flag("", true));
+    assert!(!parse_flag("", false));
+    assert!(parse_flag("maybe", true));
+    assert!(!parse_flag("maybe", false));
+    assert!(parse_flag(" true ", true));
+    assert!(!parse_flag("0", true));
+    assert!(!parse_flag("off", true));
+    assert!(!parse_flag("false", true));
+    assert!(parse_flag("1", false));
+    assert!(parse_flag("yes", false));
+    assert!(parse_flag("on", false));
+}
+
+#[test]
 fn guidance_adds_magents_playbook() {
     let text = text(&["read_file", "magents__spawn_session"]);
     assert!(text.contains("magents__spawn_session"));
@@ -280,4 +315,20 @@ async fn attach_with_mcp_disabled_adds_nothing() {
     assert_eq!(connected, 0);
     assert_eq!(after, before);
     assert!(!registry.has_mcp());
+}
+
+#[tokio::test]
+async fn attached_servers_route_through_zones_proxy_over_their_own() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    let recorded = home.path().join("environment");
+    variables.set(SERVERS, document(&recorded));
+    variables.set(PROXY_URL_VARIABLE, PROXY);
+    let mut registry = commands::registry(Shell::Excluded);
+
+    let connected = attach(&mut registry).await;
+    drop(variables);
+
+    assert_eq!(connected, 0, "the recorder exits without answering");
+    assert_routed(&recorded);
 }
