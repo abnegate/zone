@@ -4,20 +4,20 @@ use abnegate_agent::tool::PublicWeb;
 /// refuses `curl` and `wget` whenever [`super::refusal`] refuses.
 #[derive(Debug)]
 pub struct Offline {
-    chat: bool,
+    chat_offline: bool,
 }
 
 impl Offline {
-    /// The gate for a chat that opted out of the public web when `chat` is
-    /// true, and for the VPN alone otherwise.
-    pub fn new(chat: bool) -> Self {
-        Self { chat }
+    /// The gate for a chat that opted out of the public web when
+    /// `chat_offline`, and for the VPN alone otherwise.
+    pub fn new(chat_offline: bool) -> Self {
+        Self { chat_offline }
     }
 }
 
 impl PublicWeb for Offline {
     fn refusal(&self) -> Option<String> {
-        super::refusal(self.chat).map(str::to_string)
+        super::refusal(self.chat_offline).map(str::to_string)
     }
 }
 
@@ -57,11 +57,11 @@ mod tests {
         ];
         for (state, hold) in states.into_iter().enumerate() {
             let _vpn = hold();
-            for chat in [false, true] {
+            for chat_offline in [false, true] {
                 assert_eq!(
-                    Offline::new(chat).refusal(),
-                    super::super::refusal(chat).map(str::to_string),
-                    "state {state}, chat offline: {chat}"
+                    Offline::new(chat_offline).refusal(),
+                    super::super::refusal(chat_offline).map(str::to_string),
+                    "state {state}, chat offline: {chat_offline}"
                 );
             }
         }
