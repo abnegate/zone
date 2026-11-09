@@ -813,6 +813,11 @@ mod tests {
         async fn status(&self) -> InstallationStatus {
             self.row().await.status()
         }
+
+        async fn minted(&self, row: &InstallationCredential) -> Result<Credential, Error> {
+            let scope = self.scope().expect("a workspace scope");
+            self.provider.minted(&self.pool, scope, row).await
+        }
     }
 
     fn tokens_path(number: u64) -> String {
@@ -1145,14 +1150,32 @@ mod tests {
             .mount(&server)
             .await;
 
+        let row = connected.row().await;
+
         let (first, second, third) = tokio::join!(
-            connected.resolve(),
-            connected.resolve(),
-            connected.resolve()
+            connected.minted(&row),
+            connected.minted(&row),
+            connected.minted(&row)
         );
 
         for outcome in [first, second, third] {
             let error = outcome.expect_err("the one mint failed");
+            assert!(
+                matches!(error, Error::Application(ApplicationError::Status(500))),
+                "{error:?}"
+            );
+        }
+        assert_eq!(connected.provider.flights.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_resolution_after_a_failed_mint_landed_mints_again() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        refusing(&server, connected.number, 500, 2).await;
+
+        for _ in 0..2 {
+            let error = connected.resolve().await.expect_err("the mint failed");
             assert!(
                 matches!(error, Error::Application(ApplicationError::Status(500))),
                 "{error:?}"
@@ -1189,8 +1212,9 @@ mod tests {
             .mount(&server)
             .await;
         uninstalled(&server, connected.number).await;
+        let row = connected.row().await;
 
-        let (first, second) = tokio::join!(connected.resolve(), connected.resolve());
+        let (first, second) = tokio::join!(connected.minted(&row), connected.minted(&row));
 
         for outcome in [first, second] {
             let error = outcome.expect_err("GitHub no longer knows the installation");
