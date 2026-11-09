@@ -254,16 +254,16 @@ impl GitLabAdapter {
     pub fn new() -> Self {
         Self::serving(
             GitLabService::new()
-                .map(Self::anonymously_readable)
+                .and_then(Self::opened)
                 .map_err(Self::unbuilt),
         )
     }
 
     /// Create a GitLab adapter that reads through `service` wherever a source
-    /// names no instance of its own, with anonymous reads applied to it as to
-    /// every service the adapter configures
+    /// names no instance of its own, opened for anonymous reads through the
+    /// system proxy as every service the adapter configures is
     pub fn with_service(service: GitLabService) -> Self {
-        Self::serving(Ok(Self::anonymously_readable(service)))
+        Self::serving(Self::opened(service).map_err(Self::unbuilt))
     }
 
     #[cfg(test)]
@@ -282,8 +282,8 @@ impl GitLabAdapter {
         }
     }
 
-    fn anonymously_readable(service: GitLabService) -> GitLabService {
-        service.with_anonymous_reads()
+    fn opened(service: GitLabService) -> GitLabResult<GitLabService> {
+        service.with_anonymous_reads().with_system_proxy()
     }
 
     fn unbuilt(error: GitLabError) -> String {
@@ -364,7 +364,7 @@ impl GitLabAdapter {
             return Ok((self.service()?.clone(), String::new()));
         };
         let service = (self.configure)(origin)
-            .map(Self::anonymously_readable)
+            .and_then(Self::opened)
             .map_err(Self::misconfigured)?;
         Ok((service, key))
     }
