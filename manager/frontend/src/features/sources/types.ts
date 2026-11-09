@@ -21,7 +21,8 @@ export interface GitHubConfig {
 }
 
 export interface GitLabConfig {
-  project_id: string;
+  project_id?: string;
+  project?: string;
   host?: string;
   base_url?: string;
   branch?: string;

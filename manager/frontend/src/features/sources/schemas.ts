@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { GitHubInstallationStatusSchema } from '../github/installationStatus';
-import { gitLabSourceUrl } from './utils/gitLabSourceUrl';
+import { sourceUrl } from './utils/sourceUrl';
 
 export const SourceCategorySchema = z.enum(['file', 'calendar', 'mail', 'chat', 'web', 'text']);
 export const SourceTypeSchema = z.enum([
@@ -33,6 +33,13 @@ export const GitLabConfigSchema = z.object({
 export const GitLabHostSchema = z.url({
   protocol: /^https$/,
   error: 'GitLab host must be an https:// URL',
+});
+
+export const StoredGitLabConfigSchema = GitLabConfigSchema.extend({
+  project_id: z.string().optional(),
+  project: z.string().optional(),
+}).refine((config) => config.project_id !== undefined || config.project !== undefined, {
+  error: 'Project ID is required',
 });
 
 export const GitLabConfigRequestSchema = GitLabConfigSchema.extend({
@@ -79,7 +86,7 @@ export const TextConfigSchema = z.object({
 
 export const StoredSourceConfigSchema = z.union([
   GitHubConfigSchema,
-  GitLabConfigSchema,
+  StoredGitLabConfigSchema,
   FilesystemConfigSchema,
   ICalConfigSchema,
   IMAPConfigSchema,
@@ -129,30 +136,6 @@ const SOURCE_TYPE_CATEGORY: Record<
   text: 'text',
 };
 
-function deriveSourceUrl(
-  sourceType: z.infer<typeof SourceTypeSchema>,
-  config: unknown,
-  url: string | null | undefined
-): string {
-  if (url) return url;
-  if (!config || typeof config !== 'object') return '';
-  const fields = config as Record<string, unknown>;
-  if (
-    sourceType === 'github' &&
-    typeof fields.owner === 'string' &&
-    typeof fields.repo === 'string'
-  ) {
-    return `https://github.com/${fields.owner}/${fields.repo}`;
-  }
-  if (sourceType === 'gitlab') {
-    return gitLabSourceUrl(fields) ?? '';
-  }
-  if ((sourceType === 'web' || sourceType === 'ical') && typeof fields.url === 'string') {
-    return fields.url;
-  }
-  return '';
-}
-
 // Backend create/get responses omit `category` and may send `url: null`.
 // Normalize those so the UI always has a category and a display URL.
 export const SourceSchema = z
@@ -179,7 +162,7 @@ export const SourceSchema = z
     ...source,
     category: source.category ?? SOURCE_TYPE_CATEGORY[source.source_type],
     description: source.description ?? null,
-    url: deriveSourceUrl(source.source_type, source.config, source.url),
+    url: sourceUrl(source.source_type, source.config, source.url),
     last_verified_at: source.last_verified_at ?? null,
     last_error: source.last_error ?? null,
   }));

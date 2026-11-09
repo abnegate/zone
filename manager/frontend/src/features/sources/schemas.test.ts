@@ -271,6 +271,49 @@ describe('GitLab host', () => {
     }
   });
 
+  it('links a source stored with the project alias the server reads', () => {
+    const source = parse(SourceSchema, {
+      id: 'src-1',
+      name: 'project',
+      source_type: 'gitlab',
+      config: { project: 'group/project', host: 'https://gitlab.example.com', branch: 'main' },
+      description: null,
+      url: null,
+      is_active: true,
+      last_verified_at: null,
+      last_error: null,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    });
+
+    expect(source.url).toBe('https://gitlab.example.com/group/project');
+    expect(formStateFromConfig(source.source_type, source.config).glProjectId).toBe(
+      'group/project'
+    );
+  });
+
+  it('links nothing for a source stored with both project and project_id', () => {
+    const source = parse(SourceSchema, {
+      id: 'src-1',
+      name: 'project',
+      source_type: 'gitlab',
+      config: {
+        project: 'group/project',
+        project_id: 'other/project',
+        host: 'https://gitlab.example.com',
+      },
+      description: null,
+      url: null,
+      is_active: true,
+      last_verified_at: null,
+      last_error: null,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    });
+
+    expect(source.url).toBe('');
+  });
+
   it('still reads a stored source whose host predates the https rule', () => {
     const source = parse(SourceSchema, {
       id: 'src-1',

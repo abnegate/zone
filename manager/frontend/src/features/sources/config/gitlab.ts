@@ -60,7 +60,7 @@ export const gitlabSource: SourceDefinition = {
   fromConfig: (config) => {
     const gitlab = config as GitLabConfig;
     return {
-      glProjectId: gitlab.project_id,
+      glProjectId: gitlab.project_id ?? gitlab.project,
       glHost: gitlab.host || gitlab.base_url || DEFAULT_HOST,
       glBranch: gitlab.branch || 'main',
     };
