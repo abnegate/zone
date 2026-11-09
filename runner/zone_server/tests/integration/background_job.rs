@@ -568,15 +568,15 @@ async fn a_task_spawn_naming_another_checkout_writes_only_into_its_own() {
 async fn a_background_job_logs_under_dot_zone_jobs() {
     let root = directory();
     let session = Session::Task(Uuid::new_v4());
-    let server = context::build(
-        root.path().to_path_buf(),
+    let server = context::build(context::Config {
+        working_directory: root.path().to_path_buf(),
         session,
-        Vec::new(),
-        false,
-        MAXIMUM_FILE_SIZE,
-        COMMAND_TIMEOUT,
-        false,
-    );
+        denied: Vec::new(),
+        unrestricted: false,
+        maximum_file_size: MAXIMUM_FILE_SIZE,
+        command_timeout: COMMAND_TIMEOUT,
+        chat_offline: false,
+    });
 
     let started = Jobs::spawn(
         &JobCommand::new("echo", vec!["logged".to_string()]),
