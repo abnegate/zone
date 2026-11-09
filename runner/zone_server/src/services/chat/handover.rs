@@ -440,7 +440,9 @@ fn standing(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
 
     use abnegate_agent_cli::CliSettings;
     use abnegate_agent_cli::SessionError;
@@ -1096,8 +1098,14 @@ mod tests {
         assert!(!left.join(format!("{SESSION}.jsonl")).exists());
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn settling_a_handover_relocates_off_the_runtime() {
+    #[test]
+    fn settling_a_handover_relocates_off_the_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .build()
+            .expect("a runtime with one blocking thread");
+        let (release, held) = mpsc::channel::<()>();
+        runtime.spawn_blocking(move || held.recv());
         let agents = TempDir::new().expect("an agent state root");
         let config = configured(agents.path());
         let organization = Uuid::new_v4();
@@ -1123,13 +1131,20 @@ mod tests {
         };
         let elsewhere = AtomicBool::new(false);
 
-        let (overlapped, ()) = tokio::join!(
-            async {
-                settle(&config, organization, &resolved).await;
-                elsewhere.load(Ordering::SeqCst)
-            },
-            async { elsewhere.store(true, Ordering::SeqCst) },
-        );
+        let overlapped = runtime.block_on(async {
+            let (overlapped, ()) = tokio::join!(
+                biased;
+                async {
+                    settle(&config, organization, &resolved).await;
+                    elsewhere.load(Ordering::SeqCst)
+                },
+                async {
+                    elsewhere.store(true, Ordering::SeqCst);
+                    release.send(()).expect("the blocking thread waits");
+                },
+            );
+            overlapped
+        });
 
         assert!(
             overlapped,
