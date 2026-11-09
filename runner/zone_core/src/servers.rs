@@ -11,6 +11,8 @@
 //! - `ZONE_MCP_AUTO_MAGENTS`: the same switch under its older name. It can
 //!   only turn the fallback off.
 //!
+//! A `magents` server the configuration disables also turns the fallback off.
+//!
 //! A server with a `command` is launched over stdio, whatever `url` or
 //! `type` it also names. Disabled servers and servers reached only by URL are
 //! dropped before the fallback is considered, and a document in which any
@@ -87,6 +89,10 @@ pub fn config() -> McpConfig {
         );
         config.servers.clear();
     }
+    config.auto_connect &= !config
+        .servers
+        .get(MAGENTS)
+        .is_some_and(|server| server.disabled);
     for server in config.servers.values_mut() {
         if server.command.is_some() {
             server.url = None;
