@@ -1,5 +1,8 @@
 //! Fenced, transactional conversation persistence. No transaction spans model inference.
 
+use abnegate_agent::chat::{
+    self, ChatError, ContextStore, Entry, Evidence, History, NewEntry, ReplayMessage, Summary,
+};
 use abnegate_llm::{Message, Role};
 use chrono::NaiveDateTime;
 use serde_json::Value;
@@ -9,18 +12,15 @@ use std::collections::HashSet;
 use std::time::Duration;
 use uuid::Uuid;
 
-use zone_chat::history::{self, Entry, Evidence, History, NewEntry, ReplayMessage, Summary};
-use zone_chat::store;
-
 use super::chat_subagents;
 use super::chats::typed;
 
-pub use zone_chat::store::{Guard, Lease, StoredMessage};
+pub use abnegate_agent::chat::{Guard, Lease, StoredMessage};
 
 /// Postgres failures the conversation store can hit.
 ///
-/// Richer than [`store::Error`] on purpose: the queries below keep `?` and the
-/// sqlx detail, and the [`store::ContextStore`] implementation flattens it at
+/// Richer than [`ChatError`] on purpose: the queries below keep `?` and the
+/// sqlx detail, and the [`ContextStore`] implementation flattens it at
 /// the boundary so callers of the trait never see a database type.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -40,16 +40,16 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
-impl From<Error> for store::Error {
+impl From<Error> for ChatError {
     fn from(error: Error) -> Self {
         match error {
-            Error::Busy => store::Error::Busy,
-            Error::LeaseLost => store::Error::LeaseLost,
-            Error::Conflict => store::Error::Conflict,
-            Error::Integrity(detail) => store::Error::Integrity(detail),
-            Error::NotFound => store::Error::NotFound,
-            Error::Database(error) => store::Error::Backend(error.to_string()),
-            Error::Json(error) => store::Error::Backend(error.to_string()),
+            Error::Busy => ChatError::Busy,
+            Error::LeaseLost => ChatError::LeaseLost,
+            Error::Conflict => ChatError::Conflict,
+            Error::Integrity(detail) => ChatError::Integrity(detail),
+            Error::NotFound => ChatError::NotFound,
+            Error::Database(error) => ChatError::Backend(error.to_string()),
+            Error::Json(error) => ChatError::Backend(error.to_string()),
         }
     }
 }
@@ -87,12 +87,12 @@ impl Store {
             .bind(self.chat_id).bind(self.workspace_id).bind(owner).bind(milliseconds)
             .fetch_optional(&self.pool).await?;
         match row {
-            Some(row) => Ok(Lease {
-                chat_id: self.chat_id,
-                owner: row.get("owner"),
-                fence: row.get("fence"),
-                expires_at: row.get("expires_at"),
-            }),
+            Some(row) => Ok(Lease::new(
+                self.chat_id,
+                row.get("owner"),
+                row.get("fence"),
+                row.get("expires_at"),
+            )),
             None => {
                 self.scope(&mut *self.pool.acquire().await?).await?;
                 Err(Error::Busy)
@@ -108,14 +108,16 @@ impl Store {
             RETURNING l.expires_at")
             .bind(self.chat_id).bind(lease.owner).bind(lease.fence).bind(self.workspace_id).bind(milliseconds(lifetime)?)
             .fetch_optional(&self.pool).await?.ok_or(Error::LeaseLost)?;
-        Ok(Lease {
-            expires_at: row.get("expires_at"),
-            ..lease.clone()
-        })
+        Ok(Lease::new(
+            lease.chat_id,
+            lease.owner,
+            lease.fence,
+            row.get("expires_at"),
+        ))
     }
 
     pub fn keep_alive(&self, lease: Lease, lifetime: Duration) -> Result<Guard, Error> {
-        store::keep_alive(std::sync::Arc::new(self.clone()), lease, lifetime)
+        chat::keep_alive(std::sync::Arc::new(self.clone()), lease, lifetime)
             .map_err(|error| Error::Integrity(error.to_string()))
     }
 
@@ -617,7 +619,7 @@ impl Store {
         self.scope(&mut transaction).await?;
         let history = self.load_in(&mut transaction).await?;
         if let Some(summary) = &history.summary {
-            history::validate(&history, summary).map_err(Error::Integrity)?;
+            chat::validate(&history, summary).map_err(Error::Integrity)?;
         }
         transaction.commit().await?;
         Ok(history)
@@ -636,7 +638,7 @@ impl Store {
         if history.summary.as_ref() != expected {
             return Err(Error::Conflict);
         }
-        history::validate(&history, proposed).map_err(Error::Integrity)?;
+        chat::validate(&history, proposed).map_err(Error::Integrity)?;
         let previous = expected.map_or(0, |summary| summary.revision);
         if proposed.revision
             != previous
@@ -767,13 +769,9 @@ impl Store {
             .take(count as usize)
             .collect();
         let end = offset + count;
-        Ok(Evidence {
-            id: id.into(),
-            content: page,
-            offset,
-            next: (end < total).then_some(end),
-            total,
-        })
+        let mut evidence = Evidence::new(id, page, offset, total);
+        evidence.next = (end < total).then_some(end);
+        Ok(evidence)
     }
 
     fn identity(&self, lease: &Lease) -> Result<(), Error> {
@@ -833,7 +831,7 @@ impl Store {
         consumed: bool,
         legacy: bool,
     ) -> Result<(), Error> {
-        if id.is_empty() || message.version != history::VERSION {
+        if id.is_empty() || message.version != chat::VERSION {
             return Err(Error::Integrity(
                 "Invalid canonical entry version or identity".into(),
             ));
@@ -925,11 +923,7 @@ impl Store {
         let Some(partial) = partial else {
             return Ok(None);
         };
-        let entry = NewEntry {
-            id: Uuid::new_v4().to_string(),
-            message: partial.clone(),
-            mutations: Vec::new(),
-        };
+        let entry = NewEntry::new(Uuid::new_v4().to_string(), partial.clone());
         self.append_in(connection, turn_id, &entry).await?;
         Ok(Some(entry.id))
     }
@@ -972,11 +966,10 @@ impl Store {
             } else {
                 "Error: execution was interrupted before a result was durably recorded. No result is available."
             };
-            let entry = NewEntry {
-                id: Uuid::new_v4().to_string(),
-                message: ReplayMessage::from(&Message::tool_result(call, content)),
-                mutations: Vec::new(),
-            };
+            let entry = NewEntry::new(
+                Uuid::new_v4().to_string(),
+                ReplayMessage::from(&Message::tool_result(call, content)),
+            );
             self.append_in(connection, turn_id, &entry).await?;
             recovery.push(entry.id);
         }
@@ -1030,15 +1023,11 @@ impl Store {
         .fetch_optional(connection)
         .await?
         .ok_or_else(|| Error::Integrity("Visible message does not belong to this chat".into()))?;
-        Ok(StoredMessage {
-            title_claimed,
-            id,
-            chat_id: self.chat_id,
-            role: role.to_string(),
-            content: content.to_string(),
-            metadata,
-            created_at,
-        })
+        let mut message =
+            StoredMessage::new(id, self.chat_id, role, content).with_title_claimed(title_claimed);
+        message.metadata = metadata;
+        message.created_at = created_at;
+        Ok(message)
     }
 
     async fn legacy(&self, connection: &mut PgConnection) -> Result<Vec<Entry>, Error> {
@@ -1065,7 +1054,7 @@ impl Store {
                     content.push_str(&serde_json::to_string(calls)?);
                 }
             }
-            Ok(Entry { id: row.get::<Uuid,_>("id").to_string(), message: ReplayMessage::from(&message), consumed: true })
+            Ok(Entry::new(row.get::<Uuid,_>("id").to_string(), ReplayMessage::from(&message)).with_consumed(true))
         }).collect()
     }
 
@@ -1085,17 +1074,15 @@ impl Store {
             .bind(self.chat_id).fetch_all(&mut *connection).await?;
         for row in rows {
             let message: ReplayMessage = serde_json::from_value(row.get("message"))?;
-            if message.version != history::VERSION {
+            if message.version != chat::VERSION {
                 return Err(Error::Integrity(
                     "Unsupported canonical replay version".into(),
                 ));
             }
             incomplete |= row.get::<bool, _>("legacy") && legacy_incomplete(&message);
-            entries.push(Entry {
-                id: row.get("id"),
-                message,
-                consumed: row.get("consumed"),
-            });
+            entries.push(
+                Entry::new(row.get::<String, _>("id"), message).with_consumed(row.get("consumed")),
+            );
         }
         // begin/checkpoint materialize all preceding public rows before appending.
         // Any remaining public-only rows were added after the last canonical event.
@@ -1113,21 +1100,19 @@ impl Store {
         .await?;
         let summary = row
             .map(|row| {
-                Ok::<_, Error>(Summary {
-                    content: row.get("content"),
-                    entries: serde_json::from_value(row.get("entries"))?,
-                    fingerprint: row.get("fingerprint"),
-                    revision: u64::try_from(row.get::<i64, _>("revision"))
+                Ok::<_, Error>(Summary::new(
+                    row.get::<String, _>("content"),
+                    serde_json::from_value(row.get("entries"))?,
+                    row.get::<String, _>("fingerprint"),
+                    u64::try_from(row.get::<i64, _>("revision"))
                         .map_err(|_| Error::Integrity("Invalid checkpoint revision".into()))?,
-                })
+                ))
             })
             .transpose()?;
-        Ok(History {
-            entries,
-            summary,
-            latest_user,
-            incomplete,
-        })
+        let mut history = History::new(entries).with_incomplete(incomplete);
+        history.summary = summary;
+        history.latest_user = latest_user;
+        Ok(history)
     }
 }
 
@@ -1169,24 +1154,24 @@ fn legacy_incomplete(message: &ReplayMessage) -> bool {
 /// Postgres behind the storage-agnostic conversation interface. Every method
 /// is the inherent one with its database error flattened at the boundary.
 #[async_trait::async_trait]
-impl store::ContextStore for Store {
-    async fn acquire(&self, owner: Uuid, lifetime: Duration) -> Result<Lease, store::Error> {
+impl ContextStore for Store {
+    async fn acquire(&self, owner: Uuid, lifetime: Duration) -> Result<Lease, ChatError> {
         Store::acquire(self, owner, lifetime)
             .await
             .map_err(Into::into)
     }
 
-    async fn renew(&self, lease: &Lease, lifetime: Duration) -> Result<Lease, store::Error> {
+    async fn renew(&self, lease: &Lease, lifetime: Duration) -> Result<Lease, ChatError> {
         Store::renew(self, lease, lifetime)
             .await
             .map_err(Into::into)
     }
 
-    async fn assert_current(&self, lease: &Lease) -> Result<(), store::Error> {
+    async fn assert_current(&self, lease: &Lease) -> Result<(), ChatError> {
         Store::assert_current(self, lease).await.map_err(Into::into)
     }
 
-    async fn release(&self, lease: &Lease) -> Result<bool, store::Error> {
+    async fn release(&self, lease: &Lease) -> Result<bool, ChatError> {
         Store::release(self, lease).await.map_err(Into::into)
     }
 
@@ -1198,7 +1183,7 @@ impl store::ContextStore for Store {
         content: &str,
         metadata: Option<Value>,
         message: ReplayMessage,
-    ) -> Result<StoredMessage, store::Error> {
+    ) -> Result<StoredMessage, ChatError> {
         Store::begin(
             self,
             lease,
@@ -1217,7 +1202,7 @@ impl store::ContextStore for Store {
         lease: &Lease,
         turn_id: Uuid,
         entries: &[NewEntry],
-    ) -> Result<(), store::Error> {
+    ) -> Result<(), ChatError> {
         Store::append(self, lease, turn_id, entries)
             .await
             .map_err(Into::into)
@@ -1229,20 +1214,20 @@ impl store::ContextStore for Store {
         role: &str,
         content: &str,
         metadata: Option<Value>,
-    ) -> Result<StoredMessage, store::Error> {
+    ) -> Result<StoredMessage, ChatError> {
         Store::create_message(self, lease, role, content, metadata)
             .await
             .map_err(Into::into)
     }
 
-    async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, store::Error> {
+    async fn delete_message(&self, lease: &Lease, id: Uuid) -> Result<bool, ChatError> {
         Store::delete_message(self, lease, id)
             .await
             .map(|removed| removed.is_some())
             .map_err(Into::into)
     }
 
-    async fn consumed(&self, lease: &Lease, ids: &[String]) -> Result<(), store::Error> {
+    async fn consumed(&self, lease: &Lease, ids: &[String]) -> Result<(), ChatError> {
         Store::consumed(self, lease, ids).await.map_err(Into::into)
     }
 
@@ -1252,7 +1237,7 @@ impl store::ContextStore for Store {
         turn_id: Uuid,
         content: &str,
         metadata: Option<Value>,
-    ) -> Result<StoredMessage, store::Error> {
+    ) -> Result<StoredMessage, ChatError> {
         Store::complete(self, lease, turn_id, content, metadata)
             .await
             .map_err(Into::into)
@@ -1264,7 +1249,7 @@ impl store::ContextStore for Store {
         turn_id: Uuid,
         content: &str,
         metadata: Option<Value>,
-    ) -> Result<StoredMessage, store::Error> {
+    ) -> Result<StoredMessage, ChatError> {
         Store::publish(self, lease, turn_id, content, metadata)
             .await
             .map_err(Into::into)
@@ -1278,7 +1263,7 @@ impl store::ContextStore for Store {
         metadata: Option<Value>,
         interrupted: bool,
         partial: Option<&ReplayMessage>,
-    ) -> Result<StoredMessage, store::Error> {
+    ) -> Result<StoredMessage, ChatError> {
         Store::finish(
             self,
             lease,
@@ -1292,7 +1277,7 @@ impl store::ContextStore for Store {
         .map_err(Into::into)
     }
 
-    async fn interrupt(&self, lease: &Lease, turn_id: Uuid) -> Result<(), store::Error> {
+    async fn interrupt(&self, lease: &Lease, turn_id: Uuid) -> Result<(), ChatError> {
         Store::interrupt(self, lease, turn_id)
             .await
             .map_err(Into::into)
@@ -1304,17 +1289,17 @@ impl store::ContextStore for Store {
         content: Option<&str>,
         metadata: Option<Value>,
         partial: Option<&ReplayMessage>,
-    ) -> Result<bool, store::Error> {
+    ) -> Result<bool, ChatError> {
         Store::settle(self, turn_id, content, metadata, partial)
             .await
             .map_err(Into::into)
     }
 
-    async fn recover(&self, lease: &Lease) -> Result<usize, store::Error> {
+    async fn recover(&self, lease: &Lease) -> Result<usize, ChatError> {
         Store::recover(self, lease).await.map_err(Into::into)
     }
 
-    async fn load(&self) -> Result<History, store::Error> {
+    async fn load(&self) -> Result<History, ChatError> {
         Store::load(self).await.map_err(Into::into)
     }
 
@@ -1323,19 +1308,19 @@ impl store::ContextStore for Store {
         lease: &Lease,
         expected: Option<&Summary>,
         proposed: &Summary,
-    ) -> Result<(), store::Error> {
+    ) -> Result<(), ChatError> {
         Store::checkpoint(self, lease, expected, proposed)
             .await
             .map_err(Into::into)
     }
 
-    async fn evidence(&self, id: &str, offset: u64, limit: u64) -> Result<Evidence, store::Error> {
+    async fn evidence(&self, id: &str, offset: u64, limit: u64) -> Result<Evidence, ChatError> {
         Store::evidence(self, id, offset, limit)
             .await
             .map_err(Into::into)
     }
 
-    async fn catalog(&self, offset: u64, limit: u64) -> Result<Evidence, store::Error> {
+    async fn catalog(&self, offset: u64, limit: u64) -> Result<Evidence, ChatError> {
         Store::catalog(self, offset, limit)
             .await
             .map_err(Into::into)

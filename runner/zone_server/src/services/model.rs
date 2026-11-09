@@ -1,10 +1,10 @@
 //! Capabilities reported by the installed inference engine.
 
+use abnegate_agent::chat::Capacity;
 use reqwest::Client;
 use serde::Deserialize;
 use std::sync::LazyLock;
 use std::time::Duration;
-use zone_chat::capacity::native_window;
 
 use crate::services::endpoint::Origin;
 
@@ -112,7 +112,7 @@ impl Model {
             tools,
             reasoning: self.supports_reasoning(),
             needs_character: needs_character(name, tools, self.expects_persona()),
-            context_length: self.model_info.as_ref().and_then(native_window),
+            context_length: self.model_info.as_ref().and_then(Capacity::native_window),
             capabilities: self.capabilities,
         }
     }

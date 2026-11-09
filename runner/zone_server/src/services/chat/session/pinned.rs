@@ -1,5 +1,5 @@
+use abnegate_agent::chat::NewEntry;
 use abnegate_agent_cli::Session;
-use zone_chat::history::NewEntry;
 use zone_core::llm::LlmBackend;
 
 use super::{Generation, RunContext};

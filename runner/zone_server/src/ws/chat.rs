@@ -12,6 +12,7 @@
 //!    "remove_queued" act on the queue, and every change is sent as "queue"
 //! 6. Connection closes on error or client disconnect
 
+use abnegate_agent::chat::{Capacity, ReplayMessage};
 use abnegate_agent::context::ContextUsage;
 use abnegate_agent::tool::Session as ToolSession;
 use abnegate_agent::tool::job::{JobStarted, JobStatus, Jobs, parse_receipt};
@@ -66,7 +67,6 @@ use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
-use zone_chat::history::ReplayMessage;
 
 mod ending;
 pub mod job;
@@ -4382,7 +4382,7 @@ async fn handle_chat_generation(
         ran.record(state.db(), chat_id, occupancy).await;
         replay.policy = session::policy(
             &state.config().chat,
-            &zone_chat::capacity::Capacity::reported(&ran.model, occupancy.window),
+            &Capacity::reported(&ran.model, occupancy.window),
         );
         replay.reported = occupancy.used;
     }
@@ -4479,7 +4479,7 @@ async fn handle_chat_generation(
     let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
         let mut message = LlmMessage::assistant(pending_content);
         message.images = pending_images;
-        Some(zone_chat::history::ReplayMessage::from(&message))
+        Some(ReplayMessage::from(&message))
     } else {
         None
     };

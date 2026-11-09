@@ -276,7 +276,7 @@ fn dimension_label(width: usize) -> String {
 const USAGE: &str =
     "Usage: zone-server [--migrate-only | --seal-secrets [--dry-run] --backup <path>]";
 const DEFAULT_FILTER: &str =
-    "zone_server=debug,zone_chat=debug,zone_core=debug,zone_context=debug,tower_http=debug";
+    "zone_server=debug,abnegate_agent=debug,zone_core=debug,zone_context=debug,tower_http=debug";
 const DATABASE_URL: &str = "DATABASE_URL";
 const MIGRATE_ONLY: &str = "--migrate-only";
 const SEAL_SECRETS: &str = "--seal-secrets";

@@ -7,6 +7,7 @@
 //! consumes the result exactly like the plain completion stream it replaces.
 
 use abnegate_agent::ToolResult;
+use abnegate_agent::chat::{NewEntry, ReplayMessage};
 use abnegate_agent::context::{self, ContextStatus, ContextUsage, Entry, Summary};
 use abnegate_agent::tool::{Session, is_vision_url};
 use abnegate_agent_cli::CUT_SHORT;
@@ -31,7 +32,6 @@ use super::wait::{self, Waiting};
 use crate::services::chat::session::RunContext;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zone_chat::history::{NewEntry, ReplayMessage};
 
 /// What the calls queued behind a turn-ending question are told.
 ///
@@ -803,11 +803,8 @@ fn nudge(context: &mut RunContext, instruction: String) {
 }
 
 fn canonical(message: LlmMessage, mutations: Vec<String>) -> NewEntry {
-    NewEntry {
-        id: Uuid::new_v4().to_string(),
-        message: ReplayMessage::from(&message),
-        mutations,
-    }
+    NewEntry::new(Uuid::new_v4().to_string(), ReplayMessage::from(&message))
+        .with_mutations(mutations)
 }
 
 struct FinishedTool {

@@ -6366,12 +6366,8 @@ mod watchdog_tests {
         );
     }
 
-    fn canonical(id: &str, message: LlmMessage) -> zone_chat::history::NewEntry {
-        zone_chat::history::NewEntry {
-            id: id.to_string(),
-            message: (&message).into(),
-            mutations: Vec::new(),
-        }
+    fn canonical(id: &str, message: LlmMessage) -> abnegate_agent::chat::NewEntry {
+        abnegate_agent::chat::NewEntry::new(id, (&message).into())
     }
 
     #[test]

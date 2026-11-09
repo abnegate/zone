@@ -6,11 +6,11 @@
 
 use std::fmt;
 
+use abnegate_agent::chat::{ChatError, Resolver};
 use abnegate_http::metadata;
 use abnegate_llm::{Dialect, LlmConfig, Trust};
 use abnegate_secret::{REDACTED, SecretValue, conceal, redact};
 use reqwest::Url;
-use zone_chat::capacity::Resolver;
 use zone_context::embeddings::providers::{PROVIDER_OPENAI, PROVIDER_SELF_HOSTED};
 use zone_core::llm::{self, LlmBackend, LlmClient};
 
@@ -204,14 +204,18 @@ impl Endpoint {
     /// metadata, so its models are given the configured context, and it must
     /// never be sent an Ollama `num_ctx`.
     pub fn capacity(&self, config: &Config) -> Resolver {
+        let configured = Some(config.chat.context);
         match self.origin {
-            Origin::Instance => Resolver::with_context(
-                &self.url,
-                self.key.expose(),
-                &config.ollama_host,
-                Some(config.chat.context),
+            Origin::Instance => or_undisclosed(
+                Resolver::with_context(
+                    &self.url,
+                    self.key.expose(),
+                    &config.ollama_host,
+                    configured,
+                ),
+                configured,
             ),
-            Origin::Settings => Resolver::undisclosed(Some(config.chat.context)),
+            Origin::Settings => Resolver::undisclosed(configured),
         }
     }
 
@@ -375,13 +379,22 @@ pub(crate) mod testing {
     }
 }
 
+/// `built`, or, when no client could be built to read the deployment's
+/// metadata, a resolver that asks nothing and assumes `configured`.
+fn or_undisclosed(built: Result<Resolver, ChatError>, configured: Option<u64>) -> Resolver {
+    built.unwrap_or_else(|error| {
+        tracing::warn!(%error, "Could not build the deployment metadata client; assuming the configured context");
+        Resolver::undisclosed(configured)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::testing::settings;
     use super::*;
+    use abnegate_agent::context::ContextSource as Source;
     use wiremock::matchers::any;
     use wiremock::{Mock, MockServer, ResponseTemplate};
-    use zone_chat::capacity::Source;
     use zone_context::embeddings::providers::PROVIDER_BEDROCK;
 
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
