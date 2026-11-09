@@ -251,9 +251,10 @@ impl GitHubAdapter {
         )
     }
 
-    /// Create a GitHub adapter that reads through `service`
+    /// Create a GitHub adapter that reads through `service`, opened for
+    /// anonymous reads as the one `new` builds is
     pub fn with_service(service: PullRequestService) -> Self {
-        Self::serving(Ok(service))
+        Self::serving(Ok(service.with_anonymous_reads()))
     }
 
     fn serving(service: std::result::Result<PullRequestService, String>) -> Self {
@@ -1499,6 +1500,20 @@ mod tests {
         );
         assert!(matches!(item, Ok(None)), "{item:?}");
         assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_handed_service_reads_a_public_repository_without_a_token() {
+        let mock_server = MockServer::start().await;
+        mount_listing(&mock_server, json!([])).await;
+        let adapter = GitHubAdapter::with_service(
+            PullRequestService::standing_in_for(GITHUB_HOST, &mock_server.uri()).unwrap(),
+        );
+
+        let verified = adapter.verify(&create_test_source(test_repository())).await;
+
+        assert!(verified.is_ok(), "{verified:?}");
+        assert!(!mock_server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
