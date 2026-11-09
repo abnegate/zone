@@ -112,6 +112,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_zero_reported_window_is_unknown_with_its_reason() {
+        let capacity = Capacity::reported(MODEL, 0);
+
+        assert_eq!(capacity.limit, None);
+        assert_eq!(capacity.source, Source::Unknown);
+        assert_eq!(
+            capacity.reason.as_deref(),
+            Some("The deployment's server reported no context window.")
+        );
+        assert_eq!(capacity.identity, MODEL);
+    }
+
     #[tokio::test]
     async fn a_chats_window_is_unknown_until_its_agent_reports_it() {
         let (pool, chat_id) = chat().await;

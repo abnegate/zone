@@ -393,7 +393,7 @@ mod tests {
     use super::testing::settings;
     use super::*;
     use abnegate_agent::context::ContextSource as Source;
-    use wiremock::matchers::any;
+    use wiremock::matchers::{any, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     use zone_context::embeddings::providers::PROVIDER_BEDROCK;
 
@@ -1264,6 +1264,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_chats_window_on_a_settings_endpoint_keeps_the_assumed_context_note() {
+        let config = config();
+        let mut settings = settings(PROVIDER_SELF_HOSTED);
+        settings.litellm_host = Some("http://gateway.example:4000".into());
+        settings.litellm_key = Some(SecretValue::new(SAVED_KEY));
+        let endpoint = Endpoint::resolve(&config, &settings);
+        assert_eq!(endpoint.origin(), Origin::Settings);
+
+        let capacity = endpoint
+            .capacity(&config)
+            .resolve("gpt-4o")
+            .await
+            .with_request(Some(8_192));
+
+        assert_eq!(capacity.limit, Some(8_192));
+        assert_eq!(capacity.source, Source::Configured);
+        assert_eq!(
+            capacity.reason.as_deref(),
+            Some(
+                "The endpoint publishes no deployment metadata, so the configured context is assumed."
+            )
+        );
+    }
+
+    #[tokio::test]
     async fn the_instance_endpoint_asks_its_own_deployment_for_capacity() {
         let server = MockServer::start().await;
         Mock::given(any())
@@ -1284,6 +1309,68 @@ mod tests {
 
         assert_eq!(capacity.source, Source::Unknown);
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_the_resolver_rejects_is_undisclosed() {
+        let configured = Some(8_192);
+
+        let capacity = or_undisclosed(Err(ChatError::Backend("no TLS backend".into())), configured)
+            .resolve("alias")
+            .await;
+
+        assert_eq!(capacity.source, Source::Configured);
+        assert_eq!(capacity.limit, configured);
+        assert_eq!(capacity.ollama, None, "no num_ctx may reach it");
+        assert_eq!(
+            capacity.reason.as_deref(),
+            Some(
+                "The endpoint publishes no deployment metadata, so the configured context is assumed."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_route_reports_whether_it_reads_images() {
+        for (supports, vision, sees) in [
+            (Some(true), Some(true), true),
+            (Some(false), Some(false), false),
+            (None, None, true),
+        ] {
+            let server = MockServer::start().await;
+            let mut information = serde_json::json!({"max_input_tokens": 128_000});
+            if let Some(supports) = supports {
+                information["supports_vision"] = supports.into();
+            }
+            Mock::given(path("/v2/model/info"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "data": [{
+                        "model_name": "remote",
+                        "litellm_params": {"model": "openai/remote"},
+                        "model_info": information
+                    }]
+                })))
+                .mount(&server)
+                .await;
+            let config = Config {
+                litellm_host: server.uri(),
+                ollama_host: server.uri(),
+                ..config()
+            };
+
+            let capacity = Endpoint::instance(&config)
+                .capacity(&config)
+                .resolve("remote")
+                .await;
+
+            assert_eq!(capacity.source, Source::Provider, "{supports:?}");
+            assert_eq!(capacity.vision, vision, "{supports:?}");
+            assert_eq!(
+                crate::services::chat::session::sees_images("remote", capacity.vision),
+                sees,
+                "{supports:?}"
+            );
+        }
     }
 
     #[test]

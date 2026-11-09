@@ -188,7 +188,7 @@ fn name_tokens(name: &str) -> impl Iterator<Item = &str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Model, ModelProfile, needs_character};
+    use super::{Capacity, Model, ModelProfile, needs_character};
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -277,6 +277,38 @@ mod tests {
                 context_length: None,
             }
         );
+    }
+
+    #[test]
+    fn a_native_window_is_read_from_model_info() {
+        assert_eq!(
+            Capacity::native_window(
+                &json!({"general.architecture": "gemma3", "gemma3.context_length": 131_072})
+            ),
+            Some(131_072)
+        );
+        for (info, why) in [
+            (
+                json!({"general.architecture": "gemma3", "llama.context_length": 8192}),
+                "another architecture's window",
+            ),
+            (
+                json!({"general.architecture": "gemma3", "gemma3.context_length": 0}),
+                "a zero window",
+            ),
+            (
+                json!({"general.architecture": "gemma3", "gemma3.context_length": "8192"}),
+                "a window written as text",
+            ),
+            (
+                json!({"general.architecture": 3, "3.context_length": 8192}),
+                "an architecture that is not a name",
+            ),
+            (json!({"gemma3.context_length": 8192}), "no architecture"),
+            (json!("opaque"), "metadata of another shape"),
+        ] {
+            assert_eq!(Capacity::native_window(&info), None, "{why}");
+        }
     }
 
     #[test]
