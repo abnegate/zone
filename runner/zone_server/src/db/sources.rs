@@ -13,6 +13,10 @@ use zone_context::adapters::GitLabAdapter;
 use super::DbResult;
 use super::github_installations::UNATTACHABLE;
 
+mod create_error;
+
+pub use create_error::CreateError;
+
 pub const GITHUB: &str = "github";
 
 pub const GITLAB: &str = "gitlab";
@@ -257,7 +261,7 @@ pub struct NewSource<'a> {
 
 /// Create a new source. An installation outside the workspace's
 /// organization, revoked or suspended, creates nothing.
-pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<SourceRow, UpdateError> {
+pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<SourceRow, CreateError> {
     sqlx::query_as::<_, SourceRow>(
         r#"
         INSERT INTO sources (workspace_id, name, source_type, config, description, url,
@@ -284,8 +288,8 @@ pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<Sourc
     .bind(source.github_installation_id)
     .fetch_optional(pool)
     .await
-    .map_err(refused_installation)?
-    .ok_or(UpdateError::Unattachable)
+    .map_err(refused_creation)?
+    .ok_or(CreateError::Unattachable)
 }
 
 /// What an update changes; a field left `None` keeps its stored value.
@@ -313,12 +317,23 @@ pub enum UpdateError {
     Database(#[from] sqlx::Error),
 }
 
+fn names_refused_installation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(database) if database.is_foreign_key_violation())
+}
+
+fn refused_creation(error: sqlx::Error) -> CreateError {
+    if names_refused_installation(&error) {
+        CreateError::Unattachable
+    } else {
+        CreateError::Database(error)
+    }
+}
+
 fn refused_installation(error: sqlx::Error) -> UpdateError {
-    match &error {
-        sqlx::Error::Database(database) if database.is_foreign_key_violation() => {
-            UpdateError::Unattachable
-        }
-        _ => UpdateError::Database(error),
+    if names_refused_installation(&error) {
+        UpdateError::Unattachable
+    } else {
+        UpdateError::Database(error)
     }
 }
 
@@ -1051,7 +1066,7 @@ mod tests {
             .await;
 
             assert!(
-                matches!(created, Err(UpdateError::Unattachable)),
+                matches!(created, Err(CreateError::Unattachable)),
                 "{reason} installation must be refused, got {created:?}"
             );
             assert!(

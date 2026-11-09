@@ -26,6 +26,7 @@ use crate::db::github_installations;
 use crate::db::github_installations::InstallationStatus;
 use crate::db::github_installations::InstallationSummary;
 use crate::db::sources;
+use crate::db::sources::CreateError;
 use crate::db::sources::DISCORD;
 use crate::db::sources::FILESYSTEM;
 use crate::db::sources::GITHUB;
@@ -747,8 +748,8 @@ pub async fn create(
     )
     .await
     .map_err(|error| match error {
-        UpdateError::Unattachable => unattachable(),
-        UpdateError::NotFound | UpdateError::InstanceNeedsToken | UpdateError::Database(_) => {
+        CreateError::Unattachable => unattachable(),
+        CreateError::Database(_) => {
             tracing::error!(workspace_id = %workspace_id, name = %request.name, source_type = %request.source_type, error = %error, "Database error creating source");
             internal()
         }
