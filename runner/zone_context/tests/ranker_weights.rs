@@ -5,23 +5,23 @@ const TRAINED_ABSOLUTE_TOLERANCE: f32 = 1e-7;
 const STRICT: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
 const WEIGHT_BITS: [u32; 15] = [
-    0xbf16_565d,
-    0x402c_88a8,
+    0xbf1a_0d9d,
+    0x402d_9075,
     0x0000_0000,
-    0x4018_e27e,
-    0x3d9f_f27f,
-    0x3d9f_f27f,
+    0x4018_c4a3,
+    0x3d9f_3a2d,
+    0x3d9f_3a2d,
     0x0000_0000,
-    0x3e3a_18a0,
-    0x3e14_b222,
-    0x3f54_2650,
-    0x3c64_cc8e,
-    0xba2a_f80f,
-    0xbe93_5a85,
-    0x4014_5cd9,
+    0x3e62_216e,
+    0x3e2d_2cd6,
+    0x3f55_08cc,
+    0x3c67_f61e,
+    0xba41_7ed1,
+    0xbe93_055e,
+    0x4014_22f3,
     0x0000_0000,
 ];
-const BIAS_BITS: u32 = 0x3ee7_daf1;
+const BIAS_BITS: u32 = 0x3eea_0fd5;
 
 fn within_trained_tolerance(actual: f32, expected: f32) -> bool {
     actual.to_bits() == expected.to_bits()

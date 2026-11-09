@@ -7,7 +7,7 @@
       "expect_uri_contains": ["content/mod.rs"],
       "judgments": [
         {"uri_contains": "content/mod.rs", "grade": 3, "must_contain": ["should_skip_blob"]},
-        {"uri_contains": "adapters/github.rs", "grade": 2},
+        {"uri_contains": "adapters/github.rs", "grade": 2, "must_contain": ["should_skip_blob"]},
         {"uri_contains": "evals/retrieval.json", "grade": 1}
       ]
     },
@@ -211,7 +211,7 @@
     },
     {
       "id": "rewrite_query",
-      "query": "What identifiers does rewrite_query extract from a sentence?",
+      "query": "How does hybrid search use the identifiers that rewrite_query extracts?",
       "expect_identifiers": ["rewrite_query"],
       "expect_uri_contains": ["embeddings/hybrid.rs"],
       "judgments": [
@@ -221,7 +221,7 @@
     },
     {
       "id": "embed_query_text",
-      "query": "When does embed_query_text add an Instruct prefix?",
+      "query": "How does embed_cached use embed_query_text to embed and cache a query?",
       "expect_identifiers": ["embed_query_text"],
       "expect_uri_contains": ["embeddings/embed_cache.rs"],
       "judgments": [
