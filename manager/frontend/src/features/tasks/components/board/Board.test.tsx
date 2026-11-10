@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useMemo, useState } from 'react';
 import { STAGES } from '../../status';
 import type { BoardActions, Task, TaskStatus } from '../../types';
 import { Board } from './Board';
@@ -11,6 +12,7 @@ const CARD_INSET = 10;
 const CARD_HEIGHT = 80;
 const CARD_STEP = 90;
 const HEADER_HEIGHT = 60;
+const SERVER_DELAY_MS = 50;
 
 const PROJECTS = new Map([
   ['zone', 'Zone'],
@@ -70,6 +72,28 @@ function actions(): BoardActions {
 function renderBoard(handlers: BoardActions = actions()) {
   render(<Board tasks={TASKS} projects={PROJECTS} renaming={null} actions={handlers} />);
   return handlers;
+}
+
+function pause() {
+  return new Promise((resolve) => setTimeout(resolve, SERVER_DELAY_MS));
+}
+
+function MovingBoard({ refuse = false }: { refuse?: boolean }) {
+  const [tasks, setTasks] = useState(TASKS);
+  const handlers = useMemo<BoardActions>(() => {
+    const place = (id: string, status: TaskStatus) =>
+      setTasks((list) => list.map((item) => (item.id === id ? { ...item, status } : item)));
+    return {
+      ...actions(),
+      move: async (moved, status) => {
+        await pause();
+        place(moved.id, status);
+        await pause();
+        if (refuse) place(moved.id, moved.status);
+      },
+    };
+  }, [refuse]);
+  return <Board tasks={tasks} projects={PROJECTS} renaming={null} actions={handlers} />;
 }
 
 function board() {
@@ -263,6 +287,43 @@ describe('Board', () => {
       await announced('Stop the old table stays in Cancelled.');
 
       expect(handlers.move).not.toHaveBeenCalled();
+    });
+
+    async function carryRight(title: string) {
+      const handle = grip(title);
+      handle.focus();
+      await press(handle, 'Space');
+      await announced(`Picked up ${title}, in Planned.`);
+      await press(handle, 'ArrowRight');
+      await announced(`${title} is over In progress.`);
+      await press(handle, 'Space');
+      await announced(`${title} moved to In progress.`);
+    }
+
+    it('keeps focus on the grip of a card that moved to another column', async () => {
+      render(<MovingBoard />);
+
+      await carryRight('Write the spec');
+
+      await waitFor(() => {
+        expect(within(column('In progress')).getByText('Write the spec')).toBeInTheDocument();
+      });
+      await waitFor(() => expect(document.activeElement).toBe(grip('Write the spec')));
+    });
+
+    it('keeps focus on the grip of a card whose move was refused', async () => {
+      render(<MovingBoard refuse />);
+
+      await carryRight('Write the spec');
+
+      await waitFor(() => {
+        expect(within(column('In progress')).getByText('Write the spec')).toBeInTheDocument();
+      });
+      await waitFor(() => expect(document.activeElement).toBe(grip('Write the spec')));
+      await waitFor(() => {
+        expect(within(column('Planned')).getByText('Write the spec')).toBeInTheDocument();
+      });
+      await waitFor(() => expect(document.activeElement).toBe(grip('Write the spec')));
     });
 
     it('puts a card back when the move is cancelled', async () => {

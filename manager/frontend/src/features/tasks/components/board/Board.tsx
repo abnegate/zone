@@ -20,6 +20,7 @@ import { Card } from './Card';
 import { CardBody } from './CardBody';
 import { Column } from './Column';
 import { destination, stageSteps, stageUnder } from './drop';
+import { useFollowedCard } from './useFollowedCard';
 import './Board.css';
 
 export interface BoardProps {
@@ -71,6 +72,8 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
   const announcedOver = useRef<UniqueIdentifier | null>(null);
   const instructions = useId();
   const unrendered = useMemo(() => document.createElement('div'), []);
+  const root = useRef<HTMLElement>(null);
+  const follow = useFollowedCard(root);
   const sensors = useSensors(
     useSensor(PointerSensor, POINTER),
     useSensor(KeyboardSensor, KEYBOARD)
@@ -96,7 +99,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
     );
   };
 
-  const end = ({ active, over }: DragEndEvent) => {
+  const end = ({ active, over, activatorEvent }: DragEndEvent) => {
     setActive(null);
     const task = carried(active.data);
     if (!task) return;
@@ -112,6 +115,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
       return;
     }
     setAnnouncement(`${task.title} moved to ${stage.label}.`);
+    if (activatorEvent instanceof KeyboardEvent) follow(task.id);
     void actions.move(task, status);
   };
 
@@ -125,7 +129,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
   const dragged = tasks.find((task) => task.id === active);
 
   return (
-    <section className="board" aria-label="Tasks">
+    <section ref={root} className="board" aria-label="Tasks">
       <DndContext
         id={instructions}
         sensors={sensors}

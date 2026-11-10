@@ -28,7 +28,7 @@ const REFUSED = 'Task has an active run or is no longer available';
 
 const PHONE = { width: 375, height: 812 };
 
-const PULL_REQUEST ='https://github.com/test/test/pull/7';
+const PULL_REQUEST = 'https://github.com/test/test/pull/7';
 
 interface TaskOptions {
   status?: string;
@@ -492,6 +492,35 @@ test.describe('Tasks Page', () => {
         { method: 'PUT', id: 'task-1', body: { status: 'in_progress' } },
       ]);
       await expect(card(column(page, 'In progress'), 'Implement login page')).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'Move Implement login page', exact: true })
+      ).toBeFocused();
+    });
+
+    test('a refused keyboard move keeps focus on the card it puts back', async ({
+      context,
+      page,
+    }) => {
+      const server = await serveTasks(context, page);
+      let release: () => void = () => {};
+      server.refuse = true;
+      server.hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const grip = page.getByRole('button', { name: 'Move Implement login page', exact: true });
+
+      await grip.focus();
+      await page.keyboard.press('Space');
+      await expect(page.locator('.task-card-overlay')).toBeVisible();
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('Space');
+      await expect(card(column(page, 'In progress'), 'Implement login page')).toBeVisible();
+      await expect(grip).toBeFocused();
+      release();
+
+      await expect(page.getByText("Couldn't move Implement login page")).toBeVisible();
+      await expect(card(column(page, 'Planned'), 'Implement login page')).toBeVisible();
+      await expect(grip).toBeFocused();
     });
 
     test('escape puts a keyboard-carried card back without a request', async ({

@@ -65,7 +65,7 @@ export function Card({ task, projects, renaming, actions }: CardProps) {
   );
 
   return (
-    <li ref={setNodeRef} className={className} {...listeners}>
+    <li ref={setNodeRef} className={className} data-task-id={task.id} {...listeners}>
       <button
         type="button"
         ref={setActivatorNodeRef}
