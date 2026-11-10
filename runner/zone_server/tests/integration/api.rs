@@ -3484,7 +3484,6 @@ async fn test_task_status_completed() {
     let token = get_auth_token(&client).await;
     let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
 
-    // Create project and task
     let response = client
         .post_json_auth(
             "/api/projects",
@@ -3513,7 +3512,6 @@ async fn test_task_status_completed() {
         .unwrap()
         .to_string();
 
-    // Update to complete (valid statuses: created, queued, in_progress, review, complete, blocked)
     let response = client
         .put_json_auth(
             &format!("/api/tasks/{}", task_id),

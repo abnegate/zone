@@ -89,6 +89,20 @@ pub fn placeholder_title(description: &str) -> String {
 
 pub const UNTITLED_AND_UNDESCRIBED: &str = "A task needs a title or a description";
 
+/// Every value `tasks_status_check` admits, kept equal to the newest migration
+/// that redefines it so a caller can refuse an unknown status before the
+/// constraint turns it into a server error.
+pub const STATUSES: [&str; 8] = [
+    "created",
+    "queued",
+    "in_progress",
+    "blocked",
+    "paused",
+    "review",
+    "complete",
+    "cancelled",
+];
+
 /// A title someone gave, trimmed, or `None` for a blank one.
 pub fn given_title(title: Option<&str>) -> Option<&str> {
     title.map(str::trim).filter(|title| !title.is_empty())
@@ -735,6 +749,9 @@ pub async fn update_task_authorized(
     }
     if let Some(project_ids) = input.project_ids {
         lock_projects(&mut transaction, workspace_id, project_ids).await?;
+    }
+    if run_is_active(&mut transaction, input.id, input.status.is_some()).await? {
+        return Err(MutationError::ActiveRun);
     }
     let Some(task) = update_task_in(&mut transaction, &input).await? else {
         return Ok(Mutation::NotFound);

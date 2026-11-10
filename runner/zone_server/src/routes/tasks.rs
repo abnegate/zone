@@ -272,6 +272,12 @@ pub struct UpdateTaskRequest {
     model_name: Option<String>,
 }
 
+const TASK_NOT_FOUND: &str = "Task not found";
+
+const BLANK_TITLE: &str = "Title must not be blank";
+
+const UNKNOWN_STATUS: &str = "Unknown task status";
+
 fn denied(status: StatusCode, message: &str) -> Box<Response> {
     Box::new((status, Json(ErrorResponse::new(message))).into_response())
 }
@@ -338,9 +344,9 @@ async fn authorize_task(
     let task = tasks::get_task(state.db(), task_id)
         .await
         .map_err(database_error)?
-        .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task not found"))?;
+        .ok_or_else(|| denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND))?;
 
-    authorize_workspace(state, auth, task.workspace_id, "Task not found").await
+    authorize_workspace(state, auth, task.workspace_id, TASK_NOT_FOUND).await
 }
 
 /// Authorize a run and read it in the same transaction.
@@ -449,19 +455,8 @@ pub async fn get(
     }
     match tasks::get_task(state.db(), id).await {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(None) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Err(error) => *database_error(error),
     }
 }
 
@@ -481,7 +476,14 @@ pub async fn update(
         .as_deref()
         .is_some_and(|title| title.trim().is_empty())
     {
-        return *denied(StatusCode::BAD_REQUEST, "Title must not be blank");
+        return *denied(StatusCode::BAD_REQUEST, BLANK_TITLE);
+    }
+    if request
+        .status
+        .as_deref()
+        .is_some_and(|status| !tasks::STATUSES.contains(&status))
+    {
+        return *denied(StatusCode::BAD_REQUEST, UNKNOWN_STATUS);
     }
     match tasks::update_task_authorized(
         state.db(),
@@ -503,7 +505,7 @@ pub async fn update(
     .await
     {
         Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(error) => *mutation_error(error),
     }
 }
@@ -520,15 +522,8 @@ pub async fn delete(
     };
     match tasks::delete_task_authorized(state.db(), user_id, id).await {
         Ok(tasks::Mutation::Applied(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Err(error) => *database_error(error),
     }
 }
 
@@ -544,7 +539,7 @@ pub async fn queue(
     };
     match tasks::queue_task_authorized(state.db(), user_id, id).await {
         Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(error) => *mutation_error(error),
     }
 }
@@ -598,7 +593,7 @@ pub async fn create_run(
             ))),
         )
             .into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(e) => {
             if e.as_database_error()
                 .is_some_and(|error| error.is_unique_violation())
@@ -909,5 +904,41 @@ mod tests {
             "a run that has not started sends the key as null, as a task does"
         );
         assert_eq!(running["run"]["completed_at"], Value::Null);
+    }
+
+    /// The status CHECK is the only other guard, and its violation surfaces as
+    /// a 500 through `database_error`. The state's pool is lazy and points at
+    /// nothing, so reaching the database would fail this test too.
+    #[tokio::test]
+    async fn an_unknown_status_is_refused_before_the_database() {
+        let auth = AuthUser(crate::auth::jwt::Claims {
+            sub: Uuid::from_u128(7).to_string(),
+            email: "member@example.com".into(),
+            roles: vec![],
+            permissions: vec![],
+            exp: 0,
+            iat: 0,
+            jti: Uuid::from_u128(8).to_string(),
+            is_admin: false,
+        });
+        let request = serde_json::from_value(serde_json::json!({ "status": "archived" })).unwrap();
+
+        let response = update(
+            State(AppState::for_tests()),
+            auth,
+            Path(Uuid::from_u128(1)),
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"],
+            UNKNOWN_STATUS
+        );
     }
 }
