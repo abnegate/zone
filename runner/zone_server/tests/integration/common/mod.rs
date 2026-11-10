@@ -106,6 +106,7 @@ pub fn test_config() -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_commands: false,
     }
 }
 
@@ -560,6 +561,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_commands: false,
     }
 }
 
