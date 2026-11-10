@@ -3,15 +3,19 @@
 //! hold, how an edit reaches the running connection, and how a workspace
 //! narrows what its organization offers.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::http::StatusCode;
 use serde_json::Value;
 use serde_json::json;
+use tokio::time::Instant;
 use uuid::Uuid;
 use zone_core::servers;
 use zone_server::config::Config;
+use zone_server::services::mcp_servers::status::Connection;
+use zone_server::services::mcp_servers::status::UNCONNECTED;
 
 use crate::common;
 use crate::common::TestClient;
@@ -58,8 +62,18 @@ const DELETED: &str = "mcp_server.deleted";
 const RECONNECTED: &str = "mcp_server.reconnected";
 const WORKSPACE_UPDATED: &str = "workspace_mcp_servers.updated";
 
-const SETTLE: Duration = Duration::from_secs(15);
+const ERROR: &str = "error";
+
+/// How long a hub waits on one server's handshake: `CONNECT_TIMEOUT` in `abnegate_agent::mcp::hub`,
+/// which is private.
+const CONNECT: Duration = Duration::from_secs(30);
+const SETTLE: Duration = Duration::from_secs(CONNECT.as_secs() + 15);
 const POLL: Duration = Duration::from_millis(50);
+/// An edit that must leave a server running is watched for this long, or for `RESTARTS` times
+/// what that server's own restart just took when that is longer, before nothing is taken to
+/// have restarted it.
+const QUIET: Duration = Duration::from_millis(500);
+const RESTARTS: u32 = 4;
 
 const SERVER_FIELDS: [&str; 16] = [
     "arguments",
@@ -261,6 +275,16 @@ fn stdio(name: &str) -> Value {
     })
 }
 
+/// The stub, recording each handshake a client makes with it at `offered`.
+fn recording(name: &str, offered: &Path) -> Value {
+    json!({
+        "name": name,
+        "transport": "stdio",
+        "command": "python3",
+        "arguments": [stub(), offered.to_string_lossy()],
+    })
+}
+
 fn remote(name: &str) -> Value {
     json!({ "name": name, "transport": "http", "url": REMOTE_URL })
 }
@@ -278,6 +302,19 @@ fn names(list: &Value) -> Vec<&str> {
         .unwrap_or_else(|| panic!("a list holds servers: {list}"))
         .iter()
         .map(|server| server["name"].as_str().expect("every server is named"))
+        .collect()
+}
+
+fn statuses(list: &Value) -> Vec<&str> {
+    list["servers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a list holds servers: {list}"))
+        .iter()
+        .map(|server| {
+            server["status"]
+                .as_str()
+                .expect("every server has a status")
+        })
         .collect()
 }
 
@@ -300,9 +337,10 @@ fn assert_sealed(response: &TestResponse) {
     );
 }
 
-/// GET `uri` until the server it returns reaches `status`, and hand that body back.
+/// GET `uri` until the server it returns reaches `status`, and hand that body back. A server
+/// that fails while it is awaited to connect has settled, so that ends the wait at once.
 async fn settle(client: &TestClient, uri: &str, token: &str, status: &str) -> Value {
-    let deadline = tokio::time::Instant::now() + SETTLE;
+    let deadline = Instant::now() + SETTLE;
     loop {
         let response = client.get_auth(uri, token).await;
         response.assert_status(StatusCode::OK);
@@ -311,8 +349,59 @@ async fn settle(client: &TestClient, uri: &str, token: &str, status: &str) -> Va
             return server;
         }
         assert!(
-            tokio::time::Instant::now() < deadline,
+            status != CONNECTED || server["status"] != FAILED,
+            "the server failed instead of connecting: {}",
+            server[ERROR]
+        );
+        assert!(
+            Instant::now() < deadline,
             "the server never reached {status} within {SETTLE:?}: {server}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// What the stub recording at `offered` wrote when a client last shook hands with it.
+async fn handshake(offered: &Path) -> String {
+    let deadline = Instant::now() + SETTLE;
+    loop {
+        if let Ok(revision) = std::fs::read_to_string(offered)
+            && !revision.is_empty()
+        {
+            return revision;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no client shook hands with the server within {SETTLE:?}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+fn delegating() -> Connection {
+    Connection::connected(vec![STUB_TOOL.to_string()])
+}
+
+fn unknown() -> Connection {
+    Connection::failed(UNCONNECTED)
+}
+
+/// Wait until the organization's running hub holds the server named `name` as `expected`.
+async fn held(client: &TestClient, organization: Uuid, name: &str, expected: &Connection) {
+    let deadline = Instant::now() + SETTLE;
+    loop {
+        let connection = client
+            .state()
+            .mcp()
+            .existing_organization(organization)
+            .expect("the organization's hub is running")
+            .connection(name);
+        if connection == *expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the hub holds {name} as {connection:?}, not as {expected:?}"
         );
         tokio::time::sleep(POLL).await;
     }
@@ -960,6 +1049,175 @@ async fn a_reconnect_leaves_a_disabled_server_disabled() {
     let requested = requested.json_value();
     assert_eq!(requested["status"], DISABLED);
     assert_eq!(requested["enabled"], false);
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_server_made_while_the_hub_runs_connects() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+
+    let first = id(&tenant.create(&client, &stdio("first")).await);
+    let connected = settle(&client, &tenant.server(&first), token, CONNECTED).await;
+    assert_eq!(connected["available_tools"], json!([STUB_TOOL]));
+    held(&client, tenant.organization, "first", &delegating()).await;
+
+    let second = id(&tenant.create(&client, &stdio("second")).await);
+    let joined = settle(&client, &tenant.server(&second), token, CONNECTED).await;
+    assert_eq!(joined["available_tools"], json!([STUB_TOOL]));
+    assert_eq!(joined[ERROR], Value::Null);
+    held(&client, tenant.organization, "second", &delegating()).await;
+    held(&client, tenant.organization, "first", &delegating()).await;
+
+    let listed = client.get_auth(&tenant.servers(), token).await.json_value();
+    assert_eq!(names(&listed), ["first", "second"]);
+    assert_eq!(statuses(&listed), [CONNECTED, CONNECTED]);
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_renamed_server_leaves_its_old_name() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let server = id(&tenant.create(&client, &stdio("before")).await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+    held(&client, tenant.organization, "before", &delegating()).await;
+
+    let renamed = client
+        .put_json_auth(&uri, &json!({ "name": "after" }), token)
+        .await;
+    renamed.assert_status(StatusCode::OK);
+    assert_eq!(renamed.json_value()["name"], "after");
+
+    let settled = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(settled["name"], "after");
+    assert_eq!(settled["available_tools"], json!([STUB_TOOL]));
+    let listed = client.get_auth(&tenant.servers(), token).await.json_value();
+    assert_eq!(names(&listed), ["after"]);
+    held(&client, tenant.organization, "after", &delegating()).await;
+    held(&client, tenant.organization, "before", &unknown()).await;
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_disabled_server_stops_and_starts_again_once_enabled() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let offered = directory.path().join("offered");
+    let server = id(&tenant.create(&client, &recording("stub", &offered)).await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+    let revision = handshake(&offered).await;
+
+    let disabled = client
+        .put_json_auth(&uri, &json!({ "enabled": false }), token)
+        .await;
+    disabled.assert_status(StatusCode::OK);
+    let disabled = disabled.json_value();
+    assert_eq!(disabled["status"], DISABLED);
+    assert_eq!(disabled["enabled"], false);
+    assert_eq!(disabled["available_tools"], json!([]));
+    held(
+        &client,
+        tenant.organization,
+        "stub",
+        &Connection::disabled(),
+    )
+    .await;
+    std::fs::remove_file(&offered).expect("the first handshake's record is removed");
+
+    let enabled = client
+        .put_json_auth(&uri, &json!({ "enabled": true }), token)
+        .await;
+    enabled.assert_status(StatusCode::OK);
+    assert_eq!(enabled.json_value()["enabled"], true);
+    let restarted = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(restarted["available_tools"], json!([STUB_TOOL]));
+    assert_eq!(handshake(&offered).await, revision);
+    held(&client, tenant.organization, "stub", &delegating()).await;
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_deleted_server_leaves_the_hub() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let server = id(&tenant.create(&client, &stdio("gone")).await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+    held(&client, tenant.organization, "gone", &delegating()).await;
+
+    client
+        .delete_auth(&uri, token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    client
+        .get_auth(&uri, token)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    let listed = client.get_auth(&tenant.servers(), token).await.json_value();
+    assert_eq!(listed["servers"], json!([]));
+    held(&client, tenant.organization, "gone", &unknown()).await;
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_reconnect_restarts_the_server_and_an_allowlist_edit_leaves_it_running() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let offered = directory.path().join("offered");
+    let server = id(&tenant.create(&client, &recording("stub", &offered)).await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+    let revision = handshake(&offered).await;
+
+    std::fs::remove_file(&offered).expect("the first handshake's record is removed");
+    let requested = Instant::now();
+    client
+        .post_json_auth(&tenant.connection(&server), &json!({}), token)
+        .await
+        .assert_status(StatusCode::ACCEPTED);
+    assert_eq!(handshake(&offered).await, revision);
+    let restart = requested.elapsed();
+    let reconnected = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(reconnected["available_tools"], json!([STUB_TOOL]));
+
+    std::fs::remove_file(&offered).expect("the reconnect's record is removed");
+    let narrowed = client
+        .put_json_auth(&uri, &json!({ "tools": ["other"] }), token)
+        .await;
+    narrowed.assert_status(StatusCode::OK);
+    let narrowed = narrowed.json_value();
+    assert_eq!(narrowed["tools"], json!(["other"]));
+    tokio::time::sleep(QUIET.max(restart * RESTARTS)).await;
+    assert!(
+        !offered.exists(),
+        "an allowlist edit restarted the server: it shook hands again"
+    );
+    assert_eq!(narrowed["status"], CONNECTED);
+    let read = client.get_auth(&uri, token).await.json_value();
+    assert_eq!(read["status"], CONNECTED);
+    assert_eq!(read["tools"], json!(["other"]));
+    assert_eq!(read["available_tools"], json!([STUB_TOOL]));
 
     tenant.discard(&client, &[]).await;
 }
