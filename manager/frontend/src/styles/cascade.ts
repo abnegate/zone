@@ -53,6 +53,7 @@ import '../features/tasks/components/QuestionPrompt.css';
 import '../features/tasks/pages/TasksPage.css';
 import '../features/tasks/components/board/Board.css';
 import '../features/tasks/components/board/Column.css';
+import '../features/tasks/components/board/Card.css';
 import '../features/github/components/RepositoryPicker.css';
 import '../App.css';
 import '@zone/ui/styles/globals.css';
