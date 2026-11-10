@@ -224,6 +224,17 @@ describe('Card', () => {
     expect(time).toHaveTextContent('9 days ago');
   });
 
+  it('keeps tooltips off the details the open button covers', () => {
+    renderCard({ priority: 2 });
+    expect(card().querySelector('time')).not.toHaveAttribute('title');
+    expect(card().querySelector('.task-card-project')).not.toHaveAttribute('title');
+    expect(screen.getByLabelText('Priority 2')).not.toHaveAttribute('title');
+    expect(screen.getByRole('button', { name: 'Implement login' })).toHaveAttribute(
+      'title',
+      'Implement login'
+    );
+  });
+
   it('leaves the time out when the task has no timestamps', () => {
     renderCard({ updated_at: null, created_at: null });
     expect(card().querySelector('time')).toBeNull();

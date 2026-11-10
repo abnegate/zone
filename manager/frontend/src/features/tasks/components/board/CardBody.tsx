@@ -29,9 +29,7 @@ export function CardBody({ task, projects, title }: CardBodyProps) {
       <div className="task-card-heading">{title}</div>
       <div className="task-card-meta">
         {task.status === QUEUED && <Badge variant="info">Queued</Badge>}
-        <span className="task-card-project" title={projects}>
-          {projects}
-        </span>
+        <span className="task-card-project">{projects}</span>
         {task.priority !== null && <Priority value={task.priority} />}
         {task.is_agentic && <Badge variant="accent">Agentic</Badge>}
         {task.pr_status && <Badge variant={PR_TINTS[task.pr_status]}>PR {task.pr_status}</Badge>}

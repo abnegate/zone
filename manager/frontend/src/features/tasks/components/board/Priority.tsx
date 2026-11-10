@@ -3,9 +3,8 @@ export interface PriorityProps {
 }
 
 export function Priority({ value }: PriorityProps) {
-  const label = `Priority ${value}`;
   return (
-    <span className="task-card-priority" role="img" aria-label={label} title={label}>
+    <span className="task-card-priority" role="img" aria-label={`Priority ${value}`}>
       P{value}
     </span>
   );
