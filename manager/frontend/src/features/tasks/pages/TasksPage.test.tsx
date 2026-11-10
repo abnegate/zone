@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
 import { clientModule } from '../../../test/client';
-import { chooseMenuItem } from '../../../test/menu';
+import { chooseMenuItem, openMenu } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
@@ -572,6 +572,62 @@ describe('TasksPage', () => {
       await waitFor(() => {
         expect(mockUpdateTask).toHaveBeenCalledWith('task-1', { title: 'Implement sign in' });
       });
+    });
+
+    it('keeps focus on the title of the card that had it', async () => {
+      renderTasksPage();
+      (await openTitle('Implement login')).focus();
+
+      await reloadWith('in_progress');
+
+      expect(focusedTitle()).toBe('task-1');
+      expect(column('In progress').contains(document.activeElement)).toBe(true);
+    });
+
+    it('keeps focus on the grip of the card that had it', async () => {
+      renderTasksPage();
+      (await screen.findByRole('button', { name: 'Move Implement login' })).focus();
+
+      await reloadWith('in_progress');
+
+      expect(document.activeElement).toBe(
+        within(column('In progress')).getByRole('button', { name: 'Move Implement login' })
+      );
+    });
+
+    it('closes the open menu of the card and puts focus back on its trigger', async () => {
+      renderTasksPage();
+      await screen.findByText('Implement login');
+      await openMenu('Actions for Implement login');
+      expect(screen.getAllByRole('menuitem')).toHaveLength(3);
+
+      await reloadWith('in_progress');
+
+      expect(screen.queryByRole('menuitem')).not.toBeInTheDocument();
+      expect(document.activeElement).toBe(
+        within(column('In progress')).getByRole('button', { name: 'Actions for Implement login' })
+      );
+    });
+
+    it('leaves focus alone when nothing on the card had it', async () => {
+      renderTasksPage();
+      (await openTitle('Fix button styling')).focus();
+
+      await reloadWith('in_progress');
+
+      expect(focusedTitle()).toBe('task-2');
+    });
+
+    it('does not pull focus back to a card the user clicked away from', async () => {
+      renderTasksPage();
+      const title = await openTitle('Implement login');
+      title.focus();
+      fireEvent.pointerDown(document.body);
+      title.blur();
+
+      await reloadWith('in_progress');
+
+      expect(document.activeElement).toBe(document.body);
     });
 
     it('leaves a rename nobody typed in unsaved when the title changed underneath it', async () => {

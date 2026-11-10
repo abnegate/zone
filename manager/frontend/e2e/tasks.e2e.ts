@@ -781,6 +781,40 @@ test.describe('Tasks Page', () => {
       ]);
     });
 
+    test('focus follows a card that a reload moves to another column', async ({ context, page }) => {
+      const server = await serveTasks(context, page);
+      const title = page.getByRole('button', { name: 'Queue nightly build', exact: true });
+      await title.focus();
+
+      server.tasks = server.tasks.map((task) =>
+        task.id === 'task-2' ? { ...task, status: 'in_progress' } : task
+      );
+      await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+
+      await expect(card(column(page, 'In progress'), 'Queue nightly build')).toBeVisible();
+      await expect(title).toBeFocused();
+    });
+
+    test('a reload that moves a card closes its open menu and keeps focus on the card', async ({
+      context,
+      page,
+    }) => {
+      const server = await serveTasks(context, page);
+      await openMenu(page, 'Queue nightly build');
+      await expect(page.getByRole('menuitem', { name: 'Rename', exact: true })).toBeVisible();
+
+      server.tasks = server.tasks.map((task) =>
+        task.id === 'task-2' ? { ...task, status: 'in_progress' } : task
+      );
+      await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+
+      await expect(card(column(page, 'In progress'), 'Queue nightly build')).toBeVisible();
+      await expect(page.getByRole('menuitem')).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: 'Actions for Queue nightly build', exact: true })
+      ).toBeFocused();
+    });
+
     test('the delete dialog cancels without deleting', async ({ context, page }) => {
       const server = await serveTasks(context, page);
 

@@ -21,8 +21,7 @@ import { CardBody } from './CardBody';
 import { CardSensor } from './CardSensor';
 import { Column } from './Column';
 import { destination, keyboardOptions, stageUnder } from './drop';
-import { useFollowedCard } from './useFollowedCard';
-import { useNeighbourFocus } from './useNeighbourFocus';
+import { useCardFocus } from './useCardFocus';
 import './Board.css';
 
 export interface BoardProps {
@@ -72,8 +71,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
   const instructions = useId();
   const unrendered = useMemo(() => document.createElement('div'), []);
   const root = useRef<HTMLElement>(null);
-  const follow = useFollowedCard(root);
-  useNeighbourFocus(root, groups);
+  const release = useCardFocus(root, groups);
   const reducedMotion = useMediaQuery(REDUCED_MOTION);
   const heading = useRef<StageId | null>(null);
   const keyboard = useMemo(() => keyboardOptions(reducedMotion, heading), [reducedMotion]);
@@ -116,7 +114,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
       return;
     }
     setAnnouncement(`${task.title} moved to ${stage.label}.`);
-    if (activatorEvent instanceof KeyboardEvent) follow(task.id);
+    if (!(activatorEvent instanceof KeyboardEvent)) release();
     void actions.move(task, status);
   };
 

@@ -5,7 +5,6 @@ import type { BoardActions, Task } from '../../types';
 import { TaskTitleInput } from '../TaskTitleInput';
 import { CardBody } from './CardBody';
 import { CardMenu } from './CardMenu';
-import { focusLost } from './focus';
 
 export interface CardContentProps {
   task: Task;
@@ -29,7 +28,8 @@ export const CardContent = memo(function CardContent({
   const pending = awaitsTitle(task);
 
   useLayoutEffect(() => {
-    if (wasRenaming.current && !renaming && focusLost()) open.current?.focus();
+    const lost = document.activeElement === null || document.activeElement === document.body;
+    if (wasRenaming.current && !renaming && lost) open.current?.focus();
     wasRenaming.current = renaming !== null;
   }, [renaming]);
 
