@@ -4,7 +4,8 @@ depending on anything installed on the machine.
 
 Speaks newline-delimited JSON-RPC: answers initialize with the protocol
 version the client proposed, lists one tool named delegate, and echoes a
-call's instruction back as text.
+call's instruction back as text. Given a path as its first argument, it writes
+the proposed protocol version there.
 """
 import json
 import sys
@@ -35,6 +36,9 @@ for line in sys.stdin:
     if message_id is None:
         continue
     if method == "initialize":
+        if len(sys.argv) > 1:
+            with open(sys.argv[1], "w") as offered:
+                offered.write(message["params"]["protocolVersion"])
         reply(
             message_id,
             {

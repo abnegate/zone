@@ -121,6 +121,14 @@ server:
     ZONE_CONSOLE_ORIGINS: ""
     ZONE_AGENT_USAGE_TTL_SECONDS: "60"
 
+  # Origin a browser reaches Zone at, scheme://host[:port] with no path,
+  # passed to zone-server as APP_BASE_URL. Empty derives it from the first
+  # ingress host, https when ingress.tls covers that host and http otherwise;
+  # with the ingress disabled it stays unset. Set it when TLS ends somewhere
+  # the chart cannot see, or when browsers use another host or port.
+  # env.APP_BASE_URL does the same and wins.
+  baseUrl: ""
+
   # Absolute host directory bind-mounted at /host. Empty leaves chat tools on
   # the pod's /app/workspace. Recreate the deployment after changing it.
   hostRoot: ""

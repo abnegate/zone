@@ -19,6 +19,7 @@ on:
       - 'scripts/test-pull-models.sh'
       - 'manager/Dockerfile'
       - 'runner/Cargo.toml'
+      - 'runner/zone_server/src/**'
       - '.dockerignore'
       - '.github/workflows/dev-cli.yml'
   pull_request:
@@ -38,6 +39,7 @@ on:
       - 'scripts/test-pull-models.sh'
       - 'manager/Dockerfile'
       - 'runner/Cargo.toml'
+      - 'runner/zone_server/src/**'
       - '.dockerignore'
       - '.github/workflows/dev-cli.yml'
 

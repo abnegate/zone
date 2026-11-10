@@ -27,6 +27,39 @@ For production, regenerate secrets for security.
 - **Usage**: Configure DNS A record or add to /etc/hosts
 - **Note**: Retained variable name for compatibility; Zone chat is at `https://manager.<domain>/chats`
 
+### `APP_BASE_URL`
+- **Default**: `http://localhost:3000`. Compose sets
+  `http://manager.${DOMAIN_HOST_WEBUI}`, the host Traefik routes to the
+  console and the API, and the `dev` profile sets the Vite server,
+  `http://localhost:3001`. A value in `.env` replaces either; an empty one
+  counts as unset. The `zone-apps` Helm chart sets the first ingress host,
+  `http://zone.local` as shipped, over `https` when an `ingress.tls` entry
+  covers that host; `server.baseUrl` or `server.env.APP_BASE_URL` replaces
+  it. With neither set and no ingress host to go by (the ingress disabled,
+  or its first host empty or a wildcard), the chart leaves it unset. The
+  Tilt install sets the console dev server, `http://localhost:3001`.
+- **Description**: The origin a browser uses to reach Zone, written
+  `scheme://host[:port]` with no path. Zone builds every outward link from it:
+  - the GitHub App that **Connect GitHub** registers: its homepage, its
+    manifest callback `/api/github/callbacks/manifest` and its setup callback
+    `/api/github/callbacks/setup`;
+  - the settings page those callbacks send the browser on to with the
+    outcome, `/settings/organization/github`;
+  - the address GitHub delivers a synced repository's webhooks to,
+    `/api/webhooks/sync/…`, which GitHub itself has to reach;
+  - the links in sign-up verification and password reset mail.
+- **Why http in compose**: Traefik answers `http` on that host with no
+  certificate, and upgrades it itself when `SECURITY_HTTP_REDIRECT=true`;
+  `https` works only once a certificate is in place. Set
+  `APP_BASE_URL=https://manager.<domain>` when you serve TLS.
+- **Note**: It must be an origin the browser can open, or GitHub's callback
+  lands on a page that does not load and the App is left registered with
+  addresses that go nowhere. A console open at a different origin than this
+  one, such as `https://manager.localhost`, is sent here after GitHub and has
+  to sign in again, so name the origin you actually use. GitHub keeps the
+  addresses an App was registered with: after changing `APP_BASE_URL`, correct
+  them in the App's settings on GitHub, or delete the App and connect again.
+
 ---
 
 ## 🔐 Security & Authentication
@@ -2148,7 +2181,7 @@ Publication, pull-request sync, conflict repair, auto-project reviews and merges
 
 ### `GITHUB_WEB_URL`
 - **Default**: `https://github.com` when `GITHUB_API_URL` is `api.github.com`; otherwise `GITHUB_API_URL` with a trailing `/api/v3` removed, e.g. `https://github.example.com`.
-- **Description**: The GitHub web origin that **Connect GitHub** sends you to, to register Zone's GitHub App and install it. Set it only when the web UI does not live where the default puts it. It follows the same rules as `GITHUB_API_URL`: an absolute URL with a host and no credentials, query or fragment, and `http://` only with `GITHUB_API_ALLOW_HTTP=true`. Loopback and LAN hosts are allowed.
+- **Description**: The GitHub web origin that **Connect GitHub** sends you to, to register Zone's GitHub App and install it; GitHub sends you back to `APP_BASE_URL`. Set it only when the web UI does not live where the default puts it. It follows the same rules as `GITHUB_API_URL`: an absolute URL with a host and no credentials, query or fragment, and `http://` only with `GITHUB_API_ALLOW_HTTP=true`. Loopback and LAN hosts are allowed.
 
 ---
 
@@ -2438,7 +2471,7 @@ Need to find a specific config? Quick lookup:
 - **Compose**: COMPOSE_PROFILES, ZONE_VPN, ZONE_VPN_REQUIRED
 - **Authentication**: BASICAUTH_REALM, BASIC_AUTH_USERS_FILE
 - **Docker Versions**: DOCKER_VERSION_TRAEFIK, DOCKER_VERSION_OLLAMA, DOCKER_VERSION_POSTGRES, DOCKER_VERSION_LITELLM, DOCKER_VERSION_GLUETUN, DOCKER_VERSION_SEARXNG, COMFYUI_COMMIT
-- **Domains**: DOMAIN_HOST_WEBUI
+- **Domains**: DOMAIN_HOST_WEBUI, APP_BASE_URL
 - **Email**: ACME_EMAIL
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED, OLLAMA_MODEL_VISION
 - **Model backend and coding agents**: ZONE_LLM_BACKEND,

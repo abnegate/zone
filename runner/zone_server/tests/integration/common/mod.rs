@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub mod comfy;
 pub mod context;
 pub mod database;
 pub mod github_app;

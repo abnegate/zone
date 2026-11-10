@@ -125,9 +125,38 @@ Common environment variables for all containers
 */}}
 {{- define "zone-apps.commonEnv" -}}
 {{- range $key, $value := .Values.commonEnv }}
+{{- if ne $key "APP_BASE_URL" }}
 - name: {{ $key }}
   value: {{ $value | quote }}
 {{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Origin a browser reaches Zone at, or nothing. A named value wins, server.env
+over server.baseUrl over commonEnv; otherwise it is the first ingress host.
+*/}}
+{{- define "zone-apps.server.baseUrl" -}}
+{{- $named := coalesce (get (default dict .Values.server.env) "APP_BASE_URL") .Values.server.baseUrl (get (default dict .Values.commonEnv) "APP_BASE_URL") | default "" | toString -}}
+{{- $host := "" -}}
+{{- if and .Values.ingress.enabled .Values.ingress.hosts -}}
+{{- $host = (first .Values.ingress.hosts).host | default "" -}}
+{{- end -}}
+{{- if $named -}}
+{{- if not (regexMatch "^https?://[^/?#]+/?$" $named) -}}
+{{- fail (printf "APP_BASE_URL must be an origin, scheme://host[:port] with no path, but server.env, server.baseUrl or commonEnv gives %q" $named) -}}
+{{- end -}}
+{{- $named | trimSuffix "/" -}}
+{{- else if and $host (not (contains "*" $host)) -}}
+{{- $wildcard := regexReplaceAll "^[^.]+" $host "*" -}}
+{{- $scheme := "http" -}}
+{{- range .Values.ingress.tls -}}
+{{- if or (not .hosts) (has $host .hosts) (has $wildcard .hosts) -}}
+{{- $scheme = "https" -}}
+{{- end -}}
+{{- end -}}
+{{- printf "%s://%s" $scheme $host -}}
+{{- end -}}
 {{- end }}
 
 {{/*
