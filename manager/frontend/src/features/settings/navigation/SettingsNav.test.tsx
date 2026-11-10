@@ -119,6 +119,7 @@ describe('SettingsNav', () => {
       ['Billing', '/settings/organization/billing'],
       ['Audit log', '/settings/organization/audit'],
       ['GitHub', '/settings/organization/github'],
+      ['MCP servers', '/settings/organization/mcp'],
       ['Features', '/settings/server/features'],
       ['Connect a device', '/settings/server/connect'],
       ['Sessions', '/settings/you/sessions'],
@@ -156,6 +157,7 @@ describe('SettingsNav', () => {
       'Billing',
       'Audit log',
       'GitHub',
+      'MCP servers',
     ]);
   });
 

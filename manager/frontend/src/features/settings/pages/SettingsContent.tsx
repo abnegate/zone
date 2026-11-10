@@ -14,6 +14,7 @@ import {
   SettingsSection,
   settingsPath,
 } from '../navigation/sections';
+import { McpServersSection } from '../mcp';
 import {
   AuditLogsSection,
   BillingSection,
@@ -94,6 +95,13 @@ function organizationContent(
     case SettingsSection.GitHub:
       return (
         <GitHubSection
+          organizationId={organizationId}
+          canManage={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
+        />
+      );
+    case SettingsSection.Mcp:
+      return (
+        <McpServersSection
           organizationId={organizationId}
           canManage={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
         />
