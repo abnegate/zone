@@ -87,7 +87,7 @@ export function WorkspaceMcpServerRow({
           ))}
         </div>
       ) : (
-        <span className="workspace-mcp-server-fixed">Always on</span>
+        <span className="workspace-mcp-server-fixed">Set by the instance</span>
       )}
       {server.source === Source.Organization && !server.enabled && (
         <p className="workspace-mcp-server-note">Off for the organization</p>

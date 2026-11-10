@@ -1,13 +1,23 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  vi,
+} from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { createElement } from 'react';
-import { mcpQueryKeys } from '../mcpQueryKeys';
+import { POLL_INTERVAL } from '../constants';
+import { mcpQueryKeys } from '../queryKeys';
 import type { WorkspaceMcpServer } from '../types';
 
 const list = mock();
-const get = mock();
 const create = mock();
 const update = mock();
 const remove = mock();
@@ -16,7 +26,7 @@ const workspace = mock();
 const updateWorkspace = mock();
 
 mock.module('../../../../api/mcp', () => ({
-  mcpApi: { list, get, create, update, remove, reconnect, workspace, updateWorkspace },
+  mcpApi: { list, create, update, remove, reconnect, workspace, updateWorkspace },
 }));
 
 let useWorkspaceMcpServers: typeof import('./useWorkspaceMcpServers').useWorkspaceMcpServers;
@@ -67,6 +77,15 @@ function server(overrides: Partial<WorkspaceMcpServer> = {}): WorkspaceMcpServer
 const inherited = server();
 const off = server({ workspace_enabled: false, effective: false });
 
+async function advance(milliseconds: number): Promise<void> {
+  await act(async () => {
+    vi.advanceTimersByTime(milliseconds);
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(0);
+  });
+}
+
 async function renderLoaded(queryClient = createQueryClient()) {
   workspace.mockResolvedValue({ servers: [inherited] });
   const rendered = renderHook(() => useWorkspaceMcpServers('org-1', 'ws-1'), {
@@ -80,18 +99,13 @@ async function renderLoaded(queryClient = createQueryClient()) {
 
 describe('useWorkspaceMcpServers', () => {
   beforeEach(() => {
-    for (const method of [
-      list,
-      get,
-      create,
-      update,
-      remove,
-      reconnect,
-      workspace,
-      updateWorkspace,
-    ]) {
+    for (const method of [list, create, update, remove, reconnect, workspace, updateWorkspace]) {
       method.mockReset();
     }
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('loads the servers with their workspace overrides', async () => {
@@ -113,6 +127,7 @@ describe('useWorkspaceMcpServers', () => {
     await waitFor(() => {
       expect(result.current.error).toBe('Failed to load workspace MCP servers: 404');
     });
+    expect(result.current.loaded).toBe(false);
     expect(result.current.servers).toEqual([]);
   });
 
@@ -137,7 +152,7 @@ describe('useWorkspaceMcpServers', () => {
     expect(workspace).toHaveBeenCalledTimes(1);
   });
 
-  it('marks the organization list stale after saving overrides', async () => {
+  it('leaves the organization list alone after saving overrides', async () => {
     const queryClient = createQueryClient(Number.POSITIVE_INFINITY);
     queryClient.setQueryData(mcpQueryKeys.servers('org-1'), { commands: false, servers: [] });
     updateWorkspace.mockResolvedValue({ servers: [off] });
@@ -146,7 +161,20 @@ describe('useWorkspaceMcpServers', () => {
     await result.current.update({ 's-1': null });
 
     expect(updateWorkspace).toHaveBeenCalledWith('org-1', 'ws-1', { servers: { 's-1': null } });
-    expect(queryClient.getQueryState(mcpQueryKeys.servers('org-1'))?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(mcpQueryKeys.servers('org-1'))?.isInvalidated).toBe(false);
+  });
+
+  it('keeps the loaded list when a later read fails', async () => {
+    const { result } = await renderLoaded();
+    workspace.mockRejectedValue(new Error('Failed to load workspace MCP servers: 502'));
+
+    await result.current.refresh();
+
+    await waitFor(() => {
+      expect(result.current.error).toBe('Failed to load workspace MCP servers: 502');
+    });
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.servers).toEqual([inherited]);
   });
 
   it('keeps the list when saving fails', async () => {
@@ -160,7 +188,8 @@ describe('useWorkspaceMcpServers', () => {
     expect(result.current.servers).toEqual([inherited]);
   });
 
-  it('polls while a server is connecting', async () => {
+  it('polls every interval while a server is connecting and stops once it connects', async () => {
+    vi.useFakeTimers();
     workspace
       .mockResolvedValueOnce({ servers: [server({ status: 'connecting', available_tools: [] })] })
       .mockResolvedValue({ servers: [inherited] });
@@ -168,15 +197,17 @@ describe('useWorkspaceMcpServers', () => {
     const { result } = renderHook(() => useWorkspaceMcpServers('org-1', 'ws-1'), {
       wrapper: createWrapper(createQueryClient()),
     });
+    await advance(0);
+    expect(workspace).toHaveBeenCalledTimes(1);
 
-    await waitFor(
-      () => {
-        expect(workspace).toHaveBeenCalledTimes(2);
-      },
-      { timeout: 3000 }
-    );
-    await waitFor(() => {
-      expect(result.current.servers).toEqual([inherited]);
-    });
+    await advance(POLL_INTERVAL / 2);
+    expect(workspace).toHaveBeenCalledTimes(1);
+
+    await advance(POLL_INTERVAL / 2);
+    expect(workspace).toHaveBeenCalledTimes(2);
+    expect(result.current.servers).toEqual([inherited]);
+
+    await advance(POLL_INTERVAL);
+    expect(workspace).toHaveBeenCalledTimes(2);
   });
 });

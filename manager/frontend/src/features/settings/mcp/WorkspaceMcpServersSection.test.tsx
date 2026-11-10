@@ -1,10 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { WorkspaceMcpServer, WorkspaceMcpServerList } from './types';
 
 const list = mock();
-const get = mock();
 const create = mock();
 const update = mock();
 const remove = mock();
@@ -13,7 +12,7 @@ const workspace = mock();
 const updateWorkspace = mock();
 
 mock.module('../../../api/mcp', () => ({
-  mcpApi: { list, get, create, update, remove, reconnect, workspace, updateWorkspace },
+  mcpApi: { list, create, update, remove, reconnect, workspace, updateWorkspace },
 }));
 
 let WorkspaceMcpServersSection: typeof import('./WorkspaceMcpServersSection').WorkspaceMcpServersSection;
@@ -89,11 +88,12 @@ function renderSection(editable = true) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   });
-  return render(
+  render(
     <QueryClientProvider client={queryClient}>
       <WorkspaceMcpServersSection organizationId="org-1" workspaceId="ws-1" editable={editable} />
     </QueryClientProvider>
   );
+  return queryClient;
 }
 
 async function row(name: string): Promise<HTMLElement> {
@@ -120,16 +120,7 @@ function radio(name: string, option: string): HTMLInputElement {
 
 describe('WorkspaceMcpServersSection', () => {
   beforeEach(() => {
-    for (const method of [
-      list,
-      get,
-      create,
-      update,
-      remove,
-      reconnect,
-      workspace,
-      updateWorkspace,
-    ]) {
+    for (const method of [list, create, update, remove, reconnect, workspace, updateWorkspace]) {
       method.mockReset();
     }
     workspace.mockResolvedValue(listOf(docs, notes, github, magents));
@@ -153,7 +144,7 @@ describe('WorkspaceMcpServersSection', () => {
       'docsHTTPConnectedOnInherited from organizationInheritOnOff',
       'notesHTTPDisabledOffSet for this workspaceInheritOnOffOff for the organization',
       'githubCommandConnectingOnSet for this workspaceInheritOnOff',
-      'magentsCommandConnectedOnInstanceAlways on',
+      'magentsCommandConnectedOnInstanceSet by the instance',
     ]);
     expect(workspace).toHaveBeenCalledWith('org-1', 'ws-1');
     expect(screen.queryByText('Only workspace admins can change MCP servers.')).toBeNull();
@@ -240,7 +231,7 @@ describe('WorkspaceMcpServersSection', () => {
       screen.queryByRole('radiogroup', { name: 'magents in this workspace' })
     ).not.toBeInTheDocument();
     expect(within(magentsRow).queryAllByRole('radio')).toEqual([]);
-    expect(within(magentsRow).getByText('Always on')).toBeInTheDocument();
+    expect(within(magentsRow).getByText('Set by the instance')).toBeInTheDocument();
     expect(
       screen.getAllByRole('radiogroup').map((group) => group.getAttribute('aria-label'))
     ).toEqual(['docs in this workspace', 'notes in this workspace', 'github in this workspace']);
@@ -250,9 +241,9 @@ describe('WorkspaceMcpServersSection', () => {
     renderSection(false);
     await row('docs');
 
-    expect(screen.getByText('Only workspace admins can change MCP servers.')).toHaveClass(
-      'form-hint'
-    );
+    const hint = screen.getByText('Only workspace admins can change MCP servers.');
+    expect(hint).toHaveClass('form-hint');
+    expect(hint).toHaveAttribute('role', 'status');
     const inputs = ['docs', 'notes', 'github'].flatMap(radios);
     expect(inputs).toHaveLength(9);
     expect(inputs.every((input) => input.disabled)).toBe(true);
@@ -312,6 +303,38 @@ describe('WorkspaceMcpServersSection', () => {
     expect(await row('docs')).toBeInTheDocument();
     expect(workspace).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps the servers and their controls when a later read fails, and retries', async () => {
+    const queryClient = renderSection();
+    await row('docs');
+    workspace.mockRejectedValueOnce(new Error('Failed to load workspace MCP servers: Bad gateway'));
+
+    await act(async () => {
+      await queryClient.refetchQueries();
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Failed to load workspace MCP servers: Bad gateway'
+    );
+    expect(radio('docs', 'Inherit').checked).toBe(true);
+    expect(screen.getAllByRole('radiogroup')).toHaveLength(3);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(workspace).toHaveBeenCalledTimes(3);
+    expect(await row('docs')).toBeInTheDocument();
+  });
+
+  it('labels the section by its own heading', async () => {
+    renderSection();
+    await row('docs');
+
+    const heading = screen.getByRole('heading', { level: 2, name: 'MCP servers' });
+    expect(heading.id).not.toBe('workspace-mcp-title');
+    expect(screen.getByRole('region', { name: 'MCP servers' })).toHaveAttribute(
+      'aria-labelledby',
+      heading.id
+    );
   });
 
   it('says so when the organization has no servers', async () => {

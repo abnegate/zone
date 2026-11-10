@@ -1,13 +1,23 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  vi,
+} from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentType } from 'react';
 import { chooseMenuItem } from '../../../test/menu';
+import { POLL_INTERVAL } from './constants';
 import type { McpServer, McpServerList, McpServerStatus } from './types';
 
 const mcpApi = {
   list: mock(),
-  get: mock(),
   create: mock(),
   update: mock(),
   remove: mock(),
@@ -64,11 +74,27 @@ function renderSection(canManage = true) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } },
   });
-  return render(
+  render(
     <QueryClientProvider client={queryClient}>
       <McpServersSection organizationId={ORGANIZATION_ID} canManage={canManage} />
     </QueryClientProvider>
   );
+  return queryClient;
+}
+
+async function settleLoading(): Promise<void> {
+  for (let attempt = 0; attempt < 10 && screen.queryByText('Loading MCP servers…'); attempt++) {
+    await advance(0);
+  }
+}
+
+async function advance(milliseconds: number): Promise<void> {
+  await act(async () => {
+    vi.advanceTimersByTime(milliseconds);
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(0);
+  });
 }
 
 function findRow(name: string): Promise<HTMLElement> {
@@ -98,6 +124,10 @@ describe('McpServersSection', () => {
       method.mockReset();
     }
     mcpApi.list.mockResolvedValue(listing([docs]));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('labels the section and describes it', async () => {
@@ -164,6 +194,25 @@ describe('McpServersSection', () => {
     await findRow('docs');
     expect(mcpApi.list).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps the list and its actions when a later read fails, and retries', async () => {
+    const queryClient = renderSection();
+    await findRow('docs');
+    mcpApi.list.mockRejectedValueOnce(new Error('Failed to load MCP servers: 502'));
+
+    await act(async () => {
+      await queryClient.refetchQueries();
+    });
+
+    expect((await screen.findByRole('alert')).textContent).toBe('Failed to load MCP servers: 502');
+    expect(screen.getByRole('listitem', { name: 'docs' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add server' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Import JSON' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(mcpApi.list).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole('listitem', { name: 'docs' })).toBeTruthy();
   });
 
   it('says when command servers are turned off on the instance', async () => {
@@ -304,6 +353,20 @@ describe('McpServersSection', () => {
     expect(mcpApi.update).toHaveBeenCalledWith(ORGANIZATION_ID, 's-1', { enabled: false });
   });
 
+  it('keeps the switch off once the server is saved while the list is reread', async () => {
+    mcpApi.update.mockResolvedValue(
+      server('docs', { id: 's-1', enabled: false, status: 'disabled' })
+    );
+    renderSection();
+    const row = await findRow('docs');
+    mcpApi.list.mockImplementation(() => new Promise(() => {}));
+    const toggle = within(row).getByRole('switch', { name: 'Enable docs' });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
+    expect(statusOf(row)).toBe('Disabled');
+    expect(mcpApi.list).toHaveBeenCalledTimes(2);
+  });
+
   it('narrows the tools with only tools', async () => {
     mcpApi.update.mockResolvedValue(server('docs', { id: 's-1', tools: ['fetch'] }));
     renderSection();
@@ -433,20 +496,25 @@ describe('McpServersSection', () => {
     expect(within(await findRow('docs')).getByRole('switch', { name: 'Enable docs' })).toBeTruthy();
   });
 
-  it('polls while a server is connecting', async () => {
+  it('polls every interval while a server is connecting and stops once it connects', async () => {
+    vi.useFakeTimers();
     mcpApi.list
       .mockResolvedValueOnce(
         listing([server('wiki', { status: 'connecting', available_tools: [] })])
       )
       .mockResolvedValue(listing([server('wiki')]));
     renderSection();
-    expect(statusOf(await findRow('wiki'))).toBe('Connecting');
-    await waitFor(
-      () => expect(statusOf(screen.getByRole('listitem', { name: 'wiki' }))).toBe('Connected'),
-      {
-        timeout: 3000,
-      }
-    );
+    await settleLoading();
+    expect(statusOf(screen.getByRole('listitem', { name: 'wiki' }))).toBe('Connecting');
+
+    await advance(POLL_INTERVAL / 2);
+    expect(mcpApi.list).toHaveBeenCalledTimes(1);
+
+    await advance(POLL_INTERVAL / 2);
+    expect(mcpApi.list).toHaveBeenCalledTimes(2);
+    expect(statusOf(screen.getByRole('listitem', { name: 'wiki' }))).toBe('Connected');
+
+    await advance(POLL_INTERVAL);
     expect(mcpApi.list).toHaveBeenCalledTimes(2);
   });
 });
