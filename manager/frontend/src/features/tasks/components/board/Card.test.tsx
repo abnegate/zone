@@ -3,6 +3,7 @@ import { DndContext, useSensor, useSensors } from '@dnd-kit/core';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { chooseMenuItem, openMenu, settleMenu } from '../../../../test/menu';
+import { TitleDraft } from '../../TitleDraft';
 import type { BoardActions, Task } from '../../types';
 import { Card } from './Card';
 import { CardSensor } from './CardSensor';
@@ -68,7 +69,12 @@ function renderCard(
   const actions = makeActions();
   const view = render(
     <Board onDragStart={onDragStart}>
-      <Card task={task} projects={PROJECTS} renaming={renaming} actions={actions} />
+      <Card
+        task={task}
+        projects={PROJECTS}
+        renaming={renaming ? new TitleDraft(task.title) : null}
+        actions={actions}
+      />
     </Board>
   );
   return { task, actions, view };

@@ -1,4 +1,5 @@
 import { memo, type SyntheticEvent, useLayoutEffect, useRef } from 'react';
+import type { TitleDraft } from '../../TitleDraft';
 import { awaitsTitle } from '../../title';
 import type { BoardActions, Task } from '../../types';
 import { TaskTitleInput } from '../TaskTitleInput';
@@ -9,7 +10,7 @@ import { focusLost } from './focus';
 export interface CardContentProps {
   task: Task;
   projects: string;
-  renaming: boolean;
+  renaming: TitleDraft | null;
   actions: BoardActions;
 }
 
@@ -24,17 +25,18 @@ export const CardContent = memo(function CardContent({
   actions,
 }: CardContentProps) {
   const open = useRef<HTMLButtonElement>(null);
-  const wasRenaming = useRef(renaming);
+  const wasRenaming = useRef(renaming !== null);
   const pending = awaitsTitle(task);
 
   useLayoutEffect(() => {
     if (wasRenaming.current && !renaming && focusLost()) open.current?.focus();
-    wasRenaming.current = renaming;
+    wasRenaming.current = renaming !== null;
   }, [renaming]);
 
   const title = renaming ? (
     <TaskTitleInput
       title={task.title}
+      draft={renaming}
       onSave={(value) => actions.retitle(task, value)}
       onDone={() => actions.finish(task)}
     />

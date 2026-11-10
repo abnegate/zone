@@ -527,6 +527,69 @@ describe('TasksPage', () => {
     await waitFor(() => expect(focusedTitle()).toBe('task-1'));
   });
 
+  describe('a card moved to another column by a reload', () => {
+    let stored: Task[] = mockTasks;
+
+    beforeEach(() => {
+      stored = mockTasks;
+      mockGetTasks.mockImplementation(() => Promise.resolve(stored));
+    });
+
+    async function reloadWith(status: TaskStatus) {
+      stored = stored.map((task) => (task.id === 'task-1' ? { ...task, status } : task));
+      const loads = mockGetTasks.mock.calls.length;
+      await act(async () => {
+        window.dispatchEvent(new Event('visibilitychange'));
+        await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(loads + 1));
+        await mockGetTasks.mock.results[loads].value;
+      });
+      await waitFor(() => {
+        expect(column('In progress').querySelector('[data-task-id="task-1"]')).not.toBeNull();
+      });
+    }
+
+    it('keeps the rename it was in the middle of, with its text, caret and focus', async () => {
+      renderTasksPage();
+      await screen.findByText('Implement login');
+      await chooseMenuItem('Actions for Implement login', 'Rename');
+      const input = screen.getByRole<HTMLInputElement>('textbox', { name: 'Task title' });
+      fireEvent.change(input, { target: { value: 'Implement sign in' } });
+      input.setSelectionRange(10, 14);
+      fireEvent.select(input);
+
+      await reloadWith('in_progress');
+
+      const moved = within(column('In progress')).getByRole<HTMLInputElement>('textbox', {
+        name: 'Task title',
+      });
+      expect(moved).not.toBe(input);
+      expect(moved).toHaveValue('Implement sign in');
+      expect(document.activeElement).toBe(moved);
+      expect([moved.selectionStart, moved.selectionEnd]).toEqual([10, 14]);
+      expect(mockUpdateTask).not.toHaveBeenCalled();
+
+      fireEvent.keyDown(moved, { key: 'Enter' });
+      await waitFor(() => {
+        expect(mockUpdateTask).toHaveBeenCalledWith('task-1', { title: 'Implement sign in' });
+      });
+    });
+
+    it('leaves a rename nobody typed in unsaved when the title changed underneath it', async () => {
+      renderTasksPage();
+      await screen.findByText('Implement login');
+      await chooseMenuItem('Actions for Implement login', 'Rename');
+      stored = stored.map((task) =>
+        task.id === 'task-1' ? { ...task, title: 'Add the login page' } : task
+      );
+
+      await reloadWith('in_progress');
+      fireEvent.blur(screen.getByRole('textbox', { name: 'Task title' }));
+
+      expect(await openTitle('Add the login page')).toBeInTheDocument();
+      expect(mockUpdateTask).not.toHaveBeenCalled();
+    });
+  });
+
   it('does not open the editor from the Run or Delete menu items', async () => {
     renderTasksPage();
     await screen.findByText('Implement login');

@@ -15,7 +15,7 @@ import { useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMediaQuery } from '../../../../shared/hooks';
 import { groupByStage, STAGES, type StageId, stageOf } from '../../status';
-import type { BoardActions, Task } from '../../types';
+import type { BoardActions, Renaming, Task } from '../../types';
 import { Card } from './Card';
 import { CardBody } from './CardBody';
 import { CardSensor } from './CardSensor';
@@ -28,7 +28,7 @@ import './Board.css';
 export interface BoardProps {
   tasks: readonly Task[];
   projects: ReadonlyMap<string, string>;
-  renaming: string | null;
+  renaming: Renaming | null;
   actions: BoardActions;
 }
 
@@ -155,7 +155,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
                   key={task.id}
                   task={task}
                   projects={projectNames(task, projects)}
-                  renaming={renaming === task.id}
+                  renaming={renaming?.id === task.id ? renaming.draft : null}
                   actions={actions}
                 />
               ))}

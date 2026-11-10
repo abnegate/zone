@@ -11,7 +11,8 @@ import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard, DeleteTaskDialog, TaskDetail } from '../components';
 import { Board, Skeleton } from '../components/board';
 import { useTask, useTasks } from '../hooks';
-import type { BoardActions, Task, UpdateTaskRequest } from '../types';
+import { TitleDraft } from '../TitleDraft';
+import type { BoardActions, Renaming, Task, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
 import './TasksPage.css';
 
@@ -52,7 +53,7 @@ export default function TasksPage() {
   } = useTask(taskParam);
 
   const [executionTask, setExecutionTask] = useState<Task | null>(null);
-  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<Renaming | null>(null);
   const [deleting, setDeleting] = useState<Task | null>(null);
   const [deletedIds, setDeletedIds] = useState<ReadonlySet<string>>(() => new Set());
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -129,11 +130,11 @@ export default function TasksPage() {
     () => ({
       open: (task) => openEditor(task.id),
       run: setExecutionTask,
-      rename: (task) => setRenamingId(task.id),
+      rename: (task) => setRenaming({ id: task.id, draft: new TitleDraft(task.title) }),
       retitle: async (task, title) => {
         await updateListedTask(task.id, { title });
       },
-      finish: (task) => setRenamingId((current) => (current === task.id ? null : current)),
+      finish: (task) => setRenaming((current) => (current?.id === task.id ? null : current)),
       remove: setDeleting,
       move: async (task, status) => {
         try {
@@ -229,7 +230,7 @@ export default function TasksPage() {
             }
           />
         ) : (
-          <Board tasks={shown} projects={projectNames} renaming={renamingId} actions={actions} />
+          <Board tasks={shown} projects={projectNames} renaming={renaming} actions={actions} />
         )}
       </div>
 

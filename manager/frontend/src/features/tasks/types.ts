@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import type { ActionReceipt, Question, Waiting } from '../chats/types';
 import type { TaskProgressMessageSchema } from './schemas';
 import type { StageId, StatusTint, TaskStatus } from './status';
+import type { TitleDraft } from './TitleDraft';
 
 export type { TaskStatus } from './status';
 export type RunStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
@@ -113,6 +114,11 @@ export interface Stage {
   statuses: readonly TaskStatus[];
   target: TaskStatus;
   tint: StatusTint;
+}
+
+export interface Renaming {
+  id: string;
+  draft: TitleDraft;
 }
 
 export interface BoardActions {

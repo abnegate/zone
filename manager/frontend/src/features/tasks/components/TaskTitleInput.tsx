@@ -1,19 +1,24 @@
 import { type KeyboardEvent, type SyntheticEvent, useEffect, useId, useRef, useState } from 'react';
+import { TitleDraft } from '../TitleDraft';
 
 interface TaskTitleInputProps {
   title: string;
   className?: string;
+  draft?: TitleDraft;
   onSave: (title: string) => Promise<void>;
   onDone: () => void;
 }
+
+const SAVE_FAILED = 'Failed to rename task';
 
 function stopPropagation(event: SyntheticEvent) {
   event.stopPropagation();
 }
 
-export function TaskTitleInput({ title, className, onSave, onDone }: TaskTitleInputProps) {
-  const original = useRef(title);
-  const [value, setValue] = useState(title);
+export function TaskTitleInput({ title, className, draft, onSave, onDone }: TaskTitleInputProps) {
+  const [own] = useState(() => new TitleDraft(title));
+  const edit = draft ?? own;
+  const [value, setValue] = useState(edit.value);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const settled = useRef(false);
@@ -22,8 +27,14 @@ export function TaskTitleInput({ title, className, onSave, onDone }: TaskTitleIn
 
   useEffect(() => {
     input.current?.focus();
-    input.current?.select();
-  }, []);
+    input.current?.setSelectionRange(edit.start, edit.end);
+  }, [edit]);
+
+  const keep = (field: HTMLInputElement) => {
+    edit.value = field.value;
+    edit.start = field.selectionStart ?? field.value.length;
+    edit.end = field.selectionEnd ?? edit.start;
+  };
 
   const finish = () => {
     settled.current = true;
@@ -33,7 +44,7 @@ export function TaskTitleInput({ title, className, onSave, onDone }: TaskTitleIn
   const commit = async () => {
     if (settled.current || saving) return;
     const trimmed = value.trim();
-    if (!trimmed || trimmed === original.current) {
+    if (!trimmed || trimmed === edit.original) {
       finish();
       return;
     }
@@ -43,7 +54,7 @@ export function TaskTitleInput({ title, className, onSave, onDone }: TaskTitleIn
       await onSave(trimmed);
       finish();
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Failed to rename task');
+      setMessage(error instanceof Error ? error.message : SAVE_FAILED);
       setSaving(false);
     }
   };
@@ -71,7 +82,11 @@ export function TaskTitleInput({ title, className, onSave, onDone }: TaskTitleIn
         value={value}
         readOnly={saving}
         aria-busy={saving || undefined}
-        onChange={(event) => setValue(event.target.value)}
+        onChange={(event) => {
+          setValue(event.target.value);
+          keep(event.target);
+        }}
+        onSelect={(event) => keep(event.currentTarget)}
         onKeyDown={handleKeyDown}
         onClick={stopPropagation}
         onBlur={() => void commit()}

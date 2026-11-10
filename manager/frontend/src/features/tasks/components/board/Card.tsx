@@ -1,4 +1,5 @@
 import { useDraggable } from '@dnd-kit/core';
+import type { TitleDraft } from '../../TitleDraft';
 import type { BoardActions, Task } from '../../types';
 import { CardContent } from './CardContent';
 import { GripIcon } from './GripIcon';
@@ -7,7 +8,7 @@ import './Card.css';
 export interface CardProps {
   task: Task;
   projects: string;
-  renaming: boolean;
+  renaming: TitleDraft | null;
   actions: BoardActions;
 }
 
@@ -15,7 +16,7 @@ export function Card({ task, projects, renaming, actions }: CardProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } = useDraggable({
     id: task.id,
     data: { task },
-    disabled: renaming,
+    disabled: renaming !== null,
   });
   const className = [
     'task-card',

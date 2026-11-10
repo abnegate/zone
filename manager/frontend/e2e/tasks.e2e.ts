@@ -743,6 +743,44 @@ test.describe('Tasks Page', () => {
       await expect(page.locator('.task-details')).toBeVisible();
     });
 
+    test('a rename in progress survives its card moving to another column', async ({
+      context,
+      page,
+    }) => {
+      const server = await serveTasks(context, page);
+
+      await chooseFromMenu(page, 'Queue nightly build', 'Rename');
+      const input = page.getByRole('textbox', { name: 'Task title' });
+      await expect(input).toBeFocused();
+      await input.press('ArrowRight');
+      await input.pressSequentially(' and deploy');
+      await input.press('ArrowLeft');
+      await input.press('ArrowLeft');
+
+      server.tasks = server.tasks.map((task) =>
+        task.id === 'task-2' ? { ...task, status: 'in_progress' } : task
+      );
+      await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+
+      const moved = column(page, 'In progress').getByRole('textbox', { name: 'Task title' });
+      await expect(moved).toHaveValue('Queue nightly build and deploy');
+      await expect(moved).toBeFocused();
+      expect(
+        await moved.evaluate((field: HTMLInputElement) => [
+          field.selectionStart,
+          field.selectionEnd,
+        ])
+      ).toEqual([28, 28]);
+      expect(server.mutations).toEqual([]);
+
+      await moved.pressSequentially('s');
+      await moved.press('Enter');
+
+      await expect.poll(() => server.mutations).toEqual([
+        { method: 'PUT', id: 'task-2', body: { title: 'Queue nightly build and deplsoy' } },
+      ]);
+    });
+
     test('the delete dialog cancels without deleting', async ({ context, page }) => {
       const server = await serveTasks(context, page);
 
