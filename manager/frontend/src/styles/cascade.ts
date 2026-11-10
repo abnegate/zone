@@ -39,6 +39,7 @@ import '../features/settings/organization/components/AuditLogsSection.css';
 import '../features/settings/organization/components/BillingSection.css';
 import '../features/settings/organization/components/DevicesSection.css';
 import '../features/settings/organization/components/GitHubSection.css';
+import '../features/settings/mcp/McpServerRow.css';
 import '../features/settings/mcp/McpServerForm.css';
 import '../features/settings/mcp/McpImportDialog.css';
 import '../features/settings/organization/components/InvitationsSection.css';
