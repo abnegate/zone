@@ -193,6 +193,23 @@ describe('Card', () => {
     expect(actions.open).not.toHaveBeenCalled();
   });
 
+  for (const address of ['javascript:alert(document.cookie)', 'data:text/html,hello', 'pull/7']) {
+    it(`leaves out the link for a pull request address of ${address}`, () => {
+      renderCard({ pr_status: 'open', pr_url: address });
+      expect(screen.getByText('PR open')).toBeInTheDocument();
+      expect(screen.queryByRole('link')).not.toBeInTheDocument();
+      expect(card().querySelector('a')).toBeNull();
+    });
+  }
+
+  it('links to a pull request served over plain http', () => {
+    renderCard({ pr_url: 'http://git.internal/zone/app/merge_requests/7' });
+    expect(screen.getByRole('link', { name: 'View PR' })).toHaveAttribute(
+      'href',
+      'http://git.internal/zone/app/merge_requests/7'
+    );
+  });
+
   it('shows when the task was last updated relative to now', () => {
     renderCard();
     const time = card().querySelector('time');
