@@ -17,6 +17,7 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Workspace, section: SettingsSection.Ai, label: 'AI' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Folders, label: 'Folders' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Members, label: 'Members' },
+  { group: SettingsGroup.Workspace, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Organization, section: SettingsSection.Ai, label: 'AI defaults' },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
@@ -113,6 +114,11 @@ describe('findSection', () => {
       section: SettingsSection.Ai,
       label: 'AI',
     });
+    expect(findSection('workspace', 'mcp')).toMatchObject({
+      group: SettingsGroup.Workspace,
+      section: SettingsSection.Mcp,
+      label: 'MCP servers',
+    });
     expect(findSection('organization', 'ai')).toMatchObject({
       group: SettingsGroup.Organization,
       section: SettingsSection.Ai,
@@ -183,7 +189,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all fourteen sections to an organization owner who administers the workspace', () => {
+  it('shows all fifteen sections to an organization owner who administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -192,7 +198,7 @@ describe('visibleSections', () => {
       installsModels: true,
     });
 
-    expect(visible).toHaveLength(14);
+    expect(visible).toHaveLength(15);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 

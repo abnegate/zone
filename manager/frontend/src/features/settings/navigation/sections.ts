@@ -92,6 +92,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     visible: inWorkspace,
   },
   {
+    group: SettingsGroup.Workspace,
+    section: SettingsSection.Mcp,
+    label: 'MCP servers',
+    visible: inWorkspace,
+  },
+  {
     group: SettingsGroup.Organization,
     section: SettingsSection.Ai,
     label: 'AI defaults',

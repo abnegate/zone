@@ -43,6 +43,7 @@ import '../features/settings/mcp/McpServerRow.css';
 import '../features/settings/mcp/McpServerForm.css';
 import '../features/settings/mcp/McpImportDialog.css';
 import '../features/settings/mcp/McpServersSection.css';
+import '../features/settings/mcp/WorkspaceMcpServersSection.css';
 import '../features/settings/organization/components/InvitationsSection.css';
 import '../shared/components/ContextSwitcher/ContextSwitcher.css';
 import '../shared/components/Sidebar/Sidebar.css';

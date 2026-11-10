@@ -1,0 +1,125 @@
+.workspace-mcp-servers {
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-mcp-server {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--ui-space-2) var(--ui-space-3);
+  min-height: var(--ui-control-height);
+  padding: var(--ui-space-2) 0;
+  border-bottom: 1px solid var(--ui-border-subtle);
+}
+
+.workspace-mcp-server:last-child {
+  border-bottom: none;
+}
+
+.workspace-mcp-server-identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: var(--ui-space-1) var(--ui-space-2);
+}
+
+.workspace-mcp-server-name {
+  overflow: hidden;
+  max-width: 100%;
+  font-size: var(--ui-text-sm);
+  font-weight: 500;
+  color: var(--ui-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-mcp-server-transport,
+.workspace-mcp-server-fixed {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+}
+
+.workspace-mcp-server-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: var(--ui-space-2);
+}
+
+.workspace-mcp-server-status .spinner {
+  width: var(--ui-space-3);
+  height: var(--ui-space-3);
+  vertical-align: middle;
+}
+
+.workspace-mcp-server-effective {
+  font-size: var(--ui-text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.workspace-mcp-server-effective--on {
+  color: var(--ui-text-primary);
+}
+
+.workspace-mcp-server-effective--off {
+  color: var(--ui-text-muted);
+}
+
+.workspace-mcp-server-origin {
+  padding: 0 var(--ui-space-2);
+  border-radius: var(--ui-radius-full);
+  font-size: var(--ui-text-2xs);
+  font-weight: 600;
+  line-height: var(--ui-space-5);
+  white-space: nowrap;
+}
+
+.workspace-mcp-server-origin--organization,
+.workspace-mcp-server-origin--instance {
+  background: var(--ui-bg-muted);
+  color: var(--ui-text-muted);
+}
+
+.workspace-mcp-server-origin--workspace {
+  background: var(--ui-accent-muted);
+  color: var(--ui-accent);
+}
+
+.workspace-mcp-server-control .radio-option:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.workspace-mcp-server-control .radio-option input:disabled {
+  cursor: not-allowed;
+}
+
+.workspace-mcp-server-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
+}
+
+.workspace-mcp-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--ui-space-2);
+}
+
+@media (max-width: 768px) {
+  .workspace-mcp-server {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workspace-mcp-server-control,
+  .workspace-mcp-server-fixed {
+    justify-self: start;
+  }
+}
