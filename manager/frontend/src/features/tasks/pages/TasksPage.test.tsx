@@ -1,15 +1,17 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
 import { clientModule } from '../../../test/client';
-import { chooseSelect, openSelect } from '../../../test/select';
+import { chooseMenuItem } from '../../../test/menu';
+import { chooseSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
-import type { CreateTaskRequest, Task, TaskRun, TaskRunLog } from '../types';
+import { STAGE_IDS, type StageId, TASK_STATUSES } from '../status';
+import type { CreateTaskRequest, Task, TaskRun, TaskRunLog, TaskStatus } from '../types';
 import TasksPage from './TasksPage';
 
-// Create mock functions for tasks API
 const mockGetTasks = mock(() => Promise.resolve([] as Task[]));
 const mockGetTask = mock(() => Promise.resolve({} as Task));
 const mockCreateTask = mock(() => Promise.resolve({} as Task));
@@ -29,14 +31,10 @@ const mockRunTask = mock(() => Promise.resolve(running));
 const mockGetTaskRuns = mock(() => Promise.resolve([] as TaskRun[]));
 const mockGetTaskRun = mock(() => Promise.resolve(running));
 const mockGetTaskRunLogs = mock(() => Promise.resolve([] as TaskRunLog[]));
-
-// Create mock functions for projects API
 const mockGetProjects = mock(() => Promise.resolve([] as Project[]));
-
-// Create mock functions for client
 const mockGetSources = mock(() => Promise.resolve([] as Source[]));
+const mockToastError = mock();
 
-// Mock workspace context
 const mockWorkspace = {
   id: 'workspace-1',
   name: 'Test Workspace',
@@ -55,7 +53,6 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
   })),
 }));
 
-// Mock APIs
 mock.module('../../../api/tasks', () => ({
   tasksApi: {
     getTasks: mockGetTasks,
@@ -81,6 +78,13 @@ mock.module('../../../api/client', () =>
     getSources: mockGetSources,
   })
 );
+
+mock.module('sonner', () => ({
+  toast: {
+    success: mock(),
+    error: mockToastError,
+  },
+}));
 
 afterAll(() => {
   mock.restore();
@@ -161,6 +165,7 @@ const mockTasks: Task[] = [
     status: 'created',
     priority: 1,
     is_agentic: true,
+    require_plan_approval: false,
     github_repo_url: null,
     source_id: 'src-1',
     source_ids: [],
@@ -187,6 +192,7 @@ const mockTasks: Task[] = [
     status: 'complete',
     priority: 3,
     is_agentic: false,
+    require_plan_approval: false,
     github_repo_url: null,
     source_id: null,
     source_ids: [],
@@ -205,6 +211,43 @@ const mockTasks: Task[] = [
   },
 ];
 
+const TITLES: Record<TaskStatus, string> = {
+  created: 'Draft the spec',
+  queued: 'Wait for a worker',
+  in_progress: 'Write the code',
+  blocked: 'Wait on review access',
+  paused: 'Hold the migration',
+  review: 'Check the diff',
+  complete: 'Ship the release',
+  cancelled: 'Drop the legacy flag',
+};
+
+const everyStatus: Task[] = TASK_STATUSES.map((status) => ({
+  ...mockTasks[1],
+  id: `task-${status}`,
+  title: TITLES[status],
+  status,
+  pr_url: null,
+  pr_status: null,
+  branch_name: null,
+}));
+
+function column(name: string): HTMLElement {
+  return screen.getByRole('region', { name });
+}
+
+function count(name: string): string | null | undefined {
+  return column(name).querySelector('.board-column-count')?.textContent;
+}
+
+function openTitle(title: string): Promise<HTMLElement> {
+  return screen.findByRole('button', { name: title });
+}
+
+function runTask(title: string): Promise<HTMLElement> {
+  return chooseMenuItem(`Actions for ${title}`, 'Run');
+}
+
 describe('TasksPage', () => {
   beforeEach(() => {
     mockGetTasks.mockReset();
@@ -222,6 +265,7 @@ describe('TasksPage', () => {
     mockGetTaskRunLogs.mockImplementation(() => Promise.resolve([]));
     mockGetProjects.mockReset();
     mockGetSources.mockReset();
+    mockToastError.mockReset();
     mockGetTasks.mockImplementation(() => Promise.resolve(mockTasks));
     mockGetTask.mockImplementation((id: string) => {
       const found = mockTasks.find((task) => task.id === id);
@@ -234,13 +278,13 @@ describe('TasksPage', () => {
     });
     mockGetProjects.mockImplementation(() => Promise.resolve(mockProjects));
     mockGetSources.mockImplementation(() => Promise.resolve(mockSources));
-    window.confirm = mock(() => true);
   });
 
-  it('shows loading state with skeleton cards', async () => {
+  it('shows a skeleton board while loading', async () => {
     mockGetTasks.mockImplementation(() => new Promise(() => {}));
     renderTasksPage();
-    expect(document.querySelectorAll('.skeleton-card').length).toBe(4);
+    expect(document.querySelector('.board')).toHaveAttribute('aria-hidden', 'true');
+    expect(document.querySelectorAll('.skeleton-card').length).toBe(14);
   });
 
   it('shows empty state when no tasks', async () => {
@@ -251,21 +295,18 @@ describe('TasksPage', () => {
     });
   });
 
-  it('offers a way back when the active filters match nothing', async () => {
-    mockGetTasks.mockImplementation((_workspace: string, _project?: string, status?: string) =>
-      Promise.resolve(status ? [] : mockTasks)
+  it('offers a way back when the project filter matches nothing', async () => {
+    mockGetTasks.mockImplementation((_workspace: string, project?: string) =>
+      Promise.resolve(project ? [] : mockTasks)
     );
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
+    await screen.findByText('Implement login');
 
-    chooseSelect('Filter by status', 'Blocked');
+    chooseSelect('Filter by project', 'Project Beta');
 
     await waitFor(() => {
       expect(screen.getByText('No tasks match')).toBeInTheDocument();
     });
-    expect(screen.getByText('Try adjusting your filters')).toBeInTheDocument();
     expect(screen.queryByText('No tasks yet')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Show all tasks' }));
@@ -273,17 +314,77 @@ describe('TasksPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
-    expect(screen.getByRole('combobox', { name: 'Filter by status' })).toHaveTextContent(
-      'All Statuses'
+    expect(screen.getByRole('combobox', { name: 'Filter by project' })).toHaveTextContent(
+      'All Projects'
     );
   });
 
-  it('renders tasks list', async () => {
+  it('renders tasks on the board', async () => {
     renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
       expect(screen.getByText('Fix button styling')).toBeInTheDocument();
     });
+    expect(screen.getByRole('region', { name: 'Tasks' })).toBeInTheDocument();
+  });
+
+  it('lays every status out in seven columns with their counts', async () => {
+    mockGetTasks.mockImplementation(() => Promise.resolve(everyStatus));
+    renderTasksPage();
+    await screen.findByText(TITLES.created);
+
+    const board = screen.getByRole('region', { name: 'Tasks' });
+    expect(
+      Array.from(board.querySelectorAll('[data-stage]')).map((stage) =>
+        stage.getAttribute('data-stage')
+      )
+    ).toEqual([...STAGE_IDS]);
+    expect(count('Planned')).toBe('2');
+    for (const name of [
+      'In progress',
+      'Blocked',
+      'Paused',
+      'In review',
+      'Completed',
+      'Cancelled',
+    ]) {
+      expect(count(name)).toBe('1');
+    }
+    expect(within(column('In progress')).getByText(TITLES.in_progress)).toBeInTheDocument();
+    expect(within(column('Completed')).getByText(TITLES.complete)).toBeInTheDocument();
+    expect(screen.queryByText('No tasks')).not.toBeInTheDocument();
+  });
+
+  it('keeps queued tasks in Planned with a Queued chip', async () => {
+    mockGetTasks.mockImplementation(() => Promise.resolve(everyStatus));
+    renderTasksPage();
+    await screen.findByText(TITLES.queued);
+
+    const planned = column('Planned');
+    expect(within(planned).getByText(TITLES.created)).toBeInTheDocument();
+    expect(within(planned).getByText(TITLES.queued)).toBeInTheDocument();
+    expect(within(planned).getAllByText('Queued')).toHaveLength(1);
+  });
+
+  it('shows paused and cancelled tasks in their own columns', async () => {
+    mockGetTasks.mockImplementation(() => Promise.resolve(everyStatus));
+    renderTasksPage();
+    await screen.findByText(TITLES.paused);
+
+    expect(within(column('Paused')).getByText(TITLES.paused)).toBeInTheDocument();
+    expect(within(column('Cancelled')).getByText(TITLES.cancelled)).toBeInTheDocument();
+  });
+
+  it('marks columns without tasks as empty', async () => {
+    renderTasksPage();
+    await screen.findByText('Implement login');
+
+    for (const name of ['In progress', 'Blocked', 'Paused', 'In review', 'Cancelled']) {
+      expect(within(column(name)).getByText('No tasks')).toBeInTheDocument();
+      expect(count(name)).toBe('0');
+    }
+    expect(within(column('Planned')).queryByText('No tasks')).not.toBeInTheDocument();
+    expect(within(column('Completed')).queryByText('No tasks')).not.toBeInTheDocument();
   });
 
   it('opens the linked task from the page URL', async () => {
@@ -293,24 +394,22 @@ describe('TasksPage', () => {
     });
   });
 
-  it('opens an editor section from the title cell, not a dialog', async () => {
+  it('opens an editor section from the card title, not a dialog', async () => {
     renderTasksPage();
-    const title = await screen.findByText('Implement login');
-    fireEvent.click(title.closest('td') as HTMLElement);
+    fireEvent.click(await openTitle('Implement login'));
 
     await waitFor(() => {
       expect(document.querySelector('section.task-details')).not.toBeNull();
     });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    expect(screen.queryByRole('table', { name: 'Tasks' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Tasks' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'New task' })).not.toBeInTheDocument();
     expect(screen.queryByRole('combobox', { name: 'Filter by project' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('combobox', { name: 'Filter by status' })).not.toBeInTheDocument();
   });
 
   it('saves only the changed title, inline from the detail heading', async () => {
     renderTasksPage();
-    fireEvent.click((await screen.findByText('Implement login')).closest('td') as HTMLElement);
+    fireEvent.click(await openTitle('Implement login'));
 
     fireEvent.click(await screen.findByRole('button', { name: 'Rename Implement login' }));
     expect(mockGetTask).toHaveBeenCalledWith('task-1');
@@ -385,11 +484,11 @@ describe('TasksPage', () => {
     expect(screen.getByRole('textbox', { name: 'Task title' })).toHaveValue('Implement logout');
   });
 
-  it('renames a task from the list without opening it', async () => {
+  it('renames a task from the board without opening it', async () => {
     renderTasksPage();
     await screen.findByText('Implement login');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Rename Implement login' }));
+    await chooseMenuItem('Actions for Implement login', 'Rename');
     const input = screen.getByRole('textbox', { name: 'Task title' });
     expect(input).toHaveValue('Implement login');
     fireEvent.change(input, { target: { value: 'Implement logout' } });
@@ -405,11 +504,11 @@ describe('TasksPage', () => {
     });
   });
 
-  it('cancels a list rename with Escape without opening the task', async () => {
+  it('cancels a board rename with Escape without opening the task', async () => {
     renderTasksPage();
     await screen.findByText('Implement login');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Rename Implement login' }));
+    await chooseMenuItem('Actions for Implement login', 'Rename');
     const input = screen.getByRole('textbox', { name: 'Task title' });
     fireEvent.click(input);
     fireEvent.change(input, { target: { value: 'Implement logout' } });
@@ -420,11 +519,11 @@ describe('TasksPage', () => {
     expect(mockUpdateTask).not.toHaveBeenCalled();
   });
 
-  it('does not open the editor from Execute or Delete', async () => {
+  it('does not open the editor from the Run or Delete menu items', async () => {
     renderTasksPage();
     await screen.findByText('Implement login');
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Execute' })[0]);
+    await runTask('Implement login');
     expect(screen.getByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
     expect(document.querySelector('section.task-details')).toBeNull();
 
@@ -433,9 +532,10 @@ describe('TasksPage', () => {
       expect(screen.queryByRole('dialog', { name: 'Implement login' })).not.toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0]);
+    await chooseMenuItem('Actions for Implement login', 'Delete');
+    expect(screen.getByRole('dialog', { name: 'Delete "Implement login"?' })).toBeInTheDocument();
     expect(document.querySelector('section.task-details')).toBeNull();
-    expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+    expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
   });
 
   it('does not open the editor from View PR', async () => {
@@ -447,7 +547,7 @@ describe('TasksPage', () => {
     expect(document.querySelector('section.task-details')).toBeNull();
     fireEvent.keyDown(link, { key: ' ' });
     expect(document.querySelector('section.task-details')).toBeNull();
-    expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Tasks' })).toBeInTheDocument();
   });
 
   it('opens the editor from the task query, not a dialog', async () => {
@@ -470,14 +570,14 @@ describe('TasksPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
-      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Tasks' })).toBeInTheDocument();
     });
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(new URLSearchParams(window.location.search).get('id')).toBeNull();
     expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
   });
 
-  it('replaces the execute dialog with the editor when another row is opened', async () => {
+  it('replaces the execute dialog with the editor when another card is opened', async () => {
     renderTasksPage('/tasks?id=task-1');
     await waitFor(() => {
       expect(screen.getByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
@@ -495,7 +595,7 @@ describe('TasksPage', () => {
 
   it('closes the editor from Close and Cancel and drops the task param', async () => {
     renderTasksPage();
-    fireEvent.click((await screen.findByText('Implement login')).closest('td') as HTMLElement);
+    fireEvent.click(await openTitle('Implement login'));
     await waitFor(() => {
       expect(document.querySelector('section.task-details')).not.toBeNull();
     });
@@ -503,12 +603,12 @@ describe('TasksPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
-      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Tasks' })).toBeInTheDocument();
     });
     expect(document.querySelector('section.task-details')).toBeNull();
     expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
 
-    fireEvent.click(screen.getByText('Implement login').closest('td') as HTMLElement);
+    fireEvent.click(await openTitle('Implement login'));
     await waitFor(() => {
       expect(document.querySelector('section.task-details')).not.toBeNull();
     });
@@ -517,17 +617,17 @@ describe('TasksPage', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => {
-      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Tasks' })).toBeInTheDocument();
     });
     expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
     expect(mockUpdateTask).not.toHaveBeenCalled();
   });
 
-  it('shows the table and an alert when the task query is unknown', async () => {
+  it('shows the board and an alert when the task query is unknown', async () => {
     renderTasksPage('/tasks?task=missing');
     await waitFor(() => {
       expect(screen.getByRole('alert')).toBeInTheDocument();
-      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Tasks' })).toBeInTheDocument();
     });
     expect(screen.getByRole('button', { name: 'New task' })).toBeInTheDocument();
     expect(screen.getByRole('combobox', { name: 'Filter by project' })).toBeInTheDocument();
@@ -535,23 +635,22 @@ describe('TasksPage', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
-  it('opens the editor from the row with Enter and Space', async () => {
+  it('opens the editor from the card title with Enter and Space', async () => {
+    const user = userEvent.setup();
     renderTasksPage();
-    const row = (await screen.findByText('Implement login')).closest('tr') as HTMLElement;
-    row.focus();
-    fireEvent.keyDown(row, { key: 'Enter' });
+    (await openTitle('Implement login')).focus();
+    await user.keyboard('{Enter}');
     await waitFor(() => {
       expect(document.querySelector('section.task-details')).not.toBeNull();
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
-      expect(screen.getByRole('table', { name: 'Tasks' })).toBeInTheDocument();
+      expect(screen.getByRole('region', { name: 'Tasks' })).toBeInTheDocument();
     });
 
-    const rowAgain = screen.getByText('Implement login').closest('tr') as HTMLElement;
-    rowAgain.focus();
-    fireEvent.keyDown(rowAgain, { key: ' ' });
+    (await openTitle('Implement login')).focus();
+    await user.keyboard(' ');
     await waitFor(() => {
       expect(document.querySelector('section.task-details')).not.toBeNull();
     });
@@ -565,22 +664,6 @@ describe('TasksPage', () => {
     expect(screen.getByText('Autonomous agent workflows')).toBeInTheDocument();
   });
 
-  it('displays task descriptions', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Add user authentication')).toBeInTheDocument();
-      expect(screen.getByText('Update CSS for buttons')).toBeInTheDocument();
-    });
-  });
-
-  it('displays task status badges', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('created')).toBeInTheDocument();
-      expect(screen.getByText('complete')).toBeInTheDocument();
-    });
-  });
-
   it('displays agentic badge for agentic tasks', async () => {
     renderTasksPage();
     await waitFor(() => {
@@ -588,64 +671,47 @@ describe('TasksPage', () => {
     });
   });
 
-  it('displays project name for tasks', async () => {
+  it('names the projects on each card, with fallbacks for none and unknown', async () => {
+    mockGetTasks.mockImplementation(() =>
+      Promise.resolve([
+        ...mockTasks,
+        { ...mockTasks[1], id: 'task-orphan', title: 'Orphan', project_ids: [] },
+        { ...mockTasks[1], id: 'task-gone', title: 'Gone', project_ids: ['proj-gone'] },
+      ])
+    );
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
+    await screen.findByText('Implement login');
 
-    // Project names appear both in filter dropdown and task cards
-    // Just verify they exist somewhere on the page
-    expect(screen.getAllByText('Project Alpha').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('Project Beta').length).toBeGreaterThan(0);
+    const board = screen.getByRole('region', { name: 'Tasks' });
+    expect(within(board).getByText('Project Alpha')).toBeInTheDocument();
+    expect(within(board).getByText('Project Beta')).toBeInTheDocument();
+    expect(within(board).getByText('No projects')).toBeInTheDocument();
+    expect(within(board).getByText('Unknown')).toBeInTheDocument();
   });
 
   it('displays task priority', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('Priority: 1')).toBeInTheDocument();
-      expect(screen.getByText('Priority: 3')).toBeInTheDocument();
+      expect(screen.getByLabelText('Priority 1')).toHaveTextContent('P1');
+      expect(screen.getByLabelText('Priority 3')).toHaveTextContent('P3');
     });
   });
 
-  it('displays model name when available', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Model: gpt-4')).toBeInTheDocument();
-    });
-  });
-
-  it('renders filter dropdowns', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByRole('combobox', { name: 'Filter by project' })).toBeInTheDocument();
-      expect(screen.getByRole('combobox', { name: 'Filter by status' })).toBeInTheDocument();
-    });
-  });
-
-  it('filters by project', async () => {
+  it('filters by project only', async () => {
     renderTasksPage();
     await waitFor(() => {
       expect(screen.getByRole('combobox', { name: 'Filter by project' })).toBeInTheDocument();
     });
+    expect(screen.queryByRole('combobox', { name: 'Filter by status' })).not.toBeInTheDocument();
 
     chooseSelect('Filter by project', 'Project Alpha');
 
     await waitFor(() => {
-      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', undefined);
-    });
-  });
-
-  it('filters by status', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByRole('combobox', { name: 'Filter by status' })).toBeInTheDocument();
-    });
-
-    chooseSelect('Filter by status', 'Complete');
-
-    await waitFor(() => {
-      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', undefined, 'complete');
+      expect(
+        mockGetTasks.mock.calls.some(
+          ([workspace, project]) => workspace === 'workspace-1' && project === 'proj-1'
+        )
+      ).toBe(true);
     });
   });
 
@@ -711,28 +777,14 @@ describe('TasksPage', () => {
 
   it('creates a new task via wizard', async () => {
     const newTask: Task = {
+      ...mockTasks[0],
       id: 'task-3',
-      project_ids: ['proj-1'],
-      workspace_id: 'workspace-1',
       title: 'New Task',
       description: 'Task description',
-      acceptance_criteria: null,
-      status: 'created',
       priority: 2,
       is_agentic: false,
-      github_repo_url: null,
       source_id: null,
-      source_ids: [],
       model_name: null,
-      dependencies: [],
-      started_at: null,
-      completed_at: null,
-      queued_at: null,
-      worker_id: null,
-      pr_url: null,
-      branch_name: null,
-      pr_status: null,
-      pr_created_at: null,
       created_at: '2024-01-13T00:00:00Z',
       updated_at: '2024-01-13T00:00:00Z',
     };
@@ -749,11 +801,8 @@ describe('TasksPage', () => {
       expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole('button', { name: /Project Alpha/i }));
-
-    // Step 1: Project selection
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 2: Task details
     await waitFor(() => {
       expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
     });
@@ -761,11 +810,8 @@ describe('TasksPage', () => {
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Task description' },
     });
-
-    // Go to step 3 (settings)
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 3: Submit
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Create Task' })).toBeInTheDocument();
     });
@@ -791,37 +837,51 @@ describe('TasksPage', () => {
     });
   });
 
-  it('deletes a task with confirmation', async () => {
-    mockDeleteTask.mockImplementation(() => Promise.resolve(undefined));
+  describe('deleting', () => {
+    const dialogName = 'Delete "Implement login"?';
 
-    renderTasksPage();
-    await waitFor(() => {
+    async function askToDelete(): Promise<HTMLElement> {
+      renderTasksPage();
+      await screen.findByText('Implement login');
+      await chooseMenuItem('Actions for Implement login', 'Delete');
+      return screen.getByRole('dialog', { name: dialogName });
+    }
+
+    it('deletes a task once the dialog is confirmed', async () => {
+      mockDeleteTask.mockImplementation(() => Promise.resolve(undefined));
+      const dialog = await askToDelete();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete task' }));
+
+      await waitFor(() => {
+        expect(mockDeleteTask).toHaveBeenCalledWith('task-1');
+      });
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog', { name: dialogName })).not.toBeInTheDocument();
+      });
+    });
+
+    it('keeps the task when the dialog is cancelled', async () => {
+      const dialog = await askToDelete();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog', { name: dialogName })).not.toBeInTheDocument();
+      });
+      expect(mockDeleteTask).not.toHaveBeenCalled();
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
 
-    const deleteButtons = screen.getAllByRole('button', { name: 'Delete' });
-    fireEvent.click(deleteButtons[0]);
+    it('shows a failed delete inside the dialog and keeps it open', async () => {
+      mockDeleteTask.mockImplementation(() => Promise.reject(new Error('Delete failed')));
+      const dialog = await askToDelete();
 
-    expect(window.confirm).toHaveBeenCalled();
-    await waitFor(() => {
-      expect(mockDeleteTask).toHaveBeenCalledWith('task-1');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete task' }));
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent('Delete failed');
+      expect(screen.getByRole('dialog', { name: dialogName })).toBeInTheDocument();
     });
-  });
-
-  it('cancels delete when confirm rejected', async () => {
-    const confirmMock = window.confirm as unknown as ReturnType<typeof mock>;
-    confirmMock.mockReturnValueOnce(false);
-
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
-
-    const deleteButtons = screen.getAllByRole('button', { name: 'Delete' });
-    fireEvent.click(deleteButtons[0]);
-
-    expect(window.confirm).toHaveBeenCalled();
-    expect(mockDeleteTask).not.toHaveBeenCalled();
   });
 
   it('shows error when loading fails', async () => {
@@ -832,55 +892,25 @@ describe('TasksPage', () => {
     });
   });
 
-  it('shows error when delete fails', async () => {
-    mockDeleteTask.mockImplementation(() => Promise.reject(new Error('Delete failed')));
-
+  it('opens the execution dialog from the Run menu item', async () => {
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
+    await screen.findByText('Implement login');
 
-    const deleteButtons = screen.getAllByRole('button', { name: 'Delete' });
-    fireEvent.click(deleteButtons[0]);
+    await runTask('Implement login');
 
-    await waitFor(() => {
-      expect(screen.getByText('Delete failed')).toBeInTheDocument();
-    });
-  });
-
-  it('opens task execution view', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
-
-    const executeButtons = screen.getAllByRole('button', { name: 'Execute' });
-    fireEvent.click(executeButtons[0]);
-
-    expect(screen.queryByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
   });
 
   it('closes task execution view', async () => {
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
+    await screen.findByText('Implement login');
 
-    const executeButtons = screen.getAllByRole('button', { name: 'Execute' });
-    fireEvent.click(executeButtons[0]);
-
-    expect(screen.queryByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
+    await runTask('Implement login');
+    expect(screen.getByRole('dialog', { name: 'Implement login' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => {
       expect(screen.queryByRole('dialog', { name: 'Implement login' })).not.toBeInTheDocument();
-    });
-  });
-
-  it('displays source name for agentic tasks', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('GitHub Repo')).toBeInTheDocument();
     });
   });
 
@@ -892,6 +922,9 @@ describe('TasksPage', () => {
 
     const agenticCard = screen.getByText('Implement login').closest('.task-card');
     expect(agenticCard).toHaveClass('task-card-agentic');
+    expect(screen.getByText('Fix button styling').closest('.task-card')).not.toHaveClass(
+      'task-card-agentic'
+    );
   });
 
   it('enables agentic mode in create wizard', async () => {
@@ -910,11 +943,8 @@ describe('TasksPage', () => {
       expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole('button', { name: /Project Alpha/i }));
-
-    // Step 1: Select project, go to step 2
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 2: Fill in details
     await waitFor(() => {
       expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
     });
@@ -922,11 +952,8 @@ describe('TasksPage', () => {
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Test description' },
     });
-
-    // Go to step 3 (settings)
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 3: Find the agentic checkbox and click it
     const checkbox = await screen.findByRole('checkbox', { name: /Enable Agentic Mode/i });
     fireEvent.click(checkbox);
 
@@ -949,11 +976,8 @@ describe('TasksPage', () => {
       expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole('button', { name: /Project Alpha/i }));
-
-    // Step 1: Select project, go to step 2
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 2: Fill in details
     await waitFor(() => {
       expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
     });
@@ -961,34 +985,19 @@ describe('TasksPage', () => {
     fireEvent.change(screen.getByLabelText('Description'), {
       target: { value: 'Test description' },
     });
-
-    // Go to step 3 (settings)
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 3: Enable agentic mode
     const checkbox = await screen.findByRole('checkbox', { name: /Enable Agentic Mode/i });
     fireEvent.click(checkbox);
 
     expect(screen.getByText(/Project uses:/)).toBeInTheDocument();
   });
 
-  it('displays status filter options', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByRole('combobox', { name: 'Filter by status' })).toBeInTheDocument();
-    });
-
-    openSelect('Filter by status');
-    expect(screen.getByRole('option', { name: 'All Statuses' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'Created' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'In Progress' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'Complete' })).toBeInTheDocument();
-  });
-
   it('does not show fictional phases or logs after a failed start', async () => {
     mockRunTask.mockRejectedValueOnce(new Error('Worker unavailable'));
     renderTasksPage();
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    await screen.findByText('Implement login');
+    await runTask('Implement login');
     fireEvent.click(await screen.findByRole('button', { name: 'Start Execution' }));
     expect(await screen.findByText('Worker unavailable')).toBeInTheDocument();
     expect(screen.queryByText('Architect Planning')).not.toBeInTheDocument();
@@ -1003,7 +1012,8 @@ describe('TasksPage', () => {
     mockGetTaskRun.mockResolvedValue(latest);
     mockRunTask.mockRejectedValueOnce(new Error('Worker unavailable'));
     renderTasksPage();
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    await screen.findByText('Implement login');
+    await runTask('Implement login');
     const button = await screen.findByRole('button', { name: 'Run Again' });
     await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
@@ -1027,13 +1037,17 @@ describe('TasksPage', () => {
       },
     ]);
     renderTasksPage();
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    await screen.findByText('Implement login');
+    await runTask('Implement login');
     expect(await screen.findByText('Reading project files')).toBeInTheDocument();
     expect(screen.getByText('worker · info')).toBeInTheDocument();
     expect(screen.getByText('Running')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Stop Execution' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-    fireEvent.click(screen.getAllByRole('button', { name: 'Execute' })[0]);
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: 'Implement login' })).not.toBeInTheDocument();
+    });
+    await runTask('Implement login');
     expect(await screen.findByText('Reading project files')).toBeInTheDocument();
     expect(mockRunTask).not.toHaveBeenCalled();
   });
@@ -1047,7 +1061,8 @@ describe('TasksPage', () => {
       current_phase: 'complete',
     });
     renderTasksPage();
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    await screen.findByText('Implement login');
+    await runTask('Implement login');
     expect(await screen.findByText('Running')).toBeInTheDocument();
     await waitFor(
       () => expect(screen.getByText('Task completed successfully.')).toBeInTheDocument(),
@@ -1065,7 +1080,8 @@ describe('TasksPage', () => {
       error_message: 'Model rejected request',
     });
     renderTasksPage();
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    await screen.findByText('Implement login');
+    await runTask('Implement login');
     expect(await screen.findByText('Model rejected request')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Run Again' })).toBeEnabled();
     expect(screen.queryByText('Monitoring unavailable')).not.toBeInTheDocument();
@@ -1074,7 +1090,8 @@ describe('TasksPage', () => {
   it('blocks duplicate starts when the initial history cannot be verified', async () => {
     mockGetTaskRuns.mockRejectedValue(new Error('Network offline'));
     renderTasksPage();
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    await screen.findByText('Implement login');
+    await runTask('Implement login');
     expect(await screen.findByText('Monitoring unavailable')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start Execution' })).toBeDisabled();
     expect(screen.queryByText('Task failed')).not.toBeInTheDocument();
@@ -1089,7 +1106,8 @@ describe('TasksPage', () => {
         })
     );
     renderTasksPage();
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    await screen.findByText('Implement login');
+    await runTask('Implement login');
     const button = await screen.findByRole('button', { name: 'Start Execution' });
     await waitFor(() => expect(button).toBeEnabled());
     fireEvent.click(button);
@@ -1113,29 +1131,23 @@ describe('TasksPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'New task' }));
 
-    // Wait for wizard to appear
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: 'New Task' })).toBeInTheDocument();
     });
 
-    // Step 1: Select project
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Project Alpha/i })).toBeInTheDocument();
     });
     fireEvent.click(screen.getByRole('button', { name: /Project Alpha/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 2: Fill in details
     await waitFor(() => {
       expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
     });
     fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'New Task' } });
     fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Description' } });
-
-    // Go to step 3
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
 
-    // Step 3: Submit
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Create Task' })).toBeInTheDocument();
     });
@@ -1149,7 +1161,7 @@ describe('TasksPage', () => {
   it('displays PR status badge when PR exists', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('PR: merged')).toBeInTheDocument();
+      expect(screen.getByText('PR merged')).toBeInTheDocument();
     });
   });
 
@@ -1160,64 +1172,8 @@ describe('TasksPage', () => {
       expect(prLink).toHaveAttribute('href', 'https://github.com/test/repo/pull/123');
       expect(prLink).toHaveAttribute('target', '_blank');
       expect(prLink).toHaveAttribute('rel', 'noopener noreferrer');
-      expect(prLink.closest('.task-pr')).not.toBeNull();
+      expect(prLink.closest('.task-card')).not.toBeNull();
     });
-  });
-
-  it('shows the pull request in its column with the branch beside it', async () => {
-    mockGetTasks.mockImplementation(() =>
-      Promise.resolve([
-        {
-          ...mockTasks[0],
-          pr_status: 'open',
-          pr_url: 'https://github.com/test/repo/pull/7',
-          branch_name: 'zone/task-7',
-        },
-      ])
-    );
-
-    renderTasksPage();
-    const badge = await screen.findByText('PR: open');
-    const pr = badge.closest('.task-pr') as HTMLElement | null;
-    expect(pr).not.toBeNull();
-    expect(badge.closest('.task-card-title')).toBeNull();
-    expect(within(pr as HTMLElement).getByRole('link', { name: 'View PR' })).toBeInTheDocument();
-    expect(within(pr as HTMLElement).getByText('zone/task-7')).toHaveClass('task-branch');
-    expect(document.querySelectorAll('.task-card-title .ui-badge')).toHaveLength(1);
-  });
-
-  it('sets the branch tag on the pull request column, not on the actions', async () => {
-    mockGetTasks.mockImplementation(() =>
-      Promise.resolve([
-        {
-          ...mockTasks[0],
-          pr_status: 'open',
-          pr_url: 'https://github.com/test/repo/pull/7',
-          branch_name: 'zone/task-7',
-        },
-      ])
-    );
-
-    renderTasksPage();
-    const branch = await screen.findByText('zone/task-7');
-    expect(branch).toHaveClass('task-branch');
-    expect(branch.closest('.task-pr')).not.toBeNull();
-    expect(branch.closest('.task-actions')).toBeNull();
-    const row = branch.closest('.task-card') as HTMLElement;
-    expect(within(row).getByRole('button', { name: 'Execute' })).toBeInTheDocument();
-  });
-
-  it('keeps the branch tag off a card whose branch has no pull request yet', async () => {
-    mockGetTasks.mockImplementation(() =>
-      Promise.resolve([
-        { ...mockTasks[0], branch_name: 'zone/task-8', pr_status: null, pr_url: null },
-      ])
-    );
-
-    renderTasksPage();
-    await screen.findByText('Implement login');
-    expect(screen.queryByText('zone/task-8')).not.toBeInTheDocument();
-    expect(document.querySelector('.task-branch-slot')).toBeNull();
   });
 
   it('shows the pull request status before a link exists', async () => {
@@ -1226,85 +1182,33 @@ describe('TasksPage', () => {
     );
 
     renderTasksPage();
-    const badge = await screen.findByText('PR: pending');
-    expect(badge.closest('.task-pr')).not.toBeNull();
+    expect(await screen.findByText('PR pending')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
   });
 
-  it('displays branch name when branch_name exists', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      const branch = screen.getByText('feature/fix-button-styling');
-      expect(branch).toHaveClass('task-branch');
-      expect(branch).toHaveAttribute('title', 'feature/fix-button-styling');
-      expect(branch.closest('.task-pr')).not.toBeNull();
-      expect(branch.closest('.task-actions')).toBeNull();
-    });
-  });
-
-  it('leaves the pull request column empty without a pull request', async () => {
+  it('shows no pull request on a card without one', async () => {
     mockGetTasks.mockImplementation(() => Promise.resolve([mockTasks[0]]));
 
     renderTasksPage();
     await screen.findByText('Implement login');
-    expect(document.querySelector('.task-pr')).toBeNull();
+    expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/^PR /)).not.toBeInTheDocument();
   });
 
-  it('renders each task as a table row with title, project, and actions', async () => {
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
-    const table = screen.getByRole('table', { name: 'Tasks' });
-    expect(table).toBeInTheDocument();
-    const cards = document.querySelectorAll('.task-card');
-    expect(cards.length).toBeGreaterThan(1);
-    for (const card of cards) {
-      expect(card.tagName).toBe('TR');
-      expect(card.querySelector('.task-card-title')).not.toBeNull();
-      expect(card.querySelector('.task-project')).not.toBeNull();
-      expect(card.querySelector('.task-description')).not.toBeNull();
-      expect(card.querySelector('.task-actions')).not.toBeNull();
-    }
-    expect(document.querySelector('.task-pr-info')).toBeNull();
-  });
-
-  it('does not display PR info when pr_url is null', async () => {
-    // Override mockTasks to only include task without PR
-    mockGetTasks.mockImplementation(() => Promise.resolve([mockTasks[0]]));
+  it('displays every pull request status', async () => {
+    mockGetTasks.mockImplementation(() =>
+      Promise.resolve([
+        { ...mockTasks[0], id: 'task-pending', pr_status: 'pending' },
+        { ...mockTasks[0], id: 'task-open', pr_status: 'open' },
+        { ...mockTasks[0], id: 'task-closed', pr_status: 'closed' },
+      ])
+    );
 
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('Implement login')).toBeInTheDocument();
-    });
-    expect(screen.queryByText('View Pull Request')).not.toBeInTheDocument();
-  });
-
-  it('displays correct PR badge colors', async () => {
-    const tasksWithPrStatuses: Task[] = [
-      {
-        ...mockTasks[0],
-        id: 'task-pending',
-        pr_status: 'pending',
-      },
-      {
-        ...mockTasks[0],
-        id: 'task-open',
-        pr_status: 'open',
-      },
-      {
-        ...mockTasks[0],
-        id: 'task-closed',
-        pr_status: 'closed',
-      },
-    ];
-    mockGetTasks.mockImplementation(() => Promise.resolve(tasksWithPrStatuses));
-
-    renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('PR: pending')).toBeInTheDocument();
-      expect(screen.getByText('PR: open')).toBeInTheDocument();
-      expect(screen.getByText('PR: closed')).toBeInTheDocument();
+      expect(screen.getByText('PR pending')).toBeInTheDocument();
+      expect(screen.getByText('PR open')).toBeInTheDocument();
+      expect(screen.getByText('PR closed')).toBeInTheDocument();
     });
   });
 
@@ -1340,7 +1244,8 @@ describe('TasksPage', () => {
     ]);
 
     renderTasksPage();
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Execute' }))[0]);
+    await screen.findByText('Implement login');
+    await runTask('Implement login');
     fireEvent.click(await screen.findByRole('button', { name: 'Start Execution' }));
 
     const receipt = await screen.findByTestId('action-receipt');
@@ -1348,8 +1253,123 @@ describe('TasksPage', () => {
     expect(receipt).toHaveTextContent('Release checklist');
     expect(receipt).toHaveTextContent('Document created');
     expect(screen.getByTestId('action-receipt-link')).toHaveAttribute('href', '/wiki?id=doc-1');
-    // The bare log line says only that a receipt happened.
     expect(screen.queryByText('Workspace action receipt')).not.toBeInTheDocument();
+  });
+
+  describe('dragging', () => {
+    const COLUMN_STRIDE = 300;
+    const COLUMN_WIDTH = 280;
+    const COLUMN_HEIGHT = 600;
+    const CARD_INSET = 10;
+    const CARD_TOP = 40;
+    const CARD_STRIDE = 80;
+    const CARD_HEIGHT = 72;
+    const refusal = 'Task has an active run or is no longer available';
+    let measure: ReturnType<typeof spyOn>;
+
+    function box(left: number, top: number, width: number, height: number): DOMRect {
+      return {
+        x: left,
+        y: top,
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+        width,
+        height,
+      } as DOMRect;
+    }
+
+    function overlay(element: HTMLElement): boolean {
+      return (
+        element.classList.contains('task-card-overlay') ||
+        element.firstElementChild?.classList.contains('task-card-overlay') === true
+      );
+    }
+
+    beforeEach(() => {
+      const original = HTMLElement.prototype.getBoundingClientRect;
+      measure = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: HTMLElement
+      ) {
+        const card = overlay(this)
+          ? document.querySelector<HTMLElement>('.task-card-dragging')
+          : this.closest<HTMLElement>('.task-card');
+        const stage = (card ?? this).closest<HTMLElement>('[data-stage]');
+        if (!stage) return original.call(this);
+        const left = STAGE_IDS.indexOf(stage.dataset.stage as StageId) * COLUMN_STRIDE;
+        if (!card) return box(left, 0, COLUMN_WIDTH, COLUMN_HEIGHT);
+        const position = Array.from(stage.querySelectorAll('.task-card')).indexOf(card);
+        return box(
+          left + CARD_INSET,
+          CARD_TOP + position * CARD_STRIDE,
+          COLUMN_WIDTH - 2 * CARD_INSET,
+          CARD_HEIGHT
+        );
+      });
+    });
+
+    afterEach(() => {
+      measure.mockRestore();
+    });
+
+    async function press(target: HTMLElement, code: string) {
+      await act(async () => {
+        fireEvent.keyDown(target, { code, key: code === 'Space' ? ' ' : code });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+
+    async function dragRight(title: string) {
+      const handle = await screen.findByRole('button', { name: `Move ${title}` });
+      handle.focus();
+      await press(handle, 'Space');
+      await press(handle, 'ArrowRight');
+      await press(handle, 'Space');
+    }
+
+    it('moves a paused task to In review by keyboard with a status-only update', async () => {
+      let stored = everyStatus;
+      mockGetTasks.mockImplementation(() => Promise.resolve(stored));
+      mockUpdateTask.mockImplementation((id: string, request: Partial<Task>) => {
+        stored = stored.map((task) => (task.id === id ? { ...task, ...request } : task));
+        return Promise.resolve(stored.find((task) => task.id === id) as Task);
+      });
+      renderTasksPage();
+      await screen.findByText(TITLES.paused);
+
+      await dragRight(TITLES.paused);
+
+      await waitFor(() => {
+        expect(mockUpdateTask).toHaveBeenCalledWith('task-paused', { status: 'review' });
+      });
+      expect(mockUpdateTask).toHaveBeenCalledTimes(1);
+      await waitFor(() => {
+        expect(within(column('In review')).getByText(TITLES.paused)).toBeInTheDocument();
+      });
+      expect(within(column('Paused')).getByText('No tasks')).toBeInTheDocument();
+      expect(mockToastError).not.toHaveBeenCalled();
+    });
+
+    it('puts a refused move back in its column and says why', async () => {
+      mockGetTasks.mockImplementation(() => Promise.resolve(everyStatus));
+      mockUpdateTask.mockImplementation(() => Promise.reject(new Error(refusal)));
+      renderTasksPage();
+      await screen.findByText(TITLES.paused);
+
+      await dragRight(TITLES.paused);
+
+      await waitFor(() => {
+        expect(mockToastError).toHaveBeenCalledWith(`Couldn't move ${TITLES.paused}`, {
+          description: refusal,
+        });
+      });
+      expect(mockUpdateTask).toHaveBeenCalledWith('task-paused', { status: 'review' });
+      await waitFor(() => {
+        expect(within(column('Paused')).getByText(TITLES.paused)).toBeInTheDocument();
+      });
+      expect(within(column('In review')).queryByText(TITLES.paused)).not.toBeInTheDocument();
+    });
   });
 
   describe('a title generated from the description', () => {
@@ -1364,7 +1384,7 @@ describe('TasksPage', () => {
       created_at: new Date().toISOString(),
     });
 
-    it('replaces the placeholder in the list when it arrives', async () => {
+    it('replaces the placeholder on the board when it arrives', async () => {
       const pending = untitled();
       let arrived = false;
       mockGetTasks.mockImplementation(() =>
@@ -1374,12 +1394,13 @@ describe('TasksPage', () => {
       );
       renderTasksPage();
 
-      const shown = await screen.findByText(placeholder, { selector: 'h3' });
-      expect(shown).toHaveClass('task-title-pending');
+      const shown = await screen.findByText(placeholder, { selector: '.task-card-open' });
+      expect(shown).toHaveClass('task-card-title-pending');
+      expect(shown).toHaveAttribute('aria-busy', 'true');
       arrived = true;
 
       expect(await screen.findByText(generated, {}, { timeout: 5000 })).not.toHaveClass(
-        'task-title-pending'
+        'task-card-title-pending'
       );
       const calls = mockGetTasks.mock.calls.length;
       await new Promise((resolve) => setTimeout(resolve, 2500));
@@ -1394,7 +1415,7 @@ describe('TasksPage', () => {
       );
       renderTasksPage();
 
-      await screen.findByText(placeholder, { selector: 'h3' });
+      await screen.findByText(placeholder, { selector: '.task-card-open' });
       await new Promise((resolve) => setTimeout(resolve, 2500));
       expect(mockGetTasks).toHaveBeenCalledTimes(1);
     }, 10_000);

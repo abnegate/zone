@@ -330,48 +330,45 @@ const legacyScales = /var\(--(gray|blue|green|red|yellow|purple)-\d+\)/;
 
 describe('tasks page layout', () => {
   const css = read(join(features, 'tasks', 'pages', 'TasksPage.css'));
+  const board = read(join(features, 'tasks', 'components', 'board', 'Board.css'));
 
-  it('lays tasks out as a 56px-row table with a 32px header', () => {
-    expect(rule(css, '.tasks-table-wrapper')).toContain('border: 1px solid var(--ui-border)');
-    expect(rule(css, '.tasks-table th')).toContain('height: var(--ui-control-height)');
-    expect(rule(css, '.tasks-table td')).toContain('height: var(--ui-list-row-2)');
-    expect(rule(css, '.tasks-table td')).toContain('box-shadow: inset 0 -1px var(--ui-border)');
-    expect(rule(css, '.task-card-title')).toContain('height: var(--ui-space-5)');
-    expect(rule(css, '.task-project')).toContain('height: var(--ui-space-4)');
-    expect(rule(css, '.task-card .task-description')).toContain('height: var(--ui-space-4)');
+  it('scrolls the board sideways in its own row of fixed-width columns', () => {
+    expect(rule(board, '.board')).toContain('overflow-x: auto');
+    expect(rule(board, '.board-column')).toContain('width: 280px');
   });
 
-  it('guarantees the title 60% of its row and keeps the badges from pushing it out', () => {
-    expect(rule(css, '.task-card-title h3')).toContain('min-width: 60%');
-    expect(rule(css, '.task-badges')).toContain('overflow: hidden');
-    expect(rule(css, '.task-badges')).not.toContain('flex-shrink: 0');
+  it('snaps one column at a time on a phone', () => {
+    const phone = media(board, '(max-width: 768px)');
+    expect(rule(phone, '.board')).toContain('scroll-snap-type: x mandatory');
+    const column = rule(phone, '.board-column');
+    expect(column).toContain('scroll-snap-align: start');
+    expect(column).toContain('width: min(85vw, 300px)');
   });
 
-  it('keeps badges and pull request rows on the palette', () => {
+  it('leaves no table or table skeleton rules behind', () => {
+    for (const selector of [
+      '.tasks-table',
+      '.task-card-agentic td',
+      '.task-actions',
+      '.task-delete',
+      '.task-badges',
+      '.task-project',
+      '.task-priority',
+      '.task-model',
+      '.task-source',
+      '.task-pr',
+      '.task-branch',
+      '.task-rename',
+      '.task-card-title',
+      '.task-card .task-description',
+      '.tasks-page .skeleton',
+    ]) {
+      expect(css).not.toContain(selector);
+    }
+  });
+
+  it('keeps the task styles on the palette', () => {
     expect(css).not.toMatch(legacyScales);
-    expect(css).not.toContain('.task-agentic-badge');
-    expect(css).not.toContain('.task-pr-info');
-    expect(rule(css, '.task-branch')).toContain('height: var(--ui-badge-height)');
-  });
-
-  it('keeps the pull request on one row and truncates the model and source', () => {
-    expect(rule(css, '.task-pr')).toContain('display: flex');
-    expect(css).not.toContain('.task-meta > * + *::before');
-    const giveWay = rule(css, '.task-model,\n.task-source');
-    expect(giveWay).toContain('min-width: 0');
-    expect(giveWay).toContain('text-overflow: ellipsis');
-  });
-
-  it('sets the branch tag next to the pull request', () => {
-    expect(rule(css, '.task-actions')).toContain('align-items: center');
-    const slot = rule(css, '.task-branch-slot');
-    expect(slot).toContain('min-width: 0');
-    expect(slot).toContain('height: var(--ui-badge-height)');
-    const branch = rule(css, '.task-branch');
-    expect(branch).toContain('display: block');
-    expect(branch).toContain('text-overflow: ellipsis');
-    expect(branch).not.toContain('max-width: 50%');
-    expect(branch).not.toContain('flex:');
   });
 
   it('wraps the task filters instead of shrinking them off the page bar', () => {
@@ -391,8 +388,7 @@ describe('tasks page layout', () => {
     expect(rule(css, '.log-entry')).toContain('min-height: var(--ui-control-height-sm)');
   });
 
-  it('opens the editor from a pointer row and sizes the editor chrome to the header', () => {
-    expect(rule(css, '.tasks-table tbody .task-card')).toContain('cursor: pointer');
+  it('sizes the editor chrome to the header', () => {
     expect(rule(css, '.task-details-header')).toContain('height: var(--ui-header-height)');
     expect(rule(css, '.task-details-actions')).toContain('height: var(--ui-header-height)');
   });
