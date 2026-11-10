@@ -43,10 +43,6 @@ use super::common::AuditEvent;
 use super::common::ErrorResponse;
 use super::common::audit;
 
-const COMMAND: &str = "command";
-const ARGUMENTS: &str = "arguments";
-const ENVIRONMENT: &str = "environment";
-const HEADERS: &str = "headers";
 const INTERNAL: &str = "Internal server error";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -242,22 +238,33 @@ impl CreateMcpServerRequest {
         }
         validation::target(transport, self.command.as_deref(), self.url.as_deref())?;
         let (command, url) = match transport {
-            Transport::Stdio => (self.command.map(command).transpose()?, None),
-            Transport::Http | Transport::Sse => (None, self.url.as_deref().map(url).transpose()?),
+            Transport::Stdio => {
+                unexpected(transport, validation::HEADERS, self.headers.is_empty())?;
+                (self.command.map(command).transpose()?, None)
+            }
+            Transport::Http | Transport::Sse => {
+                unexpected(transport, validation::ARGUMENTS, self.arguments.is_empty())?;
+                unexpected(
+                    transport,
+                    validation::ENVIRONMENT,
+                    self.environment.is_empty(),
+                )?;
+                (None, self.url.as_deref().map(url).transpose()?)
+            }
         };
         let arguments = arguments(self.arguments)?;
         if let Some(tools) = &self.tools {
             validation::tools(tools)?;
         }
         secrets(
-            ENVIRONMENT,
+            validation::ENVIRONMENT,
             validation::environment_name,
             self.environment
                 .iter()
                 .map(|(name, value)| (name, Some(value))),
         )?;
         secrets(
-            HEADERS,
+            validation::HEADERS,
             validation::header_name,
             self.headers.iter().map(|(name, value)| (name, Some(value))),
         )?;
@@ -308,18 +315,34 @@ impl UpdateMcpServerRequest {
         if let Some(name) = &self.name {
             validation::name(name)?;
         }
+        let transport = if stdio {
+            Transport::Stdio
+        } else {
+            Transport::Http
+        };
         validation::target(
-            if stdio {
-                Transport::Stdio
-            } else {
-                Transport::Http
-            },
+            transport,
             self.command.as_deref().or(stored.command.as_deref()),
             self.url.as_deref().or(stored.url.as_deref()),
         )?;
         let (command, url) = if stdio {
+            unexpected(
+                transport,
+                validation::HEADERS,
+                self.headers.as_ref().is_none_or(BTreeMap::is_empty),
+            )?;
             (self.command.map(command).transpose()?, None)
         } else {
+            unexpected(
+                transport,
+                validation::ARGUMENTS,
+                self.arguments.as_ref().is_none_or(Vec::is_empty),
+            )?;
+            unexpected(
+                transport,
+                validation::ENVIRONMENT,
+                self.environment.as_ref().is_none_or(BTreeMap::is_empty),
+            )?;
             (None, self.url.as_deref().map(url).transpose()?)
         };
         let arguments = self.arguments.map(arguments).transpose()?;
@@ -328,7 +351,7 @@ impl UpdateMcpServerRequest {
         }
         if let Some(environment) = &self.environment {
             secrets(
-                ENVIRONMENT,
+                validation::ENVIRONMENT,
                 validation::environment_name,
                 environment
                     .iter()
@@ -337,7 +360,7 @@ impl UpdateMcpServerRequest {
         }
         if let Some(headers) = &self.headers {
             secrets(
-                HEADERS,
+                validation::HEADERS,
                 validation::header_name,
                 headers.iter().map(|(name, value)| (name, value.as_ref())),
             )?;
@@ -372,14 +395,24 @@ impl UpdateWorkspaceMcpServersRequest {
     }
 }
 
+fn unexpected(transport: Transport, field: &str, absent: bool) -> Result<(), ValidationError> {
+    if absent {
+        return Ok(());
+    }
+    Err(ValidationError::Unexpected {
+        field: field.to_string(),
+        transport,
+    })
+}
+
 fn command(value: String) -> Result<String, Refusal> {
-    validation::literal(COMMAND, &value)?;
+    validation::literal(validation::COMMAND, &value)?;
     Ok(value)
 }
 
 fn arguments(values: Vec<String>) -> Result<Vec<String>, Refusal> {
     for value in &values {
-        validation::literal(ARGUMENTS, value)?;
+        validation::literal(validation::ARGUMENTS, value)?;
     }
     Ok(values)
 }
@@ -916,6 +949,14 @@ mod tests {
         )
     }
 
+    fn misplaced(refusal: &Refusal, field: &str, transport: Transport) -> bool {
+        matches!(
+            refusal,
+            Refusal::Invalid(ValidationError::Unexpected { field: named, transport: given })
+                if named == field && *given == transport
+        )
+    }
+
     fn operator() -> Vec<McpServerResponse> {
         let mut database = McpServer::command(
             "npx",
@@ -1283,6 +1324,80 @@ mod tests {
             assert!(matches!(refusal, Refusal::Invalid(_)), "{body}: {refusal}");
             assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
         }
+    }
+
+    #[test]
+    fn a_field_the_transport_never_uses_is_refused() {
+        let created = [
+            (
+                with(stdio_body(), "headers", json!({ "Authorization": "x" })),
+                validation::HEADERS,
+                Transport::Stdio,
+            ),
+            (
+                with(remote_body(), "environment", json!({ "TOKEN": "x" })),
+                validation::ENVIRONMENT,
+                Transport::Http,
+            ),
+            (
+                with(remote_body(), "arguments", json!(["--quiet"])),
+                validation::ARGUMENTS,
+                Transport::Http,
+            ),
+        ];
+        for (body, field, transport) in created {
+            let refusal = create(body.clone(), true).expect_err("the field is refused");
+            assert!(misplaced(&refusal, field, transport), "{body}: {refusal}");
+            assert_eq!(refusal.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let changed = [
+            (
+                Transport::Stdio,
+                json!({ "headers": { "Authorization": null } }),
+                validation::HEADERS,
+            ),
+            (
+                Transport::Http,
+                json!({ "environment": { "TOKEN": "x" } }),
+                validation::ENVIRONMENT,
+            ),
+            (
+                Transport::Http,
+                json!({ "arguments": ["--quiet"] }),
+                validation::ARGUMENTS,
+            ),
+            (
+                Transport::Http,
+                json!({ "command": "python3" }),
+                validation::COMMAND,
+            ),
+        ];
+        for (transport, body, field) in changed {
+            let refusal = update(body.clone())
+                .changes(&record(transport), true)
+                .expect_err("the field is refused");
+            assert!(misplaced(&refusal, field, transport), "{body}: {refusal}");
+        }
+    }
+
+    #[test]
+    fn an_empty_field_the_transport_never_uses_is_let_through() {
+        let body = with(stdio_body(), "headers", json!({}));
+        assert!(create(body, true).is_ok());
+        let body = with(remote_body(), "environment", json!({}));
+        let body = with(body, "arguments", json!([]));
+        assert!(create(body, true).is_ok());
+
+        let cleared = update(json!({ "headers": {} }))
+            .changes(&record(Transport::Stdio), true)
+            .expect("an empty map removes what a server never uses");
+        assert_eq!(cleared.headers, Some(BTreeMap::new()));
+        let cleared = update(json!({ "environment": {}, "arguments": [] }))
+            .changes(&record(Transport::Http), true)
+            .expect("an empty map removes what a server never uses");
+        assert_eq!(cleared.environment, Some(BTreeMap::new()));
+        assert_eq!(cleared.arguments, Some(Vec::new()));
     }
 
     #[test]

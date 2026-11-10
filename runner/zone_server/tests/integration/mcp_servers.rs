@@ -508,11 +508,18 @@ async fn a_command_server_needs_the_operator_flag() {
     );
 
     let on = client(true).await;
+    let mut body = stdio("stub");
+    body["environment"] = json!({ ENVIRONMENT: ENVIRONMENT_SECRET });
     let created = on
-        .post_json_auth(&tenant.servers(), &stdio("stub"), &tenant.owner.token)
+        .post_json_auth(&tenant.servers(), &body, &tenant.owner.token)
         .await;
     created.assert_status(StatusCode::CREATED);
+    assert_sealed(&created);
     let created = created.json_value();
+    assert_eq!(
+        created["environment"],
+        json!([{ "name": ENVIRONMENT, "has_value": true }])
+    );
     assert_eq!(created["transport"], "stdio");
     assert_eq!(created["command"], "python3");
     assert_eq!(created["arguments"], json!([stub()]));
@@ -575,7 +582,6 @@ async fn secrets_are_sealed_and_never_handed_back() {
                 "transport": "http",
                 "url": REMOTE_URL,
                 "headers": { HEADER: format!("Bearer {HEADER_SECRET}") },
-                "environment": { ENVIRONMENT: ENVIRONMENT_SECRET },
             }),
             &tenant.owner.token,
         )
@@ -596,10 +602,7 @@ async fn secrets_are_sealed_and_never_handed_back() {
         created["headers"],
         json!([{ "name": HEADER, "has_value": true }])
     );
-    assert_eq!(
-        created["environment"],
-        json!([{ "name": ENVIRONMENT, "has_value": true }])
-    );
+    assert_eq!(created["environment"], json!([]));
     assert!(created["created_at"].is_string(), "{created}");
     assert!(created["updated_at"].is_string(), "{created}");
     let server = id(&created);
@@ -661,11 +664,10 @@ async fn a_null_secret_keeps_its_value_and_an_omitted_one_is_removed() {
                 "transport": "http",
                 "url": REMOTE_URL,
                 "headers": { HEADER: format!("Bearer {HEADER_SECRET}") },
-                "environment": { ENVIRONMENT: ENVIRONMENT_SECRET },
             }),
         )
         .await);
-    let environment = json!([{ "name": ENVIRONMENT, "has_value": true }]);
+    let environment = json!([]);
 
     let kept = client
         .put_json_auth(
@@ -686,7 +688,7 @@ async fn a_null_secret_keeps_its_value_and_an_omitted_one_is_removed() {
     client
         .put_json_auth(
             &tenant.server(&server),
-            &json!({ "environment": { ENVIRONMENT: null, "UNSAVED": null } }),
+            &json!({ "headers": { HEADER: null, "UNSAVED": null } }),
             &tenant.owner.token,
         )
         .await
@@ -737,6 +739,25 @@ async fn an_invalid_definition_is_refused() {
         json!({ "name": "credentialed", "transport": "http", "url": "http://u:p@host/mcp" }),
         remote(&"n".repeat(33)),
         json!({ "name": "mismatched", "transport": "http", "command": "python3" }),
+        json!({
+            "name": "misplaced",
+            "transport": "stdio",
+            "command": "python3",
+            "arguments": [stub()],
+            "headers": { HEADER: "value" },
+        }),
+        json!({
+            "name": "misplaced",
+            "transport": "http",
+            "url": REMOTE_URL,
+            "environment": { ENVIRONMENT: "value" },
+        }),
+        json!({
+            "name": "misplaced",
+            "transport": "http",
+            "url": REMOTE_URL,
+            "arguments": ["--quiet"],
+        }),
     ];
     for body in &refused {
         let response = client

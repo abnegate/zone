@@ -13,10 +13,11 @@ const SCHEMES: [&str; 2] = ["http", "https"];
 const PROBE: &str = "probe";
 const NAME: &str = "name";
 pub(crate) const URL: &str = "url";
-const COMMAND: &str = "command";
+pub(crate) const COMMAND: &str = "command";
+pub(crate) const ARGUMENTS: &str = "arguments";
 const TRANSPORT: &str = "transport";
-const ENVIRONMENT: &str = "environment";
-const HEADERS: &str = "headers";
+pub(crate) const ENVIRONMENT: &str = "environment";
+pub(crate) const HEADERS: &str = "headers";
 const TOOLS: &str = "tools";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
