@@ -15,6 +15,7 @@ use uuid::Uuid;
 use zone_core::servers;
 use zone_server::config::Config;
 use zone_server::services::mcp_servers::status::Connection;
+use zone_server::services::mcp_servers::status::SSE_UNSUPPORTED;
 use zone_server::services::mcp_servers::status::UNCONNECTED;
 
 use crate::common;
@@ -893,25 +894,47 @@ async fn an_invalid_definition_is_refused() {
     let client = client(true).await;
     let tenant = Tenant::new(&client).await;
     let refused = [
-        json!({
-            "name": "expanding",
-            "transport": "stdio",
-            "command": "python3",
-            "arguments": [stub(), "${HOME}"],
-        }),
-        json!({
-            "name": "expanding",
-            "transport": "stdio",
-            "command": "python3",
-            "arguments": [stub()],
-            "environment": { "WHERE": "${HOME}" },
-        }),
-        json!({ "name": "events", "transport": "sse", "url": "http://127.0.0.1:1/sse" }),
-        json!({ "name": "credentialed", "transport": "http", "url": "http://u:p@host/mcp" }),
-        remote(&"n".repeat(33)),
-        json!({ "name": "mismatched", "transport": "http", "command": "python3" }),
+        (
+            json!({
+                "name": "expanding",
+                "transport": "stdio",
+                "command": "python3",
+                "arguments": [stub(), "${HOME}"],
+            }),
+            "`arguments`",
+        ),
+        (
+            json!({
+                "name": "expanding",
+                "transport": "stdio",
+                "command": "python3",
+                "arguments": [stub()],
+                "environment": { "WHERE": "${HOME}" },
+            }),
+            "`environment`",
+        ),
+        (
+            json!({ "name": "events", "transport": "sse", "url": "http://127.0.0.1:1/sse" }),
+            SSE_UNSUPPORTED,
+        ),
+        (
+            json!({ "name": "credentialed", "transport": "http", "url": "http://u:p@host/mcp" }),
+            "`url`",
+        ),
+        (remote(&"n".repeat(33)), "`name`"),
+        (
+            json!({
+                "name": "mismatched",
+                "transport": "http",
+                "url": REMOTE_URL,
+                "command": "python3",
+            }),
+            "`command`",
+        ),
+        (json!({ "name": "nowhere", "transport": "http" }), "`url`"),
+        (json!({ "name": "idle", "transport": "stdio" }), "`command`"),
     ];
-    for body in &refused {
+    for (body, offender) in &refused {
         let response = client
             .post_json_auth(&tenant.servers(), body, &tenant.owner.token)
             .await;
@@ -921,17 +944,36 @@ async fn an_invalid_definition_is_refused() {
             "{body} was not refused: {}",
             response.text()
         );
+        let message = refusal(&response);
+        assert!(
+            message.contains(offender),
+            "the refusal of {body} does not name {offender}: {message}"
+        );
     }
+    let listed = client
+        .get_auth(&tenant.servers(), &tenant.owner.token)
+        .await
+        .json_value();
+    assert_eq!(
+        listed["servers"],
+        json!([]),
+        "a refused definition was stored"
+    );
 
     let server = id(&tenant.create(&client, &remote("remote")).await);
-    client
+    let unchanged = client
         .put_json_auth(
             &tenant.server(&server),
             &json!({ "transport": "stdio" }),
             &tenant.owner.token,
         )
-        .await
-        .assert_status(StatusCode::BAD_REQUEST);
+        .await;
+    unchanged.assert_status(StatusCode::BAD_REQUEST);
+    let message = refusal(&unchanged);
+    assert!(
+        message.contains("`transport`"),
+        "the refusal of a new transport does not name it: {message}"
+    );
 
     let listed = client
         .get_auth(&tenant.servers(), &tenant.owner.token)
