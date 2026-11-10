@@ -9,7 +9,7 @@ import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard, DeleteTaskDialog, TaskDetail } from '../components';
-import { Board, Skeleton } from '../components/board';
+import { Board, Skeleton, View } from '../components/board';
 import { TASKS_KEY, useTask, useTasks } from '../hooks';
 import { TitleDraft } from '../TitleDraft';
 import type { BoardActions, Renaming, Task, UpdateTaskRequest } from '../types';
@@ -23,9 +23,21 @@ const MOVE_FAILED = 'The task could not be moved';
 export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
+  const { currentWorkspace } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
+  const [scope, setScope] = useState(workspaceId);
   const [filterProject, setFilterProject] = useState(ALL_PROJECTS);
+  const [renaming, setRenaming] = useState<Renaming | null>(null);
+  const [view, setView] = useState(() => new View());
   const linkedTaskId = searchParams.get('id');
   const taskParam = searchParams.get('task');
+
+  if (scope !== workspaceId) {
+    setScope(workspaceId);
+    setFilterProject(ALL_PROJECTS);
+    setRenaming(null);
+    setView(new View());
+  }
 
   const {
     tasks,
@@ -38,8 +50,6 @@ export default function TasksPage() {
   } = useTasks(filterProject || undefined);
 
   const { projects, loading: projectsLoading } = useProjects('all');
-  const { currentWorkspace } = useWorkspace();
-  const workspaceId = currentWorkspace?.id;
   const { data: sources = [] } = useQuery({
     queryKey: ['sources', workspaceId],
     queryFn: () => client.getSources(workspaceId as string),
@@ -53,7 +63,6 @@ export default function TasksPage() {
   } = useTask(taskParam);
 
   const [executionTask, setExecutionTask] = useState<Task | null>(null);
-  const [renaming, setRenaming] = useState<Renaming | null>(null);
   const [deleting, setDeleting] = useState<Task | null>(null);
   const [removed, setRemoved] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -123,7 +132,10 @@ export default function TasksPage() {
 
   const actions = useMemo<BoardActions>(
     () => ({
-      open: (task) => openEditor(task.id),
+      open: (task) => {
+        view.opened = task.id;
+        openEditor(task.id);
+      },
       run: setExecutionTask,
       rename: (task) => setRenaming({ id: task.id, draft: new TitleDraft(task.title) }),
       retitle: async (task, title) => {
@@ -143,7 +155,7 @@ export default function TasksPage() {
         }
       },
     }),
-    [openEditor, updateListedTask, moveTask]
+    [openEditor, updateListedTask, moveTask, view]
   );
 
   const loading = tasksLoading || projectsLoading;
@@ -201,7 +213,16 @@ export default function TasksPage() {
           />
         ) : loading ? (
           <Skeleton />
-        ) : tasks.length === 0 ? (
+        ) : tasks.length > 0 ? (
+          <Board
+            tasks={tasks}
+            projects={projectNames}
+            renaming={renaming}
+            removed={removed}
+            view={view}
+            actions={actions}
+          />
+        ) : tasksError ? null : (
           <EmptyState
             className="tasks-empty"
             icon={
@@ -222,17 +243,11 @@ export default function TasksPage() {
                   Show all tasks
                 </Button>
               ) : (
-                <Button onClick={() => setShowCreateModal(true)}>Create Task</Button>
+                <Button onClick={() => setShowCreateModal(true)} disabled={projects.length === 0}>
+                  Create Task
+                </Button>
               )
             }
-          />
-        ) : (
-          <Board
-            tasks={tasks}
-            projects={projectNames}
-            renaming={renaming}
-            removed={removed}
-            actions={actions}
           />
         )}
       </div>

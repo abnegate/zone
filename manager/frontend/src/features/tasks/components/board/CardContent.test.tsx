@@ -12,9 +12,11 @@ mock.module('./CardMenu', () => ({
 }));
 
 let Board: typeof import('./Board').Board;
+let View: typeof import('./View').View;
 
 beforeAll(async () => {
   ({ Board } = await import('./Board'));
+  ({ View } = await import('./View'));
 });
 
 afterAll(() => {
@@ -77,7 +79,14 @@ async function press(target: HTMLElement, code: string) {
 describe('CardContent', () => {
   it('does not render again while a card is carried across the board', async () => {
     render(
-      <Board tasks={TASKS} projects={new Map()} renaming={null} removed={null} actions={ACTIONS} />
+      <Board
+        tasks={TASKS}
+        projects={new Map()}
+        renaming={null}
+        removed={null}
+        view={new View()}
+        actions={ACTIONS}
+      />
     );
     const rendered = new Map(menus);
     expect([...rendered.keys()].sort()).toEqual(['build', 'ship', 'write']);

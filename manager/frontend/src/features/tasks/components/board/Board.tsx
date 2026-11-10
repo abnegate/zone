@@ -11,7 +11,7 @@ import {
   useSensor,
   useSensors,
 } from '@dnd-kit/core';
-import { useId, useMemo, useRef, useState } from 'react';
+import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMediaQuery } from '../../../../shared/hooks';
 import { groupByStage, STAGES, type StageId, stageOf } from '../../status';
@@ -23,6 +23,7 @@ import { Column } from './Column';
 import { destination, keyboardOptions, stageUnder } from './drop';
 import { useCardFocus } from './useCardFocus';
 import { useNow } from './useNow';
+import type { View } from './View';
 import './Board.css';
 
 export interface BoardProps {
@@ -30,6 +31,7 @@ export interface BoardProps {
   projects: ReadonlyMap<string, string>;
   renaming: Renaming | null;
   removed: string | null;
+  view: View;
   actions: BoardActions;
 }
 
@@ -65,7 +67,7 @@ function carried(data: { current?: { task?: Task } } | undefined): Task | undefi
   return data?.current?.task;
 }
 
-export function Board({ tasks, projects, renaming, removed, actions }: BoardProps) {
+export function Board({ tasks, projects, renaming, removed, view, actions }: BoardProps) {
   const groups = useMemo(() => groupByStage(tasks), [tasks]);
   const [active, setActive] = useState<UniqueIdentifier | null>(null);
   const [announcement, setAnnouncement] = useState('');
@@ -73,7 +75,7 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
   const instructions = useId();
   const unrendered = useMemo(() => document.createElement('div'), []);
   const root = useRef<HTMLElement>(null);
-  const release = useCardFocus(root, groups, removed);
+  const focus = useCardFocus(root, groups, removed);
   const now = useNow(active !== null);
   const reducedMotion = useMediaQuery(REDUCED_MOTION);
   const heading = useRef<StageId | null>(null);
@@ -117,7 +119,7 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
       return;
     }
     setAnnouncement(`${task.title} moved to ${stage.label}.`);
-    if (!(event.activatorEvent instanceof KeyboardEvent)) release();
+    if (!(event.activatorEvent instanceof KeyboardEvent)) focus.release();
     void actions.move(task, status).then((moved) => {
       if (!moved) setAnnouncement(`${task.title} could not be moved; back in ${own.label}.`);
     });
@@ -129,6 +131,17 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
     if (!task) return;
     setAnnouncement(`Moving ${task.title} cancelled. It stays in ${stageOf(task.status).label}.`);
   };
+
+  useLayoutEffect(() => {
+    const scroller = root.current;
+    if (!scroller) return undefined;
+    scroller.scrollLeft = view.left;
+    if (view.opened !== null) focus.title(view.opened);
+    view.opened = null;
+    return () => {
+      view.left = scroller.scrollLeft;
+    };
+  }, [view, focus]);
 
   const dragged = tasks.find((task) => task.id === active);
 
@@ -152,7 +165,7 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
         {STAGES.map((stage) => {
           const cards = groups.get(stage.id) ?? [];
           return (
-            <Column key={stage.id} stage={stage} count={cards.length}>
+            <Column key={stage.id} stage={stage} count={cards.length} view={view}>
               {cards.map((task) => (
                 <Card
                   key={task.id}

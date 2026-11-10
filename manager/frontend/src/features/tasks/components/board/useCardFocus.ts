@@ -1,4 +1,4 @@
-import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { type RefObject, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import type { StageId } from '../../status';
 import type { Task } from '../../types';
 
@@ -7,6 +7,11 @@ type Groups = ReadonlyMap<StageId, readonly Task[]>;
 interface Held {
   id: string;
   control: string;
+}
+
+export interface CardFocus {
+  release: () => void;
+  title: (id: string) => void;
 }
 
 const CARD = 'li[data-task-id]';
@@ -67,7 +72,7 @@ export function useCardFocus(
   board: RefObject<HTMLElement | null>,
   groups: Groups,
   removed: string | null
-): () => void {
+): CardFocus {
   const held = useRef<Held | null>(null);
   const previous = useRef(groups);
   const departed = useRef(groups);
@@ -121,7 +126,13 @@ export function useCardFocus(
     };
   }, [board]);
 
-  return useCallback(() => {
-    held.current = null;
-  }, []);
+  return useMemo(
+    () => ({
+      release: () => {
+        held.current = null;
+      },
+      title: (id: string) => controlIn(board.current, { id, control: TITLE })?.focus(),
+    }),
+    [board]
+  );
 }

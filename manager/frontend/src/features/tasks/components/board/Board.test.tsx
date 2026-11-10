@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { STAGES } from '../../status';
 import type { BoardActions, Task, TaskStatus } from '../../types';
 import { Board } from './Board';
+import { View } from './View';
 
 const COLUMN_WIDTH = 280;
 const COLUMN_STEP = 300;
@@ -71,7 +72,14 @@ function actions(): BoardActions {
 
 function renderBoard(handlers: BoardActions = actions()) {
   render(
-    <Board tasks={TASKS} projects={PROJECTS} renaming={null} removed={null} actions={handlers} />
+    <Board
+      tasks={TASKS}
+      projects={PROJECTS}
+      renaming={null}
+      removed={null}
+      view={new View()}
+      actions={handlers}
+    />
   );
   return handlers;
 }
@@ -82,6 +90,7 @@ function pause() {
 
 function MovingBoard({ refuse = false }: { refuse?: boolean }) {
   const [tasks, setTasks] = useState(TASKS);
+  const [view] = useState(() => new View());
   const handlers = useMemo<BoardActions>(() => {
     const place = (id: string, status: TaskStatus) =>
       setTasks((list) => list.map((item) => (item.id === id ? { ...item, status } : item)));
@@ -97,7 +106,14 @@ function MovingBoard({ refuse = false }: { refuse?: boolean }) {
     };
   }, [refuse]);
   return (
-    <Board tasks={tasks} projects={PROJECTS} renaming={null} removed={null} actions={handlers} />
+    <Board
+      tasks={tasks}
+      projects={PROJECTS}
+      renaming={null}
+      removed={null}
+      view={view}
+      actions={handlers}
+    />
   );
 }
 
@@ -300,6 +316,7 @@ describe('Board', () => {
             projects={PROJECTS}
             renaming={null}
             removed={null}
+            view={new View()}
             actions={actions()}
           />
         );
@@ -323,6 +340,7 @@ describe('Board', () => {
             projects={PROJECTS}
             renaming={null}
             removed={null}
+            view={new View()}
             actions={actions()}
           />
         );

@@ -46,9 +46,11 @@ const mockWorkspace = {
   updated_at: '2024-01-01T00:00:00Z',
 };
 
+let currentWorkspace = mockWorkspace;
+
 mock.module('../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: mock(() => ({
-    currentWorkspace: mockWorkspace,
+    currentWorkspace,
     loading: false,
   })),
 }));
@@ -92,6 +94,7 @@ afterAll(() => {
 
 afterEach(() => {
   window.history.pushState({}, '', '/');
+  currentWorkspace = mockWorkspace;
 });
 
 const createQueryClient = () =>
@@ -105,13 +108,15 @@ const createQueryClient = () =>
 const renderTasksPage = (path = '/tasks') => {
   window.history.pushState({}, '', path);
   const queryClient = createQueryClient();
-  return render(
+  const page = () => (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <TasksPage />
       </BrowserRouter>
     </QueryClientProvider>
   );
+  const view = render(page());
+  return { ...view, again: () => view.rerender(page()) };
 };
 
 const mockProjects: Project[] = [
@@ -1087,12 +1092,93 @@ describe('TasksPage', () => {
     });
   });
 
-  it('shows error when loading fails', async () => {
+  it('shows only the error when loading fails, not an empty board', async () => {
     mockGetTasks.mockImplementation(() => Promise.reject(new Error('Network error')));
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Network error')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Network error');
+    expect(screen.queryByText('No tasks yet')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Create Task' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Tasks' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the board under the error when a reload fails', async () => {
+    let failing = false;
+    mockGetTasks.mockImplementation(() =>
+      failing ? Promise.reject(new Error('Network error')) : Promise.resolve(mockTasks)
+    );
+    renderTasksPage();
+    await screen.findByText('Implement login');
+
+    failing = true;
+    await act(async () => {
+      window.dispatchEvent(new Event('visibilitychange'));
     });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Network error');
+    expect(screen.getByText('Implement login')).toBeInTheDocument();
+  });
+
+  it('disables Create Task in the empty state when there is no project to put a task in', async () => {
+    mockGetTasks.mockImplementation(() => Promise.resolve([]));
+    mockGetProjects.mockImplementation(() => Promise.resolve([]));
+    renderTasksPage();
+
+    expect(await screen.findByRole('button', { name: 'Create Task' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'New task' })).toBeDisabled();
+  });
+
+  it('opens the wizard from Create Task in the empty state', async () => {
+    mockGetTasks.mockImplementation(() => Promise.resolve([]));
+    renderTasksPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Create Task' }));
+
+    expect(await screen.findByRole('dialog', { name: 'New Task' })).toBeInTheDocument();
+  });
+
+  it('clears the project filter when the workspace changes', async () => {
+    const { again } = renderTasksPage();
+    await screen.findByText('Implement login');
+    chooseSelect('Filter by project', 'Project Beta');
+    await waitFor(() => expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-2'));
+
+    currentWorkspace = { ...mockWorkspace, id: 'workspace-2', name: 'Other Workspace' };
+    again();
+
+    await waitFor(() => expect(mockGetTasks).toHaveBeenCalledWith('workspace-2', undefined));
+    expect(screen.getByRole('combobox', { name: 'Filter by project' })).toHaveTextContent(
+      'All Projects'
+    );
+    expect(mockGetTasks).not.toHaveBeenCalledWith('workspace-2', 'proj-2');
+  });
+
+  it('returns to the card and the scroll position it left when the editor closes', async () => {
+    renderTasksPage();
+    const title = await openTitle('Implement login');
+    const board = screen.getByRole('region', { name: 'Tasks' });
+    const body = column('Planned').querySelector<HTMLElement>('.board-column-body');
+    if (!body) throw new Error('The Planned column has no body');
+    board.scrollLeft = 320;
+    body.scrollTop = 48;
+
+    fireEvent.click(title);
+    await waitFor(() => expect(document.querySelector('section.task-details')).not.toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    await waitFor(() => expect(focusedTitle()).toBe('task-1'));
+    expect(screen.getByRole('region', { name: 'Tasks' })).not.toBe(board);
+    expect(screen.getByRole('region', { name: 'Tasks' }).scrollLeft).toBe(320);
+    expect(column('Planned').querySelector('.board-column-body')?.scrollTop).toBe(48);
+  });
+
+  it('does not take focus for a card when the editor was opened from a link', async () => {
+    renderTasksPage('/tasks?task=task-1');
+    await waitFor(() => expect(document.querySelector('section.task-details')).not.toBeNull());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    await screen.findByRole('region', { name: 'Tasks' });
+    expect(focusedTitle()).toBeUndefined();
   });
 
   it('opens the execution dialog from the Run menu item', async () => {

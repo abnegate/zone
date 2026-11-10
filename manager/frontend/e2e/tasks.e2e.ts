@@ -821,6 +821,29 @@ test.describe('Tasks Page', () => {
       ).toBeFocused();
     });
 
+    test('closing the editor returns to the card and the scroll position it was opened from', async ({
+      context,
+      page,
+    }) => {
+      await serveTasks(context, page);
+      const board = page.getByRole('region', { name: 'Tasks', exact: true });
+      await board.evaluate((element) =>
+        element.scrollTo({ left: element.scrollWidth, behavior: 'instant' })
+      );
+      const left = await board.evaluate((element) => element.scrollLeft);
+      expect(left).toBeGreaterThan(0);
+
+      const title = page.getByRole('button', { name: 'Drop legacy export', exact: true });
+      await title.click();
+      const editor = page.locator('.task-details');
+      await expect(editor).toBeVisible();
+      await editor.getByRole('button', { name: 'Close', exact: true }).click();
+
+      await expect(title).toBeFocused();
+      expect(await board.evaluate((element) => element.scrollLeft)).toBe(left);
+      await expect(page).toHaveURL('/tasks');
+    });
+
     test('the delete dialog cancels without deleting', async ({ context, page }) => {
       const server = await serveTasks(context, page);
 
@@ -1261,6 +1284,8 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
 
       await expect(page.getByText('Server error')).toBeVisible({ timeout: 15000 });
+      await expect(page.getByRole('heading', { name: 'No tasks yet' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Create Task' })).toHaveCount(0);
     });
   });
 
@@ -1302,6 +1327,7 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
 
       await expect(page.getByRole('button', { name: /New task/ })).toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Create Task' })).toBeDisabled();
     });
   });
 });

@@ -5,13 +5,14 @@ import { STAGE_IDS, STAGES, stageOf } from '../../status';
 import { Column } from './Column';
 import { Skeleton } from './Skeleton';
 import { StatusIcon } from './StatusIcon';
+import { View } from './View';
 
 const review = stageOf('review');
 
 function renderColumn(count: number) {
   return render(
     <DndContext>
-      <Column stage={review} count={count}>
+      <Column stage={review} count={count} view={new View()}>
         {Array.from({ length: count }, (_, index) => `Card ${index + 1}`).map((title) => (
           <li key={title}>{title}</li>
         ))}
