@@ -166,8 +166,11 @@ moved=$(mktemp)
 off=$(mktemp)
 tunnel=$(mktemp)
 closed=$(mktemp)
-trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" "$tunnel" "$closed"' EXIT HUP INT TERM
-unset ZONE_AGENT_CALLBACK_PORT ZONE_CONSOLE_ORIGINS
+named=$(mktemp)
+renamed=$(mktemp)
+blank=$(mktemp)
+trap 'rm -rf "$directory" "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" "$tunnel" "$closed" "$named" "$renamed" "$blank"' EXIT HUP INT TERM
+unset ZONE_AGENT_CALLBACK_PORT ZONE_CONSOLE_ORIGINS APP_BASE_URL
 
 # shellcheck disable=SC2046
 compose $("$script" flags '') config --format json > "$direct"
@@ -185,9 +188,18 @@ ZONE_AGENT_CALLBACK_PORT='' compose $("$script" flags '') config --format json >
 ZONE_CONSOLE_ORIGINS=http://manager.localhost:8080 compose $("$script" flags '') config --format json > "$tunnel"
 # shellcheck disable=SC2046
 ZONE_CONSOLE_ORIGINS='' compose $("$script" flags dev) config --format json > "$closed"
+# shellcheck disable=SC2046
+APP_BASE_URL=https://zone.example.com compose $("$script" flags '') config --format json > "$named"
+# shellcheck disable=SC2046
+APP_BASE_URL=https://zone.example.com compose $("$script" flags 'dev,vpn') config --format json > "$renamed"
+# shellcheck disable=SC2046
+APP_BASE_URL='' compose $("$script" flags '') config --format json > "$blank"
 
-python3 - "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" "$tunnel" "$closed" <<'PY'
+python3 - "$direct" "$devcfg" "$combo" "$bundled" "$moved" "$off" "$tunnel" "$closed" \
+    "$named" "$renamed" "$blank" "$root" <<'PY'
 import json
+import pathlib
+import re
 import sys
 
 direct = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -198,6 +210,10 @@ moved = json.load(open(sys.argv[5], encoding="utf-8"))
 off = json.load(open(sys.argv[6], encoding="utf-8"))
 tunnel = json.load(open(sys.argv[7], encoding="utf-8"))
 closed = json.load(open(sys.argv[8], encoding="utf-8"))
+named = json.load(open(sys.argv[9], encoding="utf-8"))
+renamed = json.load(open(sys.argv[10], encoding="utf-8"))
+blank = json.load(open(sys.argv[11], encoding="utf-8"))
+root = pathlib.Path(sys.argv[12])
 
 
 def dockerfile(service):
@@ -403,6 +419,93 @@ for name, config in (("core", direct), ("dev+vpn+monitoring", combo)):
     environment = config["services"]["manager"].get("environment") or {}
     if "ZONE_CONNECT_URL" not in environment:
         raise SystemExit(f"{name} manager must pass ZONE_CONNECT_URL")
+
+# GitHub sends a browser back to APP_BASE_URL after it registers Zone's App,
+# and mailed links open it, so each stack names an origin it serves itself:
+# the manager host on Traefik's plain entrypoint, which needs no certificate,
+# or the Vite server the dev overlay publishes. .env replaces it.
+MANAGER_ORIGIN = "http://manager.webui.localhost"
+OPERATOR_ORIGIN = "https://zone.example.com"
+for name, config, origin in (
+    ("core", direct, MANAGER_ORIGIN),
+    ("core with APP_BASE_URL empty", blank, MANAGER_ORIGIN),
+    ("dev", dev, VITE_CONSOLE),
+    ("dev+vpn+monitoring", combo, VITE_CONSOLE),
+    ("core with APP_BASE_URL set", named, OPERATOR_ORIGIN),
+    ("dev+vpn with APP_BASE_URL set", renamed, OPERATOR_ORIGIN),
+):
+    environment = config["services"]["manager"].get("environment") or {}
+    if environment.get("APP_BASE_URL") != origin:
+        raise SystemExit(
+            f"{name} manager must set APP_BASE_URL={origin}, "
+            f"got {environment.get('APP_BASE_URL')!r}"
+        )
+
+scheme, _, host = MANAGER_ORIGIN.partition("://")
+for name, config, manager_service in (
+    ("core", direct, "manager"),
+    ("dev+vpn+monitoring", combo, "gluetun"),
+):
+    manager_labels = labels_of(config["services"][manager_service])
+    rule = manager_labels.get("traefik.http.routers.manager.rule", "")
+    entrypoints = manager_labels.get("traefik.http.routers.manager.entrypoints", "")
+    if f"Host(`{host}`)" not in rule or "PathPrefix(`/api`)" not in rule:
+        raise SystemExit(f"{name} must route {host}/api to the manager, got {rule!r}")
+    if scheme != "http" or entrypoints != "web":
+        raise SystemExit(
+            f"{name} must serve {MANAGER_ORIGIN} on the plain entrypoint, got {entrypoints!r}"
+        )
+
+# A setting the server reads from its environment reaches it only when compose
+# passes it: the manager's environment is listed, not inherited from .env.
+ENVIRONMENT_READ = re.compile(r'\benv(?:::var(?:_os)?|_[a-z0-9_]+)\(\s*"([A-Z][A-Z0-9_]*)"')
+TEST_SOURCES = {"tests", "tests.rs", "testing.rs"}
+SERVER_DEFAULTS = {
+    # The image listens where Traefik and the healthcheck expect it.
+    "HOST",
+    "PORT",
+    # The container's own, not a setting.
+    "PATH",
+    # Older spellings of the MONITORING_* settings compose passes.
+    "GRAFANA_TOKEN",
+    "GRAFANA_URL",
+    "PROMETHEUS_URL",
+    # Left at the server's built-in values.
+    "CORS_ALLOW_CREDENTIALS",
+    "GPT4ALL_MODELS_URL",
+    "HUGGINGFACE_MODELS_URL",
+    "JWT_ACCESS_LIFETIME",
+    "JWT_REFRESH_LIFETIME",
+    "MONITORING_GRAFANA_TOKEN",
+    "SOURCE_RESYNC_ENABLED",
+    "SOURCE_RESYNC_INTERVAL_SECS",
+    "SOURCE_RESYNC_POLL_SECS",
+    "ZONE_SETUP_DISK_FREE_BYTES",
+}
+
+source = root / "runner" / "zone_server" / "src"
+readers = {}
+for path in sorted(source.rglob("*.rs")):
+    relative = path.relative_to(source)
+    if TEST_SOURCES & set(relative.parts):
+        continue
+    code = path.read_text(encoding="utf-8").split("#[cfg(test)]")[0]
+    for match in ENVIRONMENT_READ.finditer(code):
+        readers.setdefault(match.group(1), str(relative))
+if "APP_BASE_URL" not in readers:
+    raise SystemExit(f"no environment reads found under {source}; the scan is broken")
+
+passed = set(direct["services"]["manager"].get("environment") or {})
+withheld = sorted(set(readers) - passed - SERVER_DEFAULTS)
+if withheld:
+    raise SystemExit(
+        "zone_server reads these from its environment, but docker-compose.yml never passes "
+        "them to the manager, so a value in .env never reaches the server: "
+        + ", ".join(f"{name} ({readers[name]})" for name in withheld)
+    )
+stale = sorted(name for name in SERVER_DEFAULTS if name not in readers or name in passed)
+if stale:
+    raise SystemExit(f"SERVER_DEFAULTS lists settings that are passed or no longer read: {stale}")
 
 print("Compose profile combination checks passed")
 PY

@@ -370,6 +370,10 @@ services:
       - SMTP_FROM=${SMTP_FROM:-}
       - SMTP_FROM_NAME=${SMTP_FROM_NAME:-Zone}
       - DOMAIN_HOST_WEBUI=${DOMAIN_HOST_WEBUI}
+      # The origin GitHub and mailed links send a browser back to. Traefik
+      # always answers http on this host, and upgrades it itself when
+      # SECURITY_HTTP_REDIRECT is on; https needs a certificate first.
+      - APP_BASE_URL=${APP_BASE_URL:-http://manager.${DOMAIN_HOST_WEBUI}}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
       - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
