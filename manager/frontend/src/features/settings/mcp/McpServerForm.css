@@ -1,0 +1,52 @@
+.mcp-server-fields,
+.mcp-secrets {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mcp-server-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-field-gap);
+}
+
+.mcp-server-notice {
+  margin: 0;
+}
+
+.mcp-server-arguments {
+  font-family: var(--ui-font-mono);
+}
+
+.mcp-secrets > .form-label {
+  padding: 0;
+}
+
+.mcp-secret-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  margin: 0 0 var(--ui-space-2);
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-secret-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: var(--ui-space-2);
+  align-items: start;
+  min-width: 0;
+}
+
+@media (max-width: 768px) {
+  .mcp-secret-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .mcp-secret-row > :first-child {
+    grid-column: 1 / -1;
+  }
+}
