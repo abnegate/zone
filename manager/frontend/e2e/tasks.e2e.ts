@@ -523,6 +523,47 @@ test.describe('Tasks Page', () => {
       await expect(grip).toBeFocused();
     });
 
+    test('the up and down arrows scroll nothing while a card is carried', async ({
+      context,
+      page,
+    }) => {
+      await serveTasks(context, page);
+      await page.setViewportSize({ width: 1280, height: 360 });
+      const grip = page.getByRole('button', { name: 'Move Implement login page', exact: true });
+      const offsets = () =>
+        grip.evaluate((handle) => {
+          const scrolled: number[] = [document.scrollingElement?.scrollTop ?? 0];
+          for (let node = handle.parentElement; node; node = node.parentElement) {
+            scrolled.push(node.scrollTop);
+          }
+          return scrolled;
+        });
+      await page.evaluate(() => {
+        const claimed: boolean[] = [];
+        Object.assign(window, { claimed });
+        window.addEventListener('keydown', (event) => {
+          if (event.code === 'ArrowUp' || event.code === 'ArrowDown') {
+            claimed.push(event.defaultPrevented);
+          }
+        });
+      });
+
+      const before = await offsets();
+      await grip.focus();
+      await page.keyboard.press('Space');
+      await expect(page.locator('.task-card-overlay')).toBeVisible();
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('ArrowDown');
+      await page.keyboard.press('ArrowUp');
+      await page.keyboard.press('Escape');
+      await expect(page.locator('.task-card-overlay')).toHaveCount(0);
+
+      expect(
+        await page.evaluate(() => (window as unknown as { claimed: boolean[] }).claimed)
+      ).toEqual([true, true, true]);
+      expect(await offsets()).toEqual(before);
+    });
+
     test('escape puts a keyboard-carried card back without a request', async ({
       context,
       page,

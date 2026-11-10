@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from 'bun:test';
 import type { ClientRect, UniqueIdentifier } from '@dnd-kit/core';
 import { STAGE_IDS, type StageId } from '../../status';
 import type { Task, TaskStatus } from '../../types';
-import { destination, stageSteps, stageUnder } from './drop';
+import { destination, keyboardOptions, stageSteps, stageUnder } from './drop';
 
 const COLUMN_WIDTH = 280;
 const COLUMN_GAP = 20;
@@ -46,7 +46,7 @@ describe('destination', () => {
 });
 
 describe('stageSteps', () => {
-  const steps = stageSteps(() => STAGE_IDS);
+  const steps = stageSteps(STAGE_IDS);
 
   function step(
     code: string,
@@ -95,19 +95,24 @@ describe('stageSteps', () => {
     expect(step('ArrowRight', { status: 'cancelled' }).moved).toBeUndefined();
   });
 
-  it('ignores the vertical arrows and other keys without claiming them', () => {
-    for (const code of ['ArrowUp', 'ArrowDown', 'KeyA']) {
+  it('claims the vertical arrows so the page does not scroll, without moving the card', () => {
+    for (const code of ['ArrowUp', 'ArrowDown']) {
       const { moved, event } = step(code);
       expect(moved).toBeUndefined();
-      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.preventDefault).toHaveBeenCalled();
     }
   });
 
-  it('reads the column order each time it moves', () => {
-    let order: readonly StageId[] = STAGE_IDS;
-    const live = stageSteps(() => order);
+  it('ignores other keys without claiming them', () => {
+    const { moved, event } = step('KeyA');
+    expect(moved).toBeUndefined();
+    expect(event.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it('steps through the columns it was given', () => {
+    const live = stageSteps(['in_progress', 'complete']);
     const card = rect(column('in_progress').left + 10, 260, 40, 80);
-    const args = {
+    const moved = live(key('ArrowRight'), {
       active: 'task-1',
       currentCoordinates: { x: card.left, y: card.top },
       context: {
@@ -116,9 +121,23 @@ describe('stageSteps', () => {
         collisionRect: card,
         droppableRects: RECTS,
       } as never,
-    };
-    order = ['in_progress', 'complete'];
-    expect(live(key('ArrowRight'), args)).toEqual({ x: column('complete').left + 10, y: card.top });
+    });
+    expect(moved).toEqual({ x: column('complete').left + 10, y: card.top });
+  });
+});
+
+describe('keyboardOptions', () => {
+  it('picks a card up with space and drops it with space or enter', () => {
+    expect(keyboardOptions(false).keyboardCodes).toEqual({
+      start: ['Space'],
+      cancel: ['Escape'],
+      end: ['Space', 'Enter'],
+    });
+  });
+
+  it('scrolls smoothly only when motion is not reduced', () => {
+    expect(keyboardOptions(false).scrollBehavior).toBe('smooth');
+    expect(keyboardOptions(true).scrollBehavior).toBe('auto');
   });
 });
 

@@ -358,6 +358,13 @@ describe('tasks page layout', () => {
     expect(rule(touch, '.task-card-handle::after')).toContain('transform: none');
   });
 
+  it('stops the drop highlight fading in when motion is reduced', () => {
+    const column = read(join(features, 'tasks', 'components', 'board', 'Column.css'));
+    expect(rule(column, '.board-column-body')).toContain('transition:');
+    const reduced = media(column, '(prefers-reduced-motion: reduce)');
+    expect(rule(reduced, '.board-column-body')).toContain('transition: none');
+  });
+
   it('snaps one column at a time on a phone', () => {
     const phone = media(board, '(max-width: 768px)');
     expect(rule(phone, '.board')).toContain('scroll-snap-type: x mandatory');

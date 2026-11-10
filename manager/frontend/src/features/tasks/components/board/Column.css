@@ -144,3 +144,9 @@
 :root[data-theme='dark'] .status-icon-complete {
   color: var(--ui-success-400);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .board-column-body {
+    transition: none;
+  }
+}

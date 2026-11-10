@@ -14,12 +14,13 @@ import {
 } from '@dnd-kit/core';
 import { useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { groupByStage, STAGE_IDS, STAGES, stageOf } from '../../status';
+import { useMediaQuery } from '../../../../shared/hooks';
+import { groupByStage, STAGES, stageOf } from '../../status';
 import type { BoardActions, Task } from '../../types';
 import { Card } from './Card';
 import { CardBody } from './CardBody';
 import { Column } from './Column';
-import { destination, stageSteps, stageUnder } from './drop';
+import { destination, keyboardOptions, stageUnder } from './drop';
 import { useFollowedCard } from './useFollowedCard';
 import './Board.css';
 
@@ -32,10 +33,7 @@ export interface BoardProps {
 
 const POINTER = { activationConstraint: { distance: 5 } };
 
-const KEYBOARD = {
-  coordinateGetter: stageSteps(() => STAGE_IDS),
-  keyboardCodes: { start: ['Space'], cancel: ['Escape'], end: ['Space', 'Enter'] },
-};
+const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
 
 const NO_PROJECTS = 'No projects';
 
@@ -74,9 +72,11 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
   const unrendered = useMemo(() => document.createElement('div'), []);
   const root = useRef<HTMLElement>(null);
   const follow = useFollowedCard(root);
+  const reducedMotion = useMediaQuery(REDUCED_MOTION);
+  const keyboard = useMemo(() => keyboardOptions(reducedMotion), [reducedMotion]);
   const sensors = useSensors(
     useSensor(PointerSensor, POINTER),
-    useSensor(KeyboardSensor, KEYBOARD)
+    useSensor(KeyboardSensor, keyboard)
   );
 
   const start = ({ active }: DragStartEvent) => {
