@@ -44,8 +44,6 @@ const TOOL: &str = "stub__delegate";
 const PYTHON: &str = "python3";
 const TOOLS_LIST: &str = "tools/list";
 
-const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
-
 fn stub() -> NewMcpServer {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -124,7 +122,7 @@ async fn assert_parity(state: &AppState, workspace: Uuid, user: Uuid, tool: &str
 
     let (base, server) = served(state).await;
     let address = endpoint(&base);
-    for agent in AGENTS {
+    for agent in AgentKind::ALL.iter().copied() {
         let backend = LlmBackend::cli(agent, cli::settings());
         let mut tools = offered(
             &backend,
