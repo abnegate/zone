@@ -1,5 +1,14 @@
 import path from 'node:path';
 import type { Locator, Page } from '@playwright/test';
+import { z } from 'zod';
+import { McpTransportSchema } from '../src/features/settings/mcp/schemas';
+import type {
+  CreateMcpServerRequest,
+  McpSecretField,
+  McpServer,
+  UpdateMcpServerRequest,
+  UpdateWorkspaceMcpServersRequest,
+} from '../src/features/settings/mcp/types';
 import { expect, test } from './fixtures';
 import { setupAuth } from './helpers/auth';
 import { chooseSelect, expectSelectOptions } from './helpers/select';
@@ -7,37 +16,21 @@ import { blockServiceWorker, routeApi } from './test-utils';
 
 type OrgRole = 'owner' | 'admin' | 'member';
 type WorkspaceRole = 'owner' | 'admin' | 'member' | 'viewer';
-type Status = 'connected' | 'failed' | 'disabled' | 'connecting';
 
-interface SecretField {
-  name: string;
-  has_value: boolean;
+interface LeakedSecretField extends McpSecretField {
+  value?: string;
 }
 
-interface McpServer {
-  id: string | null;
-  name: string;
-  source: 'organization' | 'instance';
-  transport: 'stdio' | 'http' | 'sse';
-  command: string | null;
-  arguments: string[];
-  url: string | null;
-  tools: string[] | null;
-  enabled: boolean;
-  environment: SecretField[];
-  headers: SecretField[];
-  status: Status;
-  error: string | null;
-  available_tools: string[];
-  created_at: string | null;
-  updated_at: string | null;
+interface WireServer extends Omit<McpServer, 'environment' | 'headers'> {
+  environment: LeakedSecretField[];
+  headers: LeakedSecretField[];
 }
 
 interface Scenario {
   role?: OrgRole;
   workspaceRole?: WorkspaceRole;
   commands?: boolean;
-  servers?: McpServer[];
+  servers?: WireServer[];
   overrides?: Record<string, boolean>;
 }
 
@@ -52,7 +45,36 @@ interface Mock {
   secrets: Map<string, string>;
 }
 
-type Body = Record<string, unknown>;
+const SecretMapSchema = z.record(z.string(), z.string());
+const SecretChangesSchema = z.record(z.string(), z.string().nullable());
+const ToolsSchema = z.array(z.string()).nullable();
+
+const CreateRequestSchema = z.strictObject({
+  name: z.string(),
+  transport: McpTransportSchema,
+  command: z.string().optional(),
+  arguments: z.array(z.string()).optional(),
+  url: z.string().optional(),
+  tools: ToolsSchema.optional(),
+  enabled: z.boolean().optional(),
+  environment: SecretMapSchema.optional(),
+  headers: SecretMapSchema.optional(),
+}) satisfies z.ZodType<CreateMcpServerRequest>;
+
+const UpdateRequestSchema = z.strictObject({
+  name: z.string().optional(),
+  command: z.string().optional(),
+  arguments: z.array(z.string()).optional(),
+  url: z.string().optional(),
+  tools: ToolsSchema.optional(),
+  enabled: z.boolean().optional(),
+  environment: SecretChangesSchema.optional(),
+  headers: SecretChangesSchema.optional(),
+}) satisfies z.ZodType<UpdateMcpServerRequest>;
+
+const UpdateWorkspaceRequestSchema = z.strictObject({
+  servers: z.record(z.string(), z.boolean().nullable()),
+}) satisfies z.ZodType<UpdateWorkspaceMcpServersRequest>;
 
 const organizationId = '00000000-0000-0000-0000-000000000001';
 const workspaceId = '00000000-0000-0000-0000-000000000001';
@@ -73,7 +95,7 @@ const readOnly = 'Only organization admins can change MCP servers.';
 const workspaceReadOnly = 'Only workspace admins can change MCP servers.';
 const directory = process.env.MCP_SCREENSHOTS;
 
-function server(changes: Partial<McpServer> & Pick<McpServer, 'name'>): McpServer {
+function server(changes: Partial<WireServer> & Pick<WireServer, 'name'>): WireServer {
   return {
     id: null,
     source: 'organization',
@@ -94,14 +116,14 @@ function server(changes: Partial<McpServer> & Pick<McpServer, 'name'>): McpServe
   };
 }
 
-function fixtures(): McpServer[] {
+function fixtures(): WireServer[] {
   return [
     server({
       id: docsId,
       name: 'docs',
       url: 'https://docs.example/mcp',
       tools: ['search_pages', 'fetch_page'],
-      headers: [{ name: 'Authorization', has_value: true }],
+      headers: [{ name: 'Authorization', has_value: true, value: fixtureSecret }],
       available_tools: ['search_pages', 'fetch_page', 'list_spaces'],
     }),
     server({
@@ -140,17 +162,13 @@ function fixtures(): McpServer[] {
   ];
 }
 
-function secretMap(map: unknown): Record<string, string | null> {
-  return map && typeof map === 'object' ? (map as Record<string, string | null>) : {};
-}
-
 function storeSecrets(
   secrets: Map<string, string>,
   id: string,
   kind: string,
-  previous: SecretField[],
-  map: Record<string, string | null>
-): SecretField[] {
+  previous: LeakedSecretField[],
+  map: Record<string, string | null> = {}
+): LeakedSecretField[] {
   return Object.entries(map).map(([name, value]) => {
     if (value !== null) {
       secrets.set(`${id}:${kind}:${name}`, value);
@@ -171,7 +189,7 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
   const pending = new Map<string, number>();
   let created = 0;
 
-  const connect = (target: McpServer) => {
+  const connect = (target: WireServer) => {
     target.status = 'connecting';
     target.error = null;
     target.available_tools = [];
@@ -274,18 +292,20 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
       return;
     }
     if (pathname === serversPath && method === 'POST') {
-      const posted = body as Body;
+      const posted = CreateRequestSchema.parse(body);
       created += 1;
       const id = `22222222-2222-4222-8222-${String(created).padStart(12, '0')}`;
       const entry = server({
         id,
-        name: String(posted.name),
-        transport: posted.transport as McpServer['transport'],
-        command: typeof posted.command === 'string' ? posted.command : null,
-        arguments: Array.isArray(posted.arguments) ? (posted.arguments as string[]) : [],
-        url: typeof posted.url === 'string' ? posted.url : null,
-        environment: storeSecrets(secrets, id, 'environment', [], secretMap(posted.environment)),
-        headers: storeSecrets(secrets, id, 'headers', [], secretMap(posted.headers)),
+        name: posted.name,
+        transport: posted.transport,
+        command: posted.command ?? null,
+        arguments: posted.arguments ?? [],
+        url: posted.url ?? null,
+        tools: posted.tools ?? null,
+        enabled: posted.enabled ?? true,
+        environment: storeSecrets(secrets, id, 'environment', [], posted.environment),
+        headers: storeSecrets(secrets, id, 'headers', [], posted.headers),
       });
       connect(entry);
       servers.push(entry);
@@ -311,23 +331,23 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
         return;
       }
       if (method === 'PUT') {
-        const changes = body as Body;
+        const changes = UpdateRequestSchema.parse(body);
         let reconnect = false;
         for (const key of ['name', 'command', 'arguments', 'url'] as const) {
-          if (key in changes) {
+          if (changes[key] !== undefined) {
             Object.assign(target, { [key]: changes[key] });
             reconnect = true;
           }
         }
-        if ('tools' in changes) target.tools = changes.tools as string[] | null;
+        if (changes.tools !== undefined) target.tools = changes.tools;
         for (const kind of ['environment', 'headers'] as const) {
-          if (kind in changes) {
-            target[kind] = storeSecrets(secrets, id, kind, target[kind], secretMap(changes[kind]));
+          if (changes[kind] !== undefined) {
+            target[kind] = storeSecrets(secrets, id, kind, target[kind], changes[kind]);
             reconnect = true;
           }
         }
-        if ('enabled' in changes) {
-          target.enabled = Boolean(changes.enabled);
+        if (changes.enabled !== undefined) {
+          target.enabled = changes.enabled;
           reconnect = true;
         }
         if (!target.enabled) {
@@ -344,7 +364,7 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
     }
     if (pathname === workspacePath) {
       if (method === 'PUT') {
-        const changes = (body as { servers: Record<string, boolean | null> }).servers;
+        const { servers: changes } = UpdateWorkspaceRequestSchema.parse(body);
         for (const [id, value] of Object.entries(changes)) {
           if (value === null) overrides.delete(id);
           else overrides.set(id, value);
@@ -683,16 +703,20 @@ test.describe('MCP servers', () => {
     const mock = await openOrganization(page);
     const dialog = page.getByRole('dialog', { name: 'Edit docs' });
     const value = dialog.getByLabel('Value for Authorization', { exact: true });
+    expect(await page.content()).not.toContain(fixtureSecret);
 
     await chooseAction(page, 'docs', 'Edit');
     await expect(value).toHaveValue('');
     await expect(value).toHaveAttribute('placeholder', 'Saved');
     await expect(value).toHaveAttribute('type', 'password');
+    expect(await page.content()).not.toContain(fixtureSecret);
     await dialog.getByLabel('URL', { exact: true }).fill('https://docs.example/v2/mcp');
     await dialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(dialog).toHaveCount(0);
 
     await chooseAction(page, 'docs', 'Edit');
+    await expect(value).toHaveAttribute('placeholder', 'Saved');
+    expect(await page.content()).not.toContain(fixtureSecret);
     await value.fill('Bearer new');
     await dialog.getByRole('button', { name: 'Save', exact: true }).click();
     await expect(dialog).toHaveCount(0);
@@ -747,7 +771,7 @@ test.describe('MCP servers', () => {
     await expect(notes).toContainText('Off for the organization');
     await expect(notes.getByRole('radio', { name: 'On' })).toBeDisabled();
     const instance = page.getByRole('group', { name: 'magents', exact: true });
-    await expect(instance).toContainText('Always on');
+    await expect(instance).toContainText('Set by the instance');
     await expect(instance.getByRole('radio')).toHaveCount(0);
 
     await docs.getByRole('radio', { name: 'Off' }).click();
