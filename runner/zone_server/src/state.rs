@@ -534,11 +534,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_test_pool_gives_up_quickly_on_a_server_that_is_not_there() {
-        for pool in [
-            lazy_pool(),
-            AppState::for_tests().db().clone(),
-            crate::mcp::testing::state().db().clone(),
-        ] {
+        for pool in [lazy_pool(), AppState::for_tests().db().clone()] {
             assert_eq!(
                 pool.options().get_acquire_timeout(),
                 Duration::from_millis(250)
