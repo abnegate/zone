@@ -18,9 +18,12 @@ use sqlx::QueryBuilder;
 use uuid::Uuid;
 
 use crate::secret::Unseal;
+use crate::services::mcp_servers::validation;
 
-use super::organization_members::{self, OrgRole};
-use super::workspace_members::{self, WorkspaceRole};
+use super::organization_members;
+use super::organization_members::OrgRole;
+use super::workspace_members;
+use super::workspace_members::WorkspaceRole;
 
 const COLUMNS: &str = "id, organization_id, name, transport, command, arguments, url, tools, enabled, secrets, created_by, created_at, updated_at";
 
@@ -42,7 +45,6 @@ const INVALID_TRANSPORT: &str = "The transport must be stdio, http or sse";
 const INVALID_TARGET: &str =
     "A stdio server needs a command and no URL; an http or sse server needs a URL and no command";
 const FOREIGN_SERVER: &str = "An MCP server in the overrides does not belong to this organization";
-const MALFORMED_SECRETS: &str = "The stored MCP server secrets are malformed";
 const UNSEALABLE_SECRETS: &str = "The MCP server secrets could not be sealed";
 const ENVIRONMENT_FIELD: &str = "Environment variable";
 const HEADER_FIELD: &str = "Header";
@@ -140,7 +142,7 @@ pub enum McpServerError {
 
 type McpServerResult<T> = Result<T, McpServerError>;
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 struct Row {
     id: Uuid,
     organization_id: Uuid,
@@ -159,7 +161,7 @@ struct Row {
 
 impl Row {
     fn open(self, key: &MasterKey) -> McpServerResult<McpServerRecord> {
-        let secrets = open(self.secrets.as_deref(), key)?;
+        let secrets = open(self.id, self.secrets.as_deref(), key)?;
         Ok(self.record(secrets))
     }
 
@@ -196,15 +198,20 @@ fn seal(secrets: &Secrets, key: &MasterKey) -> McpServerResult<Option<String>> {
         .map_err(|error| McpServerError::Sealing(format!("{UNSEALABLE_SECRETS}: {error}")))
 }
 
-fn open(stored: Option<&str>, key: &MasterKey) -> McpServerResult<Secrets> {
+fn open(server: Uuid, stored: Option<&str>, key: &MasterKey) -> McpServerResult<Secrets> {
     let Some(stored) = stored else {
         return Ok(Secrets::default());
     };
     let opened = key.open_strict(stored).map_err(|error| {
-        McpServerError::Sealing(format!("The MCP server secrets did not open: {error}"))
+        McpServerError::Sealing(format!(
+            "The secrets of MCP server {server} did not open: {error}"
+        ))
     })?;
-    let opening: Opening = serde_json::from_str(opened.expose())
-        .map_err(|_| McpServerError::Sealing(MALFORMED_SECRETS.to_owned()))?;
+    let opening: Opening = serde_json::from_str(opened.expose()).map_err(|_| {
+        McpServerError::Sealing(format!(
+            "The stored secrets of MCP server {server} are malformed"
+        ))
+    })?;
     Ok(Secrets {
         environment: opening.environment,
         headers: opening.headers,
@@ -223,11 +230,16 @@ fn classify(error: sqlx::Error) -> McpServerError {
             Some(NAME_CHECK) => INVALID_NAME,
             Some(TRANSPORT_CHECK) => INVALID_TRANSPORT,
             Some(TARGET_CHECK) => INVALID_TARGET,
-            _ => return McpServerError::Invalid(database.message().to_owned()),
+            _ => return McpServerError::Database(error),
         };
         return McpServerError::Invalid(message.to_owned());
     }
     McpServerError::Database(error)
+}
+
+fn distinct(headers: &BTreeMap<String, SecretValue>) -> McpServerResult<()> {
+    validation::headers(headers.keys().map(String::as_str))
+        .map_err(|error| McpServerError::Invalid(error.to_string()))
 }
 
 fn merge(
@@ -373,6 +385,7 @@ pub async fn create_authorized(
         environment: new.environment,
         headers: new.headers,
     };
+    distinct(&secrets.headers)?;
     let sealed = seal(&secrets, key)?;
     let mut transaction = pool.begin().await?;
     authorize_organization(&mut transaction, organization, user, OrgRole::Admin).await?;
@@ -418,11 +431,9 @@ pub async fn update_authorized(
     .bind(server)
     .fetch_optional(&mut *transaction)
     .await?;
-    let before = stored
-        .ok_or(McpServerError::NotFound(SERVER_NOT_FOUND))?
-        .open(key)?;
+    let stored = stored.ok_or(McpServerError::NotFound(SERVER_NOT_FOUND))?;
+    let before = stored.clone().open(key)?;
 
-    let resealing = changes.environment.is_some() || changes.headers.is_some();
     let secrets = Secrets {
         environment: match changes.environment {
             Some(environment) => {
@@ -435,29 +446,48 @@ pub async fn update_authorized(
             None => before.secrets.headers.clone(),
         },
     };
+    distinct(&secrets.headers)?;
+    let resealing = secrets != before.secrets;
+    let name = changes.name.filter(|name| *name != before.name);
+    let command = changes
+        .command
+        .filter(|command| before.command.as_ref() != Some(command));
+    let arguments = changes
+        .arguments
+        .filter(|arguments| *arguments != before.arguments);
+    let url = changes.url.filter(|url| before.url.as_ref() != Some(url));
+    let tools = changes.tools.filter(|tools| *tools != before.tools);
+    let enabled = changes.enabled.filter(|enabled| *enabled != before.enabled);
+    let unchanged = !resealing
+        && name.is_none()
+        && command.is_none()
+        && arguments.is_none()
+        && url.is_none()
+        && tools.is_none()
+        && enabled.is_none();
 
     let mut query = QueryBuilder::<Postgres>::new("UPDATE mcp_servers SET ");
     let mut assignments = query.separated(", ");
-    if let Some(name) = changes.name {
+    if let Some(name) = name {
         assignments.push("name = ").push_bind_unseparated(name);
     }
-    if let Some(command) = changes.command {
+    if let Some(command) = command {
         assignments
             .push("command = ")
             .push_bind_unseparated(command);
     }
-    if let Some(arguments) = changes.arguments {
+    if let Some(arguments) = arguments {
         assignments
             .push("arguments = ")
             .push_bind_unseparated(arguments);
     }
-    if let Some(url) = changes.url {
+    if let Some(url) = url {
         assignments.push("url = ").push_bind_unseparated(url);
     }
-    if let Some(tools) = changes.tools {
+    if let Some(tools) = tools {
         assignments.push("tools = ").push_bind_unseparated(tools);
     }
-    if let Some(enabled) = changes.enabled {
+    if let Some(enabled) = enabled {
         assignments
             .push("enabled = ")
             .push_bind_unseparated(enabled);
@@ -475,11 +505,15 @@ pub async fn update_authorized(
         .push_bind(server)
         .push(" RETURNING ")
         .push(COLUMNS);
-    let row: Row = query
-        .build_query_as()
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(classify)?;
+    let row: Row = if unchanged {
+        stored
+    } else {
+        query
+            .build_query_as()
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(classify)?
+    };
     transaction.commit().await?;
 
     let after = row.record(secrets);
@@ -519,13 +553,28 @@ pub async fn authorize_admin(pool: &PgPool, organization: Uuid, user: Uuid) -> M
     Ok(())
 }
 
-/// Every server of `organization`, with no caller to authorize.
+/// Every server of `organization` whose secrets open, with no caller to authorize.
 pub async fn for_organization(
     pool: &PgPool,
     key: &MasterKey,
     organization: Uuid,
 ) -> McpServerResult<Vec<McpServerRecord>> {
-    open_all(rows(pool, organization).await?, key)
+    let mut records = Vec::new();
+    for row in rows(pool, organization).await? {
+        let server = row.id;
+        match row.open(key) {
+            Ok(record) => records.push(record),
+            Err(error) => {
+                tracing::warn!(
+                    %organization,
+                    %server,
+                    %error,
+                    "Leaving out an MCP server whose secrets do not open"
+                );
+            }
+        }
+    }
+    Ok(records)
 }
 
 /// Whether `organization` has a server switched on, without opening any secrets.
@@ -589,7 +638,7 @@ pub async fn set_workspace_overrides_authorized(
 
     let servers: Vec<Uuid> = changes.keys().copied().collect();
     let owned: BTreeSet<Uuid> = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM mcp_servers WHERE organization_id = $1 AND id = ANY($2)",
+        "SELECT id FROM mcp_servers WHERE organization_id = $1 AND id = ANY($2) ORDER BY id FOR UPDATE",
     )
     .bind(organization)
     .bind(&servers)

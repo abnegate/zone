@@ -1,20 +1,60 @@
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use abnegate_secret::MasterKey;
 use abnegate_secret::SecretValue;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
+
+use crate::services::mcp_servers::transport::Transport;
 
 use super::*;
 
 const ENVELOPE_OPENING: &str = "ENC[";
 const TOKEN: &str = "ghp_mcp_server_token";
 const AUTHORIZATION: &str = "Bearer mcp-header-secret";
+const POLL: Duration = Duration::from_millis(20);
+const PATIENCE: Duration = Duration::from_secs(20);
+const WAITING: &str =
+    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock')";
+
+fn database() -> String {
+    std::env::var("TEST_DATABASE_URL").expect("isolated test database")
+}
 
 async fn pool() -> PgPool {
-    PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+    PgPool::connect(&database())
         .await
         .expect("the test database accepts connections")
+}
+
+async fn session() -> (PgPool, i32) {
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database())
+        .await
+        .expect("the test database accepts connections");
+    let backend = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .expect("the session's backend");
+    (pool, backend)
+}
+
+async fn waits(pool: &PgPool, backend: i32) {
+    tokio::time::timeout(PATIENCE, async {
+        while !sqlx::query_scalar::<_, bool>(WAITING)
+            .bind(backend)
+            .fetch_one(pool)
+            .await
+            .expect("the session's activity")
+        {
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("the session waits on a lock");
 }
 
 struct Fixture {
@@ -75,11 +115,11 @@ async fn join_organization(pool: &PgPool, organization: Uuid, user: Uuid, role: 
     .expect("an organization membership");
 }
 
-async fn join_workspace(pool: &PgPool, workspace: Uuid, user: Uuid, role: &str) {
+async fn join_workspace(pool: &PgPool, workspace: Uuid, user: Uuid, role: WorkspaceRole) {
     sqlx::query("INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)")
         .bind(workspace)
         .bind(user)
-        .bind(role)
+        .bind(role.as_str())
         .execute(pool)
         .await
         .expect("a workspace membership");
@@ -118,7 +158,7 @@ fn secrets(entries: &[(&str, &str)]) -> BTreeMap<String, SecretValue> {
 fn stdio(name: &str) -> NewMcpServer {
     NewMcpServer {
         name: name.to_owned(),
-        transport: "stdio".to_owned(),
+        transport: Transport::Stdio.as_str().to_owned(),
         command: Some("npx".to_owned()),
         arguments: vec![
             "-y".to_owned(),
@@ -135,7 +175,7 @@ fn stdio(name: &str) -> NewMcpServer {
 fn http(name: &str) -> NewMcpServer {
     NewMcpServer {
         name: name.to_owned(),
-        transport: "http".to_owned(),
+        transport: Transport::Http.as_str().to_owned(),
         command: None,
         arguments: Vec::new(),
         url: Some("http://127.0.0.1:9000/mcp".to_owned()),
@@ -175,6 +215,50 @@ impl Fixture {
             .fetch_one(&self.pool)
             .await
             .expect("the server's row")
+    }
+
+    async fn read(&self, server: Uuid) -> McpServerRecord {
+        get_authorized(
+            &self.pool,
+            &self.key,
+            self.organization,
+            server,
+            self.member,
+        )
+        .await
+        .expect("a member reads the server")
+    }
+
+    async fn version(&self, server: Uuid) -> String {
+        sqlx::query_scalar("SELECT xmin::text FROM mcp_servers WHERE id = $1")
+            .bind(server)
+            .fetch_one(&self.pool)
+            .await
+            .expect("the row's version")
+    }
+
+    async fn replace_secrets(&self, server: Uuid, sealed: &str) {
+        sqlx::query("UPDATE mcp_servers SET secrets = $2 WHERE id = $1")
+            .bind(server)
+            .bind(sealed)
+            .execute(&self.pool)
+            .await
+            .expect("the stored secrets are replaced");
+    }
+
+    async fn overrides(
+        &self,
+        pool: &PgPool,
+        changes: BTreeMap<Uuid, Option<bool>>,
+    ) -> McpServerResult<BTreeMap<Uuid, bool>> {
+        set_workspace_overrides_authorized(
+            pool,
+            self.organization,
+            self.workspace,
+            self.admin,
+            changes,
+        )
+        .await
     }
 
     async fn count(&self, table: &str) -> i64 {
@@ -264,6 +348,167 @@ async fn secrets_sealed_under_another_key_do_not_open() {
 
     assert!(matches!(&error, McpServerError::Sealing(_)), "{error:?}");
     assert!(!error.to_string().contains(TOKEN), "{error}");
+}
+
+#[tokio::test]
+async fn secrets_that_do_not_open_name_the_server_and_never_the_sealed_text() {
+    let fixture = tenant().await;
+    let broken = fixture.create(http("docs")).await;
+    let healthy = fixture.create(http("wiki")).await;
+    let other = MasterKey::generate().expect("a key");
+    let foreign = encrypt_value(&SecretValue::new("{}"), &other).expect("an envelope");
+    fixture.replace_secrets(broken.id, &foreign).await;
+    let expected = format!(
+        "The secrets of MCP server {} did not open: Decryption failed: invalid key or corrupted value",
+        broken.id
+    );
+
+    let listed = list_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        fixture.member,
+    )
+    .await
+    .expect_err("one unopenable server fails the list");
+    assert!(
+        matches!(&listed, McpServerError::Sealing(message) if *message == expected),
+        "{listed:?}"
+    );
+    assert!(!listed.to_string().contains(&foreign), "{listed}");
+
+    let read = get_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        broken.id,
+        fixture.member,
+    )
+    .await
+    .expect_err("the server does not open");
+    assert_eq!(read.to_string(), expected);
+    let updated = fixture
+        .update(
+            broken.id,
+            McpServerChanges {
+                enabled: Some(false),
+                ..McpServerChanges::default()
+            },
+        )
+        .await
+        .map(|_| ())
+        .expect_err("an unopenable server is not updated");
+    assert_eq!(updated.to_string(), expected);
+    assert!(fixture.read(healthy.id).await.enabled);
+
+    let unreadable = encrypt_value(&SecretValue::new(TOKEN), &fixture.key).expect("an envelope");
+    fixture.replace_secrets(broken.id, &unreadable).await;
+    let malformed = fixture
+        .update(broken.id, McpServerChanges::default())
+        .await
+        .map(|_| ())
+        .expect_err("secrets that are not the sealed document do not open");
+    assert_eq!(
+        malformed.to_string(),
+        format!(
+            "The stored secrets of MCP server {} are malformed",
+            broken.id
+        )
+    );
+    assert!(!malformed.to_string().contains(TOKEN), "{malformed}");
+}
+
+#[tokio::test]
+async fn the_loader_leaves_out_an_unopenable_server_that_still_fails_the_list() {
+    let fixture = tenant().await;
+    let broken = fixture.create(http("docs")).await;
+    let healthy = fixture.create(http("wiki")).await;
+    let other = MasterKey::generate().expect("a key");
+    let foreign = encrypt_value(&SecretValue::new("{}"), &other).expect("an envelope");
+    fixture.replace_secrets(broken.id, &foreign).await;
+
+    let loaded = for_organization(&fixture.pool, &fixture.key, fixture.organization)
+        .await
+        .expect("the hub loader reads the servers that open");
+    let names: Vec<&str> = loaded.iter().map(|server| server.name.as_str()).collect();
+    assert_eq!(names, ["wiki"]);
+    assert_eq!(loaded[0].secrets, healthy.secrets);
+
+    let listed = list_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        fixture.member,
+    )
+    .await;
+    assert!(
+        matches!(listed, Err(McpServerError::Sealing(_))),
+        "{listed:?}"
+    );
+
+    delete_authorized(
+        &fixture.pool,
+        fixture.organization,
+        broken.id,
+        fixture.admin,
+    )
+    .await
+    .expect("an admin deletes a server whose secrets do not open");
+    let listed = list_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        fixture.member,
+    )
+    .await
+    .expect("the list opens again");
+    assert_eq!(listed.len(), 1);
+}
+
+#[tokio::test]
+async fn header_names_that_differ_only_by_case_are_invalid() {
+    let fixture = tenant().await;
+    let expected = "`headers` names `authorization` twice: header names ignore case";
+
+    let mut new = http("docs");
+    new.headers = secrets(&[
+        ("Authorization", AUTHORIZATION),
+        ("authorization", "second"),
+    ]);
+    let created = create_authorized(
+        &fixture.pool,
+        &fixture.key,
+        fixture.organization,
+        fixture.admin,
+        new,
+    )
+    .await;
+    assert!(
+        matches!(&created, Err(McpServerError::Invalid(message)) if message == expected),
+        "{created:?}"
+    );
+    assert_eq!(fixture.count("mcp_servers").await, 0);
+
+    let created = fixture.create(http("docs")).await;
+    let sealed = fixture.stored(created.id).await;
+    let updated = fixture
+        .update(
+            created.id,
+            McpServerChanges {
+                headers: Some(BTreeMap::from([
+                    ("Authorization".to_owned(), None),
+                    ("authorization".to_owned(), Some(SecretValue::new("second"))),
+                ])),
+                ..McpServerChanges::default()
+            },
+        )
+        .await
+        .map(|_| ());
+    assert!(
+        matches!(&updated, Err(McpServerError::Invalid(message)) if message == expected),
+        "{updated:?}"
+    );
+    assert_eq!(fixture.stored(created.id).await, sealed);
 }
 
 #[tokio::test]
@@ -442,6 +687,246 @@ async fn the_schema_refuses_invalid_rows() {
 }
 
 #[tokio::test]
+async fn a_check_the_module_does_not_know_stays_a_database_error() {
+    let pool = pool().await;
+    let mut connection = pool.acquire().await.expect("a connection");
+    sqlx::query(
+        "CREATE TEMPORARY TABLE probes (value integer CONSTRAINT probes_value_check CHECK (value > 0))",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("a table with a check");
+    let refused = sqlx::query("INSERT INTO probes (value) VALUES (0)")
+        .execute(&mut *connection)
+        .await
+        .expect_err("the check refuses the row");
+    assert_eq!(
+        refused
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("probes_value_check")
+    );
+
+    let classified = classify(refused);
+
+    assert!(
+        matches!(classified, McpServerError::Database(_)),
+        "{classified:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_update_that_changes_nothing_writes_nothing() {
+    let fixture = tenant().await;
+    let created = fixture.create(http("docs")).await;
+    let version = fixture.version(created.id).await;
+    let sealed = fixture.stored(created.id).await;
+
+    for changes in [
+        McpServerChanges::default(),
+        McpServerChanges {
+            name: Some(created.name.clone()),
+            command: None,
+            arguments: Some(created.arguments.clone()),
+            url: created.url.clone(),
+            tools: Some(created.tools.clone()),
+            enabled: Some(created.enabled),
+            environment: Some(BTreeMap::from([("GITHUB_TOKEN".to_owned(), None)])),
+            headers: Some(BTreeMap::from([(
+                "Authorization".to_owned(),
+                Some(SecretValue::new(AUTHORIZATION)),
+            )])),
+        },
+    ] {
+        fixture
+            .update(created.id, changes)
+            .await
+            .expect("an admin repeats the stored values");
+
+        assert_eq!(fixture.version(created.id).await, version);
+        assert_eq!(fixture.stored(created.id).await, sealed);
+        let read = fixture.read(created.id).await;
+        assert_eq!(read.updated_at, created.updated_at);
+        assert_eq!(read.secrets, created.secrets);
+    }
+}
+
+#[tokio::test]
+async fn every_real_change_moves_updated_at() {
+    let fixture = tenant().await;
+    let created = fixture.create(http("docs")).await;
+    let cases = [
+        (
+            "tools",
+            McpServerChanges {
+                tools: Some(None),
+                ..McpServerChanges::default()
+            },
+        ),
+        (
+            "enabled",
+            McpServerChanges {
+                enabled: Some(false),
+                ..McpServerChanges::default()
+            },
+        ),
+        (
+            "a secret value",
+            McpServerChanges {
+                environment: Some(BTreeMap::from([(
+                    "GITHUB_TOKEN".to_owned(),
+                    Some(SecretValue::new("rotated")),
+                )])),
+                ..McpServerChanges::default()
+            },
+        ),
+        (
+            "a removed header",
+            McpServerChanges {
+                headers: Some(BTreeMap::new()),
+                ..McpServerChanges::default()
+            },
+        ),
+        (
+            "name",
+            McpServerChanges {
+                name: Some("wiki".to_owned()),
+                ..McpServerChanges::default()
+            },
+        ),
+        (
+            "url",
+            McpServerChanges {
+                url: Some("http://127.0.0.1:9001/mcp".to_owned()),
+                ..McpServerChanges::default()
+            },
+        ),
+    ];
+
+    let mut previous = created.updated_at;
+    let mut unmoved = Vec::new();
+    for (changed, changes) in cases {
+        fixture
+            .update(created.id, changes)
+            .await
+            .expect("an admin changes the server");
+        let moved = fixture.read(created.id).await.updated_at;
+        if moved <= previous {
+            unmoved.push(changed);
+        }
+        previous = moved;
+    }
+    assert_eq!(unmoved, Vec::<&str>::new());
+
+    let read = fixture.read(created.id).await;
+    assert_eq!(read.name, "wiki");
+    assert_eq!(read.tools, None);
+    assert!(!read.enabled);
+    assert_eq!(
+        exposed(&read.secrets.environment),
+        BTreeMap::from([("GITHUB_TOKEN", "rotated")])
+    );
+    assert!(read.secrets.headers.is_empty());
+}
+
+#[tokio::test]
+async fn a_change_beside_repeated_secrets_does_not_reseal_them() {
+    let fixture = tenant().await;
+    let created = fixture.create(http("docs")).await;
+    let sealed = fixture.stored(created.id).await;
+
+    fixture
+        .update(
+            created.id,
+            McpServerChanges {
+                enabled: Some(false),
+                environment: Some(BTreeMap::from([("GITHUB_TOKEN".to_owned(), None)])),
+                headers: Some(BTreeMap::from([(
+                    "Authorization".to_owned(),
+                    Some(SecretValue::new(AUTHORIZATION)),
+                )])),
+                ..McpServerChanges::default()
+            },
+        )
+        .await
+        .expect("an admin turns the server off");
+
+    assert!(!fixture.read(created.id).await.enabled);
+    assert_eq!(fixture.stored(created.id).await, sealed);
+}
+
+#[tokio::test]
+async fn two_updates_of_one_server_keep_both_secrets() {
+    let fixture = tenant().await;
+    let created = fixture.create(http("docs")).await;
+    let (one, first) = session().await;
+    let (two, second) = session().await;
+    let mut holding = fixture.pool.begin().await.expect("a transaction");
+    sqlx::query("SELECT 1 FROM mcp_servers WHERE id = $1 FOR UPDATE")
+        .bind(created.id)
+        .execute(&mut *holding)
+        .await
+        .expect("the server is held");
+
+    let environment = update_authorized(
+        &one,
+        &fixture.key,
+        fixture.organization,
+        created.id,
+        fixture.admin,
+        McpServerChanges {
+            tools: Some(None),
+            environment: Some(BTreeMap::from([
+                ("GITHUB_TOKEN".to_owned(), None),
+                ("ADDED".to_owned(), Some(SecretValue::new("first"))),
+            ])),
+            ..McpServerChanges::default()
+        },
+    );
+    let headers = async {
+        waits(&fixture.pool, first).await;
+        update_authorized(
+            &two,
+            &fixture.key,
+            fixture.organization,
+            created.id,
+            fixture.owner,
+            McpServerChanges {
+                tools: Some(Some(vec!["fetch".to_owned()])),
+                headers: Some(BTreeMap::from([
+                    ("Authorization".to_owned(), None),
+                    ("X-Added".to_owned(), Some(SecretValue::new("second"))),
+                ])),
+                ..McpServerChanges::default()
+            },
+        )
+        .await
+    };
+    let release = async {
+        waits(&fixture.pool, second).await;
+        holding.commit().await.expect("the server is released");
+    };
+    let (environment, headers, ()) = tokio::join!(environment, headers, release);
+
+    environment.expect("the first update lands");
+    headers.expect("the second update lands");
+    let read = fixture.read(created.id).await;
+    assert_eq!(
+        exposed(&read.secrets.environment),
+        BTreeMap::from([("ADDED", "first"), ("GITHUB_TOKEN", TOKEN)])
+    );
+    assert_eq!(
+        exposed(&read.secrets.headers),
+        BTreeMap::from([("Authorization", AUTHORIZATION), ("X-Added", "second")])
+    );
+    assert!(
+        read.tools.is_none() || read.tools == Some(vec!["fetch".to_owned()]),
+        "{:?}",
+        read.tools
+    );
+}
+
+#[tokio::test]
 async fn an_update_changes_only_the_given_fields() {
     let fixture = tenant().await;
     let created = fixture.create(http("docs")).await;
@@ -464,7 +949,7 @@ async fn an_update_changes_only_the_given_fields() {
     assert_eq!(updated.tools, created.tools);
     assert_eq!(updated.secrets, created.secrets);
     assert!(fixture.stored(created.id).await.is_some());
-    assert!(updated.updated_at >= created.updated_at);
+    assert!(updated.updated_at > created.updated_at);
     let read = get_authorized(
         &fixture.pool,
         &fixture.key,
@@ -730,13 +1215,39 @@ async fn a_server_of_another_organization_is_not_found() {
         matches!(delete, Err(McpServerError::NotFound(SERVER_NOT_FOUND))),
         "{delete:?}"
     );
+    let update = fixture
+        .update(
+            created.id,
+            McpServerChanges {
+                enabled: Some(false),
+                name: Some("renamed".to_owned()),
+                ..McpServerChanges::default()
+            },
+        )
+        .await
+        .map(|_| ());
+    assert!(
+        matches!(update, Err(McpServerError::NotFound(SERVER_NOT_FOUND))),
+        "{update:?}"
+    );
+
     assert_eq!(other.count("mcp_servers").await, 1);
+    let kept = other.read(created.id).await;
+    assert_eq!(kept.name, "github");
+    assert!(kept.enabled);
+    assert_eq!(kept.updated_at, created.updated_at);
 }
 
 #[tokio::test]
 async fn workspace_overrides_are_set_and_cleared() {
     let fixture = tenant().await;
-    join_workspace(&fixture.pool, fixture.workspace, fixture.member, "admin").await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.member,
+        WorkspaceRole::Admin,
+    )
+    .await;
     let github = fixture.create(stdio("github")).await;
     let docs = fixture.create(http("docs")).await;
 
@@ -784,7 +1295,13 @@ async fn workspace_overrides_are_set_and_cleared() {
 #[tokio::test]
 async fn a_viewer_reads_overrides_and_cannot_write_them() {
     let fixture = tenant().await;
-    join_workspace(&fixture.pool, fixture.workspace, fixture.member, "viewer").await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.member,
+        WorkspaceRole::Viewer,
+    )
+    .await;
     let github = fixture.create(http("github")).await;
 
     let (servers, overrides) = workspace_list_authorized(
@@ -831,7 +1348,13 @@ async fn a_viewer_reads_overrides_and_cannot_write_them() {
 async fn an_override_of_a_foreign_server_is_invalid() {
     let fixture = tenant().await;
     let other = tenant().await;
-    join_workspace(&fixture.pool, fixture.workspace, fixture.admin, "owner").await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.admin,
+        WorkspaceRole::Owner,
+    )
+    .await;
     let own = fixture.create(stdio("github")).await;
     let foreign = other.create(stdio("github")).await;
 
@@ -861,7 +1384,13 @@ async fn an_override_of_a_foreign_server_is_invalid() {
 async fn overrides_on_a_workspace_of_another_organization_are_not_found() {
     let fixture = tenant().await;
     let other = tenant().await;
-    join_workspace(&other.pool, other.workspace, fixture.admin, "owner").await;
+    join_workspace(
+        &other.pool,
+        other.workspace,
+        fixture.admin,
+        WorkspaceRole::Owner,
+    )
+    .await;
     let own = fixture.create(stdio("github")).await;
 
     let result = set_workspace_overrides_authorized(
@@ -900,7 +1429,13 @@ async fn overrides_on_a_workspace_of_another_organization_are_not_found() {
 #[tokio::test]
 async fn deleting_the_organization_removes_its_servers_and_overrides() {
     let fixture = tenant().await;
-    join_workspace(&fixture.pool, fixture.workspace, fixture.admin, "owner").await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.admin,
+        WorkspaceRole::Owner,
+    )
+    .await;
     let created = fixture.create(stdio("github")).await;
     set_workspace_overrides_authorized(
         &fixture.pool,
@@ -926,7 +1461,13 @@ async fn deleting_the_organization_removes_its_servers_and_overrides() {
 #[tokio::test]
 async fn deleting_a_server_removes_its_overrides() {
     let fixture = tenant().await;
-    join_workspace(&fixture.pool, fixture.workspace, fixture.admin, "owner").await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.admin,
+        WorkspaceRole::Owner,
+    )
+    .await;
     let created = fixture.create(stdio("github")).await;
     set_workspace_overrides_authorized(
         &fixture.pool,
@@ -948,6 +1489,131 @@ async fn deleting_a_server_removes_its_overrides() {
     .expect("an admin deletes the server");
 
     assert_eq!(fixture.count("workspace_mcp_servers").await, 0);
+}
+
+#[tokio::test]
+async fn deleting_a_workspace_removes_its_overrides() {
+    let fixture = tenant().await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.admin,
+        WorkspaceRole::Owner,
+    )
+    .await;
+    let created = fixture.create(stdio("github")).await;
+    fixture
+        .overrides(&fixture.pool, BTreeMap::from([(created.id, Some(false))]))
+        .await
+        .expect("an override");
+    assert_eq!(fixture.count("workspace_mcp_servers").await, 1);
+
+    sqlx::query("DELETE FROM workspaces WHERE id = $1")
+        .bind(fixture.workspace)
+        .execute(&fixture.pool)
+        .await
+        .expect("the workspace is deleted");
+
+    assert_eq!(fixture.count("workspace_mcp_servers").await, 0);
+    assert_eq!(fixture.count("mcp_servers").await, 1);
+}
+
+#[tokio::test]
+async fn an_override_of_a_server_deleted_meanwhile_is_invalid() {
+    let fixture = tenant().await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.admin,
+        WorkspaceRole::Owner,
+    )
+    .await;
+    let kept = fixture.create(stdio("github")).await;
+    let deleted = fixture.create(stdio("gitlab")).await;
+    let (session, backend) = session().await;
+    let mut deleting = fixture.pool.begin().await.expect("a transaction");
+    sqlx::query("DELETE FROM mcp_servers WHERE id = $1")
+        .bind(deleted.id)
+        .execute(&mut *deleting)
+        .await
+        .expect("the server is deleted, not yet committed");
+
+    let overriding = fixture.overrides(
+        &session,
+        BTreeMap::from([(kept.id, Some(false)), (deleted.id, Some(false))]),
+    );
+    let commit = async {
+        waits(&fixture.pool, backend).await;
+        deleting.commit().await.expect("the delete commits");
+    };
+    let (result, ()) = tokio::join!(overriding, commit);
+
+    assert!(
+        matches!(&result, Err(McpServerError::Invalid(message)) if message == FOREIGN_SERVER),
+        "{result:?}"
+    );
+    assert_eq!(fixture.count("workspace_mcp_servers").await, 0);
+}
+
+#[tokio::test]
+async fn opposite_overrides_of_one_workspace_take_turns() {
+    let fixture = tenant().await;
+    join_workspace(
+        &fixture.pool,
+        fixture.workspace,
+        fixture.admin,
+        WorkspaceRole::Owner,
+    )
+    .await;
+    let github = fixture.create(stdio("github")).await.id;
+    let gitlab = fixture.create(stdio("gitlab")).await.id;
+    let (low, high) = (github.min(gitlab), github.max(gitlab));
+    fixture
+        .overrides(
+            &fixture.pool,
+            BTreeMap::from([(low, Some(false)), (high, Some(false))]),
+        )
+        .await
+        .expect("both overrides exist");
+    let (one, first) = session().await;
+    let (two, second) = session().await;
+    let mut holding = fixture.pool.begin().await.expect("a transaction");
+    sqlx::query(
+        "SELECT 1 FROM workspace_mcp_servers WHERE workspace_id = $1 AND server_id = $2 FOR UPDATE",
+    )
+    .bind(fixture.workspace)
+    .bind(low)
+    .execute(&mut *holding)
+    .await
+    .expect("the lower override is held");
+
+    let earlier = fixture.overrides(&one, BTreeMap::from([(low, Some(true)), (high, None)]));
+    let later = async {
+        waits(&fixture.pool, first).await;
+        fixture
+            .overrides(&two, BTreeMap::from([(low, None), (high, Some(true))]))
+            .await
+    };
+    let release = async {
+        waits(&fixture.pool, second).await;
+        holding.commit().await.expect("the override is released");
+    };
+    let (earlier, later, ()) = tokio::join!(earlier, later, release);
+
+    assert_eq!(
+        earlier.expect("the earlier change lands"),
+        BTreeMap::from([(low, true)])
+    );
+    assert_eq!(
+        later.expect("the later change lands"),
+        BTreeMap::from([(high, true)])
+    );
+    assert_eq!(
+        workspace_overrides(&fixture.pool, fixture.workspace)
+            .await
+            .expect("the overrides"),
+        BTreeMap::from([(high, true)])
+    );
 }
 
 #[tokio::test]
