@@ -588,6 +588,26 @@ test.describe('Tasks Page', () => {
       await expect(card(column(page, 'In review'), 'Implement login page')).toBeInViewport();
     });
 
+    test('a keyboard move reaches a column that was scrolled out of view', async ({
+      context,
+      page,
+    }) => {
+      const server = await serveTasks(context, page);
+      await expect(column(page, 'Cancelled')).not.toBeInViewport();
+
+      const grip = await pickUp(page, 'Implement login page', 'Planned');
+      for (const stage of STAGE_LABELS.slice(1)) {
+        await pressAndAnnounce(page, 'ArrowRight', `Implement login page is over ${stage}.`);
+      }
+      await pressAndAnnounce(page, 'Space', 'Implement login page moved to Cancelled.');
+
+      await expect.poll(() => moves(server)).toEqual([
+        { method: 'PUT', id: 'task-1', body: { status: 'cancelled' } },
+      ]);
+      await expect(card(column(page, 'Cancelled'), 'Implement login page')).toBeInViewport();
+      await expect(grip).toBeFocused();
+    });
+
     test('a refused keyboard move keeps focus on the card it puts back', async ({
       context,
       page,
@@ -826,6 +846,41 @@ test.describe('Tasks Page', () => {
 
       await expect(page).toHaveURL('/tasks?task=task-7');
       await expect(page.locator('.task-details')).toBeVisible();
+    });
+
+    test('a card is renamed from its menu without opening the editor', async ({ context, page }) => {
+      const server = await serveTasks(context, page);
+
+      await chooseFromMenu(page, 'Ship onboarding', 'Rename');
+      const input = page.getByRole('textbox', { name: 'Task title' });
+      await expect(input).toBeFocused();
+      await expect(input).toHaveValue('Ship onboarding');
+      await input.fill('Ship the onboarding flow');
+      await input.press('Enter');
+
+      await expect.poll(() => server.mutations).toEqual([
+        { method: 'PUT', id: 'task-7', body: { title: 'Ship the onboarding flow' } },
+      ]);
+      await expect(input).toHaveCount(0);
+      await expect(
+        page.getByRole('button', { name: 'Ship the onboarding flow', exact: true })
+      ).toBeFocused();
+      await expect(card(column(page, 'Completed'), 'Ship the onboarding flow')).toBeVisible();
+      await expect(page).toHaveURL('/tasks');
+    });
+
+    test('escape leaves a rename from the menu unsaved', async ({ context, page }) => {
+      const server = await serveTasks(context, page);
+
+      await chooseFromMenu(page, 'Ship onboarding', 'Rename');
+      const input = page.getByRole('textbox', { name: 'Task title' });
+      await input.fill('Something else');
+      await input.press('Escape');
+
+      await expect(input).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Ship onboarding', exact: true })).toBeFocused();
+      expect(server.mutations).toEqual([]);
+      await expect(page).toHaveURL('/tasks');
     });
 
     test('a rename in progress survives its card moving to another column', async ({
