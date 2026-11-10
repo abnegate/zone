@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, EmptyState, Select } from '@zone/ui';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { client } from '../../../api/client';
@@ -54,7 +54,13 @@ export default function TasksPage() {
   const [executionTask, setExecutionTask] = useState<Task | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<Task | null>(null);
+  const [deletedIds, setDeletedIds] = useState<ReadonlySet<string>>(() => new Set());
   const [showCreateModal, setShowCreateModal] = useState(false);
+
+  const shown = useMemo(
+    () => (deletedIds.size === 0 ? tasks : tasks.filter((task) => !deletedIds.has(task.id))),
+    [tasks, deletedIds]
+  );
 
   const projectNames = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
@@ -81,13 +87,16 @@ export default function TasksPage() {
     }
   }, [linkedTaskId, tasks, taskParam, searchParams, setSearchParams]);
 
-  const openEditor = (id: string) => {
-    const next = new URLSearchParams(searchParams);
-    next.set('task', id);
-    next.delete('id');
-    setSearchParams(next);
-    setExecutionTask(null);
-  };
+  const openEditor = useCallback(
+    (id: string) => {
+      const next = new URLSearchParams(searchParams);
+      next.set('task', id);
+      next.delete('id');
+      setSearchParams(next);
+      setExecutionTask(null);
+    },
+    [searchParams, setSearchParams]
+  );
 
   const closeEditor = () => {
     setExecutionTask(null);
@@ -112,28 +121,32 @@ export default function TasksPage() {
 
   const confirmDelete = async (task: Task) => {
     await deleteTask(task.id);
+    setDeletedIds((current) => new Set(current).add(task.id));
     setDeleting(null);
   };
 
-  const actions: BoardActions = {
-    open: (task) => openEditor(task.id),
-    run: setExecutionTask,
-    rename: (task) => setRenamingId(task.id),
-    retitle: async (task, title) => {
-      await updateListedTask(task.id, { title });
-    },
-    finish: () => setRenamingId((current) => (current === renamingId ? null : current)),
-    remove: setDeleting,
-    move: async (task, status) => {
-      try {
-        await moveTask(task.id, status);
-      } catch (failure) {
-        toast.error(`Couldn't move ${task.title}`, {
-          description: failure instanceof Error ? failure.message : MOVE_FAILED,
-        });
-      }
-    },
-  };
+  const actions = useMemo<BoardActions>(
+    () => ({
+      open: (task) => openEditor(task.id),
+      run: setExecutionTask,
+      rename: (task) => setRenamingId(task.id),
+      retitle: async (task, title) => {
+        await updateListedTask(task.id, { title });
+      },
+      finish: (task) => setRenamingId((current) => (current === task.id ? null : current)),
+      remove: setDeleting,
+      move: async (task, status) => {
+        try {
+          await moveTask(task.id, status);
+        } catch (failure) {
+          toast.error(`Couldn't move ${task.title}`, {
+            description: failure instanceof Error ? failure.message : MOVE_FAILED,
+          });
+        }
+      },
+    }),
+    [openEditor, updateListedTask, moveTask]
+  );
 
   const loading = tasksLoading || projectsLoading;
   const displayError = tasksError || (editorFailed ? editorError : null);
@@ -190,7 +203,7 @@ export default function TasksPage() {
           />
         ) : loading ? (
           <Skeleton />
-        ) : tasks.length === 0 ? (
+        ) : shown.length === 0 ? (
           <EmptyState
             className="tasks-empty"
             icon={
@@ -216,7 +229,7 @@ export default function TasksPage() {
             }
           />
         ) : (
-          <Board tasks={tasks} projects={projectNames} renaming={renamingId} actions={actions} />
+          <Board tasks={shown} projects={projectNames} renaming={renamingId} actions={actions} />
         )}
       </div>
 

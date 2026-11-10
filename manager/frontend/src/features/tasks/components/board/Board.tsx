@@ -22,6 +22,7 @@ import { CardBody } from './CardBody';
 import { Column } from './Column';
 import { destination, keyboardOptions, stageUnder } from './drop';
 import { useFollowedCard } from './useFollowedCard';
+import { useNeighbourFocus } from './useNeighbourFocus';
 import './Board.css';
 
 export interface BoardProps {
@@ -72,6 +73,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
   const unrendered = useMemo(() => document.createElement('div'), []);
   const root = useRef<HTMLElement>(null);
   const follow = useFollowedCard(root);
+  useNeighbourFocus(root, groups);
   const reducedMotion = useMediaQuery(REDUCED_MOTION);
   const keyboard = useMemo(() => keyboardOptions(reducedMotion), [reducedMotion]);
   const sensors = useSensors(

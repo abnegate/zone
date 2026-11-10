@@ -657,6 +657,7 @@ test.describe('Tasks Page', () => {
       );
       expect(server.mutations).toEqual([{ method: 'DELETE', id: 'task-8', body: null }]);
       await expect(page).toHaveURL('/tasks');
+      await expect(column(page, 'Cancelled')).toBeFocused();
     });
 
     test.describe('on a touch screen', () => {

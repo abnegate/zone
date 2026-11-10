@@ -240,6 +240,12 @@ function count(name: string): string | null | undefined {
   return column(name).querySelector('.board-column-count')?.textContent;
 }
 
+function focusedTitle(): string | undefined {
+  const active = document.activeElement;
+  if (!active?.classList.contains('task-card-open')) return undefined;
+  return active.closest<HTMLElement>('li.task-card')?.dataset.taskId;
+}
+
 function openTitle(title: string): Promise<HTMLElement> {
   return screen.findByRole('button', { name: title });
 }
@@ -502,6 +508,7 @@ describe('TasksPage', () => {
     await waitFor(() => {
       expect(screen.queryByRole('textbox', { name: 'Task title' })).not.toBeInTheDocument();
     });
+    await waitFor(() => expect(focusedTitle()).toBe('task-1'));
   });
 
   it('cancels a board rename with Escape without opening the task', async () => {
@@ -517,6 +524,7 @@ describe('TasksPage', () => {
     expect(screen.getByText('Implement login')).toBeInTheDocument();
     expect(document.querySelector('section.task-details')).toBeNull();
     expect(mockUpdateTask).not.toHaveBeenCalled();
+    await waitFor(() => expect(focusedTitle()).toBe('task-1'));
   });
 
   it('does not open the editor from the Run or Delete menu items', async () => {
@@ -859,6 +867,33 @@ describe('TasksPage', () => {
       await waitFor(() => {
         expect(screen.queryByRole('dialog', { name: dialogName })).not.toBeInTheDocument();
       });
+    });
+
+    it('moves focus to the next card in the column once the task is deleted', async () => {
+      const neighbour = { ...mockTasks[0], id: 'task-3', title: 'Write the docs' };
+      mockGetTasks.mockImplementation(() => Promise.resolve([...mockTasks, neighbour]));
+      mockDeleteTask.mockImplementation(() => Promise.resolve(undefined));
+      const dialog = await askToDelete();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete task' }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog', { name: dialogName })).not.toBeInTheDocument();
+      });
+      expect(screen.queryByRole('button', { name: 'Implement login' })).not.toBeInTheDocument();
+      await waitFor(() => expect(focusedTitle()).toBe('task-3'));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(focusedTitle()).toBe('task-3');
+    });
+
+    it('moves focus to the column once its last task is deleted', async () => {
+      mockDeleteTask.mockImplementation(() => Promise.resolve(undefined));
+      const dialog = await askToDelete();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete task' }));
+
+      await waitFor(() => expect(document.activeElement).toBe(column('Planned')));
+      expect(within(column('Planned')).getByText('No tasks')).toBeInTheDocument();
     });
 
     it('keeps the task when the dialog is cancelled', async () => {

@@ -1,8 +1,10 @@
-export const CARD_SELECTOR = 'li.task-card';
+const CARD_SELECTOR = 'li.task-card';
 
 export const HANDLE_SELECTOR = '.task-card-handle';
 
 export const TITLE_SELECTOR = '.task-card-open';
+
+const COLUMN_SELECTOR = 'section.board-column';
 
 export function focusLost(): boolean {
   const active = document.activeElement;
@@ -22,4 +24,11 @@ export function controlIn(
   selector: string
 ): HTMLElement | null {
   return cardIn(root, id)?.querySelector<HTMLElement>(selector) ?? null;
+}
+
+export function columnIn(root: ParentNode | null, stage: string): HTMLElement | undefined {
+  if (!root) return undefined;
+  return Array.from(root.querySelectorAll<HTMLElement>(COLUMN_SELECTOR)).find(
+    (column) => column.dataset.stage === stage
+  );
 }

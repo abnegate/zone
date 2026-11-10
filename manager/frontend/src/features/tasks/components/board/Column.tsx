@@ -15,7 +15,7 @@ export function Column({ stage, count, children }: ColumnProps) {
   const { isOver, setNodeRef } = useDroppable({ id: stage.id, data: { stage } });
 
   return (
-    <section className="board-column" data-stage={stage.id} aria-labelledby={heading}>
+    <section className="board-column" data-stage={stage.id} aria-labelledby={heading} tabIndex={-1}>
       <header className="board-column-header">
         <StatusIcon stage={stage.id} />
         <h2 id={heading}>{stage.label}</h2>

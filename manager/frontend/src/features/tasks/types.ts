@@ -120,7 +120,7 @@ export interface BoardActions {
   run: (task: Task) => void;
   rename: (task: Task) => void;
   retitle: (task: Task, title: string) => Promise<void>;
-  finish: () => void;
+  finish: (task: Task) => void;
   remove: (task: Task) => void;
   move: (task: Task, status: TaskStatus) => Promise<void>;
 }
