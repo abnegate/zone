@@ -35,6 +35,11 @@ const MAX_DESCRIPTION_LENGTH: usize = 50_000;
 /// The oldest issue a delivery can still turn into a new task
 const MAX_NEW_ISSUE_AGE: TimeDelta = TimeDelta::hours(24);
 
+const CREATED: &str = "created";
+const IN_PROGRESS: &str = "in_progress";
+const COMPLETE: &str = "complete";
+const CANCELLED: &str = "cancelled";
+
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Serialize)]
@@ -421,6 +426,11 @@ async fn admit(
 /// state the task did not follow, because a live run owns its status or the
 /// delivery is not later than the last one applied, is caught up with by a
 /// later delivery.
+///
+/// A close leaves a cancelled task cancelled and is stored as followed: it is
+/// either the cancellation coming back from the tracker, or a Linear
+/// `completed`, which arrives as the same closed state and cannot be told
+/// apart from it.
 async fn apply_to_linked(
     connection: &mut PgConnection,
     sync_config_id: Uuid,
@@ -484,12 +494,23 @@ async fn apply_to_linked(
         .state_change
         .target(&event.payload, previous.as_ref())
         .map(task_status);
+    let closed_as_cancelled = status == Some(COMPLETE)
+        && lock_task_status(&mut *connection, item.task_id)
+            .await?
+            .is_some_and(|current| current == CANCELLED);
+    if closed_as_cancelled {
+        tracing::info!(
+            "Task {} of issue {} for {sync_config_id} is cancelled, so the closed issue leaves its status alone",
+            item.task_id,
+            item.external_id
+        );
+    }
     let mut patch = tasks::Patch {
         id: item.task_id,
         title,
         description,
         acceptance_criteria: None,
-        status,
+        status: status.filter(|_| !closed_as_cancelled),
         priority: None,
         project_ids: None,
         require_plan_approval: None,
@@ -514,7 +535,7 @@ async fn apply_to_linked(
         event_type = SyncEventType::Update;
     }
     let followed = previous.and_then(|previous| previous.state);
-    if patch.status.is_none() && (refused || followed.is_some()) {
+    if !closed_as_cancelled && patch.status.is_none() && (refused || followed.is_some()) {
         applied.state = followed;
     }
 
@@ -579,11 +600,23 @@ async fn link_new_issue(
     Ok(Outcome::Created)
 }
 
+/// Holds the task row until the transaction ends, so a concurrent edit cannot
+/// change the status between this read and the update that depends on it.
+async fn lock_task_status(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1 FOR UPDATE")
+        .bind(task_id)
+        .fetch_optional(connection)
+        .await
+}
+
 fn task_status(state: IssueState) -> &'static str {
     match state {
-        IssueState::Closed => "complete",
-        IssueState::InProgress => "in_progress",
-        IssueState::Open => "created",
+        IssueState::Closed => COMPLETE,
+        IssueState::InProgress => IN_PROGRESS,
+        IssueState::Open => CREATED,
     }
 }
 
