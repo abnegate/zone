@@ -1632,7 +1632,11 @@ async fn test_task_list_with_filters() {
 
     let response = client
         .get_auth(
-            &format!("/api/workspaces/{}/tasks?status=created", workspace_id),
+            &format!(
+                "/api/workspaces/{}/tasks?status={}",
+                workspace_id,
+                zone_server::db::tasks::CREATED
+            ),
             &token,
         )
         .await;

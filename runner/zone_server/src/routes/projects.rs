@@ -744,8 +744,8 @@ pub struct AutomationCounts {
 }
 
 impl AutomationCounts {
-    /// Tally a project's tasks. A cancelled task parked by the driver is not
-    /// counted as paused: resuming the project would not pick it up.
+    /// A cancelled task the driver parked is not counted as paused: resuming
+    /// the project would not pick it up.
     fn of(listed: &[AutomationTask]) -> Self {
         let stage =
             |task: &AutomationTask| task.stage.as_deref().and_then(auto_projects::Stage::parse);

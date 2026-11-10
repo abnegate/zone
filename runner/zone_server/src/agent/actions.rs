@@ -636,21 +636,21 @@ mod tests {
             let offered = schema["properties"]["status"]["enum"]
                 .as_array()
                 .expect("status is an enumeration");
-            assert!(offered.contains(&json!("paused")), "{schema}");
-            assert!(offered.contains(&json!("cancelled")), "{schema}");
+            assert!(offered.contains(&json!(tasks::PAUSED)), "{schema}");
+            assert!(offered.contains(&json!(tasks::CANCELLED)), "{schema}");
         }
         assert!(
             listed["properties"]["status"]["enum"]
                 .as_array()
                 .expect("status is an enumeration")
-                .contains(&json!("queued")),
+                .contains(&json!(tasks::QUEUED)),
             "{listed}"
         );
         assert!(
             !updated["properties"]["status"]["enum"]
                 .as_array()
                 .expect("status is an enumeration")
-                .contains(&json!("queued")),
+                .contains(&json!(tasks::QUEUED)),
             "only a run queues a task: {updated}"
         );
         for offered in updated["properties"]["status"]["enum"]

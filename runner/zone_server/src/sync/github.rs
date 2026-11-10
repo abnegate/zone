@@ -881,30 +881,20 @@ mod tests {
 
     #[test]
     fn test_map_task_status_to_github_state() {
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("complete"),
-            GitHubState::Closed
-        );
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("blocked"),
-            GitHubState::Closed
-        );
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("created"),
-            GitHubState::Open
-        );
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("in_progress"),
-            GitHubState::Open
-        );
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("cancelled"),
-            GitHubState::Closed
-        );
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("paused"),
-            GitHubState::Open
-        );
+        for (status, state) in [
+            (tasks::COMPLETE, GitHubState::Closed),
+            (tasks::BLOCKED, GitHubState::Closed),
+            (tasks::CREATED, GitHubState::Open),
+            (tasks::IN_PROGRESS, GitHubState::Open),
+            (tasks::CANCELLED, GitHubState::Closed),
+            (tasks::PAUSED, GitHubState::Open),
+        ] {
+            assert_eq!(
+                GitHubSyncProvider::map_task_status_to_github_state(status),
+                state,
+                "{status}"
+            );
+        }
     }
 
     #[test]
