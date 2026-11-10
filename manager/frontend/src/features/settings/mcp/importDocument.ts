@@ -19,8 +19,12 @@ export const TARGET_MISSING = 'give a command or a url';
 export const COMMAND_NOT_A_STRING = 'command must be a non-empty string';
 export const URL_NOT_A_STRING = 'url must be a string';
 export const ARGUMENTS_NOT_STRINGS = 'args must be a list of strings';
+export const ARGUMENTS_NOT_LINES = 'args must not be empty or span several lines';
 export const ENVIRONMENT_NOT_STRINGS = 'env must map names to string values';
+export const ENVIRONMENT_EMPTY = 'env values must not be empty';
 export const HEADERS_NOT_STRINGS = 'headers must map names to string values';
+export const HEADERS_EMPTY = 'header values must not be empty';
+export const HEADERS_REPEATED = 'header names must differ by more than case';
 
 const SERVERS_KEY = 'mcpServers';
 const SSE_TYPE = 'sse';
@@ -33,6 +37,15 @@ export interface McpDocument {
 
 type Entry = Record<string, unknown>;
 
+interface MapErrors {
+  type: string;
+  empty: string;
+}
+
+const ENVIRONMENT_ERRORS: MapErrors = { type: ENVIRONMENT_NOT_STRINGS, empty: ENVIRONMENT_EMPTY };
+const HEADER_ERRORS: MapErrors = { type: HEADERS_NOT_STRINGS, empty: HEADERS_EMPTY };
+const LINE_BREAK = /[\r\n]/;
+
 function isRecord(value: unknown): value is Entry {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -41,17 +54,24 @@ function isStrings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
-function stringMap(value: unknown): Record<string, string> | null {
+function isLine(value: string): boolean {
+  return value !== '' && !LINE_BREAK.test(value);
+}
+
+function stringMap(value: unknown, errors: MapErrors): Record<string, string> | string {
   if (value === undefined) {
     return {};
   }
   if (!isRecord(value)) {
-    return null;
+    return errors.type;
   }
   const map: Record<string, string> = {};
   for (const [key, item] of Object.entries(value)) {
     if (typeof item !== 'string') {
-      return null;
+      return errors.type;
+    }
+    if (item === '') {
+      return errors.empty;
     }
     map[key] = item;
   }
@@ -79,6 +99,18 @@ function namesError(
   return null;
 }
 
+function repeatedHeader(headers: Record<string, string>): string | null {
+  const seen = new Set<string>();
+  for (const key of Object.keys(headers)) {
+    const folded = key.toLowerCase();
+    if (seen.has(folded)) {
+      return `${HEADERS_REPEATED} (${key})`;
+    }
+    seen.add(folded);
+  }
+  return null;
+}
+
 function mapEntries(map: Record<string, string>): string[] {
   return Object.entries(map).flat();
 }
@@ -99,9 +131,12 @@ function commandEntry(
   if (!isStrings(parameters)) {
     return ARGUMENTS_NOT_STRINGS;
   }
-  const environment = stringMap(entry.env);
-  if (environment === null) {
-    return ENVIRONMENT_NOT_STRINGS;
+  if (!parameters.every(isLine)) {
+    return ARGUMENTS_NOT_LINES;
+  }
+  const environment = stringMap(entry.env, ENVIRONMENT_ERRORS);
+  if (typeof environment === 'string') {
+    return environment;
   }
   if (referenced([command, ...parameters, ...mapEntries(environment)])) {
     return lowered(LITERAL);
@@ -113,7 +148,7 @@ function commandEntry(
   return {
     name,
     transport: Transport.Stdio,
-    command,
+    command: command.trim(),
     arguments: parameters,
     ...(Object.keys(environment).length > 0 && { environment }),
   };
@@ -130,14 +165,15 @@ function urlEntry(name: string, entry: Entry): CreateMcpServerRequest | string {
   if (typeof url !== 'string') {
     return URL_NOT_A_STRING;
   }
-  const headers = stringMap(entry.headers);
-  if (headers === null) {
-    return HEADERS_NOT_STRINGS;
+  const headers = stringMap(entry.headers, HEADER_ERRORS);
+  if (typeof headers === 'string') {
+    return headers;
   }
   if (referenced([url, ...mapEntries(headers)])) {
     return lowered(LITERAL);
   }
-  const invalid = urlError(url.trim()) ?? namesError(headers, headerNameError);
+  const invalid =
+    urlError(url.trim()) ?? namesError(headers, headerNameError) ?? repeatedHeader(headers);
   if (invalid !== null) {
     return lowered(invalid);
   }

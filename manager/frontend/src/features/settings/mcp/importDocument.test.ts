@@ -122,4 +122,55 @@ describe('parseMcpDocument', () => {
       ],
     });
   });
+
+  it('refuses arguments the form cannot edit line by line', () => {
+    const json = JSON.stringify({
+      blank: { command: 'npx', args: ['--flag', ''] },
+      split: { command: 'npx', args: ['two\nlines'] },
+      carriage: { command: 'npx', args: ['two\rlines'] },
+    });
+    expect(parseMcpDocument(json, true)).toEqual({
+      requests: [],
+      errors: [
+        'blank: args must not be empty or span several lines',
+        'split: args must not be empty or span several lines',
+        'carriage: args must not be empty or span several lines',
+      ],
+    });
+  });
+
+  it('refuses empty values and header names that differ only in case', () => {
+    const json = JSON.stringify({
+      variable: { command: 'npx', env: { TOKEN: '' } },
+      header: { url: 'https://x.example/mcp', headers: { Authorization: '' } },
+      repeated: {
+        url: 'https://x.example/mcp',
+        headers: { Authorization: 'a', authorization: 'b' },
+      },
+    });
+    expect(parseMcpDocument(json, true)).toEqual({
+      requests: [],
+      errors: [
+        'variable: env values must not be empty',
+        'header: header values must not be empty',
+        'repeated: header names must differ by more than case (authorization)',
+      ],
+    });
+  });
+
+  it('refuses the cloud metadata address', () => {
+    const json = JSON.stringify({ metadata: { url: 'http://169.254.169.254/latest' } });
+    expect(parseMcpDocument(json, true)).toEqual({
+      requests: [],
+      errors: ['metadata: do not use the cloud metadata address'],
+    });
+  });
+
+  it('trims the command', () => {
+    const json = JSON.stringify({ local: { command: '  zone-mcp  ' } });
+    expect(parseMcpDocument(json, true)).toEqual({
+      requests: [{ name: 'local', transport: Transport.Stdio, command: 'zone-mcp', arguments: [] }],
+      errors: [],
+    });
+  });
 });

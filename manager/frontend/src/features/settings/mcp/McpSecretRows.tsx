@@ -79,14 +79,7 @@ export function McpSecretRows({ list, rows, errors, onChange }: McpSecretRowsPro
                   autoComplete="off"
                   spellCheck={false}
                   error={errors[rowField(list, index, RowPart.Name)]}
-                  onChange={(event) =>
-                    replace(
-                      index,
-                      row.saved
-                        ? renamedRow(row, event.target.value)
-                        : { ...row, name: event.target.value }
-                    )
-                  }
+                  onChange={(event) => replace(index, renamedRow(row, event.target.value))}
                 />
                 <Input
                   id={`${base}-${key}-value`}

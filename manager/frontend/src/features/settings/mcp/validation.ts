@@ -9,7 +9,7 @@ export const NAME_TRAILING = 'Do not end the name with an underscore';
 export const URL_REQUIRED = 'Enter a URL';
 export const URL_INVALID = 'Enter a valid URL';
 export const URL_PROTOCOL = 'Use an http or https URL';
-export const URL_HOST = 'Include a host in the URL';
+export const URL_METADATA = 'Do not use the cloud metadata address';
 export const URL_CREDENTIALS = 'Move the credentials out of the URL and into a header';
 export const URL_FRAGMENT = 'Remove the # fragment from the URL';
 
@@ -24,6 +24,7 @@ const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 const ENVIRONMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const HEADER_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const PROTOCOLS: readonly string[] = ['http:', 'https:'];
+const METADATA_HOST = '169.254.169.254';
 
 export function nameError(name: string): string | null {
   if (name === '') {
@@ -57,8 +58,8 @@ export function urlError(raw: string): string | null {
   if (!PROTOCOLS.includes(url.protocol)) {
     return URL_PROTOCOL;
   }
-  if (url.hostname === '') {
-    return URL_HOST;
+  if (url.hostname === METADATA_HOST) {
+    return URL_METADATA;
   }
   if (url.username !== '' || url.password !== '') {
     return URL_CREDENTIALS;

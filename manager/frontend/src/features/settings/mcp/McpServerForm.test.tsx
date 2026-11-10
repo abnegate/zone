@@ -145,6 +145,28 @@ describe('McpServerForm', () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it('keeps Save disabled for a command server with an empty stored argument', () => {
+    setup({
+      server: server({
+        transport: Transport.Stdio,
+        command: 'npx',
+        arguments: ['--flag', ''],
+        url: null,
+        headers: [],
+      }),
+    });
+    expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('keeps a saved header when its name is changed and then restored', () => {
+    setup({ server: server() });
+    type('Header name 1', 'X-Api-Key');
+    type('Header name 1', 'Authorization');
+    const value = screen.getByLabelText('Value for Authorization');
+    expect(value.getAttribute('placeholder')).toBe(SAVED_PLACEHOLDER);
+    expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
+  });
+
   it('refuses a name over 32 characters without submitting', () => {
     const { onSubmit } = setup();
     type('Name', 'a'.repeat(33));

@@ -22,6 +22,7 @@ export interface SecretDraft {
   name: string;
   value: string;
   saved: boolean;
+  original?: string;
 }
 
 export interface McpServerDraft {
@@ -85,7 +86,11 @@ export function emptyDraft(transport: McpTransport): McpServerDraft {
 }
 
 function secretDrafts(fields: readonly McpSecretField[]): SecretDraft[] {
-  return fields.map((field) => ({ name: field.name, value: '', saved: field.has_value }));
+  return fields.map((field) =>
+    field.has_value
+      ? { name: field.name, value: '', saved: true, original: field.name }
+      : { name: field.name, value: '', saved: false }
+  );
 }
 
 export function draftOf(server: McpServer): McpServerDraft {
@@ -93,7 +98,7 @@ export function draftOf(server: McpServer): McpServerDraft {
     name: server.name,
     transport: server.transport,
     command: server.command ?? '',
-    arguments: server.arguments.join('\n'),
+    arguments: argumentsText(server.arguments),
     url: server.url ?? '',
     environment: secretDrafts(server.environment),
     headers: secretDrafts(server.headers),
@@ -105,7 +110,11 @@ export function emptyRow(): SecretDraft {
 }
 
 export function renamedRow(row: SecretDraft, name: string): SecretDraft {
-  return { name, value: row.value, saved: false };
+  return { ...row, name, saved: row.original === name };
+}
+
+function argumentsText(parameters: readonly string[]): string {
+  return parameters.join('\n');
 }
 
 export function argumentsOf(text: string): string[] {
@@ -248,7 +257,10 @@ export function updateRequest(server: McpServer, draft: McpServerDraft): UpdateM
       request.command = command;
     }
     const parsed = argumentsOf(draft.arguments);
-    if (!sameArguments(parsed, server.arguments)) {
+    if (
+      draft.arguments !== argumentsText(server.arguments) &&
+      !sameArguments(parsed, server.arguments)
+    ) {
       request.arguments = parsed;
     }
   } else {
