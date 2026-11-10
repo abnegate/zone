@@ -60,24 +60,14 @@ const STAGE_OF_STATUS: Record<TaskStatus, StageId> = {
   cancelled: 'cancelled',
 };
 
-function stage(id: StageId, label: string, target: TaskStatus): Stage {
-  return {
-    id,
-    label,
-    statuses: TASK_STATUSES.filter((status) => STAGE_OF_STATUS[status] === id),
-    target,
-    tint: TINTS[target],
-  };
-}
-
 const STAGE_BY_ID: Record<StageId, Stage> = {
-  planned: stage('planned', 'Planned', 'created'),
-  in_progress: stage('in_progress', 'In progress', 'in_progress'),
-  blocked: stage('blocked', 'Blocked', 'blocked'),
-  paused: stage('paused', 'Paused', 'paused'),
-  review: stage('review', 'In review', 'review'),
-  complete: stage('complete', 'Completed', 'complete'),
-  cancelled: stage('cancelled', 'Cancelled', 'cancelled'),
+  planned: { id: 'planned', label: 'Planned', target: 'created' },
+  in_progress: { id: 'in_progress', label: 'In progress', target: 'in_progress' },
+  blocked: { id: 'blocked', label: 'Blocked', target: 'blocked' },
+  paused: { id: 'paused', label: 'Paused', target: 'paused' },
+  review: { id: 'review', label: 'In review', target: 'review' },
+  complete: { id: 'complete', label: 'Completed', target: 'complete' },
+  cancelled: { id: 'cancelled', label: 'Cancelled', target: 'cancelled' },
 };
 
 export const STAGES: readonly Stage[] = STAGE_IDS.map((id) => STAGE_BY_ID[id]);

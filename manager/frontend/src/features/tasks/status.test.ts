@@ -28,22 +28,18 @@ describe('stages', () => {
   it('groups created and queued into planned, which moves cards to created', () => {
     expect(stageOf('created').id).toBe('planned');
     expect(stageOf('queued').id).toBe('planned');
-    expect(stageOf('created').statuses).toEqual(['created', 'queued']);
     expect(stageOf('created').target).toBe('created');
   });
 
-  it('puts every status in exactly one stage', () => {
+  it('puts every status in one of the stages on the board', () => {
     for (const status of TASK_STATUSES) {
-      const holders = STAGES.filter((stage) => stage.statuses.includes(status));
-      expect(holders).toHaveLength(1);
-      expect(stageOf(status)).toBe(holders[0]);
+      expect(STAGES).toContain(stageOf(status));
     }
   });
 
-  it('targets a status the stage holds', () => {
+  it('moves a card dropped on a stage to a status that stage holds', () => {
     for (const stage of STAGES) {
-      expect(stage.statuses).toContain(stage.target);
-      expect(stage.tint).toBe(statusTint(stage.target));
+      expect(stageOf(stage.target)).toBe(stage);
     }
   });
 });

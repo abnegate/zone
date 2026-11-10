@@ -277,8 +277,8 @@ class Client {
 
   // Tasks API (delegates to tasksApi)
 
-  async getTasks(workspaceId: string, projectId?: string, status?: string) {
-    return tasksApi.getTasks(workspaceId, projectId, status);
+  async getTasks(workspaceId: string, projectId?: string) {
+    return tasksApi.getTasks(workspaceId, projectId);
   }
 
   async getTask(id: string) {

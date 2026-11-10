@@ -1,7 +1,7 @@
 import type { z } from 'zod';
 import type { ActionReceipt, Question, Waiting } from '../chats/types';
 import type { TaskProgressMessageSchema } from './schemas';
-import type { StageId, StatusTint, TaskStatus } from './status';
+import type { StageId, TaskStatus } from './status';
 import type { TitleDraft } from './TitleDraft';
 
 export type { TaskStatus } from './status';
@@ -111,9 +111,7 @@ export interface CreateTaskRequest {
 export interface Stage {
   id: StageId;
   label: string;
-  statuses: readonly TaskStatus[];
   target: TaskStatus;
-  tint: StatusTint;
 }
 
 export interface Renaming {

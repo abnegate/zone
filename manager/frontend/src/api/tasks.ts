@@ -49,11 +49,8 @@ class TasksApi {
     return headers;
   }
 
-  async getTasks(workspaceId: string, projectId?: string, status?: string): Promise<Task[]> {
-    const params = new URLSearchParams();
-    if (projectId) params.set('project_id', projectId);
-    if (status) params.set('status', status);
-    const query = params.toString() ? `?${params}` : '';
+  async getTasks(workspaceId: string, projectId?: string): Promise<Task[]> {
+    const query = projectId ? `?${new URLSearchParams({ project_id: projectId })}` : '';
 
     const response = await fetch(
       `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/tasks${query}`,
