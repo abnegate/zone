@@ -707,10 +707,19 @@ async fn a_command_server_needs_the_operator_flag() {
     assert_eq!(created["command"], "python3");
     assert_eq!(created["arguments"], json!([stub()]));
     assert_eq!(created["url"], Value::Null);
-    let listed = on
-        .get_auth(&tenant.servers(), &tenant.owner.token)
+    let stored: String = sqlx::query_scalar("SELECT secrets FROM mcp_servers WHERE id = $1")
+        .bind(Uuid::parse_str(&id(&created)).expect("a server id"))
+        .fetch_one(on.state().db())
         .await
-        .json_value();
+        .expect("the server's secrets are stored");
+    assert!(stored.starts_with(SEALED_PREFIX), "{stored}");
+    assert!(
+        !stored.contains(ENVIRONMENT_SECRET),
+        "the secrets column holds a plaintext value"
+    );
+    let listed = on.get_auth(&tenant.servers(), &tenant.owner.token).await;
+    assert_sealed(&listed);
+    let listed = listed.json_value();
     assert_eq!(listed["commands"], true);
     assert_eq!(names(&listed), ["stub"]);
 
@@ -815,7 +824,7 @@ async fn secrets_are_sealed_and_never_handed_back() {
     assert_eq!(audited.len(), 1, "one create is one audit row: {audited:?}");
     for row in &audited {
         assert!(
-            !row.contains(HEADER_SECRET) && !row.contains(ENVIRONMENT_SECRET),
+            !row.contains(HEADER_SECRET),
             "the audit log holds a secret value: {row}"
         );
     }
@@ -827,7 +836,7 @@ async fn secrets_are_sealed_and_never_handed_back() {
         .expect("the server's secrets are stored");
     assert!(stored.starts_with(SEALED_PREFIX), "{stored}");
     assert!(
-        !stored.contains(HEADER_SECRET) && !stored.contains(ENVIRONMENT_SECRET),
+        !stored.contains(HEADER_SECRET),
         "the secrets column holds a plaintext value"
     );
 
