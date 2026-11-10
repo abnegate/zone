@@ -1,0 +1,114 @@
+.mcp-server {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--ui-space-2) var(--ui-space-3);
+  min-height: var(--ui-space-12);
+  padding: var(--ui-space-2) var(--ui-space-3) var(--ui-space-2) var(--ui-space-4);
+}
+
+.mcp-server + .mcp-server {
+  border-top: 1px solid var(--ui-border);
+}
+
+.mcp-server-identity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-width: 0;
+  gap: var(--ui-space-1) var(--ui-space-2);
+}
+
+.mcp-server-name {
+  overflow: hidden;
+  max-width: 100%;
+  font-size: var(--ui-text-sm);
+  font-weight: 600;
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-server-transport,
+.mcp-server-summary {
+  font-size: var(--ui-text-xs);
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+}
+
+.mcp-server-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+.mcp-server-status .spinner {
+  width: var(--ui-space-3);
+  height: var(--ui-space-3);
+  vertical-align: middle;
+}
+
+.mcp-server-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--ui-space-2);
+}
+
+.mcp-server-toggle,
+.mcp-server-toggle:hover {
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+.mcp-server-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-error);
+  overflow-wrap: anywhere;
+}
+
+.mcp-server-tools {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  grid-column: 1 / -1;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+.mcp-server-tool-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, calc(var(--ui-space-24) * 2)), 1fr));
+  align-self: stretch;
+  gap: var(--ui-space-2) var(--ui-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-server-tool-list[hidden] {
+  display: none;
+}
+
+.mcp-server-tool-list .ui-checkbox-copy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 768px) {
+  .mcp-server {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .mcp-server-state {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+}
