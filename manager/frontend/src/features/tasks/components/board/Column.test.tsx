@@ -94,4 +94,12 @@ describe('Skeleton', () => {
     }
     expect(screen.queryByRole('region')).toBeNull();
   });
+
+  it('tells assistive technology the tasks are loading, outside the hidden board', () => {
+    const { container } = render(<Skeleton />);
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent('Loading tasks');
+    expect(status.closest('[aria-hidden="true"]')).toBeNull();
+    expect(container.querySelector('.board')?.contains(status)).toBe(false);
+  });
 });
