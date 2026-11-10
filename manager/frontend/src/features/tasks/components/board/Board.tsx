@@ -7,7 +7,6 @@ import {
   DragOverlay,
   type DragStartEvent,
   KeyboardSensor,
-  PointerSensor,
   type UniqueIdentifier,
   useSensor,
   useSensors,
@@ -19,6 +18,7 @@ import { groupByStage, STAGES, stageOf } from '../../status';
 import type { BoardActions, Task } from '../../types';
 import { Card } from './Card';
 import { CardBody } from './CardBody';
+import { CardSensor } from './CardSensor';
 import { Column } from './Column';
 import { destination, keyboardOptions, stageUnder } from './drop';
 import { useFollowedCard } from './useFollowedCard';
@@ -76,10 +76,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
   useNeighbourFocus(root, groups);
   const reducedMotion = useMediaQuery(REDUCED_MOTION);
   const keyboard = useMemo(() => keyboardOptions(reducedMotion), [reducedMotion]);
-  const sensors = useSensors(
-    useSensor(PointerSensor, POINTER),
-    useSensor(KeyboardSensor, keyboard)
-  );
+  const sensors = useSensors(useSensor(CardSensor, POINTER), useSensor(KeyboardSensor, keyboard));
 
   const start = ({ active }: DragStartEvent) => {
     const task = carried(active.data);

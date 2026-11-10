@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, mock, setSystemTime } from 'bun:test';
-import { DndContext, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import { DndContext, useSensor, useSensors } from '@dnd-kit/core';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { chooseMenuItem, openMenu, settleMenu } from '../../../../test/menu';
 import type { BoardActions, Task } from '../../types';
 import { Card } from './Card';
+import { CardSensor } from './CardSensor';
 
 const NOW = new Date('2026-11-10T12:00:00Z');
 const PROJECTS = 'Website, Mobile';
@@ -51,7 +52,7 @@ function makeActions(): BoardActions {
 }
 
 function Board({ children, onDragStart }: { children: ReactNode; onDragStart?: () => void }) {
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+  const sensors = useSensors(useSensor(CardSensor, { activationConstraint: { distance: 5 } }));
   return (
     <DndContext sensors={sensors} onDragStart={onDragStart}>
       <ul>{children}</ul>
@@ -77,9 +78,15 @@ function card(): HTMLElement {
   return screen.getByRole('listitem', { hidden: true });
 }
 
-function drag(target: HTMLElement) {
-  fireEvent.pointerDown(target, { isPrimary: true, button: 0, clientX: 10, clientY: 10 });
-  fireEvent.pointerMove(target, { isPrimary: true, clientX: 40, clientY: 10 });
+function drag(target: HTMLElement, pointerType = 'mouse') {
+  fireEvent.pointerDown(target, {
+    isPrimary: true,
+    button: 0,
+    clientX: 10,
+    clientY: 10,
+    pointerType,
+  });
+  fireEvent.pointerMove(target, { isPrimary: true, clientX: 40, clientY: 10, pointerType });
 }
 
 describe('Card', () => {
@@ -250,6 +257,30 @@ describe('Card', () => {
     const onDragStart = mock();
     renderCard({}, { onDragStart });
     drag(screen.getByRole('button', { name: 'Implement login' }));
+    await waitFor(() => expect(onDragStart).toHaveBeenCalled());
+    await waitFor(() => expect(card()).toHaveClass('task-card-dragging'));
+  });
+
+  it('starts a pen drag from the card body', async () => {
+    const onDragStart = mock();
+    renderCard({}, { onDragStart });
+    drag(screen.getByRole('button', { name: 'Implement login' }), 'pen');
+    await waitFor(() => expect(onDragStart).toHaveBeenCalled());
+  });
+
+  it('leaves a finger on the card body to the browser, so a swipe scrolls', async () => {
+    const onDragStart = mock();
+    renderCard({}, { onDragStart });
+    drag(screen.getByRole('button', { name: 'Implement login' }), 'touch');
+    await settleMenu();
+    expect(onDragStart).not.toHaveBeenCalled();
+    expect(card()).not.toHaveClass('task-card-dragging');
+  });
+
+  it('starts a touch drag from the grip handle', async () => {
+    const onDragStart = mock();
+    renderCard({}, { onDragStart });
+    drag(screen.getByRole('button', { name: 'Move Implement login' }), 'touch');
     await waitFor(() => expect(onDragStart).toHaveBeenCalled());
     await waitFor(() => expect(card()).toHaveClass('task-card-dragging'));
   });

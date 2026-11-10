@@ -267,6 +267,63 @@ async function pressAndAnnounce(page: Page, key: string, announcement: string): 
   await expect(announcer(page)).toHaveText(announcement);
 }
 
+interface Point {
+  x: number;
+  y: number;
+}
+
+interface Finger {
+  down: (point: Point) => Promise<void>;
+  slide: (from: Point, to: Point) => Promise<void>;
+  up: () => Promise<void>;
+}
+
+const SLIDE_STEP = 4;
+
+async function finger(page: Page): Promise<Finger> {
+  const session = await page.context().newCDPSession(page);
+  const touch = (type: 'touchStart' | 'touchMove' | 'touchEnd', points: Point[]) =>
+    session.send('Input.dispatchTouchEvent', { type, touchPoints: points });
+  const move = async (point: Point) => {
+    await touch('touchMove', [point]);
+  };
+  return {
+    down: async (point) => {
+      await touch('touchStart', [point]);
+    },
+    slide: async (from, to) => {
+      const steps = Math.ceil(Math.hypot(to.x - from.x, to.y - from.y) / SLIDE_STEP);
+      for (let step = 1; step <= steps; step += 1) {
+        await move({
+          x: from.x + ((to.x - from.x) * step) / steps,
+          y: from.y + ((to.y - from.y) * step) / steps,
+        });
+      }
+    },
+    up: async () => {
+      await touch('touchEnd', []);
+    },
+  };
+}
+
+async function shrinkToPhone(page: Page): Promise<void> {
+  await page.setViewportSize(PHONE);
+  await expect(page.locator('.main-content')).toHaveCSS('margin-left', '0px');
+}
+
+async function recordAnnouncements(page: Page): Promise<() => Promise<string[]>> {
+  await announcer(page).evaluate((region) => {
+    const announced: string[] = [];
+    Object.assign(window, { announced });
+    new MutationObserver(() => announced.push(region.textContent ?? '')).observe(region, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+  });
+  return () => page.evaluate(() => (window as unknown as { announced: string[] }).announced);
+}
+
 async function pickUp(page: Page, title: string, stage: string): Promise<Locator> {
   const grip = page.getByRole('button', { name: `Move ${title}`, exact: true });
   await grip.focus();
@@ -700,6 +757,28 @@ test.describe('Tasks Page', () => {
           height: 44,
           hits: [true, true, true, true],
         });
+      });
+
+      test('swiping across a card scrolls the board without picking the card up', async ({
+        context,
+        page,
+      }) => {
+        const server = await serveTasks(context, page);
+        await shrinkToPhone(page);
+        const board = page.getByRole('region', { name: 'Tasks', exact: true });
+        const announced = await recordAnnouncements(page);
+        const from = await center(card(page, 'Implement login page').locator('.task-card-project'));
+        const touch = await finger(page);
+
+        await touch.down(from);
+        await touch.slide(from, { x: from.x - 160, y: from.y });
+        await expect.poll(() => board.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+        await touch.up();
+
+        expect(await announced()).toEqual([]);
+        await expect(page.locator('.task-card-overlay')).toHaveCount(0);
+        await expect(page).toHaveURL('/tasks');
+        expect(moves(server)).toEqual([]);
       });
     });
 

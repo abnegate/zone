@@ -49,7 +49,7 @@
   min-height: var(--ui-space-24);
   padding: 0 var(--ui-space-2) var(--ui-space-2);
   overflow-y: auto;
-  overscroll-behavior: contain;
+  overscroll-behavior-y: contain;
   border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card);
   transition:
     background-color var(--ui-transition-fast),
