@@ -6,6 +6,7 @@ import {
   ChatProvidersSchema,
   ChatPullRequestSchema,
   ChatSchema,
+  ChatTasksResponseSchema,
   CreateChatRequestSchema,
   HandoverSchema,
   MessageMetadataSchema,
@@ -422,5 +423,30 @@ describe('a chat pull request', () => {
         'uncredentialed'
       );
     }
+  });
+});
+
+describe('a chat task', () => {
+  const task = {
+    id: 'task-1',
+    title: 'Fix the build',
+    title_pending: false,
+    is_agentic: true,
+    href: '/tasks?id=task-1',
+    created_at: '2026-11-05T10:00:00Z',
+    updated_at: '2026-11-05T10:00:00Z',
+    run: null,
+    pull_request: null,
+  };
+
+  it('keeps a paused or cancelled task in the panel', () => {
+    const parsed = ChatTasksResponseSchema.parse({
+      tasks: [
+        { ...task, id: 'task-1', status: 'paused' },
+        { ...task, id: 'task-2', status: 'cancelled' },
+      ],
+    });
+
+    expect(parsed.tasks.map((listed) => listed.status)).toEqual(['paused', 'cancelled']);
   });
 });

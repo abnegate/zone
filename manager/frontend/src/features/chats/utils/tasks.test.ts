@@ -1,13 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type { ChatTask, ChatTaskRun } from '../types';
-import {
-  publicationName,
-  runProgress,
-  runReading,
-  taskActive,
-  taskStatusLabel,
-  taskStatusTint,
-} from './tasks';
+import { publicationName, runProgress, runReading, taskActive } from './tasks';
 
 const RUN: ChatTaskRun = {
   id: 'run-1',
@@ -32,13 +25,6 @@ const TASK: ChatTask = {
 };
 
 describe('chat task readings', () => {
-  it('names and tints every task status', () => {
-    expect(taskStatusLabel('in_progress')).toBe('In progress');
-    expect(taskStatusLabel('review')).toBe('In review');
-    expect(taskStatusTint('complete')).toBe('success');
-    expect(taskStatusTint('blocked')).toBe('destructive');
-  });
-
   it('reads a running run with what it is doing', () => {
     expect(runReading(RUN)).toBe('Running, using tools');
     expect(runReading({ ...RUN, phase: null })).toBe('Running');
@@ -65,6 +51,11 @@ describe('chat task readings', () => {
     expect(taskActive({ ...TASK, run: { ...RUN, status: 'failed' } })).toBe(false);
     expect(taskActive({ ...TASK, run: null, status: 'queued' })).toBe(true);
     expect(taskActive({ ...TASK, run: null, status: 'created' })).toBe(false);
+  });
+
+  it('stops watching a task that is paused or cancelled and has no run going', () => {
+    expect(taskActive({ ...TASK, run: null, status: 'paused' })).toBe(false);
+    expect(taskActive({ ...TASK, run: null, status: 'cancelled' })).toBe(false);
   });
 
   it('names a GitHub pull request by its repository and number', () => {
