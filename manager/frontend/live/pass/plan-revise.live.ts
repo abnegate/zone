@@ -1,6 +1,7 @@
 import type { Locator } from '@playwright/test';
 import {
   api,
+  chooseTaskAction,
   enabled,
   expect,
   ownerToken,
@@ -84,10 +85,7 @@ test.describe('plan revise', () => {
       (body as { tasks?: { id: string; title: string }[] }).tasks ?? []
     ).find((t) => t.title === title);
     expect(task).toBeTruthy();
-    await page
-      .locator('.task-card', { hasText: title })
-      .getByRole('button', { name: 'Execute' })
-      .click();
+    await chooseTaskAction(page, title, 'Run');
     await page.getByRole('button', { name: /start execution/i }).click();
     await expect
       .poll(

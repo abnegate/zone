@@ -26,7 +26,7 @@ const screens = [
     path: 'tasks',
     heading: 'Tasks',
     content: '.task-card:not(.skeleton-card)',
-    title: '.task-card-title h3',
+    title: '.task-card-open',
     titleLeading: '20px',
   },
   {
@@ -400,9 +400,12 @@ for (const viewport of [
         await fitsViewport(page);
         await ready(page, 'tasks', theme);
         await page
-          .getByRole('button', { name: 'Execute', exact: true })
-          .first()
+          .getByRole('button', {
+            name: 'Actions for Implement authentication',
+            exact: true,
+          })
           .click();
+        await page.getByRole('menuitem', { name: 'Run', exact: true }).click();
         await expect(
           page.getByText('Ready to run', { exact: true })
         ).toBeVisible();

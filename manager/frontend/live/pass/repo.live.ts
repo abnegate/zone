@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 import type { Locator, Page } from '@playwright/test';
 import {
   api,
+  chooseTaskAction,
+  deleteTask,
   enabled,
   expect,
   logLines,
@@ -164,10 +166,7 @@ async function createTask(
 
 async function startRun(page: Page, title: string): Promise<void> {
   await page.goto('/tasks');
-  await page
-    .locator('.task-card', { hasText: title })
-    .getByRole('button', { name: 'Execute' })
-    .click();
+  await chooseTaskAction(page, title, 'Run');
   await page
     .getByRole('button', { name: /start execution|run again|try again/i })
     .click();
@@ -861,8 +860,8 @@ test.describe('sources, projects and tasks', () => {
       .then(() => taskById(taskId));
     await page.goto('/tasks');
     const card = page.locator('.task-card', { hasText: title });
-    await expect(card).toContainText(/PR: open/, { timeout: 60_000 });
-    const link = card.locator('a.task-pr-link');
+    await expect(card).toContainText(/PR open/, { timeout: 60_000 });
+    const link = card.getByRole('link', { name: 'View PR' });
     await expect(link).toHaveText('View PR');
     const prUrl = String(task.pr_url);
     await shot(page, '30-task-pr-open');
@@ -895,7 +894,7 @@ test.describe('sources, projects and tasks', () => {
       .toBe('merged');
     await page.reload();
     await expect(page.locator('.task-card', { hasText: title })).toContainText(
-      /PR: merged/,
+      /PR merged/,
       { timeout: 60_000 },
     );
     await shot(page, '30-task-pr-merged');
@@ -1144,10 +1143,7 @@ test.describe('sources, projects and tasks', () => {
     expect(readTask, 'row 25 left a finished task').toBeTruthy();
     const before = (await runsOf(readTask!.id)).length;
     await page.goto('/tasks');
-    await page
-      .locator('.task-card', { hasText: readTask!.title })
-      .getByRole('button', { name: 'Execute' })
-      .click();
+    await chooseTaskAction(page, readTask!.title, 'Run');
     const again = page.getByRole('button', { name: 'Run Again' });
     await expect(again).toBeVisible({ timeout: 30_000 });
     await shot(page, '31-run-again-offered');
@@ -1197,10 +1193,7 @@ test.describe('sources, projects and tasks', () => {
       .catch(() => page.keyboard.press('Escape'));
 
     await page.goto('/tasks');
-    await page
-      .locator('.task-card', { hasText: title })
-      .getByRole('button', { name: 'Delete' })
-      .click();
+    await deleteTask(page, title);
     await expect(page.locator('.task-card', { hasText: title })).toHaveCount(
       0,
       { timeout: 30_000 },
