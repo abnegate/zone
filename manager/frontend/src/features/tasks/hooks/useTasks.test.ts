@@ -1,9 +1,9 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { createElement } from 'react';
-import type { Task } from '../types';
+import type { Task, TaskStatus } from '../types';
 
 const mockGetTasks = mock();
 const mockCreateTask = mock();
@@ -19,7 +19,6 @@ mock.module('../../../api/tasks', () => ({
   },
 }));
 
-// Mock the workspace context
 const mockWorkspace = {
   id: 'workspace-1',
   name: 'Test Workspace',
@@ -48,17 +47,31 @@ afterAll(() => {
   mock.restore();
 });
 
-const createWrapper = () => {
-  const queryClient = new QueryClient({
+const createClient = () =>
+  new QueryClient({
     defaultOptions: {
       queries: { retry: false, gcTime: 0 },
       mutations: { retry: false, gcTime: 0 },
     },
   });
 
+const createWrapper = (queryClient: QueryClient = createClient()) => {
   return ({ children }: { children: ReactNode }) =>
     createElement(QueryClientProvider, { client: queryClient }, children);
 };
+
+const deferred = <T>() => {
+  let resolve: (value: T) => void = () => {};
+  let reject: (reason: Error) => void = () => {};
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+};
+
+const MOVED: TaskStatus = 'in_progress';
+const QUERY_KEY = ['tasks', 'workspace-1', undefined];
 
 const mockTask: Task = {
   id: 'task-1',
@@ -110,20 +123,21 @@ describe('useTasks', () => {
 
     expect(result.current.tasks).toEqual([mockTask]);
     expect(result.current.error).toBeNull();
-    expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', undefined, undefined);
+    expect(mockGetTasks.mock.calls[0]).toEqual(['workspace-1', undefined]);
   });
 
-  it('loads tasks with filters', async () => {
+  it('loads tasks for a project without a status filter', async () => {
     mockGetTasks.mockResolvedValueOnce([mockTask]);
     const wrapper = createWrapper();
 
-    const { result } = renderHook(() => useTasks('proj-1', 'created'), { wrapper });
+    const { result } = renderHook(() => useTasks('proj-1'), { wrapper });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
     });
 
-    expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', 'created');
+    expect(mockGetTasks.mock.calls[0]).toEqual(['workspace-1', 'proj-1']);
+    expect(mockGetTasks.mock.calls[0]).toHaveLength(2);
   });
 
   it('handles load error', async () => {
@@ -236,27 +250,158 @@ describe('useTasks', () => {
     });
   });
 
-  it('reloads when filters change', async () => {
+  it('reloads when the project changes', async () => {
     mockGetTasks.mockResolvedValue([mockTask]);
     const wrapper = createWrapper();
 
     const { rerender } = renderHook(
-      ({ projectId, status }: { projectId?: string; status?: string }) =>
-        useTasks(projectId, status),
+      ({ projectId }: { projectId?: string }) => useTasks(projectId),
       {
-        initialProps: { projectId: 'proj-1', status: undefined as string | undefined },
+        initialProps: { projectId: 'proj-1' as string | undefined },
         wrapper,
       }
     );
 
     await waitFor(() => {
-      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', undefined);
+      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1');
     });
 
-    rerender({ projectId: 'proj-1', status: 'created' });
+    rerender({ projectId: 'proj-2' });
 
     await waitFor(() => {
-      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1', 'created');
+      expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-2');
     });
+  });
+});
+
+describe('useTasks moveTask', () => {
+  beforeEach(() => {
+    mockGetTasks.mockReset();
+    mockUpdateTask.mockReset();
+    mockGetTasks.mockResolvedValue([mockTask]);
+  });
+
+  const renderLoaded = async (queryClient: QueryClient = createClient()) => {
+    const rendered = renderHook(() => useTasks(), { wrapper: createWrapper(queryClient) });
+    await waitFor(() => {
+      expect(rendered.result.current.tasks).toEqual([mockTask]);
+    });
+    return rendered;
+  };
+
+  it('shows the new status before the update resolves', async () => {
+    const update = deferred<Task>();
+    mockUpdateTask.mockReturnValueOnce(update.promise);
+    const { result } = await renderLoaded();
+
+    let move: Promise<Task> = Promise.resolve(mockTask);
+    act(() => {
+      move = result.current.moveTask('task-1', MOVED);
+    });
+
+    await waitFor(() => {
+      expect(result.current.tasks[0].status).toBe(MOVED);
+    });
+    expect(mockUpdateTask).toHaveBeenCalledTimes(1);
+
+    const moved = { ...mockTask, status: MOVED };
+    mockGetTasks.mockResolvedValue([moved]);
+    await act(async () => {
+      update.resolve(moved);
+      await expect(move).resolves.toEqual(moved);
+    });
+    expect(result.current.tasks[0].status).toBe(MOVED);
+  });
+
+  it('sends only the status in the update body', async () => {
+    mockUpdateTask.mockResolvedValueOnce({ ...mockTask, status: MOVED });
+    const { result } = await renderLoaded();
+
+    await act(async () => {
+      await result.current.moveTask('task-1', MOVED);
+    });
+
+    expect(mockUpdateTask.mock.calls).toEqual([['task-1', { status: MOVED }]]);
+    expect(Object.keys(mockUpdateTask.mock.calls[0][1])).toEqual(['status']);
+  });
+
+  it('cancels an in-flight refetch so it cannot overwrite the optimistic status', async () => {
+    const queryClient = createClient();
+    const { result } = await renderLoaded(queryClient);
+
+    const stale = deferred<Task[]>();
+    mockGetTasks.mockReturnValueOnce(stale.promise);
+    act(() => {
+      result.current.refetch();
+    });
+    await waitFor(() => {
+      expect(mockGetTasks).toHaveBeenCalledTimes(2);
+    });
+
+    const update = deferred<Task>();
+    mockUpdateTask.mockReturnValueOnce(update.promise);
+    act(() => {
+      result.current.moveTask('task-1', MOVED);
+    });
+    await waitFor(() => {
+      expect(result.current.tasks[0].status).toBe(MOVED);
+    });
+
+    await act(async () => {
+      stale.resolve([mockTask]);
+      await stale.promise;
+    });
+
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)?.[0].status).toBe(MOVED);
+    expect(result.current.tasks[0].status).toBe(MOVED);
+  });
+
+  it('restores the previous tasks and rethrows when the update is refused', async () => {
+    const queryClient = createClient();
+    const { result } = await renderLoaded(queryClient);
+
+    const refetch = deferred<Task[]>();
+    mockGetTasks.mockReturnValue(refetch.promise);
+    const update = deferred<Task>();
+    mockUpdateTask.mockReturnValueOnce(update.promise);
+
+    let move: Promise<Task> = Promise.resolve(mockTask);
+    act(() => {
+      move = result.current.moveTask('task-1', MOVED);
+    });
+    await waitFor(() => {
+      expect(result.current.tasks[0].status).toBe(MOVED);
+    });
+
+    const refusal = new Error('Task has an active run');
+    await act(async () => {
+      update.reject(refusal);
+      await expect(move).rejects.toBe(refusal);
+    });
+
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([mockTask]);
+    await waitFor(() => {
+      expect(result.current.tasks).toEqual([mockTask]);
+    });
+  });
+
+  it('invalidates the task lists once the move settles', async () => {
+    const queryClient = createClient();
+    const invalidate = spyOn(queryClient, 'invalidateQueries');
+    const { result } = await renderLoaded(queryClient);
+
+    mockUpdateTask.mockResolvedValueOnce({ ...mockTask, status: MOVED });
+    await act(async () => {
+      await result.current.moveTask('task-1', MOVED);
+    });
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['tasks'] });
+
+    mockUpdateTask.mockRejectedValueOnce(new Error('refused'));
+    await act(async () => {
+      await expect(result.current.moveTask('task-1', 'blocked')).rejects.toThrow('refused');
+    });
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    expect(invalidate).toHaveBeenLastCalledWith({ queryKey: ['tasks'] });
   });
 });
