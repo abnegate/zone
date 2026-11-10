@@ -193,7 +193,7 @@ export function Board({ tasks, projects, renaming, removed, view, actions }: Boa
                   task={dragged}
                   projects={projectNames(dragged, projects)}
                   now={now}
-                  title={<span>{dragged.title}</span>}
+                  title={<span className="task-card-title">{dragged.title}</span>}
                 />
               </div>
             )}

@@ -728,6 +728,85 @@ test.describe('Tasks Page', () => {
       await expect(page.getByText("Couldn't move Fix navigation bug")).toHaveCount(0);
     });
 
+    test('the grip can be grabbed beside the card without covering the start of the title', async ({
+      context,
+      page,
+    }) => {
+      await serveTasks(context, page);
+      const login = card(page, 'Implement login page');
+      await login.hover();
+
+      const hit = await login.evaluate((item) => {
+        const handle = item.querySelector<HTMLElement>('.task-card-handle');
+        const title = item.querySelector<HTMLElement>('.task-card-open');
+        if (!handle || !title) throw new Error('The card has no grip or title');
+        const grip = handle.getBoundingClientRect();
+        const middle = grip.top + grip.height / 2;
+        const under = (x: number) => document.elementFromPoint(x, middle);
+        return {
+          target: Number.parseFloat(getComputedStyle(handle, '::after').width),
+          grip: under(grip.left + 1)?.closest('.task-card-handle') === handle,
+          beside: under(grip.left - 6)?.closest('.task-card-handle') === handle,
+          title: under(title.getBoundingClientRect().left + 1) === title,
+        };
+      });
+
+      expect(hit).toEqual({ target: 24, grip: true, beside: true, title: true });
+    });
+
+    test('the first card of a column has room for its focus ring where it already was', async ({
+      context,
+      page,
+    }) => {
+      await serveTasks(context, page);
+      const planned = column(page, 'Planned');
+      const title = page.getByRole('button', { name: 'Implement login page', exact: true });
+      await title.focus();
+
+      const room = await planned.evaluate((section) => {
+        const header = section.querySelector('.board-column-header');
+        const body = section.querySelector('.board-column-body');
+        const first = section.querySelector('li.task-card');
+        if (!header || !body || !first) throw new Error('The column is not laid out');
+        const top = first.getBoundingClientRect().top;
+        return {
+          rests: top - header.getBoundingClientRect().bottom,
+          above: top - body.getBoundingClientRect().top,
+          scrolled: body.scrollTop,
+        };
+      });
+
+      expect(room).toEqual({ rests: 0, above: 3, scrolled: 0 });
+    });
+
+    test('the card left behind while dragging stays muted and dashed in the dark theme', async ({
+      context,
+      page,
+    }) => {
+      await serveTasks(context, page);
+      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
+      const login = card(page, 'Implement login page');
+      await login.hover();
+
+      await pickUp(page, 'Implement login page', 'Planned');
+
+      await expect(login).toHaveClass(/task-card-dragging/);
+      await expect(login).toHaveCSS('border-top-style', 'dashed');
+      const expected = await page.evaluate(() => {
+        const probe = document.createElement('div');
+        probe.style.background = 'var(--ui-bg-muted)';
+        probe.style.border = '1px solid var(--ui-border-strong)';
+        document.body.append(probe);
+        const { backgroundColor, borderTopColor } = getComputedStyle(probe);
+        probe.remove();
+        return { backgroundColor, borderTopColor };
+      });
+      await expect(login).toHaveCSS('background-color', expected.backgroundColor);
+      await expect(login).toHaveCSS('border-top-color', expected.borderTopColor);
+      await page.keyboard.press('Escape');
+      await expect(page.locator('.task-card-overlay')).toHaveCount(0);
+    });
+
     test('clicking a card opens its editor', async ({ context, page }) => {
       await serveTasks(context, page);
 
@@ -898,7 +977,7 @@ test.describe('Tasks Page', () => {
             [left + width - 1, top + height - 1],
           ];
           return {
-            touch: matchMedia('(hover: none)').matches,
+            touch: matchMedia('(any-pointer: coarse)').matches,
             grip: [box.width, box.height],
             width,
             height,
@@ -1306,10 +1385,10 @@ test.describe('Tasks Page', () => {
       await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
       await page.goto('/tasks');
 
-      await expect(page.locator('.skeleton-card').first()).toBeVisible();
+      await expect(page.locator('.board-skeleton-card').first()).toBeVisible();
       finishLoading();
       await expect(page.locator('li.task-card')).toHaveCount(mockTasks.length);
-      await expect(page.locator('.skeleton-card')).toHaveCount(0);
+      await expect(page.locator('.board-skeleton-card')).toHaveCount(0);
     });
   });
 

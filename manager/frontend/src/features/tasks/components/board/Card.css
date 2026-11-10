@@ -52,25 +52,28 @@
   padding-right: var(--ui-control-height-sm);
 }
 
-.task-card-open {
+.task-card-title {
   display: -webkit-box;
   min-width: 0;
-  margin: 0;
-  padding: 0;
   overflow: hidden;
   font-family: var(--ui-font-body);
   font-size: var(--ui-text-sm);
   font-weight: 600;
   line-height: var(--ui-space-5);
-  color: inherit;
-  text-align: left;
   overflow-wrap: anywhere;
-  background: none;
-  border: 0;
-  cursor: pointer;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
+}
+
+.task-card-open {
+  margin: 0;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: pointer;
 }
 
 .task-card-open::after {
@@ -87,7 +90,7 @@
 .task-card-open:focus-visible::after {
   box-shadow:
     0 0 0 1px var(--ui-bg-base),
-    0 0 0 3px var(--ui-border-focus);
+    0 0 0 var(--board-column-ring) var(--ui-border-focus);
 }
 
 .task-card-title-pending {
@@ -128,10 +131,10 @@
 .task-card-handle::after {
   position: absolute;
   top: 50%;
-  left: 50%;
+  right: 0;
   width: var(--task-card-handle-target);
   height: var(--task-card-handle-target);
-  transform: translate(-50%, -50%);
+  transform: translateY(-50%);
   content: '';
 }
 
@@ -229,7 +232,10 @@
   white-space: nowrap;
 }
 
-.task-card-dragging {
+.task-card-dragging,
+.task-card-dragging:hover,
+:root[data-theme='dark'] .task-card-dragging,
+:root[data-theme='dark'] .task-card-dragging:hover {
   background: var(--ui-bg-muted);
   border-style: dashed;
   border-color: var(--ui-border-strong);
@@ -254,19 +260,7 @@
   border-color: var(--ui-border-strong);
 }
 
-.task-card-overlay .task-card-heading > span {
-  display: -webkit-box;
-  overflow: hidden;
-  font-size: var(--ui-text-sm);
-  font-weight: 600;
-  line-height: var(--ui-space-5);
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-}
-
-@media (hover: none) {
+@media (any-pointer: coarse) {
   .task-card-handle,
   .task-card-menu {
     opacity: 1;
@@ -278,6 +272,7 @@
 
   .task-card-handle::after {
     top: calc(-1 * var(--ui-space-2-5));
+    right: auto;
     left: calc(-1 * var(--ui-space-2));
     transform: none;
   }

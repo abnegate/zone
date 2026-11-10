@@ -11,7 +11,7 @@
   overscroll-behavior-x: contain;
 }
 
-.board .skeleton-card {
+.task-card.board-skeleton-card {
   display: flex;
   flex-direction: column;
   gap: var(--ui-space-2);
@@ -22,7 +22,7 @@
   pointer-events: none;
 }
 
-.board .skeleton {
+.board-skeleton {
   background: linear-gradient(
     90deg,
     var(--ui-bg-muted) 25%,
@@ -34,36 +34,33 @@
   border-radius: var(--ui-radius-sm);
 }
 
-.board .skeleton-title {
+.board-skeleton-title {
   height: var(--ui-space-3);
   max-width: 75%;
 }
 
-.board .skeleton-text {
+.board-skeleton-text {
+  width: 40%;
   height: var(--ui-space-3);
 }
 
-.board .skeleton-text.short {
-  width: 40%;
-}
-
-.board .skeleton-meta {
+.board-skeleton-meta {
   display: flex;
   align-items: center;
   gap: var(--ui-space-2);
 }
 
-.board .skeleton-badge {
+.board-skeleton-badge {
   width: 3.5rem;
   height: var(--ui-badge-height);
 }
 
-.board .skeleton-tag {
+.board-skeleton-tag {
   width: 5rem;
   height: var(--ui-space-3);
 }
 
-.board .skeleton-count {
+.board-skeleton-count {
   width: var(--ui-space-3);
   height: var(--ui-space-3);
 }

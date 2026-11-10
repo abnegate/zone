@@ -91,7 +91,7 @@ describe('Skeleton', () => {
     expect(columns.map((column) => column.dataset.stage)).toEqual(STAGES.map((stage) => stage.id));
     for (const column of columns) {
       expect(column.querySelector('.board-column-header .status-icon')).toBeTruthy();
-      expect(column.querySelectorAll('.task-card.skeleton-card')).toHaveLength(2);
+      expect(column.querySelectorAll('.task-card.board-skeleton-card')).toHaveLength(2);
     }
     expect(screen.queryByRole('region')).toBeNull();
   });

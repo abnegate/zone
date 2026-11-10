@@ -1,4 +1,5 @@
 .board-column {
+  --board-column-ring: 3px;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -7,6 +8,11 @@
   background: color-mix(in srgb, var(--ui-bg-surface) 55%, transparent);
   border: 1px solid var(--ui-border-subtle);
   border-radius: var(--ui-radius-card);
+}
+
+.board-column:focus-visible {
+  outline: 2px solid var(--ui-border-focus);
+  outline-offset: -2px;
 }
 
 .board-column-header {
@@ -47,7 +53,8 @@
   flex: 1;
   flex-direction: column;
   min-height: var(--ui-space-24);
-  padding: 0 var(--ui-space-2) var(--ui-space-2);
+  margin-top: calc(-1 * var(--board-column-ring));
+  padding: var(--board-column-ring) var(--ui-space-2) var(--ui-space-2);
   overflow-y: auto;
   overscroll-behavior-y: contain;
   border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card);

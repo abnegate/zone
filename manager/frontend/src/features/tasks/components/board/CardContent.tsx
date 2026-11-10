@@ -43,7 +43,11 @@ export const CardContent = memo(function CardContent({
     <button
       ref={open}
       type="button"
-      className={pending ? 'task-card-open task-card-title-pending' : 'task-card-open'}
+      className={
+        pending
+          ? 'task-card-title task-card-open task-card-title-pending'
+          : 'task-card-title task-card-open'
+      }
       title={task.title}
       aria-busy={pending || undefined}
       onClick={() => actions.open(task)}

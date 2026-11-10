@@ -295,7 +295,7 @@ describe('TasksPage', () => {
     mockGetTasks.mockImplementation(() => new Promise(() => {}));
     renderTasksPage();
     expect(document.querySelector('.board')).toHaveAttribute('aria-hidden', 'true');
-    expect(document.querySelectorAll('.skeleton-card').length).toBe(14);
+    expect(document.querySelectorAll('.board-skeleton-card').length).toBe(14);
   });
 
   it('shows empty state when no tasks', async () => {

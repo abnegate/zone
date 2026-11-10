@@ -25,7 +25,7 @@ const screens = [
   {
     path: 'tasks',
     heading: 'Tasks',
-    content: '.task-card:not(.skeleton-card)',
+    content: '.task-card:not(.board-skeleton-card)',
     title: '.task-card-open',
     titleLeading: '20px',
   },
@@ -122,7 +122,9 @@ for (const viewport of [
           });
           await expect(heading).toBeVisible();
           await expect(page.locator(screen.content).first()).toBeVisible();
-          await expect(page.locator('.skeleton-card')).toHaveCount(0);
+          await expect(
+            page.locator('.skeleton-card, .board-skeleton-card'),
+          ).toHaveCount(0);
           await expect(heading).toHaveCSS('font-size', '18px');
           await expect(heading).toHaveCSS('line-height', '22.5px');
           if (viewport.width > 768)

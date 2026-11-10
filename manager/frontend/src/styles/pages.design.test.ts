@@ -361,9 +361,64 @@ describe('tasks page layout', () => {
     expect(target).toContain('height: var(--task-card-handle-target)');
     expect(target).toContain("content: ''");
 
-    const touch = media(cards, '(hover: none)');
+    const touch = media(cards, '(any-pointer: coarse)');
     expect(rule(touch, '.task-card-handle')).toContain('--task-card-handle-target: 2.75rem');
     expect(rule(touch, '.task-card-handle::after')).toContain('transform: none');
+  });
+
+  it('ends the grip hit area at the grip, clear of the title beside it', () => {
+    const target = rule(cards, '.task-card-handle::after');
+    expect(target).toContain('right: 0');
+    expect(target).toContain('transform: translateY(-50%)');
+    expect(target).not.toContain('left:');
+  });
+
+  it('shows the grip and the menu wherever any pointer is coarse, not only without hover', () => {
+    expect(cards).not.toContain('(hover: none)');
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-handle,\n  .task-card-menu')).toContain('opacity: 1');
+  });
+
+  it('keeps the drag placeholder muted and dashed in the dark theme and under the pointer', () => {
+    const placeholder = rule(
+      cards,
+      ".task-card-dragging,\n.task-card-dragging:hover,\n:root[data-theme='dark'] .task-card-dragging,\n:root[data-theme='dark'] .task-card-dragging:hover"
+    );
+    expect(placeholder).toContain('background: var(--ui-bg-muted)');
+    expect(placeholder).toContain('border-style: dashed');
+    expect(placeholder).toContain('border-color: var(--ui-border-strong)');
+  });
+
+  it('gives the card title one rule, shared by the card and the copy that is dragged', () => {
+    const title = rule(cards, '.task-card-title');
+    expect(title).toContain('font-size: var(--ui-text-sm)');
+    expect(title).toContain('line-clamp: 2');
+    expect(rule(cards, '.task-card-open')).not.toContain('font-size');
+    expect(cards).not.toContain('.task-card-overlay .task-card-heading');
+  });
+
+  it('leaves room above the first card for its focus ring without moving the card', () => {
+    expect(rule(columns, '.board-column')).toContain('--board-column-ring: 3px');
+    const body = rule(columns, '.board-column-body');
+    expect(body).toContain('margin-top: calc(-1 * var(--board-column-ring))');
+    expect(body).toContain('padding: var(--board-column-ring) var(--ui-space-2) var(--ui-space-2)');
+    expect(rule(cards, '.task-card-open:focus-visible::after')).toContain(
+      '0 0 0 var(--board-column-ring) var(--ui-border-focus)'
+    );
+    expect(rule(columns, '.board-column:focus-visible')).toContain('outline-offset: -2px');
+  });
+
+  it('contains only vertical overscroll in a column, so a sideways swipe reaches the board', () => {
+    const body = rule(columns, '.board-column-body');
+    expect(body).toContain('overscroll-behavior-y: contain');
+    expect(body).not.toContain('overscroll-behavior: contain');
+  });
+
+  it('names the board skeleton apart from every other skeleton', () => {
+    expect(board).not.toMatch(/\.skeleton\b/);
+    expect(board).not.toMatch(/[\s.]skeleton-(title|text|badge|card|meta|tag|count)/);
+    expect(rule(board, '.board-skeleton-title')).toContain('max-width: 75%');
+    expect(rule(board, '.task-card.board-skeleton-card')).toContain('pointer-events: none');
   });
 
   it('stops the drop highlight fading in when motion is reduced', () => {
@@ -375,6 +430,7 @@ describe('tasks page layout', () => {
   it('snaps one column at a time on a phone', () => {
     const phone = media(board, '(max-width: 768px)');
     expect(rule(phone, '.board')).toContain('scroll-snap-type: x mandatory');
+    expect(rule(phone, '.board[data-dragging]')).toContain('scroll-snap-type: none');
     const column = rule(media(columns, '(max-width: 768px)'), '.board-column');
     expect(column).toContain('scroll-snap-align: start');
     expect(column).toContain('width: min(85vw, 300px)');

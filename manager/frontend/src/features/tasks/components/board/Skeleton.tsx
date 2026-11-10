@@ -19,17 +19,17 @@ export function Skeleton() {
             <div className="board-column-header">
               <StatusIcon stage={stage.id} />
               <h2>{stage.label}</h2>
-              <span className="skeleton skeleton-count" />
+              <span className="board-skeleton board-skeleton-count" />
             </div>
             <div className="board-column-body">
               <div className="board-column-cards">
                 {PLACEHOLDERS.map((placeholder) => (
-                  <div key={placeholder} className="task-card skeleton-card">
-                    <div className="skeleton skeleton-title" />
-                    <div className="skeleton skeleton-text short" />
-                    <div className="skeleton-meta">
-                      <div className="skeleton skeleton-badge" />
-                      <div className="skeleton skeleton-tag" />
+                  <div key={placeholder} className="task-card board-skeleton-card">
+                    <div className="board-skeleton board-skeleton-title" />
+                    <div className="board-skeleton board-skeleton-text" />
+                    <div className="board-skeleton-meta">
+                      <div className="board-skeleton board-skeleton-badge" />
+                      <div className="board-skeleton board-skeleton-tag" />
                     </div>
                   </div>
                 ))}

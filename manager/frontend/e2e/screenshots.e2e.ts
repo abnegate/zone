@@ -7,7 +7,8 @@ const runScreenshots = process.env.RUN_SCREENSHOTS === 'true';
 const describeScreenshots = runScreenshots ? test.describe : test.describe.skip;
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-const TASK_CARD = '.task-card:not(.skeleton-card)';
+const TASK_CARD = '.task-card:not(.board-skeleton-card)';
+const SKELETON_CARD = '.skeleton-card, .board-skeleton-card';
 const PHONE = { width: 375, height: 812 };
 
 const CardAction = {
@@ -67,7 +68,7 @@ async function capturePage(
   const content = populated[options?.path ?? ''];
   if (content) {
     await expect(page.locator(content).first()).toBeVisible();
-    await expect(page.locator('.skeleton-card')).toHaveCount(0);
+    await expect(page.locator(SKELETON_CARD)).toHaveCount(0);
   }
   if (options?.path?.includes('modal-'))
     await expect(page.getByRole('dialog')).toBeVisible();
@@ -224,7 +225,7 @@ describeScreenshots('Screenshots - Empty States', () => {
 
   test('Tasks page (empty)', async ({ page }) => {
     await openTasks(page, false);
-    await expect(page.locator('.skeleton-card')).toHaveCount(0);
+    await expect(page.locator(SKELETON_CARD)).toHaveCount(0);
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
