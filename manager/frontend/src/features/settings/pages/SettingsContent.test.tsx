@@ -39,6 +39,10 @@ mock.module('../organization/components', () => ({
   OrganizationMembersSection: marker('organization-members-section'),
 }));
 
+mock.module('../mcp', () => ({
+  McpServersSection: marker('mcp-servers-section'),
+}));
+
 mock.module('../server/components', () => ({
   ConnectDevicesSection: marker('connect-devices-section'),
   FeaturesSection: marker('features-section'),
@@ -181,6 +185,37 @@ describe('SettingsContent', () => {
         <SettingsContent
           group={SettingsGroup.Organization}
           section={SettingsSection.GitHub}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+  });
+
+  describe('organization MCP servers', () => {
+    const cases: { role: OrgRole | undefined; canManage: boolean }[] = [
+      { role: 'member', canManage: false },
+      { role: 'admin', canManage: true },
+      { role: 'owner', canManage: true },
+      { role: undefined, canManage: true },
+    ];
+
+    for (const { role, canManage } of cases) {
+      it(`lets an organization ${role ?? 'role the server never says'} ${canManage ? 'manage' : 'only view'} MCP servers`, () => {
+        renderSection(SettingsGroup.Organization, SettingsSection.Mcp, {
+          ...access('member'),
+          organizationRole: role,
+        });
+        expect(propsOf('mcp-servers-section')).toEqual({ organizationId, canManage });
+      });
+    }
+
+    it('renders no MCP servers section without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Organization}
+          section={SettingsSection.Mcp}
           access={access('admin', 'admin')}
         />
       );

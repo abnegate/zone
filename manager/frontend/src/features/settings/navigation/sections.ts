@@ -23,6 +23,7 @@ export const SettingsSection = {
   Billing: 'billing',
   Audit: 'audit',
   GitHub: 'github',
+  Mcp: 'mcp',
   Features: 'features',
   Connect: 'connect',
   Sessions: 'sessions',
@@ -124,6 +125,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Organization,
     section: SettingsSection.GitHub,
     label: 'GitHub',
+    visible: inOrganization,
+  },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.Mcp,
+    label: 'MCP servers',
     visible: inOrganization,
   },
   {
