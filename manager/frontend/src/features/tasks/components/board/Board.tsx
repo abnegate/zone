@@ -78,9 +78,9 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
   const keyboard = useMemo(() => keyboardOptions(reducedMotion, heading), [reducedMotion]);
   const sensors = useSensors(useSensor(CardSensor, POINTER), useSensor(KeyboardSensor, keyboard));
 
-  const start = ({ active }: DragStartEvent) => {
-    const task = carried(active.data);
-    setActive(active.id);
+  const start = (event: DragStartEvent) => {
+    const task = carried(event.active.data);
+    setActive(event.active.id);
     if (!task) return;
     const own = stageOf(task.status);
     announcedOver.current = own.id;
@@ -88,9 +88,9 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
     setAnnouncement(`Picked up ${task.title}, in ${own.label}.`);
   };
 
-  const over = ({ active, over }: DragOverEvent) => {
-    const task = carried(active.data);
-    const target = over?.id ?? null;
+  const over = (event: DragOverEvent) => {
+    const task = carried(event.active.data);
+    const target = event.over?.id ?? null;
     if (!task || target === announcedOver.current) return;
     announcedOver.current = target;
     const stage = stageNamed(target ?? undefined);
@@ -99,12 +99,12 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
     );
   };
 
-  const end = ({ active, over, activatorEvent }: DragEndEvent) => {
+  const end = (event: DragEndEvent) => {
     setActive(null);
-    const task = carried(active.data);
+    const task = carried(event.active.data);
     if (!task) return;
     const own = stageOf(task.status);
-    const stage = stageNamed(over?.id);
+    const stage = stageNamed(event.over?.id);
     if (!stage) {
       setAnnouncement(`${task.title} put back in ${own.label}.`);
       return;
@@ -115,15 +115,15 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
       return;
     }
     setAnnouncement(`${task.title} moved to ${stage.label}.`);
-    if (!(activatorEvent instanceof KeyboardEvent)) release();
+    if (!(event.activatorEvent instanceof KeyboardEvent)) release();
     void actions.move(task, status).then((moved) => {
       if (!moved) setAnnouncement(`${task.title} could not be moved; back in ${own.label}.`);
     });
   };
 
-  const cancel = ({ active }: DragCancelEvent) => {
+  const cancel = (event: DragCancelEvent) => {
     setActive(null);
-    const task = carried(active.data);
+    const task = carried(event.active.data);
     if (!task) return;
     setAnnouncement(`Moving ${task.title} cancelled. It stays in ${stageOf(task.status).label}.`);
   };

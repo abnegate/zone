@@ -1,20 +1,17 @@
-import { memo, type SyntheticEvent, useLayoutEffect, useRef } from 'react';
+import { memo, useLayoutEffect, useRef } from 'react';
 import type { TitleDraft } from '../../TitleDraft';
 import { awaitsTitle } from '../../title';
 import type { BoardActions, Task } from '../../types';
 import { TaskTitleInput } from '../TaskTitleInput';
 import { CardBody } from './CardBody';
 import { CardMenu } from './CardMenu';
+import { CardSensor } from './CardSensor';
 
 export interface CardContentProps {
   task: Task;
   projects: string;
   renaming: TitleDraft | null;
   actions: BoardActions;
-}
-
-function isolate(event: SyntheticEvent): void {
-  event.stopPropagation();
 }
 
 export const CardContent = memo(function CardContent({
@@ -56,7 +53,7 @@ export const CardContent = memo(function CardContent({
   return (
     <>
       <CardBody task={task} projects={projects} title={title} />
-      <div className="task-card-menu" onPointerDown={isolate}>
+      <div className="task-card-menu" onPointerDown={CardSensor.shield}>
         <CardMenu task={task} actions={actions} />
       </div>
     </>

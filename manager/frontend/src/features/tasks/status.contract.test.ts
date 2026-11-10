@@ -1,14 +1,4 @@
-/**
- * A task's status is a CHECK constraint in Postgres, a constant the server
- * validates against, and a list the console draws columns from. Nothing in
- * any of the three type systems links them: a status added to one side alone
- * either crashes the parse of every task list that carries it, or lets the
- * board offer a column whose every drop the database refuses.
- *
- * This reads the constraint from the newest migration that redefines it and
- * the server's `STATUSES` constant, and asserts both admit exactly the
- * statuses the console knows.
- */
+/** The database constraint, the server's STATUSES and the console must admit the same statuses. */
 
 import { describe, expect, test } from 'bun:test';
 import { readdirSync, readFileSync } from 'node:fs';

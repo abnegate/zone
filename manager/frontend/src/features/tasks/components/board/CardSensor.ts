@@ -1,5 +1,5 @@
 import { type DraggableNode, PointerSensor, type PointerSensorOptions } from '@dnd-kit/core';
-import type { PointerEvent } from 'react';
+import type { PointerEvent, SyntheticEvent } from 'react';
 
 const TOUCH = 'touch';
 
@@ -23,4 +23,8 @@ function grabs(
 
 export class CardSensor extends PointerSensor {
   static activators = [{ eventName: 'onPointerDown' as const, handler: grabs }];
+
+  static shield(event: SyntheticEvent): void {
+    event.stopPropagation();
+  }
 }

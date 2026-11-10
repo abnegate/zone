@@ -5,7 +5,7 @@ import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { awaitsTitle, TITLE_POLL_MS } from '../title';
 import type { CreateTaskRequest, Task, TaskStatus, UpdateTaskRequest } from '../types';
 
-const TASKS_KEY = ['tasks'] as const;
+export const TASKS_KEY = ['tasks'] as const;
 
 const LOAD_FAILED = 'Failed to load tasks';
 
@@ -33,7 +33,7 @@ export function useTasks(projectId?: string) {
   const queryClient = useQueryClient();
   const { currentWorkspace, loading: workspaceLoading } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
-  const queryKey = ['tasks', workspaceId, projectId];
+  const queryKey = [...TASKS_KEY, workspaceId, projectId];
 
   const [moves, setMoves] = useState(NONE);
 

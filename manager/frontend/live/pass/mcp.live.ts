@@ -2,8 +2,8 @@ import { execFileSync } from 'node:child_process';
 import type { Locator } from '@playwright/test';
 import {
   api,
-  chooseTaskAction,
   ask,
+  chooseTaskAction,
   enabled,
   expect,
   logLines,

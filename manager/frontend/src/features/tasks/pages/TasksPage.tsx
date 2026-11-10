@@ -10,7 +10,7 @@ import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard, DeleteTaskDialog, TaskDetail } from '../components';
 import { Board, Skeleton } from '../components/board';
-import { useTask, useTasks } from '../hooks';
+import { TASKS_KEY, useTask, useTasks } from '../hooks';
 import { TitleDraft } from '../TitleDraft';
 import type { BoardActions, Renaming, Task, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
@@ -112,7 +112,7 @@ export default function TasksPage() {
 
   const handleSave = async (request: UpdateTaskRequest) => {
     await updateTask(request);
-    await queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    await queryClient.invalidateQueries({ queryKey: TASKS_KEY });
   };
 
   const confirmDelete = async (task: Task) => {
