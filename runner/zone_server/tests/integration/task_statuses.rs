@@ -7,6 +7,7 @@ use axum::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zone_server::auth::{AuthUser, jwt::Claims};
+use zone_server::db::tasks::{CANCELLED, COMPLETE, CREATED, IN_PROGRESS, PAUSED, QUEUED};
 use zone_server::db::{migrations, tasks};
 use zone_server::routes::tasks as routes;
 use zone_server::state::AppState;
@@ -16,9 +17,6 @@ use crate::common::{self, Database};
 const PREFIX: &str = "task_statuses";
 const CHECK_VIOLATION: &str = "23514";
 const CONSTRAINT: &str = "tasks_status_check";
-const PAUSED: &str = "paused";
-const CANCELLED: &str = "cancelled";
-const QUEUED: &str = "queued";
 const UNKNOWN: &str = "archived";
 
 struct Fixture {
@@ -196,7 +194,70 @@ async fn an_unknown_status_is_a_bad_request() {
         "an unknown status must be refused, not reach {CONSTRAINT} as a server error"
     );
     assert_eq!(body(response).await["error"], "Unknown task status");
-    assert_eq!(fixture.status(task).await, "created");
+    assert_eq!(fixture.status(task).await, CREATED);
+
+    fixture.database.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_unknown_status_is_refused_by_a_write_that_skips_the_route() {
+    let fixture = Fixture::new().await;
+    let task = fixture.task().await;
+
+    let refused = tasks::update_task(
+        &fixture.database.pool,
+        task,
+        None,
+        None,
+        None,
+        Some(UNKNOWN),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(&refused, Err(sqlx::Error::Protocol(message)) if message == tasks::UNKNOWN_STATUS),
+        "an unknown status must be refused by name, not reach {CONSTRAINT}: {refused:?}"
+    );
+    assert_eq!(tasks::Status::parse(UNKNOWN), None);
+    for status in tasks::STATUSES {
+        assert_eq!(
+            tasks::Status::parse(status).map(tasks::Status::as_str),
+            Some(status)
+        );
+    }
+    assert_eq!(fixture.status(task).await, CREATED);
+
+    fixture.database.cleanup().await;
+}
+
+#[tokio::test]
+async fn completing_a_task_by_hand_stamps_it_and_moving_it_back_out_clears_the_stamp() {
+    let fixture = Fixture::new().await;
+    let task = fixture.task().await;
+
+    let response = fixture.put(task, COMPLETE).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let completed = body(response).await["task"]["completed_at"].clone();
+    assert!(
+        completed.is_string(),
+        "a task a person completes is recorded as completed: {completed}"
+    );
+
+    let response = fixture.put(task, COMPLETE).await;
+    assert_eq!(
+        body(response).await["task"]["completed_at"],
+        completed,
+        "restating the status moves nothing"
+    );
+
+    let response = fixture.put(task, IN_PROGRESS).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        body(response).await["task"]["completed_at"],
+        Value::Null,
+        "a task moved back out is no longer completed"
+    );
 
     fixture.database.cleanup().await;
 }
@@ -245,6 +306,28 @@ async fn an_active_run_still_owns_the_status() {
     assert_eq!(edited["task"]["title"], "Renamed mid-run");
     assert_eq!(edited["task"]["description"], "Edited mid-run");
     assert_eq!(edited["task"]["status"], QUEUED);
+
+    let request = serde_json::from_value(json!({
+        "title": "Saved whole mid-run",
+        "status": QUEUED,
+    }))
+    .unwrap();
+    let response = routes::update(
+        State(fixture.state.clone()),
+        fixture.auth(),
+        Path(task),
+        Json(request),
+    )
+    .await
+    .into_response();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a status the task already has changes nothing the run owns"
+    );
+    let restated = body(response).await;
+    assert_eq!(restated["task"]["title"], "Saved whole mid-run");
+    assert_eq!(restated["task"]["status"], QUEUED);
 
     fixture.database.cleanup().await;
 }

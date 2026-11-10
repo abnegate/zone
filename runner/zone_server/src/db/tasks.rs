@@ -32,12 +32,12 @@ pub enum MutationError {
     Project,
     #[error("Source is not available in this workspace")]
     Source,
-    #[error("Task has an active run")]
+    #[error("{ACTIVE_RUN}")]
     ActiveRun,
 }
 
 impl MutationError {
-    fn into_database(self) -> sqlx::Error {
+    pub(crate) fn into_database(self) -> sqlx::Error {
         match self {
             Self::Database(error) => error,
             error => sqlx::Error::Protocol(error.to_string()),
@@ -89,6 +89,10 @@ pub fn placeholder_title(description: &str) -> String {
 
 pub const UNTITLED_AND_UNDESCRIBED: &str = "A task needs a title or a description";
 
+pub const ACTIVE_RUN: &str = "Task has an active run";
+
+pub const UNKNOWN_STATUS: &str = "Unknown task status";
+
 pub const CREATED: &str = "created";
 pub const QUEUED: &str = "queued";
 pub const IN_PROGRESS: &str = "in_progress";
@@ -114,6 +118,45 @@ pub const STATUSES: [&str; 8] = [
 
 /// Nothing unattended starts, retries, advances or merges a task in one of these.
 pub const WITHHELD: [&str; 2] = [PAUSED, CANCELLED];
+
+/// No work is left on a task in one of these: it holds no project open and
+/// satisfies whatever depends on it.
+pub const CLOSED: [&str; 2] = [COMPLETE, CANCELLED];
+
+/// A status `tasks_status_check` admits, so a write that carries one cannot
+/// reach the constraint as a server error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Status(&'static str);
+
+impl Status {
+    pub const CREATED: Self = Self(CREATED);
+    pub const IN_PROGRESS: Self = Self(IN_PROGRESS);
+    pub const COMPLETE: Self = Self(COMPLETE);
+
+    pub fn parse(value: &str) -> Option<Self> {
+        STATUSES
+            .into_iter()
+            .find(|status| *status == value)
+            .map(Self)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+/// The stamps a status write leaves, as `SET` clauses for an `UPDATE` in
+/// which `status` still reads the value being replaced. `shipped_at` is when
+/// the task last reached `complete`, and outlives the move back out so that
+/// move stays visible as a reopen; only a new run clears it.
+pub(crate) fn completion_stamps(status: &str) -> String {
+    format!(
+        "completed_at = CASE WHEN {status}::text IS NULL OR {status} = status THEN completed_at \
+           WHEN {status} = '{COMPLETE}' THEN COALESCE(completed_at, NOW()) ELSE NULL END, \
+         shipped_at = CASE WHEN {status} = '{COMPLETE}' AND status <> '{COMPLETE}' THEN NOW() \
+           ELSE shipped_at END"
+    )
+}
 
 /// A title someone gave, trimmed, or `None` for a blank one.
 pub fn given_title(title: Option<&str>) -> Option<&str> {
@@ -155,7 +198,7 @@ pub struct Patch<'a> {
     pub title: Option<&'a str>,
     pub description: Option<&'a str>,
     pub acceptance_criteria: Option<&'a str>,
-    pub status: Option<&'a str>,
+    pub status: Option<Status>,
     pub priority: Option<i32>,
     pub project_ids: Option<&'a [Uuid]>,
     pub require_plan_approval: Option<bool>,
@@ -713,6 +756,9 @@ pub async fn update_task(
     priority: Option<i32>,
     project_ids: Option<&[Uuid]>,
 ) -> DbResult<Option<TaskRow>> {
+    let status = status
+        .map(|status| Status::parse(status).ok_or_else(|| super::actions::invalid(UNKNOWN_STATUS)))
+        .transpose()?;
     let input = Patch {
         id,
         title,
@@ -762,51 +808,103 @@ pub async fn update_task_authorized(
     if let Some(project_ids) = input.project_ids {
         lock_projects(&mut transaction, workspace_id, project_ids).await?;
     }
-    if run_is_active(&mut transaction, input.id, input.status.is_some()).await? {
+    let Some(held) = hold(&mut transaction, input.id).await? else {
+        return Err(MutationError::ActiveRun);
+    };
+    if held.refuses(input.status) {
         return Err(MutationError::ActiveRun);
     }
-    let Some(task) = apply_update(&mut transaction, &input).await? else {
+    let Some(task) = apply_update(&mut transaction, &input, &held).await? else {
         return Ok(Mutation::NotFound);
     };
     transaction.commit().await?;
+    if held.releases(input.status) {
+        release(pool, task.id).await;
+    }
     Ok(Mutation::Applied(task))
 }
 
-/// Whether the run lifecycle currently owns this task's status.
+/// Tell automation a person took a task back out of [`WITHHELD`]. The move
+/// has committed by now, so a failure here is logged and the move still
+/// reported: the caller has a run to start or a task to answer with.
+async fn release(pool: &PgPool, task_id: Uuid) {
+    if let Err(error) = super::auto_projects::reopen(pool, task_id).await {
+        tracing::warn!(%task_id, %error, "Could not reopen the auto projects of a task a person gave back");
+    }
+}
+
+/// What a task's row lock found: its status, and whether a live run owns it.
 ///
 /// The worker advances `tasks.status` from the run, so a caller-supplied status
-/// while a run is live would race those transitions. A missing task reads the
-/// same way as one whose status is not the caller's to set.
-async fn run_is_active(
-    connection: &mut PgConnection,
-    task_id: Uuid,
-    changes_status: bool,
-) -> DbResult<bool> {
-    let active: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id = $1 FOR UPDATE")
+/// while a run is live would race those transitions.
+struct Held {
+    status: String,
+    running: bool,
+}
+
+impl Held {
+    fn changes(&self, status: Option<Status>) -> Option<Status> {
+        status.filter(|status| status.as_str() != self.status)
+    }
+
+    fn refuses(&self, status: Option<Status>) -> bool {
+        self.running && self.changes(status).is_some()
+    }
+
+    fn withheld(&self) -> bool {
+        WITHHELD.contains(&self.status.as_str())
+    }
+
+    fn releases(&self, status: Option<Status>) -> bool {
+        self.withheld() && status.is_some_and(|status| !WITHHELD.contains(&status.as_str()))
+    }
+}
+
+async fn hold(connection: &mut PgConnection, task_id: Uuid) -> DbResult<Option<Held>> {
+    let row: Option<(String, Option<Uuid>)> =
+        sqlx::query_as("SELECT status, active_run_id FROM tasks WHERE id = $1 FOR UPDATE")
             .bind(task_id)
             .fetch_optional(&mut *connection)
             .await?;
-    Ok(active.is_none() || (changes_status && active.flatten().is_some()))
+    Ok(row.map(|(status, run)| Held {
+        status,
+        running: run.is_some(),
+    }))
 }
 
 /// Apply `input` inside the caller's transaction; `None` when the task is
-/// gone, or when `input` sets a status that a live run owns.
+/// gone, or when `input` changes a status that a live run owns.
 pub(crate) async fn update_task_in(
     connection: &mut PgConnection,
     input: &Patch<'_>,
 ) -> DbResult<Option<TaskRow>> {
-    if run_is_active(connection, input.id, input.status.is_some()).await? {
+    let Some(held) = hold(connection, input.id).await? else {
+        return Ok(None);
+    };
+    if held.refuses(input.status) {
         return Ok(None);
     }
-    apply_update(connection, input).await
+    apply_update(connection, input, &held).await
 }
 
-/// The caller must hold the task's row lock and have found no active run.
+/// The caller holds the task's row lock, which is where `held` came from,
+/// and has found no live run that owns the status `input` changes.
 async fn apply_update(
     connection: &mut PgConnection,
     input: &Patch<'_>,
+    held: &Held,
 ) -> DbResult<Option<TaskRow>> {
+    let status = held.changes(input.status).map(Status::as_str);
+    if let Some(status) = status {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE tasks SET {} WHERE id = $1",
+            completion_stamps("$2")
+        )))
+        .bind(input.id)
+        .bind(status)
+        .execute(&mut *connection)
+        .await?;
+    }
     let row = sqlx::query!(
         r#"
         UPDATE tasks
@@ -831,7 +929,7 @@ async fn apply_update(
         input.title,
         input.description,
         input.acceptance_criteria,
-        input.status,
+        status,
         input.priority,
         input.require_plan_approval,
         input.is_agentic,
@@ -1003,13 +1101,19 @@ pub async fn queue_task_authorized(
     }
     // Re-queueing a task the worker is already running would reset the status
     // underneath it, so an active run is a conflict rather than a refusal.
-    if run_is_active(&mut transaction, id, true).await? {
+    let Some(held) = hold(&mut transaction, id).await? else {
+        return Err(MutationError::ActiveRun);
+    };
+    if held.running {
         return Err(MutationError::ActiveRun);
     }
     let Some(task) = queue_task_in(&mut transaction, id).await? else {
         return Ok(Mutation::NotFound);
     };
     transaction.commit().await?;
+    if held.withheld() {
+        release(pool, id).await;
+    }
     Ok(Mutation::Applied(task))
 }
 
@@ -1080,8 +1184,14 @@ pub async fn create_task_run_authorized(
         return Ok(Mutation::Applied(RunMutation::Active(run)));
     }
 
+    let released = hold(&mut transaction, task_id)
+        .await?
+        .is_some_and(|held| held.withheld());
     let run = insert_task_run(&mut transaction, task_id, Some(user_id)).await?;
     transaction.commit().await?;
+    if released {
+        release(pool, task_id).await;
+    }
     Ok(Mutation::Applied(RunMutation::Created(run)))
 }
 
@@ -1103,7 +1213,7 @@ async fn insert_task_run(
     )
     .fetch_one(&mut *connection)
     .await?;
-    sqlx::query("UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), completed_at = NULL, updated_at = NOW() WHERE id = $1")
+    sqlx::query("UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), completed_at = NULL, shipped_at = NULL, updated_at = NOW() WHERE id = $1")
         .bind(task_id)
         .bind(row.id)
         .execute(&mut *connection)
@@ -1653,8 +1763,9 @@ pub async fn set_dependencies(pool: &PgPool, task_id: Uuid, dependencies: &[Uuid
 
 #[derive(Debug)]
 pub enum Unattended {
-    Created(TaskRunRow),
-    Active(TaskRunRow),
+    /// The run that was admitted.
+    Created(Uuid),
+    Active,
     Withheld,
 }
 
@@ -1684,17 +1795,14 @@ pub async fn create_unattended_task_run(
         transaction.rollback().await?;
         return Ok(Unattended::Withheld);
     }
-    let active = sqlx::query_as::<_, TaskRunRow>(sqlx::AssertSqlSafe(format!(
-        "SELECT id, task_id, triggered_by, status, current_phase, progress_percent, started_at, \
-                completed_at, error_message, artifacts, pending_question, pending_wait, plan \
-         FROM task_runs WHERE task_id = $1 AND status IN {ACTIVE_RUN_STATUSES} \
-         ORDER BY started_at DESC, id LIMIT 1"
+    let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM task_runs WHERE task_id = $1 AND status IN {ACTIVE_RUN_STATUSES})"
     )))
     .bind(task_id)
-    .fetch_optional(&mut *transaction)
+    .fetch_one(&mut *transaction)
     .await?;
-    if let Some(run) = active {
-        return Ok(Unattended::Active(run));
+    if active {
+        return Ok(Unattended::Active);
     }
     let run = insert_task_run(&mut transaction, task_id, Some(actor)).await?;
     sqlx::query("UPDATE task_runs SET unattended = TRUE WHERE id = $1")
@@ -1702,7 +1810,7 @@ pub async fn create_unattended_task_run(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
-    Ok(Unattended::Created(run))
+    Ok(Unattended::Created(run.id))
 }
 
 /// How a run is being run: whether anyone is there to answer it, and the
@@ -1753,7 +1861,7 @@ pub async fn record_run_model(
 pub async fn complete_merged_task(pool: &PgPool, task_id: Uuid, pr_url: &str) -> DbResult<bool> {
     Ok(sqlx::query(
         "UPDATE tasks SET status = 'complete', pr_status = 'merged', completed_at = NOW(), \
-           updated_at = NOW() \
+           shipped_at = NOW(), updated_at = NOW() \
          WHERE id = $1 AND active_run_id IS NULL AND status <> 'complete' AND pr_url = $2",
     )
     .bind(task_id)

@@ -168,18 +168,25 @@ pub async fn resume(pool: &PgPool, project_id: Uuid) -> DbResult<bool> {
         == 1)
 }
 
+/// What a parked row shows while a person withholds its task. Shown only:
+/// `parked_stage` is what marks the row as parked.
 pub const PAUSED_BY_PERSON: &str = "The task was paused";
 pub const CANCELLED_BY_PERSON: &str = "The task was cancelled";
 
-/// Park every task of a project a person paused or cancelled, so the pass
-/// that follows neither settles, retries, advances nor merges it. A row
-/// already parked or merged keeps the stage and reason it has.
-pub async fn park(pool: &PgPool, project_id: Uuid) -> DbResult<u64> {
-    Ok(sqlx::query(
-        "UPDATE task_automation a SET stage = $2, \
-           reason = CASE WHEN t.status = $4 THEN $5 ELSE $6 END, updated_at = NOW() \
+/// A row parked already keeps the stage and reason saved when it was first
+/// parked; only the reason it shows follows its task between paused and
+/// cancelled. A row automation paused for its own reasons is not parked, so
+/// un-withholding its task does not release it, and a merge is a fact.
+pub async fn park(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
+    sqlx::query(
+        "UPDATE task_automation a SET \
+           parked_stage = CASE WHEN a.stage = $2 THEN a.parked_stage ELSE a.stage END, \
+           parked_reason = CASE WHEN a.stage = $2 THEN a.parked_reason ELSE a.reason END, \
+           stage = $2, reason = CASE WHEN t.status = $4 THEN $5 ELSE $6 END, updated_at = NOW() \
          FROM tasks t WHERE t.id = a.task_id AND a.project_id = $1 AND t.status = ANY($3) \
-           AND a.stage <> $2 AND a.stage <> $7",
+           AND a.stage <> $7 \
+           AND (a.stage <> $2 OR (a.parked_stage IS NOT NULL \
+             AND a.reason IS DISTINCT FROM CASE WHEN t.status = $4 THEN $5 ELSE $6 END))",
     )
     .bind(project_id)
     .bind(Stage::Paused.as_str())
@@ -189,29 +196,61 @@ pub async fn park(pool: &PgPool, project_id: Uuid) -> DbResult<u64> {
     .bind(CANCELLED_BY_PERSON)
     .bind(Stage::Merged.as_str())
     .execute(pool)
-    .await?
-    .rows_affected())
+    .await?;
+    Ok(())
 }
 
-/// A task a person started a run on stays parked until that run ends.
-pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<u64> {
-    Ok(sqlx::query(
+/// A row goes back to the stage and reason it was parked with, except where
+/// its task has outgrown them: one a person completed has nothing left to
+/// drive, and a pull request the pipeline was not yet driving, opened by a run
+/// a person started meanwhile or by one not settled when the row was parked,
+/// is checked from the start. A task a person started a run on stays parked
+/// until that run ends. The clock starts over so the time spent parked does
+/// not count against checks and reviews.
+pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
+    let driving: Vec<&str> = Stage::DRIVING.into_iter().map(Stage::as_str).collect();
+    sqlx::query(
         "UPDATE task_automation a SET \
-           stage = CASE WHEN t.pr_url IS NOT NULL AND t.status <> $5 THEN $6 ELSE $7 END, \
-           reason = NULL, updated_at = NOW() \
+           stage = CASE WHEN t.status = $4 THEN $5 \
+             WHEN t.pr_url IS NOT NULL AND a.parked_stage <> ALL($6) THEN $7 \
+             ELSE a.parked_stage END, \
+           reason = CASE \
+             WHEN t.status = $4 OR (t.pr_url IS NOT NULL AND a.parked_stage <> ALL($6)) THEN NULL \
+             ELSE a.parked_reason END, \
+           parked_stage = NULL, parked_reason = NULL, \
+           checks_since = CASE WHEN a.checks_since IS NULL THEN NULL ELSE NOW() END, \
+           updated_at = NOW() \
          FROM tasks t WHERE t.id = a.task_id AND a.project_id = $1 AND a.stage = $2 \
-           AND a.reason = ANY($3) AND t.status <> ALL($4) AND t.active_run_id IS NULL",
+           AND a.parked_stage IS NOT NULL AND t.status <> ALL($3) AND t.active_run_id IS NULL",
     )
     .bind(project_id)
     .bind(Stage::Paused.as_str())
-    .bind([PAUSED_BY_PERSON, CANCELLED_BY_PERSON].as_slice())
     .bind(tasks::WITHHELD.as_slice())
     .bind(tasks::COMPLETE)
-    .bind(Stage::AwaitingChecks.as_str())
     .bind(Stage::Idle.as_str())
+    .bind(driving)
+    .bind(Stage::AwaitingChecks.as_str())
     .execute(pool)
-    .await?
-    .rows_affected())
+    .await?;
+    Ok(())
+}
+
+/// Open the auto projects an agentic task belongs to again: one that stopped
+/// or finished while a person withheld the task has work to do once they move
+/// it back. Called after that move has committed, never inside it, so no
+/// project row is locked while a task row is held.
+pub async fn reopen(pool: &PgPool, task_id: Uuid) -> DbResult<()> {
+    sqlx::query(
+        "UPDATE projects p SET auto_paused_reason = NULL, auto_completed_at = NULL, \
+           updated_at = NOW() \
+         FROM task_projects tp JOIN tasks t ON t.id = tp.task_id \
+         WHERE tp.task_id = $1 AND p.id = tp.project_id AND p.auto AND t.is_agentic \
+           AND (p.auto_paused_reason IS NOT NULL OR p.auto_completed_at IS NOT NULL)",
+    )
+    .bind(task_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Put every paused task of a project back where it was going: a task with a
@@ -219,7 +258,8 @@ pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<u64> {
 /// person paused or cancelled stays parked until they move it themselves.
 pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u64> {
     let checked = sqlx::query(
-        "UPDATE task_automation a SET stage = 'awaiting_checks', reason = NULL, updated_at = NOW() \
+        "UPDATE task_automation a SET stage = 'awaiting_checks', reason = NULL, \
+           parked_stage = NULL, parked_reason = NULL, updated_at = NOW() \
          FROM tasks t WHERE t.id = a.task_id AND a.project_id = $1 AND a.stage = 'paused' \
            AND t.pr_url IS NOT NULL AND t.status <> 'complete' AND t.status <> ALL($2)",
     )
@@ -241,7 +281,8 @@ pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u6
              AND t.status <> 'complete' AND t.status <> ALL($2) AND t.active_run_id IS NULL \
            FOR UPDATE OF t), \
          restarted AS ( \
-           UPDATE task_automation a SET stage = 'idle', reason = NULL, runs = 0, updated_at = NOW() \
+           UPDATE task_automation a SET stage = 'idle', reason = NULL, runs = 0, \
+             parked_stage = NULL, parked_reason = NULL, updated_at = NOW() \
            FROM candidates c WHERE a.task_id = c.id \
            RETURNING a.task_id) \
          UPDATE tasks SET status = 'created', updated_at = NOW() \
@@ -284,6 +325,15 @@ pub enum Stage {
 }
 
 impl Stage {
+    /// The stages at which the pipeline is driving a task's pull request.
+    pub const DRIVING: [Self; 5] = [
+        Self::AwaitingChecks,
+        Self::AwaitingReviews,
+        Self::Fixing,
+        Self::Merging,
+        Self::PostMerge,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -415,7 +465,10 @@ pub async fn task_stage(pool: &PgPool, task_id: Uuid) -> DbResult<Option<TaskAut
     .await
 }
 
-/// Move a task to a stage, creating its row on the way if it has none.
+/// Move a task to a stage, creating its row on the way if it has none. What
+/// a park saved goes with the move: `task_automation_parked_check` lets only
+/// a paused row carry it, and a row automation pauses here is not one a
+/// person's move un-parks.
 pub async fn set_stage(
     pool: &PgPool,
     task_id: Uuid,
@@ -426,7 +479,7 @@ pub async fn set_stage(
     sqlx::query(
         "INSERT INTO task_automation (task_id, project_id, stage, reason) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (task_id) DO UPDATE SET stage = EXCLUDED.stage, reason = EXCLUDED.reason, \
-         updated_at = NOW()",
+         parked_stage = NULL, parked_reason = NULL, updated_at = NOW()",
     )
     .bind(task_id)
     .bind(project_id)
@@ -529,6 +582,7 @@ pub async fn record_admission(
         "INSERT INTO task_automation (task_id, project_id, stage, runs, last_run_id) \
          VALUES ($1, $2, 'running', 1, $3) \
          ON CONFLICT (task_id) DO UPDATE SET stage = 'running', reason = NULL, \
+           parked_stage = NULL, parked_reason = NULL, \
            runs = task_automation.runs + 1, last_run_id = EXCLUDED.last_run_id, updated_at = NOW() \
          RETURNING runs",
     )
@@ -603,7 +657,9 @@ pub async fn enrollable(pool: &PgPool, project_id: Uuid) -> DbResult<Vec<Settled
 }
 
 /// The next task a project can start: created, agentic, and with every task it
-/// depends on complete. Priority first, then age.
+/// depends on complete or cancelled. A person cancelling a task takes it out
+/// of the plan, so nothing waits on it; a paused one is still to be done.
+/// Priority first, then age.
 pub async fn next_runnable(pool: &PgPool, project_id: Uuid) -> DbResult<Option<Uuid>> {
     sqlx::query_scalar(
         "SELECT t.id FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
@@ -612,10 +668,11 @@ pub async fn next_runnable(pool: &PgPool, project_id: Uuid) -> DbResult<Option<U
            AND NOT EXISTS ( \
              SELECT 1 FROM jsonb_array_elements_text( \
                CASE WHEN jsonb_typeof(t.dependencies) = 'array' THEN t.dependencies ELSE '[]'::jsonb END \
-             ) AS d(id) JOIN tasks p ON p.id::text = d.id WHERE p.status <> 'complete') \
+             ) AS d(id) JOIN tasks p ON p.id::text = d.id WHERE p.status <> ALL($2)) \
          ORDER BY t.priority NULLS LAST, t.created_at, t.id LIMIT 1",
     )
     .bind(project_id)
+    .bind(tasks::CLOSED.as_slice())
     .fetch_optional(pool)
     .await
 }
@@ -639,10 +696,10 @@ pub async fn in_flight(pool: &PgPool, project_id: Uuid) -> DbResult<i64> {
 pub async fn remaining(pool: &PgPool, project_id: Uuid) -> DbResult<i64> {
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
-         WHERE tp.project_id = $1 AND t.is_agentic AND t.status <> 'complete' AND t.status <> $2",
+         WHERE tp.project_id = $1 AND t.is_agentic AND t.status <> ALL($2)",
     )
     .bind(project_id)
-    .bind(tasks::CANCELLED)
+    .bind(tasks::CLOSED.as_slice())
     .fetch_one(pool)
     .await
 }
@@ -656,13 +713,17 @@ pub async fn active_unattended_runs(pool: &PgPool) -> DbResult<i64> {
     .await
 }
 
-/// The project's continuous-integration task, and its status.
+/// The project's continuous-integration task, and its status. One a person
+/// cancelled is not the project's any more: the project has none.
 pub async fn ci_task(pool: &PgPool, project_id: Uuid) -> DbResult<Option<(Uuid, String)>> {
     sqlx::query_as::<_, (Uuid, String)>(
         "SELECT t.id, t.status FROM task_automation a JOIN tasks t ON t.id = a.task_id \
-         WHERE a.project_id = $1 AND a.kind = 'ci' ORDER BY t.created_at LIMIT 1",
+         WHERE a.project_id = $1 AND a.kind = $2 AND t.status <> $3 \
+         ORDER BY t.created_at LIMIT 1",
     )
     .bind(project_id)
+    .bind(Kind::Ci.as_str())
+    .bind(tasks::CANCELLED)
     .fetch_optional(pool)
     .await
 }
@@ -1028,16 +1089,6 @@ pub struct Finalized {
     pub updates_chat_id: Uuid,
 }
 
-/// Translate a task mutation refusal into the database error the transaction reports.
-fn project_error(error: MutationError) -> sqlx::Error {
-    match error {
-        MutationError::Database(error) => error,
-        MutationError::Project => invalid("Project is not available in this workspace"),
-        MutationError::Source => invalid("Source is not available in this workspace"),
-        MutationError::ActiveRun => invalid("Task has an active run"),
-    }
-}
-
 /// Create a project and every task the plan names, in one transaction.
 ///
 /// The planner chat, when there is one, is bound to the project here and
@@ -1119,7 +1170,7 @@ pub async fn finalize(
             },
         )
         .await
-        .map_err(project_error)?;
+        .map_err(MutationError::into_database)?;
         set_kind(&mut transaction, created.id, project_id, task.kind, false).await?;
         task_ids.push(created.id);
     }
@@ -1154,6 +1205,10 @@ pub async fn finalize(
     })
 }
 
+/// A task in one of these has not started, so continuous integration can
+/// still go ahead of it. A paused one counts: it starts once it is un-paused.
+const YET_TO_START: [&str; 2] = [tasks::CREATED, tasks::PAUSED];
+
 /// Add a task the driver decided the project needs: continuous integration a
 /// repository turned out not to have, or a fix for a job that failed after a
 /// merge. A `ci` task goes ahead of everything still waiting to start.
@@ -1187,7 +1242,7 @@ pub async fn insert_auto_task(
         },
     )
     .await
-    .map_err(project_error)?;
+    .map_err(MutationError::into_database)?;
     set_kind(&mut transaction, created.id, project_id, kind, true).await?;
     if kind == Kind::Ci {
         sqlx::query(
@@ -1196,11 +1251,12 @@ pub async fn insert_auto_task(
                || jsonb_build_array($2::text), updated_at = NOW() \
              FROM task_projects tp \
              WHERE tp.task_id = t.id AND tp.project_id = $1 AND t.id <> $3 \
-               AND t.is_agentic AND t.status = 'created'",
+               AND t.is_agentic AND t.status = ANY($4)",
         )
         .bind(project_id)
         .bind(created.id.to_string())
         .bind(created.id)
+        .bind(YET_TO_START.as_slice())
         .execute(&mut *transaction)
         .await?;
     }
@@ -1215,7 +1271,7 @@ pub(crate) mod testing {
     use uuid::Uuid;
 
     use super::{Kind, PlannedTask, ProjectPlan, Stage, TaskAutomation, finalize, set_stage};
-    use crate::db::tasks::Origin;
+    use crate::db::tasks::{self, Origin};
     use crate::db::{organizations, users, workspace_members, workspaces};
 
     pub struct Project {
@@ -1316,6 +1372,64 @@ pub(crate) mod testing {
                 .fetch_one(&self.pool)
                 .await
                 .expect("the task's status")
+        }
+
+        pub async fn set_status(&self, task: Uuid, status: &str) {
+            sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1")
+                .bind(task)
+                .bind(status)
+                .execute(&self.pool)
+                .await
+                .expect("the task's status is set");
+        }
+
+        /// Move a task the way the console does, as the project's actor.
+        pub async fn move_to(&self, task: Uuid, status: &str) {
+            let moved = tasks::update_task_authorized(
+                &self.pool,
+                self.actor,
+                tasks::Patch {
+                    id: task,
+                    title: None,
+                    description: None,
+                    acceptance_criteria: None,
+                    status: tasks::Status::parse(status),
+                    priority: None,
+                    project_ids: None,
+                    require_plan_approval: None,
+                    is_agentic: None,
+                    source_id: None,
+                    model_name: None,
+                },
+            )
+            .await;
+            assert!(
+                matches!(moved, Ok(tasks::Mutation::Applied(_))),
+                "the task moves to {status}: {moved:?}"
+            );
+        }
+
+        pub async fn parked(&self, task: Uuid) -> (Option<String>, Option<String>) {
+            sqlx::query_as(
+                "SELECT parked_stage, parked_reason FROM task_automation WHERE task_id = $1",
+            )
+            .bind(task)
+            .fetch_one(&self.pool)
+            .await
+            .expect("the task's automation")
+        }
+
+        /// The kinds of the notices the project's updates chat received, oldest first.
+        pub async fn notices(&self) -> Vec<String> {
+            sqlx::query_scalar(
+                "SELECT m.metadata ->> 'kind' FROM messages m JOIN chats c ON c.id = m.chat_id \
+                 WHERE c.project_id = $1 AND m.metadata ->> 'source' = 'auto_project' \
+                 ORDER BY m.created_at, m.id",
+            )
+            .bind(self.id)
+            .fetch_all(&self.pool)
+            .await
+            .expect("the project's notices")
         }
 
         pub async fn runs(&self, task: Uuid) -> i64 {
@@ -1568,14 +1682,15 @@ mod tests {
             )
             .await;
         project
-            .place(working, "in_progress", None, Stage::Running)
+            .place(working, tasks::IN_PROGRESS, None, Stage::Running)
             .await;
         project
             .place(merged, tasks::CANCELLED, Some(PULL), Stage::Merged)
             .await;
 
-        let parked = park(&project.pool, project.id).await.expect("the park");
-        let again = park(&project.pool, project.id)
+        park(&project.pool, project.id).await.expect("the park");
+        let first = project.automation(paused).await.updated_at;
+        park(&project.pool, project.id)
             .await
             .expect("a second park");
         let settled: Vec<Uuid> = settled_runs(&project.pool, project.id)
@@ -1591,16 +1706,34 @@ mod tests {
         let cancelled_row = project.automation(cancelled).await;
         let working_row = project.automation(working).await;
         let merged_row = project.automation(merged).await;
+        let saved = (
+            project.parked(paused).await.0,
+            project.parked(cancelled).await.0,
+            project.parked(working).await.0,
+            project.parked(merged).await.0,
+        );
         project.remove().await;
 
-        assert_eq!(parked, 2);
-        assert_eq!(again, 0, "a parked row is left as it is");
+        assert_eq!(
+            paused_row.updated_at, first,
+            "a parked row is left as it is"
+        );
         assert_eq!(paused_row.stage(), Stage::Paused);
         assert_eq!(paused_row.reason.as_deref(), Some(PAUSED_BY_PERSON));
         assert_eq!(cancelled_row.stage(), Stage::Paused);
         assert_eq!(cancelled_row.reason.as_deref(), Some(CANCELLED_BY_PERSON));
         assert_eq!(working_row.stage(), Stage::Running);
         assert_eq!(merged_row.stage(), Stage::Merged, "a merge is a fact");
+        assert_eq!(
+            saved,
+            (
+                Some(Stage::Running.as_str().to_string()),
+                Some(Stage::AwaitingChecks.as_str().to_string()),
+                None,
+                None
+            ),
+            "only a parked row carries the stage it was parked from"
+        );
         assert_eq!(
             settled,
             vec![working],
@@ -1643,9 +1776,11 @@ mod tests {
                 Stage::Paused,
             )
             .await;
-        project.place(blocked, "blocked", None, Stage::Paused).await;
         project
-            .place(review, "review", Some(PULL), Stage::Paused)
+            .place(blocked, tasks::BLOCKED, None, Stage::Paused)
+            .await;
+        project
+            .place(review, tasks::REVIEW, Some(PULL), Stage::Paused)
             .await;
 
         let resumed = resume_paused_tasks(&project.pool, project.id)
@@ -1675,7 +1810,7 @@ mod tests {
                 (Stage::Paused, tasks::CANCELLED.to_string()),
             ]
         );
-        assert_eq!(blocked_after, (Stage::Idle, "created".to_string()));
+        assert_eq!(blocked_after, (Stage::Idle, tasks::CREATED.to_string()));
         assert_eq!(review_after, Stage::AwaitingChecks);
     }
 
@@ -1686,7 +1821,7 @@ mod tests {
             panic!("three tasks");
         };
         project
-            .place(complete, "complete", None, Stage::Merged)
+            .place(complete, tasks::COMPLETE, None, Stage::Merged)
             .await;
         project
             .place(cancelled, tasks::CANCELLED, None, Stage::Paused)
@@ -1758,6 +1893,306 @@ mod tests {
             statuses,
             (tasks::PAUSED.to_string(), tasks::CANCELLED.to_string()),
             "a refusal leaves the status a person chose"
+        );
+    }
+
+    const FIX: &str = "checks failed on 1a2b3c4: lint. Fix the cause on this branch.";
+
+    #[tokio::test]
+    async fn a_parked_row_gets_back_the_stage_and_reason_it_was_parked_with() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project
+            .place(task, tasks::REVIEW, Some(PULL), Stage::Idle)
+            .await;
+        set_stage(&project.pool, task, project.id, Stage::Fixing, Some(FIX))
+            .await
+            .expect("the fix the pipeline asked for");
+
+        project.set_status(task, tasks::CANCELLED).await;
+        park(&project.pool, project.id).await.expect("the park");
+        let cancelled = project.automation(task).await;
+        project.set_status(task, tasks::PAUSED).await;
+        park(&project.pool, project.id)
+            .await
+            .expect("a park of a row parked already");
+        let paused = project.automation(task).await;
+        let saved = project.parked(task).await;
+        project.set_status(task, tasks::REVIEW).await;
+        unpark(&project.pool, project.id).await.expect("the unpark");
+        let after = project.automation(task).await;
+        let cleared = project.parked(task).await;
+        project.remove().await;
+
+        assert_eq!(cancelled.stage(), Stage::Paused);
+        assert_eq!(cancelled.reason.as_deref(), Some(CANCELLED_BY_PERSON));
+        assert_eq!(paused.stage(), Stage::Paused);
+        assert_eq!(
+            paused.reason.as_deref(),
+            Some(PAUSED_BY_PERSON),
+            "the row says what the task is now"
+        );
+        assert_eq!(
+            saved,
+            (
+                Some(Stage::Fixing.as_str().to_string()),
+                Some(FIX.to_string())
+            ),
+            "a second park keeps what the first one saved"
+        );
+        assert_eq!(after.stage(), Stage::Fixing);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some(FIX),
+            "the next run is told what to fix"
+        );
+        assert_eq!(cleared, (None, None));
+    }
+
+    #[tokio::test]
+    async fn an_un_paused_task_without_a_pull_request_is_idle_again_and_admitted() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.place(task, tasks::PAUSED, None, Stage::Idle).await;
+        park(&project.pool, project.id).await.expect("the park");
+        let while_paused = next_runnable(&project.pool, project.id)
+            .await
+            .expect("the next runnable task");
+
+        project.set_status(task, tasks::CREATED).await;
+        unpark(&project.pool, project.id).await.expect("the unpark");
+        let after = project.automation(task).await;
+        let runnable = next_runnable(&project.pool, project.id)
+            .await
+            .expect("the next runnable task");
+        let admitted = tasks::create_unattended_task_run(&project.pool, task, project.actor)
+            .await
+            .expect("the admission");
+        project.remove().await;
+
+        assert_eq!(while_paused, None);
+        assert_eq!(after.stage(), Stage::Idle);
+        assert_eq!(after.reason, None);
+        assert_eq!(runnable, Some(task));
+        assert!(
+            matches!(admitted, tasks::Unattended::Created(_)),
+            "{admitted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_a_person_started_a_run_on_stays_parked_until_the_run_ends() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.place(task, tasks::PAUSED, None, Stage::Idle).await;
+        park(&project.pool, project.id).await.expect("the park");
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run a person started");
+        unpark(&project.pool, project.id)
+            .await
+            .expect("an unpark during the run");
+        let during = project.automation(task).await;
+        let kept = project.parked(task).await.0;
+        tasks::complete_task_run(&project.pool, run.id, "completed", None, None)
+            .await
+            .expect("the run ends");
+        sqlx::query("UPDATE tasks SET pr_url = $2 WHERE id = $1")
+            .bind(task)
+            .bind(PULL)
+            .execute(&project.pool)
+            .await
+            .expect("the run's pull request");
+        unpark(&project.pool, project.id)
+            .await
+            .expect("an unpark after the run");
+        let after = project.automation(task).await;
+        project.remove().await;
+
+        assert_eq!(during.stage(), Stage::Paused, "the run is the person's");
+        assert_eq!(kept, Some(Stage::Idle.as_str().to_string()));
+        assert_eq!(
+            after.stage(),
+            Stage::AwaitingChecks,
+            "a pull request the pipeline was not driving is checked from the start"
+        );
+        assert_eq!(after.reason, None);
+    }
+
+    #[tokio::test]
+    async fn a_row_automation_paused_for_its_own_reasons_is_not_released_by_a_person() {
+        const SPENT: &str = "task \"Task 0\" used its 3 runs; the last run failed: boom";
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.place(task, tasks::BLOCKED, None, Stage::Idle).await;
+        set_stage(&project.pool, task, project.id, Stage::Paused, Some(SPENT))
+            .await
+            .expect("automation gives up on the task");
+
+        project.set_status(task, tasks::PAUSED).await;
+        park(&project.pool, project.id).await.expect("the park");
+        let while_paused = project.automation(task).await;
+        let saved = project.parked(task).await;
+        project.set_status(task, tasks::BLOCKED).await;
+        unpark(&project.pool, project.id).await.expect("the unpark");
+        let after = project.automation(task).await;
+        project.remove().await;
+
+        assert_eq!(while_paused.reason.as_deref(), Some(SPENT));
+        assert_eq!(saved, (None, None), "the row is automation's, not parked");
+        assert_eq!(after.stage(), Stage::Paused);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some(SPENT),
+            "it still needs the person it was waiting for"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_a_person_completed_while_it_was_parked_has_nothing_left_to_drive() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project
+            .place(task, tasks::PAUSED, Some(PULL), Stage::AwaitingChecks)
+            .await;
+        park(&project.pool, project.id).await.expect("the park");
+
+        project.set_status(task, tasks::COMPLETE).await;
+        unpark(&project.pool, project.id).await.expect("the unpark");
+        let after = project.automation(task).await;
+        let changes = pipeline(&project.pool, project.id)
+            .await
+            .expect("the pipeline");
+        project.remove().await;
+
+        assert_eq!(after.stage(), Stage::Idle);
+        assert_eq!(after.reason, None);
+        assert!(changes.is_empty(), "{changes:?}");
+    }
+
+    #[tokio::test]
+    async fn a_row_moved_on_by_automation_carries_nothing_a_later_pause_could_restore() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project
+            .place(task, tasks::PAUSED, Some(PULL), Stage::Fixing)
+            .await;
+        park(&project.pool, project.id).await.expect("the park");
+
+        set_stage(
+            &project.pool,
+            task,
+            project.id,
+            Stage::Paused,
+            Some("GitHub refused the merge"),
+        )
+        .await
+        .expect("a step that was already under way pauses the task");
+        let saved = project.parked(task).await;
+        project.set_status(task, tasks::REVIEW).await;
+        unpark(&project.pool, project.id).await.expect("the unpark");
+        let after = project.automation(task).await;
+        project.remove().await;
+
+        assert_eq!(saved, (None, None));
+        assert_eq!(
+            after.stage(),
+            Stage::Paused,
+            "a pause automation made is not one a person's move lifts"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_dependency_is_met_and_a_paused_one_is_not() {
+        let project = Project::new(2).await;
+        let [blocker, dependent] = project.tasks[..] else {
+            panic!("two tasks");
+        };
+        tasks::set_dependencies(&project.pool, dependent, &[blocker])
+            .await
+            .expect("the dependency");
+
+        project.set_status(blocker, tasks::PAUSED).await;
+        let behind_paused = next_runnable(&project.pool, project.id)
+            .await
+            .expect("the next runnable task");
+        project.set_status(blocker, tasks::CANCELLED).await;
+        let behind_cancelled = next_runnable(&project.pool, project.id)
+            .await
+            .expect("the next runnable task");
+        project.remove().await;
+
+        assert_eq!(behind_paused, None, "a paused task is still to be done");
+        assert_eq!(
+            behind_cancelled,
+            Some(dependent),
+            "a cancelled task is out of the plan, so nothing waits on it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_continuous_integration_task_is_not_the_projects() {
+        let project = Project::new(1).await;
+        let added = insert_auto_task(
+            &project.pool,
+            project.id,
+            project.workspace,
+            project.actor,
+            Kind::Ci,
+            "Add continuous integration",
+            "Nothing runs on a pull request.",
+            None,
+        )
+        .await
+        .expect("the continuous-integration task");
+
+        let live = ci_task(&project.pool, project.id).await.expect("the read");
+        project.set_status(added, tasks::CANCELLED).await;
+        let cancelled = ci_task(&project.pool, project.id).await.expect("the read");
+        project.remove().await;
+
+        assert_eq!(live, Some((added, tasks::CREATED.to_string())));
+        assert_eq!(cancelled, None);
+    }
+
+    #[tokio::test]
+    async fn continuous_integration_goes_ahead_of_a_paused_task_as_of_one_yet_to_start() {
+        let project = Project::new(3).await;
+        let [waiting, paused, working] = project.tasks[..] else {
+            panic!("three tasks");
+        };
+        project.set_status(paused, tasks::PAUSED).await;
+        project.set_status(working, tasks::IN_PROGRESS).await;
+
+        let added = insert_auto_task(
+            &project.pool,
+            project.id,
+            project.workspace,
+            project.actor,
+            Kind::Ci,
+            "Add continuous integration",
+            "Nothing runs on a pull request.",
+            None,
+        )
+        .await
+        .expect("the continuous-integration task");
+        let mut waits = Vec::new();
+        for task in [waiting, paused, working] {
+            let dependencies: serde_json::Value =
+                sqlx::query_scalar("SELECT dependencies FROM tasks WHERE id = $1")
+                    .bind(task)
+                    .fetch_one(&project.pool)
+                    .await
+                    .expect("the task's dependencies");
+            waits.push(dependencies == json!([added.to_string()]));
+        }
+        project.remove().await;
+
+        assert_eq!(
+            waits,
+            vec![true, true, false],
+            "a paused task starts once it is un-paused, so it waits too"
         );
     }
 }

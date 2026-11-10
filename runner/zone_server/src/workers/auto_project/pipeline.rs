@@ -137,7 +137,7 @@ pub async fn advance(drive: &Drive<'_>, task: &TaskAutomation) -> Result<(), Str
         return Ok(());
     };
     if tasks::WITHHELD.contains(&row.status.as_str()) {
-        return park(drive).await;
+        return drive.park().await;
     }
     let Some(pr_url) = row.pr_url.clone() else {
         return pause(drive, task, "the task has no pull request to drive").await;
@@ -178,14 +178,6 @@ pub async fn advance(drive: &Drive<'_>, task: &TaskAutomation) -> Result<(), Str
     }
 }
 
-/// Leave every task a person paused or cancelled to them.
-async fn park(drive: &Drive<'_>) -> Result<(), String> {
-    auto_projects::park(drive.state.db(), drive.project.project_id)
-        .await
-        .map(drop)
-        .map_err(|error| error.to_string())
-}
-
 /// Whether a person paused, cancelled or removed the task since the step
 /// read it; a withheld task is parked. Asked right before an irreversible
 /// call, because the step's own read can be minutes old by then.
@@ -197,7 +189,7 @@ async fn withdrawn(step: &Step<'_>) -> Result<bool, String> {
     match status {
         None => Ok(true),
         Some(status) if tasks::WITHHELD.contains(&status.as_str()) => {
-            park(step.drive).await?;
+            step.drive.park().await?;
             Ok(true)
         }
         Some(_) => Ok(false),
@@ -371,22 +363,16 @@ async fn absent_checks(step: &Step<'_>, pull: &PullRequestDetail) -> Result<(), 
         .map_err(|error| error.to_string())?
     {
         None => {
-            if auto_projects::count_auto_created(pool, project.project_id, Kind::Ci)
-                .await
-                .map_err(|error| error.to_string())?
-                == 0
-            {
-                step.drive
-                    .add_task(
-                        Kind::Ci,
-                        CI_TASK_TITLE,
-                        CI_TASK_DESCRIPTION,
-                        Some(CI_TASK_CRITERIA),
-                        "The repository reports no checks on pull requests, so a task that adds \
-                         continuous integration was put ahead of everything still waiting to start.",
-                    )
-                    .await?;
-            }
+            step.drive
+                .add_task(
+                    Kind::Ci,
+                    CI_TASK_TITLE,
+                    CI_TASK_DESCRIPTION,
+                    Some(CI_TASK_CRITERIA),
+                    "The repository reports no checks on pull requests, so a task that adds \
+                     continuous integration was put ahead of everything still waiting to start.",
+                )
+                .await?;
             step.set(
                 Stage::AwaitingChecks,
                 Some("waiting for continuous integration to be added to the repository"),
@@ -2767,6 +2753,88 @@ mod tests {
             Some(auto_projects::CANCELLED_BY_PERSON)
         );
         assert_eq!(status, tasks::CANCELLED);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_continuous_integration_task_is_replaced_instead_of_waited_on() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_id": "PR_7",
+                "number": 7,
+                "title": "Add a cart",
+                "state": "open",
+                "head": {"ref": "zone/task-1a2b3c4d-add-a-cart", "sha": commit('a').as_str()},
+                "base": {"ref": "main", "sha": commit('b').as_str()},
+                "html_url": "https://github.com/acme/shop/pull/7",
+                "merged": false,
+                "mergeable": true,
+                "mergeable_state": "clean",
+            })))
+            .mount(&server)
+            .await;
+        let merged = Merged::new(&server).await;
+        let pool = merged.state.db();
+        let project_id = merged.project.project_id;
+        let cancelled = auto_projects::insert_auto_task(
+            pool,
+            project_id,
+            merged.workspace,
+            merged.actor,
+            Kind::Ci,
+            CI_TASK_TITLE,
+            CI_TASK_DESCRIPTION,
+            Some(CI_TASK_CRITERIA),
+        )
+        .await
+        .expect("the continuous-integration task");
+        sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1")
+            .bind(cancelled)
+            .bind(tasks::CANCELLED)
+            .execute(pool)
+            .await
+            .expect("a person cancels it");
+        auto_projects::set_stage(pool, merged.task, project_id, Stage::AwaitingChecks, None)
+            .await
+            .expect("the task awaits its checks");
+        let drive = merged.drive();
+        let task = merged.automation().await;
+        let row = tasks::get_task(pool, merged.task)
+            .await
+            .expect("the task")
+            .expect("a task");
+        let step = Step {
+            drive: &drive,
+            task: &task,
+            row,
+            reference: reference(),
+            token: token(),
+            pr_url: "https://github.com/acme/shop/pull/7".to_string(),
+        };
+        let pull = step.pull().await.expect("the pull request");
+
+        let waited = absent_checks(&step, &pull).await;
+        let after = merged.automation().await;
+        let replacement = auto_projects::ci_task(pool, project_id)
+            .await
+            .expect("the project's continuous-integration task");
+        merged.remove().await;
+
+        waited.expect("a head no check reports on");
+        assert!(
+            matches!(&replacement, Some((id, status)) if *id != cancelled && status == tasks::CREATED),
+            "the project gets a continuous-integration task it can run: {replacement:?}"
+        );
+        assert_eq!(after.stage(), Stage::AwaitingChecks);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some("waiting for continuous integration to be added to the repository"),
+            "the pull request does not wait on the task a person cancelled"
+        );
     }
 
     #[tokio::test]

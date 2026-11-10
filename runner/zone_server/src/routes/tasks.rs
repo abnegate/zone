@@ -276,8 +276,6 @@ const TASK_NOT_FOUND: &str = "Task not found";
 
 const BLANK_TITLE: &str = "Title must not be blank";
 
-const UNKNOWN_STATUS: &str = "Unknown task status";
-
 fn denied(status: StatusCode, message: &str) -> Box<Response> {
     Box::new((status, Json(ErrorResponse::new(message))).into_response())
 }
@@ -377,9 +375,9 @@ pub async fn list(
     if query
         .status
         .as_deref()
-        .is_some_and(|status| !tasks::STATUSES.contains(&status))
+        .is_some_and(|status| tasks::Status::parse(status).is_none())
     {
-        return *denied(StatusCode::BAD_REQUEST, UNKNOWN_STATUS);
+        return *denied(StatusCode::BAD_REQUEST, tasks::UNKNOWN_STATUS);
     }
     if let Err(response) =
         authorize_workspace(&state, &auth, workspace_id, "Workspace not found").await
@@ -485,13 +483,11 @@ pub async fn update(
     {
         return *denied(StatusCode::BAD_REQUEST, BLANK_TITLE);
     }
-    if request
-        .status
-        .as_deref()
-        .is_some_and(|status| !tasks::STATUSES.contains(&status))
-    {
-        return *denied(StatusCode::BAD_REQUEST, UNKNOWN_STATUS);
-    }
+    let status = match request.status.as_deref().map(tasks::Status::parse) {
+        Some(None) => return *denied(StatusCode::BAD_REQUEST, tasks::UNKNOWN_STATUS),
+        Some(status) => status,
+        None => None,
+    };
     match tasks::update_task_authorized(
         state.db(),
         user_id,
@@ -500,7 +496,7 @@ pub async fn update(
             title: request.title.as_deref().map(str::trim),
             description: request.description.as_deref(),
             acceptance_criteria: request.acceptance_criteria.as_deref(),
-            status: request.status.as_deref(),
+            status,
             priority: request.priority,
             project_ids: request.project_ids.as_deref(),
             require_plan_approval: request.require_plan_approval,
@@ -511,9 +507,22 @@ pub async fn update(
     )
     .await
     {
-        Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
+        Ok(tasks::Mutation::Applied(task)) => {
+            if status.is_some() {
+                poke_projects(&task);
+            }
+            Json(TaskResponse::from(task)).into_response()
+        }
         Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(error) => *mutation_error(error),
+    }
+}
+
+/// A status a person set is one the driver acts on: it parks a task they
+/// withheld and takes up one they gave back, without waiting out its tick.
+fn poke_projects(task: &tasks::TaskRow) {
+    for project in &task.project_ids {
+        crate::workers::auto_project::poke(*project);
     }
 }
 
@@ -545,7 +554,10 @@ pub async fn queue(
         Err(response) => return *response,
     };
     match tasks::queue_task_authorized(state.db(), user_id, id).await {
-        Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
+        Ok(tasks::Mutation::Applied(task)) => {
+            poke_projects(&task);
+            Json(TaskResponse::from(task)).into_response()
+        }
         Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(error) => *mutation_error(error),
     }
@@ -601,9 +613,10 @@ pub async fn create_run(
         )
             .into_response(),
         Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
-        Err(e) => {
-            if e.as_database_error()
-                .is_some_and(|error| error.is_unique_violation())
+        Err(error) => {
+            if error
+                .as_database_error()
+                .is_some_and(|violation| violation.is_unique_violation())
             {
                 return (
                     StatusCode::CONFLICT,
@@ -612,7 +625,7 @@ pub async fn create_run(
                     .into_response();
             }
 
-            *database_error(e)
+            *database_error(error)
         }
     }
 }
@@ -913,9 +926,6 @@ mod tests {
         assert_eq!(running["run"]["completed_at"], Value::Null);
     }
 
-    /// The status CHECK is the only other guard, and its violation surfaces as
-    /// a 500 through `database_error`. The state's pool is lazy and points at
-    /// nothing, so reaching the database would fail this test too.
     fn member() -> AuthUser {
         AuthUser(crate::auth::jwt::Claims {
             sub: Uuid::from_u128(7).to_string(),
@@ -936,10 +946,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_slice::<Value>(&body).unwrap()["error"],
-            UNKNOWN_STATUS
+            tasks::UNKNOWN_STATUS
         );
     }
 
+    /// The state's pool is lazy and points at nothing, so a status that got as
+    /// far as the database would fail here as a 500 instead.
     #[tokio::test]
     async fn an_unknown_status_is_refused_before_the_database() {
         let request = serde_json::from_value(serde_json::json!({ "status": "archived" })).unwrap();

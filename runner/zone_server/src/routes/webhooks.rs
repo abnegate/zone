@@ -422,10 +422,9 @@ async fn admit(
 /// delivery is not later than the last one applied, is caught up with by a
 /// later delivery.
 ///
-/// A close leaves a cancelled task cancelled and is stored as followed: it is
-/// either the cancellation coming back from the tracker, or a Linear
-/// `completed`, which arrives as the same closed state and cannot be told
-/// apart from it.
+/// A close leaves a cancelled task cancelled and is stored as followed: the
+/// tracker closing an issue must not complete a task a person cancelled, and
+/// a closed issue does not say whether it was finished or dropped.
 async fn apply_to_linked(
     connection: &mut PgConnection,
     sync_config_id: Uuid,
@@ -489,7 +488,7 @@ async fn apply_to_linked(
         .state_change
         .target(&event.payload, previous.as_ref())
         .map(task_status);
-    let closed_as_cancelled = status == Some(tasks::COMPLETE)
+    let closed_as_cancelled = status == Some(tasks::Status::COMPLETE)
         && lock_task_status(&mut *connection, item.task_id)
             .await?
             .is_some_and(|current| current == tasks::CANCELLED);
@@ -611,11 +610,11 @@ async fn lock_task_status(
         .await
 }
 
-fn task_status(state: IssueState) -> &'static str {
+fn task_status(state: IssueState) -> tasks::Status {
     match state {
-        IssueState::Closed => tasks::COMPLETE,
-        IssueState::InProgress => tasks::IN_PROGRESS,
-        IssueState::Open => tasks::CREATED,
+        IssueState::Closed => tasks::Status::COMPLETE,
+        IssueState::InProgress => tasks::Status::IN_PROGRESS,
+        IssueState::Open => tasks::Status::CREATED,
     }
 }
 
