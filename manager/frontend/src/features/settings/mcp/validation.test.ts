@@ -15,6 +15,7 @@ import {
   URL_CREDENTIALS,
   URL_FRAGMENT,
   URL_INVALID,
+  URL_METADATA,
   URL_PROTOCOL,
   URL_REQUIRED,
   urlError,
@@ -48,12 +49,20 @@ describe('urlError', () => {
     ['https://h/#f', URL_FRAGMENT],
     ['https://h/#', URL_FRAGMENT],
     ['not a url', URL_INVALID],
+    ['http://169.254.169.254/latest/meta-data/', URL_METADATA],
+    ['https://169.254.169.254:8443/mcp', URL_METADATA],
+    ['http://0xa9fea9fe/', URL_METADATA],
     ['', URL_REQUIRED],
   ])('refuses %p', (url, message) => {
     expect(urlError(url)).toBe(message);
   });
 
-  it.each([['http://127.0.0.1:8080/mcp'], ['https://h/mcp?x=1']])('accepts %p', (url) => {
+  it.each([
+    ['http://127.0.0.1:8080/mcp'],
+    ['https://h/mcp?x=1'],
+    ['http://169.254.169.253/mcp'],
+    ['http://192.168.1.10/mcp'],
+  ])('accepts %p', (url) => {
     expect(urlError(url)).toBeNull();
   });
 });

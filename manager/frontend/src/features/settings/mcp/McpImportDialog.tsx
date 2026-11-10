@@ -1,5 +1,6 @@
 import { Button, Modal } from '@zone/ui';
 import { useId, useMemo, useState } from 'react';
+import { messageOf } from './failure';
 import { parseMcpDocument } from './importDocument';
 import type { CreateMcpServerRequest } from './types';
 import { REFERENCE } from './validation';
@@ -39,7 +40,7 @@ export function McpImportDialog({ commands, onImport, onClose }: McpImportDialog
     try {
       await onImport(document.requests);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : IMPORT_FAILED);
+      setError(messageOf(failure, IMPORT_FAILED));
     } finally {
       setPending(false);
     }

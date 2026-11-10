@@ -13,8 +13,10 @@ import {
   updateRequest,
   usesCommand,
 } from './draft';
+import { messageOf } from './failure';
 import { McpSecretRows } from './McpSecretRows';
 import { type McpServerSubmission, SubmissionKind } from './submission';
+import { TRANSPORT_OPTION_LABELS } from './transport';
 import type { McpServer, McpTransport } from './types';
 import './McpServerForm.css';
 
@@ -22,12 +24,6 @@ export const COMMANDS_OFF_NOTICE =
   'Command servers are turned off on this instance (ZONE_MCP_COMMANDS)';
 export const ARGUMENTS_HINT = 'One argument per line';
 export const SAVE_FAILED = 'Failed to save the MCP server';
-
-const TRANSPORT_LABELS: Readonly<Record<McpTransport, string>> = {
-  [Transport.Http]: 'Streamable HTTP',
-  [Transport.Stdio]: 'Command (stdio)',
-  [Transport.Sse]: 'SSE',
-};
 
 const NO_ERRORS: DraftErrors = {};
 
@@ -39,7 +35,7 @@ function transportOptions(commands: boolean, current: McpTransport): SelectOptio
   if (!transports.includes(current)) {
     transports.push(current);
   }
-  return transports.map((value) => ({ value, label: TRANSPORT_LABELS[value] }));
+  return transports.map((value) => ({ value, label: TRANSPORT_OPTION_LABELS[value] }));
 }
 
 function isTransport(value: string): value is McpTransport {
@@ -92,7 +88,7 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
     try {
       await onSubmit(submission);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : SAVE_FAILED);
+      setError(messageOf(failure, SAVE_FAILED));
     } finally {
       setPending(false);
     }

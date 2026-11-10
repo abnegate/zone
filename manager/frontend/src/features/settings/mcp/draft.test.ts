@@ -69,6 +69,33 @@ describe('draftOf', () => {
       headers: [{ name: 'Authorization', value: '', saved: false }],
     });
   });
+
+  it('remembers the stored name of a saved value', () => {
+    expect(draftOf(server()).headers).toEqual([
+      { name: 'Authorization', value: '', saved: true, original: 'Authorization' },
+      { name: 'X-Team', value: '', saved: true, original: 'X-Team' },
+    ]);
+  });
+});
+
+describe('renamedRow', () => {
+  it('keeps the saved value again once the stored name is restored', () => {
+    const [stored] = draftOf(stdioServer()).environment;
+    if (stored === undefined) {
+      throw new Error('missing stored row');
+    }
+    const renamed = renamedRow(stored, 'TOKE');
+    expect(renamed).toEqual({ name: 'TOKE', value: '', saved: false, original: 'TOKEN' });
+    expect(renamedRow(renamed, 'TOKEN')).toEqual(stored);
+  });
+
+  it('never marks a new row as saved', () => {
+    expect(renamedRow({ name: '', value: 'v', saved: false }, '')).toEqual({
+      name: '',
+      value: 'v',
+      saved: false,
+    });
+  });
 });
 
 describe('updateRequest', () => {
@@ -106,6 +133,30 @@ describe('updateRequest', () => {
     expect(
       updateRequest(stored, { ...draft, command: 'bunx', arguments: '-y\npkg\n--verbose\n' })
     ).toEqual({ command: 'bunx', arguments: ['-y', 'pkg', '--verbose'] });
+  });
+
+  it('keeps stored empty and multi-line arguments when they are untouched', () => {
+    const stored = server({
+      transport: Transport.Stdio,
+      command: 'npx',
+      arguments: ['--flag', '', 'two\nlines'],
+      url: null,
+      headers: [],
+    });
+    expect(updateRequest(stored, draftOf(stored))).toEqual({});
+    expect(updateRequest(stored, { ...draftOf(stored), arguments: '--flag\n--verbose' })).toEqual({
+      arguments: ['--flag', '--verbose'],
+    });
+  });
+
+  it('sends nothing once a renamed saved variable gets its stored name back', () => {
+    const stored = stdioServer();
+    const draft = draftOf(stored);
+    const environment = draft.environment.map((row) =>
+      row.name === 'TOKEN' ? renamedRow(renamedRow(row, 'API_TOKEN'), 'TOKEN') : row
+    );
+    expect(updateRequest(stored, { ...draft, environment })).toEqual({});
+    expect(draftErrors({ ...draft, environment }, true)).toEqual({});
   });
 
   it('sends a new name', () => {
