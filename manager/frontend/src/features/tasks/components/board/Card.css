@@ -102,6 +102,7 @@
 }
 
 .task-card-handle {
+  --task-card-handle-target: var(--ui-space-6);
   position: absolute;
   z-index: 1;
   top: var(--ui-space-2-5);
@@ -122,6 +123,16 @@
   transition:
     opacity var(--ui-transition-fast),
     color var(--ui-transition-fast);
+}
+
+.task-card-handle::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--task-card-handle-target);
+  height: var(--task-card-handle-target);
+  transform: translate(-50%, -50%);
+  content: '';
 }
 
 .task-card-handle svg {
@@ -259,6 +270,16 @@
   .task-card-handle,
   .task-card-menu {
     opacity: 1;
+  }
+
+  .task-card-handle {
+    --task-card-handle-target: 2.75rem;
+  }
+
+  .task-card-handle::after {
+    top: calc(-1 * var(--ui-space-2-5));
+    left: calc(-1 * var(--ui-space-2));
+    transform: none;
   }
 }
 

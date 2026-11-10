@@ -337,6 +337,27 @@ describe('tasks page layout', () => {
     expect(rule(board, '.board-column')).toContain('width: 280px');
   });
 
+  it('gives the drag grip a 24px hit area, and 44px on a touch screen, without growing the grip', () => {
+    const card = read(join(features, 'tasks', 'components', 'board', 'Card.css'));
+    const handle = rule(card, '.task-card-handle');
+    expect(handle).toContain('width: var(--ui-space-3)');
+    expect(handle).toContain('height: var(--ui-space-5)');
+    expect(handle).toContain('--task-card-handle-target: var(--ui-space-6)');
+    const grip = rule(card, '.task-card-handle svg');
+    expect(grip).toContain('width: 0.5rem');
+    expect(grip).toContain('height: var(--ui-space-3)');
+
+    const target = rule(card, '.task-card-handle::after');
+    expect(target).toContain('position: absolute');
+    expect(target).toContain('width: var(--task-card-handle-target)');
+    expect(target).toContain('height: var(--task-card-handle-target)');
+    expect(target).toContain("content: ''");
+
+    const touch = media(card, '(hover: none)');
+    expect(rule(touch, '.task-card-handle')).toContain('--task-card-handle-target: 2.75rem');
+    expect(rule(touch, '.task-card-handle::after')).toContain('transform: none');
+  });
+
   it('snaps one column at a time on a phone', () => {
     const phone = media(board, '(max-width: 768px)');
     expect(rule(phone, '.board')).toContain('scroll-snap-type: x mandatory');

@@ -618,6 +618,49 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
     });
 
+    test.describe('on a touch screen', () => {
+      test.use({ hasTouch: true });
+
+      test('a grip can be hit anywhere in a 44px square around it', async ({ context, page }) => {
+        await serveTasks(context, page);
+        await page.setViewportSize(PHONE);
+        const grip = page.getByRole('button', { name: 'Move Implement login page', exact: true });
+        await expect(grip).toBeVisible();
+
+        const target = await grip.evaluate((handle) => {
+          const area = getComputedStyle(handle, '::after');
+          const box = handle.getBoundingClientRect();
+          const left = box.left + Number.parseFloat(area.left);
+          const top = box.top + Number.parseFloat(area.top);
+          const width = Number.parseFloat(area.width);
+          const height = Number.parseFloat(area.height);
+          const corners = [
+            [left + 1, top + 1],
+            [left + width - 1, top + 1],
+            [left + 1, top + height - 1],
+            [left + width - 1, top + height - 1],
+          ];
+          return {
+            touch: matchMedia('(hover: none)').matches,
+            grip: [box.width, box.height],
+            width,
+            height,
+            hits: corners.map(
+              ([x, y]) => document.elementFromPoint(x, y)?.closest('.task-card-handle') === handle
+            ),
+          };
+        });
+
+        expect(target).toEqual({
+          touch: true,
+          grip: [12, 20],
+          width: 44,
+          height: 44,
+          hits: [true, true, true, true],
+        });
+      });
+    });
+
     test.describe('on a phone', () => {
       test('only the board scrolls sideways, one column at a time', async ({ context, page }) => {
         await serveTasks(context, page);
