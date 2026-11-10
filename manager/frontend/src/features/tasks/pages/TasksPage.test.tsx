@@ -1622,6 +1622,9 @@ describe('TasksPage', () => {
         });
       });
       expect(mockUpdateTask.mock.calls).toEqual([['task-paused', { status: 'review' }]]);
+      expect(
+        await screen.findByText(`${TITLES.paused} could not be moved; back in Paused.`)
+      ).toHaveAttribute('aria-live', 'assertive');
       expect(within(column('Paused')).getByText(TITLES.paused)).toBeInTheDocument();
       expect(within(column('In review')).queryByText(TITLES.paused)).not.toBeInTheDocument();
     });

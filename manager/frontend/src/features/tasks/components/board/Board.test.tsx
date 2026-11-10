@@ -65,7 +65,7 @@ function actions(): BoardActions {
     retitle: mock(() => Promise.resolve()),
     finish: mock(),
     remove: mock(),
-    move: mock(() => Promise.resolve()),
+    move: mock(() => Promise.resolve(true)),
   };
 }
 
@@ -92,6 +92,7 @@ function MovingBoard({ refuse = false }: { refuse?: boolean }) {
         place(moved.id, status);
         await pause();
         if (refuse) place(moved.id, moved.status);
+        return !refuse;
       },
     };
   }, [refuse]);
@@ -343,6 +344,26 @@ describe('Board', () => {
         expect(within(column('Planned')).getByText('Write the spec')).toBeInTheDocument();
       });
       await waitFor(() => expect(document.activeElement).toBe(grip('Write the spec')));
+    });
+
+    it('says when a move was refused and where the card is again', async () => {
+      render(<MovingBoard refuse />);
+
+      await carryRight('Write the spec');
+
+      await announced('Write the spec could not be moved; back in Planned.');
+      expect(within(column('Planned')).getByText('Write the spec')).toBeInTheDocument();
+    });
+
+    it('says nothing more once a move is accepted', async () => {
+      render(<MovingBoard />);
+
+      await carryRight('Write the spec');
+
+      await waitFor(() => {
+        expect(within(column('In progress')).getByText('Write the spec')).toBeInTheDocument();
+      });
+      expect(screen.getByText('Write the spec moved to In progress.')).toBeInTheDocument();
     });
 
     it('puts a card back when the move is cancelled', async () => {

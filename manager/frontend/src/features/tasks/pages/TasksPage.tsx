@@ -134,10 +134,12 @@ export default function TasksPage() {
       move: async (task, status) => {
         try {
           await moveTask(task.id, status);
+          return true;
         } catch (failure) {
           toast.error(`Couldn't move ${task.title}`, {
             description: failure instanceof Error ? failure.message : MOVE_FAILED,
           });
+          return false;
         }
       },
     }),

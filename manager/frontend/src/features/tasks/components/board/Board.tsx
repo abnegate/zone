@@ -116,7 +116,9 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
     }
     setAnnouncement(`${task.title} moved to ${stage.label}.`);
     if (!(activatorEvent instanceof KeyboardEvent)) release();
-    void actions.move(task, status);
+    void actions.move(task, status).then((moved) => {
+      if (!moved) setAnnouncement(`${task.title} could not be moved; back in ${own.label}.`);
+    });
   };
 
   const cancel = ({ active }: DragCancelEvent) => {

@@ -48,7 +48,7 @@ function makeActions(): BoardActions {
     retitle: mock(() => Promise.resolve()),
     finish: mock(),
     remove: mock(),
-    move: mock(() => Promise.resolve()),
+    move: mock(() => Promise.resolve(true)),
   };
 }
 

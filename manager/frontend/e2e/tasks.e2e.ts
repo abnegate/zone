@@ -607,6 +607,9 @@ test.describe('Tasks Page', () => {
       release();
 
       await expect(page.getByText("Couldn't move Implement login page")).toBeVisible();
+      await expect(announcer(page)).toHaveText(
+        'Implement login page could not be moved; back in Planned.'
+      );
       await expect(card(column(page, 'Planned'), 'Implement login page')).toBeVisible();
       await expect(grip).toBeFocused();
     });
@@ -683,6 +686,9 @@ test.describe('Tasks Page', () => {
 
       await expect(page.getByText("Couldn't move Fix navigation bug")).toBeVisible();
       await expect(page.getByText(REFUSED)).toBeVisible();
+      await expect(announcer(page)).toHaveText(
+        'Fix navigation bug could not be moved; back in In progress.'
+      );
       await expect(card(column(page, 'In progress'), 'Fix navigation bug')).toBeVisible();
       await expect(card(column(page, 'Blocked'), 'Fix navigation bug')).toHaveCount(0);
       expect(moves(server)).toEqual([

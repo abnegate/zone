@@ -64,7 +64,7 @@ const ACTIONS: BoardActions = {
   retitle: mock(() => Promise.resolve()),
   finish: mock(),
   remove: mock(),
-  move: mock(() => Promise.resolve()),
+  move: mock(() => Promise.resolve(true)),
 };
 
 async function press(target: HTMLElement, code: string) {
