@@ -3,6 +3,7 @@ use abnegate_http::metadata;
 use reqwest::Url;
 use reqwest::header::HeaderName;
 
+use crate::services::mcp_servers::status;
 use crate::services::mcp_servers::transport::Transport;
 
 pub const NAME_LIMIT: usize = 32;
@@ -54,7 +55,7 @@ pub enum ValidationError {
     Missing { field: String, transport: Transport },
     #[error("`{field}` is not allowed for `{transport}` servers")]
     Unexpected { field: String, transport: Transport },
-    #[error("SSE servers are not supported; use streamable HTTP (`http`)")]
+    #[error("{}", status::SSE_UNSUPPORTED)]
     Unsupported { field: String },
     #[error("`{field}` must be `stdio`, `http` or `sse`, not `{value}`")]
     Transport { field: String, value: String },
