@@ -25,6 +25,7 @@ pub mod github_connection_states;
 pub mod github_installations;
 pub mod invitations;
 pub mod knowledge;
+pub mod mcp_servers;
 pub mod memory;
 pub mod message_embeddings;
 pub mod migrations;

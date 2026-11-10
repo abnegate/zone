@@ -13,6 +13,7 @@ use super::policy::Policy;
 
 const AGENT_LOGINS: &str = "agent_logins";
 const GITHUB_APPS: &str = "github_apps";
+const MCP_SERVERS: &str = "mcp_servers";
 const PROJECTS: &str = "projects";
 const SOURCES: &str = "sources";
 const SYNC_CONFIGS: &str = "sync_configs";
@@ -47,6 +48,8 @@ pub enum Column {
     AppPrivateKey,
     /// `github_apps.webhook_secret`.
     AppWebhookSecret,
+    /// `mcp_servers.secrets`, the sealed environment and headers of an organization's MCP server.
+    McpServerSecrets,
     /// The `api_key` in a Linear `sync_configs.config`.
     LinearApiKey,
     /// A provider key in an AI settings table.
@@ -65,6 +68,7 @@ impl Column {
         Self::AppClientSecret,
         Self::AppPrivateKey,
         Self::AppWebhookSecret,
+        Self::McpServerSecrets,
         Self::LinearApiKey,
         Self::ai(AiScope::Organization, AiKey::LitellmKey),
         Self::ai(AiScope::Organization, AiKey::OpenaiApiKey),
@@ -91,6 +95,7 @@ impl Column {
             Self::WebhookSecret | Self::GithubSyncToken | Self::LinearApiKey => SYNC_CONFIGS,
             Self::ProjectToken => PROJECTS,
             Self::AgentLoginCredential => AGENT_LOGINS,
+            Self::McpServerSecrets => MCP_SERVERS,
             Self::AppClientSecret | Self::AppPrivateKey | Self::AppWebhookSecret => GITHUB_APPS,
             Self::AiSetting { scope, .. } => scope.table(),
         }
@@ -109,6 +114,7 @@ impl Column {
             Self::AppClientSecret => "client_secret",
             Self::AppPrivateKey => "private_key",
             Self::AppWebhookSecret => "webhook_secret",
+            Self::McpServerSecrets => "secrets",
             Self::AiSetting { key, .. } => key.column(),
         }
     }
@@ -116,7 +122,9 @@ impl Column {
     /// What the column's readers accept.
     pub fn policy(&self) -> Policy {
         match self {
-            Self::SourceCredentials | Self::AgentLoginCredential => Policy::Strict,
+            Self::SourceCredentials | Self::AgentLoginCredential | Self::McpServerSecrets => {
+                Policy::Strict
+            }
             Self::WebhookSecret => Policy::Mixed,
             Self::ProjectToken | Self::GithubSyncToken => Policy::Lenient,
             Self::GithubAppPrivateKey
@@ -177,7 +185,8 @@ impl Column {
             Self::SourceCredentials
             | Self::WebhookSecret
             | Self::ProjectToken
-            | Self::AgentLoginCredential => {
+            | Self::AgentLoginCredential
+            | Self::McpServerSecrets => {
                 let table = self.table();
                 let name = self.name();
                 sqlx::query(sqlx::AssertSqlSafe(format!(
