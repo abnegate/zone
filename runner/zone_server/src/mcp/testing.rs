@@ -27,14 +27,10 @@ pub(crate) fn scope(chat: Uuid) -> Scope {
     }
 }
 
-pub(crate) fn state() -> AppState {
-    AppState::for_tests()
-}
-
 pub(crate) async fn tools(chat: Uuid) -> Arc<ChatTools> {
     Arc::new(
         ChatTools::build(WorkspaceScope {
-            state: state(),
+            state: AppState::for_tests(),
             workspace_id: Uuid::new_v4(),
             chat_id: Some(chat),
             user_id: Uuid::new_v4(),

@@ -95,6 +95,29 @@ fn mcp_disabled_attaches_nothing_even_with_auto_magents() {
 }
 
 #[test]
+fn the_master_switch_reads_as_the_configuration_reads_it() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    assert!(enabled());
+
+    for (value, on) in [
+        ("false", false),
+        ("0", false),
+        (" OFF ", false),
+        ("no", false),
+        ("true", true),
+        ("", true),
+        ("maybe", true),
+    ] {
+        variables.set(ENABLED, value);
+
+        assert_eq!(enabled(), on, "{value:?}");
+        assert_eq!(config().auto_connect, on, "{value:?}");
+        assert_eq!(config().servers.is_empty(), !on, "{value:?}");
+    }
+}
+
+#[test]
 fn auto_connect_off_attaches_nothing_even_with_auto_magents() {
     let home = TempDir::new().unwrap();
     let mut variables = isolated(&home);

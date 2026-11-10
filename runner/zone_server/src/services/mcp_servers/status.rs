@@ -3,6 +3,7 @@ use serde::Serialize;
 
 use super::definition::Definition;
 
+pub const MCP_DISABLED: &str = "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)";
 pub const COMMANDS_DISABLED: &str =
     "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)";
 pub const SSE_UNSUPPORTED: &str = "SSE servers are not supported; use streamable HTTP (`http`)";
@@ -59,15 +60,22 @@ impl Connection {
     }
 }
 
-/// The connection `definition` has whatever its server does, or `None` when
-/// only connecting it can tell.
-pub fn static_status(definition: &Definition, commands: bool) -> Option<Connection> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    pub enabled: bool,
+    pub commands: bool,
+}
+
+pub fn static_status(definition: &Definition, policy: Policy) -> Option<Connection> {
+    if !policy.enabled {
+        return Some(Connection::failed(MCP_DISABLED));
+    }
     let server = &definition.server;
     if !definition.enabled || server.disabled {
         return Some(Connection::disabled());
     }
     if server.command.is_some() {
-        if !commands {
+        if !policy.commands {
             return Some(Connection::failed(COMMANDS_DISABLED));
         }
     } else if server.transport == Some(McpTransport::Sse) {
@@ -84,8 +92,37 @@ mod tests {
 
     use super::*;
 
+    const COMMANDS: Policy = Policy {
+        enabled: true,
+        commands: true,
+    };
+    const REMOTE: Policy = Policy {
+        enabled: true,
+        commands: false,
+    };
+    const OFF: Policy = Policy {
+        enabled: false,
+        commands: true,
+    };
+
     fn definition(server: McpServer) -> Definition {
         Definition::of("docs", server)
+    }
+
+    #[test]
+    fn the_master_switch_fails_every_definition_before_anything_else() {
+        let stdio = definition(McpServer::command("python3", ["stub.py"]));
+        let http = definition(McpServer::remote("http://127.0.0.1/mcp"));
+        let mut disabled = definition(McpServer::command("python3", ["stub.py"]));
+        disabled.enabled = false;
+
+        for definition in [stdio, http, disabled] {
+            assert_eq!(
+                static_status(&definition, OFF),
+                Some(Connection::failed(MCP_DISABLED)),
+                "{definition:?}"
+            );
+        }
     }
 
     #[test]
@@ -107,25 +144,25 @@ mod tests {
     }
 
     #[test]
-    fn a_disabled_definition_is_disabled_before_anything_else() {
+    fn a_disabled_definition_is_disabled_whatever_its_server() {
         let mut stdio = definition(McpServer::command("python3", ["stub.py"]));
         stdio.enabled = false;
-        assert_eq!(static_status(&stdio, false), Some(Connection::disabled()));
+        assert_eq!(static_status(&stdio, REMOTE), Some(Connection::disabled()));
 
         let mut sse =
             definition(McpServer::remote("http://127.0.0.1/sse").with_transport(McpTransport::Sse));
         sse.enabled = false;
-        assert_eq!(static_status(&sse, true), Some(Connection::disabled()));
+        assert_eq!(static_status(&sse, COMMANDS), Some(Connection::disabled()));
     }
 
     #[test]
     fn a_command_server_needs_commands_turned_on() {
         let stdio = definition(McpServer::command("python3", ["stub.py"]));
         assert_eq!(
-            static_status(&stdio, false),
+            static_status(&stdio, REMOTE),
             Some(Connection::failed(COMMANDS_DISABLED))
         );
-        assert_eq!(static_status(&stdio, true), None);
+        assert_eq!(static_status(&stdio, COMMANDS), None);
     }
 
     #[test]
@@ -133,13 +170,13 @@ mod tests {
         let sse =
             definition(McpServer::remote("http://127.0.0.1/sse").with_transport(McpTransport::Sse));
         assert_eq!(
-            static_status(&sse, true),
+            static_status(&sse, COMMANDS),
             Some(Connection::failed(SSE_UNSUPPORTED))
         );
 
         let http = definition(McpServer::remote("http://127.0.0.1/mcp"));
         assert_eq!(
-            static_status(&http, true),
+            static_status(&http, COMMANDS),
             Some(Connection::failed(HTTP_PENDING))
         );
     }
@@ -148,7 +185,7 @@ mod tests {
     fn an_invalid_server_is_unconnected() {
         let blank = definition(McpServer::command(" ", Vec::<String>::new()));
         assert_eq!(
-            static_status(&blank, true),
+            static_status(&blank, COMMANDS),
             Some(Connection::failed(UNCONNECTED))
         );
     }

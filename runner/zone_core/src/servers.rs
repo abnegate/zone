@@ -41,6 +41,8 @@ const MAGENTS_ARGUMENTS: [&str; 1] = ["mcp"];
 
 const PREFIX: &str = "ZONE";
 
+const ENABLED_VARIABLE: &str = "ZONE_MCP_ENABLED";
+
 const AUTO_MAGENTS_VARIABLE: &str = "ZONE_MCP_AUTO_MAGENTS";
 
 const PLAYBOOK: &str = "magents coordinates other coding agents (Claude, Codex, Copilot, Cursor, \
@@ -111,6 +113,12 @@ pub fn config() -> McpConfig {
         MAGENTS,
         McpServer::command(MAGENTS, MAGENTS_ARGUMENTS).inherit_environment(),
     )
+}
+
+/// Whether the master switch leaves MCP on, for the servers [`config`] does
+/// not read.
+pub fn enabled() -> bool {
+    flag(ENABLED_VARIABLE, true)
 }
 
 /// What the model is told about magents' tools, once any is attached.

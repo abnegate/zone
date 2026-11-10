@@ -341,6 +341,7 @@ pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl Into
     match organizations::delete_organization(state.db(), owner.org_id).await {
         Ok(true) => {
             removal.run(&state).await;
+            state.mcp().forget(owner.org_id);
             audit(
                 state.db(),
                 AuditEvent {
@@ -1015,5 +1016,48 @@ pub async fn remove_member(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::services::mcp_servers::load;
+    use crate::services::mcp_servers::testing::Tenant;
+    use crate::services::mcp_servers::testing::stub;
+
+    #[tokio::test]
+    async fn deleting_an_organization_forgets_its_mcp_hub() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica();
+        tenant.store(&state, stub("stub")).await;
+        let hub = load::organization(&state, tenant.organization)
+            .await
+            .expect("the organization's hub");
+        let connected = hub.connected();
+        let held = Arc::downgrade(&hub);
+        drop(hub);
+        let owner = OrgOwner {
+            org_id: tenant.organization,
+            user_id: tenant.user,
+            email: tenant.email.clone(),
+        };
+
+        let response = delete(State(state.clone()), owner).await.into_response();
+        let forgotten = state
+            .mcp()
+            .existing_organization(tenant.organization)
+            .is_none();
+        tenant.remove().await;
+
+        assert_eq!(connected, 1, "the stub server has to connect");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(forgotten, "the deleted organization kept its hub");
+        assert!(
+            held.upgrade().is_none(),
+            "the deleted organization's servers kept running"
+        );
     }
 }
