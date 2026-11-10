@@ -74,6 +74,7 @@ mod learning_thresholds;
 mod lora_flows;
 mod mcp_agent;
 mod mcp_parity;
+mod mcp_servers;
 mod mcp_task_tools;
 mod memory;
 mod memory_isolation;
