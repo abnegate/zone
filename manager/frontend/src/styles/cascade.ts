@@ -51,6 +51,8 @@ import '../features/settings/navigation/SettingsNav.css';
 import '../features/sources/pages/SourcesPage.css';
 import '../features/tasks/components/QuestionPrompt.css';
 import '../features/tasks/pages/TasksPage.css';
+import '../features/tasks/components/board/Board.css';
+import '../features/tasks/components/board/Column.css';
 import '../features/github/components/RepositoryPicker.css';
 import '../App.css';
 import '@zone/ui/styles/globals.css';

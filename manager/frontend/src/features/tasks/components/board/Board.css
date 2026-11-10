@@ -1,0 +1,86 @@
+.board {
+  display: flex;
+  flex: 1;
+  align-items: stretch;
+  gap: var(--ui-space-3);
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+  padding-bottom: var(--ui-space-2);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.board-column {
+  flex-shrink: 0;
+  width: 280px;
+}
+
+.board .skeleton-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  padding: var(--ui-space-3);
+  background: var(--ui-bg-elevated);
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--ui-radius-sm);
+  pointer-events: none;
+}
+
+.board .skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--ui-bg-muted) 25%,
+    var(--ui-border) 50%,
+    var(--ui-bg-muted) 75%
+  );
+  background-size: 200% 100%;
+  animation: ui-shimmer 1.5s infinite;
+  border-radius: var(--ui-radius-sm);
+}
+
+.board .skeleton-title {
+  height: var(--ui-space-3);
+  max-width: 75%;
+}
+
+.board .skeleton-text {
+  height: var(--ui-space-3);
+}
+
+.board .skeleton-text.short {
+  width: 40%;
+}
+
+.board .skeleton-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--ui-space-2);
+}
+
+.board .skeleton-badge {
+  width: 3.5rem;
+  height: var(--ui-badge-height);
+}
+
+.board .skeleton-tag {
+  width: 5rem;
+  height: var(--ui-space-3);
+}
+
+.board .skeleton-count {
+  width: var(--ui-space-3);
+  height: var(--ui-space-3);
+}
+
+@media (max-width: 768px) {
+  .board {
+    scroll-snap-type: x mandatory;
+    scroll-padding-inline: var(--ui-space-1);
+  }
+
+  .board-column {
+    width: min(85vw, 300px);
+    scroll-snap-align: start;
+  }
+}
