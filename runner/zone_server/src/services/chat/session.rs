@@ -531,7 +531,7 @@ pub async fn build(
     }
     if matches!(mode, Mode::Preview)
         && agentic
-        && state.existing_mcp().is_none()
+        && state.mcp().existing_instance().is_none()
         && !zone_core::servers::config().is_empty()
     {
         incomplete = true;

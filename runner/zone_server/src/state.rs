@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zone_context::adapters::{
     AdapterRegistry, FilesystemAdapter, GitHubAdapter, GitLabAdapter, TextAdapter, WebAdapter,
@@ -15,7 +15,6 @@ use zone_context::adapters::{
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
 use zone_core::llm::{LlmBackend, cli};
-use zone_core::servers;
 
 use crate::cache::Cache;
 #[cfg(test)]
@@ -25,6 +24,7 @@ use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
 use crate::services::github_app::Provider;
 use crate::services::mail::AccountMail;
+use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
 use crate::train_jobs::TrainRegistry;
@@ -111,8 +111,9 @@ struct AppStateInner {
     /// Clip extracts queue here instead of 429ing, so a dump of hundreds of
     /// videos can run a few ffmpeg jobs at a time.
     pub frame_semaphore: Arc<Semaphore>,
-    /// Process-wide MCP hub. Connected once, shared across chat turns.
-    pub mcp: OnceCell<McpHub>,
+    /// The process's MCP hubs: the instance layer, connected once, and one
+    /// per organization, each shared across chat turns.
+    pub mcp: Hubs,
     pub github: OnceLock<Provider>,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
@@ -212,6 +213,8 @@ impl AppState {
             }
         });
 
+        let mcp = Hubs::new(zone_routing::proxy(), config.mcp_commands);
+
         Self {
             inner: Arc::new(AppStateInner {
                 config,
@@ -229,7 +232,7 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
-                mcp: OnceCell::new(),
+                mcp,
                 github: OnceLock::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
@@ -318,14 +321,9 @@ impl AppState {
         &self.inner.train_jobs
     }
 
-    /// MCP servers for this process. Connected once on first chat or task use.
-    pub async fn mcp_hub(&self) -> &McpHub {
-        self.inner
-            .mcp
-            .get_or_init(|| async {
-                McpHub::connect_through(&servers::config(), &zone_routing::proxy()).await
-            })
-            .await
+    /// MCP servers for this process, by layer. Each connects on first use.
+    pub fn mcp(&self) -> &Hubs {
+        &self.inner.mcp
     }
 
     /// Terminal frames for task runs. A waiter subscribes here; the writers
@@ -377,10 +375,6 @@ impl AppState {
         self.hold_device(device_id)
     }
 
-    pub fn existing_mcp(&self) -> Option<&McpHub> {
-        self.inner.mcp.get()
-    }
-
     /// Install an empty hub so tests never spawn MCP children.
     pub fn disable_mcp(&self) {
         self.install_mcp(McpHub::new());
@@ -390,7 +384,7 @@ impl AppState {
     /// server instead of whatever the process environment names. A hub that
     /// is already installed stays.
     pub fn install_mcp(&self, hub: McpHub) {
-        let _ = self.inner.mcp.set(hub);
+        self.inner.mcp.install_instance(hub);
     }
 
     pub fn github(&self) -> &Provider {
@@ -811,12 +805,12 @@ mod tests {
         let _ = state.sync_registry();
         let _ = state.pull_registry();
         assert!(state.train_jobs().current().is_none());
-        assert!(state.existing_mcp().is_none());
+        assert!(state.mcp().existing_instance().is_none());
         state.disable_mcp();
-        assert!(state.existing_mcp().is_some());
-        assert!(std::ptr::eq(
-            state.mcp_hub().await,
-            state.existing_mcp().unwrap()
+        assert!(state.mcp().existing_instance().is_some());
+        assert!(Arc::ptr_eq(
+            &state.mcp().instance().await,
+            &state.mcp().existing_instance().unwrap()
         ));
 
         let mail = Arc::new(AccountMail::new(Arc::new(MockMailer::new())));
@@ -845,7 +839,7 @@ mod tests {
             .expect("a lazy pool needs no server");
         let state = AppState::new(test_config(), pool, None);
 
-        let connected = state.mcp_hub().await.server_count();
+        let connected = state.mcp().instance().await.server_count();
         drop(environment);
 
         assert_eq!(connected, 0, "the recorder exits without answering");

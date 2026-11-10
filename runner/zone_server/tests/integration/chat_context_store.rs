@@ -732,7 +732,7 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
     config.litellm_host = "http://127.0.0.1:1".into();
     config.ollama_host = "http://127.0.0.1:1".into();
     let state = AppState::new(config, pool.clone(), None);
-    assert!(state.existing_mcp().is_none());
+    assert!(state.mcp().existing_instance().is_none());
     for enabled in [false, true] {
         let row = chats::update_chat(
             &pool,
@@ -764,7 +764,7 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
         .await
         .unwrap();
         assert!(
-            state.existing_mcp().is_none(),
+            state.mcp().existing_instance().is_none(),
             "Preview initialized MCP children"
         );
     }

@@ -671,15 +671,16 @@ impl ChatTools {
         let mut connected_servers = 0;
         if let Some(scope) = &scope {
             let hub = if connect {
-                Some(scope.state.mcp_hub().await)
+                Some(scope.state.mcp().instance().await)
             } else {
-                scope.state.existing_mcp()
+                scope.state.mcp().existing_instance()
             };
             let before: HashSet<String> = registry
                 .names()
                 .iter()
                 .map(|name| name.to_string())
                 .collect();
+            let hub = hub.as_deref();
             connected_servers = hub.map_or(0, McpHub::server_count);
             let added = hub.map_or(0, |hub| mcp::register(&mut registry, hub));
             if added > 0 {
