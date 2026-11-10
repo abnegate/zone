@@ -38,7 +38,6 @@ const MAX_NEW_ISSUE_AGE: TimeDelta = TimeDelta::hours(24);
 const CREATED: &str = "created";
 const IN_PROGRESS: &str = "in_progress";
 const COMPLETE: &str = "complete";
-const CANCELLED: &str = "cancelled";
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -497,7 +496,7 @@ async fn apply_to_linked(
     let closed_as_cancelled = status == Some(COMPLETE)
         && lock_task_status(&mut *connection, item.task_id)
             .await?
-            .is_some_and(|current| current == CANCELLED);
+            .is_some_and(|current| current == tasks::CANCELLED);
     if closed_as_cancelled {
         tracing::info!(
             "Task {} of issue {} for {sync_config_id} is cancelled, so the closed issue leaves its status alone",

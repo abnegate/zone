@@ -17,6 +17,8 @@
 
 use chrono::NaiveDateTime;
 
+use crate::db::tasks::CANCELLED;
+
 use super::checker::{
     Evidence, FixSubject, RegressionChecker, RegressionError, RegressionPolicy, RegressionResult,
     Verdict,
@@ -25,7 +27,6 @@ use super::checker::{
 const NAME: &str = "reopen";
 const COMPLETE: &str = "complete";
 const REVIEW: &str = "review";
-const CANCELLED: &str = "cancelled";
 
 /// Watches for a completed task being moved back out of completion.
 #[derive(Debug, Clone, Copy, Default)]

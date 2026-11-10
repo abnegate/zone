@@ -1,6 +1,6 @@
 //! Authenticated workspace mutations and durable reminders.
 use super::tools::WorkspaceScope;
-use crate::db::{actions, reminders};
+use crate::db::{actions, reminders, tasks};
 use crate::workers::titles;
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -311,7 +311,7 @@ impl Tool for WorkspaceAction {
         let identifier = json!({"type":"string","format":"uuid"});
         let (properties, required) = match self.action {
             Action::ListTasks => (
-                json!({"status":{"type":"string","enum":actions::STATUSES}}),
+                json!({"status":{"type":"string","enum":tasks::STATUSES}}),
                 json!([]),
             ),
             Action::CreateTask => (

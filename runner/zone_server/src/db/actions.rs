@@ -7,7 +7,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::DbResult;
-use super::tasks::Origin;
+use super::tasks::{Origin, STATUSES};
 use super::workspace_members::{self, WorkspaceRole};
 
 /// The last thing a model reads before it decides what to do while a runner
@@ -53,18 +53,6 @@ pub struct Update {
     #[serde(default, deserialize_with = "patch")]
     pub assignee_id: Option<Option<Uuid>>,
 }
-
-/// Every status a task can hold; `list_tasks` filters on any of them.
-pub const STATUSES: [&str; 8] = [
-    "created",
-    "queued",
-    "in_progress",
-    "review",
-    "complete",
-    "blocked",
-    "paused",
-    "cancelled",
-];
 
 /// The statuses an agent may set. `queued` is left out: only a run queues a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -469,6 +457,7 @@ mod tests {
     use crate::db::reminders::Sweep;
     use chrono::Duration;
     use chrono::Utc;
+    use std::collections::BTreeSet;
 
     /// Long enough that a claimed turn stays claimed for the length of a test,
     /// which is what a real lease is for.
@@ -588,12 +577,9 @@ mod tests {
 
     #[test]
     fn an_agent_may_set_every_status_but_queued() {
-        let settable: Vec<&str> = Status::ALL.map(Status::as_str).to_vec();
-        let listable: Vec<&str> = STATUSES
-            .into_iter()
-            .filter(|status| *status != "queued")
-            .collect();
-        assert_eq!(settable, listable);
+        let mut settable: BTreeSet<&str> = Status::ALL.map(Status::as_str).into();
+        assert!(settable.insert("queued"), "an agent must not queue a task");
+        assert_eq!(settable, BTreeSet::from(STATUSES));
     }
 
     #[tokio::test]

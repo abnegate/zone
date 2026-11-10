@@ -89,6 +89,12 @@ pub fn placeholder_title(description: &str) -> String {
 
 pub const UNTITLED_AND_UNDESCRIBED: &str = "A task needs a title or a description";
 
+/// The task status a person sets to stop work on a task for now.
+pub const PAUSED: &str = "paused";
+
+/// The task status a person sets to drop a task altogether.
+pub const CANCELLED: &str = "cancelled";
+
 /// Every value `tasks_status_check` admits, kept equal to the newest migration
 /// that redefines it so a caller can refuse an unknown status before the
 /// constraint turns it into a server error.
@@ -97,11 +103,15 @@ pub const STATUSES: [&str; 8] = [
     "queued",
     "in_progress",
     "blocked",
-    "paused",
+    PAUSED,
     "review",
     "complete",
-    "cancelled",
+    CANCELLED,
 ];
+
+/// Task statuses that take a task out of automation's hands: nothing
+/// unattended starts, retries, advances or merges a task in one of them.
+pub const WITHHELD: [&str; 2] = [PAUSED, CANCELLED];
 
 /// A title someone gave, trimmed, or `None` for a blank one.
 pub fn given_title(title: Option<&str>) -> Option<&str> {
@@ -1630,16 +1640,6 @@ pub async fn set_dependencies(pool: &PgPool, task_id: Uuid, dependencies: &[Uuid
     transaction.commit().await?;
     Ok(())
 }
-
-/// The task status a person sets to stop work on a task for now.
-pub const PAUSED: &str = "paused";
-
-/// The task status a person sets to drop a task altogether.
-pub const CANCELLED: &str = "cancelled";
-
-/// Task statuses that take a task out of automation's hands: nothing
-/// unattended starts, retries, advances or merges a task in one of them.
-pub const WITHHELD: [&str; 2] = [PAUSED, CANCELLED];
 
 /// Result of admitting a run nobody will be watching.
 #[derive(Debug)]
