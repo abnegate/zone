@@ -1,13 +1,37 @@
+use std::collections::BTreeSet;
+
 use abnegate_agent::mcp::McpServer;
 use abnegate_http::metadata;
 use reqwest::Url;
 use reqwest::header::HeaderName;
+use reqwest::header::HeaderValue;
 
 use crate::services::mcp_servers::status;
 use crate::services::mcp_servers::transport::Transport;
 
 pub const NAME_LIMIT: usize = 32;
 
+const NULL: char = '\0';
+const RESERVED: [&str; 17] = [
+    "accept",
+    "connection",
+    "content-length",
+    "content-type",
+    "host",
+    "keep-alive",
+    "last-event-id",
+    "mcp-method",
+    "mcp-name",
+    "mcp-protocol-version",
+    "mcp-session-id",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+const RESERVED_PREFIX: &str = "mcp-param-";
 const PLACEHOLDER: &str = "${";
 const SCHEMES: [&str; 2] = ["http", "https"];
 const PROBE: &str = "probe";
@@ -31,8 +55,6 @@ pub enum ValidationError {
     Unparseable { field: String },
     #[error("`{field}` must use http or https")]
     Scheme { field: String },
-    #[error("`{field}` must include a host")]
-    Host { field: String },
     #[error("`{field}` must not include a username or password; put credentials in headers")]
     Userinfo { field: String },
     #[error("`{field}` must not include a fragment")]
@@ -41,12 +63,22 @@ pub enum ValidationError {
     Metadata { field: String },
     #[error("`{field}` must not contain `${{`: Zone would expand it from its own environment")]
     Placeholder { field: String },
+    #[error("`{field}` must not contain a NUL character")]
+    Null { field: String },
+    #[error("`{field}` must not start or end with whitespace")]
+    Whitespace { field: String },
     #[error(
         "`{field}` name `{name}` must start with a letter or `_` and hold only letters, digits and `_`"
     )]
     EnvironmentName { field: String, name: String },
     #[error("`{field}` name `{name}` is not a valid HTTP header name")]
     HeaderName { field: String, name: String },
+    #[error("`{field}` name `{name}` is set by the connection itself and cannot be configured")]
+    ReservedHeader { field: String, name: String },
+    #[error("`{field}` names `{name}` twice: header names ignore case")]
+    DuplicateHeader { field: String, name: String },
+    #[error("`{field}` values must not contain line breaks or other control characters")]
+    HeaderValue { field: String },
     #[error(
         "`{field}` entry `{name}` must be non-empty and hold only letters, digits, `_` and `-`"
     )]
@@ -81,11 +113,9 @@ pub fn url(raw: &str) -> Result<Url, ValidationError> {
     literal(URL, raw)?;
     let url =
         Url::parse(raw.trim()).map_err(|_| ValidationError::Unparseable { field: field() })?;
+    literal(URL, url.as_str())?;
     if !SCHEMES.contains(&url.scheme()) {
         return Err(ValidationError::Scheme { field: field() });
-    }
-    if url.host_str().is_none_or(str::is_empty) {
-        return Err(ValidationError::Host { field: field() });
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(ValidationError::Userinfo { field: field() });
@@ -104,6 +134,14 @@ pub fn literal(field: &str, value: &str) -> Result<(), ValidationError> {
         return Err(ValidationError::Placeholder {
             field: field.to_string(),
         });
+    }
+    if value.contains(NULL) {
+        return Err(ValidationError::Null {
+            field: field.to_string(),
+        });
+    }
+    if field == HEADERS {
+        header_value(value)?;
     }
     Ok(())
 }
@@ -124,12 +162,39 @@ pub fn environment_name(name: &str) -> Result<(), ValidationError> {
 }
 
 pub fn header_name(name: &str) -> Result<(), ValidationError> {
-    HeaderName::from_bytes(name.as_bytes())
-        .map(|_| ())
-        .map_err(|_| ValidationError::HeaderName {
+    let header =
+        HeaderName::from_bytes(name.as_bytes()).map_err(|_| ValidationError::HeaderName {
             field: HEADERS.to_string(),
             name: name.to_string(),
+        })?;
+    if reserved(header.as_str()) {
+        return Err(ValidationError::ReservedHeader {
+            field: HEADERS.to_string(),
+            name: name.to_string(),
+        });
+    }
+    Ok(())
+}
+
+pub fn header_value(value: &str) -> Result<(), ValidationError> {
+    HeaderValue::from_str(value)
+        .map(|_| ())
+        .map_err(|_| ValidationError::HeaderValue {
+            field: HEADERS.to_string(),
         })
+}
+
+pub fn headers<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<(), ValidationError> {
+    let mut seen = BTreeSet::new();
+    for name in names {
+        if !seen.insert(name.to_ascii_lowercase()) {
+            return Err(ValidationError::DuplicateHeader {
+                field: HEADERS.to_string(),
+                name: name.to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub fn tools(tools: &[String]) -> Result<(), ValidationError> {
@@ -170,11 +235,20 @@ pub fn target(
             transport,
         });
     }
+    if command.is_some_and(|command| command != command.trim()) {
+        return Err(ValidationError::Whitespace {
+            field: COMMAND.to_string(),
+        });
+    }
     Ok(())
 }
 
 fn nameable_tool(tool: &str) -> bool {
     McpServer::default().with_tools([tool]).nameable(PROBE)
+}
+
+fn reserved(header: &str) -> bool {
+    RESERVED.contains(&header) || header.starts_with(RESERVED_PREFIX)
 }
 
 #[cfg(test)]
@@ -237,6 +311,143 @@ mod tests {
             Err(ValidationError::Placeholder {
                 field: URL.to_string()
             })
+        );
+    }
+
+    #[test]
+    fn url_refuses_a_placeholder_the_parser_would_assemble() {
+        for raw in [
+            "https://h/mcp?token=$\n{X}",
+            "https://h/mcp?token=$\t{X}",
+            "https://h/mcp?token=$\r{X}",
+            "https://$\n{X}/mcp",
+            "https://%24%7BX%7D/mcp",
+            "https://%24{X}/mcp",
+        ] {
+            assert_eq!(
+                url(raw),
+                Err(ValidationError::Placeholder {
+                    field: URL.to_string()
+                }),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn url_accepts_a_placeholder_that_stays_encoded_in_what_is_stored() {
+        for (raw, stored) in [
+            ("https://h/%24%7BX%7D/mcp", "https://h/%24%7BX%7D/mcp"),
+            (
+                "https://h/mcp?token=%24%7BX%7D",
+                "https://h/mcp?token=%24%7BX%7D",
+            ),
+            ("https://h/$\n{X}/mcp", "https://h/$%7BX%7D/mcp"),
+        ] {
+            assert_eq!(
+                url(raw).map(String::from),
+                Ok(stored.to_string()),
+                "{raw:?}"
+            );
+            assert!(!stored.contains(PLACEHOLDER), "{stored}");
+        }
+    }
+
+    #[test]
+    fn url_is_normalised_before_the_metadata_check() {
+        for raw in [
+            "http://2852039166/",
+            "http://0xa9.0xfe.0xa9.0xfe/",
+            "http://0251.0376.0251.0376/",
+            "http://169.254.43518/",
+            "http://169.254.169.254./",
+            "http://[::ffff:169.254.169.254]/",
+            "http://METADATA.GOOGLE.INTERNAL/",
+            "http://metadata.google.internal./",
+            "http://%6d%65%74%61%64%61%74%61.google.internal/",
+        ] {
+            assert_eq!(
+                url(raw),
+                Err(ValidationError::Metadata {
+                    field: URL.to_string()
+                }),
+                "{raw}"
+            );
+        }
+        for spelling in ["2852039166", "0xa9.0xfe.0xa9.0xfe", "0251.0376.0251.0376"] {
+            assert!(
+                !metadata::is_host(spelling),
+                "{spelling} is refused only once the parser has rewritten it"
+            );
+        }
+    }
+
+    #[test]
+    fn url_without_a_host_does_not_parse() {
+        for raw in ["http://", "https://:443/mcp", "http://?x=1", "https:///"] {
+            assert_eq!(
+                url(raw),
+                Err(ValidationError::Unparseable {
+                    field: URL.to_string()
+                }),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_null_character_is_refused_in_every_field() {
+        for field in [COMMAND, "arguments", ENVIRONMENT, HEADERS, URL] {
+            assert_eq!(
+                literal(field, "before\0after"),
+                Err(ValidationError::Null {
+                    field: field.to_string()
+                })
+            );
+        }
+        for raw in [
+            "https://h/mcp\0",
+            "https://h/mcp?token=\0",
+            "https://h\0/mcp",
+        ] {
+            assert_eq!(
+                url(raw),
+                Err(ValidationError::Null {
+                    field: URL.to_string()
+                }),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(
+            name("git\0hub"),
+            Err(ValidationError::Name {
+                field: NAME.to_string()
+            })
+        );
+        assert_eq!(
+            tools(&tool_list(&["sea\0rch"])),
+            Err(ValidationError::Tool {
+                field: TOOLS.to_string(),
+                name: "sea\0rch".to_string()
+            })
+        );
+        assert_eq!(
+            environment_name("TO\0KEN"),
+            Err(ValidationError::EnvironmentName {
+                field: ENVIRONMENT.to_string(),
+                name: "TO\0KEN".to_string()
+            })
+        );
+        assert_eq!(
+            header_name("X-\0Key"),
+            Err(ValidationError::HeaderName {
+                field: HEADERS.to_string(),
+                name: "X-\0Key".to_string()
+            })
+        );
+        assert_eq!(
+            literal(COMMAND, "np\0x").unwrap_err().to_string(),
+            "`command` must not contain a NUL character"
         );
     }
 
@@ -337,6 +548,107 @@ mod tests {
     }
 
     #[test]
+    fn header_name_refuses_what_the_connection_sets_itself_in_any_case() {
+        for name in [
+            "Host",
+            "HOST",
+            "content-length",
+            "Content-Type",
+            "Transfer-Encoding",
+            "Connection",
+            "Keep-Alive",
+            "Proxy-Authorization",
+            "Proxy-Connection",
+            "TE",
+            "Trailer",
+            "Upgrade",
+            "Accept",
+            "Mcp-Session-Id",
+            "MCP-Protocol-Version",
+            "Last-Event-Id",
+            "Mcp-Method",
+            "Mcp-Name",
+            "Mcp-Param-Region",
+        ] {
+            assert_eq!(
+                header_name(name),
+                Err(ValidationError::ReservedHeader {
+                    field: HEADERS.to_string(),
+                    name: name.to_string()
+                }),
+                "{name}"
+            );
+        }
+        for name in [
+            "Authorization",
+            "Cookie",
+            "User-Agent",
+            "Accept-Language",
+            "Mcp-Tenant",
+        ] {
+            assert_eq!(header_name(name), Ok(()), "{name}");
+        }
+        assert_eq!(
+            header_name("Host").unwrap_err().to_string(),
+            "`headers` name `Host` is set by the connection itself and cannot be configured"
+        );
+    }
+
+    #[test]
+    fn every_reserved_header_is_spelled_the_way_a_parsed_name_is() {
+        for name in RESERVED.into_iter().chain([RESERVED_PREFIX]) {
+            let header = HeaderName::from_bytes(name.as_bytes()).expect("a header name");
+            assert_eq!(header.as_str(), name);
+        }
+        assert!(RESERVED.is_sorted(), "{RESERVED:?}");
+    }
+
+    #[test]
+    fn headers_refuses_two_names_that_differ_only_by_case() {
+        assert_eq!(headers(["Authorization", "X-Api-Key"]), Ok(()));
+        assert_eq!(headers([]), Ok(()));
+        assert_eq!(
+            headers(["Authorization", "X-Api-Key", "authorization"]),
+            Err(ValidationError::DuplicateHeader {
+                field: HEADERS.to_string(),
+                name: "authorization".to_string()
+            })
+        );
+        assert_eq!(
+            headers(["A", "a"]).unwrap_err().to_string(),
+            "`headers` names `a` twice: header names ignore case"
+        );
+    }
+
+    #[test]
+    fn a_header_value_holds_no_line_break_or_control_character() {
+        for value in ["Bearer token", "tab\tseparated", "", "caf\u{e9}"] {
+            assert_eq!(header_value(value), Ok(()), "{value:?}");
+            assert_eq!(literal(HEADERS, value), Ok(()), "{value:?}");
+        }
+        for value in [
+            "a\r\nInjected: 1",
+            "a\nb",
+            "a\rb",
+            "bell\u{7}",
+            "delete\u{7f}",
+        ] {
+            let refused = Err(ValidationError::HeaderValue {
+                field: HEADERS.to_string(),
+            });
+            assert_eq!(header_value(value), refused, "{value:?}");
+            assert_eq!(literal(HEADERS, value), refused, "{value:?}");
+        }
+        assert_eq!(literal(ENVIRONMENT, "-----BEGIN KEY-----\nabc\n"), Ok(()));
+        assert_eq!(literal("arguments", "first line\nsecond line"), Ok(()));
+        let error = header_value("secret\nvalue").unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "`headers` values must not contain line breaks or other control characters"
+        );
+    }
+
+    #[test]
     fn tools_refuses_the_first_unsafe_entry() {
         assert_eq!(tools(&tool_list(&["ok", "also-ok_2"])), Ok(()));
         assert_eq!(tools(&[]), Ok(()));
@@ -418,6 +730,29 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "`command` is not allowed for `http` servers"
+        );
+    }
+
+    #[test]
+    fn target_refuses_a_command_with_surrounding_whitespace() {
+        for command in [" npx", "npx ", "\tnpx", "npx\n", " npx "] {
+            assert_eq!(
+                target(Transport::Stdio, Some(command), None),
+                Err(ValidationError::Whitespace {
+                    field: COMMAND.to_string()
+                }),
+                "{command:?}"
+            );
+        }
+        assert_eq!(
+            target(Transport::Stdio, Some("/opt/my tools/server"), None),
+            Ok(())
+        );
+        assert_eq!(
+            target(Transport::Stdio, Some(" npx"), None)
+                .unwrap_err()
+                .to_string(),
+            "`command` must not start or end with whitespace"
         );
     }
 
