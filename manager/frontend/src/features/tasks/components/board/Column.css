@@ -1,6 +1,8 @@
 .board-column {
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
+  width: 280px;
   min-height: 0;
   background: color-mix(in srgb, var(--ui-bg-surface) 55%, transparent);
   border: 1px solid var(--ui-border-subtle);
@@ -143,6 +145,13 @@
 
 :root[data-theme='dark'] .status-icon-complete {
   color: var(--ui-success-400);
+}
+
+@media (max-width: 768px) {
+  .board-column {
+    width: min(85vw, 300px);
+    scroll-snap-align: start;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

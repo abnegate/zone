@@ -75,4 +75,14 @@ describe('TaskDetail', () => {
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
     expect(onSave.mock.calls[0]?.[0]).toEqual({ status: 'paused' });
   });
+
+  it('says the save failed when the failure carries no message', async () => {
+    renderDetail(() => Promise.reject('offline'));
+
+    openSelect('Status');
+    fireEvent.click(await screen.findByRole('option', { name: 'Paused' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('Failed to save task')).toBeInTheDocument();
+  });
 });

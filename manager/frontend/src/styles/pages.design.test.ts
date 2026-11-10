@@ -330,45 +330,52 @@ const legacyScales = /var\(--(gray|blue|green|red|yellow|purple)-\d+\)/;
 
 describe('tasks page layout', () => {
   const css = read(join(features, 'tasks', 'pages', 'TasksPage.css'));
-  const board = read(join(features, 'tasks', 'components', 'board', 'Board.css'));
+  const boardStyles = join(features, 'tasks', 'components', 'board');
+  const board = read(join(boardStyles, 'Board.css'));
+  const columns = read(join(boardStyles, 'Column.css'));
+  const cards = read(join(boardStyles, 'Card.css'));
 
   it('scrolls the board sideways in its own row of fixed-width columns', () => {
     expect(rule(board, '.board')).toContain('overflow-x: auto');
-    expect(rule(board, '.board-column')).toContain('width: 280px');
+    const column = rule(columns, '.board-column');
+    expect(column).toContain('flex-shrink: 0');
+    expect(column).toContain('width: 280px');
+  });
+
+  it('keeps every column rule in the column stylesheet', () => {
+    expect(board).not.toMatch(/(^|[\s,}])\.board-column\s*[{,]/);
   });
 
   it('gives the drag grip a 24px hit area, and 44px on a touch screen, without growing the grip', () => {
-    const card = read(join(features, 'tasks', 'components', 'board', 'Card.css'));
-    const handle = rule(card, '.task-card-handle');
+    const handle = rule(cards, '.task-card-handle');
     expect(handle).toContain('width: var(--ui-space-3)');
     expect(handle).toContain('height: var(--ui-space-5)');
     expect(handle).toContain('--task-card-handle-target: var(--ui-space-6)');
-    const grip = rule(card, '.task-card-handle svg');
+    const grip = rule(cards, '.task-card-handle svg');
     expect(grip).toContain('width: 0.5rem');
     expect(grip).toContain('height: var(--ui-space-3)');
 
-    const target = rule(card, '.task-card-handle::after');
+    const target = rule(cards, '.task-card-handle::after');
     expect(target).toContain('position: absolute');
     expect(target).toContain('width: var(--task-card-handle-target)');
     expect(target).toContain('height: var(--task-card-handle-target)');
     expect(target).toContain("content: ''");
 
-    const touch = media(card, '(hover: none)');
+    const touch = media(cards, '(hover: none)');
     expect(rule(touch, '.task-card-handle')).toContain('--task-card-handle-target: 2.75rem');
     expect(rule(touch, '.task-card-handle::after')).toContain('transform: none');
   });
 
   it('stops the drop highlight fading in when motion is reduced', () => {
-    const column = read(join(features, 'tasks', 'components', 'board', 'Column.css'));
-    expect(rule(column, '.board-column-body')).toContain('transition:');
-    const reduced = media(column, '(prefers-reduced-motion: reduce)');
+    expect(rule(columns, '.board-column-body')).toContain('transition:');
+    const reduced = media(columns, '(prefers-reduced-motion: reduce)');
     expect(rule(reduced, '.board-column-body')).toContain('transition: none');
   });
 
   it('snaps one column at a time on a phone', () => {
     const phone = media(board, '(max-width: 768px)');
     expect(rule(phone, '.board')).toContain('scroll-snap-type: x mandatory');
-    const column = rule(phone, '.board-column');
+    const column = rule(media(columns, '(max-width: 768px)'), '.board-column');
     expect(column).toContain('scroll-snap-align: start');
     expect(column).toContain('width: min(85vw, 300px)');
   });
@@ -396,7 +403,9 @@ describe('tasks page layout', () => {
   });
 
   it('keeps the task styles on the palette', () => {
-    expect(css).not.toMatch(legacyScales);
+    for (const styles of [css, board, columns, cards]) {
+      expect(styles).not.toMatch(legacyScales);
+    }
   });
 
   it('wraps the task filters instead of shrinking them off the page bar', () => {

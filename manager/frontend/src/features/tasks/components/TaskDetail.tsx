@@ -29,6 +29,8 @@ type TaskDetailProps = {
   onSave: (request: UpdateTaskRequest) => Promise<void>;
 };
 
+const SAVE_FAILED = 'Failed to save task';
+
 const PRIORITIES: { value: number; label: string }[] = [
   { value: 1, label: 'Lowest' },
   { value: 2, label: 'Low' },
@@ -144,7 +146,7 @@ export function TaskDetail({
     try {
       await onSave(request);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : 'Failed to save task');
+      setError(failure instanceof Error ? failure.message : SAVE_FAILED);
     } finally {
       setSaving(false);
     }

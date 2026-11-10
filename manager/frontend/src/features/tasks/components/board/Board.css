@@ -11,11 +11,6 @@
   overscroll-behavior-x: contain;
 }
 
-.board-column {
-  flex-shrink: 0;
-  width: 280px;
-}
-
 .board .skeleton-card {
   display: flex;
   flex-direction: column;
@@ -77,10 +72,5 @@
   .board {
     scroll-snap-type: x mandatory;
     scroll-padding-inline: var(--ui-space-1);
-  }
-
-  .board-column {
-    width: min(85vw, 300px);
-    scroll-snap-align: start;
   }
 }
