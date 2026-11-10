@@ -2430,6 +2430,7 @@ mod tests {
             " http://192.168.1.10/, ,http://100.64.1.2 ",
         );
         environment.set("CORS_ALLOW_CREDENTIALS", "true");
+        environment.set(MCP_COMMANDS, "true");
         environment.set("APP_BASE_URL", "https://zone.test");
         environment.set("GITHUB_API_URL", "https://github.example.com/api/v3/");
         environment.set("SOURCE_RESYNC_ENABLED", "off");
@@ -2469,6 +2470,10 @@ mod tests {
             ["http://192.168.1.10", "http://100.64.1.2"]
         );
         assert!(configured.cors_allow_credentials);
+        assert!(
+            configured.mcp_commands,
+            "ZONE_MCP_COMMANDS=true lets the API create stdio MCP servers"
+        );
         assert_eq!(configured.app_base_url, "https://zone.test");
         // The trailing slash goes, because every caller joins a rooted path.
         assert_eq!(
