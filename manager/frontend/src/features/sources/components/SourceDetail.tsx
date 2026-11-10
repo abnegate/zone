@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { getErrors } from '../../../validation';
 import { formStateFromConfig, GITHUB_SOURCE_TYPE, getSourceById, getSourceLabel } from '../config';
-import { type SourceVerifyResponse, UpdateSourceRequestSchema } from '../schemas';
+import { type SourceVerifyResponse, updateSourceRequestSchema } from '../schemas';
 import type { Source, UpdateSourceRequest } from '../types';
 import { isAppBacked } from '../utils';
 import { FormFieldRenderer, FormFieldsRenderer } from './FormFields';
@@ -72,14 +72,14 @@ export function SourceDetail({
     if (name !== source.name) request.name = name;
     if (description !== descriptionBaseline) request.description = description;
     if (isActive !== source.is_active) request.is_active = isActive;
-    if (dirtyConfig && definition) {
-      request.config = definition.buildConfig(formState);
-      const url = definition.getUrl?.(formState);
-      if (url !== undefined) request.url = url;
+    if (dirtyConfig && definition) request.config = definition.buildConfig(formState);
+    if (credentials !== '') {
+      request.credentials = credentials;
+      const instance = definition?.getInstance?.(baseline);
+      if (instance !== undefined) request.instance = instance;
     }
-    if (credentials !== '') request.credentials = credentials;
 
-    const errors = getErrors(UpdateSourceRequestSchema, request);
+    const errors = getErrors(updateSourceRequestSchema(source.source_type), request);
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
       return;

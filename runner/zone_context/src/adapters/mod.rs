@@ -3,11 +3,14 @@
 //! This module provides the `SourceAdapter` trait and implementations for
 //! fetching content from various source types.
 
+mod credential;
 mod filesystem;
 mod github;
 mod gitlab;
+mod in_flight;
 mod notion;
 mod registry;
+mod status;
 mod text;
 mod web;
 
@@ -16,15 +19,21 @@ pub use github::GitHubAdapter;
 pub use gitlab::GitLabAdapter;
 pub use notion::NotionAdapter;
 pub use registry::AdapterRegistry;
-pub use text::{TEXT_INLINE_URI, TextAdapter};
+pub use text::TEXT_INLINE_URI;
+pub use text::TextAdapter;
 pub use web::WebAdapter;
 
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use std::sync::Arc;
-
-use crate::content::{ContentItem, FetchConfig, FetchResult, FetchStrategy};
+use crate::content::ContentItem;
+use crate::content::FetchConfig;
+use crate::content::FetchResult;
+use crate::content::FetchStrategy;
+use crate::error::ContextError;
 use crate::error::Result;
+use async_trait::async_trait;
+use chrono::DateTime;
+use chrono::Utc;
+use std::sync::Arc;
+use std::time::Duration;
 use zone_core::Source;
 
 /// Progress callback for streaming updates during fetch
@@ -39,7 +48,6 @@ pub trait ProgressCallback: Send + Sync {
     fn on_message(&self, message: &str);
 }
 
-/// No-op progress callback
 pub struct NoOpProgress;
 
 impl ProgressCallback for NoOpProgress {
@@ -48,16 +56,13 @@ impl ProgressCallback for NoOpProgress {
     fn on_message(&self, _message: &str) {}
 }
 
-/// Rate limit configuration for an adapter
+const RETRY_AFTER_SECONDS: u64 = 60;
+
 #[derive(Debug, Clone)]
 pub struct RateLimitConfig {
-    /// Requests per second limit
     pub requests_per_second: f64,
-    /// Maximum burst size
     pub burst_size: u32,
-    /// Whether to automatically retry on 429
     pub retry_after_429: bool,
-    /// Maximum number of retries
     pub max_retries: u32,
     /// Base delay for exponential backoff (ms)
     pub backoff_base_ms: u64,
@@ -75,12 +80,42 @@ impl Default for RateLimitConfig {
     }
 }
 
+impl RateLimitConfig {
+    pub(crate) async fn retried<T, E, Call, Answer>(
+        &self,
+        limited: fn(&E) -> bool,
+        mut call: Call,
+    ) -> Result<std::result::Result<T, E>>
+    where
+        Call: FnMut() -> Answer,
+        Answer: Future<Output = std::result::Result<T, E>>,
+    {
+        let mut retries = 0;
+        loop {
+            let answer = call().await;
+            if !answer.as_ref().is_err_and(limited) {
+                return Ok(answer);
+            }
+            if retries >= self.max_retries {
+                return Err(ContextError::RateLimited {
+                    retry_after_secs: RETRY_AFTER_SECONDS,
+                });
+            }
+            retries += 1;
+            tokio::time::sleep(self.wait(retries)).await;
+        }
+    }
+
+    fn wait(&self, retries: u32) -> Duration {
+        let doubling = 1_u64.checked_shl(retries - 1).unwrap_or(u64::MAX);
+        Duration::from_millis(self.backoff_base_ms.saturating_mul(doubling))
+    }
+}
+
 /// Sync state for incremental fetching
 #[derive(Debug, Clone, Default)]
 pub struct SyncState {
-    /// Source ID
     pub source_id: uuid::Uuid,
-    /// Last sync timestamp
     pub last_sync_at: Option<DateTime<Utc>>,
     /// Continuation cursor (source-specific)
     pub cursor: Option<String>,
@@ -104,7 +139,6 @@ pub trait SourceAdapter: Send + Sync {
     /// Get the source type identifier (e.g., "github", "filesystem")
     fn source_type(&self) -> &str;
 
-    /// Get rate limit configuration
     fn rate_limit_config(&self) -> RateLimitConfig {
         RateLimitConfig::default()
     }
@@ -132,18 +166,15 @@ pub trait SourceAdapter: Send + Sync {
         progress: &dyn ProgressCallback,
     ) -> Result<FetchResult>;
 
-    /// Check if incremental sync is supported
     fn supports_incremental(&self) -> bool {
         false
     }
 
-    /// Get current sync state
     async fn get_sync_state(&self, _source: &Source) -> Result<SyncState> {
         Ok(SyncState::default())
     }
 }
 
-/// Type alias for adapter references
 pub type AdapterRef = Arc<dyn SourceAdapter>;
 
 #[cfg(test)]
@@ -168,8 +199,104 @@ mod tests {
     #[test]
     fn test_no_op_progress() {
         let progress = NoOpProgress;
-        // These should not panic
         progress.on_message("test");
         progress.on_progress(0, Some(100));
+    }
+
+    #[test]
+    fn the_wait_doubles_from_the_base() {
+        let config = RateLimitConfig::default();
+
+        let waits = [1, 2, 3].map(|retries| config.wait(retries));
+
+        assert_eq!(
+            waits,
+            [1000, 2000, 4000].map(Duration::from_millis),
+            "{waits:?}"
+        );
+    }
+
+    #[test]
+    fn a_wait_past_sixty_four_retries_saturates_instead_of_overflowing() {
+        let config = RateLimitConfig::default();
+
+        for retries in [64, 65, u32::MAX] {
+            assert_eq!(
+                config.wait(retries),
+                Duration::from_millis(u64::MAX),
+                "retry {retries}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rate_limit_is_retried_with_doubling_waits_until_the_retries_run_out() {
+        let calls = std::cell::Cell::new(0);
+        let started = tokio::time::Instant::now();
+
+        let answer = RateLimitConfig::default()
+            .retried(
+                |_: &()| true,
+                || {
+                    calls.set(calls.get() + 1);
+                    std::future::ready(Err::<(), ()>(()))
+                },
+            )
+            .await;
+
+        assert!(
+            matches!(
+                answer,
+                Err(ContextError::RateLimited {
+                    retry_after_secs: 60
+                })
+            ),
+            "{answer:?}"
+        );
+        assert_eq!(calls.get(), 4);
+        assert_eq!(started.elapsed(), Duration::from_millis(7000));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_after_a_rate_limit_is_returned() {
+        let calls = std::cell::Cell::new(0);
+        let started = tokio::time::Instant::now();
+
+        let answer = RateLimitConfig::default()
+            .retried(
+                |_: &()| true,
+                || {
+                    calls.set(calls.get() + 1);
+                    std::future::ready(match calls.get() {
+                        1 => Err(()),
+                        _ => Ok(5),
+                    })
+                },
+            )
+            .await;
+
+        assert!(matches!(answer, Ok(Ok(5))), "{answer:?}");
+        assert_eq!(calls.get(), 2);
+        assert_eq!(started.elapsed(), Duration::from_millis(1000));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_error_that_is_not_a_rate_limit_is_returned_unretried() {
+        let calls = std::cell::Cell::new(0);
+        let started = tokio::time::Instant::now();
+
+        let answer = RateLimitConfig::default()
+            .retried(
+                |_: &()| false,
+                || {
+                    calls.set(calls.get() + 1);
+                    std::future::ready(Err::<(), ()>(()))
+                },
+            )
+            .await;
+
+        assert!(matches!(answer, Ok(Err(()))), "{answer:?}");
+        assert_eq!(calls.get(), 1);
+        assert_eq!(started.elapsed(), Duration::ZERO);
     }
 }

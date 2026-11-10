@@ -3598,7 +3598,7 @@ async fn test_source_with_gitlab_type() {
             &json!({
                 "name": &name,
                 "source_type": "gitlab",
-                "config": { "project_id": "test/project", "host": "http://127.0.0.1:9" }
+                "config": { "project_id": "test/project", "host": "https://127.0.0.1:9" }
             }),
             &token,
         )

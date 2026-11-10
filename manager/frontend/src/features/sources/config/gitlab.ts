@@ -1,6 +1,9 @@
 import type { GitLabConfig } from '../types';
+import { gitLabProjectUrl } from '../utils/gitLabProjectUrl';
 import { GitLabIcon } from './icons';
 import type { SourceDefinition } from './types';
+
+const DEFAULT_HOST = 'https://gitlab.com';
 
 export const gitlabSource: SourceDefinition = {
   id: 'gitlab',
@@ -17,8 +20,8 @@ export const gitlabSource: SourceDefinition = {
       id: 'glHost',
       label: 'GitLab Host',
       type: 'url',
-      placeholder: 'https://gitlab.com',
-      defaultValue: 'https://gitlab.com',
+      placeholder: DEFAULT_HOST,
+      defaultValue: DEFAULT_HOST,
     },
     {
       fields: [
@@ -50,15 +53,15 @@ export const gitlabSource: SourceDefinition = {
 
   buildConfig: (state): GitLabConfig => ({
     project_id: state.glProjectId as string,
-    host: (state.glHost as string) || 'https://gitlab.com',
+    host: (state.glHost as string) || DEFAULT_HOST,
     branch: (state.glBranch as string) || 'main',
   }),
 
   fromConfig: (config) => {
     const gitlab = config as GitLabConfig;
     return {
-      glProjectId: gitlab.project_id,
-      glHost: gitlab.host || 'https://gitlab.com',
+      glProjectId: gitlab.project_id ?? gitlab.project,
+      glHost: gitlab.host || gitlab.base_url || DEFAULT_HOST,
       glBranch: gitlab.branch || 'main',
     };
   },
@@ -68,9 +71,10 @@ export const gitlabSource: SourceDefinition = {
   getUrl: (state) => {
     const project = state.glProjectId as string;
     if (!project) return undefined;
-    const host = ((state.glHost as string) || 'https://gitlab.com').replace(/\/$/, '');
-    return `${host}/${project}`;
+    return gitLabProjectUrl(state.glHost as string, project);
   },
+
+  getInstance: (state) => (state.glHost as string) || DEFAULT_HOST,
 
   getFieldIds: () => ['glHost', 'glProjectId', 'glBranch'],
 };

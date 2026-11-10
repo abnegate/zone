@@ -1,20 +1,34 @@
 use std::fmt;
 use std::future::Future;
-use std::num::{NonZeroU8, NonZeroU32};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::num::NonZeroU8;
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::PoisonError;
 use std::time::SystemTime;
 
-use abnegate_secret::{MasterKey, SecretValue, decrypt_value, encrypt_value, is_encrypted};
-use abnegate_vcs::pull_request::{
-    ApplicationClaims, ApplicationError, ApplicationId, ApplicationService, InstallationId,
-    InstallationIssuer, InstalledRepository, TokenCache,
-};
+use abnegate_secret::MasterKey;
+use abnegate_secret::SecretValue;
+use abnegate_secret::decrypt_value;
+use abnegate_secret::encrypt_value;
+use abnegate_secret::is_encrypted;
+use abnegate_vcs::pull_request::ApplicationClaims;
+use abnegate_vcs::pull_request::ApplicationError;
+use abnegate_vcs::pull_request::ApplicationId;
+use abnegate_vcs::pull_request::ApplicationService;
+use abnegate_vcs::pull_request::InstallationId;
+use abnegate_vcs::pull_request::InstallationIssuer;
+use abnegate_vcs::pull_request::InstalledRepository;
+use abnegate_vcs::pull_request::TokenCache;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::config::Config;
 use crate::db::github_apps::AppRow;
-use crate::db::github_installations::{self, InstallationCredential, InstallationStatus};
+use crate::db::github_installations;
+use crate::db::github_installations::InstallationCredential;
+use crate::db::github_installations::InstallationStatus;
 use crate::db::projects::ProjectRow;
 use crate::db::sources::SourceRow;
 use crate::secret::Unseal;
@@ -503,25 +517,44 @@ impl fmt::Debug for Provider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use abnegate_vcs::{BranchName, PullRequestError, PullRequestService, Repository};
+    use abnegate_vcs::BranchName;
+    use abnegate_vcs::PullRequestError;
+    use abnegate_vcs::PullRequestService;
+    use abnegate_vcs::Repository;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use futures::future::join_all;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{LazyLock, Mutex, mpsc};
+    use std::sync::LazyLock;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
     use std::time::Duration;
-    use wiremock::matchers::{header, header_exists, method, path};
-    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::Request;
+    use wiremock::Respond;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::header_exists;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
-    use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
+    use crate::db::github_apps::testing::pool;
+    use crate::db::github_apps::testing::seed_organization;
+    use crate::db::github_apps::testing::seed_workspace;
+    use crate::db::sources::GITHUB;
     use crate::secret::fixture::seal;
     use crate::secret::fixture::seal_legacy;
     use crate::services::github_app::Failure;
-    use crate::services::github_app::testing::{
-        TEST_PRIVATE_KEY, installation_number, installed, issuing, issuing_once, provider,
-        uninstalled,
-    };
+    use crate::services::github_app::testing::TEST_PRIVATE_KEY;
+    use crate::services::github_app::testing::installation_number;
+    use crate::services::github_app::testing::installed;
+    use crate::services::github_app::testing::issuing;
+    use crate::services::github_app::testing::issuing_once;
+    use crate::services::github_app::testing::provider;
+    use crate::services::github_app::testing::uninstalled;
 
     const APPLICATION: ApplicationId = ApplicationId::new(12345);
 
@@ -702,7 +735,7 @@ mod tests {
         SourceRow {
             id: Uuid::new_v4(),
             name: REPOSITORY.to_string(),
-            source_type: "github".to_string(),
+            source_type: GITHUB.to_string(),
             config: json!({}),
             credentials_encrypted,
             description: None,
@@ -1205,6 +1238,22 @@ mod tests {
 
         for outcome in [first, second, third] {
             let error = outcome.expect_err("the one mint failed");
+            assert!(
+                matches!(error, Error::Application(ApplicationError::Status(500))),
+                "{error:?}"
+            );
+        }
+        assert_eq!(connected.provider.flights.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_resolution_after_a_failed_mint_landed_mints_again() {
+        let server = MockServer::start().await;
+        let connected = Connected::new(&server).await;
+        refusing(&server, connected.number, 500, 2).await;
+
+        for _ in 0..2 {
+            let error = connected.resolve().await.expect_err("the mint failed");
             assert!(
                 matches!(error, Error::Application(ApplicationError::Status(500))),
                 "{error:?}"

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { GitHubInstallationStatusSchema } from '../github/installationStatus';
+import { sourceUrl } from './utils/sourceUrl';
 
 export const SourceCategorySchema = z.enum(['file', 'calendar', 'mail', 'chat', 'web', 'text']);
 export const SourceTypeSchema = z.enum([
@@ -24,8 +25,25 @@ export const GitHubConfigSchema = z.object({
 export const GitLabConfigSchema = z.object({
   project_id: z.string().min(1, 'Project ID is required'),
   host: z.string().optional(),
+  base_url: z.string().optional(),
   branch: z.string().optional(),
   base_path: z.string().optional(),
+});
+
+export const GitLabHostSchema = z.url({
+  protocol: /^https$/,
+  error: 'GitLab host must be an https:// URL',
+});
+
+export const StoredGitLabConfigSchema = GitLabConfigSchema.extend({
+  project_id: z.string().optional(),
+  project: z.string().optional(),
+}).refine((config) => config.project_id !== undefined || config.project !== undefined, {
+  error: 'Project ID is required',
+});
+
+export const GitLabConfigRequestSchema = GitLabConfigSchema.extend({
+  host: GitLabHostSchema.optional(),
 });
 
 export const FilesystemConfigSchema = z.object({
@@ -66,9 +84,9 @@ export const TextConfigSchema = z.object({
   label: z.string().optional(),
 });
 
-export const SourceConfigSchema = z.union([
+export const StoredSourceConfigSchema = z.union([
   GitHubConfigSchema,
-  GitLabConfigSchema,
+  StoredGitLabConfigSchema,
   FilesystemConfigSchema,
   ICalConfigSchema,
   IMAPConfigSchema,
@@ -77,6 +95,31 @@ export const SourceConfigSchema = z.union([
   WebConfigSchema,
   TextConfigSchema,
 ]);
+
+const SOURCE_CONFIG_REQUEST: Record<z.infer<typeof SourceTypeSchema>, z.ZodType> = {
+  github: GitHubConfigSchema,
+  gitlab: GitLabConfigRequestSchema,
+  filesystem: FilesystemConfigSchema,
+  ical: ICalConfigSchema,
+  imap: IMAPConfigSchema,
+  discord: DiscordConfigSchema,
+  slack: SlackConfigSchema,
+  web: WebConfigSchema,
+  text: TextConfigSchema,
+};
+
+const SourceConfigRequestSchema = z.record(z.string(), z.unknown());
+
+function refineConfig(
+  sourceType: z.infer<typeof SourceTypeSchema>,
+  config: unknown,
+  context: z.RefinementCtx
+): void {
+  const result = SOURCE_CONFIG_REQUEST[sourceType].safeParse(config);
+  for (const issue of result.error?.issues ?? []) {
+    context.addIssue({ code: 'custom', message: issue.message, path: ['config', ...issue.path] });
+  }
+}
 
 const SOURCE_TYPE_CATEGORY: Record<
   z.infer<typeof SourceTypeSchema>,
@@ -93,34 +136,6 @@ const SOURCE_TYPE_CATEGORY: Record<
   text: 'text',
 };
 
-function deriveSourceUrl(
-  sourceType: z.infer<typeof SourceTypeSchema>,
-  config: unknown,
-  url: string | null | undefined
-): string {
-  if (url) return url;
-  if (!config || typeof config !== 'object') return '';
-  const fields = config as Record<string, unknown>;
-  if (
-    sourceType === 'github' &&
-    typeof fields.owner === 'string' &&
-    typeof fields.repo === 'string'
-  ) {
-    return `https://github.com/${fields.owner}/${fields.repo}`;
-  }
-  if (sourceType === 'gitlab' && typeof fields.project_id === 'string') {
-    const host =
-      typeof fields.host === 'string' && fields.host
-        ? fields.host.replace(/\/$/, '')
-        : 'https://gitlab.com';
-    return `${host}/${fields.project_id}`;
-  }
-  if ((sourceType === 'web' || sourceType === 'ical') && typeof fields.url === 'string') {
-    return fields.url;
-  }
-  return '';
-}
-
 // Backend create/get responses omit `category` and may send `url: null`.
 // Normalize those so the UI always has a category and a display URL.
 export const SourceSchema = z
@@ -129,7 +144,7 @@ export const SourceSchema = z
     name: z.string(),
     source_type: SourceTypeSchema,
     category: SourceCategorySchema.optional(),
-    config: SourceConfigSchema,
+    config: StoredSourceConfigSchema,
     description: z.string().nullable().optional(),
     url: z.string().nullable().optional(),
     is_active: z.boolean(),
@@ -147,30 +162,39 @@ export const SourceSchema = z
     ...source,
     category: source.category ?? SOURCE_TYPE_CATEGORY[source.source_type],
     description: source.description ?? null,
-    url: deriveSourceUrl(source.source_type, source.config, source.url),
+    url: sourceUrl(source.source_type, source.config, source.url),
     last_verified_at: source.last_verified_at ?? null,
     last_error: source.last_error ?? null,
   }));
 
-export const CreateSourceRequestSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  source_type: SourceTypeSchema,
-  config: SourceConfigSchema,
-  credentials: z.string().optional(),
-  github_installation_id: z.string().optional(),
-  description: z.string().optional(),
-  url: z.string().optional(),
-});
+export const CreateSourceRequestSchema = z
+  .object({
+    name: z.string().min(1, 'Name is required'),
+    source_type: SourceTypeSchema,
+    config: SourceConfigRequestSchema,
+    credentials: z.string().optional(),
+    github_installation_id: z.string().optional(),
+    description: z.string().optional(),
+    url: z.string().optional(),
+  })
+  .superRefine((request, context) => refineConfig(request.source_type, request.config, context));
 
-export const UpdateSourceRequestSchema = z.object({
+const UpdateSourceRequestFieldsSchema = z.object({
   name: z.string().min(1).optional(),
-  config: SourceConfigSchema.optional(),
+  config: SourceConfigRequestSchema.optional(),
   credentials: z.string().optional(),
   github_installation_id: z.string().nullable().optional(),
   description: z.string().optional(),
   is_active: z.boolean().optional(),
   url: z.string().optional(),
+  instance: z.string().optional(),
 });
+
+export function updateSourceRequestSchema(sourceType: z.infer<typeof SourceTypeSchema>) {
+  return UpdateSourceRequestFieldsSchema.superRefine((request, context) => {
+    if (request.config !== undefined) refineConfig(sourceType, request.config, context);
+  });
+}
 
 export const SourcesResponseSchema = z.object({
   success: z.boolean().optional(),
@@ -295,7 +319,7 @@ export type SourceZ = z.infer<typeof SourceSchema>;
 export type SourceCategoryZ = z.infer<typeof SourceCategorySchema>;
 export type SourceTypeZ = z.infer<typeof SourceTypeSchema>;
 export type CreateSourceRequestZ = z.infer<typeof CreateSourceRequestSchema>;
-export type UpdateSourceRequestZ = z.infer<typeof UpdateSourceRequestSchema>;
+export type UpdateSourceRequestZ = z.infer<typeof UpdateSourceRequestFieldsSchema>;
 export type SourcesResponse = z.infer<typeof SourcesResponseSchema>;
 export type SourceResponse = z.infer<typeof SourceResponseSchema>;
 export type SourceVerifyResponse = z.infer<typeof SourceVerifyResponseSchema>;

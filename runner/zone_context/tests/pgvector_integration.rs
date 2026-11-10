@@ -10,6 +10,8 @@
 
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
+use zone_context::content::Retention;
+use zone_context::content::UriNamespace;
 use zone_context::{
     content::{ContentCategory, ContentChunk, ContentItem},
     embeddings::{Embedding, PgVectorStore, SearchFilters, VectorStore},
@@ -511,4 +513,194 @@ async fn test_pgvector_batch_operations() {
     // Clean up
     let deleted = store.delete_by_source(source_id).await.unwrap();
     assert_eq!(deleted, 10, "Should delete all 10 embeddings");
+}
+
+async fn index(store: &PgVectorStore, source_id: Uuid, uris: &[&str]) {
+    for uri in uris {
+        let item =
+            ContentItem::new(source_id, ContentCategory::File, *uri, *uri).with_content(*uri);
+        store.store_content_item(&item).await.unwrap();
+    }
+}
+
+async fn indexed(pool: &sqlx::PgPool, source_id: Uuid) -> Vec<String> {
+    sqlx::query_scalar("SELECT uri FROM content_items WHERE source_id = $1 ORDER BY uri")
+        .bind(source_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+fn branch_of(owner: &str, repository: &str, branch: &str) -> Retention {
+    Retention::Namespace(UriNamespace::new(
+        format!("github://{owner}/{repository}/"),
+        format!("@{branch}"),
+    ))
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
+async fn a_truncated_listing_keeps_every_record_of_its_branch() {
+    let pool = create_test_pool().await;
+    let store = PgVectorStore::new(pool.clone());
+    let source_id = insert_test_source(&pool).await;
+    let kept = [
+        "github://acme/widgets/left-out.rs@main",
+        "github://acme/widgets/listed.rs@main",
+        "github://acme/widgets/src/nested@main.rs@main",
+    ];
+    index(&store, source_id, &kept).await;
+
+    let deleted = store
+        .retain(source_id, &branch_of("acme", "widgets", "main"))
+        .await
+        .unwrap();
+
+    assert_eq!(deleted, 0);
+    assert_eq!(indexed(&pool, source_id).await, kept);
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
+async fn a_truncated_listing_drops_the_records_of_a_previous_branch() {
+    let pool = create_test_pool().await;
+    let store = PgVectorStore::new(pool.clone());
+    let source_id = insert_test_source(&pool).await;
+    let other_source_id = insert_test_source(&pool).await;
+    index(
+        &store,
+        source_id,
+        &[
+            "github://acme/widgets/README.md@develop",
+            "github://acme/widgets/README.md@main",
+            "github://acme/widgets/src/lib.rs@release/main",
+            "github://acme/widgets/src/main.rs@main-next",
+        ],
+    )
+    .await;
+    index(
+        &store,
+        other_source_id,
+        &["github://acme/widgets/README.md@develop"],
+    )
+    .await;
+
+    let deleted = store
+        .retain(source_id, &branch_of("acme", "widgets", "main"))
+        .await
+        .unwrap();
+
+    assert_eq!(deleted, 3);
+    assert_eq!(
+        indexed(&pool, source_id).await,
+        ["github://acme/widgets/README.md@main"]
+    );
+    assert_eq!(
+        indexed(&pool, other_source_id).await,
+        ["github://acme/widgets/README.md@develop"]
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
+async fn a_truncated_listing_drops_the_records_of_a_previous_repository() {
+    let pool = create_test_pool().await;
+    let store = PgVectorStore::new(pool.clone());
+    let source_id = insert_test_source(&pool).await;
+    index(
+        &store,
+        source_id,
+        &[
+            "github://acme/gadgets/README.md@main",
+            "github://acme/widgets-old/README.md@main",
+            "github://acme/widgets/README.md@main",
+            "github://other/widgets/README.md@main",
+        ],
+    )
+    .await;
+
+    let deleted = store
+        .retain(source_id, &branch_of("acme", "widgets", "main"))
+        .await
+        .unwrap();
+
+    assert_eq!(deleted, 3);
+    assert_eq!(
+        indexed(&pool, source_id).await,
+        ["github://acme/widgets/README.md@main"]
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
+async fn a_truncated_listing_reads_wildcards_in_its_namespace_as_themselves() {
+    let pool = create_test_pool().await;
+    let store = PgVectorStore::new(pool.clone());
+    let source_id = insert_test_source(&pool).await;
+    let kept = r"github://acme/my_repo/README.md@50%_off\x";
+    index(
+        &store,
+        source_id,
+        &[
+            r"github://acme/my_repo/README.md@50%_off\x",
+            r"github://acme/my_repo/README.md@50-percent-off\x",
+            r"github://acme/my_repo/README.md@50%_off\\x",
+            r"github://acme/myXrepo/README.md@50%_off\x",
+        ],
+    )
+    .await;
+
+    let deleted = store
+        .retain(source_id, &branch_of("acme", "my_repo", r"50%_off\x"))
+        .await
+        .unwrap();
+
+    assert_eq!(deleted, 3);
+    assert_eq!(indexed(&pool, source_id).await, [kept]);
+}
+
+#[tokio::test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "PostgreSQL not available on this platform"
+)]
+async fn a_complete_listing_keeps_exactly_its_uris() {
+    let pool = create_test_pool().await;
+    let store = PgVectorStore::new(pool.clone());
+    let source_id = insert_test_source(&pool).await;
+    index(
+        &store,
+        source_id,
+        &[
+            "github://acme/widgets/deleted.rs@main",
+            "github://acme/widgets/listed.rs@main",
+        ],
+    )
+    .await;
+
+    let deleted = store
+        .retain(
+            source_id,
+            &Retention::Exact(vec!["github://acme/widgets/listed.rs@main".to_string()]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(deleted, 1);
+    assert_eq!(
+        indexed(&pool, source_id).await,
+        ["github://acme/widgets/listed.rs@main"]
+    );
 }

@@ -3,14 +3,21 @@
 //! This adapter allows users to provide text content directly without needing
 //! an external source. Useful for quick testing and ad-hoc content injection.
 
+use crate::adapters::ProgressCallback;
+use crate::adapters::RateLimitConfig;
+use crate::adapters::SourceAdapter;
+use crate::adapters::SyncState;
+use crate::content::ContentCategory;
+use crate::content::ContentItem;
+use crate::content::FetchConfig;
+use crate::content::FetchResult;
+use crate::content::FetchStrategy;
+use crate::error::ContextError;
+use crate::error::Result;
+use abnegate_index::estimate_tokens;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-
-use crate::adapters::{ProgressCallback, RateLimitConfig, SourceAdapter, SyncState};
-use crate::content::{
-    ContentCategory, ContentItem, FetchConfig, FetchResult, FetchStrategy, estimate_tokens,
-};
-use crate::error::{ContextError, Result};
+use serde::Deserialize;
+use serde::Serialize;
 use zone_core::Source;
 
 /// URI for inline text content
@@ -233,7 +240,6 @@ mod tests {
         assert!(result.is_ok());
 
         let token_count = result.unwrap();
-        // Should use the estimate_tokens function which is ~4 chars per token
         let expected = estimate_tokens(content);
         assert_eq!(token_count, expected);
         assert!(token_count > 0);
