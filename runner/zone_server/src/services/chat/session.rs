@@ -26,6 +26,7 @@ use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
 use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
+use crate::db::mcp_servers;
 use crate::db::tasks::Origin;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::backend;
@@ -41,6 +42,8 @@ pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
 pub const INSTRUCTIONS: &str = "instructions";
 const TEMPERATURE: f32 = 0.7;
 const SEARCH: &str = "supplement:search";
+const MCP_PENDING: &str =
+    "Configured MCP tool definitions will be counted when their servers connect.";
 pub const WITHHELD_IMAGE: &str = "[An image is omitted here because this model can't view images.]";
 
 fn parse_timeout(seconds: u64) -> Result<Duration, String> {
@@ -529,15 +532,9 @@ pub async fn build(
                 Some("Requested search results will be counted when retrieval completes.".into());
         }
     }
-    if matches!(mode, Mode::Preview)
-        && agentic
-        && state.mcp().existing_instance().is_none()
-        && !zone_core::servers::config().is_empty()
-    {
+    if matches!(mode, Mode::Preview) && agentic && mcp_pending(state, workspace).await {
         incomplete = true;
-        reason = Some(
-            "Configured MCP tool definitions will be counted when their servers connect.".into(),
-        );
+        reason = Some(MCP_PENDING.into());
     }
     if matches!(mode, Mode::Preview) && !agentic && chat.character.is_none() {
         let knowledge: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM knowledge_entries WHERE workspace_id=$1 AND is_active=TRUE ", not_memory!(), ")"))
@@ -619,6 +616,41 @@ pub async fn build(
         effort: chat.reasoning_effort,
         driver,
     })
+}
+
+/// Whether an MCP server the chat's turns are offered has yet to connect: the
+/// instance's, or one its organization has switched on. A preview starts
+/// neither, so it cannot count their tools.
+async fn mcp_pending(state: &AppState, workspace: Uuid) -> bool {
+    if state.mcp().existing_instance().is_none() && !zone_core::servers::config().is_empty() {
+        return true;
+    }
+    let organization = match mcp_servers::organization_for_workspace(state.db(), workspace).await {
+        Ok(Some(organization)) => organization,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::debug!(
+                %workspace,
+                %error,
+                "Could not read the workspace's organization; counting no MCP servers of its own"
+            );
+            return false;
+        }
+    };
+    if state.mcp().existing_organization(organization).is_some() {
+        return false;
+    }
+    match mcp_servers::has_enabled(state.db(), organization).await {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            tracing::debug!(
+                %organization,
+                %error,
+                "Could not read the organization's MCP servers; counting none"
+            );
+            false
+        }
+    }
 }
 
 /// The content of the newest canonical user turn, read before `history.entries`
@@ -1462,5 +1494,87 @@ mod tests {
             json!("high"),
             "an endpoint is sent the chat's effort at the highest level it takes: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_preview_is_incomplete_until_the_organizations_mcp_servers_connect() {
+        use crate::db::{chats, organizations, workspaces};
+        use crate::services::mcp_servers::load;
+        use sqlx::PgPool;
+
+        const UNREACHABLE: &str = "http://127.0.0.1:1";
+        const STORE: &str = "INSERT INTO mcp_servers (organization_id, name, transport, command, enabled) \
+                             VALUES ($1, $2, 'stdio', 'true', $3)";
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .expect("the test database");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let organization = organizations::create_organization(&pool, "Servers", &suffix, None)
+            .await
+            .expect("an organization")
+            .id;
+        let workspace = workspaces::create_workspace(&pool, organization, "Servers", &suffix, None)
+            .await
+            .expect("a workspace")
+            .id;
+        let chat = chats::create_chat(&pool, Some(workspace), "Servers", "test", true, false)
+            .await
+            .expect("an agent chat");
+        let mut config = crate::state::test_config();
+        config.litellm_host = UNREACHABLE.into();
+        config.ollama_host = UNREACHABLE.into();
+        let state = AppState::new(config, pool.clone(), None);
+        state.disable_mcp();
+        let endpoint = crate::services::route::Route::for_workspace(&state, workspace)
+            .await
+            .into_endpoint()
+            .expect("a usable route");
+        let preview = || async {
+            let preparation = build(
+                &state,
+                &chat,
+                Uuid::new_v4(),
+                None,
+                Mode::Preview,
+                endpoint.clone(),
+                None,
+            )
+            .await
+            .expect("a preview");
+            let pending = preparation.context.reason.as_deref() == Some(MCP_PENDING);
+            (preparation.context.incomplete, pending)
+        };
+        let store = |name: &'static str, enabled: bool| {
+            sqlx::query(STORE)
+                .bind(organization)
+                .bind(name)
+                .bind(enabled)
+                .execute(&pool)
+        };
+
+        let bare = preview().await;
+        store("off", false).await.expect("a disabled server");
+        let disabled = preview().await;
+        store("on", true).await.expect("an enabled server");
+        let unconnected = preview().await;
+        let unbuilt = state.mcp().existing_organization(organization).is_none();
+        state
+            .mcp()
+            .organization(organization, || load::definitions(&state, organization))
+            .await;
+        let connected = preview().await;
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization to be removed");
+
+        assert_eq!(bare, (false, false), "no server is stored");
+        assert_eq!(disabled, (false, false), "the only server is disabled");
+        assert_eq!(unconnected, (true, true), "an enabled server awaits a turn");
+        assert!(unbuilt, "a preview built the organization's hub");
+        assert_eq!(connected, (false, false), "the organization's hub is built");
     }
 }

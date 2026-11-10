@@ -5,6 +5,7 @@ use abnegate_agent::mcp::{McpConfig, McpHub, McpServer, SEPARATOR, qualified_too
 use abnegate_agent::tool::Proxy;
 use abnegate_agent::{Tool, ToolRegistry};
 use futures::future::join_all;
+use uuid::Uuid;
 
 use super::definition::Definition;
 use super::status::{Connection, UNCONNECTED, static_status};
@@ -187,6 +188,14 @@ impl OrganizationHub {
             .count()
     }
 
+    pub fn identifiers(&self) -> BTreeMap<String, Uuid> {
+        self.read()
+            .slots
+            .iter()
+            .filter_map(|(name, slot)| Some((name.clone(), slot.definition.id?)))
+            .collect()
+    }
+
     pub(super) fn refresh(self: &Arc<Self>, definition: Definition) {
         let name = definition.name.clone();
         let connectable = static_status(&definition, self.commands).is_none();
@@ -302,6 +311,26 @@ mod tests {
             tools: tools.map(|tools| tools.iter().map(|tool| tool.to_string()).collect()),
             ..Definition::stub("stub")
         }
+    }
+
+    #[tokio::test]
+    async fn a_stored_server_is_identified_by_its_name() {
+        let stored = Definition {
+            enabled: false,
+            ..Definition::stub("stored")
+        };
+        let unstored = Definition {
+            id: None,
+            enabled: false,
+            ..Definition::stub("unstored")
+        };
+        let identifier = stored.id.expect("a stored definition has an identifier");
+        let hub = OrganizationHub::connect(vec![stored, unstored], Proxy::default(), true).await;
+
+        assert_eq!(
+            hub.identifiers(),
+            BTreeMap::from([("stored".to_string(), identifier)])
+        );
     }
 
     #[tokio::test]

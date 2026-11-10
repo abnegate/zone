@@ -20,7 +20,7 @@ use abnegate_agent_cli::AgentKind;
 use abnegate_llm::ToolDefinition;
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,9 +38,11 @@ use super::citations::{self, Citation};
 use super::identifier::{self, Kind};
 use super::receipts::{self, ActionReceipt};
 use crate::db::{
-    DbResult, chat_attached_sources, chat_sources, knowledge, message_embeddings, projects,
-    sources, tasks::Origin, users, workspace_members,
+    DbResult, chat_attached_sources, chat_sources, knowledge, mcp_servers, message_embeddings,
+    projects, sources, tasks::Origin, users, workspace_members,
 };
+use crate::services::mcp_servers::load;
+use crate::services::mcp_servers::organization::OrganizationHub;
 use crate::state::AppState;
 
 /// Bound legacy search snippets and inventory summaries; full document reads are preserved.
@@ -115,6 +117,54 @@ pub(crate) async fn task_writer(state: &AppState, workspace: Uuid, actor: Uuid) 
         Err(error) => {
             tracing::warn!(%error, "Could not authorize task actor");
             false
+        }
+    }
+}
+
+/// The hub of the workspace's organization and the workspace's overrides of
+/// its servers, when any of them is connected. A preview (`connect` false)
+/// reads only a hub a turn already built, and asks the database nothing while
+/// no organization has one.
+async fn organization_servers(
+    scope: &WorkspaceScope,
+    connect: bool,
+) -> Option<(Arc<OrganizationHub>, BTreeMap<Uuid, bool>)> {
+    let state = &scope.state;
+    if !connect && state.mcp().organizations() == 0 {
+        return None;
+    }
+    let workspace = scope.workspace_id;
+    let organization = match mcp_servers::organization_for_workspace(state.db(), workspace).await {
+        Ok(organization) => organization?,
+        Err(error) => {
+            tracing::debug!(
+                %workspace,
+                %error,
+                "Could not read the workspace's organization; offering none of its MCP servers"
+            );
+            return None;
+        }
+    };
+    let hub = if connect {
+        state
+            .mcp()
+            .organization(organization, || load::definitions(state, organization))
+            .await
+    } else {
+        state.mcp().existing_organization(organization)?
+    };
+    if hub.connected() == 0 {
+        return None;
+    }
+    match mcp_servers::workspace_overrides(state.db(), workspace).await {
+        Ok(overrides) => Some((hub, overrides)),
+        Err(error) => {
+            tracing::debug!(
+                %workspace,
+                %error,
+                "Could not read the workspace's MCP overrides; offering none of its organization's servers"
+            );
+            None
         }
     }
 }
@@ -219,7 +269,8 @@ pub const PLAN_HELD: &str = "This task requires its plan approved before anythin
 ///
 /// Chat and tasks share workspace tools. Tasks have a sandboxed file/shell
 /// context and only receive workspace tools for an active initiating writer.
-/// Server-wide MCP tools are restricted to chats because they carry no task scope.
+/// MCP tools, the instance's and the organization's, follow the workspace
+/// tools: every chat is offered them, a task only for that writer.
 pub struct ChatTools {
     registry: ToolRegistry,
     context: ToolContext,
@@ -666,8 +717,8 @@ impl ChatTools {
                 .map(|name| name.to_string()),
         );
 
-        // A preview (connect = false) only sees a hub already connected, so
-        // drafting never spawns a server process.
+        // A preview (connect = false) only sees the hubs already connected,
+        // so drafting never spawns a server process.
         let mut connected_servers = 0;
         if let Some(scope) = &scope {
             let hub = if connect {
@@ -682,7 +733,18 @@ impl ChatTools {
                 .collect();
             let hub = hub.as_deref();
             connected_servers = hub.map_or(0, McpHub::server_count);
-            let added = hub.map_or(0, |hub| mcp::register(&mut registry, hub));
+            let mut added = hub.map_or(0, |hub| mcp::register(&mut registry, hub));
+            if let Some((organization, overrides)) = organization_servers(scope, connect).await {
+                let identifiers = organization.identifiers();
+                added += organization.register(&mut registry, &|name| {
+                    identifiers
+                        .get(name)
+                        .and_then(|server| overrides.get(server))
+                        .copied()
+                        .unwrap_or(true)
+                });
+                connected_servers += organization.connected();
+            }
             if added > 0 {
                 match profile {
                     ToolProfile::Chat => {
@@ -3712,5 +3774,266 @@ mod tests {
             servers::prompt(1, &connected.registry.names())
         );
         assert!(guidance.contains("two underscores"), "{guidance}");
+    }
+
+    const STUB: &str = "stub";
+    const STUB_TOOL: &str = "stub__delegate";
+
+    /// A workspace whose organization stores the stub stdio server, on an
+    /// instance that runs an organization's commands and attaches no server
+    /// of its own, so an MCP tool in a catalog came through the organization.
+    struct Tenant {
+        pool: sqlx::PgPool,
+        state: AppState,
+        organization: Uuid,
+        workspace: Uuid,
+        user: Uuid,
+        server: Uuid,
+    }
+
+    impl Tenant {
+        async fn storing(allowlist: Option<&[&str]>) -> Self {
+            use crate::db::mcp_servers::{NewMcpServer, create_authorized};
+            use crate::db::organization_members::{self, OrgRole};
+            use crate::db::{organizations, workspaces};
+            use crate::services::mcp_servers::definition::Definition;
+            use crate::services::mcp_servers::transport::Transport;
+
+            let pool = sqlx::PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .expect("the test database");
+            let suffix = Uuid::new_v4().simple().to_string();
+            let user =
+                users::create_user(&pool, &format!("{suffix}@example.com"), "hash", None, false)
+                    .await
+                    .expect("a user")
+                    .id;
+            let organization = organizations::create_organization(&pool, "Servers", &suffix, None)
+                .await
+                .expect("an organization")
+                .id;
+            let workspace =
+                workspaces::create_workspace(&pool, organization, "Servers", &suffix, None)
+                    .await
+                    .expect("a workspace")
+                    .id;
+            organization_members::add_member(&pool, organization, user, OrgRole::Admin, None)
+                .await
+                .expect("an organization administrator");
+            workspace_members::add_member(
+                &pool,
+                workspace,
+                user,
+                workspace_members::WorkspaceRole::Member,
+                None,
+            )
+            .await
+            .expect("a workspace member");
+            let state = AppState::new(
+                crate::config::Config {
+                    mcp_commands: true,
+                    ..test_config()
+                },
+                pool.clone(),
+                None,
+            );
+            state.disable_mcp();
+            let stub = Definition::stub(STUB).server;
+            let server = create_authorized(
+                &pool,
+                state.master_key(),
+                organization,
+                user,
+                NewMcpServer {
+                    name: STUB.to_string(),
+                    transport: Transport::Stdio.as_str().to_string(),
+                    command: stub.command,
+                    arguments: stub.arguments,
+                    url: None,
+                    tools: allowlist
+                        .map(|tools| tools.iter().map(|tool| tool.to_string()).collect()),
+                    enabled: true,
+                    environment: Default::default(),
+                    headers: Default::default(),
+                },
+            )
+            .await
+            .expect("the organization's server is stored")
+            .id;
+            Self {
+                pool,
+                state,
+                organization,
+                workspace,
+                user,
+                server,
+            }
+        }
+
+        fn scope(&self) -> WorkspaceScope {
+            WorkspaceScope {
+                state: self.state.clone(),
+                workspace_id: self.workspace,
+                chat_id: Some(Uuid::new_v4()),
+                user_id: self.user,
+                offline: false,
+                origin: crate::db::tasks::Origin::Member,
+            }
+        }
+
+        async fn chat(&self) -> ChatTools {
+            ChatTools::build(self.scope()).await
+        }
+
+        async fn run(&self) -> ChatTools {
+            ChatTools::for_task(
+                &self.state,
+                std::env::temp_dir(),
+                self.workspace,
+                Some(self.user),
+            )
+            .await
+        }
+
+        async fn overriding(&self, enabled: bool) {
+            sqlx::query(
+                "INSERT INTO workspace_mcp_servers (workspace_id, server_id, organization_id, enabled) \
+                 VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (workspace_id, server_id) DO UPDATE SET enabled = EXCLUDED.enabled",
+            )
+            .bind(self.workspace)
+            .bind(self.server)
+            .bind(self.organization)
+            .bind(enabled)
+            .execute(&self.pool)
+            .await
+            .expect("the workspace's override is stored");
+        }
+
+        fn connected(&self) -> Option<usize> {
+            self.state
+                .mcp()
+                .existing_organization(self.organization)
+                .map(|hub| hub.connected())
+        }
+
+        async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .expect("the organization is removed");
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.user)
+                .execute(&self.pool)
+                .await
+                .expect("the user is removed");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_organization_server_reaches_a_chat_and_a_writers_run() {
+        let tenant = Tenant::storing(None).await;
+
+        let chat = tenant.chat().await;
+        let run = tenant.run().await;
+        let unattributed =
+            ChatTools::for_task(&tenant.state, std::env::temp_dir(), tenant.workspace, None).await;
+        tenant.remove().await;
+
+        for (holder, tools) in [("chat", &chat), ("run", &run)] {
+            assert!(
+                tools.has(STUB_TOOL),
+                "the {holder}'s catalog lacks the organization's tool: {:?}",
+                tools.names()
+            );
+            assert!(
+                tools.remote.contains(STUB_TOOL),
+                "the {holder}'s catalog does not mark the server's own text as remote"
+            );
+        }
+        assert!(!unattributed.has(STUB_TOOL), "{:?}", unattributed.names());
+    }
+
+    #[tokio::test]
+    async fn a_workspace_override_switches_an_organization_server_off() {
+        let tenant = Tenant::storing(None).await;
+
+        let inherited = tenant.chat().await;
+        tenant.overriding(false).await;
+        let chat = tenant.chat().await;
+        let run = tenant.run().await;
+        let connected = tenant.connected();
+        tenant.overriding(true).await;
+        let restored = tenant.chat().await;
+        tenant.remove().await;
+
+        assert!(inherited.has(STUB_TOOL), "{:?}", inherited.names());
+        assert_eq!(
+            connected,
+            Some(1),
+            "the override leaves the server connected"
+        );
+        assert!(!chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert!(!run.has(STUB_TOOL), "{:?}", run.names());
+        assert!(!chat.remote.contains(STUB_TOOL));
+        assert!(restored.has(STUB_TOOL), "{:?}", restored.names());
+    }
+
+    #[tokio::test]
+    async fn an_allowlist_hides_the_organization_tools_it_leaves_out() {
+        let tenant = Tenant::storing(Some(&["other"])).await;
+
+        let chat = tenant.chat().await;
+        let run = tenant.run().await;
+        let connected = tenant.connected();
+        tenant.remove().await;
+
+        assert_eq!(
+            connected,
+            Some(1),
+            "the server has to connect, or the allowlist hides nothing"
+        );
+        assert!(!chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert!(!run.has(STUB_TOOL), "{:?}", run.names());
+    }
+
+    #[tokio::test]
+    async fn a_preview_reads_an_organization_hub_and_never_builds_one() {
+        let tenant = Tenant::storing(None).await;
+
+        let before = ChatTools::preview(tenant.scope()).await;
+        let unbuilt = tenant.connected();
+        let hubs = tenant.state.mcp().organizations();
+        let chat = tenant.chat().await;
+        let after = ChatTools::preview(tenant.scope()).await;
+        tenant.remove().await;
+
+        assert!(!before.has(STUB_TOOL), "{:?}", before.names());
+        assert_eq!(unbuilt, None, "a preview built the organization's hub");
+        assert_eq!(hubs, 0);
+        assert!(chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert!(
+            after.has(STUB_TOOL),
+            "a preview lacks the tool of a hub a turn already built: {:?}",
+            after.names()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_organization_server_alone_earns_mcp_guidance() {
+        let tenant = Tenant::storing(None).await;
+        let instance = tenant.state.mcp().instance().await.server_count();
+
+        let chat = tenant.chat().await;
+        tenant.remove().await;
+
+        assert_eq!(instance, 0, "the instance attaches no server of its own");
+        let guidance = chat
+            .mcp_guidance()
+            .expect("a connected organization server earns guidance");
+        assert_eq!(Some(guidance), servers::prompt(1, &chat.registry.names()));
     }
 }

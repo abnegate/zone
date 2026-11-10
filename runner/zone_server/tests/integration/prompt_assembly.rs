@@ -47,7 +47,9 @@ fn environment() -> Environment {
     )
 }
 
-/// A pool nothing dials, because building a catalog only reads its own registry.
+/// A pool nothing answers on. A chat's catalog asks it for the workspace's
+/// organization, and is assembled without that organization's servers once the
+/// wait for a connection runs out.
 fn state() -> zone_server::state::AppState {
     common::create_test_state(
         common::test_config(),
