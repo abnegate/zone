@@ -563,16 +563,6 @@ pub async fn for_organization(
     Ok(records)
 }
 
-/// Whether `organization` has a server switched on, without opening any secrets.
-pub async fn has_enabled(pool: &PgPool, organization: Uuid) -> McpServerResult<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM mcp_servers WHERE organization_id = $1 AND enabled)",
-    )
-    .bind(organization)
-    .fetch_one(pool)
-    .await?)
-}
-
 /// The organization `workspace` belongs to.
 pub async fn organization_for_workspace(
     pool: &PgPool,
