@@ -3655,6 +3655,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_mcp_server_is_offered_a_revision_that_has_a_handshake() {
+        use abnegate_agent::mcp::{McpConfig, McpServer};
+
+        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("stub_mcp_server.py");
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let offered = directory.path().join("offered");
+        let hub = McpHub::connect(&McpConfig::default().with_server(
+            "stub",
+            McpServer::command(
+                "python3",
+                [
+                    script.to_string_lossy().into_owned(),
+                    offered.to_string_lossy().into_owned(),
+                ],
+            ),
+        ))
+        .await;
+
+        assert_eq!(hub.server_count(), 1, "the stub server has to connect");
+        assert_eq!(
+            std::fs::read_to_string(&offered).expect("the stub records the offer"),
+            "2025-11-25"
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_guidance_follows_the_connected_servers() {
         use abnegate_agent::mcp::{McpConfig, McpServer};
 
