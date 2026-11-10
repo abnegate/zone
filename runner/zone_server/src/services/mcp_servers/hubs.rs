@@ -11,8 +11,8 @@ use tokio::sync::OnceCell;
 use uuid::Uuid;
 use zone_core::servers;
 
-use super::definition::Definition;
 use super::definition::Revisions;
+use super::definition::Snapshot;
 use super::organization::OrganizationHub;
 use super::sessions::advertised;
 use super::status::Connection;
@@ -104,7 +104,7 @@ impl Hubs {
     ) -> Result<Arc<OrganizationHub>, E>
     where
         F: FnOnce(Revisions) -> Fut,
-        Fut: Future<Output = Result<Option<Vec<Definition>>, E>>,
+        Fut: Future<Output = Result<Option<Snapshot>, E>>,
     {
         let entry = Arc::clone(self.organizations.entry(organization).or_default().value());
         let hub = {
@@ -126,7 +126,7 @@ impl Hubs {
     ) -> Result<Option<Arc<OrganizationHub>>, E>
     where
         F: FnOnce(Revisions) -> Fut,
-        Fut: Future<Output = Result<Option<Vec<Definition>>, E>>,
+        Fut: Future<Output = Result<Option<Snapshot>, E>>,
     {
         self.built(organization, None, load).await
     }
@@ -139,7 +139,7 @@ impl Hubs {
     ) -> Result<Option<Arc<OrganizationHub>>, E>
     where
         F: FnOnce(Revisions) -> Fut,
-        Fut: Future<Output = Result<Option<Vec<Definition>>, E>>,
+        Fut: Future<Output = Result<Option<Snapshot>, E>>,
     {
         self.built(organization, Some(server), load).await
     }
@@ -184,7 +184,7 @@ impl Hubs {
     ) -> Result<Option<Arc<OrganizationHub>>, E>
     where
         F: FnOnce(Revisions) -> Fut,
-        Fut: Future<Output = Result<Option<Vec<Definition>>, E>>,
+        Fut: Future<Output = Result<Option<Snapshot>, E>>,
     {
         let Some(entry) = self.entry(organization) else {
             return Ok(None);
@@ -205,14 +205,14 @@ async fn reconcile<F, Fut, E>(
 ) -> Result<Arc<OrganizationHub>, E>
 where
     F: FnOnce(Revisions) -> Fut,
-    Fut: Future<Output = Result<Option<Vec<Definition>>, E>>,
+    Fut: Future<Output = Result<Option<Snapshot>, E>>,
 {
     let known = match forced {
         Some(_) => Revisions::new(),
         None => hub.revisions(),
     };
-    if let Some(definitions) = load(known).await? {
-        hub.apply(definitions, forced);
+    if let Some(snapshot) = load(known).await? {
+        hub.apply(snapshot, forced);
     }
     Ok(Arc::clone(entry.hub.get_or_init(|| hub)))
 }
@@ -232,6 +232,7 @@ mod tests {
     use zone_core::variables::Variables;
 
     use super::*;
+    use crate::services::mcp_servers::definition::Definition;
     use crate::services::mcp_servers::organization::Registered;
     use crate::services::mcp_servers::status::COMMANDS_DISABLED;
     use crate::services::mcp_servers::status::HTTP_PENDING;
@@ -248,7 +249,7 @@ mod tests {
         commands: true,
     };
 
-    type Loaded = Result<Option<Vec<Definition>>, &'static str>;
+    type Loaded = Result<Option<Snapshot>, &'static str>;
 
     /// The rows an organization stores, read the way `load` reads the database: nothing is handed
     /// over while the revisions the hub knows are the stored ones.
@@ -272,12 +273,8 @@ mod tests {
         fn load(&self) -> impl FnOnce(Revisions) -> Ready<Loaded> + '_ {
             move |known| {
                 self.loads.fetch_add(1, Ordering::SeqCst);
-                let stored = self.stored.lock().unwrap().clone();
-                let revisions: Revisions = stored
-                    .iter()
-                    .map(|definition| (definition.id, definition.revision))
-                    .collect();
-                ready(Ok((revisions != known).then_some(stored)))
+                let stored: Snapshot = self.stored.lock().unwrap().clone().into();
+                ready(Ok((stored.revisions != known).then_some(stored)))
             }
         }
     }
@@ -301,6 +298,17 @@ mod tests {
             .await
             .expect("the rows load")
             .expect("the organization's hub is built")
+    }
+
+    async fn known(hubs: &Hubs, organization: Uuid) -> Revisions {
+        let mut known = None;
+        hubs.sync(organization, |revisions| {
+            known = Some(revisions);
+            ready(Loaded::Ok(None))
+        })
+        .await
+        .expect("the rows load");
+        known.expect("the loader is asked what changed")
     }
 
     async fn settled(hub: &OrganizationHub, name: &str) -> Connection {
@@ -356,7 +364,7 @@ mod tests {
         let session = hub.session("stub").unwrap();
 
         hubs.sync(organization, |_| {
-            ready(Loaded::Ok(Some(vec![definition.clone()])))
+            ready(Loaded::Ok(Some(vec![definition.clone()].into())))
         })
         .await
         .unwrap();
@@ -364,6 +372,34 @@ mod tests {
         assert_eq!(hub.connection("stub"), delegate());
         assert_eq!(hub.generation("stub"), generation);
         assert!(Arc::ptr_eq(&session, &hub.session("stub").unwrap()));
+    }
+
+    #[tokio::test]
+    async fn a_row_that_could_not_be_read_is_known_by_its_revision() {
+        let hubs = hubs();
+        let organization = Uuid::new_v4();
+        let read = Definition::stub("stub");
+        let unread = Definition::stub("unread");
+        let partial = Snapshot {
+            revisions: Snapshot::from(vec![read.clone(), unread.clone()]).revisions,
+            definitions: vec![read.clone()],
+        };
+        let hub = hubs
+            .organization(organization, |_| ready(Loaded::Ok(Some(partial.clone()))))
+            .await
+            .unwrap();
+        let skipped = known(&hubs, organization).await;
+        let names = hub.names();
+        hubs.sync(organization, |_| {
+            ready(Loaded::Ok(Some(vec![read.clone()].into())))
+        })
+        .await
+        .unwrap();
+        let removed = known(&hubs, organization).await;
+
+        assert_eq!(names, ["stub"]);
+        assert_eq!(skipped, partial.revisions);
+        assert_eq!(removed, Snapshot::from(vec![read]).revisions);
     }
 
     #[tokio::test]

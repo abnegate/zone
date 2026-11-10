@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use super::definition::Definition;
 use super::definition::Revisions;
+use super::definition::Snapshot;
 use super::sessions::Session;
 use super::sessions::Sessions;
 use super::status::Connection;
@@ -31,6 +32,7 @@ struct Slot {
 
 struct Inner {
     slots: BTreeMap<Uuid, Slot>,
+    unread: Revisions,
     sessions: Sessions,
     generation: u64,
 }
@@ -77,6 +79,7 @@ impl OrganizationHub {
         Self {
             inner: RwLock::new(Inner {
                 slots: BTreeMap::new(),
+                unread: Revisions::new(),
                 sessions: Sessions::new(proxy),
                 generation: 0,
             }),
@@ -150,14 +153,22 @@ impl OrganizationHub {
     }
 
     pub(super) fn revisions(&self) -> Revisions {
-        self.read()
-            .slots
-            .iter()
-            .map(|(server, slot)| (*server, slot.definition.revision))
-            .collect()
+        let inner = self.read();
+        let mut revisions = inner.unread.clone();
+        revisions.extend(
+            inner
+                .slots
+                .iter()
+                .map(|(server, slot)| (*server, slot.definition.revision)),
+        );
+        revisions
     }
 
-    pub(super) fn apply(self: &Arc<Self>, definitions: Vec<Definition>, forced: Option<Uuid>) {
+    pub(super) fn apply(self: &Arc<Self>, snapshot: Snapshot, forced: Option<Uuid>) {
+        let Snapshot {
+            revisions: mut unread,
+            definitions,
+        } = snapshot;
         let mut stale = Vec::new();
         let mut openings = Vec::new();
         let proxy = {
@@ -165,6 +176,8 @@ impl OrganizationHub {
             let inner = &mut *guard;
             let stored: BTreeSet<Uuid> =
                 definitions.iter().map(|definition| definition.id).collect();
+            unread.retain(|server, _| !stored.contains(server));
+            inner.unread = unread;
             let removed: Vec<Uuid> = inner
                 .slots
                 .keys()
@@ -314,7 +327,7 @@ mod tests {
 
     async fn settled(definitions: Vec<Definition>) -> Arc<OrganizationHub> {
         let hub = Arc::new(OrganizationHub::new(Proxy::default(), POLICY));
-        hub.apply(definitions, None);
+        hub.apply(definitions.into(), None);
         hub.settled().await;
         hub
     }

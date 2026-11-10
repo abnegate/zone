@@ -24,6 +24,27 @@ pub struct Definition {
     pub tools: Option<Vec<String>>,
 }
 
+/// One reading of what an organization stores: the revision of every row, and a definition for
+/// each row that could be read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub revisions: Revisions,
+    pub definitions: Vec<Definition>,
+}
+
+#[cfg(test)]
+impl From<Vec<Definition>> for Snapshot {
+    fn from(definitions: Vec<Definition>) -> Self {
+        Self {
+            revisions: definitions
+                .iter()
+                .map(|definition| (definition.id, definition.revision))
+                .collect(),
+            definitions,
+        }
+    }
+}
+
 #[cfg(test)]
 impl Definition {
     pub(crate) fn of(name: &str, server: McpServer) -> Self {

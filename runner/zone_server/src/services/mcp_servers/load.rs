@@ -10,6 +10,7 @@ use crate::state::AppState;
 
 use super::definition::Definition;
 use super::definition::Revisions;
+use super::definition::Snapshot;
 use super::organization::OrganizationHub;
 use super::transport::Transport;
 
@@ -58,13 +59,17 @@ async fn changed(
     state: &AppState,
     organization: Uuid,
     known: Revisions,
-) -> Result<Option<Vec<Definition>>, McpServerError> {
-    if mcp_servers::revisions(state.db(), organization).await? == known {
+) -> Result<Option<Snapshot>, McpServerError> {
+    let revisions = mcp_servers::revisions(state.db(), organization).await?;
+    if revisions == known {
         return Ok(None);
     }
     let records =
         mcp_servers::for_organization(state.db(), state.master_key(), organization).await?;
-    Ok(Some(records.iter().map(definition).collect()))
+    Ok(Some(Snapshot {
+        revisions,
+        definitions: records.iter().map(definition).collect(),
+    }))
 }
 
 fn stale(
@@ -109,7 +114,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use abnegate_agent::mcp::McpTransport;
+    use abnegate_secret::MasterKey;
     use abnegate_secret::SecretValue;
+    use abnegate_secret::encrypt_value;
     use chrono::Utc;
 
     use super::*;
@@ -328,6 +335,55 @@ mod tests {
         assert_eq!(connecting, Connection::connecting());
         assert_eq!(reconnected, delegate());
         assert!(replaced, "the session was kept");
+    }
+
+    #[tokio::test]
+    async fn a_server_whose_secrets_do_not_open_is_read_once_for_each_revision() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica();
+        tenant.store(&state, stub("stub")).await;
+        let sealed = tenant.store(&state, stub("sealed")).await;
+        let other = MasterKey::generate().expect("a key");
+        let foreign = encrypt_value(&SecretValue::from("{}"), &other).expect("an envelope");
+        sqlx::query("UPDATE mcp_servers SET secrets = $2 WHERE id = $1")
+            .bind(sealed.id)
+            .bind(&foreign)
+            .execute(&tenant.pool)
+            .await
+            .expect("the stored secrets are replaced");
+
+        let hub = organization(&state, tenant.organization)
+            .await
+            .expect("the hub");
+        let names = hub.names();
+        let known = hub.revisions();
+        let unchanged = changed(&state, tenant.organization, hub.revisions())
+            .await
+            .expect("the rows are read");
+        sqlx::query(
+            "UPDATE mcp_servers SET updated_at = updated_at + interval '1 microsecond' \
+             WHERE id = $1",
+        )
+        .bind(sealed.id)
+        .execute(&tenant.pool)
+        .await
+        .expect("the stored revision moves");
+        let revised = changed(&state, tenant.organization, hub.revisions())
+            .await
+            .expect("the rows are read");
+        tenant.remove().await;
+
+        assert_eq!(names, ["stub"]);
+        assert_eq!(known.get(&sealed.id), Some(&sealed.updated_at));
+        assert_eq!(
+            unchanged, None,
+            "a server that did not open was read again before it changed"
+        );
+        assert_eq!(
+            revised.map(|snapshot| snapshot.definitions.len()),
+            Some(1),
+            "a changed server was not read again"
+        );
     }
 
     #[tokio::test]
