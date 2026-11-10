@@ -63,11 +63,7 @@ tree-sitter-php = "=0.24.2"
 walkdir = "=2.5.0"
 glob = "=0.3.4"
 
-# Base64 encoding/decoding
-base64 = "=0.23.1"
-
 # URL encoding
-percent-encoding = "=2.3.2"
 url = "=2.5.8"
 
 # Response decoding
@@ -82,10 +78,14 @@ dirs = { workspace = true, optional = true }
 abnegate-http = { workspace = true }
 abnegate-index = { workspace = true, features = ["code-chunking"] }
 abnegate-llm = { workspace = true, features = ["ollama", "openai-compatible", "rerank"] }
+abnegate-secret = { workspace = true }
+abnegate-vcs = { workspace = true, features = ["github", "gitlab"] }
 zone_core = { path = "../zone_core" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util", "macros"] }
+abnegate-vcs = { workspace = true, features = ["github", "gitlab", "testing"] }
+base64 = "=0.23.1"
 tempfile = "=3.27.0"
-zone_core = { path = "../zone_core", features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util", "macros"] }
 wiremock = "=0.6.5"
+zone_core = { path = "../zone_core", features = ["test-support"] }

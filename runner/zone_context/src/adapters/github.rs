@@ -3,25 +3,75 @@
 //! Provides intelligent repository traversal with pattern matching,
 //! binary file detection, and progressive fetching strategies.
 
+mod tree_key;
+
+use crate::adapters::ProgressCallback;
+use crate::adapters::RateLimitConfig;
+use crate::adapters::SourceAdapter;
+use crate::adapters::SyncState;
+use crate::adapters::credential::Credential;
+use crate::adapters::in_flight::InFlight;
+use crate::adapters::status::Status;
+use crate::content::ContentCategory;
+use crate::content::ContentItem;
+use crate::content::ContentMetadata;
+use crate::content::FetchConfig;
+use crate::content::FetchResult;
+use crate::content::FetchStrategy;
+use crate::content::TokenBudget;
+use crate::content::UriNamespace;
+use crate::content::estimate_tokens_from_bytes;
+use crate::content::prioritize_paths;
+use crate::error::ContextError;
+use crate::error::Result;
+use abnegate_vcs::BranchName;
+use abnegate_vcs::Contents;
+use abnegate_vcs::ParseError;
+use abnegate_vcs::PullRequestError;
+use abnegate_vcs::PullRequestService;
+use abnegate_vcs::Repository;
+use abnegate_vcs::RepositoryPath;
+use abnegate_vcs::Tree;
+use abnegate_vcs::TreeEntry;
+use abnegate_vcs::TreeEntryKind;
 use async_trait::async_trait;
-use base64::Engine;
 use chrono::Utc;
 use glob::Pattern;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use serde::Deserialize;
+use serde::Serialize;
+use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::RwLock;
-
-use crate::adapters::{ProgressCallback, RateLimitConfig, SourceAdapter, SyncState};
-use crate::content::{
-    ContentCategory, ContentItem, ContentMetadata, FetchConfig, FetchResult, FetchStrategy,
-    TokenBudget, estimate_tokens_from_bytes, prioritize_paths,
-};
-use crate::error::{ContextError, Result};
+use tree_key::TreeKey;
 use zone_core::Source;
+
+const SOURCE_TYPE: &str = "github";
+
+const FORBIDDEN_MESSAGE: &str = "Access forbidden - check token permissions";
+
+const NOT_FOUND_MESSAGE: &str = "Repository not found";
+
+const UNBUILT_MESSAGE: &str = "Failed to build HTTP client";
+
+const REQUEST_FAILED_MESSAGE: &str = "Request failed";
+
+const REFUSED_MESSAGE: &str = "API error";
+
+const MISREAD_REPOSITORY_MESSAGE: &str = "Failed to parse repo info";
+
+const UNLISTED_MESSAGE: &str = "Failed to fetch tree";
+
+const MISREAD_TREE_MESSAGE: &str = "Failed to parse tree";
+
+const UNREAD_MESSAGE: &str = "Failed to fetch content";
+
+const MISREAD_CONTENT_MESSAGE: &str = "Failed to parse content";
+
+const MALFORMED_CONTENT_MESSAGE: &str = "Failed to decode base64";
 
 /// Binary file extensions to skip (same as FilesystemAdapter)
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -52,113 +102,66 @@ pub struct GitHubConfig {
     pub token: Option<String>,
 }
 
-/// GitHub tree entry from API
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubTreeEntry {
-    path: String,
-    #[serde(rename = "type")]
-    entry_type: String,
-    size: Option<usize>,
-    sha: String,
-}
-
-/// GitHub tree response
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubTree {
-    sha: String,
-    tree: Vec<GitHubTreeEntry>,
-    #[allow(dead_code)]
-    truncated: bool,
-}
-
-/// GitHub contents response (for file content)
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubContent {
-    #[allow(dead_code)]
-    name: String,
-    #[allow(dead_code)]
-    path: String,
-    #[allow(dead_code)]
-    sha: String,
-    #[allow(dead_code)]
-    size: usize,
-    #[serde(rename = "type")]
-    #[allow(dead_code)]
-    content_type: String,
-    content: Option<String>,
-    #[allow(dead_code)]
-    encoding: Option<String>,
-}
-
-/// GitHub repository response
-#[derive(Debug, Clone, Deserialize)]
-struct GitHubRepository {
-    #[allow(dead_code)]
-    name: String,
-    default_branch: String,
-}
-
-/// Cached tree entry with LRU tracking
 #[derive(Debug, Clone)]
 struct CachedTree {
-    tree: GitHubTree,
+    tree: Tree,
     cached_at: Instant,
     last_accessed: Instant,
     size_bytes: usize,
 }
 
-/// Cache key for GitHub trees (owner, repo, branch)
-type TreeCacheKey = (String, String, String);
-
-/// Tree cache with TTL and size limits
 #[derive(Debug, Clone)]
 struct TreeCache {
-    entries: Arc<RwLock<HashMap<TreeCacheKey, CachedTree>>>,
-    in_flight: Arc<RwLock<HashSet<TreeCacheKey>>>,
+    entries: Arc<RwLock<HashMap<TreeKey, CachedTree>>>,
+    in_flight: InFlight<TreeKey>,
     ttl: Duration,
     max_entries: usize,
     max_total_bytes: usize,
 }
 
 impl TreeCache {
-    /// Maximum number of cached trees
     const MAX_ENTRIES: usize = 50;
 
-    /// Maximum total cached size (10MB)
     const MAX_TOTAL_BYTES: usize = 10 * 1024 * 1024;
 
-    fn new(ttl_secs: u64) -> Self {
+    const ENTRY_KIND_AND_OVERHEAD_BYTES: usize = 20;
+
+    const ENTRY_SIZE_FIELD_BYTES: usize = 8;
+
+    const WAIT_ATTEMPTS: u64 = 10;
+
+    const WAIT_INTERVAL_MILLISECONDS: u64 = 100;
+
+    fn new(ttl: Duration) -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
-            in_flight: Arc::new(RwLock::new(HashSet::new())),
-            ttl: Duration::from_secs(ttl_secs),
+            in_flight: InFlight::new(),
+            ttl,
             max_entries: Self::MAX_ENTRIES,
             max_total_bytes: Self::MAX_TOTAL_BYTES,
         }
     }
 
-    /// Estimate size of a GitHubTree in bytes
-    fn estimate_tree_size(tree: &GitHubTree) -> usize {
-        // Estimate: sha (40 bytes) + overhead per entry (paths + metadata)
-        let entry_size: usize = tree
-            .tree
+    fn estimate_tree_size(tree: &Tree) -> usize {
+        let entries: usize = tree
+            .entries
             .iter()
             .map(|entry| {
-                40 + // sha
-            entry.path.len() +
-            20 + // type string + overhead
-            8 // size option
+                entry.path.len()
+                    + entry.sha.as_str().len()
+                    + entry.mode.len()
+                    + Self::ENTRY_KIND_AND_OVERHEAD_BYTES
+                    + Self::ENTRY_SIZE_FIELD_BYTES
             })
             .sum();
 
-        entry_size + 40 // tree sha
+        entries + tree.sha.as_str().len()
     }
 
-    async fn get(&self, key: &TreeCacheKey) -> Option<GitHubTree> {
+    async fn get(&self, key: &TreeKey) -> Option<Tree> {
         let mut entries = self.entries.write().await;
         entries.get_mut(key).and_then(|entry| {
             if entry.cached_at.elapsed() < self.ttl {
-                // Update last accessed time for LRU
                 entry.last_accessed = Instant::now();
                 Some(entry.tree.clone())
             } else {
@@ -167,31 +170,31 @@ impl TreeCache {
         })
     }
 
-    async fn insert(&self, key: TreeCacheKey, tree: GitHubTree) {
-        let mut entries = self.entries.write().await;
+    async fn insert(&self, key: TreeKey, tree: Tree) {
         let tree_size = Self::estimate_tree_size(&tree);
+        if tree_size > self.max_total_bytes {
+            return;
+        }
 
-        // Calculate current total size
-        let mut total_size: usize = entries.values().map(|e| e.size_bytes).sum();
+        let mut entries = self.entries.write().await;
+        let mut total_size: usize = entries.values().map(|entry| entry.size_bytes).sum();
 
-        // Evict entries if needed to make space
         while (entries.len() >= self.max_entries || total_size + tree_size > self.max_total_bytes)
             && !entries.is_empty()
         {
-            // Find LRU entry (oldest last_accessed)
             if let Some((lru_key, _)) = entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_accessed)
-                .map(|(k, v)| (k.clone(), v.size_bytes))
+                .map(|(key, entry)| (key.clone(), entry.size_bytes))
             {
                 if let Some(removed) = entries.remove(&lru_key) {
                     total_size = total_size.saturating_sub(removed.size_bytes);
                     tracing::debug!(
-                        "Evicted LRU tree cache entry: {}/{}/{} ({} bytes)",
-                        lru_key.0,
-                        lru_key.1,
-                        lru_key.2,
-                        removed.size_bytes
+                        owner = %lru_key.owner,
+                        repo = %lru_key.repo,
+                        branch = %lru_key.branch,
+                        bytes = removed.size_bytes,
+                        "Evicted LRU tree cache entry"
                     );
                 }
             } else {
@@ -210,16 +213,24 @@ impl TreeCache {
             },
         );
 
-        // Cleanup stale entries (optional, as we now have size-based eviction)
         let ttl = self.ttl;
         entries.retain(|_, entry| entry.cached_at.elapsed() < ttl);
     }
 }
 
-/// GitHub source adapter
+enum ContentRequest<'service> {
+    Sendable {
+        service: &'service PullRequestService,
+        repository: Repository,
+        path: RepositoryPath,
+        credential: Credential,
+    },
+    Skipped(ContextError),
+}
+
 #[derive(Debug, Clone)]
 pub struct GitHubAdapter {
-    base_url: String,
+    service: std::result::Result<PullRequestService, String>,
     tree_cache: TreeCache,
 }
 
@@ -230,26 +241,147 @@ impl Default for GitHubAdapter {
 }
 
 impl GitHubAdapter {
-    /// Tree cache TTL in seconds (5 minutes)
-    const TREE_CACHE_TTL_SECS: u64 = 300;
+    const TREE_CACHE_TTL: Duration = Duration::from_secs(300);
 
-    /// Create a new GitHub adapter with the default GitHub API URL
+    /// Create a new GitHub adapter reading from api.github.com
     pub fn new() -> Self {
+        Self::serving(
+            PullRequestService::new()
+                .map(PullRequestService::with_anonymous_reads)
+                .map_err(Self::unbuilt),
+        )
+    }
+
+    /// Create a GitHub adapter that reads through `service`, opened for
+    /// anonymous reads as the one `new` builds is
+    pub fn with_service(service: PullRequestService) -> Self {
+        Self::serving(Ok(service.with_anonymous_reads()))
+    }
+
+    fn serving(service: std::result::Result<PullRequestService, String>) -> Self {
         Self {
-            base_url: "https://api.github.com".to_string(),
-            tree_cache: TreeCache::new(Self::TREE_CACHE_TTL_SECS),
+            service,
+            tree_cache: TreeCache::new(Self::TREE_CACHE_TTL),
         }
     }
 
-    /// Create a new GitHub adapter with a custom base URL (for testing)
-    pub fn with_base_url(base_url: String) -> Self {
-        Self {
-            base_url,
-            tree_cache: TreeCache::new(Self::TREE_CACHE_TTL_SECS),
+    fn unbuilt(error: PullRequestError) -> String {
+        let reason = match error {
+            PullRequestError::Http(error) => error.to_string(),
+            error => error.to_string(),
+        };
+        format!("{UNBUILT_MESSAGE}: {reason}")
+    }
+
+    fn service(&self) -> Result<&PullRequestService> {
+        self.service
+            .as_ref()
+            .map_err(|message| ContextError::Config(message.clone()))
+    }
+
+    fn limited(error: &PullRequestError) -> bool {
+        matches!(
+            error,
+            PullRequestError::RateLimited | PullRequestError::QuotaExhausted { .. }
+        )
+    }
+
+    fn status(error: &PullRequestError) -> Option<Status> {
+        match error {
+            PullRequestError::NotFound | PullRequestError::RepositoryNotFound => {
+                Some(Status::NOT_FOUND)
+            }
+            PullRequestError::AuthenticationFailed => Some(Status::UNAUTHORIZED),
+            PullRequestError::Forbidden => Some(Status::FORBIDDEN),
+            PullRequestError::Refused { status, .. } => Some(Status(*status)),
+            _ => None,
         }
     }
 
-    /// Validate GitHub identifier (owner, repo, branch) to prevent URL injection
+    fn failed(message: String) -> ContextError {
+        ContextError::adapter(SOURCE_TYPE, message)
+    }
+
+    fn not_found(owner: &str, repo: &str) -> ContextError {
+        ContextError::InvalidSourceConfig(format!("{NOT_FOUND_MESSAGE}: {owner}/{repo}"))
+    }
+
+    fn unlisted(status: Status) -> ContextError {
+        Self::failed(format!("{UNLISTED_MESSAGE}: {status}"))
+    }
+
+    fn unread(status: Status) -> ContextError {
+        Self::failed(format!("{UNREAD_MESSAGE}: {status}"))
+    }
+
+    fn repository_error(owner: &str, repo: &str, error: PullRequestError) -> ContextError {
+        match error {
+            PullRequestError::NotFound
+            | PullRequestError::RepositoryNotFound
+            | PullRequestError::InvalidRepositoryName => Self::not_found(owner, repo),
+            PullRequestError::Forbidden => {
+                ContextError::PermissionDenied(FORBIDDEN_MESSAGE.to_string())
+            }
+            PullRequestError::AuthenticationFailed => {
+                Self::failed(format!("{REFUSED_MESSAGE}: {}", Status::UNAUTHORIZED))
+            }
+            PullRequestError::Refused { status, .. } => {
+                Self::failed(format!("{REFUSED_MESSAGE}: {}", Status(status)))
+            }
+            PullRequestError::Http(error) => {
+                Self::failed(format!("{REQUEST_FAILED_MESSAGE}: {error}"))
+            }
+            PullRequestError::GitHubApi(reason) => {
+                Self::failed(format!("{MISREAD_REPOSITORY_MESSAGE}: {reason}"))
+            }
+            PullRequestError::Parse(error) => {
+                Self::failed(format!("{MISREAD_REPOSITORY_MESSAGE}: {error}"))
+            }
+            error => Self::failed(format!("{REFUSED_MESSAGE}: {error}")),
+        }
+    }
+
+    fn tree_error(error: PullRequestError) -> ContextError {
+        if let Some(status) = Self::status(&error) {
+            return Self::unlisted(status);
+        }
+        match error {
+            PullRequestError::Parse(ParseError::BranchName(_)) => Self::unlisted(Status::NOT_FOUND),
+            PullRequestError::Http(error) => {
+                Self::failed(format!("{REQUEST_FAILED_MESSAGE}: {error}"))
+            }
+            PullRequestError::GitHubApi(reason) => {
+                Self::failed(format!("{MISREAD_TREE_MESSAGE}: {reason}"))
+            }
+            PullRequestError::Parse(error @ ParseError::ObjectId(_)) => {
+                Self::failed(format!("{MISREAD_TREE_MESSAGE}: {error}"))
+            }
+            error => Self::failed(format!("{UNLISTED_MESSAGE}: {error}")),
+        }
+    }
+
+    fn content_error(error: PullRequestError) -> ContextError {
+        if let Some(status) = Self::status(&error) {
+            return Self::unread(status);
+        }
+        match error {
+            PullRequestError::Parse(ParseError::BranchName(_)) => Self::unread(Status::NOT_FOUND),
+            PullRequestError::Http(error) => {
+                Self::failed(format!("{REQUEST_FAILED_MESSAGE}: {error}"))
+            }
+            PullRequestError::GitHubApi(reason) => {
+                Self::failed(format!("{MISREAD_CONTENT_MESSAGE}: {reason}"))
+            }
+            error => Self::failed(format!("{UNREAD_MESSAGE}: {error}")),
+        }
+    }
+
+    fn size(entry: &TreeEntry) -> Option<usize> {
+        entry
+            .size
+            .map(|size| usize::try_from(size).unwrap_or(usize::MAX))
+    }
+
     fn validate_github_identifier(identifier: &str, field_name: &str) -> Result<()> {
         if identifier.is_empty() {
             return Err(ContextError::InvalidSourceConfig(format!(
@@ -258,7 +390,6 @@ impl GitHubAdapter {
             )));
         }
 
-        // Check for path traversal and injection characters
         if identifier.contains('/')
             || identifier.contains('\\')
             || identifier.contains('\n')
@@ -274,104 +405,25 @@ impl GitHubAdapter {
         Ok(())
     }
 
-    /// Parse GitHub config from source
     fn parse_config(&self, source: &Source) -> Result<GitHubConfig> {
-        serde_json::from_value(source.config.clone())
-            .map_err(|e| ContextError::InvalidSourceConfig(format!("Invalid GitHub config: {}", e)))
+        serde_json::from_value(source.config.clone()).map_err(|error| {
+            ContextError::InvalidSourceConfig(format!("Invalid GitHub config: {}", error))
+        })
     }
 
-    /// Build HTTP client with GitHub API configuration
-    /// Note: We don't cache the client because tokens can change between calls
-    fn build_client(&self, token: Option<&str>) -> Result<reqwest::Client> {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::ACCEPT,
-            "application/vnd.github+json"
-                .parse()
-                .map_err(|e| ContextError::Config(format!("Invalid header: {}", e)))?,
-        );
-        headers.insert(
-            reqwest::header::USER_AGENT,
-            "zone-context"
-                .parse()
-                .map_err(|e| ContextError::Config(format!("Invalid header: {}", e)))?,
-        );
-
-        if let Some(token) = token {
-            headers.insert(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", token).parse().map_err(|_| {
-                    ContextError::Config(
-                        "Invalid authorization token format (token not logged for security)"
-                            .to_string(),
-                    )
-                })?,
-            );
-        }
-
-        reqwest::Client::builder()
-            .default_headers(headers)
-            .build()
-            .map_err(|e| ContextError::Config(format!("Failed to build HTTP client: {}", e)))
-    }
-
-    /// Fetch with retry logic for rate limiting
-    async fn fetch_with_retry(
-        &self,
-        url: &str,
-        client: &reqwest::Client,
-    ) -> Result<reqwest::Response> {
-        let config = self.rate_limit_config();
-        let mut retries = 0;
-
-        loop {
-            let response =
-                client.get(url).send().await.map_err(|e| {
-                    ContextError::adapter("github", format!("Request failed: {}", e))
-                })?;
-
-            // Check for rate limiting
-            let is_rate_limited = response.status() == 429
-                || (response.status() == 403
-                    && response
-                        .headers()
-                        .get("X-RateLimit-Remaining")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.parse::<i32>().ok())
-                        == Some(0));
-
-            if is_rate_limited && retries < config.max_retries {
-                retries += 1;
-                let backoff_ms = config.backoff_base_ms * (2_u64.pow(retries - 1));
-                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
-                continue;
-            }
-
-            if is_rate_limited {
-                return Err(ContextError::RateLimited {
-                    retry_after_secs: 60,
-                });
-            }
-
-            return Ok(response);
-        }
-    }
-
-    /// Check if a file is binary based on extension
     fn is_binary_file(path: &str) -> bool {
-        if let Some(ext_start) = path.rfind('.') {
-            let ext = &path[ext_start..];
-            BINARY_EXTENSIONS.contains(&ext)
+        if let Some(extension_start) = path.rfind('.') {
+            let extension = &path[extension_start..];
+            BINARY_EXTENSIONS.contains(&extension)
         } else {
             false
         }
     }
 
-    /// Map file extension to content type (same as FilesystemAdapter)
     fn get_content_type(path: &str) -> String {
-        if let Some(ext_start) = path.rfind('.') {
-            let ext = &path[ext_start + 1..].to_lowercase();
-            match ext.as_str() {
+        if let Some(extension_start) = path.rfind('.') {
+            let extension = &path[extension_start + 1..].to_lowercase();
+            match extension.as_str() {
                 "rs" => "text/rust".to_string(),
                 "py" => "text/python".to_string(),
                 "ts" | "tsx" => "text/typescript".to_string(),
@@ -389,7 +441,6 @@ impl GitHubAdapter {
         }
     }
 
-    /// Check if a path matches any of the patterns
     fn matches_patterns(path: &str, patterns: &[String]) -> bool {
         if patterns.is_empty() {
             return false;
@@ -404,216 +455,179 @@ impl GitHubAdapter {
         })
     }
 
-    /// Check if a file should be included based on patterns
     fn should_include_file(
         path: &str,
         include_patterns: &[String],
         exclude_patterns: &[String],
     ) -> bool {
-        // Check exclude patterns first
         if Self::matches_patterns(path, exclude_patterns) {
             return false;
         }
 
-        // If include patterns specified, file must match at least one
         if !include_patterns.is_empty() {
             return Self::matches_patterns(path, include_patterns);
         }
 
-        // No include patterns, include by default (unless excluded above)
         true
     }
 
-    /// Fetch repository info to get default branch
-    async fn get_repository_info(
+    async fn get_default_branch(
         &self,
         owner: &str,
         repo: &str,
         token: Option<&str>,
-    ) -> Result<GitHubRepository> {
-        // Validate identifiers to prevent URL injection
+    ) -> Result<BranchName> {
         Self::validate_github_identifier(owner, "owner")?;
         Self::validate_github_identifier(repo, "repo")?;
 
-        let client = self.build_client(token)?;
-        let url = format!("{}/repos/{}/{}", self.base_url, owner, repo);
+        let credential = Credential::checked(token)?;
+        let service = self.service()?;
+        let repository = Repository::new(owner, repo)
+            .map_err(|error| Self::repository_error(owner, repo, error))?;
 
-        let response = self.fetch_with_retry(&url, &client).await?;
-
-        if response.status() == 404 {
-            return Err(ContextError::InvalidSourceConfig(format!(
-                "Repository not found: {}/{}",
-                owner, repo
-            )));
-        } else if response.status() == 403 {
-            return Err(ContextError::PermissionDenied(
-                "Access forbidden - check token permissions".to_string(),
-            ));
-        } else if !response.status().is_success() {
-            return Err(ContextError::adapter(
-                "github",
-                format!("API error: {}", response.status()),
-            ));
-        }
-
-        response.json::<GitHubRepository>().await.map_err(|e| {
-            ContextError::adapter("github", format!("Failed to parse repo info: {}", e))
-        })
+        self.rate_limit_config()
+            .retried(Self::limited, || {
+                service.get_default_branch(&repository, credential.secret())
+            })
+            .await?
+            .map_err(|error| Self::repository_error(owner, repo, error))
     }
 
-    /// Fetch Git tree (recursive)
     async fn get_tree(
         &self,
         owner: &str,
         repo: &str,
         branch: &str,
         token: Option<&str>,
-    ) -> Result<GitHubTree> {
-        // Validate identifiers to prevent URL injection
+    ) -> Result<Tree> {
         Self::validate_github_identifier(owner, "owner")?;
         Self::validate_github_identifier(repo, "repo")?;
         Self::validate_github_identifier(branch, "branch")?;
 
-        let client = self.build_client(token)?;
-        let url = format!(
-            "{}/repos/{}/{}/git/trees/{}?recursive=1",
-            self.base_url, owner, repo, branch
-        );
+        let credential = Credential::checked(token)?;
+        let service = self.service()?;
+        let repository = Repository::new(owner, repo).map_err(Self::tree_error)?;
 
-        let response = self.fetch_with_retry(&url, &client).await?;
-
-        if !response.status().is_success() {
-            return Err(ContextError::adapter(
-                "github",
-                format!("Failed to fetch tree: {}", response.status()),
-            ));
-        }
-
-        response
-            .json::<GitHubTree>()
-            .await
-            .map_err(|e| ContextError::adapter("github", format!("Failed to parse tree: {}", e)))
+        self.rate_limit_config()
+            .retried(Self::limited, || {
+                service.fetch_tree_at(&repository, credential.secret(), branch, true)
+            })
+            .await?
+            .map_err(Self::tree_error)
     }
 
-    /// Get tree with caching and in-flight tracking
     async fn get_tree_cached(
         &self,
         owner: &str,
         repo: &str,
         branch: &str,
         token: Option<&str>,
-    ) -> Result<GitHubTree> {
-        let key = (owner.to_string(), repo.to_string(), branch.to_string());
+    ) -> Result<Tree> {
+        let key = TreeKey {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            branch: branch.to_string(),
+            fingerprint: Credential::checked(token)?.fingerprint(),
+        };
 
-        // Check cache first
         if let Some(tree) = self.tree_cache.get(&key).await {
             return Ok(tree);
         }
 
-        // Check if already being fetched by another task
-        {
-            let mut in_flight = self.tree_cache.in_flight.write().await;
-            if in_flight.contains(&key) {
-                // Drop the lock and wait a bit before retrying
-                drop(in_flight);
-
-                // Wait for the in-flight fetch to complete (with timeout)
-                for _ in 0..10 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    if let Some(tree) = self.tree_cache.get(&key).await {
-                        return Ok(tree);
-                    }
+        let _claim = match self.tree_cache.in_flight.claim(&key) {
+            Some(claim) => Some(claim),
+            None => {
+                let claim = self
+                    .tree_cache
+                    .in_flight
+                    .claim_when_released(
+                        &key,
+                        TreeCache::WAIT_ATTEMPTS,
+                        Duration::from_millis(TreeCache::WAIT_INTERVAL_MILLISECONDS),
+                    )
+                    .await;
+                if let Some(tree) = self.tree_cache.get(&key).await {
+                    return Ok(tree);
                 }
-
-                // If still not cached after waiting, fall through to fetch
-            } else {
-                // Mark as in-flight
-                in_flight.insert(key.clone());
+                claim
             }
-        }
+        };
 
-        // Fetch from API (outside the lock)
-        let fetch_result = self.get_tree(owner, repo, branch, token).await;
+        let tree = self.get_tree(owner, repo, branch, token).await?;
 
-        // Remove from in-flight and handle result
-        {
-            let mut in_flight = self.tree_cache.in_flight.write().await;
-            in_flight.remove(&key);
-        }
-
-        let tree = fetch_result?;
-
-        // Store in cache
         self.tree_cache.insert(key, tree.clone()).await;
 
         Ok(tree)
     }
 
-    /// Fetch file content
+    /// Fetch file content: the outer error aborts the fetch, the inner one skips the file
     async fn get_file_content(
         &self,
-        owner: &str,
-        repo: &str,
-        path: &str,
+        config: &GitHubConfig,
         branch: &str,
-        token: Option<&str>,
-    ) -> Result<GitHubContent> {
-        // Validate identifiers to prevent URL injection
-        Self::validate_github_identifier(owner, "owner")?;
-        Self::validate_github_identifier(repo, "repo")?;
+        path: &str,
+    ) -> Result<Result<Contents>> {
+        let answer = match self.content_request(config, branch, path) {
+            ContentRequest::Skipped(error) => return Ok(Err(error)),
+            ContentRequest::Sendable {
+                service,
+                repository,
+                path,
+                credential,
+            } => {
+                self.rate_limit_config()
+                    .retried(Self::limited, || {
+                        service.fetch_contents(&repository, credential.secret(), &path, branch)
+                    })
+                    .await?
+            }
+        };
+
+        match answer {
+            Ok(contents) => Ok(Ok(contents)),
+            Err(error @ PullRequestError::MalformedContent) => Err(ContextError::Parse(format!(
+                "{MALFORMED_CONTENT_MESSAGE}: {error}"
+            ))),
+            Err(error) => Ok(Err(Self::content_error(error))),
+        }
+    }
+
+    fn content_request(
+        &self,
+        config: &GitHubConfig,
+        branch: &str,
+        path: &str,
+    ) -> ContentRequest<'_> {
+        self.sendable_content(config, branch, path)
+            .unwrap_or_else(ContentRequest::Skipped)
+    }
+
+    fn sendable_content(
+        &self,
+        config: &GitHubConfig,
+        branch: &str,
+        path: &str,
+    ) -> Result<ContentRequest<'_>> {
+        Self::validate_github_identifier(&config.owner, "owner")?;
+        Self::validate_github_identifier(&config.repo, "repo")?;
         Self::validate_github_identifier(branch, "branch")?;
 
-        // URL-encode the path parameter
-        let encoded_path = utf8_percent_encode(path, NON_ALPHANUMERIC).to_string();
+        let credential = Credential::checked(config.token.as_deref())?;
+        let service = self.service()?;
+        let repository =
+            Repository::new(&config.owner, &config.repo).map_err(Self::content_error)?;
+        let path = RepositoryPath::parse(path).map_err(|_| Self::unread(Status::NOT_FOUND))?;
 
-        let client = self.build_client(token)?;
-        let url = format!(
-            "{}/repos/{}/{}/contents/{}?ref={}",
-            self.base_url, owner, repo, encoded_path, branch
-        );
-
-        let response = self.fetch_with_retry(&url, &client).await?;
-
-        if !response.status().is_success() {
-            return Err(ContextError::adapter(
-                "github",
-                format!("Failed to fetch content: {}", response.status()),
-            ));
-        }
-
-        response
-            .json::<GitHubContent>()
-            .await
-            .map_err(|e| ContextError::adapter("github", format!("Failed to parse content: {}", e)))
-    }
-
-    /// Decode base64 content as UTF-8 text.
-    ///
-    /// Returns `None` when the blob is not valid UTF-8 so callers can skip
-    /// binaries instead of aborting the whole repository fetch.
-    fn decode_text_content(content: &str) -> Result<Option<String>> {
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(content.replace("\n", ""))
-            .map_err(|e| ContextError::Parse(format!("Failed to decode base64: {}", e)))?;
-
-        Ok(String::from_utf8(decoded).ok())
-    }
-
-    /// Decode base64 content
-    #[cfg(test)]
-    fn decode_content(content: &str) -> Result<String> {
-        Self::decode_text_content(content)?.ok_or_else(|| {
-            ContextError::Parse("Failed to decode UTF-8: blob is not valid UTF-8".to_string())
+        Ok(ContentRequest::Sendable {
+            service,
+            repository,
+            path,
+            credential,
         })
     }
 
-    fn is_fatal_fetch_error(err: &ContextError) -> bool {
-        matches!(
-            err,
-            ContextError::RateLimited { .. }
-                | ContextError::Auth(_)
-                | ContextError::CredentialsRequired(_)
-        )
+    fn decode_text_content(content: Vec<u8>) -> Option<String> {
+        String::from_utf8(content).ok()
     }
 
     async fn fetch_file_item(
@@ -621,34 +635,22 @@ impl GitHubAdapter {
         source_id: uuid::Uuid,
         config: &GitHubConfig,
         branch: &str,
-        entry: &GitHubTreeEntry,
+        entry: &TreeEntry,
     ) -> Result<Option<ContentItem>> {
-        let content_response = match self
-            .get_file_content(
-                &config.owner,
-                &config.repo,
-                &entry.path,
-                branch,
-                config.token.as_deref(),
-            )
-            .await
-        {
-            Ok(response) => response,
-            Err(err) if Self::is_fatal_fetch_error(&err) => return Err(err),
-            Err(err) => {
-                tracing::warn!(path = %entry.path, error = %err, "skipping GitHub file");
+        let contents = match self.get_file_content(config, branch, &entry.path).await? {
+            Ok(contents) => contents,
+            Err(error) => {
+                tracing::warn!(path = %entry.path, error = %error, "skipping GitHub file");
                 return Ok(None);
             }
         };
 
-        let content = match content_response.content.as_deref() {
-            Some(encoded) => match Self::decode_text_content(encoded)? {
-                Some(text) => Some(text),
-                None => {
-                    tracing::debug!(path = %entry.path, "skipping non-UTF-8 GitHub file");
-                    return Ok(None);
-                }
-            },
+        let content = match contents.content.map(Self::decode_text_content) {
+            Some(Some(text)) => Some(text),
+            Some(None) => {
+                tracing::debug!(path = %entry.path, "skipping non-UTF-8 GitHub file");
+                return Ok(None);
+            }
             None => None,
         };
 
@@ -658,14 +660,13 @@ impl GitHubAdapter {
             &config.repo,
             branch,
             &entry.path,
-            &entry.sha,
-            entry.size.unwrap_or(0),
+            entry.sha.as_str(),
+            Self::size(entry).unwrap_or(0),
             content,
             false,
         )?))
     }
 
-    /// Create a ContentItem from a GitHub file
     fn create_content_item(
         source_id: uuid::Uuid,
         owner: &str,
@@ -679,7 +680,7 @@ impl GitHubAdapter {
     ) -> Result<ContentItem> {
         let file_name = Path::new(path)
             .file_name()
-            .and_then(|n| n.to_str())
+            .and_then(|name| name.to_str())
             .unwrap_or(path)
             .to_string();
 
@@ -689,11 +690,10 @@ impl GitHubAdapter {
         let mut item = ContentItem::new(source_id, ContentCategory::File, uri, file_name)
             .with_content_type(content_type);
 
-        // Build metadata
         let extension = Path::new(path)
             .extension()
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_string());
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_string());
         let mut content_metadata = ContentMetadata {
             size_bytes: Some(size),
             extension,
@@ -702,10 +702,9 @@ impl GitHubAdapter {
             ..Default::default()
         };
 
-        // Detect language from extension
-        if let Some(ext_start) = path.rfind('.') {
-            let ext = &path[ext_start + 1..].to_lowercase();
-            let lang = match ext.as_str() {
+        if let Some(extension_start) = path.rfind('.') {
+            let extension = &path[extension_start + 1..].to_lowercase();
+            let language = match extension.as_str() {
                 "rs" => Some("rust"),
                 "py" => Some("python"),
                 "ts" | "tsx" => Some("typescript"),
@@ -717,14 +716,13 @@ impl GitHubAdapter {
                 "h" | "hpp" => Some("c++"),
                 _ => None,
             };
-            if let Some(l) = lang {
-                content_metadata.language = Some(l.to_string());
+            if let Some(language) = language {
+                content_metadata.language = Some(language.to_string());
             }
         }
 
         item = item.with_metadata(content_metadata);
 
-        // Set content if provided
         if !metadata_only && let Some(content) = content {
             item = item.with_content(content);
         }
@@ -733,21 +731,30 @@ impl GitHubAdapter {
     }
 
     fn file_uri(owner: &str, repo: &str, path: &str, branch: &str) -> String {
-        format!("github://{owner}/{repo}/{path}@{branch}")
+        let namespace = Self::uri_namespace(owner, repo, branch);
+        format!("{}{path}{}", namespace.prefix, namespace.suffix)
+    }
+
+    fn uri_namespace(owner: &str, repo: &str, branch: &str) -> UriNamespace {
+        UriNamespace::new(format!("github://{owner}/{repo}/"), format!("@{branch}"))
+    }
+
+    fn priority(priority_order: &[String], path: &str) -> Option<usize> {
+        priority_order.iter().position(|pattern| {
+            Pattern::new(pattern).is_ok_and(|glob_pattern| glob_pattern.matches(path))
+        })
     }
 }
 
 #[async_trait]
 impl SourceAdapter for GitHubAdapter {
     fn source_type(&self) -> &str {
-        "github"
+        SOURCE_TYPE
     }
 
     fn rate_limit_config(&self) -> RateLimitConfig {
-        // GitHub rate limits: 5000/hr authenticated, 60/hr unauthenticated
-        // Convert to requests per second
         RateLimitConfig {
-            requests_per_second: 1.0, // Conservative: ~3600/hr
+            requests_per_second: 1.0,
             burst_size: 10,
             retry_after_429: true,
             max_retries: 3,
@@ -758,7 +765,6 @@ impl SourceAdapter for GitHubAdapter {
     async fn verify(&self, source: &Source) -> Result<()> {
         let config = self.parse_config(source)?;
 
-        // Validate required fields
         if config.owner.is_empty() {
             return Err(ContextError::InvalidSourceConfig(
                 "owner is required".to_string(),
@@ -771,16 +777,13 @@ impl SourceAdapter for GitHubAdapter {
             ));
         }
 
-        // Validate identifiers before making any API calls
         Self::validate_github_identifier(&config.owner, "owner")?;
         Self::validate_github_identifier(&config.repo, "repo")?;
         if let Some(ref branch) = config.branch {
             Self::validate_github_identifier(branch, "branch")?;
         }
 
-        // Try to fetch repository info to verify it exists and is accessible
-        let _ = self
-            .get_repository_info(&config.owner, &config.repo, config.token.as_deref())
+        self.get_default_branch(&config.owner, &config.repo, config.token.as_deref())
             .await?;
 
         Ok(())
@@ -789,42 +792,32 @@ impl SourceAdapter for GitHubAdapter {
     async fn estimate_tokens(&self, source: &Source) -> Result<usize> {
         let config = self.parse_config(source)?;
 
-        // Get repository info to determine branch
-        let repo_info = self
-            .get_repository_info(&config.owner, &config.repo, config.token.as_deref())
+        let default_branch = self
+            .get_default_branch(&config.owner, &config.repo, config.token.as_deref())
             .await?;
+        let branch = config.branch.as_deref().unwrap_or(default_branch.as_str());
 
-        let branch = config
-            .branch
-            .as_deref()
-            .unwrap_or(&repo_info.default_branch);
-
-        // Fetch tree (with caching)
         let tree = self
             .get_tree_cached(&config.owner, &config.repo, branch, config.token.as_deref())
             .await?;
 
         let mut total_tokens = 0;
 
-        for entry in &tree.tree {
-            // Skip directories
-            if entry.entry_type != "blob" {
+        for entry in &tree.entries {
+            if entry.kind != TreeEntryKind::Blob {
                 continue;
             }
 
-            // Skip binary files
             if Self::is_binary_file(&entry.path) {
                 continue;
             }
 
-            // Skip files exceeding max size
-            if let Some(size) = entry.size
+            if let Some(size) = Self::size(entry)
                 && size > MAX_FILE_SIZE_BYTES
             {
                 continue;
             }
 
-            // Apply path filter if specified
             if let Some(ref path_filter) = config.path
                 && !path_filter.is_empty()
                 && !entry.path.starts_with(path_filter)
@@ -832,8 +825,7 @@ impl SourceAdapter for GitHubAdapter {
                 continue;
             }
 
-            // Estimate tokens from size
-            if let Some(size) = entry.size {
+            if let Some(size) = Self::size(entry) {
                 total_tokens += estimate_tokens_from_bytes(size);
             }
         }
@@ -850,18 +842,15 @@ impl SourceAdapter for GitHubAdapter {
     ) -> Result<FetchResult> {
         let config = self.parse_config(source)?;
 
-        // Get repository info to determine branch
-        let repo_info = self
-            .get_repository_info(&config.owner, &config.repo, config.token.as_deref())
+        let default_branch = self
+            .get_default_branch(&config.owner, &config.repo, config.token.as_deref())
             .await?;
-
         let branch = config
             .branch
             .as_deref()
-            .unwrap_or(&repo_info.default_branch)
+            .unwrap_or(default_branch.as_str())
             .to_string();
 
-        // Fetch tree (with caching)
         let tree = self
             .get_tree_cached(
                 &config.owner,
@@ -871,29 +860,24 @@ impl SourceAdapter for GitHubAdapter {
             )
             .await?;
 
-        // Filter files
-        let files: Vec<&GitHubTreeEntry> = tree
-            .tree
+        let files: Vec<&TreeEntry> = tree
+            .entries
             .iter()
             .filter(|entry| {
-                // Only blobs (files)
-                if entry.entry_type != "blob" {
+                if entry.kind != TreeEntryKind::Blob {
                     return false;
                 }
 
-                // Skip binary files
                 if Self::is_binary_file(&entry.path) {
                     return false;
                 }
 
-                // Skip files exceeding max size
-                if let Some(size) = entry.size
+                if let Some(size) = Self::size(entry)
                     && size > MAX_FILE_SIZE_BYTES
                 {
                     return false;
                 }
 
-                // Apply path filter
                 if let Some(ref path_filter) = config.path
                     && !path_filter.is_empty()
                     && !entry.path.starts_with(path_filter)
@@ -901,7 +885,6 @@ impl SourceAdapter for GitHubAdapter {
                     return false;
                 }
 
-                // Apply include/exclude patterns
                 Self::should_include_file(
                     &entry.path,
                     &fetch_config.include_patterns,
@@ -912,7 +895,16 @@ impl SourceAdapter for GitHubAdapter {
 
         let total_files = files.len();
         let mut result = FetchResult::new(source.id, fetch_config.last_version.is_some());
-        result.version = Some(tree.sha.clone());
+        result.version = Some(tree.sha.as_str().to_string());
+        if tree.truncated {
+            tracing::warn!(
+                owner = %config.owner,
+                repo = %config.repo,
+                branch = %branch,
+                "GitHub truncated the tree, so the index keeps every file of this branch"
+            );
+            result.truncated = Some(Self::uri_namespace(&config.owner, &config.repo, &branch));
+        }
         result.live_uris = files
             .iter()
             .map(|entry| Self::file_uri(&config.owner, &config.repo, &entry.path, &branch))
@@ -920,11 +912,11 @@ impl SourceAdapter for GitHubAdapter {
 
         match strategy {
             FetchStrategy::Full => {
-                let to_fetch: Vec<&&GitHubTreeEntry> = files
+                let to_fetch: Vec<&&TreeEntry> = files
                     .iter()
                     .filter(|entry| {
                         let uri = Self::file_uri(&config.owner, &config.repo, &entry.path, &branch);
-                        !fetch_config.should_skip_blob(&uri, &entry.sha)
+                        !fetch_config.should_skip_blob(&uri, entry.sha.as_str())
                     })
                     .collect();
                 result.stats.items_skipped = total_files.saturating_sub(to_fetch.len());
@@ -933,7 +925,7 @@ impl SourceAdapter for GitHubAdapter {
                     to_fetch.len(),
                     result.stats.items_skipped
                 ));
-                for (idx, entry) in to_fetch.iter().enumerate() {
+                for (index, entry) in to_fetch.iter().enumerate() {
                     if let Some(item) = self
                         .fetch_file_item(source.id, &config, &branch, entry)
                         .await?
@@ -941,7 +933,7 @@ impl SourceAdapter for GitHubAdapter {
                         progress.on_item(&item);
                         result.add_item(item);
                     }
-                    progress.on_progress(idx + 1, Some(to_fetch.len().max(1)));
+                    progress.on_progress(index + 1, Some(to_fetch.len().max(1)));
                 }
             }
             FetchStrategy::MetadataOnly => {
@@ -949,22 +941,22 @@ impl SourceAdapter for GitHubAdapter {
                     "Fetching metadata for {} files from GitHub",
                     total_files
                 ));
-                for (idx, entry) in files.iter().enumerate() {
+                for (index, entry) in files.iter().enumerate() {
                     let item = Self::create_content_item(
                         source.id,
                         &config.owner,
                         &config.repo,
                         &branch,
                         &entry.path,
-                        &entry.sha,
-                        entry.size.unwrap_or(0),
+                        entry.sha.as_str(),
+                        Self::size(entry).unwrap_or(0),
                         None,
                         true,
                     )?;
 
                     progress.on_item(&item);
                     result.add_item(item);
-                    progress.on_progress(idx + 1, Some(total_files));
+                    progress.on_progress(index + 1, Some(total_files));
                 }
             }
             FetchStrategy::Partial { max_tokens } => {
@@ -975,19 +967,20 @@ impl SourceAdapter for GitHubAdapter {
                 let mut budget = TokenBudget::new(max_tokens);
                 let paths_with_sizes: Vec<(String, Option<usize>)> = files
                     .iter()
-                    .map(|entry| (entry.path.clone(), entry.size))
+                    .map(|entry| (entry.path.clone(), Self::size(entry)))
                     .collect();
                 let prioritized = prioritize_paths(&paths_with_sizes);
-                let files_by_path: HashMap<&str, &&GitHubTreeEntry> = files
+                let files_by_path: HashMap<&str, &&TreeEntry> = files
                     .iter()
                     .map(|entry| (entry.path.as_str(), entry))
                     .collect();
 
-                for (idx, score) in prioritized.iter().enumerate() {
+                for (index, score) in prioritized.iter().enumerate() {
                     let Some(entry) = files_by_path.get(score.path.as_str()) else {
                         continue;
                     };
-                    let estimated_tokens = estimate_tokens_from_bytes(entry.size.unwrap_or(0));
+                    let estimated_tokens =
+                        estimate_tokens_from_bytes(Self::size(entry).unwrap_or(0));
 
                     if !budget.can_fit(estimated_tokens) {
                         break;
@@ -996,59 +989,50 @@ impl SourceAdapter for GitHubAdapter {
                     if let Some(item) = self
                         .fetch_file_item(source.id, &config, &branch, entry)
                         .await?
+                        && budget.try_add(&entry.path, item.token_count)
                     {
-                        budget.try_add(&entry.path, item.token_count);
                         progress.on_item(&item);
                         result.add_item(item);
                     }
-                    progress.on_progress(idx + 1, Some(total_files));
+                    progress.on_progress(index + 1, Some(total_files));
                 }
             }
             FetchStrategy::Progressive { priority_order } => {
                 progress.on_message("Fetching files from GitHub by priority");
 
-                // Build priority scores
                 let paths_with_sizes: Vec<(String, Option<usize>)> = files
                     .iter()
-                    .map(|entry| (entry.path.clone(), entry.size))
+                    .map(|entry| (entry.path.clone(), Self::size(entry)))
                     .collect();
 
                 let mut prioritized = prioritize_paths(&paths_with_sizes);
 
-                // If user provided priority_order, reorder to match those patterns first
                 if !priority_order.is_empty() {
-                    prioritized.sort_by(|a, b| {
-                        let a_priority = priority_order.iter().position(|pattern| {
-                            if let Ok(glob_pattern) = Pattern::new(pattern) {
-                                glob_pattern.matches(&a.path)
-                            } else {
-                                false
+                    prioritized.sort_by(|left, right| {
+                        match (
+                            Self::priority(&priority_order, &left.path),
+                            Self::priority(&priority_order, &right.path),
+                        ) {
+                            (Some(left_position), Some(right_position)) => {
+                                left_position.cmp(&right_position)
                             }
-                        });
-
-                        let b_priority = priority_order.iter().position(|pattern| {
-                            if let Ok(glob_pattern) = Pattern::new(pattern) {
-                                glob_pattern.matches(&b.path)
-                            } else {
-                                false
-                            }
-                        });
-
-                        match (a_priority, b_priority) {
-                            (Some(ap), Some(bp)) => ap.cmp(&bp),
-                            (Some(_), None) => std::cmp::Ordering::Less,
-                            (None, Some(_)) => std::cmp::Ordering::Greater,
-                            (None, None) => b
+                            (Some(_), None) => Ordering::Less,
+                            (None, Some(_)) => Ordering::Greater,
+                            (None, None) => right
                                 .score
-                                .partial_cmp(&a.score)
-                                .unwrap_or(std::cmp::Ordering::Equal),
+                                .partial_cmp(&left.score)
+                                .unwrap_or(Ordering::Equal),
                         }
                     });
                 }
 
-                // Fetch in priority order
-                for (idx, priority_item) in prioritized.iter().enumerate() {
-                    if let Some(entry) = files.iter().find(|e| e.path == priority_item.path)
+                let files_by_path: HashMap<&str, &&TreeEntry> = files
+                    .iter()
+                    .map(|entry| (entry.path.as_str(), entry))
+                    .collect();
+
+                for (index, priority_item) in prioritized.iter().enumerate() {
+                    if let Some(entry) = files_by_path.get(priority_item.path.as_str())
                         && let Some(item) = self
                             .fetch_file_item(source.id, &config, &branch, entry)
                             .await?
@@ -1056,7 +1040,7 @@ impl SourceAdapter for GitHubAdapter {
                         progress.on_item(&item);
                         result.add_item(item);
                     }
-                    progress.on_progress(idx + 1, Some(prioritized.len()));
+                    progress.on_progress(index + 1, Some(prioritized.len()));
                 }
             }
         }
@@ -1071,17 +1055,11 @@ impl SourceAdapter for GitHubAdapter {
     async fn get_sync_state(&self, source: &Source) -> Result<SyncState> {
         let config = self.parse_config(source)?;
 
-        // Get repository info to determine branch
-        let repo_info = self
-            .get_repository_info(&config.owner, &config.repo, config.token.as_deref())
+        let default_branch = self
+            .get_default_branch(&config.owner, &config.repo, config.token.as_deref())
             .await?;
+        let branch = config.branch.as_deref().unwrap_or(default_branch.as_str());
 
-        let branch = config
-            .branch
-            .as_deref()
-            .unwrap_or(&repo_info.default_branch);
-
-        // Fetch tree to get commit SHA
         let tree = self
             .get_tree(&config.owner, &config.repo, branch, config.token.as_deref())
             .await?;
@@ -1089,7 +1067,7 @@ impl SourceAdapter for GitHubAdapter {
         Ok(SyncState {
             source_id: source.id,
             last_sync_at: Some(Utc::now()),
-            version: Some(tree.sha),
+            version: Some(tree.sha.as_str().to_string()),
             ..Default::default()
         })
     }
@@ -1099,11 +1077,58 @@ impl SourceAdapter for GitHubAdapter {
 mod tests {
     use super::*;
     use crate::adapters::NoOpProgress;
+    use crate::content::Retention;
+    use abnegate_vcs::ObjectId;
+    use base64::Engine;
+    use base64::prelude::BASE64_STANDARD;
     use chrono::Utc;
+    use serde_json::Value;
     use serde_json::json;
     use uuid::Uuid;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    const GITHUB_HOST: &str = "github.com";
+
+    const REPOSITORY_ROUTE: &str = "/repos/test-owner/test-repo";
+
+    const TREE_ROUTE: &str = "/repos/test-owner/test-repo/git/trees/main";
+
+    const AUTHORIZATION: &str = "authorization";
+
+    const TOKEN: &str = "ghp_cached";
+
+    const MISSING_TREE: &str = "Failed to fetch tree: 404 Not Found";
+
+    const LIB_SHA: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678";
+
+    const README_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    const TREE_SHA: &str = "6367c48dd193d56ea7b0baad25b19455e529f5ee";
+
+    const MALFORMED_TOKEN: &str = "bad\ntoken";
+
+    const MALFORMED_TOKEN_MESSAGE: &str =
+        "Invalid authorization token format (token not logged for security)";
+
+    fn served(server: &MockServer) -> GitHubAdapter {
+        GitHubAdapter::with_service(
+            PullRequestService::standing_in_for(GITHUB_HOST, &server.uri())
+                .unwrap()
+                .with_anonymous_reads(),
+        )
+    }
+
+    fn test_repository() -> Value {
+        json!({
+            "owner": "test-owner",
+            "repo": "test-repo"
+        })
+    }
 
     fn create_test_source(config: serde_json::Value) -> Source {
         Source {
@@ -1134,9 +1159,8 @@ mod tests {
 
         let result = adapter.verify(&source).await;
         assert!(result.is_err());
-        if let Err(ContextError::InvalidSourceConfig(msg)) = result {
-            // Serde error will contain "missing field" when field is required
-            assert!(msg.contains("owner") || msg.contains("missing field"));
+        if let Err(ContextError::InvalidSourceConfig(message)) = result {
+            assert!(message.contains("owner") || message.contains("missing field"));
         } else {
             panic!("Expected InvalidSourceConfig error for missing owner");
         }
@@ -1151,9 +1175,8 @@ mod tests {
 
         let result = adapter.verify(&source).await;
         assert!(result.is_err());
-        if let Err(ContextError::InvalidSourceConfig(msg)) = result {
-            // Serde error will contain "missing field" when field is required
-            assert!(msg.contains("repo") || msg.contains("missing field"));
+        if let Err(ContextError::InvalidSourceConfig(message)) = result {
+            assert!(message.contains("repo") || message.contains("missing field"));
         } else {
             panic!("Expected InvalidSourceConfig error for missing repo");
         }
@@ -1163,7 +1186,6 @@ mod tests {
     async fn test_github_adapter_verify_valid_config() {
         let mock_server = MockServer::start().await;
 
-        // Mock repository info endpoint
         Mock::given(method("GET"))
             .and(path("/repos/test-owner/test-repo"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1173,49 +1195,79 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        let adapter = GitHubAdapter::new();
-        let source = create_test_source(json!({
-            "owner": "test-owner",
-            "repo": "test-repo"
-        }));
+        let adapter = served(&mock_server);
+        let source = create_test_source(test_repository());
 
-        // This test won't work with the real GitHub API, but validates structure
-        // In production, we'd need to mock the HTTP client or use wiremock
-        // For now, we expect it to fail to connect
         let result = adapter.verify(&source).await;
-        // The test shows the structure is correct
-        assert!(result.is_err()); // Will fail because we can't reach GitHub
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    async fn mount_listing(server: &MockServer, entries: Value) {
+        Mock::given(method("GET"))
+            .and(path("/repos/test-owner/test-repo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "test-repo",
+                "default_branch": "main"
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/test-owner/test-repo/git/trees/main"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "sha": TREE_SHA,
+                "tree": entries,
+                "truncated": false
+            })))
+            .mount(server)
+            .await;
+    }
+
+    fn listed_blob(file: &str, size: usize) -> Value {
+        json!({
+            "path": file,
+            "mode": "100644",
+            "type": "blob",
+            "sha": LIB_SHA,
+            "size": size
+        })
     }
 
     #[tokio::test]
     async fn test_github_adapter_estimate_tokens_empty_repo() {
-        let adapter = GitHubAdapter::new();
-        let source = create_test_source(json!({
-            "owner": "test-owner",
-            "repo": "test-repo"
-        }));
+        let mock_server = MockServer::start().await;
+        mount_listing(&mock_server, json!([])).await;
+        let adapter = served(&mock_server);
+        let source = create_test_source(test_repository());
 
-        // This will fail to connect, but tests the structure
         let result = adapter.estimate_tokens(&source).await;
-        assert!(result.is_err()); // Expected - can't reach GitHub
+        assert!(matches!(result, Ok(0)), "{result:?}");
     }
 
     #[tokio::test]
     async fn test_github_adapter_estimate_tokens_with_files() {
-        // Similar to above - tests structure
-        let adapter = GitHubAdapter::new();
-        let source = create_test_source(json!({
-            "owner": "test-owner",
-            "repo": "test-repo"
-        }));
+        let mock_server = MockServer::start().await;
+        mount_listing(
+            &mock_server,
+            json!([
+                listed_blob("README.md", 400),
+                listed_blob("src/lib.rs", 1200),
+                listed_blob("logo.png", 4000),
+                listed_blob("data.txt", MAX_FILE_SIZE_BYTES + 1),
+            ]),
+        )
+        .await;
+        let adapter = served(&mock_server);
+        let source = create_test_source(test_repository());
 
-        let result = adapter.estimate_tokens(&source).await;
-        assert!(result.is_err()); // Expected - can't reach GitHub
+        let estimated = adapter.estimate_tokens(&source).await.unwrap();
+        assert_eq!(
+            estimated,
+            estimate_tokens_from_bytes(400) + estimate_tokens_from_bytes(1200)
+        );
     }
 
     #[test]
     fn test_github_adapter_estimate_tokens_excludes_binary() {
-        // Test binary detection logic
         assert!(GitHubAdapter::is_binary_file("image.png"));
         assert!(GitHubAdapter::is_binary_file("file.zip"));
         assert!(!GitHubAdapter::is_binary_file("file.rs"));
@@ -1223,83 +1275,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_github_adapter_fetch_full() {
-        let adapter = GitHubAdapter::new();
-        let source = create_test_source(json!({
-            "owner": "test-owner",
-            "repo": "test-repo"
-        }));
+    async fn a_missing_repository_fails_every_strategy() {
+        let mock_server = MockServer::start().await;
+        let adapter = served(&mock_server);
+        let source = create_test_source(test_repository());
 
-        let config = FetchConfig::default();
-        let progress = NoOpProgress;
-        let result = adapter
-            .fetch(&source, &config, FetchStrategy::Full, &progress)
-            .await;
+        for strategy in [
+            FetchStrategy::Full,
+            FetchStrategy::MetadataOnly,
+            FetchStrategy::Partial { max_tokens: 1000 },
+            FetchStrategy::Progressive {
+                priority_order: vec!["*.md".to_string()],
+            },
+        ] {
+            let error = adapter
+                .fetch(
+                    &source,
+                    &FetchConfig::default(),
+                    strategy.clone(),
+                    &NoOpProgress,
+                )
+                .await
+                .unwrap_err();
 
-        assert!(result.is_err()); // Expected - can't reach GitHub
-    }
-
-    #[tokio::test]
-    async fn test_github_adapter_fetch_metadata_only() {
-        let adapter = GitHubAdapter::new();
-        let source = create_test_source(json!({
-            "owner": "test-owner",
-            "repo": "test-repo"
-        }));
-
-        let config = FetchConfig::default();
-        let progress = NoOpProgress;
-        let result = adapter
-            .fetch(&source, &config, FetchStrategy::MetadataOnly, &progress)
-            .await;
-
-        assert!(result.is_err()); // Expected - can't reach GitHub
-    }
-
-    #[tokio::test]
-    async fn test_github_adapter_fetch_partial() {
-        let adapter = GitHubAdapter::new();
-        let source = create_test_source(json!({
-            "owner": "test-owner",
-            "repo": "test-repo"
-        }));
-
-        let config = FetchConfig::default();
-        let progress = NoOpProgress;
-        let result = adapter
-            .fetch(
-                &source,
-                &config,
-                FetchStrategy::Partial { max_tokens: 1000 },
-                &progress,
-            )
-            .await;
-
-        assert!(result.is_err()); // Expected - can't reach GitHub
-    }
-
-    #[tokio::test]
-    async fn test_github_adapter_fetch_progressive() {
-        let adapter = GitHubAdapter::new();
-        let source = create_test_source(json!({
-            "owner": "test-owner",
-            "repo": "test-repo"
-        }));
-
-        let config = FetchConfig::default();
-        let progress = NoOpProgress;
-        let result = adapter
-            .fetch(
-                &source,
-                &config,
-                FetchStrategy::Progressive {
-                    priority_order: vec!["*.md".to_string()],
-                },
-                &progress,
-            )
-            .await;
-
-        assert!(result.is_err()); // Expected - can't reach GitHub
+            assert_eq!(
+                error.to_string(),
+                "Invalid source configuration: Repository not found: test-owner/test-repo",
+                "{strategy:?}"
+            );
+        }
     }
 
     #[test]
@@ -1354,31 +1358,20 @@ mod tests {
         assert!(GitHubAdapter::should_include_file("README.md", &[], &[]));
     }
 
-    #[tokio::test]
-    async fn test_github_adapter_handles_api_error() {
-        let adapter = GitHubAdapter::new();
-        let source = create_test_source(json!({
-            "owner": "nonexistent-owner-12345",
-            "repo": "nonexistent-repo-67890"
-        }));
-
-        let result = adapter.verify(&source).await;
-        assert!(result.is_err());
-        // Will fail with network error since we can't reach GitHub
-    }
-
     #[test]
     fn test_decode_content() {
-        // Test base64 decoding
-        let encoded = base64::engine::general_purpose::STANDARD.encode("Hello, World!");
-        let decoded = GitHubAdapter::decode_content(&encoded).unwrap();
-        assert_eq!(decoded, "Hello, World!");
+        assert_eq!(
+            GitHubAdapter::decode_text_content(b"Hello, World!".to_vec()),
+            Some("Hello, World!".to_string())
+        );
     }
 
     #[test]
     fn test_decode_text_content_skips_invalid_utf8() {
-        let encoded = base64::engine::general_purpose::STANDARD.encode([b'h', b'e', 0xff, b'l']);
-        assert_eq!(GitHubAdapter::decode_text_content(&encoded).unwrap(), None);
+        assert_eq!(
+            GitHubAdapter::decode_text_content(vec![b'h', b'e', 0xff, b'l']),
+            None
+        );
     }
 
     #[test]
@@ -1390,7 +1383,7 @@ mod tests {
             "repo",
             "main",
             "src/lib.rs",
-            "abc123",
+            LIB_SHA,
             1000,
             Some("fn main() {}".to_string()),
             false,
@@ -1404,7 +1397,7 @@ mod tests {
         assert_eq!(item.content_type, "text/rust");
         assert!(item.content.is_some());
         assert!(!item.metadata_only);
-        assert_eq!(item.metadata.commit_hash, Some("abc123".to_string()));
+        assert_eq!(item.metadata.commit_hash, Some(LIB_SHA.to_string()));
         assert_eq!(item.metadata.branch, Some("main".to_string()));
         assert_eq!(
             GitHubAdapter::file_uri("owner", "repo", "src/lib.rs", "main"),
@@ -1421,7 +1414,7 @@ mod tests {
             "repo",
             "main",
             "README.md",
-            "def456",
+            README_SHA,
             500,
             None,
             true,
@@ -1431,5 +1424,318 @@ mod tests {
         assert!(item.content.is_none());
         assert!(item.metadata_only);
         assert_eq!(item.token_count, 0);
+    }
+
+    #[tokio::test]
+    async fn a_tokenless_source_never_reads_the_tree_a_tokened_one_cached() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(REPOSITORY_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "test-repo",
+                "default_branch": "main"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(TREE_ROUTE))
+            .and(header(AUTHORIZATION, format!("Bearer {TOKEN}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "sha": TREE_SHA,
+                "tree": [listed_blob("README.md", 400)],
+                "truncated": false
+            })))
+            .mount(&mock_server)
+            .await;
+        let adapter = served(&mock_server);
+        let mut tokened = test_repository();
+        tokened["token"] = json!(TOKEN);
+
+        let estimated = adapter
+            .estimate_tokens(&create_test_source(tokened))
+            .await
+            .unwrap();
+        let tokenless = adapter
+            .estimate_tokens(&create_test_source(test_repository()))
+            .await;
+
+        assert_eq!(estimated, estimate_tokens_from_bytes(400));
+        assert!(
+            matches!(&tokenless, Err(ContextError::Adapter { message, .. }) if message == MISSING_TREE),
+            "{tokenless:?}"
+        );
+        let trees = mock_server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == TREE_ROUTE)
+            .count();
+        assert_eq!(trees, 2);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_token_fails_the_tree_and_skips_the_contents_unsent() {
+        let mock_server = MockServer::start().await;
+        let adapter = served(&mock_server);
+        let config = GitHubConfig {
+            owner: "test-owner".to_string(),
+            repo: "test-repo".to_string(),
+            branch: None,
+            path: None,
+            token: Some(MALFORMED_TOKEN.to_string()),
+        };
+        let entry = TreeEntry::new(
+            "README.md",
+            "100644",
+            TreeEntryKind::Blob,
+            ObjectId::parse(README_SHA).unwrap(),
+        );
+
+        let tree = adapter
+            .get_tree("test-owner", "test-repo", "main", Some(MALFORMED_TOKEN))
+            .await;
+        let contents = adapter.get_file_content(&config, "main", "README.md").await;
+        let item = adapter
+            .fetch_file_item(Uuid::new_v4(), &config, "main", &entry)
+            .await;
+
+        assert!(
+            matches!(&tree, Err(ContextError::Config(message)) if message == MALFORMED_TOKEN_MESSAGE),
+            "{tree:?}"
+        );
+        assert!(
+            matches!(&contents, Ok(Err(ContextError::Config(message))) if message == MALFORMED_TOKEN_MESSAGE),
+            "{contents:?}"
+        );
+        assert!(matches!(item, Ok(None)), "{item:?}");
+        assert!(mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_handed_service_reads_a_public_repository_without_a_token() {
+        let mock_server = MockServer::start().await;
+        mount_listing(&mock_server, json!([])).await;
+        let adapter = GitHubAdapter::with_service(
+            PullRequestService::standing_in_for(GITHUB_HOST, &mock_server.uri()).unwrap(),
+        );
+
+        let verified = adapter.verify(&create_test_source(test_repository())).await;
+
+        assert!(verified.is_ok(), "{verified:?}");
+        assert!(!mock_server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_partial_fetch_never_emits_a_file_past_its_budget() {
+        let max_tokens = 100;
+        let mock_server = MockServer::start().await;
+        mount_listing(&mock_server, json!([listed_blob("lib.rs", 40)])).await;
+        Mock::given(method("GET"))
+            .and(path("/repos/test-owner/test-repo/contents/lib.rs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "file",
+                "encoding": "base64",
+                "content": BASE64_STANDARD.encode("fn grown() {}\n".repeat(400))
+            })))
+            .mount(&mock_server)
+            .await;
+        let adapter = served(&mock_server);
+
+        let fetched = adapter
+            .fetch(
+                &create_test_source(test_repository()),
+                &FetchConfig::default(),
+                FetchStrategy::Partial { max_tokens },
+                &NoOpProgress,
+            )
+            .await
+            .unwrap();
+
+        let emitted: Vec<&str> = fetched
+            .items
+            .iter()
+            .map(|item| item.title.as_str())
+            .collect();
+        assert!(
+            emitted.is_empty(),
+            "a file the budget refused is emitted: {emitted:?}"
+        );
+        assert!(fetched.stats.total_tokens <= max_tokens);
+    }
+
+    const FAILED_CLAIMANT_MILLISECONDS: u64 = 50;
+
+    #[tokio::test]
+    async fn a_waiter_reads_the_tree_soon_after_its_claimant_fails() {
+        let mock_server = MockServer::start().await;
+        mount_repository(&mock_server).await;
+        Mock::given(method("GET"))
+            .and(path(TREE_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "sha": TREE_SHA,
+                "tree": [listed_blob("README.md", 8)],
+                "truncated": false
+            })))
+            .mount(&mock_server)
+            .await;
+        let adapter = served(&mock_server);
+        let source = create_test_source(test_repository());
+        let claimant = adapter.tree_cache.in_flight.claim(&tree_key("main"));
+        let started = Instant::now();
+
+        let (estimated, ()) = tokio::join!(adapter.estimate_tokens(&source), async {
+            tokio::time::sleep(Duration::from_millis(FAILED_CLAIMANT_MILLISECONDS)).await;
+            drop(claimant);
+        });
+
+        assert!(estimated.is_ok(), "{estimated:?}");
+        assert!(
+            started.elapsed()
+                < Duration::from_millis(
+                    TreeCache::WAIT_ATTEMPTS * TreeCache::WAIT_INTERVAL_MILLISECONDS / 2
+                ),
+            "waited {:?}",
+            started.elapsed()
+        );
+    }
+
+    fn tree_key(branch: &str) -> TreeKey {
+        TreeKey {
+            owner: "test-owner".to_string(),
+            repo: "test-repo".to_string(),
+            branch: branch.to_string(),
+            fingerprint: None,
+        }
+    }
+
+    fn listed_tree(files: usize) -> Tree {
+        Tree::new(
+            ObjectId::parse(TREE_SHA).unwrap(),
+            (0..files)
+                .map(|file| {
+                    TreeEntry::new(
+                        format!("src/file{file}.rs"),
+                        "100644",
+                        TreeEntryKind::Blob,
+                        ObjectId::parse(LIB_SHA).unwrap(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_tree_larger_than_the_cache_never_evicts_the_trees_it_holds() {
+        let cached = listed_tree(1);
+        let oversized = listed_tree(10);
+        let mut cache = TreeCache::new(GitHubAdapter::TREE_CACHE_TTL);
+        cache.max_total_bytes = TreeCache::estimate_tree_size(&oversized) - 1;
+
+        cache.insert(tree_key("main"), cached).await;
+        cache.insert(tree_key("develop"), oversized).await;
+
+        assert!(cache.get(&tree_key("main")).await.is_some());
+        assert!(cache.get(&tree_key("develop")).await.is_none());
+    }
+
+    async fn mount_repository(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path(REPOSITORY_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "name": "test-repo",
+                "default_branch": "main"
+            })))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_truncated_tree_keeps_the_index_records_of_its_branch() {
+        let listed = "github://test-owner/test-repo/README.md@main".to_string();
+        let branch = UriNamespace::new("github://test-owner/test-repo/", "@main");
+        for (truncated, retained) in [
+            (false, Retention::Exact(vec![listed])),
+            (true, Retention::Namespace(branch)),
+        ] {
+            let mock_server = MockServer::start().await;
+            mount_repository(&mock_server).await;
+            Mock::given(method("GET"))
+                .and(path(TREE_ROUTE))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "sha": TREE_SHA,
+                    "tree": [listed_blob("README.md", 8)],
+                    "truncated": truncated
+                })))
+                .mount(&mock_server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/repos/test-owner/test-repo/contents/README.md"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "type": "file",
+                    "encoding": "base64",
+                    "content": BASE64_STANDARD.encode("# README")
+                })))
+                .mount(&mock_server)
+                .await;
+
+            let fetched = served(&mock_server)
+                .fetch(
+                    &create_test_source(test_repository()),
+                    &FetchConfig::default(),
+                    FetchStrategy::Full,
+                    &NoOpProgress,
+                )
+                .await
+                .unwrap();
+
+            let titles: Vec<&str> = fetched
+                .items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect();
+            assert_eq!(titles, ["README.md"], "truncated: {truncated}");
+            assert_eq!(fetched.retention(), retained, "truncated: {truncated}");
+        }
+    }
+
+    async fn tree_requested(server: &MockServer) {
+        while !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request.url.path() == TREE_ROUTE)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_tree_read_releases_its_claim() {
+        let mock_server = MockServer::start().await;
+        mount_repository(&mock_server).await;
+        Mock::given(method("GET"))
+            .and(path(TREE_ROUTE))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(60)))
+            .mount(&mock_server)
+            .await;
+        let adapter = served(&mock_server);
+        let source = create_test_source(test_repository());
+
+        let mut cancelled = Box::pin(adapter.estimate_tokens(&source));
+        tokio::select! {
+            estimated = &mut cancelled => panic!("the stalled tree was answered: {estimated:?}"),
+            () = tree_requested(&mock_server) => {}
+        }
+        drop(cancelled);
+
+        assert!(
+            adapter
+                .tree_cache
+                .in_flight
+                .claim(&tree_key("main"))
+                .is_some()
+        );
     }
 }

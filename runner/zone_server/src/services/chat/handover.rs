@@ -13,12 +13,14 @@ pub use notice::Notice;
 pub use reason::Reason;
 pub use switch::Switch;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use abnegate_agent::chat::NewEntry;
 use abnegate_agent::context::Entry;
-use abnegate_agent_cli::{AgentKind, Session};
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::Session;
 use abnegate_llm::Message;
 use chrono::Utc;
 use uuid::Uuid;
@@ -26,10 +28,13 @@ use zone_core::llm::LlmBackend;
 
 use super::session::RunContext;
 use crate::config::Config;
-use crate::db::agent_logins::{self, AgentLoginRow};
+use crate::db::agent_logins;
+use crate::db::agent_logins::AgentLoginRow;
 use crate::db::chats::ChatSession;
 use crate::services::agent::sessions;
-use crate::services::backend::{self, Continuation, Resolved};
+use crate::services::backend;
+use crate::services::backend::Continuation;
+use crate::services::backend::Resolved;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
 use crate::services::login::usage::Availability;
@@ -438,7 +443,9 @@ fn standing(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::{Arc, Condvar, Mutex};
+    use std::sync::Arc;
+    use std::sync::Condvar;
+    use std::sync::Mutex;
 
     use abnegate_agent::context::project;
     use abnegate_agent_cli::CliSettings;
@@ -447,16 +454,21 @@ mod tests {
     use abnegate_agent_cli::transcript::render;
     use abnegate_llm::Limit;
     use abnegate_secret::SecretValue;
-    use chrono::{DateTime, SecondsFormat, TimeDelta, TimeZone};
+    use chrono::DateTime;
+    use chrono::SecondsFormat;
+    use chrono::TimeDelta;
+    use chrono::TimeZone;
     use sqlx::PgPool;
     use tempfile::TempDir;
-    use tokio::runtime::{Builder, Runtime};
+    use tokio::runtime::Builder;
+    use tokio::runtime::Runtime;
 
     use super::*;
     use crate::config::AgentConfig;
     use crate::db::agent_logins::Insert;
     use crate::db::organizations;
-    use crate::services::chat::session::{Generation, Pinned};
+    use crate::services::chat::session::Generation;
+    use crate::services::chat::session::Pinned;
     use crate::services::login::claude::Sealed;
     use crate::services::login::router::Chosen;
     use crate::services::stages::Preferences;

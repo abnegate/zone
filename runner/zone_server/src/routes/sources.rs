@@ -1,25 +1,48 @@
 //! Source endpoints
 
+use abnegate_secret::REDACTED;
 use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
-use abnegate_vcs::pull_request::{ApplicationError, PullRequestError, Repository};
-use axum::{
-    Json,
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
-use serde::{Deserialize, Serialize};
+use abnegate_vcs::pull_request::ApplicationError;
+use abnegate_vcs::pull_request::PullRequestError;
+use abnegate_vcs::pull_request::Repository;
+use axum::Json;
+use axum::extract::Path;
+use axum::extract::Query;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::response::Response;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashMap;
 use uuid::Uuid;
+use zone_context::adapters::GitLabAdapter;
+use zone_context::error::ContextError;
 
 use super::common::Timestamps;
 use super::error::ErrorResponse;
 use crate::auth::AuthUser;
-use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
-use crate::db::sources::{self, GITHUB, SourceChanges, UpdateError};
+use crate::db::github_installations;
+use crate::db::github_installations::InstallationStatus;
+use crate::db::github_installations::InstallationSummary;
+use crate::db::sources;
+use crate::db::sources::CreateError;
+use crate::db::sources::DISCORD;
+use crate::db::sources::FILESYSTEM;
+use crate::db::sources::GITHUB;
+use crate::db::sources::GITLAB;
+use crate::db::sources::ICAL;
+use crate::db::sources::IMAP;
+use crate::db::sources::NOTION;
+use crate::db::sources::SLACK;
+use crate::db::sources::SourceChanges;
+use crate::db::sources::TEXT;
+use crate::db::sources::UpdateError;
+use crate::db::sources::WEB;
 use crate::error::ServerError;
-use crate::services::github_app::{self, Failure};
+use crate::services::github_app;
+use crate::services::github_app::Failure;
 use crate::state::AppState;
 
 /// Maximum name length
@@ -46,8 +69,6 @@ const UNREACHABLE: &str = "Zone can't reach this repository through that GitHub 
 const GITHUB_UNAVAILABLE: &str = "GitHub could not be reached.";
 
 const APP_REJECTED: &str = "The GitHub App connection is broken. Reconnect GitHub.";
-
-const NOTION: &str = "notion";
 
 const TOKEN_FIELD: &str = "token";
 
@@ -98,6 +119,20 @@ async fn validate_installation(
             Err(internal())
         }
     }
+}
+
+/// Refuses a GitLab config naming an instance the adapter would never read from.
+fn validate_instance(source_type: &str, config: &serde_json::Value) -> Result<(), ServerError> {
+    if source_type != GITLAB {
+        return Ok(());
+    }
+    GitLabAdapter::check_instance(config).map_err(|error| match error {
+        error @ ContextError::InvalidSourceConfig(_) => ServerError::BadRequest(error.to_string()),
+        error => {
+            tracing::error!(error = %error, "The GitLab client could not be built");
+            internal()
+        }
+    })
 }
 
 /// Refuses an installation whose token cannot read the repository `config` names.
@@ -358,12 +393,12 @@ async fn check_workspace_write_access(
 /// Category for a persisted source_type string
 fn category_for_source_type(source_type: &str) -> &'static str {
     match source_type {
-        GITHUB | "gitlab" | "filesystem" => "file",
-        "ical" => "calendar",
-        "imap" => "mail",
-        "discord" | "slack" => "chat",
-        "web" => "web",
-        "text" => "text",
+        GITHUB | GITLAB | FILESYSTEM => "file",
+        ICAL => "calendar",
+        IMAP => "mail",
+        DISCORD | SLACK => "chat",
+        WEB => "web",
+        TEXT => "text",
         _ => "file",
     }
 }
@@ -374,42 +409,10 @@ fn derive_source_url(
     config: &serde_json::Value,
     explicit: Option<&str>,
 ) -> Option<String> {
-    if let Some(url) = explicit.filter(|value| !value.is_empty()) {
-        return Some(url.to_string());
-    }
-
-    match source_type {
-        GITHUB => {
-            let owner = config
-                .get("owner")?
-                .as_str()
-                .filter(|value| !value.is_empty())?;
-            let repo = config
-                .get("repo")?
-                .as_str()
-                .filter(|value| !value.is_empty())?;
-            Some(format!("https://github.com/{}/{}", owner, repo))
-        }
-        "gitlab" => {
-            let project_id = config
-                .get("project_id")?
-                .as_str()
-                .filter(|value| !value.is_empty())?;
-            let host = config
-                .get("host")
-                .and_then(|value| value.as_str())
-                .filter(|value| !value.is_empty())
-                .unwrap_or("https://gitlab.com")
-                .trim_end_matches('/');
-            Some(format!("{}/{}", host, project_id))
-        }
-        "web" | "ical" => config
-            .get("url")
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string),
-        _ => None,
-    }
+    explicit
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| sources::derived_link(source_type, config))
 }
 
 /// Source response
@@ -567,10 +570,7 @@ impl std::fmt::Debug for CreateSourceRequest {
             .field("config", &self.config)
             .field("description", &self.description)
             .field("url", &self.url)
-            .field(
-                "credentials",
-                &self.credentials.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("credentials", &self.credentials.as_ref().map(|_| REDACTED))
             .field("github_installation_id", &self.github_installation_id)
             .finish()
     }
@@ -578,6 +578,10 @@ impl std::fmt::Debug for CreateSourceRequest {
 
 /// Update source request. `github_installation_id` is absent to leave the
 /// source as it is, `null` to detach the installation, or an id to attach it.
+/// `instance` names the GitLab instance the client last saw the source read
+/// from, so that a token entered for it is refused once the source reads from
+/// another. A GitLab update carrying `credentials` names it unless it also
+/// carries the `config` the token is for.
 #[derive(Deserialize)]
 pub struct UpdateSourceRequest {
     name: Option<String>,
@@ -588,6 +592,7 @@ pub struct UpdateSourceRequest {
     credentials: Option<String>,
     #[serde(default, deserialize_with = "crate::db::actions::patch")]
     github_installation_id: Option<Option<Uuid>>,
+    instance: Option<String>,
 }
 
 impl std::fmt::Debug for UpdateSourceRequest {
@@ -598,11 +603,9 @@ impl std::fmt::Debug for UpdateSourceRequest {
             .field("description", &self.description)
             .field("url", &self.url)
             .field("is_active", &self.is_active)
-            .field(
-                "credentials",
-                &self.credentials.as_ref().map(|_| "[REDACTED]"),
-            )
+            .field("credentials", &self.credentials.as_ref().map(|_| REDACTED))
             .field("github_installation_id", &self.github_installation_id)
+            .field("instance", &self.instance)
             .finish()
     }
 }
@@ -674,6 +677,8 @@ pub async fn create(
         )));
     }
 
+    validate_instance(&request.source_type, &request.config)?;
+
     if let Some(installation) = request.github_installation_id {
         validate_installation(
             &state,
@@ -712,8 +717,8 @@ pub async fn create(
     )
     .await
     .map_err(|error| match error {
-        UpdateError::Unattachable => unattachable(),
-        UpdateError::NotFound | UpdateError::Database(_) => {
+        CreateError::Unattachable => unattachable(),
+        CreateError::Database(_) => {
             tracing::error!(workspace_id = %workspace_id, name = %request.name, source_type = %request.source_type, error = %error, "Database error creating source");
             internal()
         }
@@ -773,6 +778,10 @@ pub async fn update(
         })?
         .ok_or_else(not_found)?;
 
+    if let Some(config) = &request.config {
+        validate_instance(&previous.source_type, config)?;
+    }
+
     if let Some(Some(installation)) = request.github_installation_id {
         validate_installation(
             &state,
@@ -809,12 +818,22 @@ pub async fn update(
             is_active: request.is_active,
             github_installation_id: request.github_installation_id,
             credentials_encrypted: credentials_encrypted.as_deref(),
+            instance: request.instance.as_deref(),
         },
     )
     .await
     .map_err(|error| match error {
         UpdateError::NotFound => not_found(),
         UpdateError::Unattachable => unattachable(),
+        error @ (UpdateError::InstanceNeedsToken
+        | UpdateError::UnreadableInstanceNeedsToken
+        | UpdateError::UnnamedTokenInstance
+        | UpdateError::UnreadableTokenInstance) => ServerError::BadRequest(error.to_string()),
+        error @ UpdateError::InstanceMoved => ServerError::Conflict(error.to_string()),
+        UpdateError::Adapter(error) => {
+            tracing::error!(error = %error, "The GitLab client could not be built");
+            internal()
+        }
         UpdateError::Database(error) => {
             tracing::error!(source_id = %id, workspace_id = %workspace_id, error = %error, "Database error updating source");
             internal()
@@ -938,11 +957,11 @@ pub async fn verify(
     // We need to parse the source_type string into zone_core::SourceType enum
     let source_type = match source_row.source_type.as_str() {
         GITHUB => zone_core::SourceType::GitHub,
-        "gitlab" => zone_core::SourceType::GitLab,
-        "filesystem" => zone_core::SourceType::Filesystem,
+        GITLAB => zone_core::SourceType::GitLab,
+        FILESYSTEM => zone_core::SourceType::Filesystem,
         NOTION => zone_core::SourceType::Notion,
-        "text" => zone_core::SourceType::Text,
-        "web" => zone_core::SourceType::Web,
+        TEXT => zone_core::SourceType::Text,
+        WEB => zone_core::SourceType::Web,
         _ => {
             let error_msg = format!("Unknown source type: {}", source_row.source_type);
             if let Err(db_err) =
@@ -1149,7 +1168,7 @@ fn describe_kind(kind: &str) -> SourceTypeInfo {
                 "required": ["owner", "repo"]
             }),
         ),
-        "gitlab" => (
+        GITLAB => (
             "GitLab",
             "file",
             "GitLab project integration",
@@ -1157,13 +1176,13 @@ fn describe_kind(kind: &str) -> SourceTypeInfo {
                 "type": "object",
                 "properties": {
                     "project_id": {"type": "string", "description": "Project path or numeric id"},
-                    "host": {"type": "string", "description": "GitLab host for self-hosted instances"},
+                    "host": {"type": "string", "description": "GitLab instance URL (https://...), defaulting to https://gitlab.com"},
                     "branch": {"type": "string", "description": "Default branch"}
                 },
                 "required": ["project_id"]
             }),
         ),
-        "filesystem" => (
+        FILESYSTEM => (
             "Local Directory",
             "file",
             "Local filesystem (self-hosted only)",
@@ -1176,7 +1195,7 @@ fn describe_kind(kind: &str) -> SourceTypeInfo {
                 "required": ["base_path"]
             }),
         ),
-        "web" => (
+        WEB => (
             "Web URL",
             "web",
             "Fetch content from a URL",
@@ -1188,7 +1207,7 @@ fn describe_kind(kind: &str) -> SourceTypeInfo {
                 "required": ["url"]
             }),
         ),
-        "text" => (
+        TEXT => (
             "Text",
             "text",
             "Inline text content",
@@ -1238,15 +1257,22 @@ mod tests {
 
     use axum::http::StatusCode;
 
-    use super::{
-        APP_REJECTED, CONNECTION_LOST, CREDENTIALS_UNREADABLE, GITHUB_UNAVAILABLE, INTERNAL_ERROR,
-        UNREACHABLE, UpdateSourceRequest, configured_repository, installation_refusal,
-        repository_refusal, verification_refusal,
-    };
+    use super::APP_REJECTED;
+    use super::CONNECTION_LOST;
+    use super::CREDENTIALS_UNREADABLE;
+    use super::GITHUB_UNAVAILABLE;
+    use super::INTERNAL_ERROR;
+    use super::UNREACHABLE;
+    use super::UpdateSourceRequest;
+    use super::configured_repository;
+    use super::installation_refusal;
+    use super::repository_refusal;
+    use super::verification_refusal;
     use crate::db::github_installations::UNATTACHABLE;
     use crate::error::ServerError;
     use crate::services::github_app;
-    use abnegate_vcs::pull_request::{ApplicationError, PullRequestError};
+    use abnegate_vcs::pull_request::ApplicationError;
+    use abnegate_vcs::pull_request::PullRequestError;
 
     fn installation_of(body: serde_json::Value) -> Option<Option<Uuid>> {
         serde_json::from_value::<UpdateSourceRequest>(body)

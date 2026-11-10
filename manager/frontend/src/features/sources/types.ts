@@ -21,8 +21,10 @@ export interface GitHubConfig {
 }
 
 export interface GitLabConfig {
-  project_id: string;
+  project_id?: string;
+  project?: string;
   host?: string;
+  base_url?: string;
   branch?: string;
   base_path?: string;
 }
@@ -113,6 +115,7 @@ export interface UpdateSourceRequest {
   description?: string;
   is_active?: boolean;
   url?: string;
+  instance?: string;
 }
 
 export interface SourceType_Info {

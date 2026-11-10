@@ -6257,7 +6257,7 @@ mod tests {
             sources::NewSource {
                 workspace_id: workspace.id,
                 name: "Invalid configured source",
-                source_type: "github",
+                source_type: sources::GITHUB,
                 config: json!({}),
                 description: None,
                 url: None,
@@ -6272,7 +6272,7 @@ mod tests {
             sources::NewSource {
                 workspace_id: foreign.id,
                 name: "Foreign source",
-                source_type: "github",
+                source_type: sources::GITHUB,
                 config: json!({}),
                 description: None,
                 url: None,

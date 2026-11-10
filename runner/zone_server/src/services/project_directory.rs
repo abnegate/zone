@@ -20,8 +20,10 @@ use abnegate_secret::SecretValue;
 use uuid::Uuid;
 
 use crate::db::chats;
-use crate::db::projects::{self, ProjectRow};
-use crate::db::sources::{self, SourceRow};
+use crate::db::projects;
+use crate::db::projects::ProjectRow;
+use crate::db::sources;
+use crate::db::sources::SourceRow;
 use crate::services::github_app::Credential;
 use crate::state::AppState;
 use candidate::Candidate;
@@ -136,12 +138,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::agent::testing::{Connected, MINTED_TOKEN, number};
+    use crate::agent::testing::Connected;
+    use crate::agent::testing::MINTED_TOKEN;
+    use crate::agent::testing::number;
     use crate::db::projects::NewProject;
     use crate::db::sources::NewSource;
+    use crate::db::sources::SLACK;
     use crate::services::github_app::testing::issuing;
-
-    const SLACK: &str = "slack";
 
     #[tokio::test]
     async fn a_source_that_cannot_clone_never_has_its_credential_resolved() {

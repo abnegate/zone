@@ -62,7 +62,7 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 
 **Gaps that block the feature (phase 0):**
 
-- No queue consumer. `claim_next_task` (`runner/zone_server/migrations/0001_v1.sql`) and the whole `runner/zone_server/queries/*.sql` directory are dead; runs are `tokio::spawn` from `routes/tasks.rs:479`, bounded by `MAX_CONCURRENT_TASKS = 5` and `TASK_TIMEOUT_SECS = 3600` (`workers/task.rs:24,27`). A restart orphans `task_runs` rows in `running`.
+- No queue consumer. `claim_next_task` (`runner/zone_server/migrations/0001_v1.sql`) is dead; runs are `tokio::spawn` from `routes/tasks.rs:479`, bounded by `MAX_CONCURRENT_TASKS = 5` and `TASK_TIMEOUT_SECS = 3600` (`workers/task.rs:24,27`). A restart orphans `task_runs` rows in `running`.
 - The task workspace directory is never created and the repo is never cloned (`workers/task.rs:271-278`). Tasks without a repo run in the server's own cwd.
 - `tasks.status` never advances during a run; `tasks.created_by` (migration 006) is never written.
 - The prod image installs only `curl ca-certificates libssl3t64 libstdc++6` (`manager/Dockerfile:50`): no `git` (the PR worker is broken in prod), no `docker`, `kubectl`, `helm`. No docker socket on `manager`. Helm runs the server with `readOnlyRootFilesystem`.

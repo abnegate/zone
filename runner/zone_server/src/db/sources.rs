@@ -5,14 +5,48 @@ use std::fmt;
 use abnegate_secret::REDACTED;
 use chrono::NaiveDateTime;
 use serde::Serialize;
-use sqlx::{PgExecutor, PgPool};
-use thiserror::Error;
+use sqlx::PgExecutor;
+use sqlx::PgPool;
 use uuid::Uuid;
+use zone_context::adapters::GitLabAdapter;
+use zone_context::error::ContextError;
 
 use super::DbResult;
-use super::github_installations::UNATTACHABLE;
+
+mod create_error;
+mod link;
+mod update_error;
+
+pub use create_error::CreateError;
+pub use link::derived_link;
+use link::legacy_link;
+pub use update_error::UpdateError;
 
 pub const GITHUB: &str = "github";
+
+pub const GITLAB: &str = "gitlab";
+
+pub const FILESYSTEM: &str = "filesystem";
+
+pub const ICAL: &str = "ical";
+
+pub const IMAP: &str = "imap";
+
+pub const DISCORD: &str = "discord";
+
+pub const SLACK: &str = "slack";
+
+pub const WEB: &str = "web";
+
+pub const TEXT: &str = "text";
+
+pub const NOTION: &str = "notion";
+
+pub const GOOGLE_CALENDAR: &str = "google_calendar";
+
+pub const GOOGLE_MAIL: &str = "google_mail";
+
+const BASE_URL_FIELD: &str = "base_url";
 
 /// Source row from database
 #[derive(Clone, sqlx::FromRow)]
@@ -231,7 +265,7 @@ pub struct NewSource<'a> {
 
 /// Create a new source. An installation outside the workspace's
 /// organization, revoked or suspended, creates nothing.
-pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<SourceRow, UpdateError> {
+pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<SourceRow, CreateError> {
     sqlx::query_as::<_, SourceRow>(
         r#"
         INSERT INTO sources (workspace_id, name, source_type, config, description, url,
@@ -259,11 +293,16 @@ pub async fn create_source(pool: &PgPool, source: NewSource<'_>) -> Result<Sourc
     .fetch_optional(pool)
     .await
     .map_err(refused_installation)?
-    .ok_or(UpdateError::Unattachable)
+    .ok_or(CreateError::Unattachable)
 }
 
-/// What an update changes; a field left `None` keeps its stored value.
+/// What an update changes; a field left `None` keeps its stored value, except
+/// that a config change moves a link derived from the stored config.
 /// `github_installation_id` is `Some(None)` to detach the installation.
+/// `instance` is the GitLab instance the caller last saw the source read
+/// from; the update is refused once it reads from another. A GitLab token
+/// sent without a config names it, so the token is never stored for an
+/// instance its sender did not see.
 #[derive(Default)]
 pub struct SourceChanges<'a> {
     pub name: Option<&'a str>,
@@ -273,28 +312,21 @@ pub struct SourceChanges<'a> {
     pub is_active: Option<bool>,
     pub github_installation_id: Option<Option<Uuid>>,
     pub credentials_encrypted: Option<&'a str>,
+    pub instance: Option<&'a str>,
 }
 
-#[derive(Debug, Error)]
-pub enum UpdateError {
-    #[error("The source does not exist in this workspace.")]
-    NotFound,
-    #[error("{UNATTACHABLE}")]
-    Unattachable,
-    #[error(transparent)]
-    Database(#[from] sqlx::Error),
-}
-
-fn refused_installation(error: sqlx::Error) -> UpdateError {
-    match &error {
+fn refused_installation(error: sqlx::Error) -> CreateError {
+    match error {
         sqlx::Error::Database(database) if database.is_foreign_key_violation() => {
-            UpdateError::Unattachable
+            CreateError::Unattachable
         }
-        _ => UpdateError::Database(error),
+        error => CreateError::Database(error),
     }
 }
 
-/// Apply every change to a source or none of them.
+/// Apply every change to a source or none of them, each judged against the
+/// row as it is locked for the write. A GitLab source holding a token moves
+/// to another instance only with a token entered for it.
 pub async fn update_source(
     pool: &PgPool,
     id: Uuid,
@@ -303,12 +335,29 @@ pub async fn update_source(
 ) -> Result<SourceRow, UpdateError> {
     let mut transaction = pool.begin().await?;
 
-    let mut current = update_fields(&mut *transaction, id, workspace_id, &changes)
+    let locked = lock_source(&mut *transaction, id, workspace_id)
         .await?
         .ok_or(UpdateError::NotFound)?;
+    if let Some(refusal) = instance_refusal(&locked, &changes) {
+        return Err(refusal);
+    }
+    let link = changes
+        .url
+        .map(ToString::to_string)
+        .or_else(|| relinked(&locked, &changes));
+
+    let mut current = update_fields(
+        &mut *transaction,
+        id,
+        workspace_id,
+        &changes,
+        link.as_deref(),
+    )
+    .await?
+    .ok_or(UpdateError::NotFound)?;
 
     if let Some(installation) = changes.github_installation_id {
-        // update_fields holds the row's lock, so no row here means the installation was refused.
+        // The row is locked, so no row here means the installation was refused.
         current = set_github_installation(&mut *transaction, id, workspace_id, installation)
             .await
             .map_err(refused_installation)?
@@ -325,11 +374,105 @@ pub async fn update_source(
     Ok(current)
 }
 
+async fn lock_source<'e>(
+    executor: impl PgExecutor<'e>,
+    id: Uuid,
+    workspace_id: Uuid,
+) -> DbResult<Option<SourceRow>> {
+    sqlx::query_as::<_, SourceRow>(
+        r#"
+        SELECT id, name, source_type, config, credentials_encrypted, description, url,
+               is_active, last_verified_at, last_error, created_at, updated_at, workspace_id,
+               github_installation_id
+        FROM sources
+        WHERE id = $1 AND workspace_id = $2
+        FOR NO KEY UPDATE
+        "#,
+    )
+    .bind(id)
+    .bind(workspace_id)
+    .fetch_optional(executor)
+    .await
+}
+
+fn instance_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    if stored.source_type != GITLAB {
+        return None;
+    }
+    unnamed_refusal(changes)
+        .or_else(|| moved_refusal(stored, changes))
+        .or_else(|| stored_token_refusal(stored, changes))
+}
+
+fn unnamed_refusal(changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    let unnamed = changes.credentials_encrypted.is_some()
+        && changes.config.is_none()
+        && changes.instance.is_none();
+    unnamed.then_some(UpdateError::UnnamedTokenInstance)
+}
+
+fn moved_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    let seen = token_instance(changes.instance?);
+    if let Err(error) = GitLabAdapter::check_instance(&seen) {
+        return Some(match error {
+            ContextError::InvalidSourceConfig(_) => UpdateError::UnreadableTokenInstance,
+            error => UpdateError::Adapter(error),
+        });
+    }
+    let expected = GitLabAdapter::instance_of(&seen).ok()?;
+    let current = GitLabAdapter::instance_of(&stored.config).ok()?;
+    (current != expected).then_some(UpdateError::InstanceMoved)
+}
+
+/// The config naming only `instance`, the GitLab instance a token is for
+fn token_instance(instance: &str) -> serde_json::Value {
+    serde_json::json!({ BASE_URL_FIELD: instance })
+}
+
+fn stored_token_refusal(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<UpdateError> {
+    if stored.credentials_encrypted.is_none() || changes.credentials_encrypted.is_some() {
+        return None;
+    }
+    let changed = changes.config.as_ref()?;
+    match (
+        GitLabAdapter::instance_of(&stored.config),
+        GitLabAdapter::instance_of(changed),
+    ) {
+        (Ok(before), Ok(after)) if before == after => None,
+        (Err(_), _) => Some(UpdateError::UnreadableInstanceNeedsToken),
+        _ => Some(UpdateError::InstanceNeedsToken),
+    }
+}
+
+/// The link a config change moves the source to, when its stored link is one
+/// its stored config derives, or it has none
+fn relinked(stored: &SourceRow, changes: &SourceChanges<'_>) -> Option<String> {
+    let config = changes.config.as_ref()?;
+    let link = stored.url.as_deref().filter(|link| !link.is_empty());
+    if link.is_some_and(|link| !derives(stored, link)) {
+        return None;
+    }
+    derived_link(&stored.source_type, config)
+}
+
+/// Whether `link` is the one the stored config derives, or the one released
+/// code derived from it
+fn derives(stored: &SourceRow, link: &str) -> bool {
+    let legacy = (stored.source_type == GITLAB)
+        .then(|| legacy_link(&stored.config))
+        .flatten();
+    [derived_link(&stored.source_type, &stored.config), legacy]
+        .into_iter()
+        .flatten()
+        .any(|derived| derived == link)
+}
+
 async fn update_fields<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
     changes: &SourceChanges<'_>,
+    link: Option<&str>,
 ) -> DbResult<Option<SourceRow>> {
     sqlx::query_as::<_, SourceRow>(
         r#"
@@ -351,7 +494,7 @@ async fn update_fields<'e>(
     .bind(changes.name)
     .bind(changes.config.as_ref())
     .bind(changes.description)
-    .bind(changes.url)
+    .bind(link)
     .bind(changes.is_active)
     .fetch_optional(executor)
     .await
@@ -394,7 +537,7 @@ pub async fn update_verification(
 }
 
 /// Store a personal access token, detaching any GitHub installation
-pub async fn update_credentials<'e>(
+async fn update_credentials<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
@@ -422,7 +565,7 @@ pub async fn update_credentials<'e>(
 /// Attach a GitHub installation, dropping any stored token, or detach one.
 /// An installation outside the workspace's organization, revoked or
 /// suspended, attaches nothing and returns no row.
-pub async fn set_github_installation<'e>(
+async fn set_github_installation<'e>(
     executor: impl PgExecutor<'e>,
     id: Uuid,
     workspace_id: Uuid,
@@ -978,7 +1121,7 @@ mod tests {
             .await;
 
             assert!(
-                matches!(created, Err(UpdateError::Unattachable)),
+                matches!(created, Err(CreateError::Unattachable)),
                 "{reason} installation must be refused, got {created:?}"
             );
             assert!(
@@ -988,6 +1131,152 @@ mod tests {
                     .is_empty(),
                 "{reason} installation created a source"
             );
+        }
+    }
+
+    async fn instance(pool: &PgPool, workspace_id: Uuid, host: &str) -> SourceRow {
+        create_source(
+            pool,
+            NewSource {
+                workspace_id,
+                name: &format!("project-{}", Uuid::new_v4()),
+                source_type: GITLAB,
+                config: serde_json::json!({ "project_id": "group/project", "host": host }),
+                description: None,
+                url: None,
+                credentials_encrypted: Some("ENC[v1:token]"),
+                github_installation_id: None,
+            },
+        )
+        .await
+        .expect("a source")
+    }
+
+    #[tokio::test]
+    async fn a_gitlab_source_holding_a_token_moves_instance_only_with_a_new_one() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let source = instance(&pool, installation.workspace, "https://first.example").await;
+        let moved =
+            serde_json::json!({ "project_id": "group/project", "host": "https://second.example" });
+
+        let refused = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                config: Some(moved.clone()),
+                ..SourceChanges::default()
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(refused, Err(UpdateError::InstanceNeedsToken)),
+            "the stored token must not follow the source, got {refused:?}"
+        );
+        let unchanged = stored(&pool, &source).await;
+        assert_eq!(unchanged.config, source.config);
+        assert_eq!(unchanged.updated_at, source.updated_at);
+
+        let moved_with_token = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                config: Some(moved.clone()),
+                credentials_encrypted: Some("ENC[v1:other]"),
+                ..SourceChanges::default()
+            },
+        )
+        .await
+        .expect("a new token moves the source");
+        assert_eq!(moved_with_token.config, moved);
+        assert_eq!(
+            moved_with_token.credentials_encrypted.as_deref(),
+            Some("ENC[v1:other]")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gitlab_token_sent_without_a_config_names_its_instance() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let source = instance(&pool, installation.workspace, "https://first.example").await;
+
+        let refused = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                credentials_encrypted: Some("ENC[v1:other]"),
+                ..SourceChanges::default()
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(refused, Err(UpdateError::UnnamedTokenInstance)),
+            "a token naming no instance must be refused, got {refused:?}"
+        );
+        let unchanged = stored(&pool, &source).await;
+        assert_eq!(
+            unchanged.credentials_encrypted,
+            source.credentials_encrypted
+        );
+        assert_eq!(unchanged.updated_at, source.updated_at);
+
+        let named = update_source(
+            &pool,
+            source.id,
+            installation.workspace,
+            SourceChanges {
+                credentials_encrypted: Some("ENC[v1:other]"),
+                instance: Some("https://first.example"),
+                ..SourceChanges::default()
+            },
+        )
+        .await
+        .expect("a token naming the source's instance is stored");
+        assert_eq!(
+            named.credentials_encrypted.as_deref(),
+            Some("ENC[v1:other]")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_naming_an_instance_no_source_reads_from_is_refused_unstored() {
+        let pool = testing::pool().await;
+        let installation = testing::installation(&pool).await;
+        let source = instance(&pool, installation.workspace, "https://first.example").await;
+
+        for named in [
+            "not a url",
+            "http://first.example",
+            "https://first.example/#fragment",
+        ] {
+            let refused = update_source(
+                &pool,
+                source.id,
+                installation.workspace,
+                SourceChanges {
+                    credentials_encrypted: Some("ENC[v1:other]"),
+                    instance: Some(named),
+                    ..SourceChanges::default()
+                },
+            )
+            .await;
+
+            assert!(
+                matches!(refused, Err(UpdateError::UnreadableTokenInstance)),
+                "a token for {named} must be refused, got {refused:?}"
+            );
+            let unchanged = stored(&pool, &source).await;
+            assert_eq!(
+                unchanged.credentials_encrypted,
+                source.credentials_encrypted
+            );
+            assert_eq!(unchanged.updated_at, source.updated_at);
         }
     }
 
@@ -1134,7 +1423,7 @@ mod tests {
             NewSource {
                 workspace_id,
                 name: &unique_name,
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo"}),
                 description: Some("Test description"),
                 url: Some("https://github.com/test/repo"),
@@ -1151,7 +1440,7 @@ mod tests {
             "Source should have workspace_id set"
         );
         assert_eq!(source.name, unique_name);
-        assert_eq!(source.source_type, "github");
+        assert_eq!(source.source_type, GITHUB);
     }
 
     #[tokio::test]
@@ -1182,7 +1471,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &format!("Source 1 {}", unique_id),
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo1"}),
                 description: None,
                 url: None,
@@ -1199,7 +1488,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id2,
                 name: &format!("Source 2 {}", unique_id),
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo2"}),
                 description: None,
                 url: None,
@@ -1248,7 +1537,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &unique_name,
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo"}),
                 description: None,
                 url: None,
@@ -1306,7 +1595,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &unique_name,
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo"}),
                 description: None,
                 url: None,
@@ -1377,7 +1666,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &unique_name,
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo"}),
                 description: None,
                 url: None,
@@ -1441,7 +1730,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id1,
                 name: &format!("Source 1 {}", unique_id),
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo1"}),
                 description: None,
                 url: None,
@@ -1457,7 +1746,7 @@ mod tests {
             NewSource {
                 workspace_id: workspace_id2,
                 name: &format!("Source 2 {}", unique_id),
-                source_type: "github",
+                source_type: GITHUB,
                 config: serde_json::json!({"repo": "test/repo2"}),
                 description: None,
                 url: None,
