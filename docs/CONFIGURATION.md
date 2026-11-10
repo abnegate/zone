@@ -1571,8 +1571,8 @@ What stands in the way:
   while the child runs. The CLIs, Zone's shell tools, `COMFYUI_TRAIN_COMMAND`,
   and the `rg`, `git`, `ffmpeg` and `ffprobe` it runs start from an
   allowlisted environment, without those secrets, and so do organization
-  stdio MCP servers, plus their own `env`. Instance-layer stdio MCP servers
-  start from the server's full environment, so they carry them.
+  stdio MCP servers, plus their own `environment`. Instance-layer stdio MCP
+  servers start from the server's full environment, so they carry them.
 - Zone's file tools, `read_file`, `list_files`, `search_code`, `write_file`
   and `apply_patch`, refuse any path under the agent state directory and any
   process's `/proc/<pid>` entry, `/proc/self` included, whatever the chat's
@@ -2085,13 +2085,19 @@ Servers come from two layers:
 - The **instance layer** is what the variables below configure: `ZONE_MCP_SERVERS`, else `ZONE_MCP_CONFIG`, else `~/.zone/mcp.json`, plus the magents fallback. Settings lists it read-only, and it can't be overridden per workspace.
 - The **organization layer** is managed by organization admins in Settings, as described under [Organization-managed servers](#organization-managed-servers).
 
-Chat turns attach both layers, whichever provider runs them, because Zone serves every MCP tool itself. `zone run` attaches only the instance layer.
+Chats and tasks attach both layers, whichever provider runs them, because Zone serves every MCP tool itself. A task attaches them only while the member who started it can still write to the workspace. `zone run` attaches only the instance layer.
 
 Instance stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat them as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
 
+An instance entry with only a `url` is skipped: the instance layer runs stdio servers only.
+
+Every member of every organization sees the instance servers in Settings: each server's name, its `command`, and the names of its `env` variables and headers. The arguments are never shown, and a URL is shown as its origin only. Pass credentials through `env` all the same, not in `args` or a URL.
+
+Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
+
 ### `ZONE_MCP_ENABLED`
 - **Default**: `true`
-- **Description**: Master switch. `false` / `0` / `off` skips every MCP server.
+- **Description**: Master switch for both layers. `false` / `0` / `off` skips every instance server, and starts or connects no organization server: each one then shows `failed` with the reason.
 
 ### `ZONE_MCP_AUTO_CONNECT`
 - **Default**: `true`
@@ -2123,34 +2129,36 @@ Instance stdio servers inherit the Zone process environment, then overlay any `e
 
 ### `ZONE_MCP_COMMANDS`
 - **Default**: `false`
-- **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on` turns it on. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `env`, never the server's full environment, but it still runs as the server's user, so turn this on only when you trust every organization admin to run commands on the host. Instance-layer servers are not affected.
-
-A server entry with only a `url` (HTTP transport) is skipped — Zone speaks stdio today.
-
-Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
+- **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on` turns it on. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `environment`, never the server's full environment, but it still runs as the server's user, so turn this on only when you trust every organization admin to run commands on the host. Instance-layer servers are not affected.
 
 ### Organization-managed servers
 
 Organization admins and owners add, edit, reconnect and delete servers in **Settings → Organization → MCP servers**; members see the list read-only. A server is `stdio`, a `command` with `arguments` that needs `ZONE_MCP_COMMANDS`, or `http`, streamable HTTP at a `url`. `sse` is refused; use streamable HTTP. A name is at most 32 letters, digits, `-` and `_`, with no `__` and no trailing `_`. It must be unique in the organization and must not match an instance server: a clash returns 409. `tools` limits which of the server's tools are offered; `null` offers them all.
 
-In **Settings → Workspace → MCP servers**, a workspace admin or owner sets each organization server to Inherit, On or Off. `effective` is the outcome: the server is enabled and the workspace has not turned it off. Instance servers can't be overridden per workspace.
+The API's field names are its own, not the `mcpServers` ones: a server's variables are `environment` and its arguments are `arguments`, where an instance document says `env` and `args`. The API ignores a key it does not know, so `env` or `args` in a request is dropped without an error.
+
+In **Settings → Workspace → MCP servers**, a workspace admin or owner sets each organization server to Inherit, On or Off. A workspace can only turn a server off: On does not enable a server the organization has turned off. `effective` is the outcome: the server is enabled and the workspace has not turned it off. Instance servers can't be overridden per workspace.
 
 Each server shows one status:
 
 - `connected`: `available_tools` lists the tools it advertised.
-- `connecting`: after a create, a change that needs a reconnect, or a reconnect request.
+- `connecting`: Zone is starting it, after a create, a change that needs a reconnect, or a reconnect request.
 - `failed`: `error` says why.
 - `disabled`: the server is turned off.
 
 HTTP servers are stored and validated, but this build does not connect them yet: they show `failed` with "Streamable HTTP servers are not connected by this build yet".
 
+Each server process runs its own copy of an organization's servers and checks it against the database whenever it lists them or runs a turn for that organization. With several replicas, a change made through one reaches the others the next time they do either, and deleting an organization stops its servers on the replica that served the request.
+
 Rules for every organization server:
 
 - Authentication is static headers only, a bearer token in `Authorization` included. OAuth is not supported.
 - Put credentials in headers, never in the URL: query strings are stored, returned and audited as entered.
-- A URL is `http` or `https` with a host. Private and loopback addresses are allowed, so a server on the host or the LAN works. Cloud metadata and link-local addresses, credentials embedded in the URL, fragments and other schemes are refused.
-- `${` is refused in every field, because Zone would expand it from its own environment.
-- `environment` and `headers` values are sealed under `ENCRYPTION_KEY`. They are never returned, logged or audited: the API lists each name with `has_value` only.
+- A URL is `http` or `https` with a host. Private and loopback addresses are allowed, so a server on the host or the LAN works. Cloud metadata and link-local addresses, credentials embedded in the URL, fragments and other schemes are refused. The URL is stored as the parser normalises it.
+- A `command` has no whitespace before or after it.
+- Header names are unique whatever their case, and a header value holds no line break or other control character. The headers the connection sets itself are refused: `Accept`, `Content-Type`, `Content-Length`, `Host`, `Connection`, `Keep-Alive`, `Proxy-Authorization`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Last-Event-Id`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and any `Mcp-Param-` header.
+- `${` is refused in every field, because Zone would expand it from its own environment. A NUL character is refused too.
+- `environment` and `headers` values are sealed under `ENCRYPTION_KEY`. They are never returned, logged or audited: the API lists each name with `has_value` only. If a server's stored values do not open under the key, listing the servers fails and the server log names that server's id: delete it by id and add it again.
 
 | Method | Path | Who |
 |---|---|---|
@@ -2163,7 +2171,9 @@ Rules for every organization server:
 | GET | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace member |
 | PUT | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace admin/owner |
 
-PUT is sparse and can't change `transport`. In `environment` and `headers` on PUT, a `null` value keeps the stored value and an omitted name is removed. On the workspace PUT, `null` clears the override.
+PUT is sparse and can't change `transport`. A field that already holds the value sent is not written, and a PUT that changes nothing leaves `updated_at` as it was. In `environment` and `headers` on PUT, a `null` value keeps the stored value and an omitted name is removed. On the workspace PUT, `null` clears the override.
+
+POST `/connection` answers 202 with the server as it is then: `connecting` when Zone can start it, `disabled` when it is turned off, and `failed` with the reason otherwise.
 
 ---
 

@@ -301,6 +301,8 @@ The chart is configured for high availability by default:
 
 Organizations on the Claude Code or Codex provider need a single server replica instead; see [Coding Agent Sign-ins](#coding-agent-sign-ins).
 
+Each server replica runs its own copy of an organization's MCP servers. A change made through one replica reaches the others the next time they list that organization's servers or run a turn for it.
+
 ## Coding Agent Sign-ins
 
 zone-server can run the claude and codex CLIs its image ships for organizations that choose the Claude Code or Codex provider, as described under Model Backend in [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md). The chart prepares the server pod for them:
