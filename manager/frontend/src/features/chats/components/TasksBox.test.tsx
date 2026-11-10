@@ -52,6 +52,22 @@ const NOTED: ChatTask = {
   run: null,
 };
 
+const COMPLETED: ChatTask = {
+  ...NOTED,
+  id: 'task-4',
+  status: 'complete',
+  href: '/tasks?id=task-4',
+};
+
+const PAUSED: ChatTask = { ...NOTED, id: 'task-5', status: 'paused', href: '/tasks?id=task-5' };
+
+const CANCELLED: ChatTask = {
+  ...NOTED,
+  id: 'task-6',
+  status: 'cancelled',
+  href: '/tasks?id=task-6',
+};
+
 const COLLAPSED_KEY = 'zone:chat-panel:user-1:tasks';
 
 function tasks(listed: ChatTask[], error: string | null = null): ChatTasks {
@@ -125,6 +141,17 @@ describe('TasksBox', () => {
     const row = screen.getByRole('listitem');
     expect(within(row).getByText('Created')).toBeInTheDocument();
     expect(row.querySelector('.chat-task-meta')).toBeNull();
+  });
+
+  it('names a finished, paused or cancelled task the way the board does', () => {
+    renderBox(tasks([COMPLETED, PAUSED, CANCELLED]));
+
+    const rows = screen.getAllByRole('listitem');
+    expect(rows.map((row) => row.querySelector('.chat-task-status')?.textContent)).toEqual([
+      'Completed',
+      'Paused',
+      'Cancelled',
+    ]);
   });
 
   it('opens the task when its row is chosen', () => {
