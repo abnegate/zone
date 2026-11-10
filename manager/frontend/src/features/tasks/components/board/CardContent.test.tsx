@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
+import { pressKey } from '../../../../test/board';
 import type { BoardActions, Task, TaskStatus } from '../../types';
 
 const menus = new Map<string, number>();
@@ -69,13 +70,6 @@ const ACTIONS: BoardActions = {
   move: mock(() => Promise.resolve(true)),
 };
 
-async function press(target: HTMLElement, code: string) {
-  await act(async () => {
-    fireEvent.keyDown(target, { code, key: code === 'Space' ? ' ' : code });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
-}
-
 describe('CardContent', () => {
   it('does not render again while a card is carried across the board', async () => {
     render(
@@ -93,10 +87,10 @@ describe('CardContent', () => {
 
     const handle = screen.getByRole('button', { name: 'Move Write the spec' });
     handle.focus();
-    await press(handle, 'Space');
+    await pressKey(handle, 'Space');
     await screen.findByText('Picked up Write the spec, in Planned.');
-    await press(handle, 'ArrowRight');
-    await press(handle, 'Escape');
+    await pressKey(handle, 'ArrowRight');
+    await pressKey(handle, 'Escape');
     await screen.findByText('Moving Write the spec cancelled. It stays in Planned.');
 
     expect(menus).toEqual(rendered);

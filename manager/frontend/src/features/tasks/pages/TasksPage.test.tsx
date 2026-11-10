@@ -1,14 +1,15 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
+import { layOutBoard, pressKey } from '../../../test/board';
 import { clientModule } from '../../../test/client';
 import { chooseMenuItem, openMenu } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
-import { STAGE_IDS, type StageId, TASK_STATUSES } from '../status';
+import { STAGE_IDS, TASK_STATUSES } from '../status';
 import type { CreateTaskRequest, Task, TaskRun, TaskRunLog, TaskStatus } from '../types';
 import TasksPage from './TasksPage';
 
@@ -1010,6 +1011,7 @@ describe('TasksPage', () => {
       const neighbour = { ...mockTasks[0], id: 'task-3', title: 'Write the docs' };
       serve([...mockTasks, neighbour]);
       const dialog = await askToDelete();
+      const loads = mockGetTasks.mock.calls.length;
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Delete task' }));
 
@@ -1018,7 +1020,10 @@ describe('TasksPage', () => {
       });
       expect(screen.queryByRole('button', { name: 'Implement login' })).not.toBeInTheDocument();
       await waitFor(() => expect(focusedTitle()).toBe('task-3'));
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await waitFor(() => expect(mockGetTasks.mock.calls.length).toBeGreaterThan(loads));
+      await act(async () => {
+        await mockGetTasks.mock.results[loads].value;
+      });
       expect(focusedTitle()).toBe('task-3');
     });
 
@@ -1546,75 +1551,23 @@ describe('TasksPage', () => {
   });
 
   describe('dragging', () => {
-    const COLUMN_STRIDE = 300;
-    const COLUMN_WIDTH = 280;
-    const COLUMN_HEIGHT = 600;
-    const CARD_INSET = 10;
-    const CARD_TOP = 40;
-    const CARD_STRIDE = 80;
-    const CARD_HEIGHT = 72;
     const refusal = 'Task has an active run or is no longer available';
-    let measure: ReturnType<typeof spyOn>;
-
-    function box(left: number, top: number, width: number, height: number): DOMRect {
-      return {
-        x: left,
-        y: top,
-        left,
-        top,
-        right: left + width,
-        bottom: top + height,
-        width,
-        height,
-      } as DOMRect;
-    }
-
-    function overlay(element: HTMLElement): boolean {
-      return (
-        element.classList.contains('task-card-overlay') ||
-        element.firstElementChild?.classList.contains('task-card-overlay') === true
-      );
-    }
+    let restore: () => void = () => {};
 
     beforeEach(() => {
-      const original = HTMLElement.prototype.getBoundingClientRect;
-      measure = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
-        this: HTMLElement
-      ) {
-        const card = overlay(this)
-          ? document.querySelector<HTMLElement>('.task-card-dragging')
-          : this.closest<HTMLElement>('.task-card');
-        const stage = (card ?? this).closest<HTMLElement>('[data-stage]');
-        if (!stage) return original.call(this);
-        const left = STAGE_IDS.indexOf(stage.dataset.stage as StageId) * COLUMN_STRIDE;
-        if (!card) return box(left, 0, COLUMN_WIDTH, COLUMN_HEIGHT);
-        const position = Array.from(stage.querySelectorAll('.task-card')).indexOf(card);
-        return box(
-          left + CARD_INSET,
-          CARD_TOP + position * CARD_STRIDE,
-          COLUMN_WIDTH - 2 * CARD_INSET,
-          CARD_HEIGHT
-        );
-      });
+      restore = layOutBoard();
     });
 
     afterEach(() => {
-      measure.mockRestore();
+      restore();
     });
-
-    async function press(target: HTMLElement, code: string) {
-      await act(async () => {
-        fireEvent.keyDown(target, { code, key: code === 'Space' ? ' ' : code });
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
-    }
 
     async function dragRight(title: string) {
       const handle = await screen.findByRole('button', { name: `Move ${title}` });
       handle.focus();
-      await press(handle, 'Space');
-      await press(handle, 'ArrowRight');
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
+      await pressKey(handle, 'ArrowRight');
+      await pressKey(handle, 'Space');
     }
 
     it('moves a paused task to In review by keyboard with a status-only update', async () => {

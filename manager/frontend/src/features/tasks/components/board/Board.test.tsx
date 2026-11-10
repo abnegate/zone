@@ -1,19 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, mock, setSystemTime, spyOn } from 'bun:test';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { useMemo, useState } from 'react';
+import { layOutBoard, pressKey } from '../../../../test/board';
 import { STAGES } from '../../status';
 import type { BoardActions, Task, TaskStatus } from '../../types';
 import { Board } from './Board';
 import { View } from './View';
-
-const COLUMN_WIDTH = 280;
-const COLUMN_STEP = 300;
-const COLUMN_HEIGHT = 600;
-const CARD_INSET = 10;
-const CARD_HEIGHT = 80;
-const CARD_STEP = 90;
-const HEADER_HEIGHT = 60;
-const SERVER_DELAY_MS = 50;
 
 const PROJECTS = new Map([
   ['zone', 'Zone'],
@@ -84,11 +76,7 @@ function renderBoard(handlers: BoardActions = actions()) {
   return handlers;
 }
 
-function pause() {
-  return new Promise((resolve) => setTimeout(resolve, SERVER_DELAY_MS));
-}
-
-function MovingBoard({ refuse = false }: { refuse?: boolean }) {
+function MovingBoard({ answer }: { answer: Promise<boolean> }) {
   const [tasks, setTasks] = useState(TASKS);
   const [view] = useState(() => new View());
   const handlers = useMemo<BoardActions>(() => {
@@ -97,14 +85,13 @@ function MovingBoard({ refuse = false }: { refuse?: boolean }) {
     return {
       ...actions(),
       move: async (moved, status) => {
-        await pause();
         place(moved.id, status);
-        await pause();
-        if (refuse) place(moved.id, moved.status);
-        return !refuse;
+        const accepted = await answer;
+        if (!accepted) place(moved.id, moved.status);
+        return accepted;
       },
     };
-  }, [refuse]);
+  }, [answer]);
   return (
     <Board
       tasks={tasks}
@@ -191,61 +178,18 @@ describe('Board', () => {
   });
 
   describe('dragging', () => {
-    let measure: ReturnType<typeof spyOn>;
-
-    function box(left: number, top: number, width: number, height: number): DOMRect {
-      return {
-        x: left,
-        y: top,
-        left,
-        top,
-        width,
-        height,
-        right: left + width,
-        bottom: top + height,
-        toJSON: () => undefined,
-      } as DOMRect;
-    }
+    let restore: () => void = () => {};
 
     beforeEach(() => {
-      const original = HTMLElement.prototype.getBoundingClientRect;
-      measure = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
-        this: HTMLElement
-      ) {
-        const overlaid =
-          this.closest('.task-card-overlay') ?? this.querySelector('.task-card-overlay');
-        const item = overlaid
-          ? document.querySelector<HTMLElement>('.board .task-card-dragging')
-          : this.closest<HTMLElement>('.board .task-card');
-        const section = (item ?? this).closest<HTMLElement>('[data-stage]');
-        if (!section?.parentElement) return original.call(this);
-        const left =
-          Array.from(section.parentElement.querySelectorAll('[data-stage]')).indexOf(section) *
-          COLUMN_STEP;
-        if (!item) return box(left, 0, COLUMN_WIDTH, COLUMN_HEIGHT);
-        const index = Array.from(section.querySelectorAll('.task-card')).indexOf(item);
-        return box(
-          left + CARD_INSET,
-          HEADER_HEIGHT + index * CARD_STEP,
-          COLUMN_WIDTH - 2 * CARD_INSET,
-          CARD_HEIGHT
-        );
-      });
+      restore = layOutBoard();
     });
 
     afterEach(() => {
-      measure.mockRestore();
+      restore();
     });
 
     function grip(title: string): HTMLElement {
       return screen.getByRole('button', { name: `Move ${title}` });
-    }
-
-    async function press(target: HTMLElement, code: string) {
-      await act(async () => {
-        fireEvent.keyDown(target, { code, key: code === 'Space' ? ' ' : code });
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      });
     }
 
     function announced(text: string) {
@@ -257,11 +201,11 @@ describe('Board', () => {
       const handle = grip('Write the spec');
       handle.focus();
 
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced('Picked up Write the spec, in Planned.');
-      await press(handle, 'ArrowRight');
+      await pressKey(handle, 'ArrowRight');
       await announced('Write the spec is over In progress.');
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced('Write the spec moved to In progress.');
 
       expect(handlers.move).toHaveBeenCalledTimes(1);
@@ -274,11 +218,11 @@ describe('Board', () => {
       handle.focus();
       expect(board()).not.toHaveAttribute('data-dragging');
 
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced('Picked up Write the spec, in Planned.');
       expect(board()).toHaveAttribute('data-dragging');
 
-      await press(handle, 'Escape');
+      await pressKey(handle, 'Escape');
       await announced('Moving Write the spec cancelled. It stays in Planned.');
       expect(board()).not.toHaveAttribute('data-dragging');
     });
@@ -353,12 +297,12 @@ describe('Board', () => {
             )
           ].value;
 
-        await press(handle, 'Space');
+        await pressKey(handle, 'Space');
         await announced('Picked up Write the spec, in Planned.');
         expect(stopped).toHaveBeenCalledWith(resting);
         expect(ticks()).toHaveLength(1);
 
-        await press(handle, 'Escape');
+        await pressKey(handle, 'Escape');
         await announced('Moving Write the spec cancelled. It stays in Planned.');
         expect(ticks()).toHaveLength(2);
         stopped.mockRestore();
@@ -370,11 +314,11 @@ describe('Board', () => {
       const handle = grip('Ship it');
       handle.focus();
 
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced('Picked up Ship it, in In review.');
-      for (let step = 0; step < 4; step += 1) await press(handle, 'ArrowLeft');
+      for (let step = 0; step < 4; step += 1) await pressKey(handle, 'ArrowLeft');
       await announced('Ship it is over Planned.');
-      await press(handle, 'Enter');
+      await pressKey(handle, 'Enter');
       await announced('Ship it moved to Planned.');
 
       expect(handlers.move).toHaveBeenCalledWith(TASKS[3], 'created');
@@ -385,9 +329,9 @@ describe('Board', () => {
       const handle = grip('Queue the build');
       handle.focus();
 
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced('Picked up Queue the build, in Planned.');
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced('Queue the build stays in Planned.');
 
       expect(handlers.move).not.toHaveBeenCalled();
@@ -398,10 +342,10 @@ describe('Board', () => {
       const handle = grip('Stop the old table');
       handle.focus();
 
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced('Picked up Stop the old table, in Cancelled.');
-      await press(handle, 'ArrowRight');
-      await press(handle, 'Space');
+      await pressKey(handle, 'ArrowRight');
+      await pressKey(handle, 'Space');
       await announced('Stop the old table stays in Cancelled.');
 
       expect(handlers.move).not.toHaveBeenCalled();
@@ -410,58 +354,42 @@ describe('Board', () => {
     async function carryRight(title: string) {
       const handle = grip(title);
       handle.focus();
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced(`Picked up ${title}, in Planned.`);
-      await press(handle, 'ArrowRight');
+      await pressKey(handle, 'ArrowRight');
       await announced(`${title} is over In progress.`);
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced(`${title} moved to In progress.`);
     }
 
     it('keeps focus on the grip of a card that moved to another column', async () => {
-      render(<MovingBoard />);
+      render(<MovingBoard answer={Promise.resolve(true)} />);
 
       await carryRight('Write the spec');
 
-      await waitFor(() => {
-        expect(within(column('In progress')).getByText('Write the spec')).toBeInTheDocument();
-      });
-      await waitFor(() => expect(document.activeElement).toBe(grip('Write the spec')));
-    });
-
-    it('keeps focus on the grip of a card whose move was refused', async () => {
-      render(<MovingBoard refuse />);
-
-      await carryRight('Write the spec');
-
-      await waitFor(() => {
-        expect(within(column('In progress')).getByText('Write the spec')).toBeInTheDocument();
-      });
-      await waitFor(() => expect(document.activeElement).toBe(grip('Write the spec')));
-      await waitFor(() => {
-        expect(within(column('Planned')).getByText('Write the spec')).toBeInTheDocument();
-      });
-      await waitFor(() => expect(document.activeElement).toBe(grip('Write the spec')));
-    });
-
-    it('says when a move was refused and where the card is again', async () => {
-      render(<MovingBoard refuse />);
-
-      await carryRight('Write the spec');
-
-      await announced('Write the spec could not be moved; back in Planned.');
-      expect(within(column('Planned')).getByText('Write the spec')).toBeInTheDocument();
-    });
-
-    it('says nothing more once a move is accepted', async () => {
-      render(<MovingBoard />);
-
-      await carryRight('Write the spec');
-
-      await waitFor(() => {
-        expect(within(column('In progress')).getByText('Write the spec')).toBeInTheDocument();
-      });
+      expect(within(column('In progress')).getByText('Write the spec')).toBeInTheDocument();
+      expect(document.activeElement).toBe(grip('Write the spec'));
       expect(screen.getByText('Write the spec moved to In progress.')).toBeInTheDocument();
+    });
+
+    it('keeps focus on the grip of a card whose move was refused, and says it is back', async () => {
+      let refuse: () => void = () => {};
+      const answer = new Promise<boolean>((resolve) => {
+        refuse = () => resolve(false);
+      });
+      render(<MovingBoard answer={answer} />);
+
+      await carryRight('Write the spec');
+      expect(within(column('In progress')).getByText('Write the spec')).toBeInTheDocument();
+      expect(document.activeElement).toBe(grip('Write the spec'));
+
+      await act(async () => {
+        refuse();
+      });
+
+      expect(within(column('Planned')).getByText('Write the spec')).toBeInTheDocument();
+      expect(document.activeElement).toBe(grip('Write the spec'));
+      await announced('Write the spec could not be moved; back in Planned.');
     });
 
     it('puts a card back when the move is cancelled', async () => {
@@ -469,11 +397,11 @@ describe('Board', () => {
       const handle = grip('Build the board');
       handle.focus();
 
-      await press(handle, 'Space');
+      await pressKey(handle, 'Space');
       await announced('Picked up Build the board, in In progress.');
-      await press(handle, 'ArrowRight');
+      await pressKey(handle, 'ArrowRight');
       await announced('Build the board is over Blocked.');
-      await press(handle, 'Escape');
+      await pressKey(handle, 'Escape');
       await announced('Moving Build the board cancelled. It stays in In progress.');
 
       expect(handlers.move).not.toHaveBeenCalled();
