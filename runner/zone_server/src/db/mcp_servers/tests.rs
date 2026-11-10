@@ -830,6 +830,45 @@ async fn every_real_change_moves_updated_at() {
 }
 
 #[tokio::test]
+async fn a_change_moves_updated_at_past_a_stored_value_ahead_of_the_clock() {
+    let fixture = tenant().await;
+    let created = fixture.create(http("docs")).await;
+    let ahead: DateTime<Utc> = sqlx::query_scalar(
+        "UPDATE mcp_servers SET updated_at = now() + interval '1 hour' WHERE id = $1 \
+         RETURNING updated_at",
+    )
+    .bind(created.id)
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("the stored revision is moved ahead");
+
+    let updated = fixture
+        .update(
+            created.id,
+            McpServerChanges {
+                enabled: Some(false),
+                ..McpServerChanges::default()
+            },
+        )
+        .await
+        .expect("an admin turns the server off");
+
+    assert!(
+        updated.updated_at > ahead,
+        "{} did not move past {ahead}",
+        updated.updated_at
+    );
+    assert_eq!(
+        updated.updated_at - ahead,
+        chrono::Duration::microseconds(1)
+    );
+    assert_eq!(
+        fixture.read(created.id).await.updated_at,
+        updated.updated_at
+    );
+}
+
+#[tokio::test]
 async fn a_change_beside_repeated_secrets_does_not_reseal_them() {
     let fixture = tenant().await;
     let created = fixture.create(http("docs")).await;

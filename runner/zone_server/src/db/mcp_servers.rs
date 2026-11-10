@@ -32,6 +32,7 @@ const NAME_CHECK: &str = "mcp_servers_name_check";
 const TRANSPORT_CHECK: &str = "mcp_servers_transport_check";
 const TARGET_CHECK: &str = "mcp_servers_target_check";
 const CHECK_VIOLATION: &str = "23514";
+const REVISED: &str = "updated_at = GREATEST(now(), updated_at + interval '1 microsecond')";
 
 const ORGANIZATION_NOT_FOUND: &str = "Organization not found";
 const WORKSPACE_NOT_FOUND: &str = "Workspace not found";
@@ -485,7 +486,7 @@ pub async fn update_authorized(
             .push("secrets = ")
             .push_bind_unseparated(seal(&secrets, key)?);
     }
-    assignments.push("updated_at = now()");
+    assignments.push(REVISED);
     query
         .push(" WHERE organization_id = ")
         .push_bind(organization)
