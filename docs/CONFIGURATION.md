@@ -2091,13 +2091,15 @@ Instance stdio servers inherit the Zone process environment, then overlay any `e
 
 An instance entry with only a `url` is skipped: the instance layer runs stdio servers only.
 
+Zone reads the instance configuration once per process, the first time Settings or a turn needs it. After changing `ZONE_MCP_SERVERS`, `ZONE_MCP_CONFIG` or `~/.zone/mcp.json`, restart the server: until then neither Settings nor a turn sees the change.
+
 Every member of every organization sees the instance servers in Settings: each server's name, its `command`, and the names of its `env` variables and headers. The arguments are never shown, and a URL is shown as its origin only. Pass credentials through `env` all the same, not in `args` or a URL.
 
 Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
 
 ### `ZONE_MCP_ENABLED`
 - **Default**: `true`
-- **Description**: Master switch for both layers. `false` / `0` / `off` skips every instance server, and starts or connects no organization server: each one then shows `failed` with the reason.
+- **Description**: Master switch for both layers. `false` / `0` / `off` skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
 
 ### `ZONE_MCP_AUTO_CONNECT`
 - **Default**: `true`
@@ -2148,7 +2150,9 @@ Each server shows one status:
 
 HTTP servers are stored and validated, but this build does not connect them yet: they show `failed` with "Streamable HTTP servers are not connected by this build yet".
 
-Each server process runs its own copy of an organization's servers and checks it against the database whenever it lists them or runs a turn for that organization. With several replicas, a change made through one reaches the others the next time they do either, and deleting an organization stops its servers on the replica that served the request.
+Each server process runs its own copy of an organization's servers and checks it against the database whenever it lists them or runs a turn for that organization. With several replicas, a change made through one reaches the others the next time they do either. Deleting an organization stops its servers on the replica that served the request; another replica keeps them running until it restarts.
+
+A turn that starts while one of its organization's servers is still connecting, after a create, an edit or a reconnect, waits for it rather than running without its tools. Each connect is given at most 30 seconds.
 
 Rules for every organization server:
 
@@ -2156,9 +2160,10 @@ Rules for every organization server:
 - Put credentials in headers, never in the URL: query strings are stored, returned and audited as entered.
 - A URL is `http` or `https` with a host. Private and loopback addresses are allowed, so a server on the host or the LAN works. Cloud metadata and link-local addresses, credentials embedded in the URL, fragments and other schemes are refused. The URL is stored as the parser normalises it.
 - A `command` has no whitespace before or after it.
+- A `stdio` server takes `environment` and refuses `url` and `headers`. An `http` server takes `headers` and refuses `command`, `arguments` and `environment`.
 - Header names are unique whatever their case, and a header value holds no line break or other control character. The headers the connection sets itself are refused: `Accept`, `Content-Type`, `Content-Length`, `Host`, `Connection`, `Keep-Alive`, `Proxy-Authorization`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Last-Event-Id`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and any `Mcp-Param-` header.
 - `${` is refused in every field, because Zone would expand it from its own environment. A NUL character is refused too.
-- `environment` and `headers` values are sealed under `ENCRYPTION_KEY`. They are never returned, logged or audited: the API lists each name with `has_value` only. If a server's stored values do not open under the key, listing the servers fails and the server log names that server's id: delete it by id and add it again.
+- `environment` and `headers` values are sealed under `ENCRYPTION_KEY`. They are never returned, logged or audited: the API lists each name with `has_value` only. If a server's stored values do not open under the key, listing the servers fails and the server log names that server's id: delete it by id and add it again. Until then chats and tasks run with the organization's other servers.
 
 | Method | Path | Who |
 |---|---|---|
@@ -2171,7 +2176,7 @@ Rules for every organization server:
 | GET | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace member |
 | PUT | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace admin/owner |
 
-PUT is sparse and can't change `transport`. A field that already holds the value sent is not written, and a PUT that changes nothing leaves `updated_at` as it was. In `environment` and `headers` on PUT, a `null` value keeps the stored value and an omitted name is removed. On the workspace PUT, `null` clears the override.
+PUT is sparse and can't change `transport`. A field that already holds the value sent is not written, and a PUT that changes nothing leaves `updated_at` as it was. A change to `tools` alone leaves a running server as it is; any other change stops it and, while it is enabled, starts it again. In `environment` and `headers` on PUT, a `null` value keeps the stored value and an omitted name is removed. On the workspace PUT, `null` clears the override.
 
 POST `/connection` answers 202 with the server as it is then: `connecting` when Zone can start it, `disabled` when it is turned off, and `failed` with the reason otherwise.
 
