@@ -1,19 +1,15 @@
 import { Alert, Button, EmptyState } from '@zone/ui';
-import { useState } from 'react';
-import { Source } from './constants';
+import { useId, useState } from 'react';
+import { messageOf } from './failure';
 import { useWorkspaceMcpServers } from './hooks';
+import { keyOf } from './key';
 import { type Override, overrideValue } from './override';
-import type { WorkspaceMcpServer } from './types';
 import { WorkspaceMcpServerRow } from './WorkspaceMcpServerRow';
 import './WorkspaceMcpServersSection.css';
 
 const UPDATE_FAILED = 'Could not update MCP servers.';
 
 const NOTHING_PENDING: ReadonlySet<string> = new Set();
-
-function keyOf(server: WorkspaceMcpServer): string {
-  return server.id ?? `${Source.Instance}:${server.name}`;
-}
 
 function without(pending: ReadonlySet<string>, id: string): ReadonlySet<string> {
   const next = new Set(pending);
@@ -32,7 +28,8 @@ export function WorkspaceMcpServersSection({
   workspaceId,
   editable,
 }: WorkspaceMcpServersSectionProps) {
-  const { servers, loading, fetching, error, refresh, update } = useWorkspaceMcpServers(
+  const headingId = useId();
+  const { servers, loaded, loading, fetching, error, refresh, update } = useWorkspaceMcpServers(
     organizationId,
     workspaceId
   );
@@ -45,11 +42,20 @@ export function WorkspaceMcpServersSection({
     try {
       await update({ [id]: overrideValue(override) });
     } catch (caught) {
-      setFailure(caught instanceof Error ? caught.message : UPDATE_FAILED);
+      setFailure(messageOf(caught, UPDATE_FAILED));
     } finally {
       setPending((current) => without(current, id));
     }
   };
+
+  const retry = error !== null && (
+    <div className="workspace-mcp-error">
+      <Alert variant="destructive">{error}</Alert>
+      <Button variant="ghost" size="sm" loading={fetching} onClick={() => void refresh()}>
+        Retry
+      </Button>
+    </div>
+  );
 
   const body = () => {
     if (loading) {
@@ -59,15 +65,8 @@ export function WorkspaceMcpServersSection({
         </div>
       );
     }
-    if (error !== null) {
-      return (
-        <div className="workspace-mcp-error">
-          <Alert variant="destructive">{error}</Alert>
-          <Button variant="ghost" size="sm" loading={fetching} onClick={() => void refresh()}>
-            Retry
-          </Button>
-        </div>
-      );
+    if (!loaded) {
+      return null;
     }
     if (servers.length === 0) {
       return (
@@ -97,10 +96,10 @@ export function WorkspaceMcpServersSection({
   };
 
   return (
-    <section className="settings-section" aria-labelledby="workspace-mcp-title">
+    <section className="settings-section" aria-labelledby={headingId}>
       <div className="section-row">
         <div className="section-row-copy">
-          <h2 id="workspace-mcp-title" className="section-title">
+          <h2 id={headingId} className="section-title">
             MCP servers
           </h2>
           <p className="section-description">
@@ -109,8 +108,13 @@ export function WorkspaceMcpServersSection({
         </div>
       </div>
 
-      {!editable && <p className="form-hint">Only workspace admins can change MCP servers.</p>}
+      {!editable && (
+        <p className="form-hint" role="status">
+          Only workspace admins can change MCP servers.
+        </p>
+      )}
       {failure !== null && <Alert variant="destructive">{failure}</Alert>}
+      {retry}
 
       {body()}
     </section>

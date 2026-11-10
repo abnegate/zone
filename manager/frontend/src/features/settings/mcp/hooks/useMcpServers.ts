@@ -1,22 +1,53 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { mcpApi } from '../../../../api/mcp';
-import { mcpQueryKeys } from '../mcpQueryKeys';
-import type { CreateMcpServerRequest, McpServer, UpdateMcpServerRequest } from '../types';
+import { messageOf } from '../failure';
+import { mcpQueryKeys } from '../queryKeys';
+import type {
+  CreateMcpServerRequest,
+  McpServer,
+  McpServerList,
+  UpdateMcpServerRequest,
+} from '../types';
 import { pollInterval } from './pollInterval';
 
 const NO_SERVERS: McpServer[] = [];
+
+const IMPORT_FAILED = 'Failed to add the MCP server';
 
 export interface McpImportResult {
   created: McpServer[];
   failures: { name: string; message: string }[];
 }
 
-function reason(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+export interface McpServersState {
+  servers: McpServer[];
+  commands: boolean;
+  loaded: boolean;
+  loading: boolean;
+  fetching: boolean;
+  error: string | null;
+  refresh(): Promise<void>;
+  create(request: CreateMcpServerRequest): Promise<McpServer>;
+  update(serverId: string, request: UpdateMcpServerRequest): Promise<McpServer>;
+  remove(serverId: string): Promise<void>;
+  reconnect(serverId: string): Promise<McpServer>;
+  importAll(requests: CreateMcpServerRequest[]): Promise<McpImportResult>;
 }
 
-export function useMcpServers(organizationId: string) {
+function replaced(
+  current: McpServerList | undefined,
+  server: McpServer
+): McpServerList | undefined {
+  return (
+    current && {
+      ...current,
+      servers: current.servers.map((entry) => (entry.id === server.id ? server : entry)),
+    }
+  );
+}
+
+export function useMcpServers(organizationId: string): McpServersState {
   const queryClient = useQueryClient();
 
   const { data, isLoading, isFetching, error, refetch } = useQuery({
@@ -28,6 +59,17 @@ export function useMcpServers(organizationId: string) {
   const invalidate = useCallback(
     () => queryClient.invalidateQueries({ queryKey: mcpQueryKeys.organization(organizationId) }),
     [queryClient, organizationId]
+  );
+
+  const settle = useCallback(
+    async (server: McpServer): Promise<McpServer> => {
+      queryClient.setQueryData<McpServerList>(mcpQueryKeys.servers(organizationId), (current) =>
+        replaced(current, server)
+      );
+      await invalidate();
+      return server;
+    },
+    [queryClient, organizationId, invalidate]
   );
 
   const refresh = useCallback(async (): Promise<void> => {
@@ -44,12 +86,9 @@ export function useMcpServers(organizationId: string) {
   );
 
   const update = useCallback(
-    async (serverId: string, request: UpdateMcpServerRequest): Promise<McpServer> => {
-      const server = await mcpApi.update(organizationId, serverId, request);
-      await invalidate();
-      return server;
-    },
-    [organizationId, invalidate]
+    async (serverId: string, request: UpdateMcpServerRequest): Promise<McpServer> =>
+      settle(await mcpApi.update(organizationId, serverId, request)),
+    [organizationId, settle]
   );
 
   const remove = useCallback(
@@ -61,12 +100,9 @@ export function useMcpServers(organizationId: string) {
   );
 
   const reconnect = useCallback(
-    async (serverId: string): Promise<McpServer> => {
-      const server = await mcpApi.reconnect(organizationId, serverId);
-      await invalidate();
-      return server;
-    },
-    [organizationId, invalidate]
+    async (serverId: string): Promise<McpServer> =>
+      settle(await mcpApi.reconnect(organizationId, serverId)),
+    [organizationId, settle]
   );
 
   const importAll = useCallback(
@@ -76,7 +112,7 @@ export function useMcpServers(organizationId: string) {
         try {
           result.created.push(await mcpApi.create(organizationId, request));
         } catch (failure) {
-          result.failures.push({ name: request.name, message: reason(failure) });
+          result.failures.push({ name: request.name, message: messageOf(failure, IMPORT_FAILED) });
         }
       }
       await invalidate();
@@ -88,6 +124,7 @@ export function useMcpServers(organizationId: string) {
   return {
     servers: data?.servers ?? NO_SERVERS,
     commands: data?.commands ?? false,
+    loaded: data !== undefined,
     loading: isLoading,
     fetching: isFetching,
     error: error ? error.message : null,

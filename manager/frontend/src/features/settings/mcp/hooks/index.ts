@@ -1,3 +1,3 @@
 export { pollInterval } from './pollInterval';
-export { type McpImportResult, useMcpServers } from './useMcpServers';
-export { useWorkspaceMcpServers } from './useWorkspaceMcpServers';
+export { type McpImportResult, type McpServersState, useMcpServers } from './useMcpServers';
+export { useWorkspaceMcpServers, type WorkspaceMcpServersState } from './useWorkspaceMcpServers';

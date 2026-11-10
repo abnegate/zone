@@ -49,15 +49,6 @@ export const mcpApi = {
     return parse(McpServerListSchema, await response.json());
   },
 
-  async get(organizationId: string, serverId: string): Promise<McpServer> {
-    const response = await send(
-      serverUrl(organizationId, serverId),
-      { method: 'GET' },
-      'Failed to load the MCP server'
-    );
-    return parse(McpServerSchema, await response.json());
-  },
-
   async create(organizationId: string, request: CreateMcpServerRequest): Promise<McpServer> {
     const response = await send(
       serversUrl(organizationId),

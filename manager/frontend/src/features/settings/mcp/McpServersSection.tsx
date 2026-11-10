@@ -1,7 +1,9 @@
 import { Button, EmptyState } from '@zone/ui';
 import { type ComponentProps, useEffect, useId, useRef, useState } from 'react';
 import { Source } from './constants';
+import { messageOf } from './failure';
 import { type McpImportResult, useMcpServers } from './hooks';
+import { keyOf } from './key';
 import { McpImportDialog } from './McpImportDialog';
 import { McpRemoveDialog } from './McpRemoveDialog';
 import { McpServerForm } from './McpServerForm';
@@ -38,14 +40,6 @@ function managed(server: McpServer): ManagedServer | null {
     : null;
 }
 
-function keyOf(server: McpServer): string {
-  return server.id ?? `instance:${server.name}`;
-}
-
-function messageOf(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
-}
-
 export function importedNotice(count: number): string {
   return count === 1 ? 'Imported 1 server.' : `Imported ${count} servers.`;
 }
@@ -60,6 +54,7 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
   const {
     servers,
     commands,
+    loaded,
     loading,
     fetching,
     error,
@@ -100,8 +95,6 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
     restoreFocus.current = true;
     hide();
   };
-
-  const ready = !loading && error === null;
 
   const change = async (id: string, action: () => Promise<unknown>) => {
     setBusy((current) => new Set(current).add(id));
@@ -179,7 +172,7 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
             Servers whose tools reach every chat and task in this organization.
           </p>
         </div>
-        {canManage && ready && (
+        {canManage && loaded && (
           <div className="section-row-actions">
             <Button variant="secondary" size="sm" onClick={openImport}>
               Import JSON
@@ -190,7 +183,7 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
           </div>
         )}
       </div>
-      {ready && !commands && (
+      {loaded && !commands && (
         <p className="form-hint" role="status">
           {COMMANDS_OFF_HINT}
         </p>
@@ -232,13 +225,13 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
           </Button>
         </div>
       )}
-      {ready && servers.length === 0 && (
+      {loaded && servers.length === 0 && (
         <EmptyState
           title="No MCP servers"
           description="Add a server or import an mcpServers JSON document."
         />
       )}
-      {ready && servers.length > 0 && (
+      {loaded && servers.length > 0 && (
         <ul className="mcp-servers-list" aria-label="MCP servers">
           {servers.map((server) => {
             const target = managed(server);

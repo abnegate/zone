@@ -1,5 +1,6 @@
 import { Button, Modal } from '@zone/ui';
 import { useState } from 'react';
+import { messageOf } from './failure';
 
 export const REMOVE_FAILED = 'Failed to remove the MCP server';
 
@@ -19,7 +20,7 @@ export function McpRemoveDialog({ name, onConfirm, onClose }: McpRemoveDialogPro
     try {
       await onConfirm();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : REMOVE_FAILED);
+      setError(messageOf(failure, REMOVE_FAILED));
       setRemoving(false);
     }
   };

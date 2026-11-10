@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, mock } from 'bun:test';
+import { afterAll, afterEach, describe, expect, it, spyOn } from 'bun:test';
 import type {
   CreateMcpServerRequest,
   McpServer,
@@ -9,7 +9,6 @@ import { ApiError } from './ApiError';
 import { mcpApi } from './mcp';
 import { session } from './session';
 
-const original = globalThis.fetch;
 const base = '/api/organizations/org-1/mcp-servers';
 const workspaceBase = '/api/organizations/org-1/workspaces/ws-1/mcp-servers';
 
@@ -38,12 +37,12 @@ const workspaceServer: WorkspaceMcpServer = {
   effective: false,
 };
 
+const fetchSpy = spyOn(globalThis, 'fetch');
+
 function respond(body: unknown, status = 200) {
-  const request = mock(async (_url: string, _init?: RequestInit) =>
+  return fetchSpy.mockImplementation(async () =>
     body === null ? new Response(null, { status }) : Response.json(body, { status })
   );
-  globalThis.fetch = request as unknown as typeof fetch;
-  return request;
 }
 
 function sent(request: ReturnType<typeof respond>) {
@@ -52,8 +51,12 @@ function sent(request: ReturnType<typeof respond>) {
 }
 
 afterEach(() => {
-  globalThis.fetch = original;
+  fetchSpy.mockReset();
   session.setAccessToken(null);
+});
+
+afterAll(() => {
+  fetchSpy.mockRestore();
 });
 
 describe('mcpApi.list', () => {
@@ -98,31 +101,6 @@ describe('mcpApi.list', () => {
       status: 403,
       message: 'Failed to load MCP servers: forbidden',
     });
-  });
-});
-
-describe('mcpApi.get', () => {
-  it('reads one server', async () => {
-    const request = respond(server);
-
-    expect(await mcpApi.get('org-1', 's-1')).toEqual(server);
-    expect(sent(request)).toEqual({ url: `${base}/s-1`, method: 'GET', body: undefined });
-  });
-
-  it('percent-encodes the server id', async () => {
-    const request = respond(server);
-
-    await mcpApi.get('org-1', 's 1/2');
-
-    expect(sent(request).url).toBe(`${base}/s%201%2F2`);
-  });
-
-  it('names the action when the server is missing', async () => {
-    respond({ error: 'not found' }, 404);
-
-    await expect(mcpApi.get('org-1', 's-1')).rejects.toThrow(
-      'Failed to load the MCP server: not found'
-    );
   });
 });
 
@@ -175,6 +153,14 @@ describe('mcpApi.update', () => {
       method: 'PUT',
       body: '{"enabled":false,"headers":{"Authorization":null}}',
     });
+  });
+
+  it('percent-encodes the server id', async () => {
+    const request = respond(server);
+
+    await mcpApi.update('org-1', 's 1/2', { enabled: true });
+
+    expect(sent(request).url).toBe(`${base}/s%201%2F2`);
   });
 
   it('names the action when saving fails', async () => {

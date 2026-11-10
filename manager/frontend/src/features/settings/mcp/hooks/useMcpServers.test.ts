@@ -1,12 +1,22 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  vi,
+} from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { createElement } from 'react';
+import { POLL_INTERVAL } from '../constants';
 import type { McpServer } from '../types';
 
 const list = mock();
-const get = mock();
 const create = mock();
 const update = mock();
 const remove = mock();
@@ -15,7 +25,7 @@ const workspace = mock();
 const updateWorkspace = mock();
 
 mock.module('../../../../api/mcp', () => ({
-  mcpApi: { list, get, create, update, remove, reconnect, workspace, updateWorkspace },
+  mcpApi: { list, create, update, remove, reconnect, workspace, updateWorkspace },
 }));
 
 let useMcpServers: typeof import('./useMcpServers').useMcpServers;
@@ -60,6 +70,15 @@ function server(name: string, overrides: Partial<McpServer> = {}): McpServer {
 
 const docs = server('docs');
 
+async function advance(milliseconds: number): Promise<void> {
+  await act(async () => {
+    vi.advanceTimersByTime(milliseconds);
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(0);
+  });
+}
+
 async function renderLoaded() {
   list.mockResolvedValue({ commands: true, servers: [docs] });
   const rendered = renderHook(() => useMcpServers('org-1'), { wrapper: createWrapper() });
@@ -71,18 +90,13 @@ async function renderLoaded() {
 
 describe('useMcpServers', () => {
   beforeEach(() => {
-    for (const method of [
-      list,
-      get,
-      create,
-      update,
-      remove,
-      reconnect,
-      workspace,
-      updateWorkspace,
-    ]) {
+    for (const method of [list, create, update, remove, reconnect, workspace, updateWorkspace]) {
       method.mockReset();
     }
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('starts empty with commands off while loading', () => {
@@ -93,6 +107,7 @@ describe('useMcpServers', () => {
     expect(result.current.servers).toEqual([]);
     expect(result.current.commands).toBe(false);
     expect(result.current.loading).toBe(true);
+    expect(result.current.loaded).toBe(false);
     expect(result.current.error).toBeNull();
   });
 
@@ -115,7 +130,22 @@ describe('useMcpServers', () => {
       expect(result.current.error).toBe('Failed to load MCP servers: 500');
     });
     expect(result.current.loading).toBe(false);
+    expect(result.current.loaded).toBe(false);
     expect(result.current.servers).toEqual([]);
+  });
+
+  it('keeps the loaded list when a later read fails', async () => {
+    const { result } = await renderLoaded();
+    list.mockRejectedValue(new Error('Failed to load MCP servers: 502'));
+
+    await result.current.refresh();
+
+    await waitFor(() => {
+      expect(result.current.error).toBe('Failed to load MCP servers: 502');
+    });
+    expect(result.current.loaded).toBe(true);
+    expect(result.current.servers).toEqual([docs]);
+    expect(result.current.commands).toBe(true);
   });
 
   it('reloads the list on refresh', async () => {
@@ -146,6 +176,34 @@ describe('useMcpServers', () => {
     expect(await result.current.update('s-docs', { enabled: false })).toEqual(disabled);
 
     expect(update).toHaveBeenCalledWith('org-1', 's-docs', { enabled: false });
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the saved server while the list is reread', async () => {
+    const disabled = server('docs', { enabled: false, status: 'disabled' });
+    update.mockResolvedValue(disabled);
+    const { result } = await renderLoaded();
+    list.mockImplementation(() => new Promise(() => {}));
+
+    void result.current.update('s-docs', { enabled: false });
+
+    await waitFor(() => {
+      expect(result.current.servers).toEqual([disabled]);
+    });
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the reconnecting server while the list is reread', async () => {
+    const connecting = server('docs', { status: 'connecting', available_tools: [] });
+    reconnect.mockResolvedValue(connecting);
+    const { result } = await renderLoaded();
+    list.mockImplementation(() => new Promise(() => {}));
+
+    void result.current.reconnect('s-docs');
+
+    await waitFor(() => {
+      expect(result.current.servers).toEqual([connecting]);
+    });
     expect(list).toHaveBeenCalledTimes(2);
   });
 
@@ -202,7 +260,8 @@ describe('useMcpServers', () => {
     expect(list).toHaveBeenCalledTimes(2);
   });
 
-  it('polls while a server is connecting', async () => {
+  it('polls every interval while a server is connecting and stops once it connects', async () => {
+    vi.useFakeTimers();
     list
       .mockResolvedValueOnce({
         commands: false,
@@ -211,15 +270,17 @@ describe('useMcpServers', () => {
       .mockResolvedValue({ commands: false, servers: [docs] });
 
     const { result } = renderHook(() => useMcpServers('org-1'), { wrapper: createWrapper() });
+    await advance(0);
+    expect(list).toHaveBeenCalledTimes(1);
 
-    await waitFor(
-      () => {
-        expect(list).toHaveBeenCalledTimes(2);
-      },
-      { timeout: 3000 }
-    );
-    await waitFor(() => {
-      expect(result.current.servers).toEqual([docs]);
-    });
+    await advance(POLL_INTERVAL / 2);
+    expect(list).toHaveBeenCalledTimes(1);
+
+    await advance(POLL_INTERVAL / 2);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(result.current.servers).toEqual([docs]);
+
+    await advance(POLL_INTERVAL);
+    expect(list).toHaveBeenCalledTimes(2);
   });
 });
