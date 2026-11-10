@@ -50,8 +50,16 @@ const STUB_TOOL: &str = "delegate";
 const REMOTE_URL: &str = "http://127.0.0.1:1/mcp";
 const HEADER: &str = "Authorization";
 const HEADER_SECRET: &str = "s3cr3t";
+const ROTATED_HEADER_SECRET: &str = "r0t4ted";
 const ENVIRONMENT: &str = "TOKEN";
 const ENVIRONMENT_SECRET: &str = "v4lue";
+const ROTATED_ENVIRONMENT_SECRET: &str = "ch4nged";
+const SECRETS: [&str; 4] = [
+    HEADER_SECRET,
+    ROTATED_HEADER_SECRET,
+    ENVIRONMENT_SECRET,
+    ROTATED_ENVIRONMENT_SECRET,
+];
 const SEALED_PREFIX: &str = "ENC[";
 const INSTANCE_SERVER: &str = "shared";
 
@@ -62,6 +70,7 @@ const UPDATED: &str = "mcp_server.updated";
 const DELETED: &str = "mcp_server.deleted";
 const RECONNECTED: &str = "mcp_server.reconnected";
 const WORKSPACE_UPDATED: &str = "workspace_mcp_servers.updated";
+const AUDITED: [&str; 5] = [CREATED, UPDATED, DELETED, RECONNECTED, WORKSPACE_UPDATED];
 
 const ERROR: &str = "error";
 
@@ -1475,6 +1484,95 @@ async fn a_deleted_server_is_gone() {
         .await
         .json_value();
     assert_eq!(listed["servers"], json!([]));
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn no_audit_row_holds_a_secret_value() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let mut remote = remote("remote");
+    remote["headers"] = json!({ HEADER: format!("Bearer {HEADER_SECRET}") });
+    let mut command = stdio("command");
+    command["environment"] = json!({ ENVIRONMENT: ENVIRONMENT_SECRET });
+    let remote = id(&tenant.create(&client, &remote).await);
+    let command = id(&tenant.create(&client, &command).await);
+
+    let rotations = [
+        (
+            &remote,
+            json!({ "headers": { HEADER: format!("Bearer {ROTATED_HEADER_SECRET}") } }),
+        ),
+        (
+            &command,
+            json!({ "environment": { ENVIRONMENT: ROTATED_ENVIRONMENT_SECRET } }),
+        ),
+    ];
+    for (server, rotation) in &rotations {
+        client
+            .put_json_auth(&tenant.server(server), rotation, token)
+            .await
+            .assert_status(StatusCode::OK);
+        client
+            .post_json_auth(&tenant.connection(server), &json!({}), token)
+            .await
+            .assert_status(StatusCode::ACCEPTED);
+    }
+    client
+        .put_json_auth(
+            &tenant.workspace_servers(),
+            &json!({ "servers": { remote.as_str(): false, command.as_str(): false } }),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    for server in [&remote, &command] {
+        client
+            .delete_auth(&tenant.server(server), token)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+    }
+
+    let audited: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT action, old_values::text, new_values::text FROM audit_logs \
+         WHERE organization_id = $1 ORDER BY created_at, id",
+    )
+    .bind(tenant.organization)
+    .fetch_all(client.state().db())
+    .await
+    .expect("the audit log is readable");
+    let written: Vec<&str> = audited
+        .iter()
+        .map(|(action, _, _)| action.as_str())
+        .filter(|action| AUDITED.contains(action))
+        .collect();
+    assert_eq!(
+        written,
+        [
+            CREATED,
+            CREATED,
+            UPDATED,
+            RECONNECTED,
+            UPDATED,
+            RECONNECTED,
+            WORKSPACE_UPDATED,
+            DELETED,
+            DELETED
+        ]
+    );
+    for (action, old, new) in &audited {
+        for values in [old, new].into_iter().flatten() {
+            for secret in SECRETS {
+                assert!(
+                    !values.contains(secret),
+                    "the {action} audit row holds a secret value: {values}"
+                );
+            }
+        }
+    }
 
     tenant.discard(&client, &[]).await;
 }
