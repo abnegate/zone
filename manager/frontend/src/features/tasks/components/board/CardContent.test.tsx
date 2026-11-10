@@ -76,7 +76,9 @@ async function press(target: HTMLElement, code: string) {
 
 describe('CardContent', () => {
   it('does not render again while a card is carried across the board', async () => {
-    render(<Board tasks={TASKS} projects={new Map()} renaming={null} actions={ACTIONS} />);
+    render(
+      <Board tasks={TASKS} projects={new Map()} renaming={null} removed={null} actions={ACTIONS} />
+    );
     const rendered = new Map(menus);
     expect([...rendered.keys()].sort()).toEqual(['build', 'ship', 'write']);
 

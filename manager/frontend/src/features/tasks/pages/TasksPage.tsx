@@ -55,13 +55,8 @@ export default function TasksPage() {
   const [executionTask, setExecutionTask] = useState<Task | null>(null);
   const [renaming, setRenaming] = useState<Renaming | null>(null);
   const [deleting, setDeleting] = useState<Task | null>(null);
-  const [deletedIds, setDeletedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [removed, setRemoved] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
-
-  const shown = useMemo(
-    () => (deletedIds.size === 0 ? tasks : tasks.filter((task) => !deletedIds.has(task.id))),
-    [tasks, deletedIds]
-  );
 
   const projectNames = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
@@ -122,7 +117,7 @@ export default function TasksPage() {
 
   const confirmDelete = async (task: Task) => {
     await deleteTask(task.id);
-    setDeletedIds((current) => new Set(current).add(task.id));
+    setRemoved(task.id);
     setDeleting(null);
   };
 
@@ -204,7 +199,7 @@ export default function TasksPage() {
           />
         ) : loading ? (
           <Skeleton />
-        ) : shown.length === 0 ? (
+        ) : tasks.length === 0 ? (
           <EmptyState
             className="tasks-empty"
             icon={
@@ -230,7 +225,13 @@ export default function TasksPage() {
             }
           />
         ) : (
-          <Board tasks={shown} projects={projectNames} renaming={renaming} actions={actions} />
+          <Board
+            tasks={tasks}
+            projects={projectNames}
+            renaming={renaming}
+            removed={removed}
+            actions={actions}
+          />
         )}
       </div>
 

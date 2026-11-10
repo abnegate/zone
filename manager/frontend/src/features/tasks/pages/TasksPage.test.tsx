@@ -966,6 +966,20 @@ describe('TasksPage', () => {
 
   describe('deleting', () => {
     const dialogName = 'Delete "Implement login"?';
+    let stored: Task[] = mockTasks;
+
+    function serve(tasks: Task[]) {
+      stored = tasks;
+      mockGetTasks.mockImplementation(() => Promise.resolve(stored));
+      mockDeleteTask.mockImplementation((id: string) => {
+        stored = stored.filter((task) => task.id !== id);
+        return Promise.resolve(undefined);
+      });
+    }
+
+    beforeEach(() => {
+      serve(mockTasks);
+    });
 
     async function askToDelete(): Promise<HTMLElement> {
       renderTasksPage();
@@ -975,7 +989,6 @@ describe('TasksPage', () => {
     }
 
     it('deletes a task once the dialog is confirmed', async () => {
-      mockDeleteTask.mockImplementation(() => Promise.resolve(undefined));
       const dialog = await askToDelete();
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Delete task' }));
@@ -990,8 +1003,7 @@ describe('TasksPage', () => {
 
     it('moves focus to the next card in the column once the task is deleted', async () => {
       const neighbour = { ...mockTasks[0], id: 'task-3', title: 'Write the docs' };
-      mockGetTasks.mockImplementation(() => Promise.resolve([...mockTasks, neighbour]));
-      mockDeleteTask.mockImplementation(() => Promise.resolve(undefined));
+      serve([...mockTasks, neighbour]);
       const dialog = await askToDelete();
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Delete task' }));
@@ -1006,13 +1018,50 @@ describe('TasksPage', () => {
     });
 
     it('moves focus to the column once its last task is deleted', async () => {
-      mockDeleteTask.mockImplementation(() => Promise.resolve(undefined));
       const dialog = await askToDelete();
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Delete task' }));
 
       await waitFor(() => expect(document.activeElement).toBe(column('Planned')));
       expect(within(column('Planned')).getByText('No tasks')).toBeInTheDocument();
+    });
+
+    it('leaves focus where it rests when a task deleted elsewhere drops out of the list', async () => {
+      const neighbour = { ...mockTasks[0], id: 'task-3', title: 'Write the docs' };
+      serve([...mockTasks, neighbour]);
+      renderTasksPage();
+      await screen.findByText('Implement login');
+      expect(document.activeElement).toBe(document.body);
+
+      stored = stored.filter((task) => task.id !== 'task-1');
+      await act(async () => {
+        window.dispatchEvent(new Event('visibilitychange'));
+      });
+      await waitFor(() => {
+        expect(screen.queryByText('Implement login')).not.toBeInTheDocument();
+      });
+
+      expect(document.activeElement).toBe(document.body);
+    });
+
+    it('removes the task at once, without waiting for the list to reload', async () => {
+      let loaded = false;
+      mockGetTasks.mockImplementation(() => {
+        if (loaded) return new Promise<Task[]>(() => {});
+        loaded = true;
+        return Promise.resolve(mockTasks);
+      });
+      mockDeleteTask.mockImplementation(() => Promise.resolve(undefined));
+      const dialog = await askToDelete();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete task' }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog', { name: dialogName })).not.toBeInTheDocument();
+      });
+      expect(screen.queryByText('Implement login')).not.toBeInTheDocument();
+      expect(screen.getByText('Fix button styling')).toBeInTheDocument();
+      await waitFor(() => expect(document.activeElement).toBe(column('Planned')));
     });
 
     it('keeps the task when the dialog is cancelled', async () => {

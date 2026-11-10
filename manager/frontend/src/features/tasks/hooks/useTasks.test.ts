@@ -229,6 +229,50 @@ describe('useTasks', () => {
     });
   });
 
+  it('drops a deleted task from every list at once, without waiting on a reload', async () => {
+    const queryClient = createClient();
+    mockGetTasks.mockResolvedValueOnce([mockTask]);
+    mockDeleteTask.mockResolvedValueOnce();
+    const { result } = renderHook(() => useTasks(), { wrapper: createWrapper(queryClient) });
+    await waitFor(() => expect(result.current.tasks).toEqual([mockTask]));
+    mockGetTasks.mockReturnValue(new Promise(() => {}));
+
+    await act(async () => {
+      await result.current.deleteTask('task-1');
+    });
+
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([]);
+    await waitFor(() => expect(result.current.tasks).toEqual([]));
+  });
+
+  it('keeps a deleted task out when a reload that began before the delete comes back', async () => {
+    const queryClient = createClient();
+    mockGetTasks.mockResolvedValueOnce([mockTask]);
+    mockDeleteTask.mockResolvedValueOnce();
+    const { result } = renderHook(() => useTasks(), { wrapper: createWrapper(queryClient) });
+    await waitFor(() => expect(result.current.tasks).toEqual([mockTask]));
+
+    const stale = deferred<Task[]>();
+    mockGetTasks.mockReturnValueOnce(stale.promise);
+    act(() => {
+      void result.current.refetch();
+    });
+    await waitFor(() => expect(mockGetTasks).toHaveBeenCalledTimes(2));
+    mockGetTasks.mockReturnValue(new Promise(() => {}));
+
+    await act(async () => {
+      await result.current.deleteTask('task-1');
+    });
+    await waitFor(() => expect(result.current.tasks).toEqual([]));
+    await act(async () => {
+      stale.resolve([mockTask]);
+      await stale.promise;
+    });
+
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([]);
+    expect(result.current.tasks).toEqual([]);
+  });
+
   it('refetches tasks', async () => {
     mockGetTasks.mockResolvedValueOnce([mockTask]);
     const wrapper = createWrapper();

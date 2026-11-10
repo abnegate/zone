@@ -28,6 +28,7 @@ export interface BoardProps {
   tasks: readonly Task[];
   projects: ReadonlyMap<string, string>;
   renaming: Renaming | null;
+  removed: string | null;
   actions: BoardActions;
 }
 
@@ -63,7 +64,7 @@ function carried(data: { current?: { task?: Task } } | undefined): Task | undefi
   return data?.current?.task;
 }
 
-export function Board({ tasks, projects, renaming, actions }: BoardProps) {
+export function Board({ tasks, projects, renaming, removed, actions }: BoardProps) {
   const groups = useMemo(() => groupByStage(tasks), [tasks]);
   const [active, setActive] = useState<UniqueIdentifier | null>(null);
   const [announcement, setAnnouncement] = useState('');
@@ -71,7 +72,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
   const instructions = useId();
   const unrendered = useMemo(() => document.createElement('div'), []);
   const root = useRef<HTMLElement>(null);
-  const release = useCardFocus(root, groups);
+  const release = useCardFocus(root, groups, removed);
   const reducedMotion = useMediaQuery(REDUCED_MOTION);
   const heading = useRef<StageId | null>(null);
   const keyboard = useMemo(() => keyboardOptions(reducedMotion, heading), [reducedMotion]);

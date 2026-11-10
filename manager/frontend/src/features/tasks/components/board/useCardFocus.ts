@@ -59,25 +59,37 @@ function neighbour(cards: readonly Task[], index: number, present: ReadonlySet<s
   );
 }
 
-export function useCardFocus(board: RefObject<HTMLElement | null>, groups: Groups): () => void {
+function ids(groups: Groups): Set<string> {
+  return new Set(Array.from(groups.values(), (cards) => cards.map((card) => card.id)).flat());
+}
+
+export function useCardFocus(
+  board: RefObject<HTMLElement | null>,
+  groups: Groups,
+  removed: string | null
+): () => void {
   const held = useRef<Held | null>(null);
   const previous = useRef(groups);
+  const departed = useRef(groups);
+  const settled = useRef<string | null>(null);
 
   useLayoutEffect(() => {
     const before = previous.current;
     previous.current = groups;
-    if (!lost()) return;
-    const kept = held.current && controlIn(board.current, held.current);
+    const present = ids(groups);
+    if (before !== groups && Array.from(ids(before)).some((id) => !present.has(id))) {
+      departed.current = before;
+    }
+    const kept = lost() && held.current && controlIn(board.current, held.current);
     if (kept) {
       kept.focus();
       return;
     }
-    if (before === groups) return;
-    const present = new Set(
-      Array.from(groups.values(), (cards) => cards.map((card) => card.id)).flat()
-    );
-    for (const [stage, cards] of before) {
-      const index = cards.findIndex((card) => !present.has(card.id));
+    if (removed === null || removed === settled.current || present.has(removed)) return;
+    settled.current = removed;
+    if (!lost()) return;
+    for (const [stage, cards] of departed.current) {
+      const index = cards.findIndex((card) => card.id === removed);
       if (index === -1) continue;
       const next = neighbour(cards, index, present);
       const target = next

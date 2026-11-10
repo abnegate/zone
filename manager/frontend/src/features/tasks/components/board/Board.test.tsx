@@ -70,7 +70,9 @@ function actions(): BoardActions {
 }
 
 function renderBoard(handlers: BoardActions = actions()) {
-  render(<Board tasks={TASKS} projects={PROJECTS} renaming={null} actions={handlers} />);
+  render(
+    <Board tasks={TASKS} projects={PROJECTS} renaming={null} removed={null} actions={handlers} />
+  );
   return handlers;
 }
 
@@ -93,7 +95,9 @@ function MovingBoard({ refuse = false }: { refuse?: boolean }) {
       },
     };
   }, [refuse]);
-  return <Board tasks={tasks} projects={PROJECTS} renaming={null} actions={handlers} />;
+  return (
+    <Board tasks={tasks} projects={PROJECTS} renaming={null} removed={null} actions={handlers} />
+  );
 }
 
 function board() {

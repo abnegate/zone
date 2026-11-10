@@ -88,8 +88,12 @@ export function useTasks(projectId?: string) {
 
   const deleteTaskMutation = useMutation({
     mutationFn: (id: string) => tasksApi.deleteTask(id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: TASKS_KEY });
+    onSuccess: async (_deleted, id) => {
+      await queryClient.cancelQueries({ queryKey: TASKS_KEY });
+      queryClient.setQueriesData<Task[]>({ queryKey: TASKS_KEY }, (current) =>
+        current?.filter((task) => task.id !== id)
+      );
+      void queryClient.invalidateQueries({ queryKey: TASKS_KEY });
     },
   });
 
