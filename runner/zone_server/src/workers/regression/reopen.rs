@@ -11,7 +11,9 @@
 //! [`RegressionPolicy::monitoring`] is a new problem on an old task rather than
 //! this fix unravelling. Between the two, a task pulled back into review is
 //! [`Verdict::Suspected`] — more eyes is not the same as broken — and a task
-//! pulled back into work is [`Verdict::Regressed`].
+//! pulled back into work is [`Verdict::Regressed`]. A completed task moved to
+//! cancelled was dropped, not reopened; one moved to paused is unfinished
+//! work again, so it counts as a reopen.
 
 use chrono::NaiveDateTime;
 
@@ -23,6 +25,7 @@ use super::checker::{
 const NAME: &str = "reopen";
 const COMPLETE: &str = "complete";
 const REVIEW: &str = "review";
+const CANCELLED: &str = "cancelled";
 
 /// Watches for a completed task being moved back out of completion.
 #[derive(Debug, Clone, Copy, Default)]
@@ -39,6 +42,14 @@ impl ReopenChecker {
     pub fn decide(&self, subject: &FixSubject, now: NaiveDateTime) -> RegressionResult {
         if subject.status == COMPLETE {
             return RegressionResult::clear(NAME, subject, "The task is still complete", now);
+        }
+        if subject.status == CANCELLED {
+            return RegressionResult::clear(
+                NAME,
+                subject,
+                "Cancelled after completion, which is not a reopen",
+                now,
+            );
         }
 
         let since_shipping = subject.last_touched_at - subject.shipped_at;
@@ -145,6 +156,27 @@ mod tests {
         assert_eq!(
             checked(&reopened("blocked", moment(2, 9, 0))).verdict,
             Verdict::Regressed
+        );
+    }
+
+    #[test]
+    fn a_completed_task_cancelled_inside_the_monitoring_window_is_not_a_reopen() {
+        let result = checked(&reopened("cancelled", moment(2, 9, 0)));
+
+        assert_eq!(result.verdict, Verdict::Clear);
+        assert!(!result.is_reportable());
+        assert_eq!(
+            result.summary(),
+            "Cancelled after completion, which is not a reopen"
+        );
+    }
+
+    #[test]
+    fn a_completed_task_paused_inside_the_monitoring_window_is_still_a_regression() {
+        assert_eq!(
+            checked(&reopened("paused", moment(2, 9, 0))).verdict,
+            Verdict::Regressed,
+            "paused work is unfinished work"
         );
     }
 
