@@ -41,17 +41,17 @@ TOOL = {
 
 def result(message):
     method = message.get("method")
-    params = message.get("params") or {}
+    parameters = message.get("params") or {}
     if method == "initialize":
         return {
-            "protocolVersion": params["protocolVersion"],
+            "protocolVersion": parameters["protocolVersion"],
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "stub", "version": "0.0.1"},
         }
     if method == "tools/list":
         return {"tools": [TOOL]}
     if method == "tools/call":
-        instruction = (params.get("arguments") or {}).get("instruction", "")
+        instruction = (parameters.get("arguments") or {}).get("instruction", "")
         return {"content": [{"type": "text", "text": f"delegated:{instruction}"}]}
     return {}
 
