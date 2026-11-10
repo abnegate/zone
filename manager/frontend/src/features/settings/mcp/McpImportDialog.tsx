@@ -22,6 +22,8 @@ export function McpImportDialog({ commands, onImport, onClose }: McpImportDialog
   const base = useId();
   const textId = `${base}-json`;
   const hintId = `${base}-hint`;
+  const addId = `${base}-add`;
+  const skippedId = `${base}-skipped`;
   const [text, setText] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -64,21 +66,31 @@ export function McpImportDialog({ commands, onImport, onClose }: McpImportDialog
           </p>
         </div>
         {count > 0 && (
-          <ul className="mcp-import-list" aria-label="Servers to add">
-            {document.requests.map((request) => (
-              <li key={request.name} className="mcp-import-name">
-                {request.name}
-              </li>
-            ))}
-          </ul>
+          <div className="mcp-import-group">
+            <p id={addId} className="form-label">
+              Servers to add
+            </p>
+            <ul className="mcp-import-list" aria-labelledby={addId}>
+              {document.requests.map((request) => (
+                <li key={request.name} className="mcp-import-name">
+                  {request.name}
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
         <div className="mcp-import-status" role="status">
           {document.errors.length > 0 && (
-            <ul className="mcp-import-skipped" aria-label="Skipped">
-              {document.errors.map((message) => (
-                <li key={message}>{message}</li>
-              ))}
-            </ul>
+            <div className="mcp-import-group">
+              <p id={skippedId} className="form-label">
+                Skipped
+              </p>
+              <ul className="mcp-import-list mcp-import-skipped" aria-labelledby={skippedId}>
+                {document.errors.map((message) => (
+                  <li key={message}>{message}</li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
         {error && (

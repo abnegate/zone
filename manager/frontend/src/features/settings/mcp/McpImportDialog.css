@@ -9,8 +9,11 @@
   font-family: var(--ui-font-mono);
 }
 
-.mcp-import-list,
-.mcp-import-skipped {
+.mcp-import-group {
+  min-width: 0;
+}
+
+.mcp-import-list {
   display: flex;
   flex-direction: column;
   gap: var(--ui-space-1);
