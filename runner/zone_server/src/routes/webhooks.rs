@@ -35,10 +35,6 @@ const MAX_DESCRIPTION_LENGTH: usize = 50_000;
 /// The oldest issue a delivery can still turn into a new task
 const MAX_NEW_ISSUE_AGE: TimeDelta = TimeDelta::hours(24);
 
-const CREATED: &str = "created";
-const IN_PROGRESS: &str = "in_progress";
-const COMPLETE: &str = "complete";
-
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Serialize)]
@@ -493,7 +489,7 @@ async fn apply_to_linked(
         .state_change
         .target(&event.payload, previous.as_ref())
         .map(task_status);
-    let closed_as_cancelled = status == Some(COMPLETE)
+    let closed_as_cancelled = status == Some(tasks::COMPLETE)
         && lock_task_status(&mut *connection, item.task_id)
             .await?
             .is_some_and(|current| current == tasks::CANCELLED);
@@ -518,7 +514,11 @@ async fn apply_to_linked(
         model_name: None,
     };
     let mut applied = event.payload.clone();
-    let mut event_type = event.event_type;
+    let mut event_type = if closed_as_cancelled {
+        SyncEventType::Update
+    } else {
+        event.event_type
+    };
     let refused = tasks::update_task_in(&mut *connection, &patch)
         .await?
         .is_none()
@@ -613,9 +613,9 @@ async fn lock_task_status(
 
 fn task_status(state: IssueState) -> &'static str {
     match state {
-        IssueState::Closed => COMPLETE,
-        IssueState::InProgress => IN_PROGRESS,
-        IssueState::Open => CREATED,
+        IssueState::Closed => tasks::COMPLETE,
+        IssueState::InProgress => tasks::IN_PROGRESS,
+        IssueState::Open => tasks::CREATED,
     }
 }
 

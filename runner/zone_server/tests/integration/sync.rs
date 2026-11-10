@@ -1205,6 +1205,11 @@ async fn a_github_close_leaves_a_cancelled_task_cancelled_and_a_reopen_brings_it
         Some(json!("closed")),
         "the close is stored as followed"
     );
+    assert_eq!(
+        synced.item_event_types().await,
+        vec![SyncEventType::Update],
+        "a close the task did not follow is logged as an update"
+    );
 
     let reopened = github_issue_at("reopened", "Renamed", "open", "2026-01-01T00:00:20Z");
     assert_eq!(synced.post_github(&reopened).await, StatusCode::OK);
