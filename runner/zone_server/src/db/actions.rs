@@ -6,7 +6,9 @@ use sqlx::{PgConnection, PgPool};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use super::DbResult;
 use super::tasks::Origin;
+use super::workspace_members::{self, WorkspaceRole};
 
 /// The last thing a model reads before it decides what to do while a runner
 /// runs, which is why the waiting section pins this one too.
@@ -22,11 +24,6 @@ pub fn subscribe() -> broadcast::Receiver<(Uuid, Value)> {
 pub fn publish(chat_id: Uuid, message: Value) {
     let _ = UPDATES.send((chat_id, message));
 }
-
-use super::{
-    DbResult,
-    workspace_members::{self, WorkspaceRole},
-};
 
 pub(crate) fn patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
@@ -57,7 +54,20 @@ pub struct Update {
     pub assignee_id: Option<Option<Uuid>>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Every status a task can hold; `list_tasks` filters on any of them.
+pub const STATUSES: [&str; 8] = [
+    "created",
+    "queued",
+    "in_progress",
+    "review",
+    "complete",
+    "blocked",
+    "paused",
+    "cancelled",
+];
+
+/// The statuses an agent may set. `queued` is left out: only a run queues a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Created,
@@ -65,16 +75,30 @@ pub enum Status {
     Review,
     Complete,
     Blocked,
+    Paused,
+    Cancelled,
 }
 
 impl Status {
-    fn as_str(&self) -> &'static str {
+    pub const ALL: [Self; 7] = [
+        Self::Created,
+        Self::InProgress,
+        Self::Review,
+        Self::Complete,
+        Self::Blocked,
+        Self::Paused,
+        Self::Cancelled,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Created => "created",
             Self::InProgress => "in_progress",
             Self::Review => "review",
             Self::Complete => "complete",
             Self::Blocked => "blocked",
+            Self::Paused => "paused",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -164,7 +188,7 @@ pub async fn update_task(
     if let Some(Some(assignee)) = input.assignee_id {
         authorize(&mut transaction, workspace_id, assignee, false).await?;
     }
-    let status = input.status.as_ref().map(Status::as_str);
+    let status = input.status.map(Status::as_str);
     let result = sqlx::query_scalar("UPDATE tasks SET title = COALESCE($3, title), title_pending = title_pending AND $3::text IS NULL, description = COALESCE($4, description), status = COALESCE($5, status), assignee_id = CASE WHEN $6 THEN $7 ELSE assignee_id END, priority = COALESCE($8, priority), started_at = CASE WHEN $5 = 'in_progress' THEN COALESCE(started_at, NOW()) ELSE started_at END, completed_at = CASE WHEN $5 = 'complete' THEN COALESCE(completed_at, NOW()) WHEN $5 IS NOT NULL THEN NULL ELSE completed_at END, updated_at = NOW() WHERE id = $1 AND workspace_id = $2 AND NOT is_agentic RETURNING to_jsonb(tasks.*)")
         .bind(input.task_id).bind(workspace_id).bind(input.title).bind(input.description).bind(status).bind(input.assignee_id.is_some()).bind(input.assignee_id.flatten()).bind(input.priority).fetch_optional(&mut *transaction).await?;
     transaction.commit().await?;
@@ -253,12 +277,7 @@ pub async fn list_tasks(
     user_id: Uuid,
     status: Option<&str>,
 ) -> DbResult<Value> {
-    if status.is_some_and(|status| {
-        !matches!(
-            status,
-            "created" | "queued" | "in_progress" | "review" | "complete" | "blocked"
-        )
-    }) {
+    if status.is_some_and(|status| !STATUSES.contains(&status)) {
         return Err(invalid("Unknown task status"));
     }
     let mut transaction = pool.begin().await?;
@@ -551,6 +570,45 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn an_agent_may_pause_or_cancel_a_task() {
+        let id = Uuid::new_v4();
+        for (value, expected) in [("paused", Status::Paused), ("cancelled", Status::Cancelled)] {
+            let update: Update =
+                serde_json::from_value(json!({"task_id":id,"status":value})).unwrap();
+            assert_eq!(update.status, Some(expected), "{value}");
+            assert_eq!(expected.as_str(), value);
+        }
+        assert!(
+            serde_json::from_value::<Update>(json!({"task_id":id,"status":"archived"})).is_err()
+        );
+    }
+
+    #[test]
+    fn an_agent_may_set_every_status_but_queued() {
+        let settable: Vec<&str> = Status::ALL.map(Status::as_str).to_vec();
+        let listable: Vec<&str> = STATUSES
+            .into_iter()
+            .filter(|status| *status != "queued")
+            .collect();
+        assert_eq!(settable, listable);
+    }
+
+    #[tokio::test]
+    async fn listing_filters_on_paused_and_cancelled_and_refuses_an_unknown_status() {
+        let (pool, organization, workspace, user, _chat) = fixture().await;
+        for status in ["paused", "cancelled"] {
+            let listed = list_tasks(&pool, workspace, user, Some(status)).await;
+            assert_eq!(listed.ok(), Some(json!([])), "{status}");
+        }
+        let unknown = list_tasks(&pool, workspace, user, Some("archived")).await;
+        assert!(
+            matches!(&unknown, Err(sqlx::Error::Protocol(message)) if message == "Unknown task status"),
+            "{unknown:?}"
+        );
+        cleanup(&pool, organization, user).await;
     }
 
     #[tokio::test]

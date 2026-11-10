@@ -18,6 +18,10 @@ const SIGNATURE_HEADER: &str = "Linear-Signature";
 const DELIVERY_HEADER: &str = "Linear-Delivery";
 const ISSUE_TYPE: &str = "Issue";
 const TIMESTAMP_TOLERANCE_MILLISECONDS: u64 = 60_000;
+const COMPLETED_STATE: &str = "completed";
+const STARTED_STATE: &str = "started";
+const CANCELED_STATE: &str = "canceled";
+const BACKLOG_STATE: &str = "backlog";
 
 /// Linear-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,18 +159,18 @@ impl LinearSyncProvider {
     /// Map Zone task status to Linear state
     fn map_task_status_to_linear_state(status: &str) -> &str {
         match status {
-            "complete" => "completed",
-            "in_progress" => "started",
-            "blocked" => "canceled",
-            _ => "backlog",
+            "complete" => COMPLETED_STATE,
+            "in_progress" => STARTED_STATE,
+            "blocked" | "cancelled" => CANCELED_STATE,
+            _ => BACKLOG_STATE,
         }
     }
 
     /// Map Linear state to IssueState
     fn map_linear_state_to_issue_state(state_type: &str) -> IssueState {
         match state_type {
-            "completed" | "canceled" => IssueState::Closed,
-            "started" => IssueState::InProgress,
+            COMPLETED_STATE | CANCELED_STATE => IssueState::Closed,
+            STARTED_STATE => IssueState::InProgress,
             _ => IssueState::Open,
         }
     }
@@ -697,6 +701,14 @@ mod tests {
         );
         assert_eq!(
             LinearSyncProvider::map_task_status_to_linear_state("created"),
+            "backlog"
+        );
+        assert_eq!(
+            LinearSyncProvider::map_task_status_to_linear_state("cancelled"),
+            "canceled"
+        );
+        assert_eq!(
+            LinearSyncProvider::map_task_status_to_linear_state("paused"),
             "backlog"
         );
     }

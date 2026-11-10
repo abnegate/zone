@@ -311,7 +311,7 @@ impl Tool for WorkspaceAction {
         let identifier = json!({"type":"string","format":"uuid"});
         let (properties, required) = match self.action {
             Action::ListTasks => (
-                json!({"status":{"type":"string","enum":["created","queued","in_progress","review","complete","blocked"]}}),
+                json!({"status":{"type":"string","enum":actions::STATUSES}}),
                 json!([]),
             ),
             Action::CreateTask => (
@@ -319,7 +319,7 @@ impl Tool for WorkspaceAction {
                 json!([]),
             ),
             Action::UpdateTask => (
-                json!({"task_id":identifier,"title":{"type":"string","minLength":1},"description":{"type":"string"},"status":{"type":"string","enum":["created","in_progress","review","complete","blocked"]},"priority":{"type":"integer","minimum":1,"maximum":5,"description":"1 is the most urgent, 5 the least."},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
+                json!({"task_id":identifier,"title":{"type":"string","minLength":1},"description":{"type":"string"},"status":{"type":"string","enum":actions::Status::ALL.map(actions::Status::as_str)},"priority":{"type":"integer","minimum":1,"maximum":5,"description":"1 is the most urgent, 5 the least."},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
                 json!(["task_id"]),
             ),
             Action::SendMessage => (
@@ -626,6 +626,41 @@ mod tests {
             serde_json::from_value(json!({"task_id": Uuid::new_v4(), "priority": 2}))
                 .expect("deny_unknown_fields must accept every property the schema advertises");
         assert_eq!(update.priority, Some(2));
+    }
+
+    #[tokio::test]
+    async fn the_task_tools_offer_paused_and_cancelled() {
+        let listed = tool(Action::ListTasks).parameters_schema();
+        let updated = tool(Action::UpdateTask).parameters_schema();
+        for schema in [&listed, &updated] {
+            let offered = schema["properties"]["status"]["enum"]
+                .as_array()
+                .expect("status is an enumeration");
+            assert!(offered.contains(&json!("paused")), "{schema}");
+            assert!(offered.contains(&json!("cancelled")), "{schema}");
+        }
+        assert!(
+            listed["properties"]["status"]["enum"]
+                .as_array()
+                .expect("status is an enumeration")
+                .contains(&json!("queued")),
+            "{listed}"
+        );
+        assert!(
+            !updated["properties"]["status"]["enum"]
+                .as_array()
+                .expect("status is an enumeration")
+                .contains(&json!("queued")),
+            "only a run queues a task: {updated}"
+        );
+        for offered in updated["properties"]["status"]["enum"]
+            .as_array()
+            .expect("status is an enumeration")
+        {
+            let update: Result<actions::Update, _> =
+                serde_json::from_value(json!({"task_id": Uuid::new_v4(), "status": offered}));
+            assert!(update.is_ok(), "{offered} is advertised and must decode");
+        }
     }
 
     #[tokio::test]
