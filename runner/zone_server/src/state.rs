@@ -487,6 +487,7 @@ pub(crate) fn test_config() -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_commands: false,
     }
 }
 
@@ -649,6 +650,7 @@ mod tests {
             host_mounts: Default::default(),
             clones: std::env::temp_dir().join("zone-clones"),
             connect_urls: Vec::new(),
+            mcp_commands: false,
         }
     }
 

@@ -133,6 +133,8 @@ pub struct Config {
     pub host_mounts: crate::host_mounts::HostMounts,
     /// Origins a phone can type into the Zone app (`ZONE_CONNECT_URL`).
     pub connect_urls: Vec<String>,
+    /// Whether the API may create stdio MCP servers (`ZONE_MCP_COMMANDS`).
+    pub mcp_commands: bool,
 }
 
 /// The instance-wide default backend.
@@ -248,6 +250,9 @@ const CONSOLE_ORIGINS: &str = "ZONE_CONSOLE_ORIGINS";
 
 /// Origins a phone should type into the Zone app.
 const CONNECT_URLS: &str = "ZONE_CONNECT_URL";
+
+/// Whether the API may create MCP servers that run a host command.
+const MCP_COMMANDS: &str = "ZONE_MCP_COMMANDS";
 
 const DEFAULT_CALLBACK_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -1336,6 +1341,7 @@ impl Config {
             endpoint_hosts: Hosts::from_env(),
             host_mounts: crate::host_mounts::HostMounts::from_env(),
             connect_urls: connect_urls(env::var(CONNECT_URLS).ok())?,
+            mcp_commands: env_truthy(MCP_COMMANDS, false),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1385,6 +1391,7 @@ impl std::fmt::Debug for Config {
             .field("host_mounts", &self.host_mounts)
             .field("clones", &self.clones)
             .field("connect_urls", &self.connect_urls)
+            .field("mcp_commands", &self.mcp_commands)
             .finish()
     }
 }
@@ -1479,6 +1486,7 @@ mod tests {
             auto: Default::default(),
             host_mounts: Default::default(),
             connect_urls: Vec::new(),
+            mcp_commands: false,
         }
     }
 
@@ -2099,6 +2107,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn zone_mcp_commands_is_off_unless_the_operator_turns_it_on() {
+        let mut environment = Variables::isolated(&[MCP_COMMANDS]);
+
+        assert!(
+            !env_truthy(MCP_COMMANDS, false),
+            "an unset ZONE_MCP_COMMANDS must keep stdio MCP servers off"
+        );
+
+        for value in ["1", "true", "YES", "on"] {
+            environment.set(MCP_COMMANDS, value);
+            assert!(
+                env_truthy(MCP_COMMANDS, false),
+                "{value} turns ZONE_MCP_COMMANDS on"
+            );
+        }
+
+        for value in ["0", "off"] {
+            environment.set(MCP_COMMANDS, value);
+            assert!(
+                !env_truthy(MCP_COMMANDS, false),
+                "{value} keeps ZONE_MCP_COMMANDS off"
+            );
+        }
+    }
+
     /// The environment picks the default every organization without an agent
     /// provider of its own falls back to.
     #[test]
@@ -2282,6 +2316,7 @@ mod tests {
             "CORS_ALLOW_CREDENTIALS",
             "CORS_ORIGINS",
             CONNECT_URLS,
+            MCP_COMMANDS,
             "DATABASE_URL",
             "ENCRYPTION_KEY",
             "GPT4ALL_MODELS_URL",
@@ -2376,6 +2411,10 @@ mod tests {
         assert_eq!(defaults.monitoring, MonitoringConfig::from_env());
         assert_eq!(defaults.train_upload_limit_mb, 4096);
         assert!(defaults.connect_urls.is_empty());
+        assert!(
+            !defaults.mcp_commands,
+            "API-created stdio MCP servers stay off until the operator opts in"
+        );
 
         environment.set("HOST", "127.0.0.1");
         environment.set("PORT", "9001");
