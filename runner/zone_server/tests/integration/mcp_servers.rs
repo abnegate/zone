@@ -23,6 +23,9 @@ const AUTO_MAGENTS_VARIABLE: &str = "ZONE_MCP_AUTO_MAGENTS";
 const CONNECTED: &str = "connected";
 const CONNECTING: &str = "connecting";
 const DISABLED: &str = "disabled";
+const FAILED: &str = "failed";
+const COMMANDS_DISABLED: &str =
+    "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)";
 
 const ORGANIZATION: &str = "organization";
 const INSTANCE: &str = "instance";
@@ -525,6 +528,40 @@ async fn a_command_server_needs_the_operator_flag() {
 }
 
 #[tokio::test]
+async fn a_stored_command_server_is_refused_while_the_flag_is_off() {
+    let _environment = isolated();
+    let on = client(true).await;
+    let tenant = Tenant::new(&on).await;
+    let token = tenant.owner.token.as_str();
+    let server = id(&tenant.create(&on, &stdio("stub")).await);
+    let uri = tenant.server(&server);
+
+    let off = client(false).await;
+    let read = off.get_auth(&uri, token).await;
+    read.assert_status(StatusCode::OK);
+    let read = read.json_value();
+    assert_eq!(read["status"], FAILED);
+    assert_eq!(read["error"], COMMANDS_DISABLED);
+    assert_eq!(read["available_tools"], json!([]));
+
+    off.put_json_auth(&uri, &json!({ "arguments": [stub()] }), token)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    off.post_json_auth(&tenant.connection(&server), &json!({}), token)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    let kept = off.get_auth(&uri, token).await.json_value();
+    assert_eq!(kept["status"], FAILED);
+    assert_eq!(kept["updated_at"], read["updated_at"]);
+
+    off.delete_auth(&uri, token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    tenant.discard(&off, &[]).await;
+}
+
+#[tokio::test]
 async fn secrets_are_sealed_and_never_handed_back() {
     let _environment = isolated();
     let client = client(false).await;
@@ -734,6 +771,41 @@ async fn an_invalid_definition_is_refused() {
 }
 
 #[tokio::test]
+async fn a_malformed_reference_is_a_bad_request() {
+    let _environment = isolated();
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    tenant.create(&client, &remote("remote")).await;
+
+    client
+        .post_json_auth(
+            &tenant.servers(),
+            &json!({ "name": "socket", "transport": "websocket", "url": REMOTE_URL }),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    client
+        .put_json_auth(
+            &tenant.workspace_servers(),
+            &json!({ "servers": { "remote": false } }),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+
+    let listed = client
+        .get_auth(&tenant.workspace_servers(), token)
+        .await
+        .json_value();
+    assert_eq!(names(&listed), ["remote"]);
+    assert_eq!(listed["servers"][0]["workspace_enabled"], Value::Null);
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
 async fn a_name_is_unique_in_the_organization_and_against_instance_servers() {
     let mut environment = isolated();
     environment.set(
@@ -838,6 +910,29 @@ async fn an_edit_reconnects_the_server_and_an_allowlist_edit_does_not() {
     assert_eq!(disabled["available_tools"], json!([]));
     let read = client.get_auth(&uri, token).await.json_value();
     assert_eq!(read["status"], DISABLED);
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_reconnect_leaves_a_disabled_server_disabled() {
+    let _environment = isolated();
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let mut body = remote("remote");
+    body["enabled"] = json!(false);
+    let created = tenant.create(&client, &body).await;
+    assert_eq!(created["enabled"], false);
+    assert_eq!(created["status"], DISABLED);
+
+    let requested = client
+        .post_json_auth(&tenant.connection(&id(&created)), &json!({}), token)
+        .await;
+    requested.assert_status(StatusCode::ACCEPTED);
+    let requested = requested.json_value();
+    assert_eq!(requested["status"], DISABLED);
+    assert_eq!(requested["enabled"], false);
 
     tenant.discard(&client, &[]).await;
 }
