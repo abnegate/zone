@@ -1029,7 +1029,7 @@ mod tests {
     use crate::services::mcp_servers::testing::stub;
 
     #[tokio::test]
-    async fn deleting_an_organization_forgets_its_mcp_hub() {
+    async fn deleting_an_organization_stops_its_mcp_servers() {
         let tenant = Tenant::new().await;
         let state = tenant.replica();
         tenant.store(&state, stub("stub")).await;
