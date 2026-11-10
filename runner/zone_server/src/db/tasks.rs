@@ -89,28 +89,30 @@ pub fn placeholder_title(description: &str) -> String {
 
 pub const UNTITLED_AND_UNDESCRIBED: &str = "A task needs a title or a description";
 
-/// The task status a person sets to stop work on a task for now.
+pub const CREATED: &str = "created";
+pub const QUEUED: &str = "queued";
+pub const IN_PROGRESS: &str = "in_progress";
+pub const BLOCKED: &str = "blocked";
 pub const PAUSED: &str = "paused";
-
-/// The task status a person sets to drop a task altogether.
+pub const REVIEW: &str = "review";
+pub const COMPLETE: &str = "complete";
 pub const CANCELLED: &str = "cancelled";
 
 /// Every value `tasks_status_check` admits, kept equal to the newest migration
 /// that redefines it so a caller can refuse an unknown status before the
 /// constraint turns it into a server error.
 pub const STATUSES: [&str; 8] = [
-    "created",
-    "queued",
-    "in_progress",
-    "blocked",
+    CREATED,
+    QUEUED,
+    IN_PROGRESS,
+    BLOCKED,
     PAUSED,
-    "review",
-    "complete",
+    REVIEW,
+    COMPLETE,
     CANCELLED,
 ];
 
-/// Task statuses that take a task out of automation's hands: nothing
-/// unattended starts, retries, advances or merges a task in one of them.
+/// Nothing unattended starts, retries, advances or merges a task in one of these.
 pub const WITHHELD: [&str; 2] = [PAUSED, CANCELLED];
 
 /// A title someone gave, trimmed, or `None` for a blank one.
@@ -763,7 +765,7 @@ pub async fn update_task_authorized(
     if run_is_active(&mut transaction, input.id, input.status.is_some()).await? {
         return Err(MutationError::ActiveRun);
     }
-    let Some(task) = update_task_in(&mut transaction, &input).await? else {
+    let Some(task) = apply_update(&mut transaction, &input).await? else {
         return Ok(Mutation::NotFound);
     };
     transaction.commit().await?;
@@ -797,6 +799,14 @@ pub(crate) async fn update_task_in(
     if run_is_active(connection, input.id, input.status.is_some()).await? {
         return Ok(None);
     }
+    apply_update(connection, input).await
+}
+
+/// Apply `input` to a task whose row the caller has locked and found free to change.
+async fn apply_update(
+    connection: &mut PgConnection,
+    input: &Patch<'_>,
+) -> DbResult<Option<TaskRow>> {
     let row = sqlx::query!(
         r#"
         UPDATE tasks
@@ -1641,12 +1651,10 @@ pub async fn set_dependencies(pool: &PgPool, task_id: Uuid, dependencies: &[Uuid
     Ok(())
 }
 
-/// Result of admitting a run nobody will be watching.
 #[derive(Debug)]
 pub enum Unattended {
     Created(TaskRunRow),
     Active(TaskRunRow),
-    /// A person moved the task to one of [`WITHHELD`]; no run was made.
     Withheld,
 }
 

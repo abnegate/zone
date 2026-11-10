@@ -33,7 +33,7 @@ use super::SyncResult;
 use super::WebhookEvent;
 use super::WebhookPayload;
 use crate::db::sync_config::SyncEventType;
-use crate::db::tasks::TaskRow;
+use crate::db::tasks::{self, TaskRow};
 use crate::secret::Unseal;
 
 const TOKEN_UNOPENABLE: &str =
@@ -45,7 +45,7 @@ const GITHUB_REFUSED: &str =
 const ISSUE_NUMBER_INVALID: &str = "the linked GitHub issue ID is not an issue number";
 const INVALID_SIGNATURE: &str = "Invalid signature";
 const CRITERIA_HEADING: &str = "\n\n## Acceptance Criteria\n\n";
-const CLOSING_STATUSES: [&str; 3] = ["complete", "blocked", "cancelled"];
+const CLOSING_STATUSES: [&str; 3] = [tasks::COMPLETE, tasks::BLOCKED, tasks::CANCELLED];
 const EVENT_HEADER: &str = "X-GitHub-Event";
 const DELIVERY_HEADER: &str = "X-GitHub-Delivery";
 const ISSUES_EVENT: &str = "issues";

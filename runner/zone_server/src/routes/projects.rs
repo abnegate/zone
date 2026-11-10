@@ -754,7 +754,7 @@ impl AutomationCounts {
             agentic: listed.iter().filter(|task| task.is_agentic).count(),
             complete: listed
                 .iter()
-                .filter(|task| task.status == "complete")
+                .filter(|task| task.status == tasks::COMPLETE)
                 .count(),
             in_flight: listed
                 .iter()
@@ -887,16 +887,19 @@ mod tests {
         let counts = AutomationCounts::of(&[
             automation_task(tasks::CANCELLED, Some(auto_projects::Stage::Paused)),
             automation_task(tasks::PAUSED, Some(auto_projects::Stage::Paused)),
-            automation_task("blocked", Some(auto_projects::Stage::Paused)),
-            automation_task("review", Some(auto_projects::Stage::AwaitingChecks)),
-            automation_task("complete", Some(auto_projects::Stage::Merged)),
-            automation_task("created", None),
+            automation_task(tasks::BLOCKED, Some(auto_projects::Stage::Paused)),
+            automation_task(tasks::REVIEW, Some(auto_projects::Stage::AwaitingChecks)),
+            automation_task(tasks::COMPLETE, Some(auto_projects::Stage::Merged)),
+            automation_task(tasks::CREATED, None),
         ]);
         assert_eq!(counts.total, 6);
         assert_eq!(counts.agentic, 6);
         assert_eq!(counts.complete, 1);
         assert_eq!(counts.in_flight, 1);
-        assert_eq!(counts.paused, 2, "a paused task can still be resumed");
+        assert_eq!(
+            counts.paused, 2,
+            "a task a person paused counts as paused; only a cancelled one does not"
+        );
     }
 
     #[test]
