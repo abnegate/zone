@@ -2,13 +2,8 @@ import { Badge } from '@zone/ui';
 import { Source, Status } from './constants';
 import { OVERRIDE_LABELS, OVERRIDES, Override, overrideOf } from './override';
 import { STATUS_BADGES } from './status';
-import type { McpTransport, WorkspaceMcpServer } from './types';
-
-const TRANSPORT_LABELS: Readonly<Record<McpTransport, string>> = {
-  http: 'HTTP',
-  stdio: 'Command',
-  sse: 'SSE',
-};
+import { TRANSPORT_LABELS } from './transport';
+import type { WorkspaceMcpServer } from './types';
 
 const Origin = {
   Organization: 'organization',

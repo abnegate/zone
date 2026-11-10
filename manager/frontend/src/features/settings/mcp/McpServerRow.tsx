@@ -3,14 +3,9 @@ import { useId, useState } from 'react';
 import { Source, Status } from './constants';
 import { STATUS_BADGES } from './status';
 import { toggledTools, toolSummary } from './tools';
-import type { McpServer, McpTransport } from './types';
+import { TRANSPORT_LABELS } from './transport';
+import type { McpServer } from './types';
 import './McpServerRow.css';
-
-const TRANSPORT_LABELS: Readonly<Record<McpTransport, string>> = {
-  http: 'HTTP',
-  stdio: 'Command',
-  sse: 'SSE',
-};
 
 interface McpServerRowProps {
   server: McpServer;
