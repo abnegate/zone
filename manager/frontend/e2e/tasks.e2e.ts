@@ -258,6 +258,23 @@ async function pointerDrag(page: Page, title: string, target: Locator): Promise<
   await expect(page.locator('.task-card-overlay')).toHaveCount(0);
 }
 
+function announcer(page: Page): Locator {
+  return page.locator('.board [aria-live="assertive"]');
+}
+
+async function pressAndAnnounce(page: Page, key: string, announcement: string): Promise<void> {
+  await page.keyboard.press(key);
+  await expect(announcer(page)).toHaveText(announcement);
+}
+
+async function pickUp(page: Page, title: string, stage: string): Promise<Locator> {
+  const grip = page.getByRole('button', { name: `Move ${title}`, exact: true });
+  await grip.focus();
+  await pressAndAnnounce(page, 'Space', `Picked up ${title}, in ${stage}.`);
+  await expect(page.locator('.task-card-overlay')).toBeVisible();
+  return grip;
+}
+
 test.describe('Tasks Page', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
@@ -477,24 +494,16 @@ test.describe('Tasks Page', () => {
 
     test('a card moves with the keyboard from its grip', async ({ context, page }) => {
       const server = await serveTasks(context, page);
-      const live = page.locator('.board [aria-live="assertive"]');
 
-      await page.getByRole('button', { name: 'Move Implement login page', exact: true }).focus();
-      await page.keyboard.press('Space');
-      await expect(page.locator('.task-card-overlay')).toBeVisible();
-      await expect(live).toHaveText('Picked up Implement login page, in Planned.');
-      await page.keyboard.press('ArrowRight');
-      await expect(live).toHaveText('Implement login page is over In progress.');
-      await page.keyboard.press('Space');
+      const grip = await pickUp(page, 'Implement login page', 'Planned');
+      await pressAndAnnounce(page, 'ArrowRight', 'Implement login page is over In progress.');
+      await pressAndAnnounce(page, 'Space', 'Implement login page moved to In progress.');
 
-      await expect(live).toHaveText('Implement login page moved to In progress.');
       await expect.poll(() => moves(server)).toEqual([
         { method: 'PUT', id: 'task-1', body: { status: 'in_progress' } },
       ]);
       await expect(card(column(page, 'In progress'), 'Implement login page')).toBeVisible();
-      await expect(
-        page.getByRole('button', { name: 'Move Implement login page', exact: true })
-      ).toBeFocused();
+      await expect(grip).toBeFocused();
     });
 
     test('a refused keyboard move keeps focus on the card it puts back', async ({
@@ -507,13 +516,10 @@ test.describe('Tasks Page', () => {
       server.hold = new Promise<void>((resolve) => {
         release = resolve;
       });
-      const grip = page.getByRole('button', { name: 'Move Implement login page', exact: true });
 
-      await grip.focus();
-      await page.keyboard.press('Space');
-      await expect(page.locator('.task-card-overlay')).toBeVisible();
-      await page.keyboard.press('ArrowRight');
-      await page.keyboard.press('Space');
+      const grip = await pickUp(page, 'Implement login page', 'Planned');
+      await pressAndAnnounce(page, 'ArrowRight', 'Implement login page is over In progress.');
+      await pressAndAnnounce(page, 'Space', 'Implement login page moved to In progress.');
       await expect(card(column(page, 'In progress'), 'Implement login page')).toBeVisible();
       await expect(grip).toBeFocused();
       release();
@@ -549,9 +555,7 @@ test.describe('Tasks Page', () => {
       });
 
       const before = await offsets();
-      await grip.focus();
-      await page.keyboard.press('Space');
-      await expect(page.locator('.task-card-overlay')).toBeVisible();
+      await pickUp(page, 'Implement login page', 'Planned');
       await page.keyboard.press('ArrowDown');
       await page.keyboard.press('ArrowDown');
       await page.keyboard.press('ArrowUp');
@@ -569,16 +573,12 @@ test.describe('Tasks Page', () => {
       page,
     }) => {
       const server = await serveTasks(context, page);
-      const live = page.locator('.board [aria-live="assertive"]');
 
-      await page.getByRole('button', { name: 'Move Implement login page', exact: true }).focus();
-      await page.keyboard.press('Space');
-      await expect(page.locator('.task-card-overlay')).toBeVisible();
-      await page.keyboard.press('ArrowRight');
-      await expect(live).toHaveText('Implement login page is over In progress.');
-      await page.keyboard.press('Escape');
-
-      await expect(live).toHaveText(
+      await pickUp(page, 'Implement login page', 'Planned');
+      await pressAndAnnounce(page, 'ArrowRight', 'Implement login page is over In progress.');
+      await pressAndAnnounce(
+        page,
+        'Escape',
         'Moving Implement login page cancelled. It stays in Planned.'
       );
       await expect(page.locator('.task-card-overlay')).toHaveCount(0);
