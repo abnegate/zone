@@ -18,6 +18,7 @@ pub mod github;
 pub mod health;
 pub mod host_mounts;
 pub mod invitations;
+pub mod mcp_servers;
 pub mod models;
 pub mod organizations;
 pub mod projects;
@@ -467,6 +468,26 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai/effective",
             get(ai_settings::get_effective),
+        )
+        // Organization MCP servers
+        .route(
+            "/api/organizations/{org_id}/mcp-servers",
+            get(mcp_servers::list).post(mcp_servers::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/mcp-servers/{server_id}",
+            get(mcp_servers::get)
+                .put(mcp_servers::update)
+                .delete(mcp_servers::delete),
+        )
+        .route(
+            "/api/organizations/{org_id}/mcp-servers/{server_id}/connection",
+            post(mcp_servers::reconnect),
+        )
+        // Workspace MCP server overrides
+        .route(
+            "/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers",
+            get(mcp_servers::list_workspace).put(mcp_servers::update_workspace),
         )
         // Coding agent sign-ins
         .route("/api/organizations/{org_id}/agents", get(agents::list))
