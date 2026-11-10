@@ -86,7 +86,11 @@ export function McpServerRow({
         <div className="mcp-server-tools">
           <button
             type="button"
-            className={buttonVariants({ variant: 'ghost', size: 'sm' })}
+            className={buttonVariants({
+              variant: 'ghost',
+              size: 'sm',
+              className: 'mcp-server-tools-toggle',
+            })}
             aria-expanded={expanded}
             aria-controls={panelId}
             aria-label={`Tools for ${server.name}`}

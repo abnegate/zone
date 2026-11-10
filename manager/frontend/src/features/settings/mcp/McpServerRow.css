@@ -7,6 +7,10 @@
   padding: var(--ui-space-2) var(--ui-space-3) var(--ui-space-2) var(--ui-space-4);
 }
 
+.mcp-server:not(:has(> .mcp-server-actions)) {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .mcp-server + .mcp-server {
   border-top: 1px solid var(--ui-border);
 }
@@ -81,6 +85,10 @@
   grid-column: 1 / -1;
   gap: var(--ui-space-2);
   min-width: 0;
+}
+
+.mcp-server-tools-toggle {
+  margin-inline-start: calc(-1 * var(--ui-space-2-5));
 }
 
 .mcp-server-tool-list {

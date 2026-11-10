@@ -99,6 +99,13 @@ describe('McpServerRow', () => {
     expect(screen.getByRole('switch', { name: 'Enable docs' })).toHaveProperty('disabled', true);
   });
 
+  it('marks the tools toggle so it lines up with the server name', () => {
+    renderRow(server());
+    const expand = screen.getByRole('button', { name: 'Tools for docs' });
+    expect(expand.classList.contains('mcp-server-tools-toggle')).toBe(true);
+    expect(expand.classList.contains('ui-btn-ghost')).toBe(true);
+  });
+
   it('expands the tool list and narrows it when a tool is unchecked', () => {
     const { onTools } = renderRow(server());
     const expand = screen.getByRole('button', { name: 'Tools for docs' });
