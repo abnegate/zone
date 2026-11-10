@@ -281,6 +281,8 @@ describe('useTasks moveTask', () => {
     mockGetTasks.mockResolvedValue([mockTask]);
   });
 
+  const moved: Task = { ...mockTask, status: MOVED };
+
   const renderLoaded = async (queryClient: QueryClient = createClient()) => {
     const rendered = renderHook(() => useTasks(), { wrapper: createWrapper(queryClient) });
     await waitFor(() => {
@@ -289,32 +291,32 @@ describe('useTasks moveTask', () => {
     return rendered;
   };
 
-  it('shows the new status before the update resolves', async () => {
+  it('shows the new status in the render the move is made in, leaving the cache alone', async () => {
+    const queryClient = createClient();
     const update = deferred<Task>();
     mockUpdateTask.mockReturnValueOnce(update.promise);
-    const { result } = await renderLoaded();
+    const { result } = await renderLoaded(queryClient);
 
     let move: Promise<Task> = Promise.resolve(mockTask);
     act(() => {
       move = result.current.moveTask('task-1', MOVED);
     });
 
-    await waitFor(() => {
-      expect(result.current.tasks[0].status).toBe(MOVED);
-    });
-    expect(mockUpdateTask).toHaveBeenCalledTimes(1);
+    expect(result.current.tasks[0].status).toBe(MOVED);
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([mockTask]);
+    await waitFor(() => expect(mockUpdateTask).toHaveBeenCalledTimes(1));
 
-    const moved = { ...mockTask, status: MOVED };
     mockGetTasks.mockResolvedValue([moved]);
     await act(async () => {
       update.resolve(moved);
       await expect(move).resolves.toEqual(moved);
     });
     expect(result.current.tasks[0].status).toBe(MOVED);
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([moved]);
   });
 
   it('sends only the status in the update body', async () => {
-    mockUpdateTask.mockResolvedValueOnce({ ...mockTask, status: MOVED });
+    mockUpdateTask.mockResolvedValueOnce(moved);
     const { result } = await renderLoaded();
 
     await act(async () => {
@@ -325,43 +327,70 @@ describe('useTasks moveTask', () => {
     expect(Object.keys(mockUpdateTask.mock.calls[0][1])).toEqual(['status']);
   });
 
-  it('cancels an in-flight refetch so it cannot overwrite the optimistic status', async () => {
+  it('keeps the new status when a refetch started after the move comes back stale', async () => {
     const queryClient = createClient();
+    const update = deferred<Task>();
+    mockUpdateTask.mockReturnValueOnce(update.promise);
     const { result } = await renderLoaded(queryClient);
 
+    act(() => {
+      void result.current.moveTask('task-1', MOVED);
+    });
     const stale = deferred<Task[]>();
     mockGetTasks.mockReturnValueOnce(stale.promise);
     act(() => {
-      result.current.refetch();
+      void result.current.refetch();
     });
-    await waitFor(() => {
-      expect(mockGetTasks).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(mockGetTasks).toHaveBeenCalledTimes(2));
+    const refreshed = { ...mockTask, title: 'Retitled elsewhere' };
+    await act(async () => {
+      stale.resolve([refreshed]);
+      await stale.promise;
     });
 
+    await waitFor(() => expect(result.current.tasks[0].title).toBe('Retitled elsewhere'));
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([refreshed]);
+    expect(result.current.tasks[0].status).toBe(MOVED);
+  });
+
+  it('ignores a stale refetch that is still in flight when the move succeeds', async () => {
+    const queryClient = createClient();
     const update = deferred<Task>();
     mockUpdateTask.mockReturnValueOnce(update.promise);
-    act(() => {
-      result.current.moveTask('task-1', MOVED);
-    });
-    await waitFor(() => {
-      expect(result.current.tasks[0].status).toBe(MOVED);
-    });
+    const { result } = await renderLoaded(queryClient);
 
+    let move: Promise<Task> = Promise.resolve(mockTask);
+    act(() => {
+      move = result.current.moveTask('task-1', MOVED);
+    });
+    const stale = deferred<Task[]>();
+    mockGetTasks.mockReturnValueOnce(stale.promise);
+    act(() => {
+      void result.current.refetch();
+    });
+    await waitFor(() => expect(mockGetTasks).toHaveBeenCalledTimes(2));
+
+    const fresh = deferred<Task[]>();
+    mockGetTasks.mockReturnValue(fresh.promise);
+    await act(async () => {
+      update.resolve(moved);
+      await move;
+    });
     await act(async () => {
       stale.resolve([mockTask]);
       await stale.promise;
     });
 
-    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)?.[0].status).toBe(MOVED);
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([moved]);
     expect(result.current.tasks[0].status).toBe(MOVED);
   });
 
-  it('restores the previous tasks and rethrows when the update is refused', async () => {
+  it('returns the card and rethrows when the update is refused, without waiting on a reload', async () => {
     const queryClient = createClient();
     const { result } = await renderLoaded(queryClient);
 
-    const refetch = deferred<Task[]>();
-    mockGetTasks.mockReturnValue(refetch.promise);
+    const reload = deferred<Task[]>();
+    mockGetTasks.mockReturnValue(reload.promise);
     const update = deferred<Task>();
     mockUpdateTask.mockReturnValueOnce(update.promise);
 
@@ -369,9 +398,7 @@ describe('useTasks moveTask', () => {
     act(() => {
       move = result.current.moveTask('task-1', MOVED);
     });
-    await waitFor(() => {
-      expect(result.current.tasks[0].status).toBe(MOVED);
-    });
+    expect(result.current.tasks[0].status).toBe(MOVED);
 
     const refusal = new Error('Task has an active run');
     await act(async () => {
@@ -379,10 +406,8 @@ describe('useTasks moveTask', () => {
       await expect(move).rejects.toBe(refusal);
     });
 
+    expect(result.current.tasks).toEqual([mockTask]);
     expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([mockTask]);
-    await waitFor(() => {
-      expect(result.current.tasks).toEqual([mockTask]);
-    });
   });
 
   it('invalidates the task lists once the move settles', async () => {
@@ -390,7 +415,7 @@ describe('useTasks moveTask', () => {
     const invalidate = spyOn(queryClient, 'invalidateQueries');
     const { result } = await renderLoaded(queryClient);
 
-    mockUpdateTask.mockResolvedValueOnce({ ...mockTask, status: MOVED });
+    mockUpdateTask.mockResolvedValueOnce(moved);
     await act(async () => {
       await result.current.moveTask('task-1', MOVED);
     });
@@ -403,6 +428,33 @@ describe('useTasks moveTask', () => {
     });
     expect(invalidate).toHaveBeenCalledTimes(2);
     expect(invalidate).toHaveBeenLastCalledWith({ queryKey: ['tasks'] });
+  });
+
+  it('finishes a move whose board has gone, so the next one shows it', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Number.POSITIVE_INFINITY },
+        mutations: { retry: false, gcTime: 0 },
+      },
+    });
+    const update = deferred<Task>();
+    mockUpdateTask.mockReturnValueOnce(update.promise);
+    const { result, unmount } = await renderLoaded(queryClient);
+
+    let move: Promise<Task> = Promise.resolve(mockTask);
+    act(() => {
+      move = result.current.moveTask('task-1', MOVED);
+    });
+    unmount();
+    mockGetTasks.mockResolvedValue([moved]);
+    await act(async () => {
+      update.resolve(moved);
+      await move;
+    });
+
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([moved]);
+    const again = renderHook(() => useTasks(), { wrapper: createWrapper(queryClient) });
+    expect(again.result.current.tasks).toEqual([moved]);
   });
 
   it('keeps its callbacks across renders', async () => {
@@ -445,11 +497,15 @@ describe('useTasks quick moves', () => {
     return rendered;
   }
 
-  function holdRefetches() {
-    const refetch = deferred<Task[]>();
+  function holdReloads() {
+    const reload = deferred<Task[]>();
     mockGetTasks.mockReset();
-    mockGetTasks.mockReturnValue(refetch.promise);
-    return refetch;
+    mockGetTasks.mockReturnValue(reload.promise);
+    return reload;
+  }
+
+  function shown(result: { current: ReturnType<typeof useTasks> }) {
+    return result.current.tasks.map((task) => task.status);
   }
 
   beforeEach(() => {
@@ -460,40 +516,10 @@ describe('useTasks quick moves', () => {
     );
   });
 
-  it('keeps a later move when an earlier one is refused', async () => {
+  it('keeps a later move that succeeds when an earlier one is refused', async () => {
     const queryClient = keepingClient();
     const { result } = await renderBoth(queryClient);
-    holdRefetches();
-    const first = deferred<Task>();
-    const second = deferred<Task>();
-    mockUpdateTask.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
-
-    let firstMove: Promise<Task> = Promise.resolve(mockTask);
-    act(() => {
-      firstMove = result.current.moveTask('task-1', MOVED);
-    });
-    await waitFor(() => expect(statusOf(queryClient, 'task-1')).toBe(MOVED));
-    act(() => {
-      void result.current.moveTask('task-2', BLOCKED);
-    });
-    await waitFor(() => expect(statusOf(queryClient, 'task-2')).toBe(BLOCKED));
-
-    await act(async () => {
-      first.reject(new Error('refused'));
-      await expect(firstMove).rejects.toThrow('refused');
-    });
-
-    expect(statusOf(queryClient, 'task-1')).toBe('created');
-    expect(statusOf(queryClient, 'task-2')).toBe(BLOCKED);
-    await waitFor(() => {
-      expect(result.current.tasks.map((task) => task.status)).toEqual(['created', BLOCKED]);
-    });
-  });
-
-  it('waits for the last move to settle before reloading the list', async () => {
-    const queryClient = keepingClient();
-    const { result } = await renderBoth(queryClient);
-    const loads = mockGetTasks.mock.calls.length;
+    holdReloads();
     const first = deferred<Task>();
     const second = deferred<Task>();
     mockUpdateTask.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
@@ -503,58 +529,103 @@ describe('useTasks quick moves', () => {
     act(() => {
       firstMove = result.current.moveTask('task-1', MOVED);
     });
-    await waitFor(() => expect(statusOf(queryClient, 'task-1')).toBe(MOVED));
     act(() => {
       secondMove = result.current.moveTask('task-2', BLOCKED);
     });
-    await waitFor(() => expect(statusOf(queryClient, 'task-2')).toBe(BLOCKED));
+    expect(shown(result)).toEqual([MOVED, BLOCKED]);
+
+    await act(async () => {
+      first.reject(new Error('refused'));
+      await expect(firstMove).rejects.toThrow('refused');
+    });
+    expect(shown(result)).toEqual(['created', BLOCKED]);
+
+    await act(async () => {
+      second.resolve({ ...other, status: BLOCKED });
+      await secondMove;
+    });
+    expect(shown(result)).toEqual(['created', BLOCKED]);
+    expect(statusOf(queryClient, 'task-1')).toBe('created');
+    expect(statusOf(queryClient, 'task-2')).toBe(BLOCKED);
+  });
+
+  it('shows the latest of two moves of one card whichever settles first', async () => {
+    const queryClient = keepingClient();
+    const { result } = await renderBoth(queryClient);
+    holdReloads();
+    const first = deferred<Task>();
+    const second = deferred<Task>();
+    mockUpdateTask.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+
+    let firstMove: Promise<Task> = Promise.resolve(mockTask);
+    let secondMove: Promise<Task> = Promise.resolve(mockTask);
+    act(() => {
+      firstMove = result.current.moveTask('task-1', MOVED);
+    });
+    act(() => {
+      secondMove = result.current.moveTask('task-1', BLOCKED);
+    });
+    expect(shown(result)).toEqual([BLOCKED, 'created']);
 
     await act(async () => {
       first.resolve({ ...mockTask, status: MOVED });
       await firstMove;
     });
+    expect(shown(result)).toEqual([BLOCKED, 'created']);
+    expect(statusOf(queryClient, 'task-1')).toBe(MOVED);
 
-    expect(mockGetTasks.mock.calls.length).toBe(loads);
-    expect(statusOf(queryClient, 'task-2')).toBe(BLOCKED);
-
-    mockGetTasks.mockImplementation(() =>
-      Promise.resolve([
-        { ...mockTask, status: MOVED },
-        { ...other, status: BLOCKED },
-      ])
-    );
     await act(async () => {
-      second.resolve({ ...other, status: BLOCKED });
-      await secondMove;
+      second.reject(new Error('refused'));
+      await expect(secondMove).rejects.toThrow('refused');
     });
-
-    await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(loads + 1));
-    expect(result.current.tasks.map((task) => task.status)).toEqual([MOVED, BLOCKED]);
+    expect(shown(result)).toEqual([MOVED, 'created']);
   });
 
-  it('puts a refused move back in the list it was made in, after the filter changed', async () => {
+  it('carries a move across a change of filter and returns the card when it is refused', async () => {
     const queryClient = keepingClient();
     const { result, rerender } = await renderBoth(queryClient);
     const update = deferred<Task>();
     mockUpdateTask.mockReturnValueOnce(update.promise);
 
-    let move: Promise<Task> = Promise.resolve(mockTask);
+    let move: Promise<Task> = Promise.resolve(other);
     act(() => {
-      move = result.current.moveTask('task-1', MOVED);
+      move = result.current.moveTask('task-2', BLOCKED);
     });
-    await waitFor(() => expect(statusOf(queryClient, 'task-1')).toBe(MOVED));
-
     rerender({ projectId: PROJECT });
-    await waitFor(() => expect(result.current.tasks).toEqual([other]));
-    holdRefetches();
+    await waitFor(() => expect(result.current.tasks).toEqual([{ ...other, status: BLOCKED }]));
+    holdReloads();
 
     await act(async () => {
       update.reject(new Error('refused'));
       await expect(move).rejects.toThrow('refused');
     });
 
-    expect(queryClient.getQueryData<Task[]>(PROJECT_KEY)).toEqual([other]);
     expect(result.current.tasks).toEqual([other]);
-    expect(statusOf(queryClient, 'task-1')).toBe('created');
+    expect(queryClient.getQueryData<Task[]>(PROJECT_KEY)).toEqual([other]);
+    expect(statusOf(queryClient, 'task-2')).toBe('created');
+  });
+
+  it('records an accepted move in every list that holds the card', async () => {
+    const queryClient = keepingClient();
+    const { result, rerender } = await renderBoth(queryClient);
+    const update = deferred<Task>();
+    mockUpdateTask.mockReturnValueOnce(update.promise);
+
+    let move: Promise<Task> = Promise.resolve(other);
+    act(() => {
+      move = result.current.moveTask('task-2', BLOCKED);
+    });
+    rerender({ projectId: PROJECT });
+    await waitFor(() => expect(result.current.tasks).toHaveLength(1));
+    holdReloads();
+
+    await act(async () => {
+      update.resolve({ ...other, status: BLOCKED });
+      await move;
+    });
+
+    expect(statusOf(queryClient, 'task-2', PROJECT_KEY)).toBe(BLOCKED);
+    expect(statusOf(queryClient, 'task-2')).toBe(BLOCKED);
+    expect(shown(result)).toEqual([BLOCKED]);
   });
 });

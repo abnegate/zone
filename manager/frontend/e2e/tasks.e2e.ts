@@ -690,6 +690,38 @@ test.describe('Tasks Page', () => {
       ]);
     });
 
+    test('a reload of the list before a move is answered leaves the card where it was dropped', async ({
+      context,
+      page,
+    }) => {
+      const server = await serveTasks(context, page);
+      let release: () => void = () => {};
+      server.hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      await pointerDrag(page, 'Fix navigation bug', column(page, 'Blocked'));
+      await expect.poll(() => moves(server)).toHaveLength(1);
+      server.tasks = server.tasks.map((task) =>
+        task.id === 'task-7' ? { ...task, title: 'Ship onboarding today' } : task
+      );
+      await page.evaluate(() => window.dispatchEvent(new Event('visibilitychange')));
+      await expect(card(column(page, 'Completed'), 'Ship onboarding today')).toBeVisible();
+      expect(server.tasks.find((task) => task.id === 'task-3')?.status).toBe('in_progress');
+
+      await expect(card(column(page, 'Blocked'), 'Fix navigation bug')).toBeVisible();
+      await expect(column(page, 'In progress').locator('p.board-column-empty')).toHaveText(
+        'No tasks'
+      );
+      release();
+
+      await expect.poll(() => server.tasks.find((task) => task.id === 'task-3')?.status).toBe(
+        'blocked'
+      );
+      await expect(card(column(page, 'Blocked'), 'Fix navigation bug')).toBeVisible();
+      await expect(page.getByText("Couldn't move Fix navigation bug")).toHaveCount(0);
+    });
+
     test('clicking a card opens its editor', async ({ context, page }) => {
       await serveTasks(context, page);
 

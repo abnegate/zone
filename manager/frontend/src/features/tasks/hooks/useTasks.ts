@@ -1,5 +1,5 @@
-import { type QueryKey, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useMemo, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { awaitsTitle, TITLE_POLL_MS } from '../title';
@@ -7,33 +7,26 @@ import type { CreateTaskRequest, Task, TaskStatus, UpdateTaskRequest } from '../
 
 const TASKS_KEY = ['tasks'] as const;
 
-const MOVE_KEY = ['tasks', 'move'] as const;
-
 const LOAD_FAILED = 'Failed to load tasks';
 
 const NO_WORKSPACE = 'No workspace selected';
+
+const NO_TASKS: Task[] = [];
+
+const NONE: Moves = new Map();
 
 interface Move {
   id: string;
   status: TaskStatus;
 }
 
-interface Moved {
-  queryKey: QueryKey;
-  id: string;
-  from: TaskStatus;
-  to: TaskStatus;
-}
+type Moves = ReadonlyMap<string, Move>;
 
-function withStatus(
-  tasks: Task[] | undefined,
-  id: string,
-  from: TaskStatus | null,
-  to: TaskStatus
-) {
-  return tasks?.map((task) =>
-    task.id === id && (from === null || task.status === from) ? { ...task, status: to } : task
-  );
+function without(moves: Moves, move: Move): Moves {
+  if (moves.get(move.id) !== move) return moves;
+  const rest = new Map(moves);
+  rest.delete(move.id);
+  return rest;
 }
 
 export function useTasks(projectId?: string) {
@@ -42,8 +35,10 @@ export function useTasks(projectId?: string) {
   const workspaceId = currentWorkspace?.id;
   const queryKey = ['tasks', workspaceId, projectId];
 
+  const [moves, setMoves] = useState(NONE);
+
   const {
-    data: tasks = [],
+    data: listed = NO_TASKS,
     isLoading,
     error,
     refetch,
@@ -79,24 +74,15 @@ export function useTasks(projectId?: string) {
   });
 
   const moveTaskMutation = useMutation({
-    mutationKey: MOVE_KEY,
     mutationFn: ({ id, status }: Move) => tasksApi.updateTask(id, { status }),
-    onMutate: async ({ id, status }: Move): Promise<Moved | undefined> => {
-      const moving = queryKey;
-      await queryClient.cancelQueries({ queryKey: moving });
-      const from = queryClient.getQueryData<Task[]>(moving)?.find((task) => task.id === id)?.status;
-      queryClient.setQueryData<Task[]>(moving, (current) => withStatus(current, id, null, status));
-      return from === undefined ? undefined : { queryKey: moving, id, from, to: status };
-    },
-    onError: (_error, _move, moved) => {
-      if (!moved) return;
-      queryClient.setQueryData<Task[]>(moved.queryKey, (current) =>
-        withStatus(current, moved.id, moved.to, moved.from)
+    onSuccess: async (moved) => {
+      await queryClient.cancelQueries({ queryKey: TASKS_KEY });
+      queryClient.setQueriesData<Task[]>({ queryKey: TASKS_KEY }, (current) =>
+        current?.map((task) => (task.id === moved.id ? moved : task))
       );
     },
     onSettled: () => {
-      if (queryClient.isMutating({ mutationKey: MOVE_KEY }) > 1) return;
-      queryClient.invalidateQueries({ queryKey: TASKS_KEY });
+      void queryClient.invalidateQueries({ queryKey: TASKS_KEY });
     },
   });
 
@@ -115,7 +101,26 @@ export function useTasks(projectId?: string) {
     [update]
   );
 
-  const moveTask = useCallback((id: string, status: TaskStatus) => move({ id, status }), [move]);
+  const moveTask = useCallback(
+    async (id: string, status: TaskStatus) => {
+      const pending: Move = { id, status };
+      setMoves((current) => new Map(current).set(id, pending));
+      try {
+        return await move(pending);
+      } finally {
+        setMoves((current) => without(current, pending));
+      }
+    },
+    [move]
+  );
+
+  const tasks = useMemo(() => {
+    if (moves.size === 0) return listed;
+    return listed.map((task) => {
+      const pending = moves.get(task.id);
+      return pending && pending.status !== task.status ? { ...task, status: pending.status } : task;
+    });
+  }, [listed, moves]);
 
   return {
     tasks,

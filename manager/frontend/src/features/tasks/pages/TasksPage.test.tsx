@@ -1386,23 +1386,75 @@ describe('TasksPage', () => {
       expect(mockToastError).not.toHaveBeenCalled();
     });
 
-    it('puts a refused move back in its column and says why', async () => {
+    it('keeps a moved card in its column when the list reloads before the move is answered', async () => {
+      let answer: (task: Task) => void = () => {};
       mockGetTasks.mockImplementation(() => Promise.resolve(everyStatus));
-      mockUpdateTask.mockImplementation(() => Promise.reject(new Error(refusal)));
+      mockUpdateTask.mockImplementation(
+        () =>
+          new Promise<Task>((resolve) => {
+            answer = resolve;
+          })
+      );
       renderTasksPage();
       await screen.findByText(TITLES.paused);
 
       await dragRight(TITLES.paused);
+      expect(within(column('In review')).getByText(TITLES.paused)).toBeInTheDocument();
+
+      const loads = mockGetTasks.mock.calls.length;
+      await act(async () => {
+        window.dispatchEvent(new Event('visibilitychange'));
+        await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(loads + 1));
+        await mockGetTasks.mock.results[loads].value;
+      });
+
+      expect(within(column('In review')).getByText(TITLES.paused)).toBeInTheDocument();
+      expect(within(column('Paused')).getByText('No tasks')).toBeInTheDocument();
+
+      const moved = { ...everyStatus.find((task) => task.id === 'task-paused'), status: 'review' };
+      mockGetTasks.mockImplementation(() =>
+        Promise.resolve(everyStatus.map((task) => (task.id === moved.id ? (moved as Task) : task)))
+      );
+      await act(async () => {
+        answer(moved as Task);
+      });
+      await waitFor(() => expect(mockGetTasks.mock.calls.length).toBeGreaterThan(loads + 1));
+      expect(within(column('In review')).getByText(TITLES.paused)).toBeInTheDocument();
+      expect(mockToastError).not.toHaveBeenCalled();
+    });
+
+    it('puts a refused move back in its column and says why, before any reload', async () => {
+      let loaded = false;
+      mockGetTasks.mockImplementation(() => {
+        if (loaded) return new Promise<Task[]>(() => {});
+        loaded = true;
+        return Promise.resolve(everyStatus);
+      });
+      let refuse: (reason: Error) => void = () => {};
+      mockUpdateTask.mockImplementation(
+        () =>
+          new Promise<Task>((_resolve, reject) => {
+            refuse = reject;
+          })
+      );
+      renderTasksPage();
+      await screen.findByText(TITLES.paused);
+
+      await dragRight(TITLES.paused);
+      expect(within(column('In review')).getByText(TITLES.paused)).toBeInTheDocument();
+      expect(within(column('Paused')).queryByText(TITLES.paused)).not.toBeInTheDocument();
+
+      await act(async () => {
+        refuse(new Error(refusal));
+      });
 
       await waitFor(() => {
         expect(mockToastError).toHaveBeenCalledWith(`Couldn't move ${TITLES.paused}`, {
           description: refusal,
         });
       });
-      expect(mockUpdateTask).toHaveBeenCalledWith('task-paused', { status: 'review' });
-      await waitFor(() => {
-        expect(within(column('Paused')).getByText(TITLES.paused)).toBeInTheDocument();
-      });
+      expect(mockUpdateTask.mock.calls).toEqual([['task-paused', { status: 'review' }]]);
+      expect(within(column('Paused')).getByText(TITLES.paused)).toBeInTheDocument();
       expect(within(column('In review')).queryByText(TITLES.paused)).not.toBeInTheDocument();
     });
   });
