@@ -337,6 +337,20 @@ fn assert_sealed(response: &TestResponse) {
     );
 }
 
+/// The message of a refusal, whose body is an `ErrorResponse` with no code.
+fn refusal(response: &TestResponse) -> String {
+    let body = response.json_value();
+    assert_eq!(
+        fields(&body),
+        [ERROR],
+        "a refusal is a message and nothing more: {body}"
+    );
+    body[ERROR]
+        .as_str()
+        .unwrap_or_else(|| panic!("a refusal's error is a message: {body}"))
+        .to_string()
+}
+
 /// GET `uri` until the server it returns reaches `status`, and hand that body back. A server
 /// that fails while it is awaited to connect has settled, so that ends the wait at once.
 async fn settle(client: &TestClient, uri: &str, token: &str, status: &str) -> Value {
@@ -527,6 +541,84 @@ async fn a_stranger_finds_nothing_on_any_route() {
     assert_eq!(kept.json_value()["enabled"], true);
 
     tenant.discard(&client, &[&stranger]).await;
+}
+
+#[tokio::test]
+async fn a_server_is_found_only_under_its_own_organization() {
+    let _environment = isolated();
+    let client = client(false).await;
+    let ours = Tenant::new(&client).await;
+    let theirs = Tenant::new(&client).await;
+    let own = id(&ours.create(&client, &remote("ours")).await);
+    let foreign = id(&theirs.create(&client, &remote("theirs")).await);
+    let stored = [(&ours, &own), (&theirs, &foreign)];
+    let mut before = Vec::new();
+    for (tenant, server) in stored {
+        let read = client
+            .get_auth(&tenant.server(server), &tenant.owner.token)
+            .await;
+        read.assert_status(StatusCode::OK);
+        before.push(read.json_value());
+    }
+
+    for (tenant, server) in [(&ours, &foreign), (&theirs, &own)] {
+        for token in [&ours.owner.token, &theirs.owner.token] {
+            let answers = [
+                client.get_auth(&tenant.server(server), token).await,
+                client
+                    .put_json_auth(&tenant.server(server), &json!({ "enabled": false }), token)
+                    .await,
+                client
+                    .post_json_auth(&tenant.connection(server), &json!({}), token)
+                    .await,
+                client.delete_auth(&tenant.server(server), token).await,
+            ];
+            for response in &answers {
+                response.assert_status(StatusCode::NOT_FOUND);
+            }
+        }
+    }
+
+    let crossed = [
+        json!({ "servers": { foreign.as_str(): false } }),
+        json!({ "servers": { foreign.as_str(): null } }),
+        json!({ "servers": { own.as_str(): false, foreign.as_str(): false } }),
+    ];
+    for body in &crossed {
+        let response = client
+            .put_json_auth(&ours.workspace_servers(), body, &ours.owner.token)
+            .await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{body} was not refused: {}",
+            response.text()
+        );
+        refusal(&response);
+    }
+    let overrides: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workspace_mcp_servers WHERE workspace_id = ANY($1)",
+    )
+    .bind(vec![ours.workspace, theirs.workspace])
+    .fetch_one(client.state().db())
+    .await
+    .expect("the overrides are readable");
+    assert_eq!(overrides, 0, "a refused override was written");
+
+    for ((tenant, server), before) in stored.into_iter().zip(&before) {
+        let kept = client
+            .get_auth(&tenant.server(server), &tenant.owner.token)
+            .await;
+        kept.assert_status(StatusCode::OK);
+        assert_eq!(
+            kept.json_value(),
+            *before,
+            "a request through another organization changed the server"
+        );
+    }
+
+    theirs.discard(&client, &[]).await;
+    ours.discard(&client, &[]).await;
 }
 
 #[tokio::test]
