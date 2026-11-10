@@ -3,22 +3,33 @@
 //! hold, how an edit reaches the running connection, and how a workspace
 //! narrows what its organization offers.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_json::json;
+use tokio::time::Instant;
 use uuid::Uuid;
-use zone_core::variables::Variables;
+use zone_core::servers;
 use zone_server::config::Config;
+use zone_server::services::mcp_servers::status::Connection;
+use zone_server::services::mcp_servers::status::SSE_UNSUPPORTED;
+use zone_server::services::mcp_servers::status::UNCONNECTED;
 
-use crate::common::{self, TestClient, TestResponse, test_email, test_password};
+use crate::common;
+use crate::common::TestClient;
+use crate::common::TestResponse;
+use crate::common::mcp;
+use crate::common::mcp::isolated;
+use crate::common::test_email;
+use crate::common::test_password;
 
-const ENABLED_VARIABLE: &str = "ZONE_MCP_ENABLED";
-const SERVERS_VARIABLE: &str = "ZONE_MCP_SERVERS";
-const CONFIG_VARIABLE: &str = "ZONE_MCP_CONFIG";
-const AUTO_CONNECT_VARIABLE: &str = "ZONE_MCP_AUTO_CONNECT";
-const AUTO_MAGENTS_VARIABLE: &str = "ZONE_MCP_AUTO_MAGENTS";
+const HOME: &str = "HOME";
+const HOME_DIRECTORY: &str = ".zone";
+const HOME_DOCUMENT: &str = "mcp.json";
+const DECOY: &str = "decoy";
 
 const CONNECTED: &str = "connected";
 const CONNECTING: &str = "connecting";
@@ -39,8 +50,16 @@ const STUB_TOOL: &str = "delegate";
 const REMOTE_URL: &str = "http://127.0.0.1:1/mcp";
 const HEADER: &str = "Authorization";
 const HEADER_SECRET: &str = "s3cr3t";
+const ROTATED_HEADER_SECRET: &str = "r0t4ted";
 const ENVIRONMENT: &str = "TOKEN";
 const ENVIRONMENT_SECRET: &str = "v4lue";
+const ROTATED_ENVIRONMENT_SECRET: &str = "ch4nged";
+const SECRETS: [&str; 4] = [
+    HEADER_SECRET,
+    ROTATED_HEADER_SECRET,
+    ENVIRONMENT_SECRET,
+    ROTATED_ENVIRONMENT_SECRET,
+];
 const SEALED_PREFIX: &str = "ENC[";
 const INSTANCE_SERVER: &str = "shared";
 
@@ -51,9 +70,20 @@ const UPDATED: &str = "mcp_server.updated";
 const DELETED: &str = "mcp_server.deleted";
 const RECONNECTED: &str = "mcp_server.reconnected";
 const WORKSPACE_UPDATED: &str = "workspace_mcp_servers.updated";
+const AUDITED: [&str; 5] = [CREATED, UPDATED, DELETED, RECONNECTED, WORKSPACE_UPDATED];
 
-const SETTLE: Duration = Duration::from_secs(15);
+const ERROR: &str = "error";
+
+/// How long a hub waits on one server's handshake: `CONNECT_TIMEOUT` in `abnegate_agent::mcp::hub`,
+/// which is private.
+const CONNECT: Duration = Duration::from_secs(30);
+const SETTLE: Duration = Duration::from_secs(CONNECT.as_secs() + 15);
 const POLL: Duration = Duration::from_millis(50);
+/// An edit that must leave a server running is watched for this long, or for `RESTARTS` times
+/// what that server's own restart just took when that is longer, before nothing is taken to
+/// have restarted it.
+const QUIET: Duration = Duration::from_millis(500);
+const RESTARTS: u32 = 4;
 
 const SERVER_FIELDS: [&str; 16] = [
     "arguments",
@@ -74,20 +104,6 @@ const SERVER_FIELDS: [&str; 16] = [
     "url",
 ];
 const WORKSPACE_FIELDS: [&str; 2] = ["effective", "workspace_enabled"];
-
-/// The process environment with no instance MCP server, held for the test: `magents` on PATH
-/// would otherwise appear as an instance row on one machine and not another.
-fn isolated() -> Variables {
-    let mut environment = Variables::isolated(&[
-        ENABLED_VARIABLE,
-        SERVERS_VARIABLE,
-        CONFIG_VARIABLE,
-        AUTO_CONNECT_VARIABLE,
-        AUTO_MAGENTS_VARIABLE,
-    ]);
-    environment.set(AUTO_CONNECT_VARIABLE, "false");
-    environment
-}
 
 async fn client(commands: bool) -> TestClient {
     TestClient::with_config(Config {
@@ -269,6 +285,16 @@ fn stdio(name: &str) -> Value {
     })
 }
 
+/// The stub, recording each handshake a client makes with it at `offered`.
+fn recording(name: &str, offered: &Path) -> Value {
+    json!({
+        "name": name,
+        "transport": "stdio",
+        "command": "python3",
+        "arguments": [stub(), offered.to_string_lossy()],
+    })
+}
+
 fn remote(name: &str) -> Value {
     json!({ "name": name, "transport": "http", "url": REMOTE_URL })
 }
@@ -286,6 +312,19 @@ fn names(list: &Value) -> Vec<&str> {
         .unwrap_or_else(|| panic!("a list holds servers: {list}"))
         .iter()
         .map(|server| server["name"].as_str().expect("every server is named"))
+        .collect()
+}
+
+fn statuses(list: &Value) -> Vec<&str> {
+    list["servers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a list holds servers: {list}"))
+        .iter()
+        .map(|server| {
+            server["status"]
+                .as_str()
+                .expect("every server has a status")
+        })
         .collect()
 }
 
@@ -308,9 +347,24 @@ fn assert_sealed(response: &TestResponse) {
     );
 }
 
-/// GET `uri` until the server it returns reaches `status`, and hand that body back.
+/// The message of a refusal, whose body is an `ErrorResponse` with no code.
+fn refusal(response: &TestResponse) -> String {
+    let body = response.json_value();
+    assert_eq!(
+        fields(&body),
+        [ERROR],
+        "a refusal is a message and nothing more: {body}"
+    );
+    body[ERROR]
+        .as_str()
+        .unwrap_or_else(|| panic!("a refusal's error is a message: {body}"))
+        .to_string()
+}
+
+/// GET `uri` until the server it returns reaches `status`, and hand that body back. A server
+/// that fails while it is awaited to connect has settled, so that ends the wait at once.
 async fn settle(client: &TestClient, uri: &str, token: &str, status: &str) -> Value {
-    let deadline = tokio::time::Instant::now() + SETTLE;
+    let deadline = Instant::now() + SETTLE;
     loop {
         let response = client.get_auth(uri, token).await;
         response.assert_status(StatusCode::OK);
@@ -319,8 +373,59 @@ async fn settle(client: &TestClient, uri: &str, token: &str, status: &str) -> Va
             return server;
         }
         assert!(
-            tokio::time::Instant::now() < deadline,
+            status != CONNECTED || server["status"] != FAILED,
+            "the server failed instead of connecting: {}",
+            server[ERROR]
+        );
+        assert!(
+            Instant::now() < deadline,
             "the server never reached {status} within {SETTLE:?}: {server}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// What the stub recording at `offered` wrote when a client last shook hands with it.
+async fn handshake(offered: &Path) -> String {
+    let deadline = Instant::now() + SETTLE;
+    loop {
+        if let Ok(revision) = std::fs::read_to_string(offered)
+            && !revision.is_empty()
+        {
+            return revision;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no client shook hands with the server within {SETTLE:?}"
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+fn delegating() -> Connection {
+    Connection::connected(vec![STUB_TOOL.to_string()])
+}
+
+fn unknown() -> Connection {
+    Connection::failed(UNCONNECTED)
+}
+
+/// Wait until the organization's running hub holds the server named `name` as `expected`.
+async fn held(client: &TestClient, organization: Uuid, name: &str, expected: &Connection) {
+    let deadline = Instant::now() + SETTLE;
+    loop {
+        let connection = client
+            .state()
+            .mcp()
+            .existing_organization(organization)
+            .expect("the organization's hub is running")
+            .connection(name);
+        if connection == *expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the hub holds {name} as {connection:?}, not as {expected:?}"
         );
         tokio::time::sleep(POLL).await;
     }
@@ -446,6 +551,84 @@ async fn a_stranger_finds_nothing_on_any_route() {
     assert_eq!(kept.json_value()["enabled"], true);
 
     tenant.discard(&client, &[&stranger]).await;
+}
+
+#[tokio::test]
+async fn a_server_is_found_only_under_its_own_organization() {
+    let _environment = isolated();
+    let client = client(false).await;
+    let ours = Tenant::new(&client).await;
+    let theirs = Tenant::new(&client).await;
+    let own = id(&ours.create(&client, &remote("ours")).await);
+    let foreign = id(&theirs.create(&client, &remote("theirs")).await);
+    let stored = [(&ours, &own), (&theirs, &foreign)];
+    let mut before = Vec::new();
+    for (tenant, server) in stored {
+        let read = client
+            .get_auth(&tenant.server(server), &tenant.owner.token)
+            .await;
+        read.assert_status(StatusCode::OK);
+        before.push(read.json_value());
+    }
+
+    for (tenant, server) in [(&ours, &foreign), (&theirs, &own)] {
+        for token in [&ours.owner.token, &theirs.owner.token] {
+            let answers = [
+                client.get_auth(&tenant.server(server), token).await,
+                client
+                    .put_json_auth(&tenant.server(server), &json!({ "enabled": false }), token)
+                    .await,
+                client
+                    .post_json_auth(&tenant.connection(server), &json!({}), token)
+                    .await,
+                client.delete_auth(&tenant.server(server), token).await,
+            ];
+            for response in &answers {
+                response.assert_status(StatusCode::NOT_FOUND);
+            }
+        }
+    }
+
+    let crossed = [
+        json!({ "servers": { foreign.as_str(): false } }),
+        json!({ "servers": { foreign.as_str(): null } }),
+        json!({ "servers": { own.as_str(): false, foreign.as_str(): false } }),
+    ];
+    for body in &crossed {
+        let response = client
+            .put_json_auth(&ours.workspace_servers(), body, &ours.owner.token)
+            .await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{body} was not refused: {}",
+            response.text()
+        );
+        refusal(&response);
+    }
+    let overrides: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM workspace_mcp_servers WHERE workspace_id = ANY($1)",
+    )
+    .bind(vec![ours.workspace, theirs.workspace])
+    .fetch_one(client.state().db())
+    .await
+    .expect("the overrides are readable");
+    assert_eq!(overrides, 0, "a refused override was written");
+
+    for ((tenant, server), before) in stored.into_iter().zip(&before) {
+        let kept = client
+            .get_auth(&tenant.server(server), &tenant.owner.token)
+            .await;
+        kept.assert_status(StatusCode::OK);
+        assert_eq!(
+            kept.json_value(),
+            *before,
+            "a request through another organization changed the server"
+        );
+    }
+
+    theirs.discard(&client, &[]).await;
+    ours.discard(&client, &[]).await;
 }
 
 #[tokio::test]
@@ -722,44 +905,75 @@ async fn an_invalid_definition_is_refused() {
     let client = client(true).await;
     let tenant = Tenant::new(&client).await;
     let refused = [
-        json!({
-            "name": "expanding",
-            "transport": "stdio",
-            "command": "python3",
-            "arguments": [stub(), "${HOME}"],
-        }),
-        json!({
-            "name": "expanding",
-            "transport": "stdio",
-            "command": "python3",
-            "arguments": [stub()],
-            "environment": { "WHERE": "${HOME}" },
-        }),
-        json!({ "name": "events", "transport": "sse", "url": "http://127.0.0.1:1/sse" }),
-        json!({ "name": "credentialed", "transport": "http", "url": "http://u:p@host/mcp" }),
-        remote(&"n".repeat(33)),
-        json!({ "name": "mismatched", "transport": "http", "command": "python3" }),
-        json!({
-            "name": "misplaced",
-            "transport": "stdio",
-            "command": "python3",
-            "arguments": [stub()],
-            "headers": { HEADER: "value" },
-        }),
-        json!({
-            "name": "misplaced",
-            "transport": "http",
-            "url": REMOTE_URL,
-            "environment": { ENVIRONMENT: "value" },
-        }),
-        json!({
-            "name": "misplaced",
-            "transport": "http",
-            "url": REMOTE_URL,
-            "arguments": ["--quiet"],
-        }),
+        (
+            json!({
+                "name": "expanding",
+                "transport": "stdio",
+                "command": "python3",
+                "arguments": [stub(), "${HOME}"],
+            }),
+            "`arguments`",
+        ),
+        (
+            json!({
+                "name": "expanding",
+                "transport": "stdio",
+                "command": "python3",
+                "arguments": [stub()],
+                "environment": { "WHERE": "${HOME}" },
+            }),
+            "`environment`",
+        ),
+        (
+            json!({ "name": "events", "transport": "sse", "url": "http://127.0.0.1:1/sse" }),
+            SSE_UNSUPPORTED,
+        ),
+        (
+            json!({ "name": "credentialed", "transport": "http", "url": "http://u:p@host/mcp" }),
+            "`url`",
+        ),
+        (remote(&"n".repeat(33)), "`name`"),
+        (
+            json!({
+                "name": "mismatched",
+                "transport": "http",
+                "url": REMOTE_URL,
+                "command": "python3",
+            }),
+            "`command`",
+        ),
+        (json!({ "name": "nowhere", "transport": "http" }), "`url`"),
+        (json!({ "name": "idle", "transport": "stdio" }), "`command`"),
+        (
+            json!({
+                "name": "misplaced",
+                "transport": "stdio",
+                "command": "python3",
+                "arguments": [stub()],
+                "headers": { HEADER: "value" },
+            }),
+            "`headers`",
+        ),
+        (
+            json!({
+                "name": "misplaced",
+                "transport": "http",
+                "url": REMOTE_URL,
+                "environment": { ENVIRONMENT: "value" },
+            }),
+            "`environment`",
+        ),
+        (
+            json!({
+                "name": "misplaced",
+                "transport": "http",
+                "url": REMOTE_URL,
+                "arguments": ["--quiet"],
+            }),
+            "`arguments`",
+        ),
     ];
-    for body in &refused {
+    for (body, offender) in &refused {
         let response = client
             .post_json_auth(&tenant.servers(), body, &tenant.owner.token)
             .await;
@@ -769,17 +983,36 @@ async fn an_invalid_definition_is_refused() {
             "{body} was not refused: {}",
             response.text()
         );
+        let message = refusal(&response);
+        assert!(
+            message.contains(offender),
+            "the refusal of {body} does not name {offender}: {message}"
+        );
     }
+    let listed = client
+        .get_auth(&tenant.servers(), &tenant.owner.token)
+        .await
+        .json_value();
+    assert_eq!(
+        listed["servers"],
+        json!([]),
+        "a refused definition was stored"
+    );
 
     let server = id(&tenant.create(&client, &remote("remote")).await);
-    client
+    let unchanged = client
         .put_json_auth(
             &tenant.server(&server),
             &json!({ "transport": "stdio" }),
             &tenant.owner.token,
         )
-        .await
-        .assert_status(StatusCode::BAD_REQUEST);
+        .await;
+    unchanged.assert_status(StatusCode::BAD_REQUEST);
+    let message = refusal(&unchanged);
+    assert!(
+        message.contains("`transport`"),
+        "the refusal of a new transport does not name it: {message}"
+    );
 
     let listed = client
         .get_auth(&tenant.servers(), &tenant.owner.token)
@@ -830,7 +1063,7 @@ async fn a_malformed_reference_is_a_bad_request() {
 async fn a_name_is_unique_in_the_organization_and_against_instance_servers() {
     let mut environment = isolated();
     environment.set(
-        SERVERS_VARIABLE,
+        mcp::SERVERS,
         format!(r#"{{"mcpServers":{{"{INSTANCE_SERVER}":{{"command":"true"}}}}}}"#),
     );
     let client = client(false).await;
@@ -870,6 +1103,41 @@ async fn a_name_is_unique_in_the_organization_and_against_instance_servers() {
     assert_eq!(instance["created_at"], Value::Null);
     assert_eq!(instance["updated_at"], Value::Null);
     assert_eq!(listed["servers"][0]["source"], ORGANIZATION);
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_configuration_in_the_home_directory_reaches_no_isolated_test() {
+    let home = tempfile::tempdir().expect("a temporary home directory");
+    let directory = home.path().join(HOME_DIRECTORY);
+    std::fs::create_dir(&directory).expect("the home directory takes zone's own");
+    std::fs::write(
+        directory.join(HOME_DOCUMENT),
+        format!(r#"{{"mcpServers":{{"{DECOY}":{{"command":"true"}}}}}}"#),
+    )
+    .expect("the decoy configuration is written");
+    let mut environment = isolated();
+    environment.set(HOME, home.path());
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+
+    let listed = client
+        .get_auth(&tenant.servers(), &tenant.owner.token)
+        .await;
+    listed.assert_status(StatusCode::OK);
+    assert_eq!(
+        listed.json_value(),
+        json!({ "commands": false, "servers": [] })
+    );
+
+    environment.remove(mcp::SERVERS);
+    let exposed = servers::config().servers;
+    assert_eq!(
+        exposed.keys().collect::<Vec<_>>(),
+        [DECOY],
+        "the decoy is what a test that only unsets the variable would list"
+    );
 
     tenant.discard(&client, &[]).await;
 }
@@ -954,6 +1222,175 @@ async fn a_reconnect_leaves_a_disabled_server_disabled() {
     let requested = requested.json_value();
     assert_eq!(requested["status"], DISABLED);
     assert_eq!(requested["enabled"], false);
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_server_made_while_the_hub_runs_connects() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+
+    let first = id(&tenant.create(&client, &stdio("first")).await);
+    let connected = settle(&client, &tenant.server(&first), token, CONNECTED).await;
+    assert_eq!(connected["available_tools"], json!([STUB_TOOL]));
+    held(&client, tenant.organization, "first", &delegating()).await;
+
+    let second = id(&tenant.create(&client, &stdio("second")).await);
+    let joined = settle(&client, &tenant.server(&second), token, CONNECTED).await;
+    assert_eq!(joined["available_tools"], json!([STUB_TOOL]));
+    assert_eq!(joined[ERROR], Value::Null);
+    held(&client, tenant.organization, "second", &delegating()).await;
+    held(&client, tenant.organization, "first", &delegating()).await;
+
+    let listed = client.get_auth(&tenant.servers(), token).await.json_value();
+    assert_eq!(names(&listed), ["first", "second"]);
+    assert_eq!(statuses(&listed), [CONNECTED, CONNECTED]);
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_renamed_server_leaves_its_old_name() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let server = id(&tenant.create(&client, &stdio("before")).await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+    held(&client, tenant.organization, "before", &delegating()).await;
+
+    let renamed = client
+        .put_json_auth(&uri, &json!({ "name": "after" }), token)
+        .await;
+    renamed.assert_status(StatusCode::OK);
+    assert_eq!(renamed.json_value()["name"], "after");
+
+    let settled = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(settled["name"], "after");
+    assert_eq!(settled["available_tools"], json!([STUB_TOOL]));
+    let listed = client.get_auth(&tenant.servers(), token).await.json_value();
+    assert_eq!(names(&listed), ["after"]);
+    held(&client, tenant.organization, "after", &delegating()).await;
+    held(&client, tenant.organization, "before", &unknown()).await;
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_disabled_server_stops_and_starts_again_once_enabled() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let offered = directory.path().join("offered");
+    let server = id(&tenant.create(&client, &recording("stub", &offered)).await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+    let revision = handshake(&offered).await;
+
+    let disabled = client
+        .put_json_auth(&uri, &json!({ "enabled": false }), token)
+        .await;
+    disabled.assert_status(StatusCode::OK);
+    let disabled = disabled.json_value();
+    assert_eq!(disabled["status"], DISABLED);
+    assert_eq!(disabled["enabled"], false);
+    assert_eq!(disabled["available_tools"], json!([]));
+    held(
+        &client,
+        tenant.organization,
+        "stub",
+        &Connection::disabled(),
+    )
+    .await;
+    std::fs::remove_file(&offered).expect("the first handshake's record is removed");
+
+    let enabled = client
+        .put_json_auth(&uri, &json!({ "enabled": true }), token)
+        .await;
+    enabled.assert_status(StatusCode::OK);
+    assert_eq!(enabled.json_value()["enabled"], true);
+    let restarted = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(restarted["available_tools"], json!([STUB_TOOL]));
+    assert_eq!(handshake(&offered).await, revision);
+    held(&client, tenant.organization, "stub", &delegating()).await;
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_deleted_server_leaves_the_hub() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let server = id(&tenant.create(&client, &stdio("gone")).await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+    held(&client, tenant.organization, "gone", &delegating()).await;
+
+    client
+        .delete_auth(&uri, token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    client
+        .get_auth(&uri, token)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    let listed = client.get_auth(&tenant.servers(), token).await.json_value();
+    assert_eq!(listed["servers"], json!([]));
+    held(&client, tenant.organization, "gone", &unknown()).await;
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_reconnect_restarts_the_server_and_an_allowlist_edit_leaves_it_running() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let offered = directory.path().join("offered");
+    let server = id(&tenant.create(&client, &recording("stub", &offered)).await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+    let revision = handshake(&offered).await;
+
+    std::fs::remove_file(&offered).expect("the first handshake's record is removed");
+    let requested = Instant::now();
+    client
+        .post_json_auth(&tenant.connection(&server), &json!({}), token)
+        .await
+        .assert_status(StatusCode::ACCEPTED);
+    assert_eq!(handshake(&offered).await, revision);
+    let restart = requested.elapsed();
+    let reconnected = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(reconnected["available_tools"], json!([STUB_TOOL]));
+
+    std::fs::remove_file(&offered).expect("the reconnect's record is removed");
+    let narrowed = client
+        .put_json_auth(&uri, &json!({ "tools": ["other"] }), token)
+        .await;
+    narrowed.assert_status(StatusCode::OK);
+    let narrowed = narrowed.json_value();
+    assert_eq!(narrowed["tools"], json!(["other"]));
+    tokio::time::sleep(QUIET.max(restart * RESTARTS)).await;
+    assert!(
+        !offered.exists(),
+        "an allowlist edit restarted the server: it shook hands again"
+    );
+    assert_eq!(narrowed["status"], CONNECTED);
+    let read = client.get_auth(&uri, token).await.json_value();
+    assert_eq!(read["status"], CONNECTED);
+    assert_eq!(read["tools"], json!(["other"]));
+    assert_eq!(read["available_tools"], json!([STUB_TOOL]));
 
     tenant.discard(&client, &[]).await;
 }
@@ -1077,6 +1514,95 @@ async fn a_deleted_server_is_gone() {
         .await
         .json_value();
     assert_eq!(listed["servers"], json!([]));
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn no_audit_row_holds_a_secret_value() {
+    let _environment = isolated();
+    let client = client(true).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let mut remote = remote("remote");
+    remote["headers"] = json!({ HEADER: format!("Bearer {HEADER_SECRET}") });
+    let mut command = stdio("command");
+    command["environment"] = json!({ ENVIRONMENT: ENVIRONMENT_SECRET });
+    let remote = id(&tenant.create(&client, &remote).await);
+    let command = id(&tenant.create(&client, &command).await);
+
+    let rotations = [
+        (
+            &remote,
+            json!({ "headers": { HEADER: format!("Bearer {ROTATED_HEADER_SECRET}") } }),
+        ),
+        (
+            &command,
+            json!({ "environment": { ENVIRONMENT: ROTATED_ENVIRONMENT_SECRET } }),
+        ),
+    ];
+    for (server, rotation) in &rotations {
+        client
+            .put_json_auth(&tenant.server(server), rotation, token)
+            .await
+            .assert_status(StatusCode::OK);
+        client
+            .post_json_auth(&tenant.connection(server), &json!({}), token)
+            .await
+            .assert_status(StatusCode::ACCEPTED);
+    }
+    client
+        .put_json_auth(
+            &tenant.workspace_servers(),
+            &json!({ "servers": { remote.as_str(): false, command.as_str(): false } }),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+    for server in [&remote, &command] {
+        client
+            .delete_auth(&tenant.server(server), token)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+    }
+
+    let audited: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT action, old_values::text, new_values::text FROM audit_logs \
+         WHERE organization_id = $1 ORDER BY created_at, id",
+    )
+    .bind(tenant.organization)
+    .fetch_all(client.state().db())
+    .await
+    .expect("the audit log is readable");
+    let written: Vec<&str> = audited
+        .iter()
+        .map(|(action, _, _)| action.as_str())
+        .filter(|action| AUDITED.contains(action))
+        .collect();
+    assert_eq!(
+        written,
+        [
+            CREATED,
+            CREATED,
+            UPDATED,
+            RECONNECTED,
+            UPDATED,
+            RECONNECTED,
+            WORKSPACE_UPDATED,
+            DELETED,
+            DELETED
+        ]
+    );
+    for (action, old, new) in &audited {
+        for values in [old, new].into_iter().flatten() {
+            for secret in SECRETS {
+                assert!(
+                    !values.contains(secret),
+                    "the {action} audit row holds a secret value: {values}"
+                );
+            }
+        }
+    }
 
     tenant.discard(&client, &[]).await;
 }
