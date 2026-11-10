@@ -113,6 +113,7 @@ describe('SettingsNav', () => {
       ['AI', '/settings/workspace/ai'],
       ['Folders', '/settings/workspace/folders'],
       ['Members', '/settings/workspace/members'],
+      ['MCP servers', '/settings/workspace/mcp'],
       ['AI defaults', '/settings/organization/ai'],
       ['Members', '/settings/organization/members'],
       ['Devices', '/settings/organization/devices'],

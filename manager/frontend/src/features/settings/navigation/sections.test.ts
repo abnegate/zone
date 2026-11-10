@@ -17,6 +17,7 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Workspace, section: SettingsSection.Ai, label: 'AI' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Folders, label: 'Folders' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Members, label: 'Members' },
+  { group: SettingsGroup.Workspace, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Organization, section: SettingsSection.Ai, label: 'AI defaults' },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
@@ -64,6 +65,7 @@ describe('settings constants', () => {
       Billing: 'billing',
       Audit: 'audit',
       GitHub: 'github',
+      Mcp: 'mcp',
       Features: 'features',
       Connect: 'connect',
       Sessions: 'sessions',
@@ -109,6 +111,11 @@ describe('findSection', () => {
       group: SettingsGroup.Workspace,
       section: SettingsSection.Ai,
       label: 'AI',
+    });
+    expect(findSection('workspace', 'mcp')).toMatchObject({
+      group: SettingsGroup.Workspace,
+      section: SettingsSection.Mcp,
+      label: 'MCP servers',
     });
     expect(findSection('organization', 'ai')).toMatchObject({
       group: SettingsGroup.Organization,
@@ -174,7 +181,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all thirteen sections to an organization owner who administers the workspace', () => {
+  it('shows all fourteen sections to an organization owner who administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -183,7 +190,7 @@ describe('visibleSections', () => {
       installsModels: true,
     });
 
-    expect(visible).toHaveLength(13);
+    expect(visible).toHaveLength(14);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 

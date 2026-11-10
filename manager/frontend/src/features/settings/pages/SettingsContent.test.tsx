@@ -39,6 +39,10 @@ mock.module('../organization/components', () => ({
   OrganizationMembersSection: marker('organization-members-section'),
 }));
 
+mock.module('../mcp', () => ({
+  WorkspaceMcpServersSection: marker('workspace-mcp-servers-section'),
+}));
+
 mock.module('../server/components', () => ({
   ConnectDevicesSection: marker('connect-devices-section'),
   FeaturesSection: marker('features-section'),
@@ -120,6 +124,51 @@ describe('SettingsContent', () => {
     it('treats an unresolved workspace role as editable and leaves enforcement to the server', () => {
       renderSection(SettingsGroup.Workspace, SettingsSection.Ai, access(undefined));
       expect(propsOf('workspace-ai-section')).toEqual({ editable: true });
+    });
+  });
+
+  describe('workspace MCP servers', () => {
+    const cases: { role: WorkspaceRole | undefined; editable: boolean }[] = [
+      { role: 'viewer', editable: false },
+      { role: 'member', editable: false },
+      { role: 'admin', editable: true },
+      { role: 'owner', editable: true },
+      { role: undefined, editable: true },
+    ];
+
+    for (const { role, editable } of cases) {
+      it(`${editable ? 'lets' : 'stops'} a workspace ${role ?? 'role the server never says'} ${editable ? 'change' : 'from changing'} MCP server overrides`, () => {
+        renderSection(SettingsGroup.Workspace, SettingsSection.Mcp, access(role));
+        expect(propsOf('workspace-mcp-servers-section')).toEqual({
+          organizationId,
+          workspaceId,
+          editable,
+        });
+      });
+    }
+
+    it('renders no MCP servers without a current workspace', () => {
+      workspaceContext.currentWorkspace = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Workspace}
+          section={SettingsSection.Mcp}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders no MCP servers without a current organization', () => {
+      workspaceContext.currentOrganization = null;
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Workspace}
+          section={SettingsSection.Mcp}
+          access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
     });
   });
 
