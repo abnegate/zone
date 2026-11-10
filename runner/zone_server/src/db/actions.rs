@@ -7,7 +7,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::DbResult;
-use super::tasks::{Origin, STATUSES};
+use super::tasks::{self, Origin, STATUSES};
 use super::workspace_members::{self, WorkspaceRole};
 
 /// The last thing a model reads before it decides what to do while a runner
@@ -16,6 +16,8 @@ pub(crate) const RUNNER_STARTED: &str = "Runner started. Wait for it with wait_f
 
 /// Where a started task tells the model [`RUNNER_STARTED`].
 pub(crate) const RUNNER_MESSAGE: &str = "message";
+
+const ACTIVE_RUN: &str = "Task has an active run";
 
 static UPDATES: Lazy<broadcast::Sender<(Uuid, Value)>> = Lazy::new(|| broadcast::channel(256).0);
 pub fn subscribe() -> broadcast::Receiver<(Uuid, Value)> {
@@ -80,13 +82,13 @@ impl Status {
 
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Created => "created",
-            Self::InProgress => "in_progress",
-            Self::Review => "review",
-            Self::Complete => "complete",
-            Self::Blocked => "blocked",
-            Self::Paused => "paused",
-            Self::Cancelled => "cancelled",
+            Self::Created => tasks::CREATED,
+            Self::InProgress => tasks::IN_PROGRESS,
+            Self::Review => tasks::REVIEW,
+            Self::Complete => tasks::COMPLETE,
+            Self::Blocked => tasks::BLOCKED,
+            Self::Paused => tasks::PAUSED,
+            Self::Cancelled => tasks::CANCELLED,
         }
     }
 }
@@ -177,10 +179,30 @@ pub async fn update_task(
         authorize(&mut transaction, workspace_id, assignee, false).await?;
     }
     let status = input.status.map(Status::as_str);
+    if status.is_some() && run_is_active(&mut transaction, workspace_id, input.task_id).await? {
+        return Err(invalid(ACTIVE_RUN));
+    }
     let result = sqlx::query_scalar("UPDATE tasks SET title = COALESCE($3, title), title_pending = title_pending AND $3::text IS NULL, description = COALESCE($4, description), status = COALESCE($5, status), assignee_id = CASE WHEN $6 THEN $7 ELSE assignee_id END, priority = COALESCE($8, priority), started_at = CASE WHEN $5 = 'in_progress' THEN COALESCE(started_at, NOW()) ELSE started_at END, completed_at = CASE WHEN $5 = 'complete' THEN COALESCE(completed_at, NOW()) WHEN $5 IS NOT NULL THEN NULL ELSE completed_at END, updated_at = NOW() WHERE id = $1 AND workspace_id = $2 AND NOT is_agentic RETURNING to_jsonb(tasks.*)")
         .bind(input.task_id).bind(workspace_id).bind(input.title).bind(input.description).bind(status).bind(input.assignee_id.is_some()).bind(input.assignee_id.flatten()).bind(input.priority).fetch_optional(&mut *transaction).await?;
     transaction.commit().await?;
     result.ok_or_else(|| invalid("Task not found or is managed by the task runner"))
+}
+
+/// Locks the task row so a run that ends after this check writes its status
+/// after this transaction, not underneath it.
+async fn run_is_active(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    task_id: Uuid,
+) -> DbResult<bool> {
+    let active: Option<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT active_run_id FROM tasks WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+    )
+    .bind(task_id)
+    .bind(workspace_id)
+    .fetch_optional(connection)
+    .await?;
+    Ok(active.flatten().is_some())
 }
 
 #[derive(Deserialize)]
@@ -594,6 +616,51 @@ mod tests {
             matches!(&unknown, Err(sqlx::Error::Protocol(message)) if message == "Unknown task status"),
             "{unknown:?}"
         );
+        cleanup(&pool, organization, user).await;
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_change_the_status_of_a_task_with_a_live_run() {
+        let (pool, organization, workspace, user, _chat) = fixture().await;
+        let created = create_task(
+            &pool,
+            workspace,
+            user,
+            None,
+            Origin::Member,
+            Task {
+                title: Some("Manual".into()),
+                description: "Run by hand".into(),
+                assignee_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let task_id = serde_json::from_value::<Uuid>(created["id"].clone()).unwrap();
+        crate::db::tasks::create_task_run(&pool, task_id)
+            .await
+            .unwrap();
+        let pause: Update =
+            serde_json::from_value(json!({"task_id":task_id,"status":"paused"})).unwrap();
+        let refused = update_task(&pool, workspace, user, pause).await;
+        assert!(
+            matches!(&refused, Err(sqlx::Error::Protocol(message)) if message == ACTIVE_RUN),
+            "{refused:?}"
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(status, "paused", "the run still owns the status");
+        let rename: Update =
+            serde_json::from_value(json!({"task_id":task_id,"title":"Renamed"})).unwrap();
+        let renamed = update_task(&pool, workspace, user, rename).await.unwrap();
+        assert_eq!(
+            renamed["title"], "Renamed",
+            "an update that leaves status alone lands"
+        );
+        assert_eq!(renamed["status"], json!(status));
         cleanup(&pool, organization, user).await;
     }
 
