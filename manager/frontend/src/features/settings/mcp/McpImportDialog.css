@@ -1,0 +1,37 @@
+.mcp-import {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-field-gap);
+  min-width: 0;
+}
+
+.mcp-import-json {
+  font-family: var(--ui-font-mono);
+}
+
+.mcp-import-list,
+.mcp-import-skipped {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--ui-text-sm);
+  overflow-wrap: anywhere;
+}
+
+.mcp-import-name {
+  font-family: var(--ui-font-mono);
+  color: var(--ui-text-primary);
+}
+
+.mcp-import-skipped {
+  color: var(--ui-text-secondary);
+}
+
+.mcp-import > .modal-actions,
+.mcp-import > .modal-error {
+  margin-top: 0;
+  margin-bottom: 0;
+}
