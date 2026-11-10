@@ -1,12 +1,39 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { type QueryKey, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback } from 'react';
 import { tasksApi } from '../../../api/tasks';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { awaitsTitle, TITLE_POLL_MS } from '../title';
 import type { CreateTaskRequest, Task, TaskStatus, UpdateTaskRequest } from '../types';
 
+const TASKS_KEY = ['tasks'] as const;
+
+const MOVE_KEY = ['tasks', 'move'] as const;
+
+const LOAD_FAILED = 'Failed to load tasks';
+
+const NO_WORKSPACE = 'No workspace selected';
+
 interface Move {
   id: string;
   status: TaskStatus;
+}
+
+interface Moved {
+  queryKey: QueryKey;
+  id: string;
+  from: TaskStatus;
+  to: TaskStatus;
+}
+
+function withStatus(
+  tasks: Task[] | undefined,
+  id: string,
+  from: TaskStatus | null,
+  to: TaskStatus
+) {
+  return tasks?.map((task) =>
+    task.id === id && (from === null || task.status === from) ? { ...task, status: to } : task
+  );
 }
 
 export function useTasks(projectId?: string) {
@@ -37,53 +64,66 @@ export function useTasks(projectId?: string) {
 
   const createTaskMutation = useMutation({
     mutationFn: (request: CreateTaskRequest) => {
-      if (!workspaceId) throw new Error('No workspace selected');
+      if (!workspaceId) throw new Error(NO_WORKSPACE);
       return tasksApi.createTask(workspaceId, request);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.invalidateQueries({ queryKey: TASKS_KEY });
     },
   });
 
   const updateTaskMutation = useMutation({
     mutationFn: ({ id, request }: { id: string; request: UpdateTaskRequest }) =>
       tasksApi.updateTask(id, request),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tasks'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: TASKS_KEY }),
   });
 
   const moveTaskMutation = useMutation({
+    mutationKey: MOVE_KEY,
     mutationFn: ({ id, status }: Move) => tasksApi.updateTask(id, { status }),
-    onMutate: async ({ id, status }: Move) => {
-      await queryClient.cancelQueries({ queryKey });
-      const previous = queryClient.getQueryData<Task[]>(queryKey);
-      queryClient.setQueryData<Task[]>(queryKey, (current) =>
-        current?.map((task) => (task.id === id ? { ...task, status } : task))
-      );
-      return { previous };
+    onMutate: async ({ id, status }: Move): Promise<Moved | undefined> => {
+      const moving = queryKey;
+      await queryClient.cancelQueries({ queryKey: moving });
+      const from = queryClient.getQueryData<Task[]>(moving)?.find((task) => task.id === id)?.status;
+      queryClient.setQueryData<Task[]>(moving, (current) => withStatus(current, id, null, status));
+      return from === undefined ? undefined : { queryKey: moving, id, from, to: status };
     },
-    onError: (_error, _move, snapshot) => {
-      queryClient.setQueryData<Task[]>(queryKey, snapshot?.previous);
+    onError: (_error, _move, moved) => {
+      if (!moved) return;
+      queryClient.setQueryData<Task[]>(moved.queryKey, (current) =>
+        withStatus(current, moved.id, moved.to, moved.from)
+      );
     },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      if (queryClient.isMutating({ mutationKey: MOVE_KEY }) > 1) return;
+      queryClient.invalidateQueries({ queryKey: TASKS_KEY });
     },
   });
 
   const deleteTaskMutation = useMutation({
     mutationFn: (id: string) => tasksApi.deleteTask(id),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tasks'] });
+      queryClient.invalidateQueries({ queryKey: TASKS_KEY });
     },
   });
+
+  const { mutateAsync: update } = updateTaskMutation;
+  const { mutateAsync: move } = moveTaskMutation;
+
+  const updateTask = useCallback(
+    (id: string, request: UpdateTaskRequest) => update({ id, request }),
+    [update]
+  );
+
+  const moveTask = useCallback((id: string, status: TaskStatus) => move({ id, status }), [move]);
 
   return {
     tasks,
     loading: workspaceId ? isLoading : workspaceLoading,
-    error: error instanceof Error ? error.message : error ? 'Failed to load tasks' : null,
+    error: error instanceof Error ? error.message : error ? LOAD_FAILED : null,
     createTask: createTaskMutation.mutateAsync,
-    updateTask: (id: string, request: UpdateTaskRequest) =>
-      updateTaskMutation.mutateAsync({ id, request }),
-    moveTask: (id: string, status: TaskStatus) => moveTaskMutation.mutateAsync({ id, status }),
+    updateTask,
+    moveTask,
     deleteTask: deleteTaskMutation.mutateAsync,
     refetch,
   };
