@@ -802,7 +802,7 @@ pub(crate) async fn update_task_in(
     apply_update(connection, input).await
 }
 
-/// Apply `input` to a task whose row the caller has locked and found free to change.
+/// The caller must hold the task's row lock and have found no active run.
 async fn apply_update(
     connection: &mut PgConnection,
     input: &Patch<'_>,

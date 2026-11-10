@@ -56,7 +56,7 @@ pub struct Update {
     pub assignee_id: Option<Option<Uuid>>,
 }
 
-/// The statuses an agent may set. `queued` is left out: only a run queues a task.
+/// `queued` stays out: only a run queues a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {

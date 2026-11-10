@@ -336,7 +336,6 @@ pub async fn drive_project(
     Ok(())
 }
 
-/// Whether a task still has work left: neither complete nor cancelled.
 fn open(status: &str) -> bool {
     status != tasks::COMPLETE && status != tasks::CANCELLED
 }
