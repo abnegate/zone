@@ -35,10 +35,17 @@ assert_origin() {
 assert_refused() {
     message=$1
     shift
-    if render "$@" >/dev/null 2>&1; then
-        printf '%s\n' "$message" >&2
+    if refusal=$(render "$@" 2>&1 >/dev/null); then
+        printf '%s\n rendered instead of being refused\n' "$message" >&2
         exit 1
     fi
+    case "$refusal" in
+        *'must be an origin'*) ;;
+        *)
+            printf '%s\n refused for another reason:\n%s\n' "$message" "$refusal" >&2
+            exit 1
+            ;;
+    esac
 }
 
 assert_origin 'http://zone.local' \
@@ -68,6 +75,15 @@ assert_origin 'http://first.example.com' \
 assert_origin '' \
     'without an ingress there is no origin to derive, so the server keeps its own default' \
     --set ingress.enabled=false
+
+assert_origin '' \
+    'an ingress rule with no host names no origin' \
+    --set-json 'ingress.hosts=[{"host":"","paths":[]}]'
+
+assert_origin '' \
+    'a wildcard ingress host is not an origin a browser can open' \
+    --set-json 'ingress.hosts=[{"host":"*.example.com","paths":[]}]' \
+    --set-json 'ingress.tls=[{"secretName":"zone-tls","hosts":["*.example.com"]}]'
 
 assert_origin 'https://zone.example.com' \
     'server.baseUrl replaces the ingress origin' \
@@ -102,6 +118,12 @@ assert_origin 'http://zone.local' \
 
 assert_refused 'server.baseUrl with a path is refused' \
     --set server.baseUrl=https://zone.example.com/console
+
+assert_refused 'server.env.APP_BASE_URL with a path is refused' \
+    --set server.env.APP_BASE_URL=https://zone.example.com/console
+
+assert_refused 'commonEnv.APP_BASE_URL without a scheme is refused' \
+    --set commonEnv.APP_BASE_URL=zone.example.com
 
 assert_origin 'https://zone.example.com' \
     'the production example serves TLS, so its origin is https' \

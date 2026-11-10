@@ -241,7 +241,7 @@ zone-server builds every outward link from `APP_BASE_URL`: the callbacks of the 
 3. `commonEnv.APP_BASE_URL`
 4. the first `ingress.hosts` entry, while `ingress.enabled` is true: `https://<host>` when an `ingress.tls` entry lists that host, lists a wildcard one label up from it (`*.example.com` for `zone.example.com`) or lists no hosts at all, and `http://<host>` otherwise. The shipped values give `http://zone.local`.
 
-With the ingress disabled and none of the first three set, the chart leaves `APP_BASE_URL` unset and zone-server falls back to `http://localhost:3000`.
+With none of the first three set and no ingress host to go by (the ingress disabled, or its first host empty or a wildcard), the chart leaves `APP_BASE_URL` unset and zone-server falls back to `http://localhost:3000`. A named value that is not an origin, such as one with a path or no scheme, fails the render.
 
 Set `server.baseUrl` when the derived origin is not the one browsers use: TLS that ends at a load balancer or proxy in front of the ingress, a port other than 80 or 443, or an install reached without the ingress, such as through `kubectl port-forward`:
 

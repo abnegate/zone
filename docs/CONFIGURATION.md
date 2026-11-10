@@ -35,9 +35,9 @@ For production, regenerate secrets for security.
   counts as unset. The `zone-apps` Helm chart sets the first ingress host,
   `http://zone.local` as shipped, over `https` when an `ingress.tls` entry
   covers that host; `server.baseUrl` or `server.env.APP_BASE_URL` replaces
-  it, and with the ingress disabled and neither set the chart leaves it
-  unset. The Tilt install sets the console dev server,
-  `http://localhost:3001`.
+  it. With neither set and no ingress host to go by (the ingress disabled,
+  or its first host empty or a wildcard), the chart leaves it unset. The
+  Tilt install sets the console dev server, `http://localhost:3001`.
 - **Description**: The origin a browser uses to reach Zone, written
   `scheme://host[:port]` with no path. Zone builds every outward link from it:
   - the GitHub App that **Connect GitHub** registers: its homepage, its
