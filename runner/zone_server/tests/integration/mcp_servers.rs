@@ -803,13 +803,19 @@ async fn an_edit_reconnects_the_server_and_an_allowlist_edit_does_not() {
     assert_eq!(narrowed["tools"], json!(["other"]));
     assert_eq!(narrowed["available_tools"], json!([STUB_TOOL]));
 
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let offered = directory
+        .path()
+        .join("offered")
+        .to_string_lossy()
+        .into_owned();
     let edited = client
-        .put_json_auth(&uri, &json!({ "arguments": [stub(), "--again"] }), token)
+        .put_json_auth(&uri, &json!({ "arguments": [stub(), offered] }), token)
         .await;
     edited.assert_status(StatusCode::OK);
     let edited = edited.json_value();
     assert_eq!(edited["status"], CONNECTING);
-    assert_eq!(edited["arguments"], json!([stub(), "--again"]));
+    assert_eq!(edited["arguments"], json!([stub(), offered]));
     let reconnected = settle(&client, &uri, token, CONNECTED).await;
     assert_eq!(reconnected["available_tools"], json!([STUB_TOOL]));
     assert_eq!(reconnected["tools"], json!(["other"]));

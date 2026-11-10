@@ -248,12 +248,12 @@ mod tests {
         let hub = built(&hubs, organization, vec![Definition::stub("stub")]).await;
         let earlier = hub.session("stub").expect("the load connected the stub");
 
-        hubs.refresh(organization, Definition::stub_marked("stub", &["first"]));
-        hubs.refresh(organization, Definition::stub_marked("stub", &["second"]));
+        hubs.refresh(organization, Definition::stub_marked("stub", "first"));
+        hubs.refresh(organization, Definition::stub_marked("stub", "second"));
 
         assert_eq!(settled(&hub, "stub").await, delegate());
-        let arguments = hub.definition("stub").unwrap().server.arguments;
-        assert_eq!(arguments.last().map(String::as_str), Some("second"));
+        let stored = hub.definition("stub").unwrap();
+        assert_eq!(stored.marker(), Some("second"));
         let session = hub.session("stub").unwrap();
         assert!(!Arc::ptr_eq(&earlier, &session), "the session was replaced");
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -402,11 +402,11 @@ mod tests {
         });
         loaded.notified().await;
 
-        hubs.refresh(organization, Definition::stub_marked("stub", &["later"]));
+        hubs.refresh(organization, Definition::stub_marked("stub", "later"));
         let hub = loading.await.unwrap();
 
-        let arguments = hub.definition("stub").unwrap().server.arguments;
-        assert_eq!(arguments.last().map(String::as_str), Some("later"));
+        let stored = hub.definition("stub").unwrap();
+        assert_eq!(stored.marker(), Some("later"));
         assert_eq!(settled(&hub, "stub").await, delegate());
     }
 
