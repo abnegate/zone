@@ -393,7 +393,7 @@ async fn absent_checks(step: &Step<'_>, pull: &PullRequestDetail) -> Result<(), 
             )
             .await
         }
-        Some((_, status)) if status != "complete" => {
+        Some((_, status)) if status != tasks::COMPLETE => {
             step.set(
                 Stage::AwaitingChecks,
                 Some("waiting for the continuous-integration task to merge"),
@@ -2661,8 +2661,6 @@ mod tests {
             .status
     }
 
-    /// A cancelled task whose pull request merged elsewhere would be
-    /// completed by a check of it; it is parked before GitHub is asked.
     #[tokio::test]
     async fn a_cancelled_task_awaiting_checks_is_parked_rather_than_advanced() {
         let server = wiremock::MockServer::start().await;
@@ -2684,8 +2682,6 @@ mod tests {
         assert_eq!(asked, 0, "nothing is asked of GitHub for a cancelled task");
     }
 
-    /// The pass reads its rows once, and a step can take minutes before it
-    /// merges; a task cancelled in between is parked, not merged.
     #[tokio::test]
     async fn a_task_cancelled_after_its_step_was_read_is_parked_not_merged() {
         use wiremock::matchers::{method, path};
@@ -2771,5 +2767,58 @@ mod tests {
             Some(auto_projects::CANCELLED_BY_PERSON)
         );
         assert_eq!(status, tasks::CANCELLED);
+    }
+
+    #[tokio::test]
+    async fn a_task_a_person_un_pauses_goes_back_to_its_checks() {
+        let server = wiremock::MockServer::start().await;
+        let merged = Merged::new(&server).await;
+        let pool = merged.state.db();
+        let project_id = merged.project.project_id;
+        let running = auto_projects::insert_auto_task(
+            pool,
+            project_id,
+            merged.workspace,
+            merged.actor,
+            Kind::Feature,
+            "Keep the project busy",
+            "A run a person started.",
+            None,
+        )
+        .await
+        .expect("a second task");
+        tasks::create_task_run(pool, running)
+            .await
+            .expect("a run keeps the project in flight");
+        auto_projects::set_stage(pool, merged.task, project_id, Stage::AwaitingChecks, None)
+            .await
+            .expect("the task awaits its checks");
+        set_status(&merged, tasks::PAUSED).await;
+        let tick = || {
+            super::super::driver::drive_project(
+                &merged.state,
+                &merged.services,
+                &merged.config,
+                project_id,
+            )
+        };
+
+        let parked = tick().await;
+        let while_paused = merged.automation().await;
+        set_status(&merged, tasks::REVIEW).await;
+        let unparked = tick().await;
+        let after = merged.automation().await;
+        let project = auto_projects::automation(pool, project_id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        merged.remove().await;
+
+        parked.expect("the first tick");
+        assert_eq!(while_paused.stage(), Stage::Paused);
+        unparked.expect("the second tick");
+        assert_eq!(after.stage(), Stage::AwaitingChecks);
+        assert_eq!(after.reason, None);
+        assert_eq!(project.paused_reason, None, "the project keeps going");
     }
 }

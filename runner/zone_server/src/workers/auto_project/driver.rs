@@ -19,15 +19,10 @@ use crate::workers::notify::{self, ChatNotifier};
 
 use super::{Services, notification, pipeline};
 
-const COMPLETE: &str = "complete";
-
-/// What came of asking for a run of a task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
     Started,
-    /// The task already had a run going.
     Active,
-    /// A person paused or cancelled the task; it was parked instead.
     Withheld,
 }
 
@@ -219,6 +214,9 @@ pub async fn drive_project(
     auto_projects::park(pool, project_id)
         .await
         .map_err(|error| error.to_string())?;
+    auto_projects::unpark(pool, project_id)
+        .await
+        .map_err(|error| error.to_string())?;
     let mut settled = auto_projects::enrollable(pool, project_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -340,7 +338,7 @@ pub async fn drive_project(
 
 /// Whether a task still has work left: neither complete nor cancelled.
 fn open(status: &str) -> bool {
-    status != COMPLETE && status != tasks::CANCELLED
+    status != tasks::COMPLETE && status != tasks::CANCELLED
 }
 
 /// The tasks among `changes` that are waiting on a review.
@@ -361,17 +359,17 @@ async fn settle(drive: &Drive<'_>, run: &SettledRun) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let runs = stage.as_ref().map_or(0, |row| row.runs);
     match (run.status.as_str(), run.pr_url.as_deref()) {
-        ("review", Some(_)) => {
+        (tasks::REVIEW, Some(_)) => {
             auto_projects::set_stage(pool, run.task_id, project_id, Stage::AwaitingChecks, None)
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        ("complete", _) => {
+        (tasks::COMPLETE, _) => {
             auto_projects::set_stage(pool, run.task_id, project_id, Stage::Merged, None)
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        ("review", None) => {
+        (tasks::REVIEW, None) => {
             retry(
                 drive,
                 run.task_id,
@@ -404,10 +402,17 @@ async fn retry(drive: &Drive<'_>, task_id: Uuid, runs: i32, reason: &str) -> Res
     let pool = drive.state.db();
     let project_id = drive.project.project_id;
     if runs >= i32::try_from(drive.config.max_runs_per_task).unwrap_or(i32::MAX) {
-        let title = tasks::get_task(pool, task_id)
-            .await
-            .ok()
-            .flatten()
+        let task = tasks::get_task(pool, task_id).await.ok().flatten();
+        if task
+            .as_ref()
+            .is_some_and(|task| tasks::WITHHELD.contains(&task.status.as_str()))
+        {
+            return auto_projects::park(pool, project_id)
+                .await
+                .map(drop)
+                .map_err(|error| error.to_string());
+        }
+        let title = task
             .map(|task| task.title)
             .unwrap_or_else(|| task_id.to_string());
         let why = format!("task \"{title}\" used its {runs} runs; {reason}");
@@ -479,7 +484,6 @@ mod tests {
     use super::*;
     use crate::db::auto_projects::testing::Project;
 
-    /// What a drive of `project` runs with, GitHub out of reach.
     struct Driven {
         state: AppState,
         services: Services,
@@ -565,12 +569,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_task_cancelled_after_its_last_run_is_parked_not_given_up_on() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project
+            .place(task, tasks::CANCELLED, None, Stage::Running)
+            .await;
+        let driven = Driven::new(&project);
+        let automation = auto_projects::automation(&project.pool, project.id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        let drive = Drive {
+            state: &driven.state,
+            services: &driven.services,
+            config: &driven.config,
+            project: &automation,
+            workspace_id: project.workspace,
+            actor: project.actor,
+        };
+        let spent = i32::try_from(driven.config.max_runs_per_task).expect("a small cap");
+
+        let retried = retry(&drive, task, spent, "the last run failed: boom").await;
+        let after = project.automation(task).await;
+        project.remove().await;
+
+        retried.expect("the retry");
+        assert_eq!(after.stage(), Stage::Paused);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some(auto_projects::CANCELLED_BY_PERSON),
+            "a cancelled task is parked quietly, not reported as out of runs"
+        );
+    }
+
+    #[tokio::test]
     async fn a_project_whose_only_open_agentic_task_is_cancelled_completes() {
         let project = Project::new(2).await;
         let [merged, cancelled] = project.tasks[..] else {
             panic!("two tasks");
         };
-        project.place(merged, COMPLETE, None, Stage::Merged).await;
+        project
+            .place(merged, tasks::COMPLETE, None, Stage::Merged)
+            .await;
         project
             .place(cancelled, tasks::CANCELLED, None, Stage::Idle)
             .await;
@@ -596,10 +637,10 @@ mod tests {
 
     #[test]
     fn a_cancelled_task_has_no_work_left_and_a_paused_one_does() {
-        assert!(!open(COMPLETE));
+        assert!(!open(tasks::COMPLETE));
         assert!(!open(tasks::CANCELLED));
         assert!(open(tasks::PAUSED));
-        assert!(open("blocked"));
+        assert!(open(tasks::BLOCKED));
     }
 
     fn change(stage: Stage) -> TaskAutomation {

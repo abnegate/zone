@@ -168,10 +168,7 @@ pub async fn resume(pool: &PgPool, project_id: Uuid) -> DbResult<bool> {
         == 1)
 }
 
-/// Why the driver parked a task a person paused.
 pub const PAUSED_BY_PERSON: &str = "The task was paused";
-
-/// Why the driver parked a task a person cancelled.
 pub const CANCELLED_BY_PERSON: &str = "The task was cancelled";
 
 /// Park every task of a project a person paused or cancelled, so the pass
@@ -191,6 +188,27 @@ pub async fn park(pool: &PgPool, project_id: Uuid) -> DbResult<u64> {
     .bind(PAUSED_BY_PERSON)
     .bind(CANCELLED_BY_PERSON)
     .bind(Stage::Merged.as_str())
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
+/// A task a person started a run on stays parked until that run ends.
+pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<u64> {
+    Ok(sqlx::query(
+        "UPDATE task_automation a SET \
+           stage = CASE WHEN t.pr_url IS NOT NULL AND t.status <> $5 THEN $6 ELSE $7 END, \
+           reason = NULL, updated_at = NOW() \
+         FROM tasks t WHERE t.id = a.task_id AND a.project_id = $1 AND a.stage = $2 \
+           AND a.reason = ANY($3) AND t.status <> ALL($4) AND t.active_run_id IS NULL",
+    )
+    .bind(project_id)
+    .bind(Stage::Paused.as_str())
+    .bind([PAUSED_BY_PERSON, CANCELLED_BY_PERSON].as_slice())
+    .bind(tasks::WITHHELD.as_slice())
+    .bind(tasks::COMPLETE)
+    .bind(Stage::AwaitingChecks.as_str())
+    .bind(Stage::Idle.as_str())
     .execute(pool)
     .await?
     .rows_affected())
@@ -1200,7 +1218,6 @@ pub(crate) mod testing {
     use crate::db::tasks::Origin;
     use crate::db::{organizations, users, workspace_members, workspaces};
 
-    /// An auto project of agentic tasks, in an organization of its own.
     pub struct Project {
         pub pool: PgPool,
         pub organization: Uuid,
@@ -1280,8 +1297,6 @@ pub(crate) mod testing {
             }
         }
 
-        /// Put a task where a test needs it: its status, its pull request
-        /// and its automation stage.
         pub async fn place(&self, task: Uuid, status: &str, pr_url: Option<&str>, stage: Stage) {
             sqlx::query("UPDATE tasks SET status = $2, pr_url = $3 WHERE id = $1")
                 .bind(task)
