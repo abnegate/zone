@@ -374,6 +374,13 @@ pub async fn list(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
+    if query
+        .status
+        .as_deref()
+        .is_some_and(|status| !tasks::STATUSES.contains(&status))
+    {
+        return *denied(StatusCode::BAD_REQUEST, UNKNOWN_STATUS);
+    }
     if let Err(response) =
         authorize_workspace(&state, &auth, workspace_id, "Workspace not found").await
     {
@@ -909,9 +916,8 @@ mod tests {
     /// The status CHECK is the only other guard, and its violation surfaces as
     /// a 500 through `database_error`. The state's pool is lazy and points at
     /// nothing, so reaching the database would fail this test too.
-    #[tokio::test]
-    async fn an_unknown_status_is_refused_before_the_database() {
-        let auth = AuthUser(crate::auth::jwt::Claims {
+    fn member() -> AuthUser {
+        AuthUser(crate::auth::jwt::Claims {
             sub: Uuid::from_u128(7).to_string(),
             email: "member@example.com".into(),
             roles: vec![],
@@ -920,18 +926,10 @@ mod tests {
             iat: 0,
             jti: Uuid::from_u128(8).to_string(),
             is_admin: false,
-        });
-        let request = serde_json::from_value(serde_json::json!({ "status": "archived" })).unwrap();
+        })
+    }
 
-        let response = update(
-            State(AppState::for_tests()),
-            auth,
-            Path(Uuid::from_u128(1)),
-            Json(request),
-        )
-        .await
-        .into_response();
-
+    async fn refused_as_unknown(response: Response) {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -940,5 +938,37 @@ mod tests {
             serde_json::from_slice::<Value>(&body).unwrap()["error"],
             UNKNOWN_STATUS
         );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_status_is_refused_before_the_database() {
+        let request = serde_json::from_value(serde_json::json!({ "status": "archived" })).unwrap();
+
+        let response = update(
+            State(AppState::for_tests()),
+            member(),
+            Path(Uuid::from_u128(1)),
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        refused_as_unknown(response).await;
+    }
+
+    #[tokio::test]
+    async fn listing_by_an_unknown_status_is_refused_before_the_database() {
+        let query = serde_json::from_value(serde_json::json!({ "status": "archived" })).unwrap();
+
+        let response = list(
+            State(AppState::for_tests()),
+            member(),
+            Path(Uuid::from_u128(1)),
+            Query(query),
+        )
+        .await
+        .into_response();
+
+        refused_as_unknown(response).await;
     }
 }
