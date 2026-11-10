@@ -168,15 +168,45 @@ pub async fn resume(pool: &PgPool, project_id: Uuid) -> DbResult<bool> {
         == 1)
 }
 
+/// Why the driver parked a task a person paused.
+pub const PAUSED_BY_PERSON: &str = "The task was paused";
+
+/// Why the driver parked a task a person cancelled.
+pub const CANCELLED_BY_PERSON: &str = "The task was cancelled";
+
+/// Park every task of a project a person paused or cancelled, so the pass
+/// that follows neither settles, retries, advances nor merges it. A row
+/// already parked or merged keeps the stage and reason it has.
+pub async fn park(pool: &PgPool, project_id: Uuid) -> DbResult<u64> {
+    Ok(sqlx::query(
+        "UPDATE task_automation a SET stage = $2, \
+           reason = CASE WHEN t.status = $4 THEN $5 ELSE $6 END, updated_at = NOW() \
+         FROM tasks t WHERE t.id = a.task_id AND a.project_id = $1 AND t.status = ANY($3) \
+           AND a.stage <> $2 AND a.stage <> $7",
+    )
+    .bind(project_id)
+    .bind(Stage::Paused.as_str())
+    .bind(tasks::WITHHELD.as_slice())
+    .bind(tasks::PAUSED)
+    .bind(PAUSED_BY_PERSON)
+    .bind(CANCELLED_BY_PERSON)
+    .bind(Stage::Merged.as_str())
+    .execute(pool)
+    .await?
+    .rows_affected())
+}
+
 /// Put every paused task of a project back where it was going: a task with a
-/// pull request is checked again, one without is started again.
+/// pull request is checked again, one without is started again. A task a
+/// person paused or cancelled stays parked until they move it themselves.
 pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u64> {
     let checked = sqlx::query(
         "UPDATE task_automation a SET stage = 'awaiting_checks', reason = NULL, updated_at = NOW() \
          FROM tasks t WHERE t.id = a.task_id AND a.project_id = $1 AND a.stage = 'paused' \
-           AND t.pr_url IS NOT NULL AND t.status <> 'complete'",
+           AND t.pr_url IS NOT NULL AND t.status <> 'complete' AND t.status <> ALL($2)",
     )
     .bind(project_id)
+    .bind(tasks::WITHHELD.as_slice())
     .execute(pool)
     .await?
     .rows_affected();
@@ -190,7 +220,7 @@ pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u6
         "WITH candidates AS ( \
            SELECT t.id FROM tasks t JOIN task_automation a ON a.task_id = t.id \
            WHERE a.project_id = $1 AND a.stage = 'paused' AND t.pr_url IS NULL \
-             AND t.status <> 'complete' AND t.active_run_id IS NULL \
+             AND t.status <> 'complete' AND t.status <> ALL($2) AND t.active_run_id IS NULL \
            FOR UPDATE OF t), \
          restarted AS ( \
            UPDATE task_automation a SET stage = 'idle', reason = NULL, runs = 0, updated_at = NOW() \
@@ -200,6 +230,7 @@ pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u6
          WHERE id IN (SELECT task_id FROM restarted)",
     )
     .bind(project_id)
+    .bind(tasks::WITHHELD.as_slice())
     .execute(pool)
     .await?
     .rows_affected();
@@ -585,13 +616,15 @@ pub async fn in_flight(pool: &PgPool, project_id: Uuid) -> DbResult<i64> {
     .await
 }
 
-/// Agentic tasks of the project not yet complete.
+/// Agentic tasks of the project not yet complete. A cancelled task is not
+/// left to do, so it does not hold the project open.
 pub async fn remaining(pool: &PgPool, project_id: Uuid) -> DbResult<i64> {
     sqlx::query_scalar(
         "SELECT COUNT(*) FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
-         WHERE tp.project_id = $1 AND t.is_agentic AND t.status <> 'complete'",
+         WHERE tp.project_id = $1 AND t.is_agentic AND t.status <> 'complete' AND t.status <> $2",
     )
     .bind(project_id)
+    .bind(tasks::CANCELLED)
     .fetch_one(pool)
     .await
 }
@@ -1158,7 +1191,151 @@ pub async fn insert_auto_task(
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    use serde_json::json;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    use super::{Kind, PlannedTask, ProjectPlan, Stage, TaskAutomation, finalize, set_stage};
+    use crate::db::tasks::Origin;
+    use crate::db::{organizations, users, workspace_members, workspaces};
+
+    /// An auto project of agentic tasks, in an organization of its own.
+    pub struct Project {
+        pub pool: PgPool,
+        pub organization: Uuid,
+        pub workspace: Uuid,
+        pub actor: Uuid,
+        pub id: Uuid,
+        pub tasks: Vec<Uuid>,
+    }
+
+    impl Project {
+        pub async fn new(count: usize) -> Self {
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .expect("the test database");
+            let suffix = Uuid::new_v4().simple().to_string();
+            let organization =
+                organizations::create_organization(&pool, "Automation", &suffix, None)
+                    .await
+                    .expect("an organization");
+            let workspace =
+                workspaces::create_workspace(&pool, organization.id, "Automation", &suffix, None)
+                    .await
+                    .expect("a workspace");
+            let actor = users::create_user(
+                &pool,
+                &format!("{suffix}@example.test"),
+                "unused",
+                Some("Actor"),
+                false,
+            )
+            .await
+            .expect("a user");
+            workspace_members::add_member(
+                &pool,
+                workspace.id,
+                actor.id,
+                workspace_members::WorkspaceRole::Member,
+                None,
+            )
+            .await
+            .expect("a membership");
+            let planned: Vec<PlannedTask> = (0..count)
+                .map(|index| PlannedTask {
+                    kind: Kind::Feature,
+                    title: format!("Task {index}"),
+                    description: "Ships a change.".into(),
+                    acceptance_criteria: None,
+                    depends_on: Vec::new(),
+                    priority: None,
+                })
+                .collect();
+            let finalized = finalize(
+                &pool,
+                workspace.id,
+                actor.id,
+                None,
+                Origin::Member,
+                &ProjectPlan {
+                    name: "Automation",
+                    description: None,
+                    repository: None,
+                    brief: &json!({}),
+                    tasks: &planned,
+                },
+            )
+            .await
+            .expect("an auto project");
+            Self {
+                pool,
+                organization: organization.id,
+                workspace: workspace.id,
+                actor: actor.id,
+                id: finalized.project_id,
+                tasks: finalized.task_ids,
+            }
+        }
+
+        /// Put a task where a test needs it: its status, its pull request
+        /// and its automation stage.
+        pub async fn place(&self, task: Uuid, status: &str, pr_url: Option<&str>, stage: Stage) {
+            sqlx::query("UPDATE tasks SET status = $2, pr_url = $3 WHERE id = $1")
+                .bind(task)
+                .bind(status)
+                .bind(pr_url)
+                .execute(&self.pool)
+                .await
+                .expect("the task is placed");
+            set_stage(&self.pool, task, self.id, stage, None)
+                .await
+                .expect("the task's stage");
+        }
+
+        pub async fn status(&self, task: Uuid) -> String {
+            sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1")
+                .bind(task)
+                .fetch_one(&self.pool)
+                .await
+                .expect("the task's status")
+        }
+
+        pub async fn runs(&self, task: Uuid) -> i64 {
+            sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE task_id = $1")
+                .bind(task)
+                .fetch_one(&self.pool)
+                .await
+                .expect("the task's runs")
+        }
+
+        pub async fn automation(&self, task: Uuid) -> TaskAutomation {
+            super::task_stage(&self.pool, task)
+                .await
+                .expect("the task's automation")
+                .expect("an automated task")
+        }
+
+        pub async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .expect("the organization to be removed");
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.actor)
+                .execute(&self.pool)
+                .await
+                .expect("the user to be removed");
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::testing::Project;
     use super::*;
 
     fn row(
@@ -1353,6 +1530,219 @@ mod tests {
         assert_eq!(
             project.github_repo_url.as_deref(),
             Some("https://github.com/acme/widgets")
+        );
+    }
+
+    const PULL: &str = "https://github.com/acme/shop/pull/7";
+
+    #[tokio::test]
+    async fn park_leaves_paused_and_cancelled_tasks_out_of_the_pass() {
+        let project = Project::new(4).await;
+        let [paused, cancelled, working, merged] = project.tasks[..] else {
+            panic!("four tasks");
+        };
+        project
+            .place(paused, tasks::PAUSED, None, Stage::Running)
+            .await;
+        project
+            .place(
+                cancelled,
+                tasks::CANCELLED,
+                Some(PULL),
+                Stage::AwaitingChecks,
+            )
+            .await;
+        project
+            .place(working, "in_progress", None, Stage::Running)
+            .await;
+        project
+            .place(merged, tasks::CANCELLED, Some(PULL), Stage::Merged)
+            .await;
+
+        let parked = park(&project.pool, project.id).await.expect("the park");
+        let again = park(&project.pool, project.id)
+            .await
+            .expect("a second park");
+        let settled: Vec<Uuid> = settled_runs(&project.pool, project.id)
+            .await
+            .expect("the settled runs")
+            .into_iter()
+            .map(|run| run.task_id)
+            .collect();
+        let changes = pipeline(&project.pool, project.id)
+            .await
+            .expect("the pipeline");
+        let paused_row = project.automation(paused).await;
+        let cancelled_row = project.automation(cancelled).await;
+        let working_row = project.automation(working).await;
+        let merged_row = project.automation(merged).await;
+        project.remove().await;
+
+        assert_eq!(parked, 2);
+        assert_eq!(again, 0, "a parked row is left as it is");
+        assert_eq!(paused_row.stage(), Stage::Paused);
+        assert_eq!(paused_row.reason.as_deref(), Some(PAUSED_BY_PERSON));
+        assert_eq!(cancelled_row.stage(), Stage::Paused);
+        assert_eq!(cancelled_row.reason.as_deref(), Some(CANCELLED_BY_PERSON));
+        assert_eq!(working_row.stage(), Stage::Running);
+        assert_eq!(merged_row.stage(), Stage::Merged, "a merge is a fact");
+        assert_eq!(
+            settled,
+            vec![working],
+            "only the task still in work is settled"
+        );
+        assert!(
+            changes.is_empty(),
+            "nothing parked is advanced: {changes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_a_project_leaves_tasks_a_person_paused_or_cancelled_parked() {
+        let project = Project::new(6).await;
+        let [
+            paused,
+            paused_with_pull,
+            cancelled,
+            cancelled_with_pull,
+            blocked,
+            review,
+        ] = project.tasks[..]
+        else {
+            panic!("six tasks");
+        };
+        project
+            .place(paused, tasks::PAUSED, None, Stage::Paused)
+            .await;
+        project
+            .place(paused_with_pull, tasks::PAUSED, Some(PULL), Stage::Paused)
+            .await;
+        project
+            .place(cancelled, tasks::CANCELLED, None, Stage::Paused)
+            .await;
+        project
+            .place(
+                cancelled_with_pull,
+                tasks::CANCELLED,
+                Some(PULL),
+                Stage::Paused,
+            )
+            .await;
+        project.place(blocked, "blocked", None, Stage::Paused).await;
+        project
+            .place(review, "review", Some(PULL), Stage::Paused)
+            .await;
+
+        let resumed = resume_paused_tasks(&project.pool, project.id)
+            .await
+            .expect("the resume");
+        let mut withheld = Vec::new();
+        for task in [paused, paused_with_pull, cancelled, cancelled_with_pull] {
+            withheld.push((
+                project.automation(task).await.stage(),
+                project.status(task).await,
+            ));
+        }
+        let blocked_after = (
+            project.automation(blocked).await.stage(),
+            project.status(blocked).await,
+        );
+        let review_after = project.automation(review).await.stage();
+        project.remove().await;
+
+        assert_eq!(resumed, 2, "only the blocked and the review task resume");
+        assert_eq!(
+            withheld,
+            vec![
+                (Stage::Paused, tasks::PAUSED.to_string()),
+                (Stage::Paused, tasks::PAUSED.to_string()),
+                (Stage::Paused, tasks::CANCELLED.to_string()),
+                (Stage::Paused, tasks::CANCELLED.to_string()),
+            ]
+        );
+        assert_eq!(blocked_after, (Stage::Idle, "created".to_string()));
+        assert_eq!(review_after, Stage::AwaitingChecks);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_task_is_not_left_to_do_and_a_paused_one_is() {
+        let project = Project::new(3).await;
+        let [complete, cancelled, paused] = project.tasks[..] else {
+            panic!("three tasks");
+        };
+        project
+            .place(complete, "complete", None, Stage::Merged)
+            .await;
+        project
+            .place(cancelled, tasks::CANCELLED, None, Stage::Paused)
+            .await;
+        let with_paused = {
+            project
+                .place(paused, tasks::PAUSED, None, Stage::Paused)
+                .await;
+            remaining(&project.pool, project.id)
+                .await
+                .expect("the count")
+        };
+        project
+            .place(paused, tasks::CANCELLED, None, Stage::Paused)
+            .await;
+        let all_cancelled = remaining(&project.pool, project.id)
+            .await
+            .expect("the count");
+        project.remove().await;
+
+        assert_eq!(with_paused, 1);
+        assert_eq!(all_cancelled, 0);
+    }
+
+    #[tokio::test]
+    async fn no_unattended_run_is_admitted_for_a_paused_or_cancelled_task() {
+        let project = Project::new(3).await;
+        let [paused, cancelled, created] = project.tasks[..] else {
+            panic!("three tasks");
+        };
+        project
+            .place(paused, tasks::PAUSED, None, Stage::Idle)
+            .await;
+        project
+            .place(cancelled, tasks::CANCELLED, None, Stage::Idle)
+            .await;
+
+        let mut refused = Vec::new();
+        for task in [paused, cancelled] {
+            refused.push(
+                tasks::create_unattended_task_run(&project.pool, task, project.actor)
+                    .await
+                    .expect("the admission"),
+            );
+        }
+        let admitted = tasks::create_unattended_task_run(&project.pool, created, project.actor)
+            .await
+            .expect("the admission");
+        let runs = (
+            project.runs(paused).await,
+            project.runs(cancelled).await,
+            project.runs(created).await,
+        );
+        let statuses = (
+            project.status(paused).await,
+            project.status(cancelled).await,
+        );
+        project.remove().await;
+
+        assert!(
+            refused
+                .iter()
+                .all(|outcome| matches!(outcome, tasks::Unattended::Withheld)),
+            "{refused:?}"
+        );
+        assert!(matches!(admitted, tasks::Unattended::Created(_)));
+        assert_eq!(runs, (0, 0, 1));
+        assert_eq!(
+            statuses,
+            (tasks::PAUSED.to_string(), tasks::CANCELLED.to_string()),
+            "a refusal leaves the status a person chose"
         );
     }
 }

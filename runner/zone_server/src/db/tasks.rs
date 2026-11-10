@@ -1631,26 +1631,51 @@ pub async fn set_dependencies(pool: &PgPool, task_id: Uuid, dependencies: &[Uuid
     Ok(())
 }
 
+/// The task status a person sets to stop work on a task for now.
+pub const PAUSED: &str = "paused";
+
+/// The task status a person sets to drop a task altogether.
+pub const CANCELLED: &str = "cancelled";
+
+/// Task statuses that take a task out of automation's hands: nothing
+/// unattended starts, retries, advances or merges a task in one of them.
+pub const WITHHELD: [&str; 2] = [PAUSED, CANCELLED];
+
+/// Result of admitting a run nobody will be watching.
+#[derive(Debug)]
+pub enum Unattended {
+    Created(TaskRunRow),
+    Active(TaskRunRow),
+    /// A person moved the task to one of [`WITHHELD`]; no run was made.
+    Withheld,
+}
+
 /// Admit a run nobody will be watching, as the person automation runs as.
 ///
 /// The actor is authorized the way a run started from the console is, so a
 /// run the driver starts carries exactly the authority a run that person
 /// started would. A task that already has a run is reported rather than
-/// admitted twice.
+/// admitted twice, and a task a person paused or cancelled is refused under
+/// the same row lock, so a move that lands after the driver last read the
+/// task still wins.
 pub async fn create_unattended_task_run(
     pool: &PgPool,
     task_id: Uuid,
     actor: Uuid,
-) -> DbResult<RunMutation> {
+) -> DbResult<Unattended> {
     let mut transaction = pool.begin().await?;
     // Membership before the task lock, as every user-triggered admission
     // orders them; then the row is held so two drivers cannot both find no
     // active run and each insert one.
     authorize_task_in(&mut transaction, task_id, actor, true).await?;
-    sqlx::query("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
+    let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
         .fetch_one(&mut *transaction)
         .await?;
+    if WITHHELD.contains(&status.as_str()) {
+        transaction.rollback().await?;
+        return Ok(Unattended::Withheld);
+    }
     let active = sqlx::query_as::<_, TaskRunRow>(sqlx::AssertSqlSafe(format!(
         "SELECT id, task_id, triggered_by, status, current_phase, progress_percent, started_at, \
                 completed_at, error_message, artifacts, pending_question, pending_wait, plan \
@@ -1661,7 +1686,7 @@ pub async fn create_unattended_task_run(
     .fetch_optional(&mut *transaction)
     .await?;
     if let Some(run) = active {
-        return Ok(RunMutation::Active(run));
+        return Ok(Unattended::Active(run));
     }
     let run = insert_task_run(&mut transaction, task_id, Some(actor)).await?;
     sqlx::query("UPDATE task_runs SET unattended = TRUE WHERE id = $1")
@@ -1669,7 +1694,7 @@ pub async fn create_unattended_task_run(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
-    Ok(RunMutation::Created(run))
+    Ok(Unattended::Created(run))
 }
 
 /// How a run is being run: whether anyone is there to answer it, and the

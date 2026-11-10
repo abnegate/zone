@@ -18,7 +18,7 @@ use uuid::Uuid;
 use crate::auth::AuthUser;
 use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
 use crate::db::projects::{self, LinkError, NewProject, ProjectRow, Reorder};
-use crate::db::{auto_projects, chats, sources, sync_config, workspace_members};
+use crate::db::{auto_projects, chats, sources, sync_config, tasks, workspace_members};
 use crate::error::ServerError;
 use crate::services::model::Model;
 use crate::services::route::Route;
@@ -743,6 +743,32 @@ pub struct AutomationCounts {
     paused: usize,
 }
 
+impl AutomationCounts {
+    /// Tally a project's tasks. A cancelled task parked by the driver is not
+    /// counted as paused: resuming the project would not pick it up.
+    fn of(listed: &[AutomationTask]) -> Self {
+        let stage =
+            |task: &AutomationTask| task.stage.as_deref().and_then(auto_projects::Stage::parse);
+        Self {
+            total: listed.len(),
+            agentic: listed.iter().filter(|task| task.is_agentic).count(),
+            complete: listed
+                .iter()
+                .filter(|task| task.status == "complete")
+                .count(),
+            in_flight: listed
+                .iter()
+                .filter(|task| stage(task).is_some_and(auto_projects::Stage::in_flight))
+                .count(),
+            paused: listed
+                .iter()
+                .filter(|task| stage(task) == Some(auto_projects::Stage::Paused))
+                .filter(|task| task.status != tasks::CANCELLED)
+                .count(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct AutomationResponse {
     project_id: Uuid,
@@ -791,27 +817,7 @@ pub async fn automation(
             auto_created: task.auto_created.unwrap_or(false),
         })
         .collect();
-    let counts = AutomationCounts {
-        total: listed.len(),
-        agentic: listed.iter().filter(|task| task.is_agentic).count(),
-        complete: listed
-            .iter()
-            .filter(|task| task.status == "complete")
-            .count(),
-        in_flight: listed
-            .iter()
-            .filter(|task| {
-                task.stage
-                    .as_deref()
-                    .and_then(auto_projects::Stage::parse)
-                    .is_some_and(auto_projects::Stage::in_flight)
-            })
-            .count(),
-        paused: listed
-            .iter()
-            .filter(|task| task.stage.as_deref() == Some("paused"))
-            .count(),
-    };
+    let counts = AutomationCounts::of(&listed);
     Ok(Json(AutomationResponse {
         project_id: id,
         auto: automation.auto,
@@ -849,6 +855,49 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    fn automation_task(status: &str, stage: Option<auto_projects::Stage>) -> AutomationTask {
+        AutomationTask {
+            task_id: Uuid::new_v4(),
+            title: "Ships a change".to_string(),
+            status: status.to_string(),
+            is_agentic: true,
+            kind: None,
+            stage: stage.map(|stage| stage.as_str().to_string()),
+            reason: None,
+            runs: 0,
+            review_rounds: 0,
+            reviewers: None,
+            pr_url: None,
+            head: None,
+            checks: None,
+            merge_sha: None,
+            auto_created: false,
+        }
+    }
+
+    #[test]
+    fn a_cancelled_task_the_driver_parked_is_not_counted_as_paused() {
+        let only_cancelled = AutomationCounts::of(&[automation_task(
+            tasks::CANCELLED,
+            Some(auto_projects::Stage::Paused),
+        )]);
+        assert_eq!(only_cancelled.paused, 0);
+
+        let counts = AutomationCounts::of(&[
+            automation_task(tasks::CANCELLED, Some(auto_projects::Stage::Paused)),
+            automation_task(tasks::PAUSED, Some(auto_projects::Stage::Paused)),
+            automation_task("blocked", Some(auto_projects::Stage::Paused)),
+            automation_task("review", Some(auto_projects::Stage::AwaitingChecks)),
+            automation_task("complete", Some(auto_projects::Stage::Merged)),
+            automation_task("created", None),
+        ]);
+        assert_eq!(counts.total, 6);
+        assert_eq!(counts.agentic, 6);
+        assert_eq!(counts.complete, 1);
+        assert_eq!(counts.in_flight, 1);
+        assert_eq!(counts.paused, 2, "a paused task can still be resumed");
+    }
 
     #[test]
     fn an_installation_refused_at_the_write_is_a_bad_request() {

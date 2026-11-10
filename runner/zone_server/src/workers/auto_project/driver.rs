@@ -12,12 +12,24 @@ use uuid::Uuid;
 use crate::config::AutoProjectConfig;
 use crate::db::auto_projects::{self, Kind, ProjectAutomation, SettledRun, Stage, TaskAutomation};
 use crate::db::chats::{self, ChatPurpose};
-use crate::db::tasks::{self, RunMutation};
+use crate::db::tasks::{self, Unattended};
 use crate::db::workspace_members;
 use crate::state::AppState;
 use crate::workers::notify::{self, ChatNotifier};
 
 use super::{Services, notification, pipeline};
+
+const COMPLETE: &str = "complete";
+
+/// What came of asking for a run of a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    Started,
+    /// The task already had a run going.
+    Active,
+    /// A person paused or cancelled the task; it was parked instead.
+    Withheld,
+}
 
 /// What the driver has to hand a pipeline step.
 pub struct Drive<'a> {
@@ -85,10 +97,11 @@ impl Drive<'_> {
         }
     }
 
-    /// Start a run of a task, as the person automation runs as.
-    pub async fn admit(&self, task_id: Uuid, reason: Option<&str>) -> Result<bool, String> {
+    /// Start a run of a task, as the person automation runs as. A task a
+    /// person paused or cancelled since the pass began is parked instead.
+    pub async fn admit(&self, task_id: Uuid, reason: Option<&str>) -> Result<Admission, String> {
         match tasks::create_unattended_task_run(self.state.db(), task_id, self.actor).await {
-            Ok(RunMutation::Created(run)) => {
+            Ok(Unattended::Created(run)) => {
                 auto_projects::record_admission(
                     self.state.db(),
                     task_id,
@@ -113,9 +126,16 @@ impl Drive<'_> {
                     crate::workers::task::execute_task_run(&state, run.id, task_id).await;
                 });
                 tracing::info!(project_id = %self.project.project_id, %task_id, run_id = %run.id, "Auto project admitted a run");
-                Ok(true)
+                Ok(Admission::Started)
             }
-            Ok(RunMutation::Active(_)) => Ok(false),
+            Ok(Unattended::Active(_)) => Ok(Admission::Active),
+            Ok(Unattended::Withheld) => {
+                auto_projects::park(self.state.db(), self.project.project_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                tracing::info!(project_id = %self.project.project_id, %task_id, "Auto project left a paused or cancelled task alone");
+                Ok(Admission::Withheld)
+            }
             Err(error) => Err(format!("could not admit a run for task {task_id}: {error}")),
         }
     }
@@ -196,7 +216,9 @@ pub async fn drive_project(
         return Ok(());
     }
 
-    // 1. What earlier runs left behind, whether the driver started them or not.
+    auto_projects::park(pool, project_id)
+        .await
+        .map_err(|error| error.to_string())?;
     let mut settled = auto_projects::enrollable(pool, project_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -209,7 +231,6 @@ pub async fn drive_project(
         settle(&drive, &run).await?;
     }
 
-    // 2. Every change on its way from a run to a merge.
     let changes = auto_projects::pipeline(pool, project_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -220,10 +241,8 @@ pub async fn drive_project(
         }
     }
 
-    // 3. Start what can start.
     admit_runnable(&drive).await?;
 
-    // 4. Done, stuck, or still going.
     let remaining = auto_projects::remaining(pool, project_id)
         .await
         .map_err(|error| error.to_string())?;
@@ -241,7 +260,7 @@ pub async fn drive_project(
                 .count();
             let manual = tasks
                 .iter()
-                .filter(|task| !task.is_agentic && task.status != "complete")
+                .filter(|task| !task.is_agentic && open(&task.status))
                 .count();
             let post_merge = tasks
                 .iter()
@@ -268,6 +287,7 @@ pub async fn drive_project(
         let paused: Vec<String> = stuck
             .iter()
             .filter(|task| task.stage.as_deref() == Some(Stage::Paused.as_str()))
+            .filter(|task| task.status != tasks::CANCELLED)
             .map(|task| {
                 format!(
                     "{}: {}",
@@ -294,7 +314,7 @@ pub async fn drive_project(
                 // that never finished. Spinning here would look like progress.
                 let waiting: Vec<String> = stuck
                     .iter()
-                    .filter(|task| task.status != "complete")
+                    .filter(|task| open(&task.status))
                     .map(|task| {
                         format!(
                             "{} ({}{})",
@@ -316,6 +336,11 @@ pub async fn drive_project(
         }
     }
     Ok(())
+}
+
+/// Whether a task still has work left: neither complete nor cancelled.
+fn open(status: &str) -> bool {
+    status != COMPLETE && status != tasks::CANCELLED
 }
 
 /// The tasks among `changes` that are waiting on a review.
@@ -401,7 +426,7 @@ async fn retry(drive: &Drive<'_>, task_id: Uuid, runs: i32, reason: &str) -> Res
     auto_projects::set_stage(pool, task_id, project_id, Stage::Idle, Some(reason))
         .await
         .map_err(|error| error.to_string())?;
-    if !drive.admit(task_id, Some(reason)).await? {
+    if drive.admit(task_id, Some(reason)).await? == Admission::Active {
         auto_projects::set_stage(pool, task_id, project_id, Stage::Running, Some(reason))
             .await
             .map_err(|error| error.to_string())?;
@@ -439,7 +464,7 @@ async fn admit_runnable(drive: &Drive<'_>) -> Result<(), String> {
         admitted.push(task_id);
         // The row is made before the run so the task counts as in flight at
         // once; `next_runnable` reads `created`, which admission moves past.
-        if !drive.admit(task_id, None).await? {
+        if drive.admit(task_id, None).await? != Admission::Started {
             break;
         }
     }
@@ -448,9 +473,134 @@ async fn admit_runnable(drive: &Drive<'_>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    use abnegate_vcs::PullRequestService;
     use chrono::Utc;
 
     use super::*;
+    use crate::db::auto_projects::testing::Project;
+
+    /// What a drive of `project` runs with, GitHub out of reach.
+    struct Driven {
+        state: AppState,
+        services: Services,
+        config: AutoProjectConfig,
+    }
+
+    impl Driven {
+        fn new(project: &Project) -> Self {
+            Self {
+                state: AppState::new(crate::state::test_config(), project.pool.clone(), None),
+                services: Services::standing_in_for(
+                    PullRequestService::new().expect("GitHub's own origin"),
+                ),
+                config: AutoProjectConfig::default(),
+            }
+        }
+
+        async fn drive(&self, project: &Project) -> Result<(), String> {
+            drive_project(&self.state, &self.services, &self.config, project.id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_settled_run_on_a_paused_task_is_not_retried() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project
+            .place(task, tasks::PAUSED, None, Stage::Running)
+            .await;
+
+        let driven = Driven::new(&project);
+        let drove = driven.drive(&project).await;
+        let runs = project.runs(task).await;
+        let after = project.automation(task).await;
+        let status = project.status(task).await;
+        project.remove().await;
+
+        drove.expect("the drive");
+        assert_eq!(runs, 0, "no run is started for a paused task");
+        assert_eq!(after.stage(), Stage::Paused);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some(auto_projects::PAUSED_BY_PERSON)
+        );
+        assert_eq!(status, tasks::PAUSED);
+    }
+
+    #[tokio::test]
+    async fn a_task_cancelled_after_the_park_gets_no_run_from_a_retry() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project
+            .place(task, tasks::CANCELLED, None, Stage::Running)
+            .await;
+        let driven = Driven::new(&project);
+        let automation = auto_projects::automation(&project.pool, project.id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        let drive = Drive {
+            state: &driven.state,
+            services: &driven.services,
+            config: &driven.config,
+            project: &automation,
+            workspace_id: project.workspace,
+            actor: project.actor,
+        };
+
+        let retried = retry(&drive, task, 1, "the last run failed: boom").await;
+        let runs = project.runs(task).await;
+        let after = project.automation(task).await;
+        let status = project.status(task).await;
+        project.remove().await;
+
+        retried.expect("the retry");
+        assert_eq!(runs, 0, "the admission is refused under the task's lock");
+        assert_eq!(after.stage(), Stage::Paused);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some(auto_projects::CANCELLED_BY_PERSON)
+        );
+        assert_eq!(status, tasks::CANCELLED);
+    }
+
+    #[tokio::test]
+    async fn a_project_whose_only_open_agentic_task_is_cancelled_completes() {
+        let project = Project::new(2).await;
+        let [merged, cancelled] = project.tasks[..] else {
+            panic!("two tasks");
+        };
+        project.place(merged, COMPLETE, None, Stage::Merged).await;
+        project
+            .place(cancelled, tasks::CANCELLED, None, Stage::Idle)
+            .await;
+
+        let driven = Driven::new(&project);
+        let drove = driven.drive(&project).await;
+        let automation = auto_projects::automation(&project.pool, project.id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        let runs = project.runs(cancelled).await;
+        project.remove().await;
+
+        drove.expect("the drive");
+        assert!(
+            automation.completed_at.is_some(),
+            "the project is complete, not paused: {:?}",
+            automation.paused_reason
+        );
+        assert_eq!(automation.paused_reason, None);
+        assert_eq!(runs, 0);
+    }
+
+    #[test]
+    fn a_cancelled_task_has_no_work_left_and_a_paused_one_does() {
+        assert!(!open(COMPLETE));
+        assert!(!open(tasks::CANCELLED));
+        assert!(open(tasks::PAUSED));
+        assert!(open("blocked"));
+    }
 
     fn change(stage: Stage) -> TaskAutomation {
         TaskAutomation {
