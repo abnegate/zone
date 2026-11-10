@@ -73,4 +73,8 @@
     scroll-snap-type: x mandatory;
     scroll-padding-inline: var(--ui-space-1);
   }
+
+  .board[data-dragging] {
+    scroll-snap-type: none;
+  }
 }

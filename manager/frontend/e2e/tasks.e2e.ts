@@ -274,6 +274,7 @@ interface Point {
 
 interface Finger {
   down: (point: Point) => Promise<void>;
+  move: (point: Point) => Promise<void>;
   slide: (from: Point, to: Point) => Promise<void>;
   up: () => Promise<void>;
 }
@@ -291,6 +292,7 @@ async function finger(page: Page): Promise<Finger> {
     down: async (point) => {
       await touch('touchStart', [point]);
     },
+    move,
     slide: async (from, to) => {
       const steps = Math.ceil(Math.hypot(to.x - from.x, to.y - from.y) / SLIDE_STEP);
       for (let step = 1; step <= steps; step += 1) {
@@ -779,6 +781,44 @@ test.describe('Tasks Page', () => {
         await expect(page.locator('.task-card-overlay')).toHaveCount(0);
         await expect(page).toHaveURL('/tasks');
         expect(moves(server)).toEqual([]);
+      });
+
+      test('a card dragged by its grip to the edge stops two columns over', async ({
+        context,
+        page,
+      }) => {
+        const server = await serveTasks(context, page);
+        await shrinkToPhone(page);
+        const bounds = await page.getByRole('region', { name: 'Tasks', exact: true }).boundingBox();
+        if (!bounds) throw new Error('The board has no layout box');
+        const from = await center(
+          page.getByRole('button', { name: 'Move Implement login page', exact: true })
+        );
+        const edge = { x: bounds.x + bounds.width - 12, y: from.y };
+        const rest = { x: bounds.x + bounds.width * 0.75, y: from.y };
+        const touch = await finger(page);
+
+        await touch.down(from);
+        await touch.slide(from, edge);
+        await column(page, 'Blocked').evaluate(
+          (section, reach) =>
+            new Promise<void>((resolve) => {
+              const watch = () =>
+                section.getBoundingClientRect().left < reach
+                  ? resolve()
+                  : requestAnimationFrame(watch);
+              watch();
+            }),
+          rest.x - 20
+        );
+        await touch.move(rest);
+        await expect(announcer(page)).toHaveText('Implement login page is over Blocked.');
+        await touch.up();
+
+        await expect.poll(() => moves(server)).toEqual([
+          { method: 'PUT', id: 'task-1', body: { status: 'blocked' } },
+        ]);
+        await expect(card(column(page, 'Blocked'), 'Implement login page')).toBeInViewport();
       });
     });
 

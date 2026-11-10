@@ -128,7 +128,12 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
   const dragged = tasks.find((task) => task.id === active);
 
   return (
-    <section ref={root} className="board" aria-label="Tasks">
+    <section
+      ref={root}
+      className="board"
+      aria-label="Tasks"
+      data-dragging={active !== null || undefined}
+    >
       <DndContext
         id={instructions}
         sensors={sensors}

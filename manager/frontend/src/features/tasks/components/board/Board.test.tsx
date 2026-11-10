@@ -247,6 +247,21 @@ describe('Board', () => {
       expect(handlers.move).toHaveBeenCalledWith(TASKS[0], 'in_progress');
     });
 
+    it('marks the board as dragging only while a card is carried', async () => {
+      renderBoard();
+      const handle = grip('Write the spec');
+      handle.focus();
+      expect(board()).not.toHaveAttribute('data-dragging');
+
+      await press(handle, 'Space');
+      await announced('Picked up Write the spec, in Planned.');
+      expect(board()).toHaveAttribute('data-dragging');
+
+      await press(handle, 'Escape');
+      await announced('Moving Write the spec cancelled. It stays in Planned.');
+      expect(board()).not.toHaveAttribute('data-dragging');
+    });
+
     it('moves a card back to Planned as created', async () => {
       const handlers = renderBoard();
       const handle = grip('Ship it');
