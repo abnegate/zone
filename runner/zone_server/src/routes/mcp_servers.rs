@@ -11,6 +11,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use reqwest::Url;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
@@ -118,8 +119,8 @@ impl McpServerResponse {
             source: Source::Instance,
             transport: transport(server),
             command: server.command.clone(),
-            arguments: server.arguments.clone(),
-            url: server.url.clone(),
+            arguments: Vec::new(),
+            url: server.url.as_deref().and_then(origin),
             tools: (!server.tools.is_empty()).then(|| server.tools.clone()),
             enabled: !server.disabled,
             environment: fields(&server.environment),
@@ -141,6 +142,12 @@ impl McpServerResponse {
             ..self
         }
     }
+}
+
+fn origin(url: &str) -> Option<String> {
+    validation::literal(validation::URL, url).ok()?;
+    let origin = Url::parse(url).ok()?.origin();
+    origin.is_tuple().then(|| origin.ascii_serialization())
 }
 
 #[derive(Debug, Serialize)]
@@ -847,6 +854,10 @@ mod tests {
     const HEADER_SECRET: &str = "Bearer s3cr3t";
     const ENVIRONMENT_SECRET: &str = "v4lue";
     const REMOTE_URL: &str = "http://127.0.0.1:1/mcp";
+    const ARGUMENT_SECRET: &str = "postgresql://operator:hunter2@db.internal/zone";
+    const CREDENTIALED_URL: &str =
+        "https://operator:hunter2@mcp.internal:8443/tenants/acme?key=hunter2#hunter2";
+    const CREDENTIAL: &str = "hunter2";
 
     fn secret(name: &str, value: &str) -> BTreeMap<String, SecretValue> {
         BTreeMap::from([(name.to_string(), SecretValue::from(value))])
@@ -905,6 +916,31 @@ mod tests {
         )
     }
 
+    fn operator() -> Vec<McpServerResponse> {
+        let mut database = McpServer::command(
+            "npx",
+            [
+                "-y",
+                "@modelcontextprotocol/server-postgres",
+                ARGUMENT_SECRET,
+            ],
+        );
+        database.environment = secret("PGPASSWORD", ENVIRONMENT_SECRET);
+        let mut remote = McpServer::remote(CREDENTIALED_URL);
+        remote.headers = secret("Authorization", HEADER_SECRET);
+        vec![
+            McpServerResponse::instance("database", &database, Connection::connecting()),
+            McpServerResponse::instance("remote", &remote, Connection::connecting()),
+        ]
+    }
+
+    fn sealed(body: &Value) {
+        let text = body.to_string();
+        for secret in [CREDENTIAL, ENVIRONMENT_SECRET, "s3cr3t", "tenants/acme"] {
+            assert!(!text.contains(secret), "{secret} is published: {text}");
+        }
+    }
+
     #[test]
     fn a_response_names_a_servers_secrets_without_their_values() {
         let mut record = record(Transport::Http);
@@ -946,7 +982,7 @@ mod tests {
 
     #[test]
     fn an_instance_row_has_no_identity_and_names_its_secrets_only() {
-        let mut server = McpServer::command("magents", ["mcp"]);
+        let mut server = McpServer::command("magents", ["mcp", "--token", CREDENTIAL]);
         server.environment = secret("TOKEN", ENVIRONMENT_SECRET);
         server.headers = secret("Authorization", HEADER_SECRET);
 
@@ -964,7 +1000,7 @@ mod tests {
                 "source": "instance",
                 "transport": "stdio",
                 "command": "magents",
-                "arguments": ["mcp"],
+                "arguments": [],
                 "url": null,
                 "tools": null,
                 "enabled": true,
@@ -977,6 +1013,56 @@ mod tests {
                 "updated_at": null,
             })
         );
+    }
+
+    #[test]
+    fn an_instance_url_is_published_as_its_origin_only() {
+        for (url, published) in [
+            (CREDENTIALED_URL, Some("https://mcp.internal:8443")),
+            ("http://10.0.0.5/mcp?token=hunter2", Some("http://10.0.0.5")),
+            ("https://example.com:443/a/b", Some("https://example.com")),
+            ("https://${HOST}/mcp", None),
+            ("file:///etc/passwd", None),
+            ("not a url", None),
+        ] {
+            assert_eq!(origin(url).as_deref(), published, "{url}");
+        }
+    }
+
+    #[test]
+    fn an_operators_credentials_never_reach_a_list_or_an_audit_row() {
+        let overrides = BTreeMap::new();
+        let list = McpServerListResponse {
+            commands: true,
+            servers: operator(),
+        };
+        let workspace = WorkspaceMcpServerListResponse {
+            servers: operator()
+                .into_iter()
+                .map(|server| WorkspaceMcpServerResponse::of(server, &overrides))
+                .collect(),
+        };
+
+        let listed = serde_json::to_value(&list).unwrap();
+        let audited = serde_json::to_value(&workspace).unwrap();
+
+        sealed(&listed);
+        sealed(&audited);
+        for body in [&listed, &audited] {
+            let database = &body["servers"][0];
+            assert_eq!(database["command"], "npx");
+            assert_eq!(database["arguments"], json!([]));
+            assert_eq!(
+                database["environment"],
+                json!([{ "name": "PGPASSWORD", "has_value": true }])
+            );
+            let remote = &body["servers"][1];
+            assert_eq!(remote["url"], "https://mcp.internal:8443");
+            assert_eq!(
+                remote["headers"],
+                json!([{ "name": "Authorization", "has_value": true }])
+            );
+        }
     }
 
     #[test]
