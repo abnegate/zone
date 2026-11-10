@@ -66,6 +66,48 @@ describe('ToolTrace', () => {
     expect(screen.queryByText('some_new_tool')).not.toBeInTheDocument();
   });
 
+  it('names a server tool by the tool and the server it came from', () => {
+    render(<ToolTrace calls={[call({ name: 'docs__search_pages' })]} />);
+
+    expect(screen.getByText('Search pages (docs)')).toBeInTheDocument();
+    expect(screen.queryByText('docs__search_pages')).not.toBeInTheDocument();
+  });
+
+  it('keeps the server out of the tool name rather than reading it as the first word', () => {
+    render(<ToolTrace calls={[call({ name: 'magents__spawn_session' })]} />);
+
+    expect(screen.getByText('Spawn session (magents)')).toBeInTheDocument();
+    expect(screen.queryByText('Magents spawn session')).not.toBeInTheDocument();
+  });
+
+  it('splits a server tool at the first separator and keeps the server name as written', () => {
+    render(<ToolTrace calls={[call({ name: 'stub_http__delegate' })]} />);
+
+    expect(screen.getByText('Delegate (stub_http)')).toBeInTheDocument();
+  });
+
+  it('spells out a name with no server before the separator as a plain tool', () => {
+    render(<ToolTrace calls={[call({ name: '__orphan' })]} />);
+
+    expect(screen.getByText('Orphan')).toBeInTheDocument();
+  });
+
+  it('names the server tools a load took alongside the built-in ones', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'load_tools',
+            arguments: '{"names":["docs__fetch_url","web_search"]}',
+            detail: 'Loaded docs__fetch_url, web_search.',
+          }),
+        ]}
+      />
+    );
+
+    expect(screen.getByText('Fetch URL (docs), Web search')).toBeInTheDocument();
+  });
+
   it('labels the tools the receipts already know by the same words', () => {
     render(
       <ToolTrace
