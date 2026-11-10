@@ -423,12 +423,27 @@ impl AppState {
     ///
     /// The pool is lazy, so nothing connects unless a test actually queries.
     pub fn for_tests() -> Self {
-        let db =
-            PgPool::connect_lazy("postgres://localhost/test").expect("a lazy pool needs no server");
-        let state = Self::new(test_config(), db, None);
+        let state = Self::new(test_config(), lazy_pool(), None);
         state.disable_mcp();
         state
     }
+}
+
+#[cfg(test)]
+const LAZY_DATABASE: &str = "postgres://localhost/test";
+
+#[cfg(test)]
+const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// A pool that dials nothing until a test queries it, and gives up on a server
+/// that is not there within [`ACQUIRE_TIMEOUT`]: sqlx retries a refused
+/// connection until the acquire timeout, which is thirty seconds by default.
+#[cfg(test)]
+pub(crate) fn lazy_pool() -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(ACQUIRE_TIMEOUT)
+        .connect_lazy(LAZY_DATABASE)
+        .expect("a lazy pool needs no server")
 }
 
 /// A loopback port nothing listens on, where a test's agent logins read usage unless the test
@@ -450,7 +465,7 @@ pub(crate) fn test_config() -> Config {
     Config {
         host: "localhost".to_string(),
         port: 8000,
-        database_url: "postgres://localhost/test".to_string(),
+        database_url: LAZY_DATABASE.to_string(),
         redis_url: "redis://localhost:6379".to_string(),
         jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
         jwt_access_lifetime: 900,
@@ -515,6 +530,20 @@ mod tests {
             .await
             .expect("REDIS_URL must point to a reachable cache");
         Some(cache)
+    }
+
+    #[tokio::test]
+    async fn a_test_pool_gives_up_quickly_on_a_server_that_is_not_there() {
+        for pool in [
+            lazy_pool(),
+            AppState::for_tests().db().clone(),
+            crate::mcp::testing::state().db().clone(),
+        ] {
+            assert_eq!(
+                pool.options().get_acquire_timeout(),
+                Duration::from_millis(250)
+            );
+        }
     }
 
     #[tokio::test]

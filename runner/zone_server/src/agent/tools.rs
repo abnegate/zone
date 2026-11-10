@@ -1982,7 +1982,7 @@ mod tests {
         assert!(tools.has("read_file"));
     }
     use super::*;
-    use crate::state::test_config;
+    use crate::state::{lazy_pool, test_config};
     use abnegate_agent::tool::job::{JobCommand, Jobs};
     use abnegate_agent::tool::{OFF_LIMITS, Preview, REASON_DESCRIPTION, REASON_PARAMETER};
     use sqlx::postgres::PgPoolOptions;
@@ -3175,10 +3175,7 @@ mod tests {
             json!({"login": OTHER_LOGIN}).to_string(),
         )
         .unwrap();
-        let db = PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/test")
-            .expect("a lazy pool needs no server");
-        let state = AppState::new(config, db, None);
+        let state = AppState::new(config, lazy_pool(), None);
         state.disable_mcp();
         let scope = WorkspaceScope {
             state,
@@ -3701,13 +3698,7 @@ mod tests {
         ))
         .await;
         assert_eq!(hub.server_count(), 1, "the stub server has to connect");
-        let state = AppState::new(
-            test_config(),
-            PgPoolOptions::new()
-                .connect_lazy("postgres://localhost/test")
-                .expect("a lazy pool needs no server"),
-            None,
-        );
+        let state = AppState::new(test_config(), lazy_pool(), None);
         state.install_mcp(hub);
 
         let connected = ChatTools::preview(WorkspaceScope { state, ..scope() }).await;

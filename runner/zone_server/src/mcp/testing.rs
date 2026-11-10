@@ -28,11 +28,7 @@ pub(crate) fn scope(chat: Uuid) -> Scope {
 }
 
 pub(crate) fn state() -> AppState {
-    let db = sqlx::PgPool::connect_lazy("postgres://localhost/test")
-        .expect("a lazy pool needs no server");
-    let state = AppState::new(crate::state::test_config(), db, None);
-    state.disable_mcp();
-    state
+    AppState::for_tests()
 }
 
 pub(crate) async fn tools(chat: Uuid) -> Arc<ChatTools> {

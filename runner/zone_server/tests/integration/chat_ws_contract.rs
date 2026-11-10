@@ -209,7 +209,10 @@ async fn unauthenticated_connections_reject_bad_tokens_and_excess_fanout() {
 
 #[tokio::test(start_paused = true)]
 async fn silent_connection_receives_an_authentication_timeout() {
-    let pool = PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:9/unused").unwrap();
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(250))
+        .connect_lazy("postgres://unused:unused@127.0.0.1:9/unused")
+        .unwrap();
     let address = spawn(test_config(), pool).await;
     let mut socket = connect(&address, Uuid::new_v4()).await;
 
