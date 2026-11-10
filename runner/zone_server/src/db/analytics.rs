@@ -114,7 +114,9 @@ pub async fn finished_runs(
     .await
 }
 
-/// Tasks the workspace finished inside `[start, end)`, most recent first.
+/// Tasks that reached `complete` inside `[start, end)`, most recent first,
+/// wherever they stand now. `completed_at` is not that: every run that ends
+/// writes it, whether or not the task was ever finished.
 pub async fn shipped_tasks(
     pool: &PgPool,
     workspace_id: Uuid,
@@ -128,15 +130,15 @@ pub async fn shipped_tasks(
             task.id AS task_id,
             task.title AS title,
             task.status AS status,
-            task.completed_at AS shipped_at,
-            COALESCE(task.updated_at, task.completed_at) AS last_touched_at,
+            task.shipped_at AS shipped_at,
+            COALESCE(task.updated_at, task.shipped_at) AS last_touched_at,
             task.pr_url AS pull_request_url
         FROM tasks task
         WHERE task.workspace_id = $1
-          AND task.completed_at IS NOT NULL
-          AND task.completed_at >= $2
-          AND task.completed_at < $3
-        ORDER BY task.completed_at DESC, task.id
+          AND task.shipped_at IS NOT NULL
+          AND task.shipped_at >= $2
+          AND task.shipped_at < $3
+        ORDER BY task.shipped_at DESC, task.id
         LIMIT $4
         "#,
     )
