@@ -1524,9 +1524,10 @@ The processes that run as that user are:
   without an approval card. `write_file` and `apply_patch` do the same once
   approved or with Auto-approve on, and `run_shell` and `run_command` then
   reach everything above;
-- configured stdio MCP servers, which also inherit the server's full
-  environment, and `COMFYUI_TRAIN_COMMAND`, which gets the allowlist described
-  under it.
+- instance-layer stdio MCP servers (`ZONE_MCP_SERVERS`, `ZONE_MCP_CONFIG`),
+  which also inherit the server's full environment, organization stdio MCP
+  servers, which get the allowlist, and `COMFYUI_TRAIN_COMMAND`, which gets
+  the allowlist described under it.
 
 What stands in the way:
 
@@ -1536,7 +1537,8 @@ What stands in the way:
   process only: any process of the same user can read a child's environment
   while the child runs. The CLIs, Zone's shell tools, `COMFYUI_TRAIN_COMMAND`,
   and the `rg`, `git`, `ffmpeg` and `ffprobe` it runs start from an
-  allowlisted environment, without those secrets. Configured stdio MCP servers
+  allowlisted environment, without those secrets, and so do organization
+  stdio MCP servers, plus their own `env`. Instance-layer stdio MCP servers
   start from the server's full environment, so they carry them.
 - Zone's file tools, `read_file`, `list_files`, `search_code`, `write_file`
   and `apply_patch`, refuse any path under the agent state directory and any
@@ -2045,7 +2047,14 @@ Zone's agent loop can attach [Model Context Protocol](https://modelcontextprotoc
 
 Config uses the same JSON shape as Cursor (`mcpServers`). Tool names are `server__tool`: the server name, two underscores, then the tool's own name, so magents' `spawn_session` becomes `magents__spawn_session`. A name is at most 64 characters.
 
-Stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat configured servers as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
+Servers come from two layers:
+
+- The **instance layer** is what the variables below configure: `ZONE_MCP_SERVERS`, else `ZONE_MCP_CONFIG`, else `~/.zone/mcp.json`, plus the magents fallback. Settings lists it read-only, and it can't be overridden per workspace.
+- The **organization layer** is managed by organization admins in Settings, as described under [Organization-managed servers](#organization-managed-servers).
+
+Chat turns attach both layers, whichever provider runs them, because Zone serves every MCP tool itself. `zone run` attaches only the instance layer.
+
+Instance stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat them as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
 
 ### `ZONE_MCP_ENABLED`
 - **Default**: `true`
@@ -2079,9 +2088,49 @@ Stdio servers inherit the Zone process environment, then overlay any `env` map o
 - **Default**: *empty*
 - **Description**: Inline JSON of the same shape as `ZONE_MCP_CONFIG`. Useful in Compose. Takes precedence over the config file.
 
+### `ZONE_MCP_COMMANDS`
+- **Default**: `false`
+- **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on` turns it on. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `env`, never the server's full environment, but it still runs as the server's user, so turn this on only when you trust every organization admin to run commands on the host. Instance-layer servers are not affected.
+
 A server entry with only a `url` (HTTP transport) is skipped — Zone speaks stdio today.
 
 Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
+
+### Organization-managed servers
+
+Organization admins and owners add, edit, reconnect and delete servers in **Settings → Organization → MCP servers**; members see the list read-only. A server is `stdio`, a `command` with `arguments` that needs `ZONE_MCP_COMMANDS`, or `http`, streamable HTTP at a `url`. `sse` is refused; use streamable HTTP. A name is at most 32 letters, digits, `-` and `_`, with no `__` and no trailing `_`. It must be unique in the organization and must not match an instance server: a clash returns 409. `tools` limits which of the server's tools are offered; `null` offers them all.
+
+In **Settings → Workspace → MCP servers**, a workspace admin or owner sets each organization server to Inherit, On or Off. `effective` is the outcome: the server is enabled and the workspace has not turned it off. Instance servers can't be overridden per workspace.
+
+Each server shows one status:
+
+- `connected`: `available_tools` lists the tools it advertised.
+- `connecting`: after a create, a change that needs a reconnect, or a reconnect request.
+- `failed`: `error` says why.
+- `disabled`: the server is turned off.
+
+HTTP servers are stored and validated, but this build does not connect them yet: they show `failed` with "Streamable HTTP servers are not connected by this build yet".
+
+Rules for every organization server:
+
+- Authentication is static headers only, a bearer token in `Authorization` included. OAuth is not supported.
+- Put credentials in headers, never in the URL: query strings are stored, returned and audited as entered.
+- A URL is `http` or `https` with a host. Private and loopback addresses are allowed, so a server on the host or the LAN works. Cloud metadata and link-local addresses, credentials embedded in the URL, fragments and other schemes are refused.
+- `${` is refused in every field, because Zone would expand it from its own environment.
+- `environment` and `headers` values are sealed under `ENCRYPTION_KEY`. They are never returned, logged or audited: the API lists each name with `has_value` only.
+
+| Method | Path | Who |
+|---|---|---|
+| GET | `/api/organizations/{org_id}/mcp-servers` | org member |
+| POST | `/api/organizations/{org_id}/mcp-servers` | org admin/owner |
+| GET | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org member |
+| PUT | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org admin/owner |
+| DELETE | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org admin/owner |
+| POST | `/api/organizations/{org_id}/mcp-servers/{server_id}/connection` | org admin/owner |
+| GET | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace member |
+| PUT | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace admin/owner |
+
+PUT is sparse and can't change `transport`. In `environment` and `headers` on PUT, a `null` value keeps the stored value and an omitted name is removed. On the workspace PUT, `null` clears the override.
 
 ---
 
@@ -2410,7 +2459,7 @@ Need to find a specific config? Quick lookup:
   COMFYUI_COMMIT
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
-- **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_CONNECT, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS
+- **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_CONNECT, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS, ZONE_MCP_COMMANDS
 - **Auto projects**: ZONE_AUTO_ENABLED, ZONE_AUTO_PARALLEL_TASKS, ZONE_AUTO_REVIEW_MODELS, ZONE_AUTO_REVIEW_BOTS, ZONE_AUTO_ADMIN_MERGE, ZONE_AUTO_*
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
