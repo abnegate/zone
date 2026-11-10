@@ -125,9 +125,33 @@ Common environment variables for all containers
 */}}
 {{- define "zone-apps.commonEnv" -}}
 {{- range $key, $value := .Values.commonEnv }}
+{{- if ne $key "APP_BASE_URL" }}
 - name: {{ $key }}
   value: {{ $value | quote }}
 {{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Origin a browser reaches Zone at, or nothing. A value the install names wins,
+server.env first, then server.baseUrl, then commonEnv; otherwise it is the
+first ingress host, over https when a TLS entry covers that host.
+*/}}
+{{- define "zone-apps.server.baseUrl" -}}
+{{- $named := coalesce (get (default dict .Values.server.env) "APP_BASE_URL") .Values.server.baseUrl (get (default dict .Values.commonEnv) "APP_BASE_URL") -}}
+{{- if $named -}}
+{{- $named | toString | trimSuffix "/" -}}
+{{- else if and .Values.ingress.enabled .Values.ingress.hosts -}}
+{{- $host := (first .Values.ingress.hosts).host -}}
+{{- $wildcard := regexReplaceAll "^[^.]+" $host "*" -}}
+{{- $scheme := "http" -}}
+{{- range .Values.ingress.tls -}}
+{{- if or (not .hosts) (has $host .hosts) (has $wildcard .hosts) -}}
+{{- $scheme = "https" -}}
+{{- end -}}
+{{- end -}}
+{{- printf "%s://%s" $scheme $host -}}
+{{- end -}}
 {{- end }}
 
 {{/*

@@ -61,6 +61,7 @@ The following table lists the configurable parameters and their default values.
 | `server.autoscaling.minReplicas` | Minimum number of replicas | `2` |
 | `server.autoscaling.maxReplicas` | Maximum number of replicas | `10` |
 | `server.autoscaling.targetCPUUtilization` | Target CPU utilization percentage | `70` |
+| `server.baseUrl` | Origin a browser reaches Zone at, `scheme://host[:port]` with no path, passed to zone-server as `APP_BASE_URL`; see [Public Origin](#public-origin) | `""` (the first ingress host) |
 | `server.agentState.persistence.enabled` | Keep agent state (each sign-in's CLI home under `<state>/<org>/<agent>/logins/<id>`, with codex's login and the CLI's session files, and each agent's shared `work` directory) on a claim; applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
 | `server.agentState.persistence.size` | Size of the agent-state claim, which grows with every CLI turn; see [Coding Agent Sign-ins](#coding-agent-sign-ins) | `1Gi` |
 | `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default | `""` |
@@ -230,6 +231,26 @@ secrets:
 migration:
   enabled: true
 ```
+
+## Public Origin
+
+zone-server builds every outward link from `APP_BASE_URL`: the callbacks of the GitHub App that **Connect GitHub** registers and the page a browser lands on afterwards, the address GitHub delivers repository webhooks to, and the links in sign-up verification and password reset mail. The chart sets it on the server container, from the first of these that has a value:
+
+1. `server.env.APP_BASE_URL`
+2. `server.baseUrl`
+3. `commonEnv.APP_BASE_URL`
+4. the first `ingress.hosts` entry, while `ingress.enabled` is true: `https://<host>` when an `ingress.tls` entry lists that host, lists a wildcard one label up from it (`*.example.com` for `zone.example.com`) or lists no hosts at all, and `http://<host>` otherwise. The shipped values give `http://zone.local`.
+
+With the ingress disabled and none of the first three set, the chart leaves `APP_BASE_URL` unset and zone-server falls back to `http://localhost:3000`.
+
+Set `server.baseUrl` when the derived origin is not the one browsers use: TLS that ends at a load balancer or proxy in front of the ingress, a port other than 80 or 443, or an install reached without the ingress, such as through `kubectl port-forward`:
+
+```yaml
+server:
+  baseUrl: https://zone.example.com
+```
+
+GitHub keeps the addresses an App was registered with, so settle the origin before connecting GitHub. After changing it, correct the addresses in the App's settings on GitHub, or delete the App and connect again.
 
 ## Upgrading
 
