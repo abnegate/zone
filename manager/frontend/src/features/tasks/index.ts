@@ -1,10 +1,5 @@
-// Types
-
-// Hooks
 export { useTask, useTaskRuns, useTasks } from './hooks';
-// Pages
 export { TasksPage } from './pages';
-// Schemas
 export {
   CreateTaskRequestSchema,
   LogLevelSchema,
@@ -23,12 +18,25 @@ export {
   TasksResponseSchema,
   UpdateTaskRequestSchema,
 } from './schemas';
+export type { StageId, StatusTint } from './status';
+export {
+  groupByStage,
+  STAGE_IDS,
+  STAGES,
+  STATUS_OPTIONS,
+  stageOf,
+  statusLabel,
+  statusTint,
+  TASK_STATUSES,
+} from './status';
 export type {
+  BoardActions,
   CreateTaskRequest,
   LogLevel,
   PendingQuestion,
   PrStatus,
   RunStatus,
+  Stage,
   Task,
   TaskProgressMessage,
   TaskResponse,

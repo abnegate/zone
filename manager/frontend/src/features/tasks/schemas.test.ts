@@ -6,6 +6,7 @@ import {
   TaskProgressMessageSchema,
   TaskResponseSchema,
   TaskRunSchema,
+  TaskStatusSchema,
   TasksResponseSchema,
 } from './schemas';
 
@@ -16,6 +17,23 @@ describe('server task response contract', () => {
       expect(TasksResponseSchema.safeParse({ tasks: [response.task] }).success).toBe(true);
     });
   }
+});
+
+describe('task status', () => {
+  it.each(['paused', 'cancelled'])('accepts %s', (status) => {
+    expect(TaskStatusSchema.parse(status)).toBe(status);
+  });
+
+  it('accepts a task the server sends as paused or cancelled', () => {
+    for (const status of ['paused', 'cancelled']) {
+      const task = { ...populated.task, status };
+      expect(TaskResponseSchema.parse({ task }).task.status).toBe(status);
+    }
+  });
+
+  it('rejects a status the server never writes', () => {
+    expect(TaskStatusSchema.safeParse('archived').success).toBe(false);
+  });
 });
 
 const run = {
