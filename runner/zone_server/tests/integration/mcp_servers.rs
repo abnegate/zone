@@ -7,18 +7,24 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_json::json;
 use uuid::Uuid;
-use zone_core::variables::Variables;
+use zone_core::servers;
 use zone_server::config::Config;
 
-use crate::common::{self, TestClient, TestResponse, test_email, test_password};
+use crate::common;
+use crate::common::TestClient;
+use crate::common::TestResponse;
+use crate::common::mcp;
+use crate::common::mcp::isolated;
+use crate::common::test_email;
+use crate::common::test_password;
 
-const ENABLED_VARIABLE: &str = "ZONE_MCP_ENABLED";
-const SERVERS_VARIABLE: &str = "ZONE_MCP_SERVERS";
-const CONFIG_VARIABLE: &str = "ZONE_MCP_CONFIG";
-const AUTO_CONNECT_VARIABLE: &str = "ZONE_MCP_AUTO_CONNECT";
-const AUTO_MAGENTS_VARIABLE: &str = "ZONE_MCP_AUTO_MAGENTS";
+const HOME: &str = "HOME";
+const HOME_DIRECTORY: &str = ".zone";
+const HOME_DOCUMENT: &str = "mcp.json";
+const DECOY: &str = "decoy";
 
 const CONNECTED: &str = "connected";
 const CONNECTING: &str = "connecting";
@@ -74,20 +80,6 @@ const SERVER_FIELDS: [&str; 16] = [
     "url",
 ];
 const WORKSPACE_FIELDS: [&str; 2] = ["effective", "workspace_enabled"];
-
-/// The process environment with no instance MCP server, held for the test: `magents` on PATH
-/// would otherwise appear as an instance row on one machine and not another.
-fn isolated() -> Variables {
-    let mut environment = Variables::isolated(&[
-        ENABLED_VARIABLE,
-        SERVERS_VARIABLE,
-        CONFIG_VARIABLE,
-        AUTO_CONNECT_VARIABLE,
-        AUTO_MAGENTS_VARIABLE,
-    ]);
-    environment.set(AUTO_CONNECT_VARIABLE, "false");
-    environment
-}
 
 async fn client(commands: bool) -> TestClient {
     TestClient::with_config(Config {
@@ -809,7 +801,7 @@ async fn a_malformed_reference_is_a_bad_request() {
 async fn a_name_is_unique_in_the_organization_and_against_instance_servers() {
     let mut environment = isolated();
     environment.set(
-        SERVERS_VARIABLE,
+        mcp::SERVERS,
         format!(r#"{{"mcpServers":{{"{INSTANCE_SERVER}":{{"command":"true"}}}}}}"#),
     );
     let client = client(false).await;
@@ -849,6 +841,41 @@ async fn a_name_is_unique_in_the_organization_and_against_instance_servers() {
     assert_eq!(instance["created_at"], Value::Null);
     assert_eq!(instance["updated_at"], Value::Null);
     assert_eq!(listed["servers"][0]["source"], ORGANIZATION);
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_configuration_in_the_home_directory_reaches_no_isolated_test() {
+    let home = tempfile::tempdir().expect("a temporary home directory");
+    let directory = home.path().join(HOME_DIRECTORY);
+    std::fs::create_dir(&directory).expect("the home directory takes zone's own");
+    std::fs::write(
+        directory.join(HOME_DOCUMENT),
+        format!(r#"{{"mcpServers":{{"{DECOY}":{{"command":"true"}}}}}}"#),
+    )
+    .expect("the decoy configuration is written");
+    let mut environment = isolated();
+    environment.set(HOME, home.path());
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+
+    let listed = client
+        .get_auth(&tenant.servers(), &tenant.owner.token)
+        .await;
+    listed.assert_status(StatusCode::OK);
+    assert_eq!(
+        listed.json_value(),
+        json!({ "commands": false, "servers": [] })
+    );
+
+    environment.remove(mcp::SERVERS);
+    let exposed = servers::config().servers;
+    assert_eq!(
+        exposed.keys().collect::<Vec<_>>(),
+        [DECOY],
+        "the decoy is what a test that only unsets the variable would list"
+    );
 
     tenant.discard(&client, &[]).await;
 }

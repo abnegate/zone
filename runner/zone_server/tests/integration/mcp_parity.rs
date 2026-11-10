@@ -4,49 +4,47 @@
 //! calls from. A coding agent runs its own loop and reaches them only through
 //! zone's `/mcp` endpoint, so each agent kind is served the turn's tools there
 //! and asked for its catalog the way the spawned agent asks for it.
-use crate::common;
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use abnegate_agent_cli::AgentKind;
 use axum::http::StatusCode;
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_json::json;
 use tokio::net::TcpListener;
 use uuid::Uuid;
-use zone_core::llm::{BuiltinTools, LlmBackend, cli};
-use zone_core::variables::Variables;
-use zone_server::agent::{ApprovalGate, ApprovalPolicy, ChatTools, LoopBudget, WorkspaceScope};
+use zone_core::llm::BuiltinTools;
+use zone_core::llm::LlmBackend;
+use zone_core::llm::cli;
+use zone_server::agent::ApprovalGate;
+use zone_server::agent::ApprovalPolicy;
+use zone_server::agent::ChatTools;
+use zone_server::agent::LoopBudget;
+use zone_server::agent::WorkspaceScope;
 use zone_server::config::Config;
-use zone_server::db::mcp_servers::{self, NewMcpServer};
-use zone_server::db::organization_members::{self, OrgRole};
+use zone_server::db::mcp_servers;
+use zone_server::db::mcp_servers::NewMcpServer;
+use zone_server::db::organization_members;
+use zone_server::db::organization_members::OrgRole;
 use zone_server::db::tasks::Origin;
-use zone_server::db::workspace_members::{self, WorkspaceRole};
-use zone_server::mcp::{AgentTools, Scope, endpoint, offered};
+use zone_server::db::workspace_members;
+use zone_server::db::workspace_members::WorkspaceRole;
+use zone_server::mcp::AgentTools;
+use zone_server::mcp::Scope;
+use zone_server::mcp::endpoint;
+use zone_server::mcp::offered;
 use zone_server::services::mcp_servers::transport::Transport;
 use zone_server::state::AppState;
+
+use crate::common;
+use crate::common::mcp::isolated;
 
 const SERVER: &str = "stub";
 const TOOL: &str = "stub__delegate";
 const PYTHON: &str = "python3";
 const TOOLS_LIST: &str = "tools/list";
 
-const ENABLED: &str = "ZONE_MCP_ENABLED";
-const SERVERS: &str = "ZONE_MCP_SERVERS";
-const CONFIGURATION: &str = "ZONE_MCP_CONFIG";
-const AUTO_CONNECT: &str = "ZONE_MCP_AUTO_CONNECT";
-const AUTO_MAGENTS: &str = "ZONE_MCP_AUTO_MAGENTS";
-
 const AGENTS: [AgentKind; 2] = [AgentKind::Claude, AgentKind::Codex];
-
-/// No instance server reaches the test from the host: not `magents` on the PATH, nor a
-/// `~/.zone/mcp.json`, nor the environment the test binary was started with.
-fn isolated() -> Variables {
-    let mut variables =
-        Variables::isolated(&[ENABLED, SERVERS, CONFIGURATION, AUTO_CONNECT, AUTO_MAGENTS]);
-    variables.set(AUTO_CONNECT, "false");
-    variables
-}
 
 fn stub() -> NewMcpServer {
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

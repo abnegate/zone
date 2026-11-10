@@ -10,6 +10,7 @@ pub mod context;
 pub mod database;
 pub mod github_app;
 pub mod mail;
+pub mod mcp;
 pub mod stand_in;
 pub mod transcript;
 
