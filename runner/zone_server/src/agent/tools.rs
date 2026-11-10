@@ -130,7 +130,7 @@ async fn organization_servers(
     connect: bool,
 ) -> Option<(Arc<OrganizationHub>, BTreeMap<Uuid, bool>)> {
     let state = &scope.state;
-    if !connect && state.mcp().organizations() == 0 {
+    if !state.mcp().policy().enabled || (!connect && state.mcp().organizations() == 0) {
         return None;
     }
     let workspace = scope.workspace_id;
@@ -146,10 +146,7 @@ async fn organization_servers(
         }
     };
     let hub = if connect {
-        state
-            .mcp()
-            .organization(organization, || load::definitions(state, organization))
-            .await
+        load::organization(state, organization).await?
     } else {
         state.mcp().existing_organization(organization)?
     };
@@ -735,15 +732,11 @@ impl ChatTools {
             connected_servers = hub.map_or(0, McpHub::server_count);
             let mut added = hub.map_or(0, |hub| mcp::register(&mut registry, hub));
             if let Some((organization, overrides)) = organization_servers(scope, connect).await {
-                let identifiers = organization.identifiers();
-                added += organization.register(&mut registry, &|name| {
-                    identifiers
-                        .get(name)
-                        .and_then(|server| overrides.get(server))
-                        .copied()
-                        .unwrap_or(true)
+                let registered = organization.register(&mut registry, &|server| {
+                    overrides.get(&server).copied().unwrap_or(true)
                 });
-                connected_servers += organization.connected();
+                added += registered.tools;
+                connected_servers += registered.servers;
             }
             if added > 0 {
                 match profile {
@@ -3793,9 +3786,12 @@ mod tests {
 
     impl Tenant {
         async fn storing(allowlist: Option<&[&str]>) -> Self {
-            use crate::db::mcp_servers::{NewMcpServer, create_authorized};
-            use crate::db::organization_members::{self, OrgRole};
-            use crate::db::{organizations, workspaces};
+            use crate::db::mcp_servers::NewMcpServer;
+            use crate::db::mcp_servers::create_authorized;
+            use crate::db::organization_members;
+            use crate::db::organization_members::OrgRole;
+            use crate::db::organizations;
+            use crate::db::workspaces;
             use crate::services::mcp_servers::definition::Definition;
             use crate::services::mcp_servers::transport::Transport;
 
@@ -4035,5 +4031,52 @@ mod tests {
             .mcp_guidance()
             .expect("a connected organization server earns guidance");
         assert_eq!(Some(guidance), servers::prompt(1, &chat.registry.names()));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_offers_the_workspace_no_tool_earns_no_mcp_guidance() {
+        let switched = Tenant::storing(None).await;
+        switched.overriding(false).await;
+        let narrowed = Tenant::storing(Some(&["other"])).await;
+
+        let overridden = switched.chat().await;
+        let hidden = narrowed.chat().await;
+        let connected = (switched.connected(), narrowed.connected());
+        switched.remove().await;
+        narrowed.remove().await;
+
+        assert_eq!(
+            connected,
+            (Some(1), Some(1)),
+            "both servers have to connect, or nothing would be counted anyway"
+        );
+        for (reason, chat) in [("override", &overridden), ("allowlist", &hidden)] {
+            assert!(!chat.has(STUB_TOOL), "{reason}: {:?}", chat.names());
+            assert_eq!(
+                chat.mcp_guidance(),
+                None,
+                "{reason}: guidance about MCP tools with none in the catalog"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_master_switch_keeps_an_organization_server_out_of_every_turn() {
+        const ENABLED: &str = "ZONE_MCP_ENABLED";
+        let mut variables = zone_core::variables::Variables::isolated(&[ENABLED]);
+        variables.set(ENABLED, "false");
+        let tenant = Tenant::storing(None).await;
+
+        let chat = tenant.chat().await;
+        let run = tenant.run().await;
+        let built = tenant.connected();
+        let hubs = tenant.state.mcp().organizations();
+        tenant.remove().await;
+
+        assert!(!chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert!(!run.has(STUB_TOOL), "{:?}", run.names());
+        assert_eq!(chat.mcp_guidance(), None);
+        assert_eq!(built, None, "a turn built the organization's hub");
+        assert_eq!(hubs, 0);
     }
 }

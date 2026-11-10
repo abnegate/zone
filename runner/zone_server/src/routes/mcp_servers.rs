@@ -17,7 +17,6 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::de::IgnoredAny;
 use uuid::Uuid;
-use zone_core::servers;
 
 use crate::auth::AuthUser;
 use crate::db::audit::actions;
@@ -33,6 +32,7 @@ use crate::services::mcp_servers::organization::OrganizationHub;
 use crate::services::mcp_servers::source::Source;
 use crate::services::mcp_servers::status;
 use crate::services::mcp_servers::status::Connection;
+use crate::services::mcp_servers::status::Policy;
 use crate::services::mcp_servers::status::Status;
 use crate::services::mcp_servers::transport::Transport;
 use crate::services::mcp_servers::validation;
@@ -126,16 +126,6 @@ impl McpServerResponse {
             available_tools: connection.tools,
             created_at: None,
             updated_at: None,
-        }
-    }
-
-    fn connecting(self) -> Self {
-        let connection = Connection::connecting();
-        Self {
-            status: connection.status,
-            error: connection.error,
-            available_tools: connection.tools,
-            ..self
         }
     }
 }
@@ -504,60 +494,70 @@ fn stored_transport(record: &McpServerRecord) -> Transport {
     transport(&load::definition(record).server)
 }
 
-fn taken(name: &str) -> bool {
-    servers::config().servers.contains_key(name)
+async fn taken(state: &AppState, name: &str) -> bool {
+    state.mcp().configured().await.servers.contains_key(name)
 }
 
 fn connection(
     hub: Option<&OrganizationHub>,
     definition: &Definition,
-    commands: bool,
+    policy: Policy,
 ) -> Connection {
     match hub {
         Some(hub) => hub.connection(&definition.name),
-        None => status::static_status(definition, commands).unwrap_or_else(Connection::connecting),
+        None => status::static_status(definition, policy).unwrap_or_else(Connection::connecting),
     }
 }
 
 fn row(
     hub: Option<&OrganizationHub>,
-    commands: bool,
+    policy: Policy,
     record: &McpServerRecord,
 ) -> McpServerResponse {
     let definition = load::definition(record);
-    let connection = connection(hub, &definition, commands);
+    let connection = connection(hub, &definition, policy);
     McpServerResponse::organization(record, transport(&definition.server), connection)
 }
 
 fn warm(state: &AppState, organization: Uuid) {
     let state = state.clone();
     tokio::spawn(async move {
-        state
-            .mcp()
-            .organization(organization, || load::definitions(&state, organization))
-            .await;
+        load::organization(&state, organization).await;
     });
 }
 
-fn server(state: &AppState, organization: Uuid, record: &McpServerRecord) -> McpServerResponse {
-    let hub = state.mcp().existing_organization(organization);
-    let response = row(hub.as_deref(), state.config().mcp_commands, record);
+fn answered(
+    state: &AppState,
+    organization: Uuid,
+    hub: Option<&OrganizationHub>,
+    record: &McpServerRecord,
+) -> McpServerResponse {
+    let response = row(hub, state.mcp().policy(), record);
     if hub.is_none() && response.status == Status::Connecting {
         warm(state, organization);
     }
     response
 }
 
-fn organization_servers(
+async fn server(
+    state: &AppState,
+    organization: Uuid,
+    record: &McpServerRecord,
+) -> McpServerResponse {
+    let hub = load::sync(state, organization).await;
+    answered(state, organization, hub.as_deref(), record)
+}
+
+async fn organization_servers(
     state: &AppState,
     organization: Uuid,
     records: &[McpServerRecord],
 ) -> Vec<McpServerResponse> {
-    let hub = state.mcp().existing_organization(organization);
-    let commands = state.config().mcp_commands;
+    let hub = load::sync(state, organization).await;
+    let policy = state.mcp().policy();
     let rows: Vec<McpServerResponse> = records
         .iter()
-        .map(|record| row(hub.as_deref(), commands, record))
+        .map(|record| row(hub.as_deref(), policy, record))
         .collect();
     if hub.is_none() && rows.iter().any(|row| row.status == Status::Connecting) {
         warm(state, organization);
@@ -565,15 +565,16 @@ fn organization_servers(
     rows
 }
 
-fn instance_servers(state: &AppState) -> Vec<McpServerResponse> {
-    let configured = servers::config().servers;
-    if !configured.is_empty() && state.mcp().existing_instance().is_none() {
+async fn instance_servers(state: &AppState) -> Vec<McpServerResponse> {
+    let configuration = state.mcp().configured().await;
+    if !configuration.servers.is_empty() && state.mcp().existing_instance().is_none() {
         let state = state.clone();
         tokio::spawn(async move {
             state.mcp().instance().await;
         });
     }
-    configured
+    configuration
+        .servers
         .iter()
         .map(|(name, server)| {
             McpServerResponse::instance(name, server, state.mcp().instance_connection(name))
@@ -581,16 +582,17 @@ fn instance_servers(state: &AppState) -> Vec<McpServerResponse> {
         .collect()
 }
 
-fn workspace_servers(
+async fn workspace_servers(
     state: &AppState,
     organization: Uuid,
     records: &[McpServerRecord],
     overrides: &BTreeMap<Uuid, bool>,
 ) -> WorkspaceMcpServerListResponse {
+    let mut servers = organization_servers(state, organization, records).await;
+    servers.extend(instance_servers(state).await);
     WorkspaceMcpServerListResponse {
-        servers: organization_servers(state, organization, records)
+        servers: servers
             .into_iter()
-            .chain(instance_servers(state))
             .map(|server| WorkspaceMcpServerResponse::of(server, overrides))
             .collect(),
     }
@@ -617,8 +619,8 @@ pub async fn list(
     let user = caller(&auth)?;
     let records =
         mcp_servers::list_authorized(state.db(), state.master_key(), org_id, user).await?;
-    let mut servers = organization_servers(&state, org_id, &records);
-    servers.extend(instance_servers(&state));
+    let mut servers = organization_servers(&state, org_id, &records).await;
+    servers.extend(instance_servers(&state).await);
     Ok(Json(McpServerListResponse {
         commands: state.config().mcp_commands,
         servers,
@@ -635,13 +637,12 @@ pub async fn create(
     let user = caller(&auth)?;
     mcp_servers::authorize_admin(state.db(), org_id, user).await?;
     let new = request.validated(state.config().mcp_commands)?;
-    if taken(&new.name) {
+    if taken(&state, &new.name).await {
         return Err(Refusal::Taken);
     }
     let record =
         mcp_servers::create_authorized(state.db(), state.master_key(), org_id, user, new).await?;
-    state.mcp().refresh(org_id, load::definition(&record));
-    let response = server(&state, org_id, &record);
+    let response = server(&state, org_id, &record).await;
     audit(
         state.db(),
         AuditEvent {
@@ -675,7 +676,7 @@ pub async fn get(
         user,
     )
     .await?;
-    Ok(Json(server(&state, path.org_id, &record)))
+    Ok(Json(server(&state, path.org_id, &record).await))
 }
 
 /// PUT /api/organizations/{org_id}/mcp-servers/{server_id}
@@ -696,14 +697,13 @@ pub async fn update(
     )
     .await?;
     let changes = request.changes(&stored, state.config().mcp_commands)?;
-    if changes
-        .name
-        .as_deref()
-        .is_some_and(|name| name != stored.name && taken(name))
+    if let Some(name) = changes.name.as_deref()
+        && name != stored.name
+        && taken(&state, name).await
     {
         return Err(Refusal::Taken);
     }
-    let (record, _) = mcp_servers::update_authorized(
+    let record = mcp_servers::update_authorized(
         state.db(),
         state.master_key(),
         path.org_id,
@@ -712,11 +712,7 @@ pub async fn update(
         changes,
     )
     .await?;
-    if record.name != stored.name {
-        state.mcp().remove(path.org_id, &stored.name);
-    }
-    state.mcp().refresh(path.org_id, load::definition(&record));
-    let response = server(&state, path.org_id, &record);
+    let response = server(&state, path.org_id, &record).await;
     audit(
         state.db(),
         AuditEvent {
@@ -744,7 +740,7 @@ pub async fn delete(
     let user = caller(&auth)?;
     let record =
         mcp_servers::delete_authorized(state.db(), path.org_id, path.server_id, user).await?;
-    state.mcp().remove(path.org_id, &record.name);
+    load::sync(&state, path.org_id).await;
     audit(
         state.db(),
         AuditEvent {
@@ -782,14 +778,8 @@ pub async fn reconnect(
     if stored_transport(&record) == Transport::Stdio && !state.config().mcp_commands {
         return Err(Refusal::Commands);
     }
-    state.mcp().remove(path.org_id, &record.name);
-    state.mcp().refresh(path.org_id, load::definition(&record));
-    let current = server(&state, path.org_id, &record);
-    let response = if record.enabled {
-        current.connecting()
-    } else {
-        current
-    };
+    let hub = load::reconnect(&state, path.org_id, record.id).await;
+    let response = answered(&state, path.org_id, hub.as_deref(), &record);
     audit(
         state.db(),
         AuditEvent {
@@ -823,12 +813,9 @@ pub async fn list_workspace(
         user,
     )
     .await?;
-    Ok(Json(workspace_servers(
-        &state,
-        path.org_id,
-        &records,
-        &overrides,
-    )))
+    Ok(Json(
+        workspace_servers(&state, path.org_id, &records, &overrides).await,
+    ))
 }
 
 /// PUT /api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers
@@ -856,7 +843,7 @@ pub async fn update_workspace(
         user,
     )
     .await?;
-    let response = workspace_servers(&state, path.org_id, &records, &overrides);
+    let response = workspace_servers(&state, path.org_id, &records, &overrides).await;
     audit(
         state.db(),
         AuditEvent {
@@ -877,12 +864,17 @@ pub async fn update_workspace(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use chrono::Utc;
     use serde_json::Value;
     use serde_json::json;
 
     use super::*;
+    use crate::auth::jwt::Claims;
     use crate::db::mcp_servers::Secrets;
+    use crate::services::mcp_servers::testing;
+    use crate::services::mcp_servers::testing::Tenant;
 
     const HEADER_SECRET: &str = "Bearer s3cr3t";
     const ENVIRONMENT_SECRET: &str = "v4lue";
@@ -891,6 +883,19 @@ mod tests {
     const CREDENTIALED_URL: &str =
         "https://operator:hunter2@mcp.internal:8443/tenants/acme?key=hunter2#hunter2";
     const CREDENTIAL: &str = "hunter2";
+
+    const POLICY: Policy = Policy {
+        enabled: true,
+        commands: true,
+    };
+    const REMOTE: Policy = Policy {
+        enabled: true,
+        commands: false,
+    };
+    const OFF: Policy = Policy {
+        enabled: false,
+        commands: true,
+    };
 
     fn secret(name: &str, value: &str) -> BTreeMap<String, SecretValue> {
         BTreeMap::from([(name.to_string(), SecretValue::from(value))])
@@ -991,7 +996,7 @@ mod tests {
             headers: secret("Authorization", HEADER_SECRET),
         };
 
-        let response = row(None, true, &record);
+        let response = row(None, POLICY, &record);
 
         let body = serde_json::to_string(&response).unwrap();
         assert!(
@@ -1129,46 +1134,32 @@ mod tests {
     fn a_server_with_no_hub_is_connecting_only_when_it_can_connect() {
         let stdio = record(Transport::Stdio);
         assert_eq!(
-            connection(None, &load::definition(&stdio), true),
+            connection(None, &load::definition(&stdio), POLICY),
             Connection::connecting()
         );
         assert_eq!(
-            connection(None, &load::definition(&stdio), false),
+            connection(None, &load::definition(&stdio), REMOTE),
             Connection::failed(status::COMMANDS_DISABLED)
+        );
+        assert_eq!(
+            connection(None, &load::definition(&stdio), OFF),
+            Connection::failed(status::MCP_DISABLED)
         );
 
         let mut disabled = record(Transport::Stdio);
         disabled.enabled = false;
         assert_eq!(
-            connection(None, &load::definition(&disabled), true),
+            connection(None, &load::definition(&disabled), POLICY),
             Connection::disabled()
         );
 
         assert_eq!(
-            connection(None, &load::definition(&record(Transport::Http)), true),
+            connection(None, &load::definition(&record(Transport::Http)), POLICY),
             Connection::failed(status::HTTP_PENDING)
         );
         assert_eq!(
-            connection(None, &load::definition(&record(Transport::Sse)), true),
+            connection(None, &load::definition(&record(Transport::Sse)), POLICY),
             Connection::failed(status::SSE_UNSUPPORTED)
-        );
-    }
-
-    #[test]
-    fn a_reconnect_answers_connecting_whatever_the_server_showed() {
-        let failed = row(None, true, &record(Transport::Http));
-        assert_eq!(failed.status, Status::Failed);
-
-        let response = failed.clone().connecting();
-
-        assert_eq!(
-            response,
-            McpServerResponse {
-                status: Status::Connecting,
-                error: None,
-                available_tools: Vec::new(),
-                ..failed
-            }
         );
     }
 
@@ -1193,7 +1184,7 @@ mod tests {
         let record = record(Transport::Stdio);
         let other = Uuid::new_v4();
         let overrides = BTreeMap::from([(record.id, false), (other, true)]);
-        let organization = row(None, true, &record);
+        let organization = row(None, POLICY, &record);
         let instance = McpServerResponse::instance(
             "magents",
             &McpServer::command("magents", ["mcp"]),
@@ -1557,5 +1548,248 @@ mod tests {
             serde_json::from_slice::<Value>(&body).unwrap(),
             json!({ "error": "A server with this name already exists" })
         );
+    }
+
+    fn delegate() -> Connection {
+        Connection::connected(vec!["delegate".to_string()])
+    }
+
+    fn administrator(tenant: &Tenant) -> AuthUser {
+        AuthUser(Claims {
+            sub: tenant.user.to_string(),
+            email: tenant.email.clone(),
+            roles: Vec::new(),
+            permissions: Vec::new(),
+            exp: i64::MAX,
+            iat: 0,
+            jti: String::new(),
+            is_admin: false,
+        })
+    }
+
+    fn stub_body(name: &str) -> Value {
+        let stub = testing::stub(name);
+        json!({
+            "name": name,
+            "transport": "stdio",
+            "command": stub.command,
+            "arguments": stub.arguments,
+        })
+    }
+
+    fn path(tenant: &Tenant, server: &McpServerResponse) -> Path<McpServerPath> {
+        Path(McpServerPath {
+            org_id: tenant.organization,
+            server_id: server.id.expect("an organization's server has an id"),
+        })
+    }
+
+    async fn creating(state: &AppState, tenant: &Tenant, body: Value) -> McpServerResponse {
+        let request = serde_json::from_value(body).expect("the body is a create request");
+        let (status, Json(response)) = super::create(
+            State(state.clone()),
+            administrator(tenant),
+            Path(tenant.organization),
+            Json(request),
+        )
+        .await
+        .expect("the server is created");
+        assert_eq!(status, StatusCode::CREATED);
+        response
+    }
+
+    async fn updating(
+        state: &AppState,
+        tenant: &Tenant,
+        server: &McpServerResponse,
+        body: Value,
+    ) -> McpServerResponse {
+        let Json(response) = super::update(
+            State(state.clone()),
+            administrator(tenant),
+            path(tenant, server),
+            Json(update(body)),
+        )
+        .await
+        .expect("the server is updated");
+        response
+    }
+
+    async fn reconnecting(
+        state: &AppState,
+        tenant: &Tenant,
+        server: &McpServerResponse,
+    ) -> McpServerResponse {
+        let (status, Json(response)) = reconnect(
+            State(state.clone()),
+            administrator(tenant),
+            path(tenant, server),
+        )
+        .await
+        .expect("the reconnect is accepted");
+        assert_eq!(status, StatusCode::ACCEPTED);
+        response
+    }
+
+    async fn reading(
+        state: &AppState,
+        tenant: &Tenant,
+        server: &McpServerResponse,
+    ) -> McpServerResponse {
+        let Json(response) = get(
+            State(state.clone()),
+            administrator(tenant),
+            path(tenant, server),
+        )
+        .await
+        .expect("the server is read");
+        response
+    }
+
+    async fn listing(state: &AppState, tenant: &Tenant) -> Vec<McpServerResponse> {
+        let Json(response) = list(
+            State(state.clone()),
+            administrator(tenant),
+            Path(tenant.organization),
+        )
+        .await
+        .expect("the servers are listed");
+        response
+            .servers
+            .into_iter()
+            .filter(|server| server.source == Source::Organization)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn every_write_reaches_a_hub_that_is_already_built() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica();
+        let hub = load::organization(&state, tenant.organization)
+            .await
+            .expect("the organization's hub");
+
+        let created = creating(&state, &tenant, stub_body("stub")).await;
+        load::organization(&state, tenant.organization).await;
+        let connected = hub.connection("stub");
+        let generation = hub.generation("stub");
+
+        let narrowed = updating(&state, &tenant, &created, json!({ "tools": ["other"] })).await;
+        let kept = hub.generation("stub");
+
+        let renamed = updating(&state, &tenant, &created, json!({ "name": "renamed" })).await;
+        let ghost = hub.connection("stub");
+        load::organization(&state, tenant.organization).await;
+        let session = hub
+            .session("renamed")
+            .expect("the renamed server connected");
+
+        let requested = reconnecting(&state, &tenant, &created).await;
+        load::organization(&state, tenant.organization).await;
+        let replaced = hub
+            .session("renamed")
+            .is_some_and(|replaced| !Arc::ptr_eq(&replaced, &session));
+
+        let removed = delete(
+            State(state.clone()),
+            administrator(&tenant),
+            path(&tenant, &created),
+        )
+        .await
+        .expect("the server is deleted");
+        let left = hub.names();
+        tenant.remove().await;
+
+        assert_eq!(created.status, Status::Connecting);
+        assert_eq!(connected, delegate());
+        assert_eq!(narrowed.status, Status::Connected);
+        assert_eq!(narrowed.tools, Some(vec!["other".to_string()]));
+        assert_eq!(kept, generation, "an allowlist edit reconnected the server");
+        assert_eq!(renamed.status, Status::Connecting);
+        assert_eq!(ghost, Connection::failed(status::UNCONNECTED));
+        assert_eq!(requested.status, Status::Connecting);
+        assert!(replaced, "a reconnect kept the session");
+        assert_eq!(removed, StatusCode::NO_CONTENT);
+        assert!(left.is_empty(), "a deleted server kept its slot: {left:?}");
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_answers_with_the_servers_own_connection() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica();
+        let remote = creating(
+            &state,
+            &tenant,
+            json!({ "name": "remote", "transport": "http", "url": REMOTE_URL }),
+        )
+        .await;
+        let mut body = stub_body("off");
+        body["enabled"] = json!(false);
+        let off = creating(&state, &tenant, body).await;
+
+        let unbuilt = [
+            reconnecting(&state, &tenant, &remote).await,
+            reconnecting(&state, &tenant, &off).await,
+        ];
+        let hubs = state.mcp().organizations();
+        load::organization(&state, tenant.organization).await;
+        let built = [
+            reconnecting(&state, &tenant, &remote).await,
+            reconnecting(&state, &tenant, &off).await,
+        ];
+        let stub = creating(&state, &tenant, stub_body("stub")).await;
+        load::organization(&state, tenant.organization).await;
+        let settled = reading(&state, &tenant, &stub).await;
+        let requested = reconnecting(&state, &tenant, &stub).await;
+        load::organization(&state, tenant.organization).await;
+        tenant.remove().await;
+
+        assert_eq!(
+            hubs, 0,
+            "a reconnect of servers that cannot connect built a hub"
+        );
+        for responses in [unbuilt, built] {
+            let [remote, off] = responses;
+            assert_eq!(remote.status, Status::Failed);
+            assert_eq!(remote.error.as_deref(), Some(status::HTTP_PENDING));
+            assert_eq!(off.status, Status::Disabled);
+            assert_eq!(off.error, None);
+        }
+        assert_eq!(settled.status, Status::Connected);
+        assert_eq!(requested.status, Status::Connecting);
+        assert_eq!(requested.available_tools, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn a_read_shows_what_another_replica_wrote() {
+        let tenant = Tenant::new().await;
+        let writer = tenant.replica();
+        let reader = tenant.replica();
+        load::organization(&reader, tenant.organization).await;
+
+        let created = creating(&writer, &tenant, stub_body("stub")).await;
+        let listed = listing(&reader, &tenant).await;
+        load::organization(&reader, tenant.organization).await;
+        let read = reading(&reader, &tenant, &created).await;
+        updating(&writer, &tenant, &created, json!({ "name": "renamed" })).await;
+        let renamed = listing(&reader, &tenant).await;
+        tenant.delete(created.id.expect("a stored server")).await;
+        let emptied = listing(&reader, &tenant).await;
+        let left = reader
+            .mcp()
+            .existing_organization(tenant.organization)
+            .map(|hub| hub.names());
+        load::organization(&writer, tenant.organization).await;
+        tenant.remove().await;
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, Status::Connecting);
+        assert_eq!(read.status, Status::Connected);
+        assert_eq!(read.available_tools, ["delegate"]);
+        assert_eq!(renamed.len(), 1);
+        assert_eq!(renamed[0].name, "renamed");
+        assert_eq!(renamed[0].status, Status::Connecting);
+        assert!(emptied.is_empty());
+        assert_eq!(left, Some(Vec::new()));
     }
 }

@@ -248,15 +248,6 @@ fn merge(
         .collect()
 }
 
-fn reconnects(before: &McpServerRecord, after: &McpServerRecord) -> bool {
-    before.name != after.name
-        || before.command != after.command
-        || before.arguments != after.arguments
-        || before.url != after.url
-        || before.enabled != after.enabled
-        || before.secrets != after.secrets
-}
-
 async fn authorize_organization(
     connection: &mut PgConnection,
     organization: Uuid,
@@ -398,9 +389,6 @@ pub async fn create_authorized(
 }
 
 /// Change the given fields of one of `organization`'s servers, for one of its administrators.
-///
-/// The `bool` is true when the change reaches the server's connection: its name, target,
-/// arguments, enablement or secrets differ afterwards.
 pub async fn update_authorized(
     pool: &PgPool,
     key: &MasterKey,
@@ -408,7 +396,7 @@ pub async fn update_authorized(
     server: Uuid,
     user: Uuid,
     changes: McpServerChanges,
-) -> McpServerResult<(McpServerRecord, bool)> {
+) -> McpServerResult<McpServerRecord> {
     let mut transaction = pool.begin().await?;
     authorize_organization(&mut transaction, organization, user, OrgRole::Admin).await?;
     let stored: Option<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -482,9 +470,7 @@ pub async fn update_authorized(
         .map_err(classify)?;
     transaction.commit().await?;
 
-    let after = row.record(secrets);
-    let reconnect = reconnects(&before, &after);
-    Ok((after, reconnect))
+    Ok(row.record(secrets))
 }
 
 /// Remove one of `organization`'s servers, for one of its administrators.
@@ -640,6 +626,42 @@ pub async fn set_workspace_overrides_authorized(
     let overrides = overrides(&mut *transaction, workspace).await?;
     transaction.commit().await?;
     Ok(overrides)
+}
+
+/// When each server of `organization` last changed, without opening any secrets.
+pub async fn revisions(
+    pool: &PgPool,
+    organization: Uuid,
+) -> McpServerResult<BTreeMap<Uuid, DateTime<Utc>>> {
+    let rows: Vec<(Uuid, DateTime<Utc>)> =
+        sqlx::query_as("SELECT id, updated_at FROM mcp_servers WHERE organization_id = $1")
+            .bind(organization)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
+/// The servers `organization` has switched on and `workspace` has not switched off, their
+/// secrets left unopened.
+pub async fn offered(
+    pool: &PgPool,
+    organization: Uuid,
+    workspace: Uuid,
+) -> McpServerResult<Vec<McpServerRecord>> {
+    let rows: Vec<Row> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {COLUMNS} FROM mcp_servers WHERE organization_id = $1 AND enabled \
+         AND NOT EXISTS (SELECT 1 FROM workspace_mcp_servers AS choice \
+         WHERE choice.workspace_id = $2 AND choice.server_id = mcp_servers.id AND NOT choice.enabled) \
+         ORDER BY name"
+    )))
+    .bind(organization)
+    .bind(workspace)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.record(Secrets::default()))
+        .collect())
 }
 
 #[cfg(test)]

@@ -1,78 +1,27 @@
-use std::collections::{BTreeMap, HashSet};
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::sync::PoisonError;
+use std::sync::RwLock;
+use std::sync::RwLockReadGuard;
+use std::sync::RwLockWriteGuard;
 
-use abnegate_agent::mcp::{McpConfig, McpHub, McpServer, SEPARATOR, qualified_tool_name};
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::mcp::McpServer;
+use abnegate_agent::mcp::qualified_tool_name;
 use abnegate_agent::tool::Proxy;
-use abnegate_agent::{Tool, ToolRegistry};
-use futures::future::join_all;
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use super::definition::Definition;
-use super::status::{Connection, UNCONNECTED, static_status};
-
-type Session = Arc<McpHub>;
-
-struct Sessions {
-    proxy: Proxy,
-    hubs: BTreeMap<String, Session>,
-}
-
-impl Sessions {
-    fn new(proxy: Proxy) -> Self {
-        Self {
-            proxy,
-            hubs: BTreeMap::new(),
-        }
-    }
-
-    fn proxy(&self) -> Proxy {
-        self.proxy.clone()
-    }
-
-    async fn open(name: String, server: McpServer, proxy: Proxy) -> (String, Session) {
-        let config = McpConfig::default().with_server(name.clone(), server);
-        let hub = McpHub::connect_through(&config, &proxy).await;
-        (name, Arc::new(hub))
-    }
-
-    fn insert(&mut self, name: &str, session: Session) -> Option<Session> {
-        self.hubs.insert(name.to_string(), session)
-    }
-
-    fn remove(&mut self, name: &str) -> Option<Session> {
-        self.hubs.remove(name)
-    }
-
-    fn connected(&self, name: &str) -> bool {
-        self.hubs
-            .get(name)
-            .is_some_and(|hub| hub.server_count() == 1)
-    }
-
-    fn tools(&self, name: &str) -> Vec<String> {
-        self.hubs
-            .get(name)
-            .map(|hub| advertised(name, hub))
-            .unwrap_or_default()
-    }
-
-    fn tools_avoiding(&self, name: &str, used: &mut HashSet<String>) -> Vec<Arc<dyn Tool>> {
-        self.hubs
-            .get(name)
-            .map(|hub| hub.tools_avoiding(used))
-            .unwrap_or_default()
-    }
-}
-
-/// The tools `hub` advertises for the server `name`, without the prefix
-/// that qualifies them.
-pub(super) fn advertised(name: &str, hub: &McpHub) -> Vec<String> {
-    let prefix = format!("{name}{SEPARATOR}");
-    hub.tools()
-        .iter()
-        .filter_map(|tool| tool.name().strip_prefix(&prefix).map(str::to_string))
-        .collect()
-}
+use super::definition::Revisions;
+use super::sessions::Session;
+use super::sessions::Sessions;
+use super::status::Connection;
+use super::status::Policy;
+use super::status::UNCONNECTED;
+use super::status::static_status;
 
 struct Slot {
     definition: Definition,
@@ -81,7 +30,7 @@ struct Slot {
 }
 
 struct Inner {
-    slots: BTreeMap<String, Slot>,
+    slots: BTreeMap<Uuid, Slot>,
     sessions: Sessions,
     generation: u64,
 }
@@ -91,92 +40,95 @@ impl Inner {
         self.generation += 1;
         self.generation
     }
+
+    fn named(&self, name: &str) -> Option<(Uuid, &Slot)> {
+        self.slots
+            .iter()
+            .find(|(_, slot)| slot.definition.name == name)
+            .map(|(server, slot)| (*server, slot))
+    }
+
+    fn connecting(&self) -> bool {
+        self.slots.values().any(|slot| slot.connecting)
+    }
+}
+
+struct Opening {
+    server: Uuid,
+    generation: u64,
+    name: String,
+    target: McpServer,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Registered {
+    pub servers: usize,
+    pub tools: usize,
 }
 
 pub struct OrganizationHub {
     inner: RwLock<Inner>,
-    commands: bool,
+    policy: Policy,
+    connecting: watch::Sender<bool>,
 }
 
 impl OrganizationHub {
-    pub(super) async fn connect(
-        definitions: Vec<Definition>,
-        proxy: Proxy,
-        commands: bool,
-    ) -> Self {
-        let mut inner = Inner {
-            slots: BTreeMap::new(),
-            sessions: Sessions::new(proxy),
-            generation: 0,
-        };
-        for definition in definitions {
-            let generation = inner.next();
-            inner.slots.insert(
-                definition.name.clone(),
-                Slot {
-                    definition,
-                    connecting: false,
-                    generation,
-                },
-            );
-        }
-        let opened = join_all(
-            inner
-                .slots
-                .values()
-                .filter(|slot| static_status(&slot.definition, commands).is_none())
-                .map(|slot| {
-                    Sessions::open(
-                        slot.definition.name.clone(),
-                        slot.definition.server.clone(),
-                        inner.sessions.proxy(),
-                    )
-                })
-                .collect::<Vec<_>>(),
-        )
-        .await;
-        for (name, session) in opened {
-            inner.sessions.insert(&name, session);
-        }
+    pub(super) fn new(proxy: Proxy, policy: Policy) -> Self {
         Self {
-            inner: RwLock::new(inner),
-            commands,
+            inner: RwLock::new(Inner {
+                slots: BTreeMap::new(),
+                sessions: Sessions::new(proxy),
+                generation: 0,
+            }),
+            policy,
+            connecting: watch::Sender::new(false),
         }
     }
 
     pub fn connection(&self, name: &str) -> Connection {
         let inner = self.read();
-        let Some(slot) = inner.slots.get(name) else {
+        let Some((server, slot)) = inner.named(name) else {
             return Connection::failed(UNCONNECTED);
         };
-        if let Some(connection) = static_status(&slot.definition, self.commands) {
+        if let Some(connection) = static_status(&slot.definition, self.policy) {
             return connection;
         }
         if slot.connecting {
             return Connection::connecting();
         }
-        if inner.sessions.connected(name) {
-            return Connection::connected(inner.sessions.tools(name));
+        if inner.sessions.connected(server) {
+            return Connection::connected(inner.sessions.tools(server, name));
         }
         Connection::failed(UNCONNECTED)
     }
 
-    pub fn register(&self, registry: &mut ToolRegistry, include: &dyn Fn(&str) -> bool) -> usize {
+    pub fn register(
+        &self,
+        registry: &mut ToolRegistry,
+        include: &dyn Fn(Uuid) -> bool,
+    ) -> Registered {
         let mut used: HashSet<String> = registry.names().into_iter().map(str::to_string).collect();
         let inner = self.read();
-        let mut added = 0;
-        for (name, slot) in &inner.slots {
-            if !include(name) {
-                continue;
-            }
-            for tool in inner.sessions.tools_avoiding(name, &mut used) {
+        let mut slots: Vec<(Uuid, &Slot)> = inner
+            .slots
+            .iter()
+            .map(|(server, slot)| (*server, slot))
+            .filter(|(server, _)| include(*server))
+            .collect();
+        slots.sort_by(|(_, left), (_, right)| left.definition.name.cmp(&right.definition.name));
+        let mut registered = Registered::default();
+        for (server, slot) in slots {
+            let mut tools = 0;
+            for tool in inner.sessions.tools_avoiding(server, &mut used) {
                 if allowed(&slot.definition, tool.name()) {
                     registry.register(tool);
-                    added += 1;
+                    tools += 1;
                 }
             }
+            registered.tools += tools;
+            registered.servers += usize::from(tools > 0);
         }
-        added
+        registered
     }
 
     pub fn connected(&self) -> usize {
@@ -184,80 +136,113 @@ impl OrganizationHub {
         inner
             .slots
             .keys()
-            .filter(|name| inner.sessions.connected(name))
+            .filter(|server| inner.sessions.connected(**server))
             .count()
     }
 
-    pub fn identifiers(&self) -> BTreeMap<String, Uuid> {
+    pub fn connecting(&self) -> bool {
+        *self.connecting.borrow()
+    }
+
+    pub(super) async fn settled(&self) {
+        let mut connecting = self.connecting.subscribe();
+        let _ = connecting.wait_for(|connecting| !connecting).await;
+    }
+
+    pub(super) fn revisions(&self) -> Revisions {
         self.read()
             .slots
             .iter()
-            .filter_map(|(name, slot)| Some((name.clone(), slot.definition.id?)))
+            .map(|(server, slot)| (*server, slot.definition.revision))
             .collect()
     }
 
-    pub(super) fn refresh(self: &Arc<Self>, definition: Definition) {
-        let name = definition.name.clone();
-        let connectable = static_status(&definition, self.commands).is_none();
-        let (stale, pending) = {
+    pub(super) fn apply(self: &Arc<Self>, definitions: Vec<Definition>, forced: Option<Uuid>) {
+        let mut stale = Vec::new();
+        let mut openings = Vec::new();
+        let proxy = {
             let mut guard = self.write();
             let inner = &mut *guard;
-            if let Some(slot) = inner.slots.get_mut(&name)
-                && slot.definition.server == definition.server
-                && slot.definition.enabled == definition.enabled
-            {
-                slot.definition = definition;
-                return;
+            let stored: BTreeSet<Uuid> =
+                definitions.iter().map(|definition| definition.id).collect();
+            let removed: Vec<Uuid> = inner
+                .slots
+                .keys()
+                .filter(|server| !stored.contains(server))
+                .copied()
+                .collect();
+            for server in removed {
+                inner.slots.remove(&server);
+                stale.extend(inner.sessions.remove(server));
             }
-            let generation = inner.next();
-            let server = definition.server.clone();
-            inner.slots.insert(
-                name.clone(),
-                Slot {
-                    definition,
-                    connecting: connectable,
-                    generation,
-                },
-            );
-            if connectable {
-                (None, Some((server, generation, inner.sessions.proxy())))
-            } else {
-                (inner.sessions.remove(&name), None)
+            for definition in definitions {
+                let server = definition.id;
+                if forced != Some(server)
+                    && let Some(slot) = inner.slots.get_mut(&server)
+                {
+                    if slot.definition.revision == definition.revision {
+                        continue;
+                    }
+                    if !reconnects(&slot.definition, &definition) {
+                        slot.definition = definition;
+                        continue;
+                    }
+                }
+                let generation = inner.next();
+                let connecting = static_status(&definition, self.policy).is_none();
+                stale.extend(inner.sessions.remove(server));
+                if connecting {
+                    openings.push(Opening {
+                        server,
+                        generation,
+                        name: definition.name.clone(),
+                        target: definition.server.clone(),
+                    });
+                }
+                inner.slots.insert(
+                    server,
+                    Slot {
+                        definition,
+                        connecting,
+                        generation,
+                    },
+                );
             }
+            self.connecting.send_replace(inner.connecting());
+            inner.sessions.proxy()
         };
         drop(stale);
-        let Some((server, generation, proxy)) = pending else {
-            return;
-        };
+        for opening in openings {
+            self.open(opening, proxy.clone());
+        }
+    }
+
+    fn open(self: &Arc<Self>, opening: Opening, proxy: Proxy) {
         let hub = Arc::downgrade(self);
         tokio::spawn(async move {
-            let (name, session) = Sessions::open(name, server, proxy).await;
+            // A connect that panics still has to settle its slot, or `settled` never returns.
+            let session = tokio::spawn(Sessions::open(opening.name, opening.target, proxy))
+                .await
+                .ok();
             if let Some(hub) = hub.upgrade() {
-                hub.settle(&name, generation, session);
+                hub.settle(opening.server, opening.generation, session);
             }
         });
     }
 
-    pub(super) fn remove(&self, name: &str) {
-        let stale = {
-            let mut inner = self.write();
-            inner.slots.remove(name);
-            inner.sessions.remove(name)
-        };
-        drop(stale);
-    }
-
-    fn settle(&self, name: &str, generation: u64, session: Session) {
+    fn settle(&self, server: Uuid, generation: u64, session: Option<Session>) {
         let stale = {
             let mut guard = self.write();
             let inner = &mut *guard;
-            match inner.slots.get_mut(name) {
+            let stale = match inner.slots.get_mut(&server) {
                 Some(slot) if slot.generation == generation => {
                     slot.connecting = false;
-                    inner.sessions.insert(name, session)
+                    session.and_then(|session| inner.sessions.insert(server, session))
                 }
-                _ => Some(session),
-            }
+                _ => session,
+            };
+            self.connecting.send_replace(inner.connecting());
+            stale
         };
         drop(stale);
     }
@@ -271,6 +256,12 @@ impl OrganizationHub {
     }
 }
 
+fn reconnects(stored: &Definition, definition: &Definition) -> bool {
+    stored.name != definition.name
+        || stored.server != definition.server
+        || stored.enabled != definition.enabled
+}
+
 fn allowed(definition: &Definition, tool: &str) -> bool {
     definition.tools.as_ref().is_none_or(|entries| {
         entries
@@ -281,15 +272,31 @@ fn allowed(definition: &Definition, tool: &str) -> bool {
 
 #[cfg(test)]
 impl OrganizationHub {
-    pub(super) fn definition(&self, name: &str) -> Option<Definition> {
+    pub(crate) fn definition(&self, name: &str) -> Option<Definition> {
         self.read()
-            .slots
-            .get(name)
-            .map(|slot| slot.definition.clone())
+            .named(name)
+            .map(|(_, slot)| slot.definition.clone())
     }
 
-    pub(super) fn session(&self, name: &str) -> Option<Session> {
-        self.read().sessions.hubs.get(name).cloned()
+    pub(crate) fn session(&self, name: &str) -> Option<Session> {
+        let inner = self.read();
+        let (server, _) = inner.named(name)?;
+        inner.sessions.get(server)
+    }
+
+    pub(crate) fn generation(&self, name: &str) -> Option<u64> {
+        self.read().named(name).map(|(_, slot)| slot.generation)
+    }
+
+    pub(crate) fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .read()
+            .slots
+            .values()
+            .map(|slot| slot.definition.name.clone())
+            .collect();
+        names.sort();
+        names
     }
 }
 
@@ -300,8 +307,20 @@ mod tests {
     use super::*;
     use crate::services::mcp_servers::status::Status;
 
-    async fn connected(definitions: Vec<Definition>) -> OrganizationHub {
-        let hub = OrganizationHub::connect(definitions, Proxy::default(), true).await;
+    const POLICY: Policy = Policy {
+        enabled: true,
+        commands: true,
+    };
+
+    async fn settled(definitions: Vec<Definition>) -> Arc<OrganizationHub> {
+        let hub = Arc::new(OrganizationHub::new(Proxy::default(), POLICY));
+        hub.apply(definitions, None);
+        hub.settled().await;
+        hub
+    }
+
+    async fn connected(definitions: Vec<Definition>) -> Arc<OrganizationHub> {
+        let hub = settled(definitions).await;
         assert_eq!(hub.connected(), 1, "the stub server has to connect");
         hub
     }
@@ -313,24 +332,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_stored_server_is_identified_by_its_name() {
-        let stored = Definition {
-            enabled: false,
-            ..Definition::stub("stored")
-        };
-        let unstored = Definition {
-            id: None,
-            enabled: false,
-            ..Definition::stub("unstored")
-        };
-        let identifier = stored.id.expect("a stored definition has an identifier");
-        let hub = OrganizationHub::connect(vec![stored, unstored], Proxy::default(), true).await;
-
-        assert_eq!(
-            hub.identifiers(),
-            BTreeMap::from([("stored".to_string(), identifier)])
-        );
+    fn one() -> Registered {
+        Registered {
+            servers: 1,
+            tools: 1,
+        }
     }
 
     #[tokio::test]
@@ -353,9 +359,17 @@ mod tests {
             let hub = connected(vec![allowing(tools)]).await;
             let mut registry = ToolRegistry::new();
 
-            let added = hub.register(&mut registry, &|_| true);
+            let registered = hub.register(&mut registry, &|_| true);
 
-            assert_eq!(added, usize::from(expected), "{tools:?}");
+            assert_eq!(
+                registered,
+                if expected {
+                    one()
+                } else {
+                    Registered::default()
+                },
+                "{tools:?}"
+            );
             assert_eq!(
                 registry.get("stub__delegate").is_some(),
                 expected,
@@ -374,25 +388,28 @@ mod tests {
     async fn a_collided_tool_does_not_match_its_allowlist_entry() {
         let other = connected(vec![Definition::stub("stub")]).await;
         let mut registry = ToolRegistry::new();
-        assert_eq!(other.register(&mut registry, &|_| true), 1);
+        assert_eq!(other.register(&mut registry, &|_| true), one());
         assert!(registry.get("stub__delegate").is_some());
         let hub = connected(vec![allowing(Some(&["delegate"]))]).await;
 
-        let added = hub.register(&mut registry, &|_| true);
+        let registered = hub.register(&mut registry, &|_| true);
 
-        assert_eq!(added, 0, "{:?}", registry.names());
+        assert_eq!(registered, Registered::default(), "{:?}", registry.names());
         assert!(registry.get("stub__delegate_2").is_none());
     }
 
     #[tokio::test]
-    async fn an_excluded_server_registers_nothing() {
-        let hub = connected(vec![Definition::stub("stub")]).await;
+    async fn registration_asks_about_each_server_by_its_row() {
+        let kept = Definition::stub("kept");
+        let excluded = Definition::stub("excluded");
+        let hub = settled(vec![kept.clone(), excluded.clone()]).await;
+        assert_eq!(hub.connected(), 2, "both stub servers have to connect");
         let mut registry = ToolRegistry::new();
 
-        let added = hub.register(&mut registry, &|name| name != "stub");
+        let registered = hub.register(&mut registry, &|server| server != excluded.id);
 
-        assert_eq!(added, 0);
-        assert!(registry.names().is_empty(), "{:?}", registry.names());
+        assert_eq!(registered, one());
+        assert_eq!(registry.names(), ["kept__delegate"]);
     }
 
     #[tokio::test]
@@ -422,9 +439,18 @@ mod tests {
             McpServer::command("/nonexistent/zone-mcp-stub", Vec::<String>::new()),
         );
 
-        let hub = OrganizationHub::connect(vec![missing], Proxy::default(), true).await;
+        let hub = settled(vec![missing]).await;
 
         assert_eq!(hub.connected(), 0);
+        assert!(!hub.connecting());
         assert_eq!(hub.connection("missing"), Connection::failed(UNCONNECTED));
+    }
+
+    #[tokio::test]
+    async fn a_hub_with_nothing_to_connect_is_settled() {
+        let hub = settled(Vec::new()).await;
+
+        assert!(!hub.connecting());
+        assert!(hub.revisions().is_empty());
     }
 }

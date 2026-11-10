@@ -1,14 +1,23 @@
+use std::collections::BTreeMap;
+
 use abnegate_agent::mcp::McpServer;
 #[cfg(test)]
 use abnegate_secret::SecretValue;
+use chrono::DateTime;
+#[cfg(test)]
+use chrono::Duration;
+use chrono::Utc;
 use uuid::Uuid;
 
 #[cfg(test)]
 const MARKER: &str = "ZONE_STUB_MARKER";
 
+pub type Revisions = BTreeMap<Uuid, DateTime<Utc>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Definition {
-    pub id: Option<Uuid>,
+    pub id: Uuid,
+    pub revision: DateTime<Utc>,
     pub name: String,
     pub server: McpServer,
     pub enabled: bool,
@@ -19,7 +28,8 @@ pub struct Definition {
 impl Definition {
     pub(crate) fn of(name: &str, server: McpServer) -> Self {
         Self {
-            id: Some(Uuid::new_v4()),
+            id: Uuid::new_v4(),
+            revision: Utc::now(),
             name: name.to_string(),
             server,
             enabled: true,
@@ -39,16 +49,23 @@ impl Definition {
     }
 
     pub(crate) fn stub_marked(name: &str, marker: &str) -> Self {
-        let mut definition = Self::stub(name);
-        definition
-            .server
+        Self::stub(name).marked(marker)
+    }
+
+    pub(crate) fn marked(mut self, marker: &str) -> Self {
+        self.server
             .environment
             .insert(MARKER.to_string(), SecretValue::from(marker));
-        definition
+        self
     }
 
     pub(crate) fn marker(&self) -> Option<&str> {
         self.server.environment.get(MARKER).map(SecretValue::expose)
+    }
+
+    pub(crate) fn revised(mut self) -> Self {
+        self.revision += Duration::microseconds(1);
+        self
     }
 }
 
@@ -66,5 +83,16 @@ mod tests {
         assert_eq!(plain.marker(), None);
         assert_eq!(marked.marker(), Some("first"));
         assert_ne!(marked.server, plain.server);
+    }
+
+    #[test]
+    fn a_revised_definition_keeps_its_identity() {
+        let stored = Definition::stub("stub");
+
+        let revised = stored.clone().revised();
+
+        assert_eq!(revised.id, stored.id);
+        assert_ne!(revised.revision, stored.revision);
+        assert_eq!(revised.server, stored.server);
     }
 }

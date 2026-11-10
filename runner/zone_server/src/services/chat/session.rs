@@ -34,6 +34,9 @@ use crate::services::chat::driver::Driver;
 use crate::services::chat::handover::Handover;
 use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
+use crate::services::mcp_servers::load;
+use crate::services::mcp_servers::status;
+use crate::services::mcp_servers::status::Status;
 use crate::services::project_directory::{self, Start};
 use crate::state::AppState;
 
@@ -619,10 +622,11 @@ pub async fn build(
 }
 
 /// Whether an MCP server the chat's turns are offered has yet to connect: the
-/// instance's, or one its organization has switched on. A preview starts
-/// neither, so it cannot count their tools.
+/// instance's, or one its organization has switched on, its workspace has not
+/// switched off and this instance can connect. A preview starts neither, so it
+/// cannot count their tools.
 async fn mcp_pending(state: &AppState, workspace: Uuid) -> bool {
-    if state.mcp().existing_instance().is_none() && !zone_core::servers::config().is_empty() {
+    if state.mcp().existing_instance().is_none() && !state.mcp().configured().await.is_empty() {
         return true;
     }
     let organization = match mcp_servers::organization_for_workspace(state.db(), workspace).await {
@@ -637,11 +641,16 @@ async fn mcp_pending(state: &AppState, workspace: Uuid) -> bool {
             return false;
         }
     };
-    if state.mcp().existing_organization(organization).is_some() {
+    let hub = state.mcp().existing_organization(organization);
+    if hub.as_ref().is_some_and(|hub| !hub.connecting()) {
         return false;
     }
-    match mcp_servers::has_enabled(state.db(), organization).await {
-        Ok(enabled) => enabled,
+    let policy = state.mcp().policy();
+    match mcp_servers::offered(state.db(), organization, workspace).await {
+        Ok(records) => records.iter().any(|record| match &hub {
+            Some(hub) => hub.connection(&record.name).status == Status::Connecting,
+            None => status::static_status(&load::definition(record), policy).is_none(),
+        }),
         Err(error) => {
             tracing::debug!(
                 %organization,
@@ -1498,83 +1507,134 @@ mod tests {
 
     #[tokio::test]
     async fn a_preview_is_incomplete_until_the_organizations_mcp_servers_connect() {
-        use crate::db::{chats, organizations, workspaces};
-        use crate::services::mcp_servers::load;
-        use sqlx::PgPool;
+        use crate::db::chats;
+        use crate::db::mcp_servers::NewMcpServer;
+        use crate::services::mcp_servers::testing::Tenant;
+        use crate::services::mcp_servers::testing::remote;
+        use crate::services::mcp_servers::testing::stub;
 
         const UNREACHABLE: &str = "http://127.0.0.1:1";
-        const STORE: &str = "INSERT INTO mcp_servers (organization_id, name, transport, command, enabled) \
-                             VALUES ($1, $2, 'stdio', 'true', $3)";
-        let pool = PgPool::connect(
-            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        let tenant = Tenant::new().await;
+        let chat = chats::create_chat(
+            &tenant.pool,
+            Some(tenant.workspace),
+            "Servers",
+            "test",
+            true,
+            false,
         )
         .await
-        .expect("the test database");
-        let suffix = Uuid::new_v4().simple().to_string();
-        let organization = organizations::create_organization(&pool, "Servers", &suffix, None)
-            .await
-            .expect("an organization")
-            .id;
-        let workspace = workspaces::create_workspace(&pool, organization, "Servers", &suffix, None)
-            .await
-            .expect("a workspace")
-            .id;
-        let chat = chats::create_chat(&pool, Some(workspace), "Servers", "test", true, false)
-            .await
-            .expect("an agent chat");
-        let mut config = crate::state::test_config();
-        config.litellm_host = UNREACHABLE.into();
-        config.ollama_host = UNREACHABLE.into();
-        let state = AppState::new(config, pool.clone(), None);
-        state.disable_mcp();
-        let endpoint = crate::services::route::Route::for_workspace(&state, workspace)
+        .expect("an agent chat");
+        let configured = |commands: bool| {
+            let mut config = crate::state::test_config();
+            config.litellm_host = UNREACHABLE.into();
+            config.ollama_host = UNREACHABLE.into();
+            config.mcp_commands = commands;
+            tenant.configured(config)
+        };
+        let state = configured(true);
+        let remote_only = configured(false);
+        let endpoint = crate::services::route::Route::for_workspace(&state, tenant.workspace)
             .await
             .into_endpoint()
             .expect("a usable route");
-        let preview = || async {
-            let preparation = build(
-                &state,
-                &chat,
-                Uuid::new_v4(),
-                None,
-                Mode::Preview,
-                endpoint.clone(),
-                None,
-            )
-            .await
-            .expect("a preview");
-            let pending = preparation.context.reason.as_deref() == Some(MCP_PENDING);
-            (preparation.context.incomplete, pending)
-        };
-        let store = |name: &'static str, enabled: bool| {
-            sqlx::query(STORE)
-                .bind(organization)
-                .bind(name)
-                .bind(enabled)
-                .execute(&pool)
+        let preview = |state: &AppState| {
+            let state = state.clone();
+            let chat = chat.clone();
+            let endpoint = endpoint.clone();
+            async move {
+                let preparation = build(
+                    &state,
+                    &chat,
+                    Uuid::new_v4(),
+                    None,
+                    Mode::Preview,
+                    endpoint,
+                    None,
+                )
+                .await
+                .expect("a preview");
+                let pending = preparation.context.reason.as_deref() == Some(MCP_PENDING);
+                (preparation.context.incomplete, pending)
+            }
         };
 
-        let bare = preview().await;
-        store("off", false).await.expect("a disabled server");
-        let disabled = preview().await;
-        store("on", true).await.expect("an enabled server");
-        let unconnected = preview().await;
-        let unbuilt = state.mcp().existing_organization(organization).is_none();
-        state
+        let bare = preview(&state).await;
+        let off = NewMcpServer {
+            enabled: false,
+            ..stub("off")
+        };
+        tenant.store(&state, off).await;
+        let disabled = preview(&state).await;
+        tenant.store(&state, remote("remote")).await;
+        let unconnectable = preview(&state).await;
+        let on = tenant.store(&state, stub("on")).await;
+        let commands_off = preview(&remote_only).await;
+        let unconnected = preview(&state).await;
+        tenant.overriding(on.id, false).await;
+        let overridden = preview(&state).await;
+        tenant.overriding(on.id, true).await;
+        let restored = preview(&state).await;
+        let unbuilt = state
             .mcp()
-            .organization(organization, || load::definitions(&state, organization))
-            .await;
-        let connected = preview().await;
-        sqlx::query("DELETE FROM organizations WHERE id = $1")
-            .bind(organization)
-            .execute(&pool)
-            .await
-            .expect("the organization to be removed");
+            .existing_organization(tenant.organization)
+            .is_none();
+        load::organization(&state, tenant.organization).await;
+        let connected = preview(&state).await;
+        tenant.remove().await;
 
         assert_eq!(bare, (false, false), "no server is stored");
         assert_eq!(disabled, (false, false), "the only server is disabled");
+        assert_eq!(
+            unconnectable,
+            (false, false),
+            "an http server is not connected by this build"
+        );
+        assert_eq!(
+            commands_off,
+            (false, false),
+            "a command server never connects while commands are off"
+        );
         assert_eq!(unconnected, (true, true), "an enabled server awaits a turn");
+        assert_eq!(
+            overridden,
+            (false, false),
+            "the workspace switched the only connectable server off"
+        );
+        assert_eq!(restored, (true, true), "the workspace switched it back on");
         assert!(unbuilt, "a preview built the organization's hub");
         assert_eq!(connected, (false, false), "the organization's hub is built");
+    }
+
+    #[tokio::test]
+    async fn a_preview_is_incomplete_while_a_built_hub_is_still_connecting() {
+        use crate::db::mcp_servers::NewMcpServer;
+        use crate::services::mcp_servers::testing::Tenant;
+        use crate::services::mcp_servers::testing::stub;
+
+        let tenant = Tenant::new().await;
+        let state = tenant.replica();
+        load::organization(&state, tenant.organization).await;
+        let settled = mcp_pending(&state, tenant.workspace).await;
+        let silent = NewMcpServer {
+            command: Some("sleep".to_string()),
+            arguments: vec!["30".to_string()],
+            ..stub("silent")
+        };
+        let stored = tenant.store(&state, silent).await;
+
+        load::sync(&state, tenant.organization).await;
+        let connecting = mcp_pending(&state, tenant.workspace).await;
+        tenant.overriding(stored.id, false).await;
+        let overridden = mcp_pending(&state, tenant.workspace).await;
+        state.mcp().forget(tenant.organization);
+        tenant.remove().await;
+
+        assert!(!settled, "an empty hub has nothing left to connect");
+        assert!(connecting, "the server has not answered yet");
+        assert!(
+            !overridden,
+            "the workspace switched the connecting server off"
+        );
     }
 }

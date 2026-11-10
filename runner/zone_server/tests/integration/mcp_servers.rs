@@ -382,7 +382,7 @@ async fn an_organization_member_reads_but_only_an_administrator_writes() {
         .post_json_auth(&tenant.connection(&probe), &json!({}), &admin.token)
         .await;
     reconnecting.assert_status(StatusCode::ACCEPTED);
-    assert_eq!(reconnecting.json_value()["status"], CONNECTING);
+    assert_eq!(reconnecting.json_value()["status"], FAILED);
     client
         .delete_auth(&tenant.server(&id(&created.json_value())), &admin.token)
         .await

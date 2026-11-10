@@ -157,7 +157,7 @@ impl Fixture {
         &self,
         server: Uuid,
         changes: McpServerChanges,
-    ) -> McpServerResult<(McpServerRecord, bool)> {
+    ) -> McpServerResult<McpServerRecord> {
         update_authorized(
             &self.pool,
             &self.key,
@@ -446,7 +446,7 @@ async fn an_update_changes_only_the_given_fields() {
     let fixture = tenant().await;
     let created = fixture.create(http("docs")).await;
 
-    let (updated, reconnect) = fixture
+    let updated = fixture
         .update(
             created.id,
             McpServerChanges {
@@ -457,7 +457,6 @@ async fn an_update_changes_only_the_given_fields() {
         .await
         .expect("an admin updates the server");
 
-    assert!(reconnect);
     assert!(!updated.enabled);
     assert_eq!(updated.name, created.name);
     assert_eq!(updated.url, created.url);
@@ -479,12 +478,12 @@ async fn an_update_changes_only_the_given_fields() {
 }
 
 #[tokio::test]
-async fn a_tools_change_does_not_reconnect() {
+async fn a_tools_change_leaves_the_secrets_sealed_as_they_were() {
     let fixture = tenant().await;
     let created = fixture.create(http("docs")).await;
     let sealed = fixture.stored(created.id).await;
 
-    let (updated, reconnect) = fixture
+    let updated = fixture
         .update(
             created.id,
             McpServerChanges {
@@ -495,7 +494,6 @@ async fn a_tools_change_does_not_reconnect() {
         .await
         .expect("an admin updates the tools");
 
-    assert!(!reconnect);
     assert_eq!(updated.tools, None);
     assert_eq!(
         fixture.stored(created.id).await,
@@ -505,11 +503,11 @@ async fn a_tools_change_does_not_reconnect() {
 }
 
 #[tokio::test]
-async fn an_arguments_change_reconnects() {
+async fn an_arguments_change_keeps_the_command() {
     let fixture = tenant().await;
     let created = fixture.create(stdio("github")).await;
 
-    let (updated, reconnect) = fixture
+    let updated = fixture
         .update(
             created.id,
             McpServerChanges {
@@ -520,34 +518,8 @@ async fn an_arguments_change_reconnects() {
         .await
         .expect("an admin updates the arguments");
 
-    assert!(reconnect);
     assert_eq!(updated.arguments, ["--read-only"]);
     assert_eq!(updated.command.as_deref(), Some("npx"));
-}
-
-#[tokio::test]
-async fn the_same_values_do_not_reconnect() {
-    let fixture = tenant().await;
-    let created = fixture.create(http("docs")).await;
-
-    let (_, reconnect) = fixture
-        .update(
-            created.id,
-            McpServerChanges {
-                name: Some("docs".to_owned()),
-                url: created.url.clone(),
-                environment: Some(BTreeMap::from([("GITHUB_TOKEN".to_owned(), None)])),
-                headers: Some(BTreeMap::from([(
-                    "Authorization".to_owned(),
-                    Some(SecretValue::new(AUTHORIZATION)),
-                )])),
-                ..McpServerChanges::default()
-            },
-        )
-        .await
-        .expect("an admin updates the server");
-
-    assert!(!reconnect);
 }
 
 #[tokio::test]
@@ -557,7 +529,7 @@ async fn a_kept_secret_keeps_its_value_and_an_absent_one_is_removed() {
     new.environment = secrets(&[("GITHUB_TOKEN", TOKEN), ("REMOVED", "gone")]);
     let created = fixture.create(new).await;
 
-    let (updated, reconnect) = fixture
+    let updated = fixture
         .update(
             created.id,
             McpServerChanges {
@@ -571,7 +543,6 @@ async fn a_kept_secret_keeps_its_value_and_an_absent_one_is_removed() {
         .await
         .expect("an admin updates the environment");
 
-    assert!(reconnect);
     let expected = BTreeMap::from([("ADDED", "new"), ("GITHUB_TOKEN", TOKEN)]);
     assert_eq!(exposed(&updated.secrets.environment), expected);
     assert_eq!(
@@ -595,7 +566,7 @@ async fn removing_every_secret_stores_null() {
     let fixture = tenant().await;
     let created = fixture.create(http("docs")).await;
 
-    let (updated, reconnect) = fixture
+    let updated = fixture
         .update(
             created.id,
             McpServerChanges {
@@ -607,7 +578,6 @@ async fn removing_every_secret_stores_null() {
         .await
         .expect("an admin removes the secrets");
 
-    assert!(reconnect);
     assert_eq!(updated.secrets, Secrets::default());
     assert_eq!(fixture.stored(created.id).await, None);
 }
@@ -948,6 +918,104 @@ async fn deleting_a_server_removes_its_overrides() {
     .expect("an admin deletes the server");
 
     assert_eq!(fixture.count("workspace_mcp_servers").await, 0);
+}
+
+#[tokio::test]
+async fn revisions_follow_every_change_to_a_server() {
+    let fixture = tenant().await;
+    assert!(
+        revisions(&fixture.pool, fixture.organization)
+            .await
+            .expect("no servers")
+            .is_empty()
+    );
+    let github = fixture.create(stdio("github")).await;
+    let docs = fixture.create(http("docs")).await;
+    assert_eq!(
+        revisions(&fixture.pool, fixture.organization)
+            .await
+            .expect("the created servers"),
+        BTreeMap::from([(github.id, github.updated_at), (docs.id, docs.updated_at)])
+    );
+
+    let updated = fixture
+        .update(
+            github.id,
+            McpServerChanges {
+                tools: Some(Some(vec!["search".to_owned()])),
+                ..McpServerChanges::default()
+            },
+        )
+        .await
+        .expect("an admin updates the tools");
+    delete_authorized(&fixture.pool, fixture.organization, docs.id, fixture.admin)
+        .await
+        .expect("an admin deletes the server");
+
+    assert_ne!(updated.updated_at, github.updated_at);
+    assert_eq!(
+        revisions(&fixture.pool, fixture.organization)
+            .await
+            .expect("the changed servers"),
+        BTreeMap::from([(github.id, updated.updated_at)])
+    );
+    assert!(
+        revisions(&fixture.pool, Uuid::new_v4())
+            .await
+            .expect("another organization")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn offered_leaves_out_what_the_organization_or_the_workspace_switched_off() {
+    let fixture = tenant().await;
+    let github = fixture
+        .create(NewMcpServer {
+            environment: secrets(&[("GITHUB_TOKEN", TOKEN)]),
+            ..stdio("github")
+        })
+        .await;
+    let docs = fixture.create(http("docs")).await;
+    fixture
+        .create(NewMcpServer {
+            enabled: false,
+            ..stdio("disabled")
+        })
+        .await;
+    let elsewhere = workspace(&fixture.pool, fixture.organization).await;
+    for (server, enabled) in [(github.id, true), (docs.id, false)] {
+        sqlx::query(
+            "INSERT INTO workspace_mcp_servers (workspace_id, server_id, organization_id, enabled) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(fixture.workspace)
+        .bind(server)
+        .bind(fixture.organization)
+        .bind(enabled)
+        .execute(&fixture.pool)
+        .await
+        .expect("an override");
+    }
+
+    let here = offered(&fixture.pool, fixture.organization, fixture.workspace)
+        .await
+        .expect("the servers the workspace is offered");
+    let unset = offered(&fixture.pool, fixture.organization, elsewhere)
+        .await
+        .expect("the servers a workspace with no overrides is offered");
+
+    let names = |records: &[McpServerRecord]| -> Vec<String> {
+        records.iter().map(|record| record.name.clone()).collect()
+    };
+    assert_eq!(names(&here), ["github"]);
+    assert_eq!(names(&unset), ["docs", "github"]);
+    assert_eq!(here[0].id, github.id);
+    assert_eq!(
+        here[0].secrets,
+        Secrets::default(),
+        "the secrets are left unopened"
+    );
 }
 
 #[tokio::test]
