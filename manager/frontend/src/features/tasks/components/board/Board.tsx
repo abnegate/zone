@@ -22,6 +22,7 @@ import { CardSensor } from './CardSensor';
 import { Column } from './Column';
 import { destination, keyboardOptions, stageUnder } from './drop';
 import { useCardFocus } from './useCardFocus';
+import { useNow } from './useNow';
 import './Board.css';
 
 export interface BoardProps {
@@ -73,6 +74,7 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
   const unrendered = useMemo(() => document.createElement('div'), []);
   const root = useRef<HTMLElement>(null);
   const release = useCardFocus(root, groups, removed);
+  const now = useNow(active !== null);
   const reducedMotion = useMediaQuery(REDUCED_MOTION);
   const heading = useRef<StageId | null>(null);
   const keyboard = useMemo(() => keyboardOptions(reducedMotion, heading), [reducedMotion]);
@@ -156,6 +158,7 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
                   key={task.id}
                   task={task}
                   projects={projectNames(task, projects)}
+                  now={now}
                   renaming={renaming?.id === task.id ? renaming.draft : null}
                   actions={actions}
                 />
@@ -176,6 +179,7 @@ export function Board({ tasks, projects, renaming, removed, actions }: BoardProp
                 <CardBody
                   task={dragged}
                   projects={projectNames(dragged, projects)}
+                  now={now}
                   title={<span>{dragged.title}</span>}
                 />
               </div>

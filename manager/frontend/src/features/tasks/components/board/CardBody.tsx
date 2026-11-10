@@ -9,6 +9,7 @@ import { Stamp } from './Stamp';
 export interface CardBodyProps {
   task: Task;
   projects: string;
+  now: number;
   title: ReactNode;
 }
 
@@ -21,7 +22,7 @@ const PR_TINTS: Record<PrStatus, StatusTint> = {
   closed: 'destructive',
 };
 
-export function CardBody({ task, projects, title }: CardBodyProps) {
+export function CardBody({ task, projects, now, title }: CardBodyProps) {
   const stamp = task.updated_at ?? task.created_at;
 
   return (
@@ -34,7 +35,7 @@ export function CardBody({ task, projects, title }: CardBodyProps) {
         {task.is_agentic && <Badge variant="accent">Agentic</Badge>}
         {task.pr_status && <Badge variant={PR_TINTS[task.pr_status]}>PR {task.pr_status}</Badge>}
         {task.pr_url && <PullRequestLink url={task.pr_url} />}
-        {stamp && <Stamp value={stamp} />}
+        {stamp && <Stamp value={stamp} now={now} />}
       </div>
     </>
   );

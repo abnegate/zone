@@ -10,6 +10,7 @@ import { CardSensor } from './CardSensor';
 export interface CardContentProps {
   task: Task;
   projects: string;
+  now: number;
   renaming: TitleDraft | null;
   actions: BoardActions;
 }
@@ -17,6 +18,7 @@ export interface CardContentProps {
 export const CardContent = memo(function CardContent({
   task,
   projects,
+  now,
   renaming,
   actions,
 }: CardContentProps) {
@@ -52,7 +54,7 @@ export const CardContent = memo(function CardContent({
 
   return (
     <>
-      <CardBody task={task} projects={projects} title={title} />
+      <CardBody task={task} projects={projects} now={now} title={title} />
       <div className="task-card-menu" onPointerDown={CardSensor.shield}>
         <CardMenu task={task} actions={actions} />
       </div>

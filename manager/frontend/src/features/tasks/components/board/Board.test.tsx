@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock, setSystemTime, spyOn } from 'bun:test';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useMemo, useState } from 'react';
 import { STAGES } from '../../status';
@@ -265,6 +265,86 @@ describe('Board', () => {
       await press(handle, 'Escape');
       await announced('Moving Write the spec cancelled. It stays in Planned.');
       expect(board()).not.toHaveAttribute('data-dragging');
+    });
+
+    describe('relative times', () => {
+      const NOW = new Date('2026-11-10T12:00:00Z');
+      const MINUTE_MS = 60_000;
+      const AGED = TASKS.map((item) => ({ ...item, updated_at: '2026-11-10T11:55:00Z' }));
+      let timers: ReturnType<typeof spyOn>;
+
+      function ticks(): (() => void)[] {
+        return timers.mock.calls
+          .filter((call: unknown[]) => call[1] === MINUTE_MS)
+          .map((call: unknown[]) => call[0] as () => void);
+      }
+
+      function ages(): (string | null)[] {
+        return Array.from(board().querySelectorAll('time'), (time) => time.textContent);
+      }
+
+      beforeEach(() => {
+        setSystemTime(NOW);
+        timers = spyOn(globalThis, 'setInterval');
+      });
+
+      afterEach(() => {
+        timers.mockRestore();
+        setSystemTime();
+      });
+
+      it('refreshes every card from one timer for the whole board', async () => {
+        render(
+          <Board
+            tasks={AGED}
+            projects={PROJECTS}
+            renaming={null}
+            removed={null}
+            actions={actions()}
+          />
+        );
+        expect(ages()).toEqual(AGED.map(() => '5 minutes ago'));
+        expect(ticks()).toHaveLength(1);
+
+        setSystemTime(new Date(NOW.getTime() + 2 * MINUTE_MS));
+        await act(async () => {
+          ticks()[0]();
+        });
+
+        expect(ages()).toEqual(AGED.map(() => '7 minutes ago'));
+        expect(ticks()).toHaveLength(1);
+      });
+
+      it('stops ticking while a card is carried and starts again once it is put down', async () => {
+        const stopped = spyOn(globalThis, 'clearInterval');
+        render(
+          <Board
+            tasks={AGED}
+            projects={PROJECTS}
+            renaming={null}
+            removed={null}
+            actions={actions()}
+          />
+        );
+        const handle = grip('Write the spec');
+        handle.focus();
+        const resting =
+          timers.mock.results[
+            timers.mock.calls.indexOf(
+              timers.mock.calls.find((call: unknown[]) => call[1] === MINUTE_MS)
+            )
+          ].value;
+
+        await press(handle, 'Space');
+        await announced('Picked up Write the spec, in Planned.');
+        expect(stopped).toHaveBeenCalledWith(resting);
+        expect(ticks()).toHaveLength(1);
+
+        await press(handle, 'Escape');
+        await announced('Moving Write the spec cancelled. It stays in Planned.');
+        expect(ticks()).toHaveLength(2);
+        stopped.mockRestore();
+      });
     });
 
     it('moves a card back to Planned as created', async () => {

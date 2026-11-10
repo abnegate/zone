@@ -72,6 +72,7 @@ function renderCard(
       <Card
         task={task}
         projects={PROJECTS}
+        now={NOW.getTime()}
         renaming={renaming ? new TitleDraft(task.title) : null}
         actions={actions}
       />

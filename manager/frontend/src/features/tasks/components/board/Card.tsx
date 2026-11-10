@@ -8,11 +8,12 @@ import './Card.css';
 export interface CardProps {
   task: Task;
   projects: string;
+  now: number;
   renaming: TitleDraft | null;
   actions: BoardActions;
 }
 
-export function Card({ task, projects, renaming, actions }: CardProps) {
+export function Card({ task, projects, now, renaming, actions }: CardProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } = useDraggable({
     id: task.id,
     data: { task },
@@ -37,7 +38,13 @@ export function Card({ task, projects, renaming, actions }: CardProps) {
       >
         <GripIcon />
       </button>
-      <CardContent task={task} projects={projects} renaming={renaming} actions={actions} />
+      <CardContent
+        task={task}
+        projects={projects}
+        now={now}
+        renaming={renaming}
+        actions={actions}
+      />
     </li>
   );
 }
