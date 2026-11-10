@@ -85,6 +85,49 @@ describe('stageSteps', () => {
     expect(moved).toEqual({ x: column('complete').left + 10, y: card.top });
   });
 
+  it('steps on from the column it last asked for while the board has yet to catch up', () => {
+    const heading = { current: null as StageId | null };
+    const quick = stageSteps(STAGE_IDS, heading);
+    const card = rect(column('planned').left + 10, 260, 40, 80);
+    const press = () =>
+      quick(key('ArrowRight'), {
+        active: 'task-1',
+        currentCoordinates: { x: card.left, y: card.top },
+        context: {
+          active: { id: 'task-1', data: { current: { task: task('created') } } },
+          over: null,
+          collisionRect: card,
+          droppableRects: RECTS,
+        } as never,
+      });
+
+    expect(press()).toEqual({ x: column('in_progress').left + 10, y: card.top });
+    expect(press()).toEqual({ x: column('blocked').left + 10, y: card.top });
+    expect(press()).toEqual({ x: column('paused').left + 10, y: card.top });
+    expect(heading.current).toBe('paused');
+  });
+
+  it('keeps its heading at the last column', () => {
+    const heading = { current: 'complete' as StageId | null };
+    const quick = stageSteps(STAGE_IDS, heading);
+    const card = rect(column('complete').left + 10, 260, 40, 80);
+    const press = () =>
+      quick(key('ArrowRight'), {
+        active: 'task-1',
+        currentCoordinates: { x: card.left, y: card.top },
+        context: {
+          active: { id: 'task-1', data: { current: { task: task('complete') } } },
+          over: null,
+          collisionRect: card,
+          droppableRects: RECTS,
+        } as never,
+      });
+
+    expect(press()).toEqual({ x: column('cancelled').left + 10, y: card.top });
+    expect(press()).toBeUndefined();
+    expect(heading.current).toBe('cancelled');
+  });
+
   it('starts a queued card from Planned', () => {
     const { moved, card } = step('ArrowRight', { status: 'queued' });
     expect(moved).toEqual({ x: column('in_progress').left + 10, y: card.top });

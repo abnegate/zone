@@ -14,7 +14,7 @@ import {
 import { useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMediaQuery } from '../../../../shared/hooks';
-import { groupByStage, STAGES, stageOf } from '../../status';
+import { groupByStage, STAGES, type StageId, stageOf } from '../../status';
 import type { BoardActions, Task } from '../../types';
 import { Card } from './Card';
 import { CardBody } from './CardBody';
@@ -75,7 +75,8 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
   const follow = useFollowedCard(root);
   useNeighbourFocus(root, groups);
   const reducedMotion = useMediaQuery(REDUCED_MOTION);
-  const keyboard = useMemo(() => keyboardOptions(reducedMotion), [reducedMotion]);
+  const heading = useRef<StageId | null>(null);
+  const keyboard = useMemo(() => keyboardOptions(reducedMotion, heading), [reducedMotion]);
   const sensors = useSensors(useSensor(CardSensor, POINTER), useSensor(KeyboardSensor, keyboard));
 
   const start = ({ active }: DragStartEvent) => {
@@ -84,6 +85,7 @@ export function Board({ tasks, projects, renaming, actions }: BoardProps) {
     if (!task) return;
     const own = stageOf(task.status);
     announcedOver.current = own.id;
+    heading.current = own.id;
     setAnnouncement(`Picked up ${task.title}, in ${own.label}.`);
   };
 

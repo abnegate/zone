@@ -19,7 +19,14 @@ function centre(rect: ClientRect): number {
   return rect.left + rect.width / 2;
 }
 
-export function stageSteps(stages: readonly StageId[]): KeyboardCoordinateGetter {
+export interface Heading {
+  current: StageId | null;
+}
+
+export function stageSteps(
+  stages: readonly StageId[],
+  heading?: Heading
+): KeyboardCoordinateGetter {
   return (event, { currentCoordinates, context }) => {
     if (HELD_KEYS.has(event.code)) {
       event.preventDefault();
@@ -29,13 +36,14 @@ export function stageSteps(stages: readonly StageId[]): KeyboardCoordinateGetter
     if (!step) return undefined;
     event.preventDefault();
     const task: Task | undefined = context.active?.data.current?.task;
-    const start = context.over?.id ?? (task && stageOf(task.status).id);
+    const start = heading?.current ?? context.over?.id ?? (task && stageOf(task.status).id);
     const index = stages.indexOf(start as StageId);
     if (index === -1) return undefined;
     const target = stages[index + step];
     const rect = target === undefined ? undefined : context.droppableRects.get(target);
     const { collisionRect } = context;
-    if (!rect || !collisionRect) return undefined;
+    if (target === undefined || !rect || !collisionRect) return undefined;
+    if (heading) heading.current = target;
     return {
       x: currentCoordinates.x + centre(rect) - centre(collisionRect),
       y: currentCoordinates.y,
@@ -43,9 +51,9 @@ export function stageSteps(stages: readonly StageId[]): KeyboardCoordinateGetter
   };
 }
 
-export function keyboardOptions(reducedMotion: boolean): KeyboardSensorOptions {
+export function keyboardOptions(reducedMotion: boolean, heading?: Heading): KeyboardSensorOptions {
   return {
-    coordinateGetter: stageSteps(STAGE_IDS),
+    coordinateGetter: stageSteps(STAGE_IDS, heading),
     keyboardCodes: KEYBOARD_CODES,
     scrollBehavior: reducedMotion ? 'auto' : 'smooth',
   };

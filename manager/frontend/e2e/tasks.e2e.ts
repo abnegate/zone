@@ -565,6 +565,29 @@ test.describe('Tasks Page', () => {
       await expect(grip).toBeFocused();
     });
 
+    test('quick arrow presses each carry a card one column further', async ({ context, page }) => {
+      const server = await serveTasks(context, page);
+
+      await pickUp(page, 'Implement login page', 'Planned');
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('ArrowRight');
+      await expect(announcer(page)).toHaveText('Implement login page is over Paused.');
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('ArrowRight');
+      await page.keyboard.press('ArrowRight');
+      await expect(announcer(page)).toHaveText('Implement login page is over Cancelled.');
+      await page.keyboard.press('ArrowLeft');
+      await page.keyboard.press('ArrowLeft');
+      await expect(announcer(page)).toHaveText('Implement login page is over In review.');
+      await pressAndAnnounce(page, 'Space', 'Implement login page moved to In review.');
+
+      await expect.poll(() => moves(server)).toEqual([
+        { method: 'PUT', id: 'task-1', body: { status: 'review' } },
+      ]);
+      await expect(card(column(page, 'In review'), 'Implement login page')).toBeInViewport();
+    });
+
     test('a refused keyboard move keeps focus on the card it puts back', async ({
       context,
       page,
