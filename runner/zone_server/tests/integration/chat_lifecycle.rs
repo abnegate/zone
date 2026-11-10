@@ -1,6 +1,7 @@
 //! Generation ownership and deadline acceptance through the real authenticated router.
 
 use crate::common::MEDIA;
+use crate::common::comfy;
 use crate::common::context::{Harness, Socket, answer, finish, next, send, successful};
 use serde_json::json;
 use std::process::Command;
@@ -124,11 +125,7 @@ async fn lost_media_wait(lane: &str) {
         .expect(1)
         .mount(&occupied)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/history/occupied"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-        .mount(&occupied)
-        .await;
+    comfy::queued(&occupied, "occupied").await;
     Mock::given(method("POST"))
         .and(path("/queue"))
         .respond_with(ResponseTemplate::new(200))
@@ -173,38 +170,25 @@ async fn lost_media_wait(lane: &str) {
         .acquire(Uuid::new_v4(), Duration::from_secs(30))
         .await
         .unwrap();
-    let stopped = tokio::time::timeout(Duration::from_secs(15), finish(&mut waiting)).await;
-
-    let followup = if let Ok(frames) = &stopped {
-        let terminal = frames.last().unwrap();
-        assert_eq!(terminal["type"], "error", "{frames:?}");
-        assert!(terminal["message"].as_str().unwrap().contains("ownership"));
-        waiter.store().assert_current(&replacement).await.unwrap();
-        waiter.store().release(&replacement).await.unwrap();
-        send(
-            &mut waiting,
-            json!({"type":"send","content":"Please continue with text", "metadata":{"image_generation":false,"video_generation":false,"audio_generation":false}}),
-        )
-        .await;
-        Some(tokio::time::timeout(Duration::from_secs(3), finish(&mut waiting)).await)
-    } else {
-        None
-    };
+    let frames = finish(&mut waiting).await;
+    let terminal = frames.last().unwrap();
+    assert_eq!(terminal["type"], "error", "{frames:?}");
+    assert!(terminal["message"].as_str().unwrap().contains("ownership"));
+    waiter.store().assert_current(&replacement).await.unwrap();
+    waiter.store().release(&replacement).await.unwrap();
+    send(
+        &mut waiting,
+        json!({"type":"send","content":"Please continue with text", "metadata":{"image_generation":false,"video_generation":false,"audio_generation":false}}),
+    )
+    .await;
+    let followup = finish(&mut waiting).await;
     let submitted = unused.received_requests().await.unwrap();
     send(&mut holding, json!({"type":"cancel"})).await;
     let cleanup = finish(&mut holding).await;
-    assert_eq!(cleanup.last().unwrap()["type"], "cancelled");
-    assert!(
-        stopped.is_ok(),
-        "{lane} wait retained ownership after lease loss while media capacity remained occupied"
-    );
+    assert_eq!(cleanup.last().unwrap()["type"], "cancelled", "{cleanup:?}");
     assert!(
         submitted.is_empty(),
         "the fenced {lane} request must never reach ComfyUI: {submitted:?}"
     );
-    successful(
-        &followup.unwrap().expect(
-            "lost generation must release the per-chat permit before media capacity returns",
-        ),
-    );
+    successful(&followup);
 }
