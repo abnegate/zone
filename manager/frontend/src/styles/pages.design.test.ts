@@ -626,7 +626,9 @@ describe('settings page layout', () => {
   it('pads the scroller under the source editor footer so a focused field scrolls clear of it', () => {
     const body = rule(css, '.settings-page .page-body:has(.source-details-actions)');
     expect(body).toContain('padding-bottom: 0');
-    expect(body).toContain('scroll-padding-bottom: var(--ui-header-height)');
+    expect(body).toContain(
+      'scroll-padding-bottom: calc(var(--ui-header-height) + var(--ui-space-2))'
+    );
   });
 
   it('keeps feature setup in a settings section without a content card', () => {
