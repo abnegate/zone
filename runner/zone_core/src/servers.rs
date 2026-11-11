@@ -287,7 +287,10 @@ fn blank(server: &McpServer) -> bool {
         .is_some_and(|command| command.trim().is_empty())
 }
 
-fn flag(name: &str, default: bool) -> bool {
+/// The switch `name`, read the way abnegate-agent-cli reads `ZONE_MCP_ENABLED` for the instance
+/// layer, so that every layer agrees on it: trimmed and case-blind, with an unset, empty or
+/// unrecognised value meaning `default`.
+pub fn flag(name: &str, default: bool) -> bool {
     std::env::var(name).map_or(default, |value| parse_flag(&value, default))
 }
 

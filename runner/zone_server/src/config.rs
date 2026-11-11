@@ -15,6 +15,7 @@ use abnegate_agent_cli::{AgentKind, CodexSandbox};
 use abnegate_vcs::pull_request::PullRequestResult;
 use abnegate_vcs::{PullRequestError, PullRequestService};
 use uuid::Uuid;
+use zone_core::servers;
 
 use crate::services::hosts::Hosts;
 use crate::services::login::claude::ROOT_PATH;
@@ -1346,8 +1347,8 @@ impl Config {
             endpoint_hosts: Hosts::from_env(),
             host_mounts: crate::host_mounts::HostMounts::from_env(),
             connect_urls: connect_urls(env::var(CONNECT_URLS).ok())?,
-            mcp_enabled: env_truthy(MCP_ENABLED, true),
-            mcp_commands: env_truthy(MCP_COMMANDS, false),
+            mcp_enabled: servers::flag(MCP_ENABLED, true),
+            mcp_commands: servers::flag(MCP_COMMANDS, false),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1428,6 +1429,58 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::matchers::path;
     use zone_core::variables::Variables;
+
+    const ENVIRONMENT: &[&str] = &[
+        "APP_BASE_URL",
+        "GITHUB_API_URL",
+        "GITHUB_WEB_URL",
+        "CORS_ALLOW_CREDENTIALS",
+        "CORS_ORIGINS",
+        CONNECT_URLS,
+        MCP_ENABLED,
+        MCP_COMMANDS,
+        "DATABASE_URL",
+        "ENCRYPTION_KEY",
+        "GPT4ALL_MODELS_URL",
+        "HOST",
+        "HUGGINGFACE_MODELS_URL",
+        "JWT_ACCESS_LIFETIME",
+        "JWT_REFRESH_LIFETIME",
+        "JWT_SECRET",
+        "LITELLM_HOST",
+        "LITELLM_KEY",
+        "MODEL_SEARCH_PROXY_URL",
+        "MONITORING_ENABLED",
+        "MONITORING_GRAFANA_ADMIN_PASSWORD",
+        "MONITORING_GRAFANA_ADMIN_USER",
+        "MONITORING_GRAFANA_TOKEN",
+        "MONITORING_GRAFANA_URL",
+        "MONITORING_PROMETHEUS_URL",
+        "OLLAMA_HOST",
+        "PORT",
+        "PROMETHEUS_URL",
+        "REDIS_URL",
+        "SEARCH_TIMEOUT_SECONDS",
+        "SEARCH_TIMEOUT_SECS",
+        "SOURCE_RESYNC_ENABLED",
+        "SOURCE_RESYNC_INTERVAL_SECS",
+        "SOURCE_RESYNC_POLL_SECS",
+        "TRAIN_UPLOAD_LIMIT_MB",
+        MODEL_BACKEND,
+        MODEL_BACKEND_EXECUTABLE,
+        AGENT_STATE,
+        AGENT_HOST_LOGIN,
+        CLAUDE_TOKEN_URL,
+        USAGE_TTL,
+        CLAUDE_API_URL,
+        CODEX_API_URL,
+        CODEX_SANDBOX,
+    ];
+    const INSTANCE_SERVERS: &str = "ZONE_MCP_SERVERS";
+    const INSTANCE_CONFIGURATION: &str = "ZONE_MCP_CONFIG";
+    const INSTANCE_AUTO_CONNECT: &str = "ZONE_MCP_AUTO_CONNECT";
+    const INSTANCE_AUTO_MAGENTS: &str = "ZONE_MCP_AUTO_MAGENTS";
+    const INSTANCE_DOCUMENT: &str = r#"{"mcpServers":{"docs":{"url":"http://127.0.0.1:1/mcp"}}}"#;
 
     /// abnegate-agent-cli adds a read-only sandbox, which a turn that withholds codex's tools
     /// already runs in. An operator naming it for granted tools gets an error, not a codex that
@@ -2120,49 +2173,73 @@ mod tests {
         let mut environment = Variables::isolated(&[MCP_COMMANDS]);
 
         assert!(
-            !env_truthy(MCP_COMMANDS, false),
+            !servers::flag(MCP_COMMANDS, false),
             "an unset ZONE_MCP_COMMANDS must keep stdio MCP servers off"
         );
 
-        for value in ["1", "true", "YES", "on"] {
+        for value in ["1", "true", " true ", "YES", "on"] {
             environment.set(MCP_COMMANDS, value);
             assert!(
-                env_truthy(MCP_COMMANDS, false),
+                servers::flag(MCP_COMMANDS, false),
                 "{value} turns ZONE_MCP_COMMANDS on"
             );
         }
 
-        for value in ["0", "off"] {
+        for value in ["0", "off", "", "garbage"] {
             environment.set(MCP_COMMANDS, value);
             assert!(
-                !env_truthy(MCP_COMMANDS, false),
+                !servers::flag(MCP_COMMANDS, false),
                 "{value} keeps ZONE_MCP_COMMANDS off"
             );
         }
     }
 
+    /// The instance layer reads `ZONE_MCP_ENABLED` through abnegate-agent-cli, so the
+    /// organization layer has to read it the same way: one value never leaves one layer on and
+    /// the other off.
     #[test]
-    fn zone_mcp_enabled_is_on_unless_the_operator_turns_it_off() {
-        let mut environment = Variables::isolated(&[MCP_ENABLED]);
+    fn zone_mcp_enabled_reads_the_same_in_both_layers() {
+        let mut environment = Variables::isolated(ENVIRONMENT);
+        environment.clear(&[INSTANCE_CONFIGURATION, INSTANCE_AUTO_MAGENTS]);
+        environment.set(INSTANCE_SERVERS, INSTANCE_DOCUMENT);
+        environment.set(INSTANCE_AUTO_CONNECT, "false");
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
+        environment.set("DATABASE_URL", "postgres://database/zone");
+        environment.set("REDIS_URL", "redis://cache:6379");
+        environment.set("LITELLM_HOST", "http://models:4000");
+        environment.set("LITELLM_KEY", "models-key");
 
-        assert!(
-            env_truthy(MCP_ENABLED, true),
-            "an unset ZONE_MCP_ENABLED must leave MCP servers on"
-        );
+        for (value, enabled) in [
+            (None, true),
+            (Some("1"), true),
+            (Some("true"), true),
+            (Some(" true "), true),
+            (Some("YES"), true),
+            (Some("on"), true),
+            (Some(""), true),
+            (Some("  "), true),
+            (Some("garbage"), true),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some(" false "), false),
+            (Some("Off"), false),
+            (Some("no"), false),
+        ] {
+            match value {
+                Some(value) => environment.set(MCP_ENABLED, value),
+                None => environment.remove(MCP_ENABLED),
+            }
 
-        for value in ["1", "true", "YES", "on"] {
-            environment.set(MCP_ENABLED, value);
-            assert!(
-                env_truthy(MCP_ENABLED, true),
-                "{value} leaves ZONE_MCP_ENABLED on"
-            );
-        }
+            let organization = Config::from_env()
+                .expect("required values are present")
+                .mcp_enabled;
+            let instance = !servers::config().servers.is_empty();
 
-        for value in ["0", "false", "off"] {
-            environment.set(MCP_ENABLED, value);
-            assert!(
-                !env_truthy(MCP_ENABLED, true),
-                "{value} turns ZONE_MCP_ENABLED off"
+            assert_eq!(
+                (organization, instance),
+                (enabled, enabled),
+                "ZONE_MCP_ENABLED={value:?}"
             );
         }
     }
@@ -2343,53 +2420,7 @@ mod tests {
 
     #[test]
     fn environment_matrix_validates_secrets_and_loads_server_settings() {
-        let names = [
-            "APP_BASE_URL",
-            "GITHUB_API_URL",
-            "GITHUB_WEB_URL",
-            "CORS_ALLOW_CREDENTIALS",
-            "CORS_ORIGINS",
-            CONNECT_URLS,
-            MCP_ENABLED,
-            MCP_COMMANDS,
-            "DATABASE_URL",
-            "ENCRYPTION_KEY",
-            "GPT4ALL_MODELS_URL",
-            "HOST",
-            "HUGGINGFACE_MODELS_URL",
-            "JWT_ACCESS_LIFETIME",
-            "JWT_REFRESH_LIFETIME",
-            "JWT_SECRET",
-            "LITELLM_HOST",
-            "LITELLM_KEY",
-            "MODEL_SEARCH_PROXY_URL",
-            "MONITORING_ENABLED",
-            "MONITORING_GRAFANA_ADMIN_PASSWORD",
-            "MONITORING_GRAFANA_ADMIN_USER",
-            "MONITORING_GRAFANA_TOKEN",
-            "MONITORING_GRAFANA_URL",
-            "MONITORING_PROMETHEUS_URL",
-            "OLLAMA_HOST",
-            "PORT",
-            "PROMETHEUS_URL",
-            "REDIS_URL",
-            "SEARCH_TIMEOUT_SECONDS",
-            "SEARCH_TIMEOUT_SECS",
-            "SOURCE_RESYNC_ENABLED",
-            "SOURCE_RESYNC_INTERVAL_SECS",
-            "SOURCE_RESYNC_POLL_SECS",
-            "TRAIN_UPLOAD_LIMIT_MB",
-            MODEL_BACKEND,
-            MODEL_BACKEND_EXECUTABLE,
-            AGENT_STATE,
-            AGENT_HOST_LOGIN,
-            CLAUDE_TOKEN_URL,
-            USAGE_TTL,
-            CLAUDE_API_URL,
-            CODEX_API_URL,
-            CODEX_SANDBOX,
-        ];
-        let mut environment = Variables::isolated(&names);
+        let mut environment = Variables::isolated(ENVIRONMENT);
 
         assert!(matches!(
             Config::from_env(),
