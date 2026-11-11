@@ -73,6 +73,7 @@ pub struct OrganizationHub {
     inner: RwLock<Inner>,
     policy: Policy,
     connecting: watch::Sender<bool>,
+    connects: watch::Sender<usize>,
 }
 
 impl OrganizationHub {
@@ -86,6 +87,7 @@ impl OrganizationHub {
             }),
             policy,
             connecting: watch::Sender::new(false),
+            connects: watch::Sender::new(0),
         }
     }
 
@@ -196,13 +198,15 @@ impl OrganizationHub {
             }
             for definition in definitions {
                 let server = definition.id;
-                if forced != Some(server)
-                    && let Some(slot) = inner.slots.get_mut(&server)
-                {
-                    if slot.definition.revision == definition.revision {
+                if let Some(slot) = inner.slots.get_mut(&server) {
+                    let unchanged = slot.definition.revision == definition.revision;
+                    if forced == Some(server) {
+                        if unchanged && slot.connecting {
+                            continue;
+                        }
+                    } else if unchanged {
                         continue;
-                    }
-                    if !reconnects(&slot.definition, &definition) {
+                    } else if !reconnects(&slot.definition, &definition) {
                         slot.definition = definition;
                         continue;
                     }
@@ -238,6 +242,7 @@ impl OrganizationHub {
 
     fn open(self: &Arc<Self>, opening: Opening, proxy: Proxy) {
         let hub = Arc::downgrade(self);
+        self.connects.send_modify(|connects| *connects += 1);
         tokio::spawn(async move {
             // A connect that panics still has to settle its slot, or `settled` never returns.
             let session = tokio::spawn(Sessions::open(opening.name, opening.target, proxy))
@@ -245,6 +250,7 @@ impl OrganizationHub {
                 .ok();
             if let Some(hub) = hub.upgrade() {
                 hub.settle(opening.server, opening.generation, session);
+                hub.connects.send_modify(|connects| *connects -= 1);
             }
         });
     }
@@ -299,6 +305,12 @@ impl OrganizationHub {
             |server| self.connection(server),
         )
     }
+
+    /// A number that changes exactly when the server a test knows only by `name` is connected
+    /// afresh.
+    pub fn generation(&self, name: &str) -> Option<u64> {
+        self.read().named(name).map(|(_, slot)| slot.generation)
+    }
 }
 
 #[cfg(test)]
@@ -321,8 +333,14 @@ impl OrganizationHub {
         inner.sessions.failure(server, name)
     }
 
-    pub(crate) fn generation(&self, name: &str) -> Option<u64> {
-        self.read().named(name).map(|(_, slot)| slot.generation)
+    pub(crate) fn connects(&self) -> usize {
+        *self.connects.borrow()
+    }
+
+    /// Returns once every connect the hub started has settled, a superseded one included.
+    pub(crate) async fn quiet(&self) {
+        let mut connects = self.connects.subscribe();
+        let _ = connects.wait_for(|connects| *connects == 0).await;
     }
 
     pub(crate) fn names(&self) -> Vec<String> {

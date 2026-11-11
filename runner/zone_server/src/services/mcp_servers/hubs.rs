@@ -240,6 +240,7 @@ mod tests {
     use crate::services::mcp_servers::testing;
 
     const LIMIT: Duration = Duration::from_secs(30);
+    const RECONNECTS: usize = 5;
     const UNREADABLE: &str = "the database is away";
     const REMOTE: &str = "remote";
     const TOKEN: &str = "stub-token-51c2d9";
@@ -547,6 +548,31 @@ mod tests {
         assert!(!Arc::ptr_eq(&earlier, &hub.session("stub").unwrap()));
         assert!(Arc::ptr_eq(&untouched, &hub.session("other").unwrap()));
         assert_eq!(hub.generation("other"), generation);
+    }
+
+    #[tokio::test]
+    async fn reconnects_during_a_connect_of_the_same_revision_start_no_other() {
+        let hubs = hubs();
+        let organization = Uuid::new_v4();
+        let rows = Rows::default();
+        let hub = built(&hubs, organization, &rows).await;
+        let silent = Definition::of(
+            "silent",
+            McpServer::command("sh", ["-c".to_string(), "exec sleep 3600".to_string()]),
+        );
+        rows.store(vec![silent.clone()]);
+        synced(&hubs, organization, &rows).await;
+        let generation = hub.generation("silent");
+
+        for _ in 0..RECONNECTS {
+            hubs.reconnect(organization, silent.id, rows.load())
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(hub.named("silent"), Connection::connecting());
+        assert_eq!(hub.generation("silent"), generation);
+        assert_eq!(hub.connects(), 1);
     }
 
     #[tokio::test]
