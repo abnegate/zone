@@ -36,7 +36,6 @@ const ProjectsPage = lazyRoute(loaders.projects);
 const SettingsPage = lazyRoute(loaders.settings);
 const SetupGate = lazyRoute(loaders.setupGate);
 const SetupPage = lazyRoute(loaders.setup);
-const SourcesPage = lazyRoute(loaders.sources);
 const TasksPage = lazyRoute(loaders.tasks);
 const WikiPage = lazyRoute(loaders.wiki);
 
@@ -174,14 +173,6 @@ function App({
                           element={
                             <ProtectedRoute requiredPermission={PERMISSIONS.TASKS.READ}>
                               <TasksPage />
-                            </ProtectedRoute>
-                          }
-                        />
-                        <Route
-                          path="sources"
-                          element={
-                            <ProtectedRoute requiredPermission={PERMISSIONS.SOURCES.READ}>
-                              <SourcesPage />
                             </ProtectedRoute>
                           }
                         />

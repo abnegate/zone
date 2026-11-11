@@ -532,8 +532,8 @@ describe('projects page layout', () => {
   });
 });
 
-describe('sources page layout', () => {
-  const css = read(join(features, 'sources', 'pages', 'SourcesPage.css'));
+describe('sources section layout', () => {
+  const css = read(join(features, 'sources', 'components', 'SourcesSection.css'));
 
   it('lays sources out as a 56px-row table with a 32px header', () => {
     expect(rule(css, '.sources-table-wrapper')).toContain('border: 1px solid var(--ui-border)');

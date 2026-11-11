@@ -1,9 +1,4 @@
-.sources-page {
-  background: var(--ui-bg-base);
-  color: var(--ui-text-primary);
-}
-
-.sources-body {
+.sources-section {
   display: flex;
   flex-direction: column;
   min-width: 0;

@@ -25,7 +25,12 @@ describe('route preloading', () => {
   });
 
   it('loads the settings shell for a nested section and for each legacy settings path', async () => {
-    for (const path of ['/settings/organization/billing', '/org-settings', '/sessions']) {
+    for (const path of [
+      '/settings/organization/billing',
+      '/org-settings',
+      '/sessions',
+      '/sources',
+    ]) {
       expect(await preloadRoute(path, storageWith(ACCESS_TOKEN_KEY))).toHaveLength(4);
     }
   });
@@ -36,6 +41,6 @@ describe('route preloading', () => {
 
   it('loads each signed in chunk once for later navigation', async () => {
     const settled = (await preloadSignedInRoutes(storageWith(ACCESS_TOKEN_KEY))) as unknown[];
-    expect(settled).toHaveLength(12);
+    expect(settled).toHaveLength(11);
   });
 });
