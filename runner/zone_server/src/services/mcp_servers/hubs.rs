@@ -39,17 +39,7 @@ struct Entry {
 }
 
 impl Hubs {
-    pub fn new(proxy: Proxy, commands: bool) -> Self {
-        Self::with(
-            proxy,
-            Policy {
-                enabled: servers::enabled(),
-                commands,
-            },
-        )
-    }
-
-    fn with(proxy: Proxy, policy: Policy) -> Self {
+    pub fn new(proxy: Proxy, policy: Policy) -> Self {
         Self {
             proxy,
             policy,
@@ -236,7 +226,6 @@ mod tests {
     use abnegate_agent::mcp::McpServer;
     use abnegate_agent::mcp::McpTransport;
     use tokio::sync::Notify;
-    use zone_core::variables::Variables;
 
     use super::*;
     use crate::services::mcp_servers::definition::Definition;
@@ -251,7 +240,6 @@ mod tests {
     use crate::services::mcp_servers::testing;
 
     const LIMIT: Duration = Duration::from_secs(30);
-    const ENABLED: &str = "ZONE_MCP_ENABLED";
     const UNREADABLE: &str = "the database is away";
     const REMOTE: &str = "remote";
     const TOKEN: &str = "stub-token-51c2d9";
@@ -305,7 +293,7 @@ mod tests {
     }
 
     fn hubs() -> Hubs {
-        Hubs::with(Proxy::default(), POLICY)
+        Hubs::new(Proxy::default(), POLICY)
     }
 
     fn unreadable(_: Revisions) -> Ready<Loaded> {
@@ -800,7 +788,7 @@ mod tests {
 
     #[tokio::test]
     async fn commands_off_never_spawns_a_command_server() {
-        let hubs = Hubs::with(
+        let hubs = Hubs::new(
             Proxy::default(),
             Policy {
                 enabled: true,
@@ -830,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_master_switch_off_never_spawns_a_server() {
-        let hubs = Hubs::with(
+        let hubs = Hubs::new(
             Proxy::default(),
             Policy {
                 enabled: false,
@@ -860,24 +848,6 @@ mod tests {
             Registered::default()
         );
         assert!(!marker.exists(), "a server was spawned");
-    }
-
-    #[test]
-    fn the_master_switch_is_read_when_the_hubs_are_made() {
-        let mut variables = Variables::isolated(&[ENABLED]);
-        let on = Hubs::new(Proxy::default(), true).policy();
-        variables.set(ENABLED, "false");
-        let off = Hubs::new(Proxy::default(), true).policy();
-        variables.set(ENABLED, "true");
-
-        assert_eq!(on, POLICY);
-        assert_eq!(
-            off,
-            Policy {
-                enabled: false,
-                commands: true,
-            }
-        );
     }
 
     fn touching(name: &str, marker: &std::path::Path) -> Definition {

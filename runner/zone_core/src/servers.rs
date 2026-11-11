@@ -59,8 +59,6 @@ const MAGENTS_ARGUMENTS: [&str; 1] = ["mcp"];
 
 const PREFIX: &str = "ZONE";
 
-const ENABLED_VARIABLE: &str = "ZONE_MCP_ENABLED";
-
 const AUTO_MAGENTS_VARIABLE: &str = "ZONE_MCP_AUTO_MAGENTS";
 
 const HEADER_VALUE: &str = "header value";
@@ -209,12 +207,6 @@ pub fn mask(server: &mut McpServer) {
     for (index, (_, value)) in url.query_pairs().enumerate() {
         hide(format!("{QUERY_VALUE} {index}"), &value);
     }
-}
-
-/// Whether the master switch leaves MCP on, for the servers [`config`] does
-/// not read.
-pub fn enabled() -> bool {
-    flag(ENABLED_VARIABLE, true)
 }
 
 /// What the model is told about magents' tools, once any is attached.

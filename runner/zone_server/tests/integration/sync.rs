@@ -88,6 +88,7 @@ async fn setup_test_state() -> AppState {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
         mcp_commands: false,
     };
 

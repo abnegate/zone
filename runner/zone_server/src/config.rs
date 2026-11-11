@@ -133,6 +133,8 @@ pub struct Config {
     pub host_mounts: crate::host_mounts::HostMounts,
     /// Origins a phone can type into the Zone app (`ZONE_CONNECT_URL`).
     pub connect_urls: Vec<String>,
+    /// Whether any MCP server is connected (`ZONE_MCP_ENABLED`).
+    pub mcp_enabled: bool,
     /// Whether the API may create stdio MCP servers (`ZONE_MCP_COMMANDS`).
     pub mcp_commands: bool,
 }
@@ -250,6 +252,9 @@ const CONSOLE_ORIGINS: &str = "ZONE_CONSOLE_ORIGINS";
 
 /// Origins a phone should type into the Zone app.
 const CONNECT_URLS: &str = "ZONE_CONNECT_URL";
+
+/// The master switch for MCP servers, the instance's and every organization's.
+const MCP_ENABLED: &str = "ZONE_MCP_ENABLED";
 
 /// Whether the API may create MCP servers that run a host command.
 const MCP_COMMANDS: &str = "ZONE_MCP_COMMANDS";
@@ -1341,6 +1346,7 @@ impl Config {
             endpoint_hosts: Hosts::from_env(),
             host_mounts: crate::host_mounts::HostMounts::from_env(),
             connect_urls: connect_urls(env::var(CONNECT_URLS).ok())?,
+            mcp_enabled: env_truthy(MCP_ENABLED, true),
             mcp_commands: env_truthy(MCP_COMMANDS, false),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
@@ -1391,6 +1397,7 @@ impl std::fmt::Debug for Config {
             .field("host_mounts", &self.host_mounts)
             .field("clones", &self.clones)
             .field("connect_urls", &self.connect_urls)
+            .field("mcp_enabled", &self.mcp_enabled)
             .field("mcp_commands", &self.mcp_commands)
             .finish()
     }
@@ -1486,6 +1493,7 @@ mod tests {
             auto: Default::default(),
             host_mounts: Default::default(),
             connect_urls: Vec::new(),
+            mcp_enabled: true,
             mcp_commands: false,
         }
     }
@@ -2133,6 +2141,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn zone_mcp_enabled_is_on_unless_the_operator_turns_it_off() {
+        let mut environment = Variables::isolated(&[MCP_ENABLED]);
+
+        assert!(
+            env_truthy(MCP_ENABLED, true),
+            "an unset ZONE_MCP_ENABLED must leave MCP servers on"
+        );
+
+        for value in ["1", "true", "YES", "on"] {
+            environment.set(MCP_ENABLED, value);
+            assert!(
+                env_truthy(MCP_ENABLED, true),
+                "{value} leaves ZONE_MCP_ENABLED on"
+            );
+        }
+
+        for value in ["0", "false", "off"] {
+            environment.set(MCP_ENABLED, value);
+            assert!(
+                !env_truthy(MCP_ENABLED, true),
+                "{value} turns ZONE_MCP_ENABLED off"
+            );
+        }
+    }
+
     /// The environment picks the default every organization without an agent
     /// provider of its own falls back to.
     #[test]
@@ -2316,6 +2350,7 @@ mod tests {
             "CORS_ALLOW_CREDENTIALS",
             "CORS_ORIGINS",
             CONNECT_URLS,
+            MCP_ENABLED,
             MCP_COMMANDS,
             "DATABASE_URL",
             "ENCRYPTION_KEY",
@@ -2412,6 +2447,10 @@ mod tests {
         assert_eq!(defaults.train_upload_limit_mb, 4096);
         assert!(defaults.connect_urls.is_empty());
         assert!(
+            defaults.mcp_enabled,
+            "MCP servers stay on until the operator turns them off"
+        );
+        assert!(
             !defaults.mcp_commands,
             "API-created stdio MCP servers stay off until the operator opts in"
         );
@@ -2430,6 +2469,7 @@ mod tests {
             " http://192.168.1.10/, ,http://100.64.1.2 ",
         );
         environment.set("CORS_ALLOW_CREDENTIALS", "true");
+        environment.set(MCP_ENABLED, "off");
         environment.set(MCP_COMMANDS, "true");
         environment.set("APP_BASE_URL", "https://zone.test");
         environment.set("GITHUB_API_URL", "https://github.example.com/api/v3/");
@@ -2470,6 +2510,10 @@ mod tests {
             ["http://192.168.1.10", "http://100.64.1.2"]
         );
         assert!(configured.cors_allow_credentials);
+        assert!(
+            !configured.mcp_enabled,
+            "ZONE_MCP_ENABLED=off connects no MCP server"
+        );
         assert!(
             configured.mcp_commands,
             "ZONE_MCP_COMMANDS=true lets the API create stdio MCP servers"

@@ -25,6 +25,7 @@ use crate::services::chat::pull_request::StatusCache;
 use crate::services::github_app::Provider;
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
+use crate::services::mcp_servers::status::Policy;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
 use crate::train_jobs::TrainRegistry;
@@ -213,7 +214,13 @@ impl AppState {
             }
         });
 
-        let mcp = Hubs::new(zone_routing::proxy(), config.mcp_commands);
+        let mcp = Hubs::new(
+            zone_routing::proxy(),
+            Policy {
+                enabled: config.mcp_enabled,
+                commands: config.mcp_commands,
+            },
+        );
 
         Self {
             inner: Arc::new(AppStateInner {
@@ -511,6 +518,7 @@ pub(crate) fn test_config() -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
         mcp_commands: false,
     }
 }
@@ -688,6 +696,7 @@ mod tests {
             host_mounts: Default::default(),
             clones: std::env::temp_dir().join("zone-clones"),
             connect_urls: Vec::new(),
+            mcp_enabled: true,
             mcp_commands: false,
         }
     }
@@ -888,6 +897,21 @@ mod tests {
 
         assert_eq!(connected, 0, "the recorder exits without answering");
         recording::assert_routed(&recorded);
+    }
+
+    #[tokio::test]
+    async fn the_mcp_policy_is_the_configurations() {
+        for (enabled, commands) in [(true, false), (false, true)] {
+            let config = Config {
+                mcp_enabled: enabled,
+                mcp_commands: commands,
+                ..test_config()
+            };
+
+            let state = AppState::new(config, lazy_pool(), None);
+
+            assert_eq!(state.mcp().policy(), Policy { enabled, commands });
+        }
     }
 
     #[tokio::test]

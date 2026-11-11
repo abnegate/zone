@@ -47,24 +47,26 @@ pub(crate) fn isolated() -> Variables {
 /// A state that took nothing about MCP servers from the machine the test runs on, and attaches
 /// no instance server.
 pub(crate) async fn state(config: Config, pool: PgPool) -> AppState {
-    built(isolated(), config, pool).await
-}
-
-/// [`state`] on an instance whose operator turned MCP off.
-pub(crate) async fn switched_off(config: Config, pool: PgPool) -> AppState {
-    let mut environment = isolated();
-    environment.set(ENABLED, OFF);
-    built(environment, config, pool).await
-}
-
-// The master switch is read when the state is made and the instance's servers on first use, so
-// both are read here, before `environment` gives the lock back to the other tests.
-async fn built(environment: Variables, config: Config, pool: PgPool) -> AppState {
+    let environment = isolated();
     let state = AppState::new(config, pool, None);
+    // The instance's servers are read on first use, so they are read here, before `environment`
+    // gives the lock back to the other tests.
     state.mcp().configured().await;
     drop(environment);
     state.disable_mcp();
     state
+}
+
+/// [`state`] on an instance whose operator turned MCP off.
+pub(crate) async fn switched_off(config: Config, pool: PgPool) -> AppState {
+    state(
+        Config {
+            mcp_enabled: false,
+            ..config
+        },
+        pool,
+    )
+    .await
 }
 
 pub(crate) struct Tenant {
