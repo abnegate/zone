@@ -13,6 +13,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { createElement } from 'react';
+import { fakeTimers } from '../../../../test/timers';
 import { POLL_INTERVAL } from '../constants';
 import { mcpQueryKeys } from '../queryKeys';
 import type { WorkspaceMcpServer } from '../types';
@@ -189,7 +190,7 @@ describe('useWorkspaceMcpServers', () => {
   });
 
   it('polls every interval while a server is connecting and stops once it connects', async () => {
-    vi.useFakeTimers();
+    await fakeTimers();
     workspace
       .mockResolvedValueOnce({ servers: [server({ status: 'connecting', available_tools: [] })] })
       .mockResolvedValue({ servers: [inherited] });

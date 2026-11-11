@@ -13,6 +13,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { createElement } from 'react';
+import { fakeTimers } from '../../../../test/timers';
 import { POLL_INTERVAL } from '../constants';
 import type { McpServer } from '../types';
 
@@ -261,7 +262,7 @@ describe('useMcpServers', () => {
   });
 
   it('polls every interval while a server is connecting and stops once it connects', async () => {
-    vi.useFakeTimers();
+    await fakeTimers();
     list
       .mockResolvedValueOnce({
         commands: false,
