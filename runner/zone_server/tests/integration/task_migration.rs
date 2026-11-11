@@ -903,19 +903,84 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
     assert!(!driven, "no project has had a pass under the new order");
 }
 
-/// `ALTER TABLE` holds its table's exclusive lock until the migration's
-/// transaction ends, so a migration altering two tables queues for the second
-/// while it holds the first. The server takes the same pairs in both orders:
-/// `park` locks `task_automation` and then `tasks` where `resume_paused_tasks`
-/// locks `tasks` first, and an insert into `task_automation` reaches
-/// `projects` through its foreign key where `finalize` writes `projects`
-/// first. Whichever order the migration picks, one of them deadlocks with the
-/// boot of a rolling deploy, so each table gets a migration, and a
-/// transaction, of its own. 0003 predates this and has run everywhere.
+/// The tables `sql` holds a lock on until its transaction ends, upper-cased,
+/// read from each kind of statement a migration changes a live table with.
+fn locked_tables(sql: &str) -> BTreeSet<String> {
+    const QUALIFIERS: [&str; 6] = ["TABLE", "IF", "NOT", "EXISTS", "ONLY", "CONCURRENTLY"];
+    const SCHEMA: &str = "PUBLIC.";
+    let code = sql
+        .lines()
+        .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_uppercase();
+    let mut tables = BTreeSet::new();
+    for statement in code.split(';') {
+        let words: Vec<&str> = statement.split_whitespace().collect();
+        for at in 0..words.len() {
+            let named = match &words[at..] {
+                ["ALTER" | "DROP" | "LOCK", "TABLE", named @ ..] => named,
+                ["CREATE", "INDEX", index @ ..] | ["CREATE", "UNIQUE", "INDEX", index @ ..] => {
+                    index
+                        .iter()
+                        .position(|word| *word == "ON")
+                        .map_or(&[][..], |on| &index[on + 1..])
+                }
+                ["LOCK" | "UPDATE", named @ ..] if at == 0 => named,
+                _ => continue,
+            };
+            for word in named.iter().skip_while(|word| QUALIFIERS.contains(*word)) {
+                let name = word.split('(').next().unwrap_or(word);
+                let name = name.trim_end_matches(',').trim_matches('"');
+                tables.insert(name.strip_prefix(SCHEMA).unwrap_or(name).to_string());
+                if !word.ends_with(',') {
+                    break;
+                }
+            }
+        }
+    }
+    tables
+}
+
+#[test]
+fn every_kind_of_statement_that_locks_a_table_counts_it() {
+    const TASKS: &str = "TASKS";
+    const PROJECTS: &str = "PROJECTS";
+    const ONE_TABLE: &str = "SET LOCAL lock_timeout = '5s';\n\
+        ALTER TABLE tasks ADD COLUMN reopened_at timestamp; -- ALTER TABLE projects\n\
+        UPDATE tasks SET shipped_at = completed_at WHERE status = 'complete';\n\
+        INSERT INTO tasks (id) SELECT id FROM tasks ON CONFLICT (id) DO UPDATE SET title = '';\n\
+        CREATE INDEX tasks_shipped ON tasks (shipped_at);";
+    const SECOND_TABLE: [&str; 9] = [
+        "ALTER TABLE IF EXISTS ONLY public.projects ADD COLUMN driven boolean",
+        "DO $$ BEGIN ALTER TABLE projects ADD COLUMN driven boolean; END $$",
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS projects_driven\n    ON public.projects USING btree (driven)",
+        "CREATE INDEX projects_driven ON projects(driven)",
+        "DROP TABLE IF EXISTS projects CASCADE",
+        "DROP TABLE tasks, projects",
+        "LOCK TABLE projects IN SHARE MODE",
+        "LOCK ONLY \"projects\"",
+        "update projects set driven = false",
+    ];
+
+    assert_eq!(
+        locked_tables(ONE_TABLE),
+        BTreeSet::from([TASKS.to_string()])
+    );
+    for statement in SECOND_TABLE {
+        assert_eq!(
+            locked_tables(&format!("{ONE_TABLE}\n{statement};")),
+            BTreeSet::from([PROJECTS.to_string(), TASKS.to_string()]),
+            "`{statement}` locks a second table"
+        );
+    }
+}
+
+/// A migration that locks two tables can deadlock with the server, which
+/// takes the same pairs in both orders. 0003 predates this and has run everywhere.
 #[test]
 fn each_migration_after_github_connections_alters_one_table() {
     const FIRST: i64 = 4;
-    const QUALIFIERS: [&str; 3] = ["IF", "EXISTS", "ONLY"];
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
         let path = entry.expect("migration entry is readable").path();
@@ -937,27 +1002,11 @@ fn each_migration_after_github_connections_alters_one_table() {
             continue;
         }
         let sql = std::fs::read_to_string(&path).expect("migration is readable");
-        let words: Vec<String> = sql
-            .lines()
-            .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
-            .flat_map(str::split_whitespace)
-            .map(str::to_ascii_uppercase)
-            .collect();
-        let altered: BTreeSet<&str> = words
-            .windows(2)
-            .enumerate()
-            .filter(|(_, pair)| pair[0] == "ALTER" && pair[1] == "TABLE")
-            .filter_map(|(at, _)| {
-                words[at + 2..]
-                    .iter()
-                    .find(|word| !QUALIFIERS.contains(&word.as_str()))
-            })
-            .map(|table| table.trim_start_matches("PUBLIC.").trim_end_matches(';'))
-            .collect();
+        let locked = locked_tables(&sql);
         assert!(
-            altered.len() <= 1,
-            "{name} alters {altered:?} in one transaction, so its boot can deadlock with a \
-             statement that locks the same tables in the other order; alter each in a migration \
+            locked.len() <= 1,
+            "{name} locks {locked:?} in one transaction, so its boot can deadlock with a \
+             statement that locks the same tables in the other order; change each in a migration \
              of its own"
         );
     }
