@@ -124,8 +124,11 @@ mod tests {
     use crate::db::mcp_servers::Secrets;
     use crate::services::mcp_servers::status::Connection;
     use crate::services::mcp_servers::status::UNCONNECTED;
+    use crate::services::mcp_servers::testing;
     use crate::services::mcp_servers::testing::Tenant;
     use crate::services::mcp_servers::testing::stub;
+    use crate::state::test_config;
+    use crate::state::unreachable_pool;
 
     fn record(transport: Transport) -> McpServerRecord {
         McpServerRecord {
@@ -388,7 +391,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreadable_database_builds_no_hub() {
-        let state = AppState::for_tests();
+        let state = testing::state(test_config(), unreachable_pool()).await;
         let organization = Uuid::new_v4();
 
         let turn = super::organization(&state, organization).await;

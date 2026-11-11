@@ -433,6 +433,9 @@ impl AppState {
 const LAZY_DATABASE: &str = "postgres://localhost/test";
 
 #[cfg(test)]
+const UNREACHABLE_DATABASE: &str = "postgres://127.0.0.1:1/unreachable";
+
+#[cfg(test)]
 const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// A pool that dials nothing until a test queries it, and gives up on a server
@@ -440,9 +443,21 @@ const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
 /// connection until the acquire timeout, which is thirty seconds by default.
 #[cfg(test)]
 pub(crate) fn lazy_pool() -> PgPool {
+    lazy(LAZY_DATABASE)
+}
+
+/// A [`lazy_pool`] for a test that has to fail every query: nothing listens
+/// on its port, whatever database the machine or its `PG*` variables offer.
+#[cfg(test)]
+pub(crate) fn unreachable_pool() -> PgPool {
+    lazy(UNREACHABLE_DATABASE)
+}
+
+#[cfg(test)]
+fn lazy(database: &str) -> PgPool {
     sqlx::postgres::PgPoolOptions::new()
         .acquire_timeout(ACQUIRE_TIMEOUT)
-        .connect_lazy(LAZY_DATABASE)
+        .connect_lazy(database)
         .expect("a lazy pool needs no server")
 }
 
@@ -534,7 +549,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_test_pool_gives_up_quickly_on_a_server_that_is_not_there() {
-        for pool in [lazy_pool(), AppState::for_tests().db().clone()] {
+        for pool in [
+            lazy_pool(),
+            unreachable_pool(),
+            AppState::for_tests().db().clone(),
+        ] {
             assert_eq!(
                 pool.options().get_acquire_timeout(),
                 Duration::from_millis(250)
