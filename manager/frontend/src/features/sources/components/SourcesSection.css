@@ -223,7 +223,7 @@
   border-bottom: 1px solid var(--ui-border);
 }
 
-.source-details-header h2 {
+.source-details-header h3 {
   margin: 0;
   min-width: 0;
   overflow: hidden;

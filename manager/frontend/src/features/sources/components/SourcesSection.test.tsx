@@ -985,6 +985,20 @@ describe('SourcesSection', () => {
       });
     });
 
+    it('titles the editor one level below the section heading', async () => {
+      renderSection(`${SECTION_PATH}?source=src-1`);
+
+      const editor = await waitFor(() => {
+        const section = document.querySelector('.source-details');
+        expect(section).not.toBeNull();
+        return section as HTMLElement;
+      });
+      expect(
+        within(editor).getByRole('heading', { level: 3, name: 'GitHub Repository' })
+      ).toBeInTheDocument();
+      expect(within(editor).queryByRole('heading', { level: 2 })).toBeNull();
+    });
+
     it('shows the table and Add source when the source id is unknown', async () => {
       renderSection(`${SECTION_PATH}?source=missing`);
 

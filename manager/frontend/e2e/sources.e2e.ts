@@ -794,7 +794,7 @@ test.describe('Sources Section', () => {
 
       await expect(page).toHaveURL(`${SOURCES_PATH}?source=src-1`);
       await expect(
-        page.locator('.source-details').getByRole('heading', { name: 'acme/frontend' })
+        page.locator('.source-details').getByRole('heading', { level: 3, name: 'acme/frontend' })
       ).toBeVisible();
     });
 

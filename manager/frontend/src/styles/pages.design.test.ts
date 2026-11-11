@@ -553,6 +553,7 @@ describe('sources section layout', () => {
       'padding: var(--ui-panel-padding) var(--ui-gutter)'
     );
     expect(rule(css, '.source-details-actions')).toContain('height: var(--ui-header-height)');
+    expect(rule(css, '.source-details-header h3')).toContain('font-size: var(--ui-heading-size)');
   });
 
   it('sticks the editor footer to the settings scroller instead of scrolling a body of its own', () => {
