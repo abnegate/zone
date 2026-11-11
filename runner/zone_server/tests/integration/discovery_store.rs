@@ -21,7 +21,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::db::knowledge::discovery::{
-    self, CATEGORY, Discovery, Kind, MAX_LISTED, Outcome, Provenance, Source,
+    self, ALLOWANCE, CATEGORY, Discovery, Kind, MAX_LISTED, Outcome, Provenance, Source,
 };
 use zone_server::db::knowledge::{
     self, DocumentUpdate, KnowledgeUpsertOutcome, LearnedCategory, LearnedFact, LearningProvenance,
@@ -712,15 +712,17 @@ async fn a_flood_from_one_run_leaves_room_for_what_other_sources_recorded() {
         .map(|row| row.title)
         .collect();
     assert_eq!(
-        listed[..5],
+        listed[..7],
         [
             "Flood 39",
+            "Flood 38",
+            "Flood 37",
             "Lint command",
             "Migration names",
-            "Flood 38",
-            "Flood 37"
+            "Flood 36",
+            "Flood 35"
         ],
-        "every source shows its most recent entry before any source shows a second"
+        "a source leads with its allowance, and the rest waits behind every other source"
     );
 
     let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
@@ -747,6 +749,69 @@ async fn a_flood_from_one_run_leaves_room_for_what_other_sources_recorded() {
         prompt.ends_with(&format!(
             "\n\n{} older entries are recorded here but not shown.\n",
             FLOOD - flooded
+        )),
+        "{}",
+        &prompt[prompt.len() - 120..]
+    );
+
+    fixture.clean().await;
+}
+
+/// A workspace gathers more sources than a block has lines, most of them a
+/// chat that recorded one thing. What a run then records is the most recent
+/// there is, and a finding split across subjects is several entries: an
+/// order that gave every source one line before any had a second would leave
+/// all but the last behind every older source's single entry, never read.
+#[tokio::test]
+async fn a_run_s_recent_entries_lead_however_many_older_sources_recorded_one() {
+    let fixture = Fixture::new().await;
+    for index in 0..MAX_LISTED {
+        let mut earlier = fixture.discovery(&format!("Earlier {index:03}"), "Stated.");
+        earlier.provenance.source = Source::Chat(Uuid::new_v4());
+        discovery::record(&fixture.pool, &earlier)
+            .await
+            .expect("recording a discovery");
+    }
+    let today: Vec<String> = (0..ALLOWANCE)
+        .map(|index| format!("Today {index}"))
+        .collect();
+    for subject in &today {
+        fixture.record(subject, "Stated.").await;
+    }
+
+    let listing = discovery::listing(&fixture.pool, fixture.workspace)
+        .await
+        .expect("listing discoveries");
+    assert_eq!(listing.recorded, MAX_LISTED + ALLOWANCE);
+    let listed: Vec<&str> = listing.rows.iter().map(|row| row.title.as_str()).collect();
+    let mut leading: Vec<String> = today.iter().rev().cloned().collect();
+    leading.push(format!("Earlier {:03}", MAX_LISTED - 1));
+    assert_eq!(
+        listed[..=ALLOWANCE],
+        leading,
+        "a source's allowance comes by recency alone, ahead of anything older"
+    );
+
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
+        .await
+        .expect("rendering the learned block");
+    for subject in &today {
+        assert!(
+            prompt.contains(&format!(
+                "\n- {subject}: Stated. (lesson, recorded during a task run on 2026-11-11)\n"
+            )),
+            "{subject} is missing from {prompt}"
+        );
+    }
+    let earlier = prompt.matches("\n- Earlier ").count();
+    assert_eq!(
+        earlier, 79,
+        "fewer than the sources there are, so the block cannot show one from each"
+    );
+    assert!(
+        prompt.ends_with(&format!(
+            "\n\n{} older entries are recorded here but not shown.\n",
+            MAX_LISTED - earlier
         )),
         "{}",
         &prompt[prompt.len() - 120..]
