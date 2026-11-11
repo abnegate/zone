@@ -5,10 +5,10 @@
 //! its agreed answer is written to the knowledge store as a standing instruction.
 //!
 //! A wrongly promoted instruction silently steers every later answer in the workspace,
-//! so the bars are deliberately high: the question must recur across several separate
-//! chats, the cluster must stay tight around its first member, and the answers given
-//! must agree with each other. Every promotion records its provenance and can be
-//! retired with [`crate::db::knowledge::retire_standing_instruction`].
+//! so no single thread can promote one: the question must recur in more than one chat,
+//! the cluster must stay tight around its first member, and the answers given must
+//! agree with each other. Every promotion records its provenance and can be retired
+//! with [`crate::db::knowledge::retire_standing_instruction`].
 //!
 //! A cluster that clears every bar is still screened against the rulebook the
 //! memory tools share, [`crate::agent::memory::rules`], so a credential, a
@@ -27,8 +27,8 @@ use crate::db::{DbResult, knowledge};
 use crate::state::AppState;
 
 pub const PROMOTION_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
-const MINIMUM_OCCURRENCES: usize = 4;
-const MINIMUM_DISTINCT_CHATS: usize = 3;
+const MINIMUM_OCCURRENCES: usize = 3;
+const MINIMUM_DISTINCT_CHATS: usize = 2;
 const MINIMUM_QUESTION_SIMILARITY: f32 = 0.88;
 const ANSWER_SIMILARITY: f32 = 0.85;
 const MINIMUM_ANSWER_AGREEMENT: f32 = 0.6;
@@ -53,7 +53,8 @@ pub struct PromotionPolicy {
     pub minimum_question_similarity: f32,
     /// Cosine similarity at which two answers count as saying the same thing.
     pub answer_similarity: f32,
-    /// Fraction of the cluster's answers that must agree with the one being promoted.
+    /// Fraction of the cluster's other answers that must agree with the one being
+    /// promoted. High enough that the minimum number of answers must be unanimous.
     pub minimum_answer_agreement: f32,
     pub minimum_question_characters: usize,
     pub minimum_answer_characters: usize,
@@ -390,7 +391,7 @@ pub struct Screening {
 ///
 /// Only the half a server can check is enforced here, because a worker has no
 /// prompt to carry the rest. What keeps a one-off disclosure out is upstream:
-/// an answer reaches this point only after recurring across several chats with
+/// an answer reaches this point only after recurring in more than one chat with
 /// its wording agreed.
 pub fn screen(candidates: Vec<PromotionCandidate>) -> Screening {
     let mut screening = Screening::default();
@@ -719,6 +720,20 @@ mod tests {
         ]
     }
 
+    const DISSENTING_ANSWER: &str =
+        "Ask the platform team to run them for you in the shared environment.";
+
+    fn with_one_dissenter(occurrences: usize) -> Vec<Exchange> {
+        let mut exchanges = recurring_question();
+        exchanges.truncate(occurrences);
+        let dissenter = exchanges
+            .last_mut()
+            .expect("at least one exchange to dissent");
+        dissenter.answer = DISSENTING_ANSWER.to_string();
+        dissenter.answer_embedding = Some(CONTRADICTING_ANSWER.to_vec());
+        exchanges
+    }
+
     fn answered(answer: &str) -> Vec<Exchange> {
         recurring_question()
             .into_iter()
@@ -762,14 +777,34 @@ mod tests {
     #[test]
     fn cluster_below_occurrence_threshold_is_not_promoted() {
         let mut exchanges = recurring_question();
-        exchanges.truncate(3);
+        exchanges.truncate(2);
 
         let policy = PromotionPolicy::default();
-        assert_eq!(policy.minimum_occurrences, 4);
         assert!(
             promotion_candidates(&exchanges, &policy).is_empty(),
-            "three occurrences must stay below the four-occurrence bar"
+            "two occurrences must stay below the three-occurrence bar"
         );
+        assert_eq!(policy.minimum_occurrences, 3);
+    }
+
+    #[test]
+    fn three_occurrences_across_two_chats_are_promoted() {
+        let mut exchanges = recurring_question();
+        exchanges.truncate(3);
+        exchanges[2].chat_id = exchanges[1].chat_id;
+
+        let candidates = promotion_candidates(&exchanges, &PromotionPolicy::default());
+
+        assert_eq!(
+            candidates.len(),
+            1,
+            "a question asked three times in two chats should promote"
+        );
+        let candidate = &candidates[0];
+        assert_eq!(candidate.answer, RUN_TESTS_ANSWER);
+        assert_eq!(candidate.occurrences, 3);
+        assert_eq!(candidate.distinct_chats, 2);
+        assert!((candidate.agreement - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -789,16 +824,15 @@ mod tests {
     fn repetition_inside_one_chat_is_not_promoted() {
         let exchanges: Vec<Exchange> = recurring_question()
             .into_iter()
-            .enumerate()
-            .map(|(index, mut exchange)| {
-                exchange.chat_id = Uuid::from_u128(if index == 0 { 101 } else { 102 });
+            .map(|mut exchange| {
+                exchange.chat_id = Uuid::from_u128(101);
                 exchange
             })
             .collect();
 
         assert!(
             promotion_candidates(&exchanges, &PromotionPolicy::default()).is_empty(),
-            "a question repeated within two chats must not clear the three-chat bar"
+            "a question repeated within one chat must not clear the two-chat bar"
         );
     }
 
@@ -921,7 +955,7 @@ mod tests {
             105,
             "How do I run the tests again?",
             TESTS_QUESTION,
-            "Ask the platform team to run them for you in the shared environment.",
+            DISSENTING_ANSWER,
             CONTRADICTING_ANSWER,
         ));
 
@@ -932,6 +966,42 @@ mod tests {
             "the answer the workspace agrees on must win over a lone outlier"
         );
         assert!(candidates[0].agreement >= 0.6);
+    }
+
+    #[test]
+    fn three_answers_with_one_dissenter_are_not_promoted() {
+        let policy = PromotionPolicy::default();
+        let exchanges = with_one_dissenter(3);
+
+        assert!(
+            promotion_candidates(&exchanges, &policy).is_empty(),
+            "at the minimum count the answers must be unanimous"
+        );
+
+        let unbarred = PromotionPolicy {
+            minimum_answer_agreement: 0.5,
+            ..policy
+        };
+        let candidates = promotion_candidates(&exchanges, &unbarred);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "occurrences and chats pass, so answer agreement is what refused it"
+        );
+        assert!((candidates[0].agreement - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn four_answers_with_one_dissenter_are_promoted() {
+        let candidates = promotion_candidates(&with_one_dissenter(4), &PromotionPolicy::default());
+
+        assert_eq!(
+            candidates.len(),
+            1,
+            "two of the other three agreeing clears the 0.6 bar"
+        );
+        assert_eq!(candidates[0].answer, RUN_TESTS_ANSWER);
+        assert!((candidates[0].agreement - 2.0 / 3.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1111,9 +1181,19 @@ mod tests {
     #[test]
     fn default_policy_keeps_a_high_bar() {
         let policy = PromotionPolicy::default();
-        assert!(policy.minimum_occurrences >= 4);
-        assert!(policy.minimum_distinct_chats >= 3);
-        assert!(policy.minimum_question_similarity >= 0.85);
-        assert!(policy.minimum_answer_agreement > 0.5);
+        assert_eq!(policy.minimum_occurrences, 3);
+        assert_eq!(policy.minimum_distinct_chats, 2);
+        assert!(
+            (policy.minimum_question_similarity - 0.88).abs() < 1e-6,
+            "kept: it decides which questions are the same one, and lower merges different ones"
+        );
+        assert!(
+            (policy.answer_similarity - 0.85).abs() < 1e-6,
+            "kept: it decides which answers say the same thing, and lower counts dissent as agreement"
+        );
+        assert!(
+            (policy.minimum_answer_agreement - 0.6).abs() < 1e-6,
+            "kept: three answers agree at 0, 0.5 or 1, so 0.6 holds the minimum to unanimity"
+        );
     }
 }
