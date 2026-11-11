@@ -1,9 +1,9 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as after } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import type { Locator, Page } from '@playwright/test';
 import {
   api,
@@ -50,17 +50,11 @@ const CONNECTED = 'Connected';
 const OFF = /=(0|false|no|off)$/i;
 const PORT_LINE = /^PORT=(\d+)$/;
 const STUB_DEADLINE = 30_000;
-const STUB = join(
-  __dirname,
-  '..',
-  '..',
-  '..',
-  '..',
-  'runner',
-  'zone_server',
-  'tests',
-  'fixtures',
-  'stub_mcp_http_server.py',
+const STUB = fileURLToPath(
+  new URL(
+    '../../../../runner/zone_server/tests/fixtures/stub_mcp_http_server.py',
+    import.meta.url,
+  ),
 );
 
 // Which agent magents should start, and where: a headless claude on a host
