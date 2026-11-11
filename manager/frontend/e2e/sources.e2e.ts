@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 
 const generateMockSource = (
   id: string,
@@ -50,16 +50,18 @@ const sourcesListPattern = /\/api\/workspaces\/[^/]+\/sources\/?$/;
 const sourceDetailPattern = /\/api\/workspaces\/[^/]+\/sources\/src-1$/;
 const sourceVerifyPattern = /\/api\/workspaces\/[^/]+\/sources\/src-1\/verify$/;
 
+const SHORT_VIEWPORT = { width: 1280, height: 600 };
+
 const isSourcesListRequest = (requestUrl: string) =>
   sourcesListPattern.test(new URL(requestUrl).pathname);
 
 const addSourceButton = (page: Page) =>
-  page.locator('.page-bar').getByRole('button', { name: 'Add source' });
+  page.locator('.sources-section .section-row-actions').getByRole('button', { name: 'Add source' });
 
 const openAccessTokenFields = (page: Page) =>
   page.getByRole('button', { name: 'Use an access token instead' }).click();
 
-test.describe('Sources Page', () => {
+test.describe('Sources Section', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
 
@@ -135,15 +137,21 @@ test.describe('Sources Page', () => {
 
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
-    await page.click('a[href="/sources"]');
-    await expect(page).toHaveURL('/sources');
-    await expect(page.locator('.sources-page')).toBeVisible({ timeout: 10000 });
+    await page.click('a[href="/settings"]');
+    await page
+      .getByRole('navigation', { name: 'Settings' })
+      .getByRole('link', { name: 'Sources', exact: true })
+      .click();
+    await expect(page).toHaveURL(SOURCES_PATH);
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
   });
 
-  test.describe('Page Header', () => {
-    test('displays page title and subtitle', async ({ page }) => {
+  test.describe('Section Header', () => {
+    test('displays section title and description', async ({ page }) => {
       await expect(
-        page.getByRole('heading', { name: 'Sources', exact: true })
+        page
+          .locator('.sources-section .section-row')
+          .getByRole('heading', { level: 2, name: 'Sources', exact: true })
       ).toBeVisible();
       await expect(
         page.getByText('Connect repositories, calendars, email, and other data sources')
@@ -166,7 +174,7 @@ test.describe('Sources Page', () => {
         )
       ).toBeVisible();
       await expect(
-        page.locator('.sources-empty').getByRole('button', { name: 'Add source' })
+        page.locator('.sources-section .ui-empty').getByRole('button', { name: 'Add source' })
       ).toBeVisible();
     });
   });
@@ -190,7 +198,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(page.locator('.source-card')).toHaveCount(3);
     });
@@ -213,7 +220,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       const row = page.locator('.source-card', { hasText: 'acme/frontend' });
       await expect(row.locator('.source-name')).toHaveText('acme/frontend');
@@ -238,7 +244,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(
         page.locator('.source-card', { hasText: 'acme/frontend' }).locator('.source-status')
@@ -263,7 +268,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(
         page.locator('.source-card', { hasText: 'acme/backend' }).locator('.source-status')
@@ -288,7 +292,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(
         page.locator('.source-card', { hasText: 'Work Calendar' }).locator('.source-status')
@@ -314,7 +317,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       const sourceUrl = page.locator('a.source-url').first();
       await expect(sourceUrl).toHaveAttribute('href', 'https://github.com/acme/frontend');
@@ -542,7 +544,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
       await expect(page.locator('.source-card')).toHaveCount(3);
     });
 
@@ -645,6 +646,87 @@ test.describe('Sources Page', () => {
     });
   });
 
+  test.describe('Source Editor', () => {
+    test.beforeEach(async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+    });
+
+    test('keeps Save in view when a tall editor first opens, before any scroll', async ({
+      page,
+    }) => {
+      await routeApi(page, sourceDetailPattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ source: mockSources[0] }),
+          });
+        } else {
+          route.continue();
+        }
+      });
+      await page.setViewportSize(SHORT_VIEWPORT);
+
+      await page.goto(`${SOURCES_PATH}?source=src-1`);
+
+      const editor = page.locator('.source-details');
+      const save = editor.getByRole('button', { name: 'Save' });
+      await expect(save).toBeVisible();
+      expect(await page.locator('.page-body').evaluate((body) => body.scrollTop)).toBe(0);
+      const editorBox = await editor.boundingBox();
+      const footerBox = await editor.locator('.source-details-actions').boundingBox();
+      const saveBox = await save.boundingBox();
+      expect(editorBox).not.toBeNull();
+      expect(footerBox).not.toBeNull();
+      expect(saveBox).not.toBeNull();
+      expect(editorBox!.y + editorBox!.height).toBeGreaterThan(SHORT_VIEWPORT.height);
+      expect(saveBox!.y + saveBox!.height).toBeLessThanOrEqual(SHORT_VIEWPORT.height);
+      expect(footerBox!.y + footerBox!.height).toBeCloseTo(SHORT_VIEWPORT.height, 0);
+    });
+
+    test('scrolls a focused field clear of the sticky footer', async ({ page }) => {
+      await routeApi(page, sourceDetailPattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ source: mockSources[0] }),
+          });
+        } else {
+          route.continue();
+        }
+      });
+      await page.setViewportSize(SHORT_VIEWPORT);
+
+      await page.goto(`${SOURCES_PATH}?source=src-1`);
+
+      const editor = page.locator('.source-details');
+      const branch = editor.getByLabel('Branch');
+      const token = editor.getByLabel('Access Token');
+      const footer = editor.locator('.source-details-actions');
+      await expect(token).toBeAttached();
+      await page.locator('.page-body').evaluate((body) => {
+        const field = body.querySelector('#credentials')!.getBoundingClientRect();
+        const bar = body.querySelector('.source-details-actions')!.getBoundingClientRect();
+        body.scrollTop += field.top - bar.top - (bar.height - field.height) / 2;
+      });
+      const hidden = await token.boundingBox();
+      const bar = await footer.boundingBox();
+      expect(hidden!.y).toBeGreaterThanOrEqual(bar!.y);
+      expect(hidden!.y + hidden!.height).toBeLessThanOrEqual(bar!.y + bar!.height);
+      await branch.focus();
+
+      await page.keyboard.press('Tab');
+
+      await expect(token).toBeFocused();
+      const tokenBox = await token.boundingBox();
+      const footerBox = await footer.boundingBox();
+      expect(tokenBox).not.toBeNull();
+      expect(footerBox).not.toBeNull();
+      expect(tokenBox!.y + tokenBox!.height).toBeLessThanOrEqual(footerBox!.y);
+    });
+  });
+
   test.describe('Error Handling', () => {
     test('shows error when loading sources fails', async ({ page }) => {
       await page.unroute(sourcesRoutePattern);
@@ -661,7 +743,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(page.getByText('Server error')).toBeVisible();
     });
@@ -688,11 +769,52 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(page.locator('.skeleton-card').first()).toBeVisible();
       finishLoading();
       await expect(page.locator('.source-card')).toHaveCount(3);
+    });
+  });
+
+  test.describe('Legacy Route', () => {
+    test('redirects /sources with a source to the open editor in workspace settings', async ({
+      page,
+    }) => {
+      await routeApi(page, sourceDetailPattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ source: mockSources[0] }),
+          });
+        } else {
+          route.continue();
+        }
+      });
+
+      await page.goto('/sources?source=src-1');
+
+      await expect(page).toHaveURL(`${SOURCES_PATH}?source=src-1`);
+      await expect(
+        page.locator('.source-details').getByRole('heading', { level: 3, name: 'acme/frontend' })
+      ).toBeVisible();
+    });
+
+    test('keeps the hash when redirecting /sources', async ({ page }) => {
+      await page.goto('/sources#details');
+
+      await expect(page).toHaveURL(`${SOURCES_PATH}#details`);
+      await expect(page.locator('.sources-section')).toBeVisible();
+    });
+
+    test('replaces the /sources entry in history', async ({ page }) => {
+      await page.goto('/chats');
+      await page.goto('/sources');
+      await expect(page).toHaveURL(SOURCES_PATH);
+
+      await page.goBack();
+
+      await expect(page).toHaveURL('/chats');
     });
   });
 });

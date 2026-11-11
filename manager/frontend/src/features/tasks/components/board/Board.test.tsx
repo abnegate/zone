@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock, setSystemTime, spyOn } from 'bun:test';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useMemo, useState } from 'react';
 import { layOutBoard, pressKey } from '../../../../test/board';
 import { STAGES } from '../../status';
@@ -158,14 +158,129 @@ describe('Board', () => {
     expect(within(column('Cancelled')).getByText('Stop the old table')).toBeInTheDocument();
   });
 
-  it('names each card its projects, with fallbacks for none and for an unknown one', () => {
+  it('names each card its projects, with a fallback for an unknown one and nothing for none', () => {
     renderBoard();
 
     const project = (title: string) => card(title).querySelector('.task-card-project')?.textContent;
     expect(project('Write the spec')).toBe('Zone, Cloud');
-    expect(project('Queue the build')).toBe('No projects');
+    expect(project('Queue the build')).toBeUndefined();
     expect(project('Build the board')).toBe('Zone, Unknown');
     expect(project('Ship it')).toBe('Cloud');
+    expect(within(board()).queryByText('No projects')).not.toBeInTheDocument();
+  });
+
+  describe('related tasks', () => {
+    const RELATED: Task[] = [
+      TASKS[0],
+      { ...TASKS[1], dependencies: ['write'] },
+      { ...TASKS[2], dependencies: ['write', 'queue', 'gone'] },
+      { ...TASKS[3], dependencies: ['build', 'write', 'queue', 'stop', 'deleted', 'gone'] },
+      TASKS[4],
+    ];
+
+    function renderRelated(handlers: BoardActions = actions()) {
+      render(
+        <Board
+          tasks={RELATED}
+          projects={PROJECTS}
+          renaming={null}
+          removed={null}
+          view={new View()}
+          actions={handlers}
+        />
+      );
+      return handlers;
+    }
+
+    function related(title: string, label: string): string[] {
+      const list = within(card(title)).queryByRole('list', { name: label });
+      if (!list) return [];
+      return within(list)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent ?? '');
+    }
+
+    it('names on each card one loaded task it depends on, with its status, and counts the rest', () => {
+      renderRelated();
+
+      expect(related('Queue the build', 'Depends on')).toEqual(['Write the specCreated']);
+      expect(related('Build the board', 'Depends on')).toEqual([
+        'Write the specCreated',
+        '+2 more',
+      ]);
+      expect(related('Write the spec', 'Depends on')).toEqual([]);
+    });
+
+    it('names on each card one loaded task that depends on it and counts the rest', () => {
+      renderRelated();
+
+      expect(related('Write the spec', 'Blocks')).toEqual(['Queue the buildQueued', '+2 more']);
+      expect(related('Queue the build', 'Blocks')).toEqual([
+        'Build the boardIn progress',
+        '+1 more',
+      ]);
+      expect(related('Stop the old table', 'Blocks')).toEqual(['Ship itIn review']);
+      expect(related('Ship it', 'Blocks')).toEqual([]);
+    });
+
+    it('names one dependency, then counts the rest and the unknown together', () => {
+      renderRelated();
+
+      expect(related('Ship it', 'Depends on')).toEqual(['Build the boardIn progress', '+5 more']);
+    });
+
+    it('opens the related task from another card, not the card it is listed on', () => {
+      const handlers = renderRelated();
+
+      const host = within(card('Build the board'));
+      fireEvent.click(host.getByRole('button', { name: 'Open Write the spec' }));
+
+      expect(handlers.open).toHaveBeenCalledTimes(1);
+      expect(handlers.open).toHaveBeenCalledWith(RELATED[0], RELATED[2]);
+    });
+
+    it('shows no relation on a board whose tasks have none', () => {
+      renderBoard();
+
+      expect(within(board()).queryByText('Depends on')).not.toBeInTheDocument();
+      expect(within(board()).queryByText('Blocks')).not.toBeInTheDocument();
+      expect(within(board()).queryByRole('button', { name: /^Open / })).not.toBeInTheDocument();
+    });
+
+    it('still moves a card that lists related tasks by keyboard from its grip', async () => {
+      const restore = layOutBoard();
+      const handlers = renderRelated();
+      const handle = screen.getByRole('button', { name: 'Move Build the board' });
+      handle.focus();
+
+      await pressKey(handle, 'Space');
+      await screen.findByText('Picked up Build the board, in In progress.');
+      await pressKey(handle, 'ArrowRight');
+      await screen.findByText('Build the board is over Blocked.');
+      await pressKey(handle, 'Space');
+      await screen.findByText('Build the board moved to Blocked.');
+      restore();
+
+      expect(handlers.move).toHaveBeenCalledTimes(1);
+      expect(handlers.move).toHaveBeenCalledWith(RELATED[2], 'blocked');
+      expect(handlers.open).not.toHaveBeenCalled();
+    });
+
+    it('does not pick a card up with Space or Enter on a related task', async () => {
+      const restore = layOutBoard();
+      const handlers = renderRelated();
+      const open = within(card('Build the board')).getByRole('button', {
+        name: 'Open Write the spec',
+      });
+      open.focus();
+
+      await pressKey(open, 'Space');
+      await pressKey(open, 'Enter');
+      restore();
+
+      expect(board()).not.toHaveAttribute('data-dragging');
+      expect(handlers.move).not.toHaveBeenCalled();
+    });
   });
 
   it('tells a keyboard user how to move a card', () => {
@@ -264,7 +379,7 @@ describe('Board', () => {
             actions={actions()}
           />
         );
-        expect(ages()).toEqual(AGED.map(() => '5 minutes ago'));
+        expect(ages()).toEqual(AGED.map(() => '5m5 minutes ago'));
         expect(ticks()).toHaveLength(1);
 
         setSystemTime(new Date(NOW.getTime() + 2 * MINUTE_MS));
@@ -272,7 +387,7 @@ describe('Board', () => {
           ticks()[0]();
         });
 
-        expect(ages()).toEqual(AGED.map(() => '7 minutes ago'));
+        expect(ages()).toEqual(AGED.map(() => '7m7 minutes ago'));
         expect(ticks()).toHaveLength(1);
       });
 

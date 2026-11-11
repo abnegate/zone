@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { type ReactElement, useEffect, useRef } from 'react';
 import type { Source } from '../../../types';
+import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 
 export const NEW_SOURCE_OPTION = 'new-source';
 
@@ -21,7 +22,7 @@ export function SourceStep({
   canCreate,
   onCreate,
   focusId,
-}: SourceStepProps) {
+}: SourceStepProps): ReactElement {
   const options = useRef(new Map<string, HTMLButtonElement>());
 
   useEffect(() => {
@@ -40,7 +41,7 @@ export function SourceStep({
         <div className="wizard-empty-state">
           <p>No sources available.</p>
           <p className="wizard-empty-hint">
-            You can add sources from the Sources page and link them later.
+            You can add sources in {SOURCES_LOCATION} and link them later.
           </p>
         </div>
       ) : (

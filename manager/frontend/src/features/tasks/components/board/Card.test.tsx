@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, mock, setSystemTime } from 'bun:test';
 import { DndContext, useSensor, useSensors } from '@dnd-kit/core';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { chooseMenuItem, openMenu, settleMenu } from '../../../../test/menu';
+import { type Relations, UNRELATED } from '../../relations';
 import { TitleDraft } from '../../TitleDraft';
-import type { BoardActions, Task } from '../../types';
+import type { BoardActions, Task, TaskStatus } from '../../types';
 import { Card } from './Card';
 import { CardSensor } from './CardSensor';
+import { Unfolded } from './Unfolded';
 
 const NOW = new Date('2026-11-10T12:00:00Z');
 const PROJECTS = 'Website, Mobile';
@@ -61,9 +63,20 @@ function Board({ children, onDragStart }: { children: ReactNode; onDragStart?: (
   );
 }
 
+interface CardOptions {
+  renaming?: boolean;
+  projects?: string;
+  relations?: Relations;
+  onDragStart?: () => void;
+}
+
+function other(id: string, title: string, status: TaskStatus = 'created'): Task {
+  return { ...base, id, title, status };
+}
+
 function renderCard(
   overrides: Partial<Task> = {},
-  { renaming = false, onDragStart }: { renaming?: boolean; onDragStart?: () => void } = {}
+  { renaming = false, projects = PROJECTS, relations = UNRELATED, onDragStart }: CardOptions = {}
 ) {
   const task = { ...base, ...overrides };
   const actions = makeActions();
@@ -71,7 +84,8 @@ function renderCard(
     <Board onDragStart={onDragStart}>
       <Card
         task={task}
-        projects={PROJECTS}
+        projects={projects}
+        relations={relations}
         now={NOW.getTime()}
         renaming={renaming ? new TitleDraft(task.title) : null}
         actions={actions}
@@ -82,7 +96,17 @@ function renderCard(
 }
 
 function card(): HTMLElement {
-  return screen.getByRole('listitem', { hidden: true });
+  const item = document.querySelector<HTMLElement>('li.task-card');
+  if (!item) throw new Error('No card is rendered');
+  return item;
+}
+
+function relation(label: string): HTMLElement {
+  return screen.getByRole('list', { name: label });
+}
+
+function description(control: HTMLElement): string | null | undefined {
+  return document.getElementById(control.getAttribute('aria-describedby') ?? '')?.textContent;
 }
 
 function drag(target: HTMLElement, pointerType = 'mouse') {
@@ -134,9 +158,10 @@ describe('Card', () => {
     expect(title).not.toHaveClass('task-card-title-pending');
   });
 
-  it('shows the Queued chip only on queued tasks', () => {
+  it('marks only queued tasks as Queued, in the line of details rather than as a chip', () => {
     const { view } = renderCard({ status: 'queued' });
-    expect(screen.getByText('Queued')).toHaveClass('ui-badge-info');
+    expect(screen.getByText('Queued')).toHaveClass('task-card-fact', 'task-card-queued');
+    expect(screen.getByText('Queued')).not.toHaveClass('ui-badge');
     view.unmount();
     renderCard({ status: 'created' });
     expect(screen.queryByText('Queued')).not.toBeInTheDocument();
@@ -147,89 +172,431 @@ describe('Card', () => {
     expect(card().querySelector('.task-card-project')).toHaveTextContent(PROJECTS);
   });
 
-  it('shows a priority chip named for screen readers', () => {
+  it('leaves the projects out when the task has none', () => {
+    renderCard({ project_ids: [] }, { projects: '' });
+    expect(card().querySelector('.task-card-project')).toBeNull();
+    expect(screen.queryByText('No projects')).not.toBeInTheDocument();
+  });
+
+  it('leaves the details row empty when the task has nothing to put in it', () => {
+    renderCard({ project_ids: [], updated_at: null, created_at: null }, { projects: '' });
+    expect(card().querySelector('.task-card-meta')?.childNodes).toHaveLength(0);
+  });
+
+  it('shows the priority named for screen readers', () => {
     renderCard({ priority: 2 });
     expect(screen.getByLabelText('Priority 2')).toHaveTextContent('P2');
   });
 
-  it('leaves the priority chip out when the task has none', () => {
+  it('keeps every detail on one line: priority, projects, queued, then agentic and the time', () => {
+    renderCard({ priority: 2, status: 'queued', is_agentic: true });
+    const details = Array.from(card().querySelector('.task-card-meta')?.children ?? []);
+    expect(details.map((detail) => detail.className)).toEqual([
+      'task-card-fact task-card-priority',
+      'task-card-fact task-card-project',
+      'task-card-fact task-card-queued',
+      'task-card-agentic-mark',
+      'task-card-time',
+    ]);
+    expect(card().querySelector('.ui-badge')).toBeNull();
+  });
+
+  it('leaves the priority out when the task has none', () => {
     renderCard({ priority: null });
     expect(screen.queryByLabelText(/^Priority/)).not.toBeInTheDocument();
   });
 
-  it('badges agentic tasks and marks the card', () => {
+  it('marks agentic tasks with one named glyph and no badge', () => {
     renderCard({ is_agentic: true });
-    expect(screen.getByText('Agentic')).toHaveClass('ui-badge-accent');
-    expect(card()).toHaveClass('task-card', 'task-card-agentic');
-  });
-
-  it('leaves manual tasks without the agentic badge', () => {
-    renderCard();
+    const mark = screen.getByRole('img', { name: 'Agentic' });
+    expect(mark).toHaveAttribute('title', 'Agentic');
+    expect(mark.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
     expect(screen.queryByText('Agentic')).not.toBeInTheDocument();
     expect(card()).not.toHaveClass('task-card-agentic');
   });
 
-  for (const [status, tint] of [
-    ['pending', 'ui-badge-neutral'],
-    ['open', 'ui-badge-success'],
-    ['merged', 'ui-badge-accent'],
-    ['closed', 'ui-badge-destructive'],
-  ] as const) {
-    it(`tints a ${status} pull request badge`, () => {
+  it('leaves manual tasks without the agentic mark', () => {
+    renderCard();
+    expect(screen.queryByRole('img', { name: 'Agentic' })).not.toBeInTheDocument();
+  });
+
+  function pullRequest(): HTMLElement {
+    const row = card().querySelector<HTMLElement>('.task-card-pull-request');
+    if (!row) throw new Error('No pull request is shown');
+    return row;
+  }
+
+  for (const status of ['pending', 'open', 'merged', 'closed'] as const) {
+    it(`shows a ${status} pull request that has no address yet as a tinted row, and does not link it`, () => {
       renderCard({ pr_status: status });
-      expect(screen.getByText(`PR ${status}`)).toHaveClass(tint);
+      expect(pullRequest()).toHaveTextContent(`Pull request${status}`);
+      expect(pullRequest()).toHaveClass(`task-card-pull-request-${status}`);
+      expect(pullRequest().tagName).toBe('SPAN');
+      expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    });
+
+    it(`links a ${status} pull request by its number and status`, () => {
+      renderCard({ pr_status: status, pr_url: 'https://github.com/zone/app/pull/7' });
+      const link = screen.getByRole('link', { name: `Pull request #7 ${status}` });
+      expect(link).toBe(pullRequest());
+      expect(link).toHaveClass(`task-card-pull-request-${status}`);
+      expect(link).toHaveTextContent(`Pull request#7${status}`);
     });
   }
 
-  it('links to the pull request in a new tab without an opener', () => {
+  it('links the one pull request row in a new tab without an opener', () => {
     const { actions } = renderCard({
       pr_status: 'open',
-      pr_url: 'https://github.com/zone/app/pull/7',
+      pr_url: 'https://github.com/zone/app/pull/220',
     });
-    const link = screen.getByRole('link', { name: 'View PR' });
-    expect(link).toHaveAttribute('href', 'https://github.com/zone/app/pull/7');
+    const link = screen.getByRole('link', { name: 'Pull request #220 open' });
+    expect(link).toHaveAttribute('href', 'https://github.com/zone/app/pull/220');
     expect(link).toHaveAttribute('target', '_blank');
     expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.getAllByText('Pull request')).toHaveLength(1);
+    expect(card().querySelector('.ui-badge')).toBeNull();
+    expect(screen.queryByText('View PR')).not.toBeInTheDocument();
     fireEvent.click(link);
     expect(actions.open).not.toHaveBeenCalled();
   });
 
+  it('leaves the number out of a pull request address that has none', () => {
+    renderCard({ pr_status: 'merged', pr_url: 'https://review.example.com/changes/latest' });
+    expect(screen.getByRole('link', { name: 'Pull request merged' })).toHaveAttribute(
+      'href',
+      'https://review.example.com/changes/latest'
+    );
+  });
+
   for (const address of ['javascript:alert(document.cookie)', 'data:text/html,hello', 'pull/7']) {
-    it(`leaves out the link for a pull request address of ${address}`, () => {
+    it(`shows the status without a link for a pull request address of ${address}`, () => {
       renderCard({ pr_status: 'open', pr_url: address });
-      expect(screen.getByText('PR open')).toBeInTheDocument();
+      expect(pullRequest()).toHaveTextContent('Pull requestopen');
       expect(screen.queryByRole('link')).not.toBeInTheDocument();
+      expect(card().querySelector('a')).toBeNull();
+    });
+
+    it(`shows no pull request for an address of ${address} that has no status`, () => {
+      renderCard({ pr_url: address });
+      expect(screen.queryByText('Pull request')).not.toBeInTheDocument();
       expect(card().querySelector('a')).toBeNull();
     });
   }
 
-  it('links to a pull request served over plain http', () => {
+  it('links to a pull request served over plain http, untinted while it has no status', () => {
     renderCard({ pr_url: 'http://git.internal/zone/app/merge_requests/7' });
-    expect(screen.getByRole('link', { name: 'View PR' })).toHaveAttribute(
-      'href',
-      'http://git.internal/zone/app/merge_requests/7'
+    const link = screen.getByRole('link', { name: 'Pull request #7' });
+    expect(link).toHaveAttribute('href', 'http://git.internal/zone/app/merge_requests/7');
+    expect(link).toHaveClass('task-card-pull-request-untinted');
+  });
+
+  it('shows no pull request and no links on a task without any', () => {
+    renderCard();
+    expect(screen.queryByText('Pull request')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(card().querySelector('.task-card-links')).toBeNull();
+  });
+
+  it('shows no relations on a task without any', () => {
+    renderCard();
+    expect(screen.queryByText('Depends on')).not.toBeInTheDocument();
+    expect(screen.queryByText('Blocks')).not.toBeInTheDocument();
+    expect(card().querySelector('ul')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Open / })).not.toBeInTheDocument();
+  });
+
+  it('names one task it depends on and one it blocks, each with its status', () => {
+    renderCard(
+      {},
+      {
+        relations: {
+          dependencies: [other('api', 'Design the API', 'in_progress')],
+          dependents: [other('ship', 'Ship it', 'queued')],
+          unknown: 0,
+        },
+      }
     );
+
+    const dependencies = within(relation('Depends on')).getAllByRole('button');
+    expect(dependencies.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'Open Design the API',
+    ]);
+    expect(dependencies.map((button) => button.textContent)).toEqual(['Design the API']);
+    expect(dependencies.map(description)).toEqual(['In progress']);
+    expect(dependencies[0].querySelector('svg')).toHaveClass('status-icon-in_progress');
+    expect(dependencies[0]).toHaveAttribute('title', 'Design the API');
+    expect(within(relation('Depends on')).getAllByRole('listitem')).toHaveLength(1);
+
+    const dependents = within(relation('Blocks')).getAllByRole('button');
+    expect(dependents.map((button) => button.getAttribute('aria-label'))).toEqual(['Open Ship it']);
+    expect(dependents.map(description)).toEqual(['Queued']);
+    expect(dependents[0].querySelector('svg')).toHaveClass('status-icon-planned');
+    expect(within(relation('Blocks')).getAllByRole('listitem')).toHaveLength(1);
+  });
+
+  it('shows one relation without the other', () => {
+    renderCard(
+      {},
+      { relations: { ...UNRELATED, dependents: [other('ship', 'Ship it', 'review')] } }
+    );
+    expect(relation('Blocks')).toBeInTheDocument();
+    expect(screen.queryByText('Depends on')).not.toBeInTheDocument();
+  });
+
+  it('names one related task per relation and counts the rest', () => {
+    const many = ['One', 'Two', 'Three', 'Four', 'Five'].map((title) =>
+      other(title.toLowerCase(), title)
+    );
+    renderCard({}, { relations: { dependencies: many, dependents: many.slice(0, 2), unknown: 0 } });
+
+    const dependencies = within(relation('Depends on'));
+    expect(
+      dependencies.getAllByRole('button', { name: /^Open / }).map((button) => button.textContent)
+    ).toEqual(['One']);
+    expect(dependencies.getAllByRole('listitem')[1]).toHaveTextContent('+4 more');
+    const dependents = within(relation('Blocks'));
+    expect(dependents.getAllByRole('button', { name: /^Open / })).toHaveLength(1);
+    expect(dependents.getAllByRole('listitem')[1]).toHaveTextContent('+1 more');
+  });
+
+  it('expands a relation from its count to name every task, and folds it back', () => {
+    const many = ['One', 'Two', 'Three'].map((title) => other(title.toLowerCase(), title));
+    const { actions } = renderCard(
+      {},
+      { relations: { dependencies: many, dependents: many.slice(0, 2), unknown: 2 } }
+    );
+    const dependencies = within(relation('Depends on'));
+    const names = () =>
+      dependencies.getAllByRole('button', { name: /^Open / }).map((button) => button.textContent);
+
+    const count = dependencies.getByRole('button', { name: '+4 more' });
+    expect(count).toHaveAttribute('aria-expanded', 'false');
+    expect(description(count)).toBe('Depends on');
+    expect(relation('Depends on').parentElement).not.toHaveAttribute('data-expanded');
+    count.focus();
+    fireEvent.click(count);
+
+    expect(names()).toEqual(['One', 'Two', 'Three']);
+    expect(dependencies.getByText('2 unknown')).toBeInTheDocument();
+    const fold = dependencies.getByRole('button', { name: 'Show less' });
+    expect(fold).toBe(count);
+    expect(fold).toHaveAttribute('aria-expanded', 'true');
+    expect(document.activeElement).toBe(fold);
+    expect(relation('Depends on').parentElement).toHaveAttribute('data-expanded', 'true');
+    expect(within(relation('Blocks')).getAllByRole('button', { name: /^Open / })).toHaveLength(1);
+
+    fireEvent.click(fold);
+    expect(names()).toEqual(['One']);
+    expect(document.activeElement).toBe(dependencies.getByRole('button', { name: '+4 more' }));
+    expect(screen.queryByText('2 unknown')).not.toBeInTheDocument();
+    expect(actions.open).not.toHaveBeenCalled();
+  });
+
+  it('remembers which relations are expanded in the set the board hands it', () => {
+    const many = ['One', 'Two'].map((title) => other(title.toLowerCase(), title));
+    const relations = { dependencies: many, dependents: many, unknown: 0 };
+    const unfolded = new Set<string>();
+    const show = () =>
+      render(
+        <Unfolded value={unfolded}>
+          <Board>
+            <Card
+              task={base}
+              projects={PROJECTS}
+              relations={relations}
+              now={NOW.getTime()}
+              renaming={null}
+              actions={makeActions()}
+            />
+          </Board>
+        </Unfolded>
+      );
+
+    const first = show();
+    fireEvent.click(within(relation('Blocks')).getByRole('button', { name: '+1 more' }));
+    expect(Array.from(unfolded)).toEqual(['task-1:Blocks']);
+    first.unmount();
+
+    show();
+    expect(within(relation('Blocks')).getByRole('button', { name: 'Show less' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    );
+    expect(within(relation('Depends on')).getByRole('button', { name: '+1 more' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    );
+    fireEvent.click(within(relation('Blocks')).getByRole('button', { name: 'Show less' }));
+    expect(unfolded.size).toBe(0);
+  });
+
+  it('opens a task that was only named after expanding', () => {
+    const many = ['One', 'Two', 'Three'].map((title) => other(title.toLowerCase(), title));
+    const { task, actions } = renderCard({}, { relations: { ...UNRELATED, dependencies: many } });
+    fireEvent.click(screen.getByRole('button', { name: '+2 more' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Three' }));
+    expect(actions.open).toHaveBeenCalledTimes(1);
+    expect(actions.open).toHaveBeenCalledWith(many[2], task);
+  });
+
+  it('offers no count to expand when every related task is already named', () => {
+    renderCard(
+      {},
+      { relations: { ...UNRELATED, dependencies: [other('one', 'One')], unknown: 1 } }
+    );
+    expect(within(relation('Depends on')).getAllByRole('button')).toHaveLength(1);
+    expect(within(relation('Depends on')).getByText('1 unknown')).toBeInTheDocument();
+  });
+
+  it('does not start a drag from the count that expands a relation', async () => {
+    const onDragStart = mock();
+    const many = ['One', 'Two'].map((title) => other(title.toLowerCase(), title));
+    renderCard({}, { relations: { ...UNRELATED, dependencies: many }, onDragStart });
+    drag(screen.getByRole('button', { name: '+1 more' }));
+    await settleMenu();
+    expect(onDragStart).not.toHaveBeenCalled();
+  });
+
+  it('names a single related task without counting a rest', () => {
+    renderCard({}, { relations: { ...UNRELATED, dependencies: [other('one', 'One')] } });
+    expect(within(relation('Depends on')).getAllByRole('listitem')).toHaveLength(1);
+    expect(screen.queryByText(/more$/)).not.toBeInTheDocument();
+  });
+
+  it('names a task still in the way ahead of the settled ones', () => {
+    renderCard(
+      {},
+      {
+        relations: {
+          dependencies: [
+            other('spec', 'Write the spec', 'complete'),
+            other('old', 'Old plan', 'cancelled'),
+            other('api', 'Design the API', 'blocked'),
+            other('data', 'Model the data', 'created'),
+          ],
+          dependents: [other('done', 'Done', 'complete'), other('ship', 'Ship it', 'paused')],
+          unknown: 0,
+        },
+      }
+    );
+    expect(within(relation('Depends on')).getByRole('button', { name: /^Open / })).toHaveAttribute(
+      'aria-label',
+      'Open Design the API'
+    );
+    expect(within(relation('Blocks')).getByRole('button', { name: /^Open / })).toHaveAttribute(
+      'aria-label',
+      'Open Ship it'
+    );
+  });
+
+  it('names a settled task when every related task is settled', () => {
+    renderCard(
+      {},
+      { relations: { ...UNRELATED, dependencies: [other('spec', 'Write the spec', 'complete')] } }
+    );
+    expect(within(relation('Depends on')).getByRole('button', { name: /^Open / })).toHaveAttribute(
+      'aria-label',
+      'Open Write the spec'
+    );
+  });
+
+  it('counts a dependency that is not loaded instead of naming it', () => {
+    renderCard(
+      { dependencies: ['spec', 'gone', 'deleted'] },
+      { relations: { ...UNRELATED, dependencies: [other('spec', 'Write the spec')], unknown: 2 } }
+    );
+    const dependencies = within(relation('Depends on'));
+    expect(dependencies.getAllByRole('button')).toHaveLength(1);
+    expect(dependencies.getByText('2 unknown')).toBeInTheDocument();
+    expect(screen.queryByText(/gone|deleted/)).not.toBeInTheDocument();
+  });
+
+  it('counts the dependencies of a task whose every dependency is unknown', () => {
+    renderCard({ dependencies: ['gone'] }, { relations: { ...UNRELATED, unknown: 1 } });
+    expect(within(relation('Depends on')).getByText('1 unknown')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Open / })).not.toBeInTheDocument();
+  });
+
+  it('counts the unknown dependencies in with the ones it does not name', () => {
+    const many = ['One', 'Two', 'Three', 'Four'].map((title) => other(title.toLowerCase(), title));
+    renderCard({}, { relations: { ...UNRELATED, dependencies: many, unknown: 2 } });
+    expect(within(relation('Depends on')).getAllByRole('listitem')[1]).toHaveTextContent('+5 more');
+    expect(screen.queryByText(/unknown/)).not.toBeInTheDocument();
+  });
+
+  it('opens the related task, not the card it is listed on', () => {
+    const spec = other('spec', 'Write the spec', 'complete');
+    const { task, actions } = renderCard({}, { relations: { ...UNRELATED, dependencies: [spec] } });
+    fireEvent.click(screen.getByRole('button', { name: 'Open Write the spec' }));
+    expect(actions.open).toHaveBeenCalledTimes(1);
+    expect(actions.open).toHaveBeenCalledWith(spec, task);
+  });
+
+  it('keeps the related tasks between the title and the menu for the keyboard', () => {
+    renderCard(
+      { pr_url: 'https://github.com/zone/app/pull/7' },
+      {
+        relations: {
+          dependencies: [other('spec', 'Write the spec'), other('plan', 'Plan it')],
+          dependents: [other('ship', 'Ship it')],
+          unknown: 0,
+        },
+      }
+    );
+    const controls = Array.from(card().querySelectorAll('button, a'));
+    expect(
+      controls.map((control) => control.getAttribute('aria-label') ?? control.textContent)
+    ).toEqual([
+      'Move Implement login',
+      'Implement login',
+      'Pull request #7',
+      'Open Write the spec',
+      '+1 more',
+      'Open Ship it',
+      'Actions for Implement login',
+    ]);
   });
 
   it('shows when the task was last updated relative to now', () => {
     renderCard();
     const time = card().querySelector('time');
     expect(time).toHaveAttribute('dateTime', '2026-11-10T09:00:00Z');
-    expect(time).toHaveTextContent('about 3 hours ago');
+    expect(time?.querySelector('[aria-hidden="true"]')).toHaveTextContent(/^3h$/);
+    expect(time?.querySelector('.sr-only')).toHaveTextContent(/^3 hours ago$/);
   });
+
+  for (const [updated, brief, spoken] of [
+    ['2026-11-10T11:59:30Z', 'now', 'just now'],
+    ['2026-11-10T11:59:00Z', '1m', '1 minute ago'],
+    ['2026-11-10T11:15:00Z', '45m', '45 minutes ago'],
+    ['2026-11-10T09:10:00Z', '2h', '2 hours ago'],
+    ['2026-11-09T11:30:00Z', '1d', '1 day ago'],
+    ['2026-11-08T00:00:00Z', '2d', '2 days ago'],
+    ['2026-10-11T12:00:00Z', '1mo', '1 month ago'],
+    ['2026-08-01T12:00:00Z', '3mo', '3 months ago'],
+    ['2024-11-01T12:00:00Z', '2y', '2 years ago'],
+  ] as const) {
+    it(`shortens an update from ${spoken} to ${brief} and spells it out for screen readers`, () => {
+      renderCard({ updated_at: updated });
+      const time = card().querySelector('time');
+      expect(time?.querySelector('[aria-hidden="true"]')).toHaveTextContent(brief);
+      expect(time?.querySelector('.sr-only')).toHaveTextContent(spoken);
+      expect(time?.children).toHaveLength(2);
+    });
+  }
 
   it('falls back to the creation time when the task was never updated', () => {
     renderCard({ updated_at: null });
     const time = card().querySelector('time');
     expect(time).toHaveAttribute('dateTime', '2026-11-01T12:00:00Z');
-    expect(time).toHaveTextContent('9 days ago');
+    expect(time).toHaveTextContent('9d9 days ago');
   });
 
   it('never dates an update ahead of the clock the board last read', () => {
     renderCard({ updated_at: '2026-11-10T12:00:20Z' });
     const time = card().querySelector('time');
     expect(time).toHaveAttribute('dateTime', '2026-11-10T12:00:20Z');
-    expect(time).toHaveTextContent('less than a minute ago');
+    expect(time).toHaveTextContent('nowjust now');
   });
 
   it('keeps tooltips off the details the open button covers', () => {
@@ -353,9 +720,37 @@ describe('Card', () => {
   it('does not start a drag from the pull request link', async () => {
     const onDragStart = mock();
     renderCard({ pr_url: 'https://github.com/zone/app/pull/7' }, { onDragStart });
-    drag(screen.getByRole('link', { name: 'View PR' }));
+    drag(screen.getByRole('link', { name: 'Pull request #7' }));
     await settleMenu();
     expect(onDragStart).not.toHaveBeenCalled();
+  });
+
+  it('does not start a drag from a related task', async () => {
+    const onDragStart = mock();
+    renderCard(
+      {},
+      {
+        relations: { ...UNRELATED, dependencies: [other('spec', 'Write the spec')] },
+        onDragStart,
+      }
+    );
+    drag(screen.getByRole('button', { name: 'Open Write the spec' }));
+    await settleMenu();
+    expect(onDragStart).not.toHaveBeenCalled();
+    expect(card()).not.toHaveClass('task-card-dragging');
+  });
+
+  it('still starts a pointer drag from the body of a card that lists related tasks', async () => {
+    const onDragStart = mock();
+    renderCard(
+      {},
+      {
+        relations: { ...UNRELATED, dependencies: [other('spec', 'Write the spec')] },
+        onDragStart,
+      }
+    );
+    drag(screen.getByText('Depends on'));
+    await waitFor(() => expect(onDragStart).toHaveBeenCalled());
   });
 
   it('does not start a drag while the title is being renamed', async () => {

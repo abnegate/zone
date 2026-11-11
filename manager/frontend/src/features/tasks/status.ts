@@ -70,6 +70,8 @@ const STAGE_BY_ID: Record<StageId, Stage> = {
   cancelled: { id: 'cancelled', label: 'Cancelled', target: 'cancelled' },
 };
 
+const SETTLED: ReadonlySet<TaskStatus> = new Set(['complete', 'cancelled']);
+
 export const STAGES: readonly Stage[] = STAGE_IDS.map((id) => STAGE_BY_ID[id]);
 
 export const STATUS_OPTIONS: readonly { value: TaskStatus; label: string }[] = TASK_STATUSES.map(
@@ -84,6 +86,10 @@ export function statusTint(status: TaskStatus): StatusTint {
   return TINTS[status];
 }
 
+export function settled(status: TaskStatus): boolean {
+  return SETTLED.has(status);
+}
+
 export function stageOf(status: TaskStatus): Stage {
   return STAGE_BY_ID[STAGE_OF_STATUS[status]];
 }
@@ -96,4 +102,11 @@ export function groupByStage<T extends { status: TaskStatus }>(
     groups.get(STAGE_OF_STATUS[task.status])?.push(task);
   }
   return groups;
+}
+
+export function unsettledFirst<T extends { status: TaskStatus }>(items: readonly T[]): T[] {
+  return [
+    ...items.filter((item) => !settled(item.status)),
+    ...items.filter((item) => settled(item.status)),
+  ];
 }

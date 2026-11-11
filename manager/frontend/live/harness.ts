@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { test as base, expect, type Locator, type Page } from '@playwright/test';
 import { setupCompleteKey } from '../src/features/models/setupComplete';
 
+export { SOURCES_PATH } from '../src/features/settings/navigation/sections';
+
 /**
  * The live suite talks to a real server. Nothing here mocks a route, forges a
  * token, or answers for the API: a test that passes has seen the console render

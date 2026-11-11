@@ -68,11 +68,13 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
   WorkspaceProvider: ({ children }: { children: React.ReactNode }) => children,
 }));
 
-let SourcesPage: typeof import('./SourcesPage').default;
+const SECTION_PATH = '/settings/workspace/sources';
+
+let SourcesSection: typeof import('./SourcesSection').SourcesSection;
 let mockConfirm: ReturnType<typeof mock>;
 
 beforeAll(async () => {
-  SourcesPage = (await import('./SourcesPage')).default;
+  SourcesSection = (await import('./SourcesSection')).SourcesSection;
 });
 
 afterAll(() => {
@@ -83,7 +85,7 @@ afterEach(() => {
   window.history.pushState({}, '', '/');
 });
 
-const renderSourcesPage = (path = '/sources') => {
+const renderSection = (path = SECTION_PATH) => {
   window.history.pushState({}, '', path);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
@@ -91,7 +93,7 @@ const renderSourcesPage = (path = '/sources') => {
   return render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <SourcesPage />
+        <SourcesSection />
       </BrowserRouter>
     </QueryClientProvider>
   );
@@ -148,7 +150,7 @@ const mockSources: Source[] = [
   },
 ];
 
-describe('SourcesPage', () => {
+describe('SourcesSection', () => {
   beforeEach(() => {
     mockGetSources.mockReset();
     mockCreateSource.mockReset();
@@ -175,13 +177,40 @@ describe('SourcesPage', () => {
 
   it('shows loading state with skeleton cards', async () => {
     mockGetSources.mockImplementation(() => new Promise(() => {}));
-    renderSourcesPage();
+    renderSection();
     expect(document.querySelectorAll('.skeleton-card').length).toBe(3);
+  });
+
+  it('heads the skeleton and the loaded table with the same columns', async () => {
+    const columns = ['Name', 'Type', 'Status', 'URL', 'Verified', 'Actions'];
+    let finish: (sources: Source[]) => void = () => {};
+    mockGetSources.mockImplementation(
+      () =>
+        new Promise<Source[]>((resolve) => {
+          finish = resolve;
+        })
+    );
+    renderSection();
+    const skeleton = [...document.querySelectorAll('.sources-table th')].map(
+      (header) => header.textContent
+    );
+
+    await act(async () => {
+      finish(mockSources);
+    });
+
+    const table = await screen.findByRole('table', { name: 'Sources' });
+    expect(skeleton).toEqual(columns);
+    expect(
+      within(table)
+        .getAllByRole('columnheader')
+        .map((header) => header.textContent)
+    ).toEqual(columns);
   });
 
   it('shows empty state when no sources', async () => {
     mockGetSources.mockImplementation(() => Promise.resolve([]));
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('No sources configured')).toBeInTheDocument();
     });
@@ -189,7 +218,7 @@ describe('SourcesPage', () => {
 
   it('keeps the skeleton rows while the workspace is still resolving', () => {
     workspaceState = { ...resolvedWorkspace, currentWorkspace: null, loading: true };
-    renderSourcesPage();
+    renderSection();
     expect(document.querySelectorAll('.skeleton-card').length).toBe(3);
     expect(screen.queryByText('No sources configured')).toBeNull();
     expect(mockGetSources).not.toHaveBeenCalled();
@@ -202,7 +231,7 @@ describe('SourcesPage', () => {
       currentOrganization: null,
       error: 'Failed to load organizations',
     };
-    renderSourcesPage();
+    renderSection();
     const alert = screen.getByRole('alert');
     expect(alert).toHaveTextContent('Failed to load organizations');
     expect(screen.queryByText('No sources configured')).toBeNull();
@@ -214,29 +243,39 @@ describe('SourcesPage', () => {
   });
 
   it('renders sources list', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
       expect(screen.getByText('GitLab Project')).toBeInTheDocument();
     });
   });
 
-  it('renders page header', async () => {
-    renderSourcesPage();
+  it('renders the section header', async () => {
+    renderSection();
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: 'Sources' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { level: 2, name: 'Sources' })).toBeInTheDocument();
     });
     expect(screen.getByText(/Connect repositories, calendars/)).toBeInTheDocument();
   });
 
-  it('renders the Add source primary in sentence case with the plus icon', async () => {
-    renderSourcesPage();
+  it('renders Add source as a small primary in the section row', async () => {
+    renderSection();
     const button = await screen.findByRole('button', { name: 'Add source' });
-    expect(button.querySelector('svg.plus-icon')).not.toBeNull();
+    expect(button.closest('.section-row-actions')).not.toBeNull();
+    expect(button.querySelector('svg')).toBeNull();
+    expect(button).toHaveClass('ui-btn-sm');
+  });
+
+  it('renders no page chrome of its own', async () => {
+    const { container } = renderSection();
+    await screen.findByRole('heading', { level: 2, name: 'Sources' });
+    expect(container.querySelector('.page')).toBeNull();
+    expect(container.querySelector('.page-bar')).toBeNull();
+    expect(container.querySelector('.page-body')).toBeNull();
   });
 
   it('displays source type badges', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub')).toBeInTheDocument();
       expect(screen.getByText('GitLab')).toBeInTheDocument();
@@ -244,7 +283,7 @@ describe('SourcesPage', () => {
   });
 
   it('displays verified status', async () => {
-    renderSourcesPage();
+    renderSection();
     const row = await screen.findByText('GitHub Repository');
     expect(within(row.closest('.source-card') as HTMLElement).getByText('Verified')).toHaveClass(
       'source-status'
@@ -252,28 +291,28 @@ describe('SourcesPage', () => {
   });
 
   it('displays error status', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('Error')).toBeInTheDocument();
     });
   });
 
   it('displays inactive status', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('Inactive')).toBeInTheDocument();
     });
   });
 
   it('displays source description', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('Main repository')).toBeInTheDocument();
     });
   });
 
   it('displays source URL as link', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByRole('link', { name: 'https://github.com/test/repo' })).toHaveAttribute(
         'href',
@@ -283,14 +322,14 @@ describe('SourcesPage', () => {
   });
 
   it('displays source error message', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('Authentication failed')).toBeInTheDocument();
     });
   });
 
   it('opens create source wizard', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
@@ -300,7 +339,7 @@ describe('SourcesPage', () => {
   });
 
   it('closes create wizard on cancel', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
@@ -315,7 +354,7 @@ describe('SourcesPage', () => {
   });
 
   it('closes create wizard on close button', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
@@ -333,7 +372,7 @@ describe('SourcesPage', () => {
     mockVerifySource.mockImplementation(() => Promise.resolve({ verified: true, message: 'OK' }));
     mockGetSource.mockImplementation(() => Promise.resolve(mockSources[0]));
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
     });
@@ -360,7 +399,7 @@ describe('SourcesPage', () => {
       })
     );
 
-    renderSourcesPage();
+    renderSection();
     await screen.findByText('GitHub Repository');
     fireEvent.click(screen.getAllByRole('button', { name: 'Verify' })[0]);
 
@@ -377,7 +416,7 @@ describe('SourcesPage', () => {
     const updatedSource = { ...mockSources[0], is_active: false };
     mockUpdateSource.mockImplementation(() => Promise.resolve(updatedSource));
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
     });
@@ -396,7 +435,7 @@ describe('SourcesPage', () => {
     const updatedSource = { ...mockSources[1], is_active: true };
     mockUpdateSource.mockImplementation(() => Promise.resolve(updatedSource));
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitLab Project')).toBeInTheDocument();
     });
@@ -414,7 +453,7 @@ describe('SourcesPage', () => {
   it('deletes a source with confirmation', async () => {
     mockDeleteSource.mockImplementation(() => Promise.resolve(undefined));
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
     });
@@ -431,7 +470,7 @@ describe('SourcesPage', () => {
   it('cancels delete when confirm is rejected', async () => {
     mockConfirm.mockReturnValueOnce(false);
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
     });
@@ -445,7 +484,7 @@ describe('SourcesPage', () => {
 
   it('shows error when loading fails', async () => {
     mockGetSources.mockImplementation(() => Promise.reject(new Error('Network error')));
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('Network error')).toBeInTheDocument();
     });
@@ -462,7 +501,7 @@ describe('SourcesPage', () => {
   it('shows error when delete fails', async () => {
     mockDeleteSource.mockImplementation(() => Promise.reject(new Error('Delete failed')));
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
     });
@@ -478,7 +517,7 @@ describe('SourcesPage', () => {
   it('shows error when toggle active fails', async () => {
     mockUpdateSource.mockImplementation(() => Promise.reject(new Error('Update failed')));
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
     });
@@ -494,7 +533,7 @@ describe('SourcesPage', () => {
   it('shows error when verify fails', async () => {
     mockVerifySource.mockImplementation(() => Promise.reject(new Error('Verify failed')));
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
     });
@@ -517,7 +556,7 @@ describe('SourcesPage', () => {
     );
     mockGetSource.mockImplementation(() => Promise.resolve(mockSources[0]));
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
     });
@@ -534,15 +573,21 @@ describe('SourcesPage', () => {
     });
   });
 
-  it('displays verified date', async () => {
-    renderSourcesPage();
-    await waitFor(() => {
-      expect(screen.getByText(/^Verified \w{3} \d/)).toBeInTheDocument();
+  it('displays the verified date without repeating the column heading', async () => {
+    renderSection();
+    const row = await screen.findByText('GitHub Repository');
+    const verified = new Date('2024-01-15T00:00:00Z').toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
     });
+    expect(
+      (row.closest('.source-card') as HTMLElement).querySelector('.source-meta')?.textContent
+    ).toBe(verified);
   });
 
   it('applies inactive styling to inactive sources', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByText('GitLab Project')).toBeInTheDocument();
     });
@@ -552,7 +597,7 @@ describe('SourcesPage', () => {
   });
 
   it('shows source type options in create wizard', async () => {
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
@@ -579,7 +624,7 @@ describe('SourcesPage', () => {
     };
     mockCreateSource.mockImplementation(() => Promise.resolve(newSource));
 
-    renderSourcesPage();
+    renderSection();
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
     });
@@ -628,7 +673,7 @@ describe('SourcesPage', () => {
     };
 
     it('renders toggle field for filesystem source', async () => {
-      renderSourcesPage();
+      renderSection();
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
@@ -653,7 +698,7 @@ describe('SourcesPage', () => {
     });
 
     it('allows toggling the toggle field', async () => {
-      renderSourcesPage();
+      renderSection();
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
@@ -680,7 +725,7 @@ describe('SourcesPage', () => {
     });
 
     it('renders textarea field for text source', async () => {
-      renderSourcesPage();
+      renderSection();
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
@@ -701,7 +746,7 @@ describe('SourcesPage', () => {
     });
 
     it('allows input in textarea field', async () => {
-      renderSourcesPage();
+      renderSection();
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
@@ -723,7 +768,7 @@ describe('SourcesPage', () => {
     });
 
     it('changes source type and shows different config fields', async () => {
-      renderSourcesPage();
+      renderSection();
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
@@ -759,7 +804,7 @@ describe('SourcesPage', () => {
     it('shows error when create source fails', async () => {
       mockCreateSource.mockImplementation(() => Promise.reject(new Error('Creation failed')));
 
-      renderSourcesPage();
+      renderSection();
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
@@ -795,7 +840,7 @@ describe('SourcesPage', () => {
     it('shows loading state during create source', async () => {
       mockCreateSource.mockImplementation(() => new Promise(() => {}));
 
-      renderSourcesPage();
+      renderSection();
       await waitFor(() => {
         expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       });
@@ -839,7 +884,7 @@ describe('SourcesPage', () => {
     };
 
     it('opens an editor section from a row click, not a dialog, and hides Add source', async () => {
-      renderSourcesPage();
+      renderSection();
       await openGitHubEditor();
 
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
@@ -849,7 +894,7 @@ describe('SourcesPage', () => {
     });
 
     it('has no Delete button in the editor', async () => {
-      renderSourcesPage();
+      renderSection();
       await openGitHubEditor();
 
       expect(
@@ -861,7 +906,7 @@ describe('SourcesPage', () => {
     });
 
     it('saves a changed name with a sparse PUT', async () => {
-      renderSourcesPage();
+      renderSection();
       await openGitHubEditor();
 
       const nameInput = screen.getByLabelText('Name');
@@ -877,7 +922,7 @@ describe('SourcesPage', () => {
     });
 
     it('does not open the editor from Verify, Disable, or Delete', async () => {
-      renderSourcesPage();
+      renderSection();
       const row = (await screen.findByText('GitHub Repository')).closest(
         '.source-card'
       ) as HTMLElement;
@@ -905,7 +950,7 @@ describe('SourcesPage', () => {
     });
 
     it('does not open the editor from the source URL', async () => {
-      renderSourcesPage();
+      renderSection();
       await screen.findByText('GitHub Repository');
 
       fireEvent.click(screen.getByRole('link', { name: 'https://github.com/test/repo' }));
@@ -914,8 +959,8 @@ describe('SourcesPage', () => {
       expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
     });
 
-    it('opens the editor from /sources?source=src-1', async () => {
-      renderSourcesPage('/sources?source=src-1');
+    it('opens the editor from ?source=src-1', async () => {
+      renderSection(`${SECTION_PATH}?source=src-1`);
 
       await waitFor(() => {
         expect(document.querySelector('.source-details')).not.toBeNull();
@@ -925,11 +970,12 @@ describe('SourcesPage', () => {
       expect(mockGetSource).toHaveBeenCalledWith('test-workspace-id', 'src-1');
     });
 
-    it('closes the editor back to the table and drops the query param', async () => {
-      renderSourcesPage('/sources?source=src-1');
+    it('closes a deep-linked editor in place, back to the table without the query param', async () => {
+      renderSection(`${SECTION_PATH}?source=src-1`);
       await waitFor(() => {
         expect(document.querySelector('.source-details')).not.toBeNull();
       });
+      const entries = window.history.length;
 
       fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 
@@ -938,11 +984,50 @@ describe('SourcesPage', () => {
         expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
       });
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
+      expect(window.location.pathname).toBe(SECTION_PATH);
       expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
+      expect(window.history.length).toBe(entries);
+    });
+
+    it('closes an editor opened from the list by returning to the list entry', async () => {
+      window.history.pushState({}, '', '/chats');
+      renderSection();
+      await openGitHubEditor();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => {
+        expect(document.querySelector('.source-details')).toBeNull();
+        expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
+      });
+      expect(window.location.pathname).toBe(SECTION_PATH);
+      expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
+
+      act(() => {
+        window.history.back();
+      });
+
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/chats');
+      });
+    });
+
+    it('titles the editor one level below the section heading', async () => {
+      renderSection(`${SECTION_PATH}?source=src-1`);
+
+      const editor = await waitFor(() => {
+        const section = document.querySelector('.source-details');
+        expect(section).not.toBeNull();
+        return section as HTMLElement;
+      });
+      expect(
+        within(editor).getByRole('heading', { level: 3, name: 'GitHub Repository' })
+      ).toBeInTheDocument();
+      expect(within(editor).queryByRole('heading', { level: 2 })).toBeNull();
     });
 
     it('shows the table and Add source when the source id is unknown', async () => {
-      renderSourcesPage('/sources?source=missing');
+      renderSection(`${SECTION_PATH}?source=missing`);
 
       await waitFor(() => {
         expect(screen.getByRole('alert')).toHaveTextContent('Source not found');
@@ -953,8 +1038,64 @@ describe('SourcesPage', () => {
       expect(new URLSearchParams(window.location.search).get('source')).toBe('missing');
     });
 
+    it('closes an editor opened over an unknown source straight back to a clean list', async () => {
+      mockGetSource.mockImplementation((_workspace: string, id: string) =>
+        id === 'src-1'
+          ? Promise.resolve(mockSources[0])
+          : Promise.reject(new Error('Source not found'))
+      );
+      renderSection(`${SECTION_PATH}?source=missing`);
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent('Source not found');
+      });
+      const entries = window.history.length;
+
+      await openGitHubEditor();
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => {
+        expect(document.querySelector('.source-details')).toBeNull();
+        expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
+      });
+      expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(window.history.length).toBe(entries);
+    });
+
+    it('keeps returning to the list entry after opening a second source from an error', async () => {
+      mockGetSource.mockImplementation((_workspace: string, id: string) =>
+        id === 'src-1'
+          ? Promise.resolve(mockSources[0])
+          : Promise.reject(new Error('Source not found'))
+      );
+      window.history.pushState({}, '', '/chats');
+      renderSection();
+      const failing = await screen.findByText('Error Source');
+      fireEvent.click(failing.closest('.source-card') as HTMLElement);
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent('Source not found');
+      });
+
+      await openGitHubEditor();
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => {
+        expect(document.querySelector('.source-details')).toBeNull();
+      });
+      expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+
+      act(() => {
+        window.history.back();
+      });
+
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/chats');
+      });
+    });
+
     it('opens the editor from Enter or Space on a focused row', async () => {
-      renderSourcesPage();
+      renderSection();
       const row = (await screen.findByText('GitHub Repository')).closest(
         '.source-card'
       ) as HTMLElement;
@@ -981,7 +1122,7 @@ describe('SourcesPage', () => {
     });
 
     it('omits blank credentials from the save payload', async () => {
-      renderSourcesPage();
+      renderSection();
       await openGitHubEditor();
 
       const token = screen.getByLabelText(/Access Token/);

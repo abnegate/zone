@@ -22,6 +22,7 @@ export function useSettingsAccess(): SettingsAccessState {
       workspace: currentWorkspace !== null,
       workspaceRole,
       installsModels: hasPermission(PERMISSIONS.MODELS.READ),
+      readsSources: hasPermission(PERMISSIONS.SOURCES.READ),
     },
     loading: loading || resolvingRole,
     resolvingWorkspaceRole,

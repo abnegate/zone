@@ -397,6 +397,80 @@ describe('tasks page layout', () => {
     expect(cards).not.toContain('.task-card-overlay .task-card-heading');
   });
 
+  it('keeps the card details on one line that never wraps', () => {
+    const details = rule(cards, '.task-card-meta');
+    expect(details).toContain('white-space: nowrap');
+    expect(details).not.toContain('flex-wrap');
+    const project = rule(cards, '.task-card-project');
+    expect(project).toContain('min-width: 0');
+    expect(project).toContain('text-overflow: ellipsis');
+    expect(rule(cards, '.task-card-fact')).toContain('flex-shrink: 0');
+    expect(cards).not.toContain('.task-card-agentic::before');
+  });
+
+  it('lays each link on a card out as one row behind a shared label column', () => {
+    expect(rule(cards, '.task-card-links')).toContain('--task-card-link-label: 4rem');
+    expect(rule(cards, '.task-card-link-label,\n.task-card .task-relation-label')).toContain(
+      'flex: 0 0 var(--task-card-link-label)'
+    );
+    expect(rule(cards, '.task-card .task-relation')).toContain('flex-direction: row');
+    expect(rule(cards, '.task-card-pull-request')).toContain('min-height: var(--ui-space-6)');
+  });
+
+  it('stacks a relation into rows only while it is expanded', () => {
+    const relations = read(join(boardStyles, 'Relation.css'));
+    expect(rule(cards, '.task-card .task-relation-list')).toContain('flex-direction: row');
+    const expanded = rule(cards, '.task-card .task-relation[data-expanded] .task-relation-list');
+    expect(expanded).toContain('flex-direction: column');
+    expect(expanded).toContain('align-items: stretch');
+    const toggle = rule(relations, '.task-relation-toggle');
+    expect(toggle).toContain('z-index: 1');
+    expect(toggle).toContain('min-width: var(--ui-space-6)');
+    expect(toggle).toContain('min-height: var(--ui-space-6)');
+    expect(rule(relations, '.task-relation-toggle:focus-visible')).toContain(
+      'outline: 2px solid var(--ui-border-focus)'
+    );
+  });
+
+  it('gives the title the full width of the card unless the menu is always shown', () => {
+    expect(rule(cards, '.task-card-heading')).not.toContain('padding-right');
+    expect(rule(cards, '.task-card-heading:has(.task-title-edit)')).toContain(
+      'padding-right: var(--ui-control-height-sm)'
+    );
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-heading')).toContain(
+      'padding-right: var(--ui-control-height-sm)'
+    );
+    expect(rule(cards, '.task-card-menu')).toContain('background: var(--task-card-surface)');
+    expect(rule(cards, '.task-card-menu::before')).toContain(
+      'linear-gradient(to right, transparent, var(--task-card-surface))'
+    );
+    expect(rule(cards, ":root[data-theme='dark'] .task-card:hover")).toContain(
+      '--task-card-surface: var(--ui-bg-hover)'
+    );
+    expect(rule(touch, '.task-card-menu::before')).toContain('content: none');
+    expect(rule(cards, '.task-card:has(.task-title-edit) .task-card-menu::before')).toContain(
+      'content: none'
+    );
+  });
+
+  it('tints the pull request icon by status and leaves the rest of the row quiet', () => {
+    expect(rule(cards, '.task-card-pull-request .pull-request-icon')).toContain(
+      'color: var(--ui-text-muted)'
+    );
+    for (const [status, colour] of [
+      ['open', '--ui-success-600'],
+      ['merged', '--ui-accent'],
+      ['closed', '--ui-error-600'],
+    ]) {
+      expect(rule(cards, `.task-card-pull-request-${status} .pull-request-icon`)).toContain(
+        `color: var(${colour})`
+      );
+    }
+    expect(cards).not.toContain('.task-card-pull-request-pending');
+    expect(cards).not.toContain('.task-card-pull-request-untinted');
+  });
+
   it('makes room above a focused card for its ring without moving the card', () => {
     expect(rule(columns, '.board-column')).toContain('--board-column-ring: 3px');
     expect(rule(columns, '.board-column-body')).toContain(
@@ -532,8 +606,8 @@ describe('projects page layout', () => {
   });
 });
 
-describe('sources page layout', () => {
-  const css = read(join(features, 'sources', 'pages', 'SourcesPage.css'));
+describe('sources section layout', () => {
+  const css = read(join(features, 'sources', 'components', 'SourcesSection.css'));
 
   it('lays sources out as a 56px-row table with a 32px header', () => {
     expect(rule(css, '.sources-table-wrapper')).toContain('border: 1px solid var(--ui-border)');
@@ -553,10 +627,58 @@ describe('sources page layout', () => {
       'padding: var(--ui-panel-padding) var(--ui-gutter)'
     );
     expect(rule(css, '.source-details-actions')).toContain('height: var(--ui-header-height)');
+    expect(rule(css, '.source-details-header h3')).toContain('font-size: var(--ui-heading-size)');
+  });
+
+  it('sticks the editor footer to the settings scroller instead of scrolling a body of its own', () => {
+    const footer = rule(css, '.source-details-actions');
+    expect(footer).toContain('position: sticky');
+    expect(footer).toContain('bottom: 0;');
+    expect(footer).toContain('background: var(--ui-bg-elevated)');
+    expect(footer).toContain('border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card)');
+    expect(css).not.toContain('.page-body');
+    expect(rule(css, '.source-details')).not.toContain('flex: 1');
+    expect(rule(css, '.source-details')).not.toContain('min-height');
+    expect(rule(css, '.source-details-body')).not.toContain('overflow');
+    expect(rule(css, '.source-details-body')).not.toContain('flex: 1');
+  });
+
+  it('shows source form hints in full over the two-line settings clamp in any import order', () => {
+    const settings = read(join(features, 'settings', 'pages', 'SettingsPage.css'));
+    expect(rule(settings, '.settings-page .form-hint')).toContain('display: -webkit-box');
+    const hint = rule(css, '.settings-page .source-details .form-hint');
+    expect(hint).toContain('display: block');
+    expect(hint).toContain('overflow: visible');
+    expect(hint).toContain('-webkit-line-clamp: unset');
+  });
+
+  it('leaves the empty state to sit in the section flow like its sibling sections', () => {
+    expect(css).not.toContain('.sources-empty');
   });
 
   it('aligns the access token disclosure with the field labels', () => {
     expect(rule(css, '.github-configuration > .ui-btn-link')).toContain('padding-inline: 0');
+  });
+
+  it('drops the URL and verified columns when the settings column is too narrow for the actions', () => {
+    expect(rule(css, '.sources-table-wrapper')).toContain('container-type: inline-size');
+    const desktop = media(css, '(min-width: 769px)');
+    expect(desktop).toContain('@container (max-width: 48rem)');
+    expect(
+      rule(
+        desktop,
+        '.sources-table th:nth-child(4),\n.sources-table td:nth-child(4),\n.sources-table th:nth-child(5),\n.sources-table td:nth-child(5)'
+      )
+    ).toContain('display: none');
+    const name = rule(desktop, '.sources-table td:first-child');
+    expect(name).toContain('width: 100%');
+    expect(name).toContain('max-width: 0');
+  });
+
+  it('lets the URL column absorb the spare width so the actions fit the settings column', () => {
+    const cell = rule(css, '.sources-table .source-url-cell');
+    expect(cell).toContain('width: 100%');
+    expect(cell).toContain('max-width: 0');
   });
 });
 
@@ -573,6 +695,14 @@ describe('settings page layout', () => {
     const body = rule(css, '.settings-page .page-body:has(.settings-actions)');
     expect(body).toContain('padding-bottom: 0');
     expect(body).toContain('flex-direction: column');
+  });
+
+  it('pads the scroller under the source editor footer so a focused field scrolls clear of it', () => {
+    const body = rule(css, '.settings-page .page-body:has(.source-details-actions)');
+    expect(body).toContain('padding-bottom: 0');
+    expect(body).toContain(
+      'scroll-padding-bottom: calc(var(--ui-header-height) + var(--ui-space-2))'
+    );
   });
 
   it('keeps feature setup in a settings section without a content card', () => {

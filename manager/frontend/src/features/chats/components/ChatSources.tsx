@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 import type { Source } from '../../sources/types';
 import type { ChatSource } from '../types';
 
@@ -138,8 +139,8 @@ export function ChatSources({ attached, available, loading, error, onChange }: C
           </div>
           {available.length === 0 ? (
             <p className="chat-sources-empty">
-              No sources in this workspace yet. Connect a repository, folder or page under Sources
-              first.
+              No sources in this workspace yet. Connect a repository, folder or page in{' '}
+              {SOURCES_LOCATION} first.
             </p>
           ) : (
             <div className="chat-sources-options">

@@ -455,6 +455,11 @@
   padding-bottom: 0;
 }
 
+.settings-page .page-body:has(.source-details-actions) {
+  padding-bottom: 0;
+  scroll-padding-bottom: calc(var(--ui-header-height) + var(--ui-space-2));
+}
+
 .settings-form:has(.settings-actions) {
   flex: 1;
 }

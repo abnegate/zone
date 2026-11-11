@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { SessionsSection } from '../../auth/components';
+import { SourcesSection } from '../../sources/components';
 import { McpServersSection, WorkspaceMcpServersSection } from '../mcp';
 import {
   allowsOrganization,
@@ -69,6 +70,8 @@ function workspaceContent(
           readOnly={!allowsWorkspace(access.workspaceRole, WORKSPACE_EDIT_ROLE.folders)}
         />
       );
+    case SettingsSection.Sources:
+      return <SourcesSection />;
     case SettingsSection.Members:
       return workspaceId !== null && organizationId !== null ? (
         <WorkspaceMembersSection workspaceId={workspaceId} orgId={organizationId} />

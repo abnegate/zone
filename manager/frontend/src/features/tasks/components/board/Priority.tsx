@@ -4,7 +4,7 @@ export interface PriorityProps {
 
 export function Priority({ value }: PriorityProps) {
   return (
-    <span className="task-card-priority" role="img" aria-label={`Priority ${value}`}>
+    <span className="task-card-fact task-card-priority" role="img" aria-label={`Priority ${value}`}>
       P{value}
     </span>
   );

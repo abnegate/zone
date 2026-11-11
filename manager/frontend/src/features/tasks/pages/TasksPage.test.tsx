@@ -9,6 +9,7 @@ import { chooseMenuItem, openMenu } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
+import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 import { STAGE_IDS, TASK_STATUSES } from '../status';
 import type { CreateTaskRequest, Task, TaskRun, TaskRunLog, TaskStatus } from '../types';
 import TasksPage from './TasksPage';
@@ -216,6 +217,10 @@ const mockTasks: Task[] = [
     updated_at: '2024-01-12T00:00:00Z',
   },
 ];
+
+const PULL_REQUEST = 'Pull request #123 merged';
+
+const PULL_REQUEST_CHIP = 'PR #123 · merged';
 
 const TITLES: Record<TaskStatus, string> = {
   created: 'Draft the spec',
@@ -671,9 +676,9 @@ describe('TasksPage', () => {
     expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
   });
 
-  it('does not open the editor from View PR', async () => {
+  it('does not open the editor from the pull request link', async () => {
     renderTasksPage();
-    const link = await screen.findByRole('link', { name: 'View PR' });
+    const link = await screen.findByRole('link', { name: PULL_REQUEST });
     fireEvent.click(link);
     expect(document.querySelector('section.task-details')).toBeNull();
     fireEvent.keyDown(link, { key: 'Enter' });
@@ -797,14 +802,13 @@ describe('TasksPage', () => {
     expect(screen.getByText('Autonomous agent workflows')).toBeInTheDocument();
   });
 
-  it('displays agentic badge for agentic tasks', async () => {
+  it('marks agentic tasks on their cards', async () => {
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Agentic')).toBeInTheDocument();
-    });
+    const mark = await screen.findByRole('img', { name: 'Agentic' });
+    expect(mark.closest('.task-card')).toHaveTextContent('Implement login');
   });
 
-  it('names the projects on each card, with fallbacks for none and unknown', async () => {
+  it('names the projects on each card, with a fallback for unknown and nothing for none', async () => {
     mockGetTasks.mockImplementation(() =>
       Promise.resolve([
         ...mockTasks,
@@ -818,8 +822,10 @@ describe('TasksPage', () => {
     const board = screen.getByRole('region', { name: 'Tasks' });
     expect(within(board).getByText('Project Alpha')).toBeInTheDocument();
     expect(within(board).getByText('Project Beta')).toBeInTheDocument();
-    expect(within(board).getByText('No projects')).toBeInTheDocument();
     expect(within(board).getByText('Unknown')).toBeInTheDocument();
+    expect(within(board).queryByText('No projects')).not.toBeInTheDocument();
+    const orphan = (await openTitle('Orphan')).closest('li.task-card');
+    expect(orphan?.querySelector('.task-card-project')).toBeNull();
   });
 
   it('displays task priority', async () => {
@@ -1208,17 +1214,16 @@ describe('TasksPage', () => {
     });
   });
 
-  it('shows agentic styling for agentic task cards', async () => {
+  it('leaves the agentic mark off manual task cards', async () => {
     renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
 
-    const agenticCard = screen.getByText('Implement login').closest('.task-card');
-    expect(agenticCard).toHaveClass('task-card-agentic');
-    expect(screen.getByText('Fix button styling').closest('.task-card')).not.toHaveClass(
-      'task-card-agentic'
-    );
+    const manual = screen.getByText('Fix button styling').closest<HTMLElement>('.task-card');
+    expect(manual).not.toBeNull();
+    expect(within(manual as HTMLElement).queryByRole('img', { name: 'Agentic' })).toBeNull();
+    expect(screen.getAllByRole('img', { name: 'Agentic' })).toHaveLength(1);
   });
 
   it('enables agentic mode in create wizard', async () => {
@@ -1285,6 +1290,38 @@ describe('TasksPage', () => {
     fireEvent.click(checkbox);
 
     expect(screen.getByText(/Project uses:/)).toBeInTheDocument();
+  });
+
+  it('points to workspace settings when agentic mode has no source to use', async () => {
+    mockGetSources.mockImplementation(() => Promise.resolve([]));
+    renderTasksPage();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'New task' })).not.toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Project Beta/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Project Beta/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'Test Task' } });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Test description' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    const checkbox = await screen.findByRole('checkbox', { name: /Enable Agentic Mode/i });
+    fireEvent.click(checkbox);
+
+    expect(
+      screen.getByText(`No sources configured. Add one in ${SOURCES_LOCATION}.`)
+    ).toBeInTheDocument();
   });
 
   it('does not show fictional phases or logs after a failed start', async () => {
@@ -1452,21 +1489,22 @@ describe('TasksPage', () => {
     });
   });
 
-  it('displays PR status badge when PR exists', async () => {
+  it('displays the pull request number and status in one row when a PR exists', async () => {
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('PR merged')).toBeInTheDocument();
-    });
+    const link = await screen.findByRole('link', { name: PULL_REQUEST });
+    expect(link).toHaveClass('task-card-pull-request-merged');
+    expect(link).toHaveTextContent('Pull request#123merged');
+    expect(screen.getAllByText('Pull request')).toHaveLength(1);
   });
 
-  it('displays PR link when pr_url exists', async () => {
+  it('links the pull request row when pr_url exists', async () => {
     renderTasksPage();
     await waitFor(() => {
-      const prLink = screen.getByRole('link', { name: 'View PR' });
-      expect(prLink).toHaveAttribute('href', 'https://github.com/test/repo/pull/123');
-      expect(prLink).toHaveAttribute('target', '_blank');
-      expect(prLink).toHaveAttribute('rel', 'noopener noreferrer');
-      expect(prLink.closest('.task-card')).not.toBeNull();
+      const link = screen.getByRole('link', { name: PULL_REQUEST });
+      expect(link).toHaveAttribute('href', 'https://github.com/test/repo/pull/123');
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(link.closest('.task-card')).not.toBeNull();
     });
   });
 
@@ -1476,8 +1514,9 @@ describe('TasksPage', () => {
     );
 
     renderTasksPage();
-    expect(await screen.findByText('PR pending')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
+    const label = await screen.findByText('Pull request');
+    expect(label.closest('.task-card-pull-request')).toHaveTextContent('Pull requestpending');
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 
   it('shows no pull request on a card without one', async () => {
@@ -1485,8 +1524,8 @@ describe('TasksPage', () => {
 
     renderTasksPage();
     await screen.findByText('Implement login');
-    expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
-    expect(screen.queryByText(/^PR /)).not.toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pull request')).not.toBeInTheDocument();
   });
 
   it('displays every pull request status', async () => {
@@ -1500,9 +1539,398 @@ describe('TasksPage', () => {
 
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('PR pending')).toBeInTheDocument();
-      expect(screen.getByText('PR open')).toBeInTheDocument();
-      expect(screen.getByText('PR closed')).toBeInTheDocument();
+      const rows = Array.from(document.querySelectorAll('.task-card-pull-request'));
+      expect(rows.map((row) => row.textContent)).toEqual([
+        'Pull requestpending',
+        'Pull requestopen',
+        'Pull requestclosed',
+      ]);
+    });
+  });
+
+  describe('related tasks', () => {
+    const spec: Task = { ...mockTasks[1], id: 'task-spec', title: 'Write the spec' };
+    const login: Task = { ...mockTasks[0], dependencies: ['task-spec', 'task-gone'] };
+    const release: Task = {
+      ...mockTasks[1],
+      id: 'task-release',
+      title: 'Ship the release',
+      status: 'review',
+      dependencies: ['task-1'],
+      pr_url: null,
+      pr_status: null,
+      branch_name: null,
+    };
+    const linked: Task[] = [login, spec, release];
+
+    beforeEach(() => {
+      mockGetTasks.mockImplementation(() => Promise.resolve(linked));
+      mockGetTask.mockImplementation((id: string) => {
+        const found = linked.find((task) => task.id === id);
+        return found ? Promise.resolve(found) : Promise.reject(new Error('Task not found'));
+      });
+    });
+
+    function cardOf(title: string): HTMLElement {
+      const item = screen.getByRole('button', { name: title }).closest<HTMLElement>('li.task-card');
+      if (!item) throw new Error(`No card for ${title}`);
+      return item;
+    }
+
+    async function editing(title: string): Promise<HTMLElement> {
+      await screen.findByRole('button', { name: `Rename ${title}` });
+      return screen.getByRole('region', { name: 'Links' });
+    }
+
+    it('lists on a card what it depends on and what it blocks', async () => {
+      renderTasksPage();
+      await openTitle('Implement login');
+
+      const host = within(cardOf('Implement login'));
+      expect(
+        within(host.getByRole('list', { name: 'Depends on' }))
+          .getAllByRole('listitem')
+          .map((item) => item.textContent)
+      ).toEqual(['Write the specCompleted', '1 unknown']);
+      expect(
+        within(host.getByRole('list', { name: 'Blocks' }))
+          .getAllByRole('button')
+          .map((button) => button.getAttribute('aria-label'))
+      ).toEqual(['Open Ship the release']);
+      expect(
+        within(cardOf('Write the spec')).getByRole('button', { name: 'Open Implement login' })
+      ).toBeInTheDocument();
+    });
+
+    it('opens the related task from a card, not the card it is listed on', async () => {
+      renderTasksPage();
+      await openTitle('Implement login');
+
+      fireEvent.click(
+        within(cardOf('Implement login')).getByRole('button', { name: 'Open Write the spec' })
+      );
+
+      await screen.findByRole('button', { name: 'Rename Write the spec' });
+      expect(new URLSearchParams(window.location.search).get('task')).toBe('task-spec');
+      expect(mockGetTask).toHaveBeenCalledWith('task-spec');
+      expect(mockGetTask).not.toHaveBeenCalledWith('task-1');
+    });
+
+    it('returns to the card of the related task that was opened when the editor closes', async () => {
+      renderTasksPage();
+      await openTitle('Implement login');
+      fireEvent.click(
+        within(cardOf('Implement login')).getByRole('button', { name: 'Open Write the spec' })
+      );
+      await screen.findByRole('button', { name: 'Rename Write the spec' });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => expect(focusedTitle()).toBe('task-spec'));
+    });
+
+    describe('with the project filter on', () => {
+      beforeEach(() => {
+        mockGetTasks.mockImplementation((_workspace: string, project?: string) =>
+          Promise.resolve(
+            project ? linked.filter((task) => task.project_ids.includes(project)) : linked
+          )
+        );
+      });
+
+      async function filterToAlpha(): Promise<void> {
+        renderTasksPage();
+        await openTitle('Implement login');
+        chooseSelect('Filter by project', 'Project Alpha');
+        await waitFor(() =>
+          expect(screen.queryByRole('button', { name: 'Write the spec' })).not.toBeInTheDocument()
+        );
+      }
+
+      it('names the related tasks of other projects', async () => {
+        await filterToAlpha();
+
+        const host = within(cardOf('Implement login'));
+        await waitFor(() =>
+          expect(
+            within(host.getByRole('list', { name: 'Depends on' }))
+              .getAllByRole('listitem')
+              .map((item) => item.textContent)
+          ).toEqual(['Write the specCompleted', '1 unknown'])
+        );
+        expect(
+          within(host.getByRole('list', { name: 'Blocks' }))
+            .getAllByRole('button')
+            .map((button) => button.getAttribute('aria-label'))
+        ).toEqual(['Open Ship the release']);
+      });
+
+      it('says so when the tasks of other projects cannot be read', async () => {
+        mockGetTasks.mockImplementation((_workspace: string, project?: string) =>
+          project
+            ? Promise.resolve(linked.filter((task) => task.project_ids.includes(project)))
+            : Promise.reject(new Error('The workspace could not be read'))
+        );
+        renderTasksPage();
+        await screen.findByRole('alert');
+        chooseSelect('Filter by project', 'Project Alpha');
+
+        await waitFor(() =>
+          expect(screen.getByRole('alert')).toHaveTextContent(
+            'Tasks in other projects could not be loaded'
+          )
+        );
+        expect(screen.getByRole('button', { name: 'Implement login' })).toBeInTheDocument();
+      });
+
+      it('returns to the card a filtered-out related task was opened from', async () => {
+        await filterToAlpha();
+        fireEvent.click(
+          await within(cardOf('Implement login')).findByRole('button', {
+            name: 'Open Write the spec',
+          })
+        );
+        await screen.findByRole('button', { name: 'Rename Write the spec' });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+        await waitFor(() => expect(focusedTitle()).toBe('task-1'));
+      });
+    });
+
+    it('lists the links in the editor from the tasks the board already loaded', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+
+      const links = within(await editing('Implement login'));
+      expect(
+        within(links.getByRole('list', { name: 'Depends on' }))
+          .getAllByRole('listitem')
+          .map((item) => item.textContent)
+      ).toEqual(['Write the specCompleted', '1 unknown']);
+      expect(
+        within(links.getByRole('list', { name: 'Blocks' }))
+          .getAllByRole('listitem')
+          .map((item) => item.textContent)
+      ).toEqual(['Ship the releaseIn review']);
+      expect(mockGetTasks).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows the pull request and branch in the editor', async () => {
+      renderTasksPage('/tasks?task=task-spec');
+
+      const links = within(await editing('Write the spec'));
+      expect(links.getByRole('link', { name: PULL_REQUEST_CHIP })).toHaveAttribute(
+        'href',
+        'https://github.com/test/repo/pull/123'
+      );
+      expect(links.getByText('feature/fix-button-styling')).toBeInTheDocument();
+      expect(links.getByRole('button', { name: 'Open Implement login' })).toBeInTheDocument();
+    });
+
+    it('leaves the Links section out of the editor of a task with nothing linked', async () => {
+      mockGetTasks.mockImplementation(() => Promise.resolve([mockTasks[0]]));
+      mockGetTask.mockImplementation(() => Promise.resolve(mockTasks[0]));
+      renderTasksPage('/tasks?task=task-1');
+
+      await screen.findByRole('button', { name: 'Rename Implement login' });
+      expect(screen.queryByRole('region', { name: 'Links' })).not.toBeInTheDocument();
+    });
+
+    it('switches the editor to a related task and back to its card on close', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+      const links = within(await editing('Implement login'));
+
+      fireEvent.click(links.getByRole('button', { name: 'Open Ship the release' }));
+
+      const next = within(await editing('Ship the release'));
+      expect(new URLSearchParams(window.location.search).get('task')).toBe('task-release');
+      expect(mockGetTask).toHaveBeenCalledWith('task-release');
+      expect(screen.queryByRole('button', { name: 'Rename Implement login' })).toBeNull();
+      expect(next.getByRole('button', { name: 'Open Implement login' })).toBeInTheDocument();
+      expect(mockUpdateTask).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+      await waitFor(() => expect(focusedTitle()).toBe('task-release'));
+    });
+
+    it('takes focus to the title of the related task the editor switched to', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+      const related = within(await editing('Implement login')).getByRole('button', {
+        name: 'Open Ship the release',
+      });
+      related.focus();
+
+      fireEvent.click(related);
+
+      const title = await screen.findByRole('button', { name: 'Rename Ship the release' });
+      await waitFor(() => expect(document.activeElement).toBe(title));
+    });
+
+    it('leaves focus alone when the editor opens from the board', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+
+      const title = await screen.findByRole('button', { name: 'Rename Implement login' });
+      expect(document.activeElement).not.toBe(title);
+    });
+
+    it('keeps focus on the related task of a card that a reload moves', async () => {
+      let stored = linked;
+      mockGetTasks.mockImplementation(() => Promise.resolve(stored));
+      renderTasksPage();
+      await openTitle('Implement login');
+      const host = within(cardOf('Implement login'));
+      host.getByRole('button', { name: 'Open Ship the release' }).focus();
+
+      stored = stored.map((task) =>
+        task.id === 'task-1' ? { ...task, status: 'in_progress' } : task
+      );
+      const loads = mockGetTasks.mock.calls.length;
+      await act(async () => {
+        window.dispatchEvent(new Event('visibilitychange'));
+        await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(loads + 1));
+        await mockGetTasks.mock.results[loads].value;
+      });
+      await waitFor(() => {
+        expect(column('In progress').querySelector('[data-task-id="task-1"]')).not.toBeNull();
+      });
+
+      expect(document.activeElement).toBe(
+        within(column('In progress')).getByRole('button', { name: 'Open Ship the release' })
+      );
+    });
+
+    describe('a card that folds a relation', () => {
+      const plan: Task = { ...mockTasks[0], id: 'task-plan', title: 'Plan the work' };
+      const host: Task = {
+        ...login,
+        dependencies: ['task-spec', 'task-plan'],
+        pr_url: 'https://github.com/test/repo/pull/9',
+        pr_status: 'open',
+      };
+      let stored: Task[];
+
+      beforeEach(() => {
+        stored = [host, spec, plan, release];
+        mockGetTasks.mockImplementation(() => Promise.resolve(stored));
+        mockGetTask.mockImplementation((id: string) => {
+          const found = stored.find((task) => task.id === id);
+          return found ? Promise.resolve(found) : Promise.reject(new Error('Task not found'));
+        });
+      });
+
+      async function reload(changed: Partial<Task> & Pick<Task, 'id'>): Promise<void> {
+        stored = stored.map((task) => (task.id === changed.id ? { ...task, ...changed } : task));
+        const loads = mockGetTasks.mock.calls.length;
+        await act(async () => {
+          window.dispatchEvent(new Event('visibilitychange'));
+          await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(loads + 1));
+          await mockGetTasks.mock.results[loads].value;
+        });
+      }
+
+      function named(): (string | null)[] {
+        const list = within(cardOf('Implement login')).getByRole('list', { name: 'Depends on' });
+        return within(list)
+          .getAllByRole('button', { name: /^Open / })
+          .map((button) => button.textContent);
+      }
+
+      it('stays expanded after a task it only named once expanded is opened and closed', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        expect(named()).toEqual(['Plan the work']);
+
+        fireEvent.click(within(cardOf('Implement login')).getByRole('button', { name: '+1 more' }));
+        expect(named()).toEqual(['Plan the work', 'Write the spec']);
+        fireEvent.click(
+          within(cardOf('Implement login')).getByRole('button', { name: 'Open Write the spec' })
+        );
+        await editing('Write the spec');
+        fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+        await openTitle('Implement login');
+
+        expect(named()).toEqual(['Plan the work', 'Write the spec']);
+        const fold = within(cardOf('Implement login')).getByRole('button', { name: 'Show less' });
+        expect(fold).toHaveAttribute('aria-expanded', 'true');
+
+        fireEvent.click(fold);
+        expect(named()).toEqual(['Plan the work']);
+      });
+
+      it('stays expanded on a card that a reload moves, and keeps focus on its count', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        const count = within(cardOf('Implement login')).getByRole('button', { name: '+1 more' });
+        fireEvent.click(count);
+        count.focus();
+
+        await reload({ id: 'task-1', status: 'in_progress' });
+        await waitFor(() => {
+          expect(column('In progress').querySelector('[data-task-id="task-1"]')).not.toBeNull();
+        });
+
+        expect(named()).toEqual(['Plan the work', 'Write the spec']);
+        expect(document.activeElement).toBe(
+          within(column('In progress')).getByRole('button', { name: 'Show less' })
+        );
+      });
+
+      it('keeps focus on the pull request of a card that a reload moves', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        within(cardOf('Implement login'))
+          .getByRole('link', { name: 'Pull request #9 open' })
+          .focus();
+
+        await reload({ id: 'task-1', status: 'in_progress' });
+        await waitFor(() => {
+          expect(column('In progress').querySelector('[data-task-id="task-1"]')).not.toBeNull();
+        });
+
+        expect(document.activeElement).toBe(
+          within(column('In progress')).getByRole('link', { name: 'Pull request #9 open' })
+        );
+      });
+
+      it('moves focus to the title when the related task that had it is no longer named', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        within(cardOf('Implement login'))
+          .getByRole('button', { name: 'Open Plan the work' })
+          .focus();
+
+        await reload({ id: 'task-plan', status: 'complete' });
+        await waitFor(() => expect(named()).toEqual(['Write the spec']));
+
+        expect(focusedTitle()).toBe('task-1');
+      });
+
+      it('moves focus to the title when the count that had it has nothing left to fold', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        const count = within(cardOf('Implement login')).getByRole('button', { name: '+1 more' });
+        fireEvent.click(count);
+        count.focus();
+
+        await reload({ id: 'task-1', dependencies: ['task-plan'] });
+        await waitFor(() => expect(named()).toEqual(['Plan the work']));
+        expect(
+          within(cardOf('Implement login')).queryByRole('button', { name: /more|Show less/ })
+        ).toBeNull();
+        expect(focusedTitle()).toBe('task-1');
+
+        await reload({ id: 'task-1', dependencies: ['task-spec', 'task-plan'] });
+        await waitFor(() =>
+          expect(
+            within(cardOf('Implement login')).getByRole('button', { name: '+1 more' })
+          ).toHaveAttribute('aria-expanded', 'false')
+        );
+        expect(named()).toEqual(['Plan the work']);
+      });
     });
   });
 

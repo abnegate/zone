@@ -268,6 +268,57 @@ describe('SettingsPage', () => {
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
+
+    it('lists Sources between Folders and Members for a user who can read sources', () => {
+      signInAs('member', 'viewer', [PERMISSIONS.MODELS.READ, PERMISSIONS.SOURCES.READ]);
+
+      renderAt('/settings/workspace/sources');
+
+      expect(linkLabels('Workspace')).toEqual([
+        'General',
+        'AI',
+        'Folders',
+        'Sources',
+        'Members',
+        'MCP servers',
+      ]);
+      expect(location()).toBe('/settings/workspace/sources');
+      expect(screen.getByTestId('settings-content').textContent).toBe('workspace/sources');
+    });
+
+    it('sends a user who cannot read sources deep-linking to Sources to the first visible section', () => {
+      signInAs('owner', 'admin');
+
+      renderAt('/settings/workspace/sources?source=abc#details');
+
+      expect(location()).toBe('/settings/workspace/general?source=abc#details');
+      expect(screen.getByTestId('settings-content').textContent).toBe('workspace/general');
+      expect(linkLabels('Workspace')).toEqual([
+        'General',
+        'AI',
+        'Folders',
+        'Members',
+        'MCP servers',
+      ]);
+    });
+
+    it('keeps a user who can read sources deep-linking to a source exactly where they asked', () => {
+      signInAs('owner', 'admin', [PERMISSIONS.MODELS.READ, PERMISSIONS.SOURCES.READ]);
+
+      renderAt('/settings/workspace/sources?source=abc#details');
+
+      expect(location()).toBe('/settings/workspace/sources?source=abc#details');
+      expect(screen.getByTestId('settings-content').textContent).toBe('workspace/sources');
+    });
+
+    it('hides Sources outside a workspace even from a user who can read sources', () => {
+      signInAs('admin', null, [PERMISSIONS.MODELS.READ, PERMISSIONS.SOURCES.READ]);
+
+      renderAt('/settings/workspace/sources');
+
+      expect(location()).toBe('/settings/organization/ai');
+      expect(screen.queryByRole('link', { name: 'Sources' })).not.toBeInTheDocument();
+    });
   });
 
   describe('desktop', () => {
@@ -292,7 +343,16 @@ describe('SettingsPage', () => {
         workspace: true,
         workspaceRole: 'admin',
         installsModels: true,
+        readsSources: false,
       });
+    });
+
+    it('passes whether the user can read sources to the content', () => {
+      signInAs('owner', 'admin', [PERMISSIONS.MODELS.READ, PERMISSIONS.SOURCES.READ]);
+
+      renderAt('/settings/workspace/sources');
+
+      expect(contentAccess.at(-1)?.readsSources).toBe(true);
     });
 
     it('sends a hidden deep link to the first visible section', () => {

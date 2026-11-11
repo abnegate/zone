@@ -53,6 +53,10 @@ mock.module('../../auth/components', () => ({
   SessionsSection: marker('sessions-section'),
 }));
 
+mock.module('../../sources/components', () => ({
+  SourcesSection: marker('sources-section'),
+}));
+
 let SettingsContent: typeof import('./SettingsContent').default;
 
 beforeAll(async () => {
@@ -73,6 +77,7 @@ function access(
     workspace: true,
     workspaceRole,
     installsModels: true,
+    readsSources: true,
   };
 }
 
@@ -302,6 +307,12 @@ describe('SettingsContent', () => {
     }[] = [
       {
         group: SettingsGroup.Workspace,
+        section: SettingsSection.Sources,
+        testId: 'sources-section',
+        props: {},
+      },
+      {
+        group: SettingsGroup.Workspace,
         section: SettingsSection.Members,
         testId: 'workspace-members-section',
         props: { workspaceId, orgId: organizationId },
@@ -363,6 +374,28 @@ describe('SettingsContent', () => {
           group={SettingsGroup.You}
           section={SettingsSection.Billing}
           access={access('admin', 'admin')}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders no sources without permission to read them', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Workspace}
+          section={SettingsSection.Sources}
+          access={{ ...access('admin'), readsSources: false }}
+        />
+      );
+      expect(container.innerHTML).toBe('');
+    });
+
+    it('renders no sources outside a workspace', () => {
+      const { container } = render(
+        <SettingsContent
+          group={SettingsGroup.Workspace}
+          section={SettingsSection.Sources}
+          access={{ ...access('admin'), workspace: false }}
         />
       );
       expect(container.innerHTML).toBe('');

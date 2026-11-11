@@ -1,0 +1,32 @@
+.task-pull-request {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  flex-shrink: 0;
+  text-decoration: none;
+  border-radius: var(--ui-radius-md);
+}
+
+.task-pull-request-status {
+  flex-shrink: 0;
+}
+
+:root[data-theme='dark'] .task-pull-request-status.ui-badge-neutral {
+  background-color: var(--ui-bg-active);
+}
+
+.task-pull-request .link-icon {
+  flex-shrink: 0;
+  width: var(--ui-space-2);
+  height: var(--ui-space-2);
+}
+
+.task-pull-request:hover .task-pull-request-status {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.task-pull-request:focus-visible {
+  outline: 2px solid var(--ui-border-focus);
+  outline-offset: 1px;
+}

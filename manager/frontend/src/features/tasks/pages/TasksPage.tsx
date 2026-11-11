@@ -9,8 +9,8 @@ import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard, DeleteTaskDialog, TaskDetail } from '../components';
-import { Board, Skeleton, View } from '../components/board';
-import { TASKS_KEY, useTask, useTasks } from '../hooks';
+import { Board, Skeleton, Unfolded, View } from '../components/board';
+import { TASKS_KEY, useTask, useTasks, useWorkspaceTasks } from '../hooks';
 import { TitleDraft } from '../TitleDraft';
 import type { BoardActions, Renaming, Task, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
@@ -19,6 +19,9 @@ import './TasksPage.css';
 const ALL_PROJECTS = '';
 
 const MOVE_FAILED = 'The task could not be moved';
+
+const RELATIONS_FAILED =
+  'Tasks in other projects could not be loaded, so related tasks outside this project are missing';
 
 export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -48,6 +51,9 @@ export default function TasksPage() {
     moveTask,
     deleteTask,
   } = useTasks(filterProject || undefined);
+  const filtered = filterProject !== ALL_PROJECTS;
+  const workspace = useWorkspaceTasks(filtered);
+  const known = workspace.tasks ?? tasks;
 
   const { projects, loading: projectsLoading } = useProjects('all');
   const { data: sources = [] } = useQuery({
@@ -65,6 +71,7 @@ export default function TasksPage() {
   const [executionTask, setExecutionTask] = useState<Task | null>(null);
   const [deleting, setDeleting] = useState<Task | null>(null);
   const [removed, setRemoved] = useState<string | null>(null);
+  const [followed, setFollowed] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   const projectNames = useMemo(
@@ -103,7 +110,22 @@ export default function TasksPage() {
     [searchParams, setSearchParams]
   );
 
+  const open = useCallback(
+    (task: Task, host?: Task) => {
+      if (host) view.trail.push(host.id);
+      view.trail.push(task.id);
+      openEditor(task.id);
+    },
+    [view, openEditor]
+  );
+
+  const follow = (task: Task) => {
+    setFollowed(task.id);
+    open(task);
+  };
+
   const closeEditor = () => {
+    setFollowed(null);
     setExecutionTask(null);
     const next = new URLSearchParams(searchParams);
     next.delete('task');
@@ -132,10 +154,7 @@ export default function TasksPage() {
 
   const actions = useMemo<BoardActions>(
     () => ({
-      open: (task) => {
-        view.opened = task.id;
-        openEditor(task.id);
-      },
+      open,
       run: setExecutionTask,
       rename: (task) => setRenaming({ id: task.id, draft: new TitleDraft(task.title) }),
       retitle: async (task, title) => {
@@ -155,12 +174,14 @@ export default function TasksPage() {
         }
       },
     }),
-    [openEditor, updateListedTask, moveTask, view]
+    [open, updateListedTask, moveTask]
   );
 
   const loading = tasksLoading || projectsLoading;
-  const displayError = tasksError || (editorFailed ? editorError : null);
-  const filtered = filterProject !== ALL_PROJECTS;
+  const displayError =
+    tasksError ||
+    (editorFailed ? editorError : null) ||
+    (workspace.error ? RELATIONS_FAILED : null);
 
   return (
     <div className="page page--workspace tasks-page">
@@ -205,8 +226,11 @@ export default function TasksPage() {
         ) : editorReady && editorTask ? (
           <TaskDetail
             task={editorTask}
+            tasks={known}
             projects={projects}
             sources={sources}
+            focusTitle={followed === editorTask.id}
+            onOpen={follow}
             onClose={closeEditor}
             onExecute={() => setExecutionTask(editorTask)}
             onSave={handleSave}
@@ -214,14 +238,17 @@ export default function TasksPage() {
         ) : loading ? (
           <Skeleton />
         ) : tasks.length > 0 ? (
-          <Board
-            tasks={tasks}
-            projects={projectNames}
-            renaming={renaming}
-            removed={removed}
-            view={view}
-            actions={actions}
-          />
+          <Unfolded value={view.unfolded}>
+            <Board
+              tasks={tasks}
+              known={known}
+              projects={projectNames}
+              renaming={renaming}
+              removed={removed}
+              view={view}
+              actions={actions}
+            />
+          </Unfolded>
         ) : tasksError ? null : (
           <EmptyState
             className="tasks-empty"

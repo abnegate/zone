@@ -14,6 +14,7 @@ import {
 import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMediaQuery } from '../../../../shared/hooks';
+import { relate, UNRELATED } from '../../relations';
 import { groupByStage, STAGES, type StageId, stageOf } from '../../status';
 import type { BoardActions, Renaming, Task } from '../../types';
 import { Card } from './Card';
@@ -28,6 +29,7 @@ import './Board.css';
 
 export interface BoardProps {
   tasks: readonly Task[];
+  known?: readonly Task[];
   projects: ReadonlyMap<string, string>;
   renaming: Renaming | null;
   removed: string | null;
@@ -38,8 +40,6 @@ export interface BoardProps {
 const POINTER = { activationConstraint: { distance: 5 } };
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
-
-const NO_PROJECTS = 'No projects';
 
 const UNKNOWN_PROJECT = 'Unknown';
 
@@ -55,7 +55,6 @@ const SILENT: Announcements = {
 };
 
 function projectNames(task: Task, projects: ReadonlyMap<string, string>): string {
-  if (task.project_ids.length === 0) return NO_PROJECTS;
   return task.project_ids.map((id) => projects.get(id) ?? UNKNOWN_PROJECT).join(', ');
 }
 
@@ -67,8 +66,17 @@ function carried(data: { current?: { task?: Task } } | undefined): Task | undefi
   return data?.current?.task;
 }
 
-export function Board({ tasks, projects, renaming, removed, view, actions }: BoardProps) {
+export function Board({
+  tasks,
+  known = tasks,
+  projects,
+  renaming,
+  removed,
+  view,
+  actions,
+}: BoardProps) {
   const groups = useMemo(() => groupByStage(tasks), [tasks]);
+  const relations = useMemo(() => relate(known), [known]);
   const [active, setActive] = useState<UniqueIdentifier | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const announcedOver = useRef<UniqueIdentifier | null>(null);
@@ -136,8 +144,8 @@ export function Board({ tasks, projects, renaming, removed, view, actions }: Boa
     const scroller = root.current;
     if (!scroller) return undefined;
     scroller.scrollLeft = view.left;
-    if (view.opened !== null) focus.title(view.opened);
-    view.opened = null;
+    [...view.trail].reverse().some(focus.title);
+    view.trail.length = 0;
     return () => {
       view.left = scroller.scrollLeft;
     };
@@ -171,6 +179,7 @@ export function Board({ tasks, projects, renaming, removed, view, actions }: Boa
                   key={task.id}
                   task={task}
                   projects={projectNames(task, projects)}
+                  relations={relations.get(task.id) ?? UNRELATED}
                   now={now}
                   renaming={renaming?.id === task.id ? renaming.draft : null}
                   actions={actions}
@@ -192,8 +201,10 @@ export function Board({ tasks, projects, renaming, removed, view, actions }: Boa
                 <CardBody
                   task={dragged}
                   projects={projectNames(dragged, projects)}
+                  relations={relations.get(dragged.id) ?? UNRELATED}
                   now={now}
                   title={<span className="task-card-title">{dragged.title}</span>}
+                  onOpen={actions.open}
                 />
               </div>
             )}
