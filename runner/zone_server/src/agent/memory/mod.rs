@@ -432,7 +432,13 @@ impl WriteTool {
         if category == MemoryCategory::Fact && description.is_none() {
             return Err(description_required());
         }
-        allowed(&request.content, description)?;
+        let named =
+            (category.title().is_none() && request.version.is_none()).then_some(title.as_str());
+        allowed(
+            [Some(request.content.as_str()), description, named]
+                .into_iter()
+                .flatten(),
+        )?;
 
         let scope = &self.0;
         let outcome = memory::write(
@@ -503,7 +509,7 @@ impl AppendTool {
         let request: AppendRequest = parse(params)?;
         let category = category(&request.category)?;
         let title = entry(category, request.name.as_deref())?;
-        allowed(&request.content, None)?;
+        allowed([request.content.as_str()])?;
 
         let scope = &self.0;
         let outcome = memory::append(
@@ -634,9 +640,12 @@ fn stated(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|text| !text.is_empty())
 }
 
-/// Both halves of an entry are stored, so the rulebook screens both.
-fn allowed(content: &str, description: Option<&str>) -> Result<(), String> {
-    for text in std::iter::once(content).chain(description) {
+/// Everything a call stores is screened: the content, the description, and
+/// the name a new fact is created under. A call that quotes a version, and an
+/// append, reach an entry by the name it already has and store no new one, so
+/// an entry named before names were screened can still be changed.
+fn allowed<'a>(texts: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    for text in texts {
         if let Some(refusal) = rules::refused(text) {
             return Err(refusal.message().to_string());
         }
@@ -1398,6 +1407,32 @@ mod tests {
         assert_eq!(refusal(&result), Refusal::Identifier.message());
     }
 
+    /// The index lists a fact by its name at every turn that reads it, so the
+    /// name a fact is created under is stored text as its content is.
+    #[tokio::test]
+    async fn the_name_a_new_fact_is_created_under_is_screened_as_the_content_is() {
+        for (name, expected) in [
+            (CREDENTIAL, Refusal::Secret),
+            (CONTACT, Refusal::Identifier),
+            (SUPPRESSION, Refusal::Suppression),
+        ] {
+            let result = WriteTool(scope())
+                .execute(
+                    json!({
+                        "category": "fact",
+                        "name": name,
+                        "description": "When we ship.",
+                        "content": "Thursdays, after standup."
+                    }),
+                    &chat(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(refusal(&result), expected.message(), "{name}");
+        }
+    }
+
     #[test]
     fn an_index_names_each_entry_in_the_word_the_model_passes_back() {
         let rendered = index(&[
@@ -1765,6 +1800,61 @@ mod tests {
         assert_eq!(message(&after), NOTHING_REMEMBERED);
 
         fixture.clean().await;
+    }
+
+    /// A replace and an append reach an entry by the name it already has and
+    /// store no new one, so an entry named before names were screened stays
+    /// one its owner can still change.
+    #[tokio::test]
+    async fn an_entry_named_before_names_were_screened_can_still_be_replaced_and_added_to() {
+        let fixture = fixture().await;
+        let scope = &fixture.scope;
+        let created = memory::write(
+            scope.state.db(),
+            MemoryWrite {
+                workspace_id: scope.workspace_id,
+                user_id: scope.user_id,
+                category: MemoryCategory::Fact,
+                title: CONTACT,
+                description: Some("Who to ask before a release."),
+                content: "Ask before the release branch is cut.",
+                version: None,
+            },
+        )
+        .await
+        .expect("the store takes a name the tool would now refuse");
+        assert!(matches!(created, MemoryOutcome::Created { version: 1 }));
+
+        let replaced = WriteTool(scope.clone())
+            .execute(
+                json!({
+                    "category": "fact",
+                    "name": CONTACT,
+                    "description": "Who to ask before a release.",
+                    "content": "Ask before the release branch is cut, and again before tagging.",
+                    "version": 1
+                }),
+                &chat(),
+            )
+            .await
+            .unwrap();
+        let appended = AppendTool(scope.clone())
+            .execute(
+                json!({"category": "fact", "name": CONTACT, "content": "Never on a Friday."}),
+                &chat(),
+            )
+            .await
+            .unwrap();
+        fixture.clean().await;
+
+        assert_eq!(
+            message(&replaced),
+            memory::updated(MemoryCategory::Fact, CONTACT, 2)
+        );
+        assert_eq!(
+            message(&appended),
+            memory::appended(MemoryCategory::Fact, CONTACT, 3)
+        );
     }
 
     #[tokio::test]
