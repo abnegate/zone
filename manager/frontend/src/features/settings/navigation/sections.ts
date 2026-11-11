@@ -60,9 +60,13 @@ const SOURCES_LABEL = 'Sources';
 
 const LOCATION_SEPARATOR = ' → ';
 
-export const SOURCES_LOCATION = [SETTINGS_TITLE, GROUP_LABELS.workspace, SOURCES_LABEL].join(
-  LOCATION_SEPARATOR
-);
+export const SOURCES_LOCATION = [
+  SETTINGS_TITLE,
+  GROUP_LABELS[SettingsGroup.Workspace],
+  SOURCES_LABEL,
+].join(LOCATION_SEPARATOR);
+
+export const SOURCES_PATH = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
 
 const inWorkspace = (access: SettingsAccess): boolean => access.workspace;
 

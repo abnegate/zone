@@ -1,6 +1,6 @@
 import type { Page, BrowserContext, Route } from '@playwright/test';
 
-export { SOURCES_PATH } from '../src/features/settings/navigation/legacy';
+export { SOURCES_PATH } from '../src/features/settings/navigation/sections';
 
 export const CHAT_PROVIDERS = /\/api\/chats\/[^/?]+\/providers(\?|$)/;
 export const WORKSPACE_CHAT_PROVIDERS = /\/api\/workspaces\/[^/?]+\/chat-providers(\?|$)/;

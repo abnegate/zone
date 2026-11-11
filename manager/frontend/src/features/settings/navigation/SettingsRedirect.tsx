@@ -1,5 +1,7 @@
+import type { ReactElement } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
-import { legacyOrganizationPath, relocate, SESSIONS_PATH, SOURCES_PATH } from './legacy';
+import { legacyOrganizationPath, relocate, SESSIONS_PATH } from './legacy';
+import { SOURCES_PATH } from './sections';
 
 export const LegacySettings = {
   Organization: 'organization',
@@ -20,7 +22,7 @@ function target(from: LegacySettings, search: string, hash: string): string {
   }
 }
 
-export default function SettingsRedirect({ from }: { from: LegacySettings }) {
+export default function SettingsRedirect({ from }: { from: LegacySettings }): ReactElement {
   const location = useLocation();
   return <Navigate to={target(from, location.search, location.hash)} replace />;
 }

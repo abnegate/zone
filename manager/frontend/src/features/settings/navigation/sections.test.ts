@@ -10,6 +10,7 @@ import {
   SettingsGroup,
   SettingsSection,
   SOURCES_LOCATION,
+  SOURCES_PATH,
   settingsPath,
   visibleSections,
 } from './sections';
@@ -345,5 +346,10 @@ describe('visibleSections', () => {
       `${SETTINGS_TITLE} → ${GROUP_LABELS[SettingsGroup.Workspace]} → ${section?.label}`
     );
     expect(SOURCES_LOCATION).toBe('Settings → Workspace → Sources');
+  });
+
+  it('puts the canonical Sources path under workspace settings', () => {
+    expect(SOURCES_PATH).toBe(settingsPath(SettingsGroup.Workspace, SettingsSection.Sources));
+    expect(SOURCES_PATH).toBe('/settings/workspace/sources');
   });
 });
