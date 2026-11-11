@@ -200,8 +200,15 @@ struct TaskLease {
 /// weaker rule. And the recall the profile block invites — read before you
 /// answer about the person — is exactly the call a chat would otherwise pay
 /// the trip on every time.
-const NEVER_DEFERRED: [&str; 6] = [
+///
+/// `record_discovery` is here on the memory tools' first ground. `prompt::
+/// section::workspace` tells a run and a chat to record what they verified
+/// before they finish, unasked, and the moment that rule applies is the end of
+/// the work: a model that has to load the schema first is one round trip from
+/// skipping a write nobody asked it for.
+const NEVER_DEFERRED: [&str; 7] = [
     "start_task",
+    super::discovery::RECORD_DISCOVERY,
     super::memory::MEMORY_LIST,
     super::memory::MEMORY_READ,
     super::memory::MEMORY_WRITE,
@@ -625,6 +632,7 @@ impl ChatTools {
             // both the catalog and the definitions sort by name.
             super::documents::register(&mut registry, scope);
             core.extend(registry.names().iter().map(|name| name.to_string()));
+            super::discovery::register(&mut registry, scope);
             super::actions::register(&mut registry, scope);
             super::integrations::register(&mut registry, scope);
             if scope.chat_id.is_some() {
@@ -2817,12 +2825,25 @@ mod tests {
             crate::agent::memory::MEMORY_WRITE,
             crate::agent::memory::MEMORY_APPEND,
             crate::agent::memory::MEMORY_DELETE,
+            crate::agent::discovery::RECORD_DISCOVERY,
         ] {
             assert!(
                 tools.names().contains(&name.to_string()),
                 "{name} must be available"
             );
         }
+        assert_eq!(
+            tools.tier(crate::agent::discovery::RECORD_DISCOVERY),
+            Tier::Write,
+            "recording is the one unasked write, so nobody is asked to confirm it"
+        );
+        assert!(
+            tools
+                .workspace
+                .iter()
+                .any(|name| name == crate::agent::discovery::RECORD_DISCOVERY),
+            "a call has to pass the workspace authorization every workspace tool passes"
+        );
         assert!(tools.context.unrestricted);
         assert_eq!(tools.profile(), ToolProfile::Chat);
         assert!(!tools.mutating("list_projects"));
@@ -2865,6 +2886,10 @@ mod tests {
         assert!(!tools.names().contains(&"start_task".to_string()));
         assert!(!tools.names().contains(&"generate_image".to_string()));
         assert!(!tools.names().contains(&"query_prometheus".to_string()));
+        assert!(
+            !tools.has(crate::agent::discovery::RECORD_DISCOVERY),
+            "a run nobody authorized records nothing about the workspace"
+        );
         for name in crate::agent::models::NAMES {
             assert!(
                 !tools.names().contains(&name.to_string()),
@@ -2959,6 +2984,14 @@ mod tests {
                 "{name} reached a background run"
             );
         }
+        assert!(
+            tools
+                .definitions()
+                .iter()
+                .any(|definition| definition.function.name
+                    == crate::agent::discovery::RECORD_DISCOVERY),
+            "a run is where most of what is worth recording is found, so its schema is sent"
+        );
 
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(organization.id)

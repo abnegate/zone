@@ -6,6 +6,7 @@
 //! `send_message`, the reminder tools and the GitHub writers it was never
 //! given, which is exactly what the conduct section forbids offering.
 
+use crate::agent::discovery::RECORD_DISCOVERY;
 use crate::agent::prompt::{Context, Surface};
 use crate::agent::wait::WAIT_FOR;
 
@@ -78,7 +79,7 @@ const BULLETS: &[Bullet] = &[
         &[],
         REQUESTED,
     ),
-    (&["record_discovery"], &[], DISCOVERY),
+    (&[RECORD_DISCOVERY], &[], DISCOVERY),
     (
         &[
             "start_task",
