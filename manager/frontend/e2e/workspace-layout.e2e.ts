@@ -7,6 +7,8 @@ import {
 } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
+const SOURCES_PATH = 'settings/workspace/sources';
+
 const screens = [
   {
     path: 'chats',
@@ -27,13 +29,6 @@ const screens = [
     heading: 'Tasks',
     content: '.task-card:not(.board-skeleton-card)',
     title: '.task-card-open',
-    titleLeading: '20px',
-  },
-  {
-    path: 'sources',
-    heading: 'Sources',
-    content: '.source-card',
-    title: '.source-name',
     titleLeading: '20px',
   },
   {
@@ -144,20 +139,51 @@ for (const viewport of [
         }
       });
 
-      // One test per wizard: each walkthrough gets the whole per-test budget
-      // and its own retries, and a failure names the wizard. Four of them in
-      // one test ran out of the 60-second budget on a slow WebKit runner.
+      test('the sources section keeps its table inside the viewport', async ({
+        page,
+      }) => {
+        await ready(page, SOURCES_PATH, theme);
+        await expect(
+          page
+            .getByRole('region', { name: 'Sources', exact: true })
+            .getByRole('heading', { level: 2, name: 'Sources', exact: true })
+        ).toBeVisible();
+        await expect(page.locator('.source-card').first()).toBeVisible();
+        await expect(page.locator('.skeleton-card')).toHaveCount(0);
+        await expect(page.locator('.source-name').first()).toHaveCSS(
+          'font-size',
+          '13px'
+        );
+        await expect(page.locator('.source-name').first()).toHaveCSS(
+          'line-height',
+          '20px'
+        );
+        await fitsViewport(page);
+        await capture(page, `${profile}-sources`, theme);
+      });
+
       for (const wizard of [
-        { path: 'projects', button: 'New project', title: 'New Project' },
-        { path: 'tasks', button: 'New task', title: 'New Task' },
-        { path: 'sources', button: 'Add source', title: 'Add Source' },
         {
+          name: 'projects',
+          path: 'projects',
+          button: 'New project',
+          title: 'New Project',
+        },
+        { name: 'tasks', path: 'tasks', button: 'New task', title: 'New Task' },
+        {
+          name: 'sources',
+          path: SOURCES_PATH,
+          button: 'Add source',
+          title: 'Add Source',
+        },
+        {
+          name: 'wiki',
           path: 'wiki',
           button: 'Add knowledge',
           title: 'Add Knowledge Entry',
         },
       ]) {
-        test(`the ${wizard.path} creation wizard keeps its title, steps, content and footer visible`, async ({
+        test(`the ${wizard.name} creation wizard keeps its title, steps, content and footer visible`, async ({
           page,
         }) => {
           await ready(page, wizard.path, theme);
@@ -187,12 +213,12 @@ for (const viewport of [
           expect(bounds!.width).toBeLessThanOrEqual(viewport.width - 32);
           expect(bounds!.height).toBeLessThanOrEqual(viewport.height - 32);
           await fitsViewport(page);
-          await capture(page, `${profile}-${wizard.path}-wizard`, theme);
-          if (wizard.path === 'projects') {
+          await capture(page, `${profile}-${wizard.name}-wizard`, theme);
+          if (wizard.name === 'projects') {
             await dialog.getByLabel('Project Name').fill('Layout review');
-          } else if (wizard.path === 'tasks') {
+          } else if (wizard.name === 'tasks') {
             await dialog.locator('.project-selection-option').first().click();
-          } else if (wizard.path === 'sources') {
+          } else if (wizard.name === 'sources') {
             await dialog
               .locator('.source-type-option')
               .filter({ hasText: 'Raw text' })
@@ -206,14 +232,14 @@ for (const viewport of [
           );
           await capture(
             page,
-            `${profile}-${wizard.path}-wizard-content`,
+            `${profile}-${wizard.name}-wizard-content`,
             theme
           );
-          if (wizard.path === 'tasks') {
+          if (wizard.name === 'tasks') {
             await dialog
               .getByLabel('Description', { exact: true })
               .fill('Keep typography and spacing consistent.');
-          } else if (wizard.path === 'sources' || wizard.path === 'wiki') {
+          } else if (wizard.name === 'sources' || wizard.name === 'wiki') {
             await dialog
               .locator('textarea')
               .first()
@@ -228,7 +254,7 @@ for (const viewport of [
           await expect(
             dialog.getByRole('button', { name: 'Previous', exact: true })
           ).toBeVisible();
-          if (wizard.path === 'wiki') {
+          if (wizard.name === 'wiki') {
             await dialog
               .getByLabel('Title', { exact: true })
               .fill('Design notes');
@@ -236,7 +262,7 @@ for (const viewport of [
             await dialog.locator('#knowledge-tags').press('Enter');
             await expect(dialog.locator('.tag-item')).toBeVisible();
           }
-          if (wizard.path === 'tasks') {
+          if (wizard.name === 'tasks') {
             const priorities = await dialog
               .locator('.priority-selector')
               .evaluate((element) => ({
@@ -278,7 +304,7 @@ for (const viewport of [
           );
           await capture(
             page,
-            `${profile}-${wizard.path}-wizard-details`,
+            `${profile}-${wizard.name}-wizard-details`,
             theme
           );
         });

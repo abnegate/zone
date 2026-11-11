@@ -53,8 +53,10 @@ const sourceVerifyPattern = /\/api\/workspaces\/[^/]+\/sources\/src-1\/verify$/;
 const isSourcesListRequest = (requestUrl: string) =>
   sourcesListPattern.test(new URL(requestUrl).pathname);
 
+const SOURCES_PATH = '/settings/workspace/sources';
+
 const addSourceButton = (page: Page) =>
-  page.locator('.page-bar').getByRole('button', { name: 'Add source' });
+  page.locator('.sources-section .section-row-actions').getByRole('button', { name: 'Add source' });
 
 const openAccessTokenFields = (page: Page) =>
   page.getByRole('button', { name: 'Use an access token instead' }).click();
@@ -135,15 +137,21 @@ test.describe('Sources Page', () => {
 
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 10000 });
 
-    await page.click('a[href="/sources"]');
-    await expect(page).toHaveURL('/sources');
-    await expect(page.locator('.sources-page')).toBeVisible({ timeout: 10000 });
+    await page.click('a[href="/settings"]');
+    await page
+      .getByRole('navigation', { name: 'Settings' })
+      .getByRole('link', { name: 'Sources', exact: true })
+      .click();
+    await expect(page).toHaveURL(SOURCES_PATH);
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
   });
 
   test.describe('Page Header', () => {
-    test('displays page title and subtitle', async ({ page }) => {
+    test('displays section title and description', async ({ page }) => {
       await expect(
-        page.getByRole('heading', { name: 'Sources', exact: true })
+        page
+          .locator('.sources-section .section-row')
+          .getByRole('heading', { level: 2, name: 'Sources', exact: true })
       ).toBeVisible();
       await expect(
         page.getByText('Connect repositories, calendars, email, and other data sources')
@@ -190,7 +198,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(page.locator('.source-card')).toHaveCount(3);
     });
@@ -213,7 +220,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       const row = page.locator('.source-card', { hasText: 'acme/frontend' });
       await expect(row.locator('.source-name')).toHaveText('acme/frontend');
@@ -238,7 +244,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(
         page.locator('.source-card', { hasText: 'acme/frontend' }).locator('.source-status')
@@ -263,7 +268,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(
         page.locator('.source-card', { hasText: 'acme/backend' }).locator('.source-status')
@@ -288,7 +292,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(
         page.locator('.source-card', { hasText: 'Work Calendar' }).locator('.source-status')
@@ -314,7 +317,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       const sourceUrl = page.locator('a.source-url').first();
       await expect(sourceUrl).toHaveAttribute('href', 'https://github.com/acme/frontend');
@@ -542,7 +544,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
       await expect(page.locator('.source-card')).toHaveCount(3);
     });
 
@@ -661,7 +662,6 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(page.getByText('Server error')).toBeVisible();
     });
@@ -688,11 +688,52 @@ test.describe('Sources Page', () => {
       });
 
       await page.reload();
-      await page.click('a[href="/sources"]');
 
       await expect(page.locator('.skeleton-card').first()).toBeVisible();
       finishLoading();
       await expect(page.locator('.source-card')).toHaveCount(3);
+    });
+  });
+
+  test.describe('Legacy Route', () => {
+    test('redirects /sources with a source to the open editor in workspace settings', async ({
+      page,
+    }) => {
+      await routeApi(page, sourceDetailPattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ source: mockSources[0] }),
+          });
+        } else {
+          route.continue();
+        }
+      });
+
+      await page.goto('/sources?source=src-1');
+
+      await expect(page).toHaveURL(`${SOURCES_PATH}?source=src-1`);
+      await expect(
+        page.locator('.source-details').getByRole('heading', { name: 'acme/frontend' })
+      ).toBeVisible();
+    });
+
+    test('keeps the hash when redirecting /sources', async ({ page }) => {
+      await page.goto('/sources#details');
+
+      await expect(page).toHaveURL(`${SOURCES_PATH}#details`);
+      await expect(page.locator('.sources-section')).toBeVisible();
+    });
+
+    test('replaces the /sources entry in history', async ({ page }) => {
+      await page.goto('/chats');
+      await page.goto('/sources');
+      await expect(page).toHaveURL(SOURCES_PATH);
+
+      await page.goBack();
+
+      await expect(page).toHaveURL('/chats');
     });
   });
 });

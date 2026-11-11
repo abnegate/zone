@@ -10,6 +10,7 @@ const PNG_BASE64 =
 const TASK_CARD = '.task-card:not(.board-skeleton-card)';
 const SKELETON_CARD = '.skeleton-card, .board-skeleton-card';
 const PHONE = { width: 375, height: 812 };
+const SOURCES_PATH = '/settings/workspace/sources';
 
 const CardAction = {
   rename: 'Rename',
@@ -240,9 +241,9 @@ describeScreenshots('Screenshots - Empty States', () => {
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -643,9 +644,9 @@ describeScreenshots('Screenshots - Populated States', () => {
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -828,9 +829,9 @@ describeScreenshots('Screenshots - Dark Mode', () => {
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -938,16 +939,15 @@ describeScreenshots('Screenshots - Modals', () => {
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
 
-    // Click add source button
-    const addSourceBtn = page
-      .locator('button')
-      .filter({ hasText: /Add Source/i });
-    await expect(addSourceBtn).toBeVisible();
-    await addSourceBtn.click();
+    const addSource = page
+      .locator('.sources-section .section-row-actions')
+      .getByRole('button', { name: 'Add source' });
+    await expect(addSource).toBeVisible();
+    await addSource.click();
     await page.waitForTimeout(300);
     await capturePage(page, {
       path: 'screenshots/modal-add-source.png',

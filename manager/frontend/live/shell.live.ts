@@ -35,7 +35,7 @@ test.describe('the console against a real server', () => {
       '/models',
       '/tasks',
       '/projects',
-      '/sources',
+      '/settings/workspace/sources',
       '/settings/workspace/general',
     ]) {
       await page.goto(path);

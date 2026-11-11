@@ -29,6 +29,7 @@ const REPO =
 const TOKEN = process.env.ZONE_LIVE_REPO_TOKEN ?? '';
 const [OWNER, NAME] = REPO.replace(/^https:\/\/github\.com\//, '').split('/');
 const SOURCE = 'Scratch repo';
+const SOURCES_PATH = '/settings/workspace/sources';
 const REPO_PROJECT = 'Real pass repository';
 const SCRATCH_PROJECT = 'Real pass scratch';
 const BROKEN_PROJECT = 'Real pass broken';
@@ -235,7 +236,7 @@ test.describe('sources, projects and tasks', () => {
 
   test('20: a GitHub source is added, verified, toggled', async ({ page }) => {
     await signIn(page);
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     page.on('dialog', (d) => d.accept());
     const existing = page.locator('.source-card', { hasText: SOURCE });
     if (await existing.count()) {
@@ -243,6 +244,7 @@ test.describe('sources, projects and tasks', () => {
       await expect(existing).toHaveCount(0, { timeout: 30_000 });
     }
     await page
+      .locator('.settings-content')
       .getByRole('button', { name: 'Add source' })
       .first()
       .click();
@@ -332,7 +334,7 @@ test.describe('sources, projects and tasks', () => {
     page,
   }) => {
     await signIn(page);
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     page.on('dialog', (d) => d.accept());
     const outcomes: Record<string, string> = {};
 
@@ -342,8 +344,9 @@ test.describe('sources, projects and tasks', () => {
       name: string,
     ): Promise<string> {
       await page
+        .locator('.settings-content')
         .getByRole('button', { name: 'Add source' })
-      .first()
+        .first()
         .click();
       const wizard = page.getByRole('dialog');
       await wizard
@@ -388,8 +391,9 @@ test.describe('sources, projects and tasks', () => {
 
     const kinds = await (async () => {
       await page
+        .locator('.settings-content')
         .getByRole('button', { name: 'Add source' })
-      .first()
+        .first()
         .click();
       const wizard = page.getByRole('dialog');
       const names = await wizard

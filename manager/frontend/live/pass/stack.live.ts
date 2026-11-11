@@ -162,7 +162,7 @@ test.describe('compose stack', () => {
       '/chats',
       '/projects',
       '/tasks',
-      '/sources',
+      '/settings/workspace/sources',
       '/search',
       '/models',
       '/wiki',
