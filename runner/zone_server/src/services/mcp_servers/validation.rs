@@ -12,7 +12,7 @@ use crate::services::mcp_servers::transport::Transport;
 pub const NAME_LIMIT: usize = 32;
 
 const NULL: char = '\0';
-const RESERVED: [&str; 17] = [
+const RESERVED: [&str; 24] = [
     "accept",
     "connection",
     "content-length",
@@ -24,12 +24,19 @@ const RESERVED: [&str; 17] = [
     "mcp-name",
     "mcp-protocol-version",
     "mcp-session-id",
+    "metadata",
+    "metadata-flavor",
     "proxy-authorization",
     "proxy-connection",
     "te",
     "trailer",
     "transfer-encoding",
     "upgrade",
+    "x-aliyun-ecs-metadata-token",
+    "x-aliyun-ecs-metadata-token-ttl-seconds",
+    "x-aws-ec2-metadata-token",
+    "x-aws-ec2-metadata-token-ttl-seconds",
+    "x-google-metadata-request",
 ];
 const RESERVED_PREFIX: &str = "mcp-param-";
 const PLACEHOLDER: &str = "${";
@@ -593,6 +600,31 @@ mod tests {
             header_name("Host").unwrap_err().to_string(),
             "`headers` name `Host` is set by the connection itself and cannot be configured"
         );
+    }
+
+    #[test]
+    fn a_metadata_header_is_reserved_whatever_its_case() {
+        for name in [
+            "Metadata-Flavor",
+            "METADATA",
+            "X-aws-ec2-metadata-token",
+            "X-Aws-Ec2-Metadata-Token-Ttl-Seconds",
+            "X-Google-Metadata-Request",
+            "x-aliyun-ecs-metadata-token",
+            "X-Aliyun-Ecs-Metadata-Token-TTL-Seconds",
+        ] {
+            assert_eq!(
+                header_name(name),
+                Err(ValidationError::ReservedHeader {
+                    field: HEADERS.to_string(),
+                    name: name.to_string()
+                }),
+                "{name}"
+            );
+        }
+        for name in ["X-Metadata-Note", "Authorization"] {
+            assert_eq!(header_name(name), Ok(()), "{name}");
+        }
     }
 
     #[test]

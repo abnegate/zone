@@ -106,10 +106,25 @@ describe('headerNameError', () => {
     expect(headerNameError(name)).toBe(HEADER_RESERVED);
   });
 
-  it.each([['Authorization'], ['X-Content-Type'], ['Accept-Language'], ['Mcp-Parameter']])(
-    'accepts %p, which only resembles a reserved name',
-    (name) => {
-      expect(headerNameError(name)).toBeNull();
-    }
-  );
+  it.each([
+    ['Metadata-Flavor'],
+    ['METADATA'],
+    ['X-aws-ec2-metadata-token'],
+    ['X-Aws-Ec2-Metadata-Token-Ttl-Seconds'],
+    ['X-Google-Metadata-Request'],
+    ['x-aliyun-ecs-metadata-token'],
+    ['X-Aliyun-Ecs-Metadata-Token-TTL-Seconds'],
+  ])('refuses %p, which a cloud metadata service requires', (name) => {
+    expect(headerNameError(name)).toBe(HEADER_RESERVED);
+  });
+
+  it.each([
+    ['Authorization'],
+    ['X-Content-Type'],
+    ['Accept-Language'],
+    ['Mcp-Parameter'],
+    ['X-Metadata-Note'],
+  ])('accepts %p, which only resembles a reserved name', (name) => {
+    expect(headerNameError(name)).toBeNull();
+  });
 });

@@ -33,12 +33,19 @@ export const RESERVED_HEADERS: readonly string[] = [
   'mcp-name',
   'mcp-protocol-version',
   'mcp-session-id',
+  'metadata',
+  'metadata-flavor',
   'proxy-authorization',
   'proxy-connection',
   'te',
   'trailer',
   'transfer-encoding',
   'upgrade',
+  'x-aliyun-ecs-metadata-token',
+  'x-aliyun-ecs-metadata-token-ttl-seconds',
+  'x-aws-ec2-metadata-token',
+  'x-aws-ec2-metadata-token-ttl-seconds',
+  'x-google-metadata-request',
 ];
 export const RESERVED_HEADER_PREFIX = 'mcp-param-';
 
