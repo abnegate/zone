@@ -6,7 +6,7 @@ import { useSource, useSources } from '../hooks';
 import type { Source } from '../types';
 import { CreateSourceWizard } from './CreateSourceWizard';
 import { SourceDetail } from './SourceDetail';
-import { SourceSkeleton } from './SourceSkeleton';
+import { COLUMNS, SourceSkeleton } from './SourceSkeleton';
 import { SourceStatusBadge } from './SourceStatusBadge';
 import './SourcesSection.css';
 
@@ -180,12 +180,9 @@ export function SourcesSection(): ReactElement {
           <table className="sources-table" aria-label="Sources">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>URL</th>
-                <th>Verified</th>
-                <th>Actions</th>
+                {COLUMNS.map((column) => (
+                  <th key={column}>{column}</th>
+                ))}
               </tr>
             </thead>
             <tbody>

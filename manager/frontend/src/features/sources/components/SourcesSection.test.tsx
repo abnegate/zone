@@ -181,6 +181,33 @@ describe('SourcesSection', () => {
     expect(document.querySelectorAll('.skeleton-card').length).toBe(3);
   });
 
+  it('heads the skeleton and the loaded table with the same columns', async () => {
+    const columns = ['Name', 'Type', 'Status', 'URL', 'Verified', 'Actions'];
+    let finish: (sources: Source[]) => void = () => {};
+    mockGetSources.mockImplementation(
+      () =>
+        new Promise<Source[]>((resolve) => {
+          finish = resolve;
+        })
+    );
+    renderSection();
+    const skeleton = [...document.querySelectorAll('.sources-table th')].map(
+      (header) => header.textContent
+    );
+
+    await act(async () => {
+      finish(mockSources);
+    });
+
+    const table = await screen.findByRole('table', { name: 'Sources' });
+    expect(skeleton).toEqual(columns);
+    expect(
+      within(table)
+        .getAllByRole('columnheader')
+        .map((header) => header.textContent)
+    ).toEqual(columns);
+  });
+
   it('shows empty state when no sources', async () => {
     mockGetSources.mockImplementation(() => Promise.resolve([]));
     renderSection();

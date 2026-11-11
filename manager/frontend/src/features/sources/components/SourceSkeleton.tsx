@@ -1,5 +1,7 @@
 import type { ReactElement } from 'react';
 
+export const COLUMNS = ['Name', 'Type', 'Status', 'URL', 'Verified', 'Actions'] as const;
+
 const SKELETON_ROWS = [1, 2, 3];
 
 export function SourceSkeleton(): ReactElement {
@@ -8,12 +10,9 @@ export function SourceSkeleton(): ReactElement {
       <table className="sources-table">
         <thead>
           <tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Status</th>
-            <th>URL</th>
-            <th>Verified</th>
-            <th>Actions</th>
+            {COLUMNS.map((column) => (
+              <th key={column}>{column}</th>
+            ))}
           </tr>
         </thead>
         <tbody>
