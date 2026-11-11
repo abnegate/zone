@@ -966,8 +966,9 @@ const MEMORY_USED_KEY: &str = "memory_used";
 /// Both are workspace-readable — the record rides the assistant message's
 /// metadata and the frame goes to every reader with the chat open — so a
 /// memory tool's arguments and stated reason are reduced here, before either
-/// exists. Lifted out of the loop so the trace a call leaves can be tested
-/// with the arguments a real call carries.
+/// exists, and so are those of a discovery its tool is about to refuse, which
+/// may be refused for the credential in them. Lifted out of the loop so the
+/// trace a call leaves can be tested with the arguments a real call carries.
 fn trace_started(
     message_id: Uuid,
     id: String,
@@ -979,8 +980,12 @@ fn trace_started(
     let (reasoning, reasoning_at) = thought.map_or((None, None), |thought| {
         (Some(thought.text), Some(thought.at))
     });
-    let reason = crate::agent::memory::trace_reason(&name, crate::agent::reason(arguments));
+    let reason = crate::agent::discovery::trace_reason(
+        &name,
+        crate::agent::memory::trace_reason(&name, crate::agent::reason(arguments)),
+    );
     let shown = crate::agent::memory::trace_arguments(&name, arguments)
+        .or_else(|| crate::agent::discovery::trace_arguments(&name, arguments))
         .unwrap_or_else(|| arguments.to_string());
     let record = ToolCallRecord {
         id: id.clone(),
@@ -8606,6 +8611,88 @@ cat 'DIR/reply.jsonl'
         assert_eq!(
             crate::agent::memory::trace_detail("read_file", "fn main() {} (12 lines)"),
             "fn main() {} (12 lines)"
+        );
+    }
+
+    /// The trace is written before the tool runs, so a call the tool goes on
+    /// to refuse would otherwise leave what it was refused for where the whole
+    /// workspace reads it: the credential in a subject, in a statement, or in
+    /// a reason nobody asked for.
+    #[test]
+    fn a_discovery_the_tool_will_refuse_leaves_none_of_its_text_in_the_trace() {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use serde_json::json;
+        const SECRET: &str = "ghp_abcdefgh1234";
+        const SUBJECT: &str = "The deploy token";
+
+        for arguments in [
+            json!({"kind": "lesson", "subject": format!("{SUBJECT} is {SECRET}"), "statement": "Kept in the vault."}),
+            json!({"kind": "lesson", "subject": SUBJECT, "statement": format!("It is {SECRET}")}),
+            json!({"kind": "lesson", "subject": SUBJECT, "statement": "Kept in the vault.", "reason": format!("It is {SECRET}")}),
+        ] {
+            let (record, frame) = trace_started(
+                Uuid::new_v4(),
+                "call_1".to_string(),
+                RECORD_DISCOVERY.to_string(),
+                &arguments.to_string(),
+                0,
+                None,
+            );
+
+            assert_eq!(record.name, RECORD_DISCOVERY);
+            assert_eq!(record.arguments, r#"{"kind":"lesson"}"#, "{arguments}");
+            assert_eq!(record.reason, None, "{arguments}");
+            let record = serde_json::to_string(&record).expect("a record serialises");
+            let frame = serde_json::to_string(&frame).expect("a frame serialises");
+            for refused in [SECRET, SUBJECT, "Kept in the vault."] {
+                assert!(!record.contains(refused), "{refused} in {record}");
+                assert!(!frame.contains(refused), "{refused} in {frame}");
+            }
+        }
+
+        let unreadable = trace_started(
+            Uuid::new_v4(),
+            "call_2".to_string(),
+            RECORD_DISCOVERY.to_string(),
+            &json!({"kind": SECRET, "subject": SUBJECT}).to_string(),
+            0,
+            None,
+        )
+        .0;
+        assert_eq!(
+            unreadable.arguments, "{}",
+            "a kind the store does not know is model-written text like any other"
+        );
+    }
+
+    #[test]
+    fn a_discovery_the_tool_will_take_is_traced_as_it_was_written() {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use serde_json::json;
+        let arguments = json!({
+            "kind": "lesson",
+            "subject": "Frontend tests need isolation",
+            "statement": "Run bun test with --isolate.",
+        })
+        .to_string();
+
+        let (record, frame) = trace_started(
+            Uuid::new_v4(),
+            "call_1".to_string(),
+            RECORD_DISCOVERY.to_string(),
+            &arguments,
+            0,
+            None,
+        );
+
+        assert_eq!(
+            record.arguments, arguments,
+            "an entry the workspace reads anyway"
+        );
+        assert_eq!(record.reason, None);
+        assert_eq!(
+            serde_json::to_value(&frame).expect("a frame serialises")["arguments"],
+            arguments
         );
     }
 
