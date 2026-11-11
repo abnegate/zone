@@ -28,6 +28,7 @@ type TaskDetailProps = {
   tasks: readonly Task[];
   projects: Project[];
   sources: Source[];
+  focusTitle?: boolean;
   onOpen: (task: Task) => void;
   onClose: () => void;
   onExecute: () => void;
@@ -74,7 +75,7 @@ function rebase(draft: Draft, previous: Draft, next: Draft): Draft {
 function changed(task: Task, draft: Draft): UpdateTaskRequest {
   const request: UpdateTaskRequest = {};
   const description = draft.description.trim();
-  if (description !== task.description) request.description = description;
+  if (description !== task.description.trim()) request.description = description;
   if (draft.acceptance_criteria !== (task.acceptance_criteria ?? '')) {
     request.acceptance_criteria = draft.acceptance_criteria;
   }
@@ -104,6 +105,7 @@ export function TaskDetail({
   tasks,
   projects,
   sources,
+  focusTitle = false,
   onOpen,
   onClose,
   onExecute,
@@ -119,6 +121,10 @@ export function TaskDetail({
   const wasRenaming = useRef(false);
 
   useEffect(() => {
+    if (focusTitle) renameButton.current?.focus();
+  }, [focusTitle]);
+
+  useEffect(() => {
     if (wasRenaming.current && !renaming) renameButton.current?.focus();
     wasRenaming.current = renaming;
   }, [renaming]);
@@ -130,6 +136,7 @@ export function TaskDetail({
     if (previous.id !== task.id) {
       setDraft(hydrate(task));
       setError(null);
+      setLeaving(null);
       return;
     }
     setDraft((current) => rebase(current, hydrate(previous), hydrate(task)));

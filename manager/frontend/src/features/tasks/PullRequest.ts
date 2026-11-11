@@ -26,12 +26,12 @@ function parse(address: string | null): URL | null {
 }
 
 function numberIn(address: URL): string | null {
-  const segments = address.pathname.split('/');
+  const segments = address.pathname.split('/').reverse();
   const marked = segments.findIndex(
-    (segment, index) => REQUEST_SEGMENTS.has(segment) && NUMERIC.test(segments[index + 1] ?? '')
+    (segment, index) => NUMERIC.test(segment) && REQUEST_SEGMENTS.has(segments[index + 1] ?? '')
   );
-  if (marked !== -1) return segments[marked + 1];
-  return [...segments].reverse().find((segment) => NUMERIC.test(segment)) ?? null;
+  if (marked !== -1) return segments[marked];
+  return segments.find((segment) => NUMERIC.test(segment)) ?? null;
 }
 
 export class PullRequest {

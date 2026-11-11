@@ -71,6 +71,7 @@ export default function TasksPage() {
   const [executionTask, setExecutionTask] = useState<Task | null>(null);
   const [deleting, setDeleting] = useState<Task | null>(null);
   const [removed, setRemoved] = useState<string | null>(null);
+  const [followed, setFollowed] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   const projectNames = useMemo(
@@ -118,7 +119,13 @@ export default function TasksPage() {
     [view, openEditor]
   );
 
+  const follow = (task: Task) => {
+    setFollowed(task.id);
+    open(task);
+  };
+
   const closeEditor = () => {
+    setFollowed(null);
     setExecutionTask(null);
     const next = new URLSearchParams(searchParams);
     next.delete('task');
@@ -222,7 +229,8 @@ export default function TasksPage() {
             tasks={known}
             projects={projects}
             sources={sources}
-            onOpen={open}
+            focusTitle={followed === editorTask.id}
+            onOpen={follow}
             onClose={closeEditor}
             onExecute={() => setExecutionTask(editorTask)}
             onSave={handleSave}

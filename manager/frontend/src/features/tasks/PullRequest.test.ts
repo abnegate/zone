@@ -45,7 +45,20 @@ describe('PullRequest', () => {
     ).toBe('PR #12 · open');
   });
 
-  it('takes the last numeric segment when the address goes on past the number', () => {
+  it('reads the request, not an owner or group that happens to be named like one', () => {
+    expect(
+      PullRequest.of({ pr_url: 'https://github.com/pull/2048/pull/7', pr_status: 'open' })?.label
+    ).toBe('PR #7 · open');
+  });
+
+  it('falls back to the last number for a host with no request segment', () => {
+    expect(
+      PullRequest.of({ pr_url: 'https://review.example.com/c/app/+/42/3', pr_status: 'open' })
+        ?.label
+    ).toBe('PR #3 · open');
+  });
+
+  it('reads the number of a request whose address goes on past it', () => {
     const pullRequest = PullRequest.of({
       pr_url: 'https://github.com/zone/2048/pull/220/files?diff=split#top',
       pr_status: 'closed',

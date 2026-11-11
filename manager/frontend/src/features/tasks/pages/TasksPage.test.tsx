@@ -1636,7 +1636,6 @@ describe('TasksPage', () => {
         );
         renderTasksPage();
         await screen.findByRole('alert');
-        mockGetTasks.mockClear();
         chooseSelect('Filter by project', 'Project Alpha');
 
         await waitFor(() =>
@@ -1717,6 +1716,28 @@ describe('TasksPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Close' }));
       await waitFor(() => expect(focusedTitle()).toBe('task-release'));
+    });
+
+    it('takes focus to the title of the related task the editor switched to', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+      const related = within(await editing('Implement login')).getByRole('button', {
+        name: 'Open Ship the release',
+      });
+      related.focus();
+
+      fireEvent.click(related);
+
+      const title = await screen.findByRole('button', { name: 'Rename Ship the release' });
+      await waitFor(() => expect(document.activeElement).toBe(title));
+    });
+
+    it('leaves focus alone when the editor opens from the board', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+
+      const title = await screen.findByRole('button', { name: 'Rename Implement login' });
+      expect(document.activeElement).not.toBe(title);
     });
 
     it('keeps focus on the related task of a card that a reload moves', async () => {

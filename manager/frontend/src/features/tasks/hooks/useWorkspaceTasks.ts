@@ -23,6 +23,6 @@ export function useWorkspaceTasks(enabled: boolean): WorkspaceTasks {
 
   return {
     tasks: data,
-    error: error instanceof Error ? error.message : error ? LOAD_FAILED : null,
+    error: data || !error ? null : error instanceof Error ? error.message : LOAD_FAILED,
   };
 }

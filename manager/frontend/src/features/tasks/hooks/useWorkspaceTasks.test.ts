@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { createElement } from 'react';
 import { TITLE_POLL_MS } from '../title';
@@ -55,10 +55,12 @@ const task: Task = {
   pr_created_at: null,
 };
 
-function wrapper({ children }: { children: ReactNode }) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
-  return createElement(QueryClientProvider, { client }, children);
+function provider(client: QueryClient = new QueryClient(QUIET)) {
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
 }
+
+const QUIET = { defaultOptions: { queries: { retry: false, gcTime: 0 } } };
 
 describe('useWorkspaceTasks', () => {
   beforeEach(() => {
@@ -66,7 +68,7 @@ describe('useWorkspaceTasks', () => {
   });
 
   it('reads nothing while the board is not filtered', async () => {
-    const { result } = renderHook(() => useWorkspaceTasks(false), { wrapper });
+    const { result } = renderHook(() => useWorkspaceTasks(false), { wrapper: provider() });
     await new Promise((settle) => setTimeout(settle, 50));
     expect(mockGetTasks).not.toHaveBeenCalled();
     expect(result.current.tasks).toBeUndefined();
@@ -74,23 +76,51 @@ describe('useWorkspaceTasks', () => {
 
   it('reads every task of the workspace', async () => {
     mockGetTasks.mockResolvedValue([task]);
-    const { result } = renderHook(() => useWorkspaceTasks(true), { wrapper });
+    const { result } = renderHook(() => useWorkspaceTasks(true), { wrapper: provider() });
     await waitFor(() => expect(result.current.tasks).toEqual([task]));
     expect(mockGetTasks).toHaveBeenCalledWith('workspace-1');
   });
 
-  it('reads again while a task waits for its generated title', async () => {
-    mockGetTasks.mockResolvedValue([task]);
-    renderHook(() => useWorkspaceTasks(true), { wrapper });
-    await waitFor(() => expect(mockGetTasks).toHaveBeenCalledTimes(2), {
-      timeout: TITLE_POLL_MS * 2,
-    });
-  });
+  it(
+    'reads again while a task waits for its generated title',
+    async () => {
+      mockGetTasks.mockResolvedValue([task]);
+      renderHook(() => useWorkspaceTasks(true), { wrapper: provider() });
+      await waitFor(() => expect(mockGetTasks).toHaveBeenCalledTimes(2), {
+        timeout: TITLE_POLL_MS * 2,
+      });
+    },
+    TITLE_POLL_MS * 4
+  );
 
   it('reports a failed read', async () => {
     mockGetTasks.mockRejectedValue(new Error('The workspace could not be read'));
-    const { result } = renderHook(() => useWorkspaceTasks(true), { wrapper });
+    const { result } = renderHook(() => useWorkspaceTasks(true), { wrapper: provider() });
     await waitFor(() => expect(result.current.error).toBe('The workspace could not be read'));
     expect(result.current.tasks).toBeUndefined();
+  });
+
+  it('keeps the tasks it read when a later read fails, without reporting it', async () => {
+    const client = new QueryClient(QUIET);
+    const settled = { ...task, title_pending: false };
+    mockGetTasks.mockResolvedValue([settled]);
+    let renders = 0;
+    const { result } = renderHook(
+      () => {
+        renders += 1;
+        return useWorkspaceTasks(true);
+      },
+      { wrapper: provider(client) }
+    );
+    await waitFor(() => expect(result.current.tasks).toEqual([settled]));
+    const before = renders;
+
+    mockGetTasks.mockRejectedValue(new Error('The workspace could not be read'));
+    await act(() => client.refetchQueries());
+    await waitFor(() => expect(renders).toBeGreaterThan(before));
+
+    expect(mockGetTasks).toHaveBeenCalledTimes(2);
+    expect(result.current.tasks).toEqual([settled]);
+    expect(result.current.error).toBeNull();
   });
 });
