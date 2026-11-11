@@ -97,6 +97,9 @@ const commandsDisabled = 'Command servers are turned off on this instance (ZONE_
 const transportFixed = '`transport` cannot be changed; remove the server and add it again';
 const workspaceMissing = 'Workspace not found';
 const reservedHeaders = ['accept', 'content-type', 'host', 'mcp-session-id'];
+const metadataAddress = 'Do not use a link-local or cloud metadata address';
+const metadataRefused = '`url` must not point at a link-local or cloud metadata address';
+const refusedHost = 'refused.example';
 const directory = process.env.MCP_SCREENSHOTS;
 
 function server(changes: Partial<WireServer> & Pick<WireServer, 'name'>): WireServer {
@@ -201,6 +204,9 @@ function refusal(
   const field = Object.entries(unused).find(([, present]) => present)?.[0];
   if (field) {
     return `\`${field}\` is not allowed for \`${transport}\` servers`;
+  }
+  if (fields.url !== undefined && new URL(fields.url).hostname === refusedHost) {
+    return metadataRefused;
   }
   const reserved = Object.keys(fields.headers ?? {}).find((name) =>
     reservedHeaders.includes(name.toLowerCase())
@@ -846,6 +852,48 @@ test.describe('MCP servers', () => {
         },
       },
     ]);
+  });
+
+  test('a link-local or metadata address is refused before anything is posted', async ({
+    page,
+  }) => {
+    const mock = await openOrganization(page);
+
+    const dialog = await fillHttpServer(page);
+    const url = dialog.getByLabel('URL', { exact: true });
+    for (const address of [
+      'http://169.254.10.1/mcp',
+      'http://[fe80::1]/mcp',
+      'http://[::ffff:169.254.169.254]/mcp',
+      'http://2852039166/mcp',
+      'http://0251.0376.0251.0376/mcp',
+      'http://metadata.google.internal./mcp',
+    ]) {
+      await url.fill(address);
+      await dialog.getByRole('button', { name: 'Add server', exact: true }).click();
+      await expect(url, address).toHaveAccessibleDescription(metadataAddress);
+    }
+    expect(writes(mock)).toEqual([]);
+  });
+
+  test('a URL only the server refuses is shown on the URL field', async ({ page }) => {
+    const mock = await openOrganization(page);
+
+    const dialog = await fillHttpServer(page);
+    const url = dialog.getByLabel('URL', { exact: true });
+    await url.fill(`https://${refusedHost}/mcp`);
+    await dialog.getByRole('button', { name: 'Add server', exact: true }).click();
+
+    await expect(url).toHaveAccessibleDescription(metadataRefused);
+    await expect(url).toHaveAttribute('aria-invalid', 'true');
+    await expect(dialog.locator('.modal-error')).toHaveCount(0);
+    expect(writes(mock)).toHaveLength(1);
+
+    await url.fill('https://wiki.example/mcp');
+    await expect(url).toHaveAttribute('aria-invalid', 'false');
+    await dialog.getByRole('button', { name: 'Add server', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(row(page, 'wiki')).toBeVisible();
   });
 
   test('with commands on a stdio server posts its command, arguments and environment', async ({

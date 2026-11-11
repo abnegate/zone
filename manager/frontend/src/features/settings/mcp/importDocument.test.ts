@@ -167,11 +167,19 @@ describe('parseMcpDocument', () => {
     });
   });
 
-  it('refuses the cloud metadata address', () => {
-    const json = JSON.stringify({ metadata: { url: 'http://169.254.169.254/latest' } });
+  it('refuses a link-local or cloud metadata address', () => {
+    const json = JSON.stringify({
+      metadata: { url: 'http://169.254.169.254/latest' },
+      local: { url: 'http://[fe80::1]/mcp', disabled: true },
+      named: { url: 'http://metadata.google.internal/mcp' },
+    });
     expect(parseMcpDocument(json, true)).toEqual({
       requests: [],
-      errors: ['metadata: do not use the cloud metadata address'],
+      errors: [
+        'metadata: do not use a link-local or cloud metadata address',
+        'local: do not use a link-local or cloud metadata address',
+        'named: do not use a link-local or cloud metadata address',
+      ],
       ignored: [],
     });
   });

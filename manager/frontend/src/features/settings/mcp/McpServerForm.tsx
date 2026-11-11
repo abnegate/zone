@@ -13,7 +13,7 @@ import {
   updateRequest,
   usesCommand,
 } from './draft';
-import { messageOf } from './failure';
+import { messageOf, urlRefusal } from './failure';
 import { McpSecretRows } from './McpSecretRows';
 import { type McpServerSubmission, SubmissionKind } from './submission';
 import { TRANSPORT_OPTION_LABELS } from './transport';
@@ -42,6 +42,11 @@ function isTransport(value: string): value is McpTransport {
   return Object.values<string>(Transport).includes(value);
 }
 
+interface Refusal {
+  url: string;
+  message: string;
+}
+
 interface McpServerFormProps {
   server?: McpServer;
   commands: boolean;
@@ -60,6 +65,7 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
   const [attempted, setAttempted] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
 
   const editing = server !== undefined;
   const errors = attempted ? draftErrors(draft, editing) : NO_ERRORS;
@@ -67,6 +73,7 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
   const unchanged = server !== undefined && !changed(updateRequest(server, draft));
   const command = usesCommand(draft.transport);
   const argumentsError = errors[DraftField.Arguments];
+  const refused = refusal?.url === draft.url ? refusal.message : undefined;
 
   const update = <K extends keyof McpServerDraft>(key: K, value: McpServerDraft[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
@@ -85,10 +92,16 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
       : { kind: SubmissionKind.Create, request: createRequest(draft) };
     setPending(true);
     setError(null);
+    setRefusal(null);
     try {
       await onSubmit(submission);
     } catch (failure) {
-      setError(messageOf(failure, SAVE_FAILED));
+      const message = command ? null : urlRefusal(failure);
+      if (message === null) {
+        setError(messageOf(failure, SAVE_FAILED));
+      } else {
+        setRefusal({ url: draft.url, message });
+      }
     } finally {
       setPending(false);
     }
@@ -180,7 +193,7 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
                 autoComplete="off"
                 spellCheck={false}
                 placeholder="https://example.com/mcp"
-                error={errors[DraftField.Url]}
+                error={errors[DraftField.Url] ?? refused}
                 onChange={(event) => update('url', event.target.value)}
               />
               <McpSecretRows

@@ -13,8 +13,10 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { ApiError } from '../../../api/ApiError';
 import { rustVariants, structFields } from '../../../test/rust';
 import { SERVER_NAME_LIMIT, Source, Status, Transport } from './constants';
+import { urlRefusal } from './failure';
 import { COMMANDS_OFF_NOTICE } from './McpServerForm';
 import {
   McpSecretFieldSchema,
@@ -23,7 +25,7 @@ import {
   WorkspaceMcpServerListSchema,
   WorkspaceMcpServerSchema,
 } from './schemas';
-import { RESERVED_HEADER_PREFIX, RESERVED_HEADERS } from './validation';
+import { RESERVED_HEADER_PREFIX, RESERVED_HEADERS, URL_METADATA, urlError } from './validation';
 
 const RUNNER = join(import.meta.dir, '../../../../../../runner/zone_server/src');
 const ROUTES_RS = readFileSync(join(RUNNER, 'routes/mcp_servers.rs'), 'utf8');
@@ -54,6 +56,17 @@ function list(source: string, name: string): string[] {
   const body = source.match(new RegExp(`const ${name}: \\[&str; \\d+\\] = \\[([^\\]]*)\\];`))?.[1];
   if (body === undefined) throw new Error(`${name} is not a string list in the Rust source`);
   return [...body.matchAll(/"([^"]*)"/g)].map((match) => match[1]);
+}
+
+function rustTest(source: string, name: string): string {
+  const start = source.indexOf(`fn ${name}()`);
+  const end = source.indexOf('\n    }\n', start);
+  if (start === -1 || end === -1) throw new Error(`${name} is not a test in the Rust source`);
+  return source.slice(start, end);
+}
+
+function urls(text: string): string[] {
+  return [...text.matchAll(/"(https?:\/\/[^"]*)"/g)].map((match) => match[1]);
 }
 
 describe('the servers the console parses are the ones routes/mcp_servers.rs sends', () => {
@@ -105,5 +118,53 @@ describe('the form refuses what services/mcp_servers/validation.rs refuses', () 
 
   test('the notice on a locked command server is the reason the server gives', () => {
     expect(COMMANDS_OFF_NOTICE).toBe(constant(STATUS_RS, 'COMMANDS_DISABLED'));
+  });
+});
+
+/**
+ * The hosts and addresses themselves live in the `abnegate-http` crate, outside
+ * this repository, so the form is held to the URLs the server's own tests name.
+ */
+describe('the form refuses the addresses services/mcp_servers/validation.rs refuses', () => {
+  const refused = [
+    ...[...VALIDATION_RS.matchAll(/"([^"]+)",\s*ValidationError::Metadata \{/g)].map(
+      (match) => match[1]
+    ),
+    ...urls(rustTest(VALIDATION_RS, 'url_is_normalised_before_the_metadata_check')),
+  ];
+  const accepted = urls(rustTest(VALIDATION_RS, 'url_allows_private_loopback_and_public_hosts'));
+
+  test('every URL the server refuses as a metadata address is refused before it is sent', () => {
+    for (const anchor of [
+      'http://169.254.169.254/',
+      'http://[fe80::1]/',
+      'http://metadata.google.internal/',
+      'http://2852039166/',
+      'http://[::ffff:169.254.169.254]/',
+    ]) {
+      expect(refused).toContain(anchor);
+    }
+    expect(refused.map((url) => [url, urlError(url)])).toEqual(
+      refused.map((url) => [url, URL_METADATA])
+    );
+  });
+
+  test('every private, loopback and public URL the server accepts is accepted', () => {
+    expect(accepted).toContain('http://127.0.0.1:8080/mcp');
+    expect(accepted.map((url) => [url, urlError(url)])).toEqual(accepted.map((url) => [url, null]));
+  });
+
+  test('a refusal of the url is recognised in every sentence the server writes about a field', () => {
+    const field = constant(VALIDATION_RS, 'URL');
+    const sentences = [...VALIDATION_RS.matchAll(/#\[error\(\s*"(`\{field\}`[^"]*)"\s*\)\]/g)].map(
+      (match) => match[1].replace('{field}', field)
+    );
+
+    expect(sentences).toContain('`url` must not point at a link-local or cloud metadata address');
+    for (const sentence of sentences) {
+      expect(urlRefusal(new ApiError(`Failed to add the MCP server: ${sentence}`, 400))).toBe(
+        sentence
+      );
+    }
   });
 });

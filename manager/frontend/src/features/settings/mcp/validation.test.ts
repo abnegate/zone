@@ -58,12 +58,87 @@ describe('urlError', () => {
     expect(urlError(url)).toBe(message);
   });
 
+  it('names both kinds of address it refuses', () => {
+    expect(URL_METADATA).toBe('Do not use a link-local or cloud metadata address');
+  });
+
+  it.each([
+    ['http://169.254.0.1/'],
+    ['http://169.254.169.253/mcp'],
+    ['https://169.254.255.255:8443/mcp'],
+    ['http://100.100.100.200/'],
+    ['http://168.63.129.16/machine'],
+    ['http://[fe80::1]/'],
+    ['http://[FE80::1]:8080/mcp'],
+    ['http://[febf:ffff::1]/'],
+    ['http://[fd00:ec2::254]/'],
+    ['http://[fd20:ce::254]/'],
+    ['http://[64:ff9b:1::a9fe:a9fe]/'],
+    ['http://[64:ff9b:1:ffff::1]/'],
+  ])('refuses %p, a link-local or metadata address', (url) => {
+    expect(urlError(url)).toBe(URL_METADATA);
+  });
+
+  it.each([
+    ['http://[::ffff:169.254.169.254]/'],
+    ['http://[::ffff:a9fe:a9fe]/'],
+    ['http://[::169.254.169.254]/'],
+    ['http://[64:ff9b::a9fe:a9fe]/'],
+    ['http://[64:ff9b::6464:64c8]/'],
+    ['http://[::ffff:168.63.129.16]/'],
+  ])('refuses %p, an IPv6 address that carries a refused IPv4 one', (url) => {
+    expect(urlError(url)).toBe(URL_METADATA);
+  });
+
+  it.each([
+    ['http://2852039166/'],
+    ['http://0xa9.0xfe.0xa9.0xfe/'],
+    ['http://0251.0376.0251.0376/'],
+    ['http://169.254.43518/'],
+    ['http://169.254.169.254./'],
+    ['http://169.254.169.254../'],
+  ])('refuses %p, another spelling of the metadata address', (url) => {
+    expect(urlError(url)).toBe(URL_METADATA);
+  });
+
+  it.each([
+    ['http://metadata.google.internal/computeMetadata/v1/'],
+    ['http://METADATA.GOOGLE.INTERNAL/'],
+    ['http://metadata.google.internal./'],
+    ['http://%6d%65%74%61%64%61%74%61.google.internal/'],
+    ['https://metadata.goog/'],
+  ])('refuses %p, a metadata host name', (url) => {
+    expect(urlError(url)).toBe(URL_METADATA);
+  });
+
   it.each([
     ['http://127.0.0.1:8080/mcp'],
     ['https://h/mcp?x=1'],
-    ['http://169.254.169.253/mcp'],
     ['http://192.168.1.10/mcp'],
-  ])('accepts %p', (url) => {
+    ['http://169.253.255.255/mcp'],
+    ['http://169.255.0.1/mcp'],
+    ['http://100.100.100.100/'],
+    ['http://168.63.129.17/'],
+    ['http://168.63.128.16/'],
+    ['http://10.0.0.5/'],
+    ['http://172.17.0.1/'],
+    ['http://[::1]:8080/mcp'],
+    ['http://[fd00::1]/'],
+    ['http://[fd00:ec2::253]/'],
+    ['http://[fd20:ce::253]/'],
+    ['http://[fd20::254]/'],
+    ['http://[fe7f::1]/'],
+    ['http://[fec0::1]/'],
+    ['http://[64:ff9b:2::a9fe:a9fe]/'],
+    ['http://[64:ff9b::808:808]/'],
+    ['http://[::ffff:192.168.1.20]/'],
+    ['http://[2606:2800:220:1:248:1893:25c8:1946]/'],
+    ['http://localhost/mcp'],
+    ['http://metadata/'],
+    ['http://metadata.google.internal.example/'],
+    ['http://gateway.internal/'],
+    ['http://ollama.lan/'],
+  ])('accepts %p, which is not or only resembles a refused address', (url) => {
     expect(urlError(url)).toBeNull();
   });
 });

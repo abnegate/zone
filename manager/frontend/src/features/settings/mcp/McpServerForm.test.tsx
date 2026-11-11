@@ -1,5 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { ApiError } from '../../../api/ApiError';
 import { chooseSelect, selectOptionValues } from '../../../test/select';
 import { Source, Status, Transport } from './constants';
 import { SAVED_PLACEHOLDER } from './McpSecretRows';
@@ -7,6 +8,8 @@ import { COMMANDS_OFF_NOTICE, McpServerForm } from './McpServerForm';
 import { type McpServerSubmission, SubmissionKind } from './submission';
 import type { McpServer } from './types';
 import { NAME_LENGTH } from './validation';
+
+const URL_REFUSED = '`url` must not point at a link-local or cloud metadata address';
 
 function server(overrides: Partial<McpServer> = {}): McpServer {
   return {
@@ -190,6 +193,44 @@ describe('McpServerForm', () => {
     expect(alert.className).toBe('modal-error');
     expect(screen.getByRole('dialog', { name: 'Add MCP server' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Add server' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('shows a URL only the server refuses on the URL field', async () => {
+    const onSubmit = mock((_submission: McpServerSubmission) =>
+      Promise.reject(new ApiError(`Failed to add the MCP server: ${URL_REFUSED}`, 400))
+    );
+    render(<McpServerForm commands onSubmit={onSubmit} onClose={() => {}} />);
+    type('Name', 'wiki');
+    type('URL', 'https://rebound.example/mcp');
+    fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(URL_REFUSED);
+    expect(alert.className).toBe('ui-input-error-text');
+    const url = screen.getByLabelText('URL');
+    expect(url.getAttribute('aria-invalid')).toBe('true');
+    expect(url.getAttribute('aria-describedby')).toBe(alert.id);
+    expect(screen.getByRole('dialog', { name: 'Add MCP server' })).toBeTruthy();
+
+    type('URL', 'https://wiki.example/mcp');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(url.getAttribute('aria-invalid')).toBe('false');
+  });
+
+  it.each([
+    ['another field', new ApiError('Failed to add the MCP server: `name` is taken', 400)],
+    ['another status', new ApiError(`Failed to add the MCP server: ${URL_REFUSED}`, 500)],
+    ['no field', new ApiError('Failed to add the MCP server: 400', 400)],
+  ])('keeps a refusal that names %s under the form', async (_case, failure) => {
+    const onSubmit = mock((_submission: McpServerSubmission) => Promise.reject(failure));
+    render(<McpServerForm commands onSubmit={onSubmit} onClose={() => {}} />);
+    type('Name', 'wiki');
+    type('URL', 'https://wiki.example/mcp');
+    fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(failure.message);
+    expect(alert.className).toBe('modal-error');
+    expect(screen.getByLabelText('URL').getAttribute('aria-invalid')).toBe('false');
   });
 
   it('blocks saving a stored command server while commands are off', () => {
