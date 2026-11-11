@@ -6,6 +6,7 @@
 use chrono::NaiveDateTime;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use uuid::Uuid;
 use zone_context::embeddings::align_vector;
 
@@ -2083,6 +2084,35 @@ pub async fn list_learned_facts(
     .bind(MAX_LEARNED_FACTS)
     .fetch_all(pool)
     .await
+}
+
+/// How many active entries a workspace has filed under each category that
+/// [`list_standing_instructions`] and [`list_learned_facts`] read, by category.
+///
+/// Both read to a row limit and say nothing of the rest, so a caller that
+/// tells its reader how much it was not shown asks here. A category with
+/// nothing filed has no key. Discoveries are left out: [`discovery::listing`]
+/// counts its own in the statement that reads them.
+pub async fn count_learned_entries(
+    pool: &PgPool,
+    workspace_id: Uuid,
+) -> DbResult<HashMap<String, i64>> {
+    let categories: Vec<&str> = std::iter::once(STANDING_INSTRUCTION_CATEGORY)
+        .chain(LearnedCategory::ALL.map(LearnedCategory::as_str))
+        .collect();
+    let counts: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        SELECT category, COUNT(*)
+        FROM knowledge_entries
+        WHERE workspace_id = $1 AND category = ANY($2) AND is_active = TRUE
+        GROUP BY category
+        "#,
+    )
+    .bind(workspace_id)
+    .bind(categories)
+    .fetch_all(pool)
+    .await?;
+    Ok(counts.into_iter().collect())
 }
 
 /// Withdraw a learned fact. Learning is reversible: a later pass re-derives it only

@@ -1090,3 +1090,107 @@ async fn a_chat_is_told_how_many_discoveries_it_is_not_shown() {
     assert!(!block.text.contains("learned entr"), "{}", block.text);
     assert!(block.text.len() <= learned::MAX_RENDERED_BYTES);
 }
+
+/// The count a chat's closing line is built from: what is still filed, by
+/// category, and none of the discoveries, which their own block counts. A
+/// withdrawn entry or a counted discovery would have the line claim an entry
+/// nothing withheld.
+#[tokio::test]
+async fn the_learned_count_is_of_active_pass_derived_entries_by_category() {
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a migrated disposable database");
+    let (organization, workspace) = workspace(&pool).await;
+    let mut instructions = Vec::new();
+    for index in 0..3 {
+        let (instruction, _) = knowledge::upsert_standing_instruction(
+            &pool,
+            &StandingInstruction {
+                workspace_id: workspace,
+                title: format!("Repeated answer {index}"),
+                content: format!("Answer {index}."),
+                provenance: PromotionProvenance {
+                    fingerprint: format!("promoted-{index}"),
+                    occurrences: 4,
+                    distinct_chats: 3,
+                    last_confirmed: confirmed(),
+                },
+            },
+        )
+        .await
+        .expect("a standing instruction");
+        instructions.push(instruction);
+    }
+    let withdrawn = knowledge::retire_standing_instruction(&pool, instructions[0]).await;
+    knowledge::upsert_learned_fact(
+        &pool,
+        &LearnedFact {
+            workspace_id: workspace,
+            category: LearnedCategory::RepositoryConvention,
+            title: "Migration names".to_string(),
+            content: CONVENTION.to_string(),
+            provenance: LearningProvenance {
+                fingerprint: "learned-migrations".to_string(),
+                observations: 9,
+                distinct_runs: 4,
+                confidence: 0.82,
+                last_confirmed: confirmed(),
+            },
+        },
+    )
+    .await
+    .expect("a repository convention");
+    let author = users::create_user(
+        &pool,
+        &format!("{}@example.com", Uuid::new_v4()),
+        "hash",
+        None,
+        false,
+    )
+    .await
+    .expect("whoever the recording chat was acting for")
+    .id;
+    discovery::record(
+        &pool,
+        &Discovery {
+            workspace_id: workspace,
+            subject: "Test database port".to_string(),
+            statement: DISCOVERY.to_string(),
+            author,
+            provenance: discovery::Provenance {
+                kind: discovery::Kind::Lesson,
+                source: discovery::Source::Chat(Uuid::new_v4()),
+                last_confirmed: confirmed(),
+            },
+        },
+    )
+    .await
+    .expect("a discovery");
+
+    let filed = knowledge::count_learned_entries(&pool, workspace).await;
+    let elsewhere = knowledge::count_learned_entries(&pool, Uuid::new_v4()).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("the workspace and everything in it go");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(author)
+        .execute(&pool)
+        .await
+        .expect("the author goes");
+
+    assert!(withdrawn.expect("the instruction is withdrawn"));
+    assert_eq!(
+        filed.expect("the count"),
+        std::collections::HashMap::from([
+            (knowledge::STANDING_INSTRUCTION_CATEGORY.to_string(), 2),
+            (LearnedCategory::RepositoryConvention.to_string(), 1),
+        ])
+    );
+    assert_eq!(
+        elsewhere.expect("the count"),
+        std::collections::HashMap::new(),
+        "a workspace that has filed nothing has no category to count"
+    );
+}

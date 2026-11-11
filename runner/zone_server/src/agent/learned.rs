@@ -296,24 +296,6 @@ async fn read<Rows: Default>(
     })
 }
 
-/// How many active entries the workspace has filed under each category whose
-/// store reads to a row limit and says nothing of the rest.
-async fn tally(pool: &PgPool, workspace_id: Uuid) -> DbResult<HashMap<String, i64>> {
-    let categories: Vec<&str> = std::iter::once(knowledge::STANDING_INSTRUCTION_CATEGORY)
-        .chain(LearnedCategory::ALL.map(LearnedCategory::as_str))
-        .collect();
-    let counts: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT category, count(*) FROM knowledge_entries \
-         WHERE workspace_id = $1 AND category = ANY($2) AND is_active = TRUE \
-         GROUP BY category",
-    )
-    .bind(workspace_id)
-    .bind(categories)
-    .fetch_all(pool)
-    .await?;
-    Ok(counts.into_iter().collect())
-}
-
 /// How many of a category's entries its store's row limit kept from being
 /// read. A family that arrived empty was either never filed or could not be
 /// read, and counts for nothing either way.
@@ -352,7 +334,7 @@ pub async fn load(pool: &PgPool, workspace_id: Uuid) -> Learned {
             discovery::CATEGORY,
             discovery::listing(pool, workspace_id),
         ),
-        tally(pool, workspace_id),
+        knowledge::count_learned_entries(pool, workspace_id),
     );
     let filed = filed.unwrap_or_else(|error| {
         tracing::warn!(
