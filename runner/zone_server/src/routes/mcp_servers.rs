@@ -1934,4 +1934,138 @@ mod tests {
         assert!(emptied.is_empty());
         assert_eq!(left, Some(Vec::new()));
     }
+
+    const AUTHORIZATION: &str = "Authorization";
+    const KEY: &str = "X-Key";
+    const KEY_SECRET: &str = "k3y-51c2d9";
+    const ROTATED_SECRET: &str = "Bearer r0t4ted";
+    const ELSEWHERE_URL: &str = "http://127.0.0.1:2/mcp";
+
+    fn headed() -> Value {
+        json!({
+            "name": "remote",
+            "transport": "http",
+            "url": REMOTE_URL,
+            "headers": { AUTHORIZATION: HEADER_SECRET, KEY: KEY_SECRET },
+        })
+    }
+
+    async fn refused(
+        state: &AppState,
+        tenant: &Tenant,
+        server: &McpServerResponse,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let refusal = super::update(
+            State(state.clone()),
+            administrator(tenant),
+            path(tenant, server),
+            Ok(Json(update(body))),
+        )
+        .await
+        .expect_err("the update is refused");
+        let response = refusal.into_response();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    async fn stored(state: &AppState, tenant: &Tenant, server: &McpServerResponse) -> Vec<String> {
+        let record = mcp_servers::get_authorized(
+            state.db(),
+            state.master_key(),
+            tenant.organization,
+            server.id.expect("a stored server"),
+            tenant.user,
+        )
+        .await
+        .expect("the server is read");
+        assert_eq!(record.url.as_deref(), server.url.as_deref());
+        record
+            .secrets
+            .headers
+            .values()
+            .map(|value| value.expose().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_new_origin_that_keeps_a_saved_header_value_is_refused() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica().await;
+        let created = creating(&state, &tenant, headed()).await;
+
+        let mut answers = Vec::new();
+        for body in [
+            json!({ "url": ELSEWHERE_URL }),
+            json!({ "url": "https://127.0.0.1:1/mcp" }),
+            json!({ "url": ELSEWHERE_URL, "headers": { AUTHORIZATION: null, KEY: null } }),
+            json!({ "url": ELSEWHERE_URL, "headers": { AUTHORIZATION: ROTATED_SECRET, KEY: null } }),
+        ] {
+            answers.push(refused(&state, &tenant, &created, body).await);
+        }
+        let kept = stored(&state, &tenant, &created).await;
+        tenant.remove().await;
+
+        for answer in answers {
+            assert_eq!(
+                answer,
+                (
+                    StatusCode::BAD_REQUEST,
+                    json!({ "error": mcp_servers::ORIGIN_CHANGED })
+                )
+            );
+        }
+        assert_eq!(kept, [HEADER_SECRET, KEY_SECRET]);
+    }
+
+    #[tokio::test]
+    async fn a_new_origin_takes_the_header_values_sent_with_it() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica().await;
+        let created = creating(&state, &tenant, headed()).await;
+
+        let moved = updating(
+            &state,
+            &tenant,
+            &created,
+            json!({ "url": "http://127.0.0.1:1/other" }),
+        )
+        .await;
+        let kept = stored(&state, &tenant, &moved).await;
+        let rehomed = updating(
+            &state,
+            &tenant,
+            &created,
+            json!({ "url": ELSEWHERE_URL, "headers": { AUTHORIZATION: ROTATED_SECRET } }),
+        )
+        .await;
+        let rotated = stored(&state, &tenant, &rehomed).await;
+        let cleared = updating(
+            &state,
+            &tenant,
+            &created,
+            json!({ "url": REMOTE_URL, "headers": {} }),
+        )
+        .await;
+        let emptied = stored(&state, &tenant, &cleared).await;
+        tenant.remove().await;
+
+        assert_eq!(moved.url.as_deref(), Some("http://127.0.0.1:1/other"));
+        assert_eq!(kept, [HEADER_SECRET, KEY_SECRET]);
+        assert_eq!(rehomed.url.as_deref(), Some(ELSEWHERE_URL));
+        assert_eq!(
+            rehomed.headers,
+            [McpSecretField {
+                name: AUTHORIZATION.to_string(),
+                has_value: true,
+            }]
+        );
+        assert_eq!(rotated, [ROTATED_SECRET]);
+        assert_eq!(cleared.url.as_deref(), Some(REMOTE_URL));
+        assert!(cleared.headers.is_empty());
+        assert!(emptied.is_empty());
+    }
 }

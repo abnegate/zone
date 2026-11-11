@@ -94,6 +94,8 @@ const TOKEN_VARIABLE: &str = "ZONE_TEST_MCP_TOKEN";
 const KEY_FLAG: &str = "--key";
 const KEY_HEADER: &str = "X-Key";
 const STUB_KEY: &str = "the-key-the-stub-wants";
+const RECORD_FLAG: &str = "--record";
+const ORIGIN_CHANGED: &str = "Re-enter the header values when the URL's origin changes";
 /// What a failing server is sent, which it echoes in its refusal. Each is long enough for the
 /// hub to scrub once it is bound to its server, and none is shaped like a credential, so nothing
 /// but that binding keeps one out of a failure's text and the log.
@@ -2078,6 +2080,66 @@ async fn a_wrong_token_fails_and_the_right_one_connects() {
     assert_eq!(again["available_tools"], json!([STUB_TOOL]));
 
     tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_saved_header_value_never_follows_the_url_to_a_new_origin() {
+    let _environment = isolated();
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let record = directory.path().join("headers");
+    let original = Stub::start(&[TOKEN_FLAG, STUB_TOKEN]).await;
+    let elsewhere = Stub::start(&[
+        TOKEN_FLAG,
+        WRONG_TOKEN,
+        RECORD_FLAG,
+        &record.to_string_lossy(),
+    ])
+    .await;
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let body = sending(HTTP_SERVER, &original.url(), HEADER, &bearer(STUB_TOKEN));
+    let uri = tenant.server(&id(&tenant.create(&client, &body).await));
+    settle(&client, &uri, token, CONNECTED).await;
+
+    let mut refusals = Vec::new();
+    for body in [
+        json!({ "url": elsewhere.url() }),
+        json!({ "url": elsewhere.url(), "headers": { HEADER: null } }),
+    ] {
+        let refused = client.put_json_auth(&uri, &body, token).await;
+        refusals.push((refused.status, refused.json_value()));
+    }
+    let kept = client.get_auth(&uri, token).await.json_value();
+    let moved = client
+        .put_json_auth(
+            &uri,
+            &json!({ "url": elsewhere.url(), "headers": { HEADER: bearer(WRONG_TOKEN) } }),
+            token,
+        )
+        .await;
+    moved.assert_status(StatusCode::OK);
+    let connected = settle(&client, &uri, token, CONNECTED).await;
+    let recorded =
+        std::fs::read_to_string(&record).expect("the new host recorded what it was sent");
+    tenant.discard(&client, &[]).await;
+
+    assert!(
+        !recorded.contains(STUB_TOKEN),
+        "the new host was sent the value saved for the old one: {recorded}"
+    );
+    assert!(
+        recorded.contains(&bearer(WRONG_TOKEN)),
+        "the new host was not sent the value given with its URL: {recorded}"
+    );
+    for refused in refusals {
+        assert_eq!(
+            refused,
+            (StatusCode::BAD_REQUEST, json!({ ERROR: ORIGIN_CHANGED }))
+        );
+    }
+    assert_eq!(kept["url"], original.url());
+    assert_eq!(connected["url"], elsewhere.url());
 }
 
 /// The runtime is current-thread so every task the server spawns logs through the subscriber

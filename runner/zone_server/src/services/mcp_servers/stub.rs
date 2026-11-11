@@ -23,8 +23,8 @@ pub struct Stub {
 }
 
 impl Stub {
-    /// Starts the stub with `arguments` (`--token <token>` makes it demand that bearer token)
-    /// and returns once it has printed the port it listens on, which it does after binding.
+    /// Starts the stub with `arguments` (`--token <token>` makes it demand that bearer token,
+    /// `--record <path>` appends every request's headers to that file) and returns once it has printed the port it listens on, which it does after binding.
     pub async fn start(arguments: &[&str]) -> Self {
         let script: PathBuf = [env!("CARGO_MANIFEST_DIR")]
             .into_iter()

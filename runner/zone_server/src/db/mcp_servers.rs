@@ -8,6 +8,7 @@ use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
 use chrono::DateTime;
 use chrono::Utc;
+use reqwest::Url;
 use serde::Deserialize;
 use sqlx::Executor;
 use sqlx::PgConnection;
@@ -46,6 +47,7 @@ const INVALID_TARGET: &str =
     "A stdio server needs a command and no URL; an http server needs a URL and no command";
 const FOREIGN_SERVER: &str = "An MCP server in the overrides does not belong to this organization";
 const UNSEALABLE_SECRETS: &str = "The MCP server secrets could not be sealed";
+pub const ORIGIN_CHANGED: &str = "Re-enter the header values when the URL's origin changes";
 const ENVIRONMENT_FIELD: &str = "Environment variable";
 const HEADER_FIELD: &str = "Header";
 const ENVIRONMENT_KEY: &str = "environment";
@@ -266,6 +268,25 @@ fn merge(
         .collect()
 }
 
+fn moved(before: Option<&str>, after: &str) -> bool {
+    match (before.map(Url::parse), Url::parse(after)) {
+        (Some(Ok(before)), Ok(after)) => before.origin() != after.origin(),
+        _ => true,
+    }
+}
+
+fn kept(
+    stored: &BTreeMap<String, SecretValue>,
+    changes: Option<&BTreeMap<String, Option<SecretValue>>>,
+) -> bool {
+    match changes {
+        None => !stored.is_empty(),
+        Some(changes) => changes
+            .iter()
+            .any(|(name, value)| value.is_none() && stored.contains_key(name)),
+    }
+}
+
 async fn authorize_organization(
     connection: &mut PgConnection,
     organization: Uuid,
@@ -427,6 +448,14 @@ pub async fn update_authorized(
     .await?;
     let stored = stored.ok_or(McpServerError::NotFound(SERVER_NOT_FOUND))?;
     let before = stored.clone().open(key)?;
+    if changes
+        .url
+        .as_deref()
+        .is_some_and(|url| moved(before.url.as_deref(), url))
+        && kept(&before.secrets.headers, changes.headers.as_ref())
+    {
+        return Err(McpServerError::Invalid(ORIGIN_CHANGED.to_owned()));
+    }
 
     let secrets = Secrets {
         environment: match changes.environment {

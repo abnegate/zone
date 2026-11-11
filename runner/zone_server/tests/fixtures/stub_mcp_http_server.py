@@ -15,11 +15,16 @@ path and the token: any other request, to any path, gets 400 with the
 plain-text body "refused <the X-Key it sent> at <its path and query>", the
 way a server that echoes what it was sent answers.
 
+With --record, every request's headers are appended to the file at that path,
+one "<name>: <value>" line each, before anything else is checked.
+
 --self-test drives the server in-process and exits non-zero on any failure.
 """
 import argparse
 import json
+import os
 import sys
+import tempfile
 import threading
 import urllib.error
 import urllib.request
@@ -35,7 +40,9 @@ TEXT_TYPE = "text/plain; charset=utf-8"
 KEY_HEADER = "X-Key"
 SELF_TEST_TOKEN = "self-test"
 SELF_TEST_KEY = "self-test-key"
+SELF_TEST_MARKER = "self-test-marker"
 ELSEWHERE = "/elsewhere/mcp?probe=1"
+RECORDING = threading.Lock()
 
 TOOL = {
     "name": "delegate",
@@ -65,7 +72,7 @@ def result(message):
     return {}
 
 
-def handler(token, key):
+def handler(token, key, record):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -92,6 +99,9 @@ def handler(token, key):
             self.send(status, {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": message}})
 
         def admitted(self):
+            if record is not None:
+                with RECORDING, open(record, "a", encoding="utf-8") as recorded:
+                    recorded.writelines(f"{name}: {value}\n" for name, value in self.headers.items())
             if key is not None and self.headers.get(KEY_HEADER) != key:
                 sent = self.headers.get(KEY_HEADER, "")
                 self.write(HTTPStatus.BAD_REQUEST, f"refused {sent} at {self.path}".encode(), TEXT_TYPE)
@@ -145,8 +155,8 @@ def handler(token, key):
     return Handler
 
 
-def serve(token, key):
-    return ThreadingHTTPServer((HOST, 0), handler(token, key))
+def serve(token, key, record=None):
+    return ThreadingHTTPServer((HOST, 0), handler(token, key, record))
 
 
 def request(url, method, body=None, token=None, session=None, key=None):
@@ -256,11 +266,30 @@ def drive(token, key):
     return failures
 
 
+def recorded():
+    failures = []
+    with tempfile.TemporaryDirectory() as directory:
+        record = os.path.join(directory, "headers")
+        server = serve(None, None, record)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            request(f"http://{HOST}:{server.server_address[1]}{PATH}", "GET", key=SELF_TEST_MARKER)
+        finally:
+            server.shutdown()
+            server.server_close()
+        with open(record, encoding="utf-8") as lines:
+            written = lines.read().splitlines()
+        check(f"{KEY_HEADER}: {SELF_TEST_MARKER}" in written, f"recorded headers {written!r}", failures)
+    return failures
+
+
 def self_test(token, key):
     failures = drive(token, key)
     if token is None and key is None:
         failures += [f"guarded: {failure}" for failure in drive(SELF_TEST_TOKEN, None)]
         failures += [f"keyed: {failure}" for failure in drive(None, SELF_TEST_KEY)]
+        failures += [f"recorded: {failure}" for failure in recorded()]
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)
     print("self-test failed" if failures else "self-test passed", file=sys.stderr)
@@ -271,11 +300,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--token", help="require Authorization: Bearer <token>")
     parser.add_argument("--key", help="require X-Key: <key>, answering 400 with what was sent instead")
+    parser.add_argument("--record", help="append every request's headers to this file")
     parser.add_argument("--self-test", action="store_true", help="drive the server in-process and exit")
     arguments = parser.parse_args()
     if arguments.self_test:
         return self_test(arguments.token, arguments.key)
-    server = serve(arguments.token, arguments.key)
+    server = serve(arguments.token, arguments.key, arguments.record)
     print(f"PORT={server.server_address[1]}", flush=True)
     try:
         server.serve_forever()
