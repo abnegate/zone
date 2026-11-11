@@ -3,6 +3,7 @@ use std::fs;
 use std::iter;
 use std::os::unix::fs::PermissionsExt;
 
+use abnegate_agent::mcp::McpEndpoint;
 use serde_json::Value;
 use serde_json::json;
 use tempfile::TempDir;
@@ -22,6 +23,9 @@ const SERVERS: &str = "ZONE_MCP_SERVERS";
 const CONFIG: &str = "ZONE_MCP_CONFIG";
 const AUTO_CONNECT: &str = "ZONE_MCP_AUTO_CONNECT";
 const AUTO_MAGENTS: &str = "ZONE_MCP_AUTO_MAGENTS";
+const CREDENTIAL: &str = "ZONE_SERVERS_TEST_CREDENTIAL";
+
+const UNBOUND: [(&str, &str); 0] = [];
 
 const PLAYBOOK_MARKER: &str = "untrusted inert history";
 const DELEGATION_MARKER: &str = "would mean reading across several files";
@@ -190,7 +194,7 @@ fn configured_servers_and_the_fallback_inherit_the_environment() {
 }
 
 #[test]
-fn a_url_only_config_still_gets_the_magents_fallback() {
+fn a_url_server_stays_configured() {
     let home = TempDir::new().unwrap();
     let mut variables = isolated(&home);
     variables.set(
@@ -198,7 +202,364 @@ fn a_url_only_config_still_gets_the_magents_fallback() {
         r#"{"mcpServers": {"remote": {"url": "http://localhost:3000/mcp"}}}"#,
     );
 
-    assert_eq!(names(&config()), [MAGENTS]);
+    let config = config();
+
+    assert_eq!(names(&config), ["remote"]);
+    let remote = &config.servers["remote"];
+    assert_eq!(remote.url.as_deref(), Some("http://localhost:3000/mcp"));
+    assert_eq!(remote.command, None);
+    assert!(!remote.inherit_environment);
+    assert!(remote.valid());
+}
+
+#[test]
+fn a_url_only_config_counts_as_configured() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    variables.set(
+        SERVERS,
+        r#"{"mcpServers": {"remote": {"type": "http", "url": "http://localhost:3000/mcp"}}}"#,
+    );
+
+    let config = config();
+
+    assert!(config.auto_connect);
+    assert_eq!(names(&config), ["remote"]);
+}
+
+#[test]
+fn an_sse_only_config_counts_as_configured() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    variables.set(
+        SERVERS,
+        r#"{"mcpServers": {"remote": {"type": "sse", "url": "http://localhost:3000/sse"}}}"#,
+    );
+
+    let config = config();
+
+    assert!(config.auto_connect);
+    assert_eq!(names(&config), ["remote"]);
+    assert_eq!(config.servers["remote"].transport, Some(McpTransport::Sse));
+}
+
+#[test]
+fn a_server_the_hub_cannot_attach_stays_configured_and_unbound() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    variables.set(
+        SERVERS,
+        r#"{"mcpServers": {"remote": {"type": "ws", "url": "ws://localhost:3000/mcp"}}}"#,
+    );
+
+    let config = config();
+
+    assert_eq!(names(&config), ["remote"]);
+    let remote = &config.servers["remote"];
+    assert!(!remote.valid());
+    assert_eq!(bound(remote), UNBOUND);
+}
+
+#[test]
+fn a_disabled_url_server_is_dropped() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+
+    for (document, expected) in [
+        (
+            r#"{"mcpServers": {"remote": {"url": "http://localhost:3000/mcp", "disabled": true}}}"#,
+            MAGENTS,
+        ),
+        (
+            r#"{"mcpServers": {"remote": {"url": "http://localhost:3000/mcp", "disabled": true}, "docs": {"command": "docs-server"}}}"#,
+            "docs",
+        ),
+    ] {
+        variables.set(SERVERS, document);
+
+        assert_eq!(names(&config()), [expected], "{document}");
+    }
+}
+
+#[test]
+fn the_environment_feeds_an_instance_url_server() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    variables.set(
+        SERVERS,
+        json!({"mcpServers": {"remote": {
+            "url": "http://127.0.0.1:3000/mcp",
+            "headers": {"Authorization": format!("Bearer ${{{CREDENTIAL}}}")}
+        }}})
+        .to_string(),
+    );
+    variables.set(CREDENTIAL, "token-9f3a7b");
+
+    let set = config();
+    variables.remove(CREDENTIAL);
+    let unset = config();
+
+    let remote = &set.servers["remote"];
+    assert_eq!(remote.url.as_deref(), Some("http://127.0.0.1:3000/mcp"));
+    assert_eq!(
+        remote.headers["Authorization"].expose(),
+        format!("Bearer ${{{CREDENTIAL}}}")
+    );
+    let endpoint = remote.endpoint().expect("the environment binds the token");
+    assert_eq!(endpoint.url, "http://127.0.0.1:3000/mcp");
+    assert_eq!(sent(&endpoint), [("Authorization", "Bearer token-9f3a7b")]);
+    assert_eq!(
+        bound(remote),
+        [
+            (CREDENTIAL, "token-9f3a7b"),
+            ("header credential Authorization", "token-9f3a7b"),
+            ("header value Authorization", "Bearer token-9f3a7b"),
+            ("path segment 0", "mcp"),
+            ("url path", "/mcp"),
+        ]
+    );
+    assert_eq!(names(&unset), ["remote"]);
+    assert_eq!(unset.servers["remote"].endpoint(), None);
+    assert_eq!(bound(&unset.servers["remote"]), UNBOUND);
+}
+
+#[test]
+fn a_command_server_is_never_bound() {
+    let home = TempDir::new().unwrap();
+    let mut variables = isolated(&home);
+    let argument = format!("--token=${{{CREDENTIAL}}}");
+    variables.set(
+        SERVERS,
+        json!({"mcpServers": {"docs": {
+            "command": "docs-server",
+            "args": [argument],
+            "url": format!("http://localhost:3000/${{{CREDENTIAL}}}")
+        }}})
+        .to_string(),
+    );
+    variables.set(CREDENTIAL, "token-9f3a7b");
+
+    let config = config();
+
+    let docs = &config.servers["docs"];
+    assert_eq!(docs.arguments, [argument]);
+    assert_eq!(bound(docs), UNBOUND);
+}
+
+#[test]
+fn references_in_a_url_and_headers_are_bound_from_the_lookup() {
+    let written = McpServer::remote("https://${HOST:-127.0.0.1}/mcp/${PATH_KEY}")
+        .with_header("Authorization", "Bearer ${TOKEN}");
+    let resolved = written
+        .endpoint_with(&lookup)
+        .expect("the lookup or a default answers every reference");
+    let mut server = written.clone();
+
+    assert!(bind(&mut server, &lookup));
+
+    assert_eq!(server.url, written.url);
+    assert_eq!(server.headers, written.headers);
+    assert_eq!(
+        bound(&server),
+        [
+            ("PATH_KEY", "path-key-51c2"),
+            ("TOKEN", "token-9f3a7b"),
+            ("header credential Authorization", "token-9f3a7b"),
+            ("header value Authorization", "Bearer token-9f3a7b"),
+            ("path segment 0", "mcp"),
+            ("path segment 1", "path-key-51c2"),
+            ("url path", "/mcp/path-key-51c2"),
+        ]
+    );
+    assert_eq!(resolved.url, "https://127.0.0.1/mcp/path-key-51c2");
+    assert_eq!(sent(&resolved), [("Authorization", "Bearer token-9f3a7b")]);
+    assert_eq!(server.endpoint(), Some(resolved));
+}
+
+#[test]
+fn an_unset_reference_binds_nothing() {
+    let mut server = McpServer::remote("https://example.com/mcp/${PATH_KEY}")
+        .with_header("Authorization", "Bearer ${MISSING}");
+
+    assert!(!bind(&mut server, &lookup));
+
+    assert_eq!(server.endpoint(), None);
+    assert_eq!(bound(&server), UNBOUND);
+}
+
+#[test]
+fn a_literal_header_value_is_masked() {
+    let mut server =
+        McpServer::remote("https://example.com/mcp").with_header("X-Key", "literal-key-7d21");
+
+    mask(&mut server);
+
+    assert_eq!(
+        bound(&server),
+        [
+            ("header value X-Key", "literal-key-7d21"),
+            ("path segment 0", "mcp"),
+            ("url path", "/mcp"),
+        ]
+    );
+    assert!(server.secrets.keys().all(|key| spaced(key)));
+}
+
+#[test]
+fn a_two_part_header_value_also_masks_its_credential() {
+    let mut server = McpServer::remote("https://example.com")
+        .with_header("Authorization", "Bearer credential-4e8b")
+        .with_header("X-Padded", " padded-0c6d ");
+
+    mask(&mut server);
+
+    assert_eq!(
+        bound(&server),
+        [
+            ("header credential Authorization", "credential-4e8b"),
+            ("header value Authorization", "Bearer credential-4e8b"),
+            ("header value X-Padded", " padded-0c6d "),
+            ("url path", "/"),
+        ]
+    );
+}
+
+#[test]
+fn a_urls_path_and_query_are_masked() {
+    let mut queried = McpServer::remote(
+        "https://example.com/mcp/segment-a1b2c3/v1/?key=value-d4e5f6&empty=&mode=fast",
+    );
+    let mut plain = McpServer::remote("https://example.com/mcp");
+
+    mask(&mut queried);
+    mask(&mut plain);
+
+    assert_eq!(
+        bound(&queried),
+        [
+            ("path segment 0", "mcp"),
+            ("path segment 1", "segment-a1b2c3"),
+            ("path segment 2", "v1"),
+            ("query value 0", "value-d4e5f6"),
+            ("query value 2", "fast"),
+            ("url path", "/mcp/segment-a1b2c3/v1/"),
+            ("url query", "key=value-d4e5f6&empty=&mode=fast"),
+        ]
+    );
+    assert_eq!(
+        bound(&plain),
+        [("path segment 0", "mcp"), ("url path", "/mcp")]
+    );
+}
+
+#[test]
+fn an_encoded_piece_of_a_url_is_masked_as_the_server_reads_it() {
+    let mut server = McpServer::remote(
+        "https://example.com/open%20sesame%2F9c1e/100%/%E2%9C%93%zz?note=a%20b+c%26d",
+    );
+
+    mask(&mut server);
+
+    assert_eq!(
+        bound(&server),
+        [
+            ("path segment 0", "open sesame/9c1e"),
+            ("path segment 1", "100%"),
+            ("path segment 2", "\u{2713}%zz"),
+            ("query value 0", "a b c&d"),
+            ("url path", "/open%20sesame%2F9c1e/100%/%E2%9C%93%zz"),
+            ("url query", "note=a%20b+c%26d"),
+        ]
+    );
+}
+
+#[test]
+fn a_header_named_like_its_own_reference_resolves_unchanged() {
+    let written =
+        McpServer::remote("https://example.com/mcp").with_header("TOKEN", "Bearer ${TOKEN}");
+    let resolved = written
+        .endpoint_with(&lookup)
+        .expect("the lookup answers the reference");
+    let mut server = written.clone();
+
+    assert!(bind(&mut server, &lookup));
+
+    assert_eq!(
+        bound(&server),
+        [
+            ("TOKEN", "token-9f3a7b"),
+            ("header credential TOKEN", "token-9f3a7b"),
+            ("header value TOKEN", "Bearer token-9f3a7b"),
+            ("path segment 0", "mcp"),
+            ("url path", "/mcp"),
+        ]
+    );
+    assert!(
+        server
+            .secrets
+            .keys()
+            .filter(|key| *key != "TOKEN")
+            .all(|key| spaced(key))
+    );
+    assert_eq!(sent(&resolved), [("TOKEN", "Bearer token-9f3a7b")]);
+    assert_eq!(server.endpoint(), Some(resolved));
+}
+
+#[test]
+fn masking_is_idempotent() {
+    let mut server = McpServer::remote("https://example.com/mcp/${PATH_KEY}?key=value-d4e5f6")
+        .with_header("Authorization", "Bearer ${TOKEN}")
+        .with_header("X-Key", "literal-key-7d21");
+    assert!(bind(&mut server, &lookup));
+    let once = server.secrets.clone();
+    let resolved = server.endpoint();
+
+    mask(&mut server);
+
+    assert_eq!(server.secrets, once);
+    assert_eq!(server.endpoint(), resolved);
+    assert_eq!(once.len(), 10);
+}
+
+#[test]
+fn a_server_with_no_endpoint_is_left_unmasked() {
+    let mut command = McpServer::command("docs-server", ["--token=token-9f3a7b"]);
+    let mut unbound = McpServer::remote("https://example.com/mcp/${PATH_KEY}")
+        .with_header("X-Key", "literal-key-7d21");
+
+    mask(&mut command);
+    mask(&mut unbound);
+
+    assert_eq!(bound(&command), UNBOUND);
+    assert_eq!(bound(&unbound), UNBOUND);
+}
+
+fn lookup(variable: &str) -> Option<String> {
+    match variable {
+        "PATH_KEY" => Some("path-key-51c2".to_string()),
+        "TOKEN" => Some("token-9f3a7b".to_string()),
+        _ => None,
+    }
+}
+
+fn bound(server: &McpServer) -> Vec<(&str, &str)> {
+    server
+        .secrets
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.expose()))
+        .collect()
+}
+
+fn sent(endpoint: &McpEndpoint) -> Vec<(&str, &str)> {
+    endpoint
+        .headers
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.expose()))
+        .collect()
+}
+
+fn spaced(key: &str) -> bool {
+    key.contains(' ')
 }
 
 #[test]
