@@ -1,5 +1,5 @@
 import type { WizardStep } from '@zone/ui';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { type ReactElement, useCallback, useMemo, useRef, useState } from 'react';
 import { Wizard } from '../../../components';
 import { getErrors } from '../../../validation';
 import type { GitHubRepository } from '../../github';
@@ -15,7 +15,7 @@ import { GitHubConnectionMode } from './GitHubConnectionMode';
 interface CreateSourceWizardProps {
   isOpen: boolean;
   onClose: () => void;
-  onCreated: (source: Source) => void;
+  onCreated?: (source: Source) => void;
   createSource: (request: CreateSourceRequest) => Promise<Source>;
 }
 
@@ -64,7 +64,7 @@ export function CreateSourceWizard({
   onClose,
   onCreated,
   createSource,
-}: CreateSourceWizardProps) {
+}: CreateSourceWizardProps): ReactElement {
   const [currentStep, setCurrentStep] = useState(0);
   const [sourceType, setSourceType] = useState<SourceType>(GITHUB_SOURCE_TYPE);
   const [formState, setFormState] = useState<Record<string, unknown>>(() =>
@@ -190,10 +190,10 @@ export function CreateSourceWizard({
 
     try {
       const source = await createSource(request);
-      onCreated(source);
+      onCreated?.(source);
       handleClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create source');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to create source');
     } finally {
       setLoading(false);
     }

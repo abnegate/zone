@@ -1,46 +1,19 @@
-import { Badge, Button, EmptyState } from '@zone/ui';
-import { useState } from 'react';
+import { Button, EmptyState } from '@zone/ui';
+import { type ReactElement, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { getSourceById, getSourceLabel } from '../config';
 import { useSource, useSources } from '../hooks';
 import type { Source } from '../types';
 import { CreateSourceWizard } from './CreateSourceWizard';
 import { SourceDetail } from './SourceDetail';
+import { SourceSkeleton } from './SourceSkeleton';
+import { SourceStatusBadge } from './SourceStatusBadge';
 import './SourcesSection.css';
 
-const SKELETON_ROWS = [1, 2, 3];
+const SOURCE_PARAMETER = 'source';
 
-function stopRowActivation(event: { stopPropagation: () => void }) {
+function stopRowActivation(event: { stopPropagation: () => void }): void {
   event.stopPropagation();
-}
-
-function SourceStatusBadge({ source }: { source: Source }) {
-  if (!source.is_active) {
-    return (
-      <Badge className="source-status" variant="neutral">
-        Inactive
-      </Badge>
-    );
-  }
-  if (source.last_error) {
-    return (
-      <Badge className="source-status" variant="destructive">
-        Error
-      </Badge>
-    );
-  }
-  if (source.last_verified_at) {
-    return (
-      <Badge className="source-status" variant="success">
-        Verified
-      </Badge>
-    );
-  }
-  return (
-    <Badge className="source-status" variant="warning">
-      Unverified
-    </Badge>
-  );
 }
 
 function formatVerified(at: string): string {
@@ -51,52 +24,9 @@ function formatVerified(at: string): string {
   });
 }
 
-function SourceSkeleton() {
-  return (
-    <div className="sources-table-wrapper" aria-hidden="true">
-      <table className="sources-table">
-        <thead>
-          <tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Status</th>
-            <th>URL</th>
-            <th>Verified</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {SKELETON_ROWS.map((row) => (
-            <tr key={row} className="source-card skeleton-card">
-              <td>
-                <div className="skeleton skeleton-title" />
-              </td>
-              <td>
-                <div className="skeleton skeleton-text short" />
-              </td>
-              <td>
-                <div className="skeleton skeleton-badge" />
-              </td>
-              <td>
-                <div className="skeleton skeleton-text" />
-              </td>
-              <td>
-                <div className="skeleton skeleton-text short" />
-              </td>
-              <td>
-                <div className="skeleton skeleton-badge" />
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-export function SourcesSection() {
+export function SourcesSection(): ReactElement {
   const [searchParams, setSearchParams] = useSearchParams();
-  const sourceParam = searchParams.get('source') || null;
+  const selectedId = searchParams.get(SOURCE_PARAMETER) || null;
   const {
     sources,
     loading,
@@ -113,32 +43,32 @@ export function SourcesSection() {
     error: sourceError,
     updateSource: updateSelected,
     verifySource: verifySelected,
-  } = useSource(sourceParam);
+  } = useSource(selectedId);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [verifying, setVerifying] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
 
   const showEditor =
-    Boolean(sourceParam) && selected?.id === sourceParam && !sourceError && !sourceLoading;
-  const showSpinner = Boolean(sourceParam) && !showEditor && !sourceError;
+    Boolean(selectedId) && selected?.id === selectedId && !sourceError && !sourceLoading;
+  const showSpinner = Boolean(selectedId) && !showEditor && !sourceError;
   const showAddSource = !showSpinner && !showEditor;
-  const displayError = error || operationError || (sourceParam && !showEditor ? sourceError : null);
+  const displayError = error || operationError || (selectedId && !showEditor ? sourceError : null);
   const unloaded = error !== null && sources.length === 0;
 
-  const openSource = (id: string) => {
+  const openSource = (id: string): void => {
     const next = new URLSearchParams(searchParams);
-    next.set('source', id);
+    next.set(SOURCE_PARAMETER, id);
     setSearchParams(next);
   };
 
-  const closeSource = () => {
-    if (!searchParams.has('source')) return;
+  const closeSource = (): void => {
+    if (!searchParams.has(SOURCE_PARAMETER)) return;
     const next = new URLSearchParams(searchParams);
-    next.delete('source');
+    next.delete(SOURCE_PARAMETER);
     setSearchParams(next, { replace: true });
   };
 
-  const handleVerify = async (sourceId: string) => {
+  const handleVerify = async (sourceId: string): Promise<void> => {
     setVerifying(sourceId);
     setOperationError(null);
     try {
@@ -146,30 +76,30 @@ export function SourcesSection() {
       if (!result.verified) {
         setOperationError(result.message || 'Verification failed');
       }
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to verify source');
+    } catch (failure) {
+      setOperationError(failure instanceof Error ? failure.message : 'Failed to verify source');
     } finally {
       setVerifying(null);
     }
   };
 
-  const handleDelete = async (sourceId: string) => {
+  const handleDelete = async (sourceId: string): Promise<void> => {
     if (!window.confirm('Are you sure you want to delete this source?')) return;
 
     setOperationError(null);
     try {
       await deleteSource(sourceId);
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to delete source');
+    } catch (failure) {
+      setOperationError(failure instanceof Error ? failure.message : 'Failed to delete source');
     }
   };
 
-  const handleToggleActive = async (source: Source) => {
+  const handleToggleActive = async (source: Source): Promise<void> => {
     setOperationError(null);
     try {
       await updateSource(source.id, { is_active: !source.is_active });
-    } catch (err) {
-      setOperationError(err instanceof Error ? err.message : 'Failed to update source');
+    } catch (failure) {
+      setOperationError(failure instanceof Error ? failure.message : 'Failed to update source');
     }
   };
 
@@ -219,7 +149,6 @@ export function SourcesSection() {
         <SourceSkeleton />
       ) : unloaded ? null : sources.length === 0 ? (
         <EmptyState
-          className="sources-empty"
           icon={
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
               <path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
@@ -356,7 +285,6 @@ export function SourcesSection() {
       <CreateSourceWizard
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}
-        onCreated={() => undefined}
         createSource={createSource}
       />
     </div>

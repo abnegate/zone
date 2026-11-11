@@ -244,6 +244,7 @@ describe('SourcesSection', () => {
     await screen.findByRole('heading', { level: 2, name: 'Sources' });
     expect(container.querySelector('.page')).toBeNull();
     expect(container.querySelector('.page-bar')).toBeNull();
+    expect(container.querySelector('.page-body')).toBeNull();
   });
 
   it('displays source type badges', async () => {
@@ -941,6 +942,7 @@ describe('SourcesSection', () => {
       await waitFor(() => {
         expect(document.querySelector('.source-details')).not.toBeNull();
       });
+      const entries = window.history.length;
 
       fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 
@@ -950,6 +952,7 @@ describe('SourcesSection', () => {
       });
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
       expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
+      expect(window.history.length).toBe(entries);
     });
 
     it('shows the table and Add source when the source id is unknown', async () => {
