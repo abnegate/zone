@@ -218,6 +218,7 @@ where
 mod tests {
     use std::future::Ready;
     use std::future::ready;
+    use std::pin::pin;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
@@ -225,6 +226,7 @@ mod tests {
     use abnegate_agent::ToolRegistry;
     use abnegate_agent::mcp::McpServer;
     use abnegate_agent::mcp::McpTransport;
+    use futures::poll;
     use tokio::sync::Notify;
 
     use super::*;
@@ -452,7 +454,9 @@ mod tests {
         assert_eq!(stored.marker(), Some("second"));
         let session = hub.session("stub").unwrap();
         assert!(!Arc::ptr_eq(&earlier, &session), "the session was replaced");
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::timeout(LIMIT, hub.quiet())
+            .await
+            .expect("the superseded connect settles");
         assert!(
             Arc::ptr_eq(&session, &hub.session("stub").unwrap()),
             "the earlier connect never lands after the later one"
@@ -692,15 +696,14 @@ mod tests {
         });
         read.notified().await;
         rows.store(later);
-        let second = tokio::spawn({
-            let hubs = Arc::clone(&hubs);
-            let rows = Arc::clone(&rows);
-            async move { hubs.sync(organization, rows.load()).await }
-        });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut second = pin!(hubs.sync(organization, rows.load()));
+        assert!(
+            poll!(second.as_mut()).is_pending(),
+            "the second change has to wait at the gate the first holds"
+        );
         release.notify_one();
         first.await.unwrap().unwrap();
-        second.await.unwrap().unwrap();
+        second.await.unwrap();
         tokio::time::timeout(LIMIT, hub.settled())
             .await
             .expect("the connections settle");

@@ -132,11 +132,6 @@ const ERROR: &str = "error";
 const CONNECT: Duration = Duration::from_secs(30);
 const SETTLE: Duration = Duration::from_secs(CONNECT.as_secs() + 15);
 const POLL: Duration = Duration::from_millis(50);
-/// An edit that must leave a server running is watched for this long, or for `RESTARTS` times
-/// what that server's own restart just took when that is longer, before nothing is taken to
-/// have restarted it.
-const QUIET: Duration = Duration::from_millis(500);
-const RESTARTS: u32 = 4;
 
 const SERVER_FIELDS: [&str; 16] = [
     "arguments",
@@ -1595,27 +1590,32 @@ async fn a_reconnect_restarts_the_server_and_an_allowlist_edit_leaves_it_running
     let revision = handshake(&offered).await;
 
     std::fs::remove_file(&offered).expect("the first handshake's record is removed");
-    let requested = Instant::now();
+    let hub = client
+        .state()
+        .mcp()
+        .existing_organization(tenant.organization)
+        .expect("the organization's hub is running");
+    let connected = hub.generation("stub");
     client
         .post_json_auth(&tenant.connection(&server), &json!({}), token)
         .await
         .assert_status(StatusCode::ACCEPTED);
     assert_eq!(handshake(&offered).await, revision);
-    let restart = requested.elapsed();
     let reconnected = settle(&client, &uri, token, CONNECTED).await;
     assert_eq!(reconnected["available_tools"], json!([STUB_TOOL]));
+    let restarted = hub.generation("stub");
 
-    std::fs::remove_file(&offered).expect("the reconnect's record is removed");
     let narrowed = client
         .put_json_auth(&uri, &json!({ "tools": ["other"] }), token)
         .await;
     narrowed.assert_status(StatusCode::OK);
     let narrowed = narrowed.json_value();
     assert_eq!(narrowed["tools"], json!(["other"]));
-    tokio::time::sleep(QUIET.max(restart * RESTARTS)).await;
-    assert!(
-        !offered.exists(),
-        "an allowlist edit restarted the server: it shook hands again"
+    assert_ne!(restarted, connected, "the reconnect kept the connection");
+    assert_eq!(
+        hub.generation("stub"),
+        restarted,
+        "an allowlist edit restarted the server"
     );
     assert_eq!(narrowed["status"], CONNECTED);
     let read = client.get_auth(&uri, token).await.json_value();
