@@ -1,5 +1,5 @@
 import { describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { openSelect } from '../../../test/select';
 import type { Task, UpdateTaskRequest } from '../types';
 import { TaskDetail } from './TaskDetail';
@@ -36,13 +36,45 @@ function renderDetail(onSave: (request: UpdateTaskRequest) => Promise<void>) {
   return render(
     <TaskDetail
       task={task}
+      tasks={[task]}
       projects={[]}
       sources={[]}
+      onOpen={() => {}}
       onClose={() => {}}
       onExecute={() => {}}
       onSave={onSave}
     />
   );
+}
+
+function other(id: string, title: string, overrides: Partial<Task> = {}): Task {
+  return { ...task, id, title, ...overrides };
+}
+
+function renderLinked(edited: Task, others: Task[] = []) {
+  const onOpen = mock((_task: Task) => {});
+  const onSave = mock((_request: UpdateTaskRequest) => Promise.resolve());
+  render(
+    <TaskDetail
+      task={edited}
+      tasks={[edited, ...others]}
+      projects={[]}
+      sources={[]}
+      onOpen={onOpen}
+      onClose={() => {}}
+      onExecute={() => {}}
+      onSave={onSave}
+    />
+  );
+  return { onOpen, onSave };
+}
+
+function links(): HTMLElement {
+  return screen.getByRole('region', { name: 'Links' });
+}
+
+function description(control: HTMLElement): string | null | undefined {
+  return document.getElementById(control.getAttribute('aria-describedby') ?? '')?.textContent;
 }
 
 describe('TaskDetail', () => {
@@ -84,5 +116,143 @@ describe('TaskDetail', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     expect(await screen.findByText('Failed to save task')).toBeInTheDocument();
+  });
+
+  describe('links', () => {
+    const LONG =
+      'Migrate the notification service from the legacy queue to the event bus without dropping messages';
+
+    it('shows no Links section for a task with nothing linked', () => {
+      renderLinked(task, [other('task-2', 'Write the spec')]);
+
+      expect(screen.queryByRole('region', { name: 'Links' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Links' })).not.toBeInTheDocument();
+      expect(screen.queryByText('Depends on')).not.toBeInTheDocument();
+      expect(screen.queryByText('Blocks')).not.toBeInTheDocument();
+    });
+
+    it('shows no Links section for a pull request address that cannot be linked', () => {
+      renderLinked({ ...task, pr_url: 'javascript:alert(1)' });
+
+      expect(screen.queryByRole('region', { name: 'Links' })).not.toBeInTheDocument();
+    });
+
+    it('links the pull request and names its branch', () => {
+      renderLinked({
+        ...task,
+        pr_url: 'https://github.com/zone/app/pull/220',
+        pr_status: 'open',
+        branch_name: 'feature/task-links',
+      });
+
+      expect(within(links()).getByRole('heading', { name: 'Links', level: 3 })).toBeInTheDocument();
+      const link = within(links()).getByRole('link', { name: 'PR #220 · open' });
+      expect(link).toHaveAttribute('href', 'https://github.com/zone/app/pull/220');
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(within(link).getByText('PR #220 · open')).toHaveClass('ui-badge-success');
+      expect(within(links()).getByText('feature/task-links')).toBeInTheDocument();
+      expect(within(links()).queryByText('Depends on')).not.toBeInTheDocument();
+    });
+
+    it('shows a pull request status that has no address without a link', () => {
+      renderLinked({ ...task, pr_status: 'pending' });
+
+      expect(within(links()).getByText('PR · pending')).toHaveClass('ui-badge-neutral');
+      expect(within(links()).queryByRole('link')).not.toBeInTheDocument();
+    });
+
+    it('shows the status without a link for a pull request address that is not on the web', () => {
+      renderLinked({ ...task, pr_status: 'open', pr_url: 'javascript:alert(1)' });
+
+      expect(within(links()).getByText('PR · open')).toBeInTheDocument();
+      expect(links().querySelector('a')).toBeNull();
+    });
+
+    it('names the branch of a task that has no pull request yet', () => {
+      renderLinked({ ...task, branch_name: 'feature/auth' });
+
+      expect(within(links()).getByText('feature/auth')).toBeInTheDocument();
+      expect(within(links()).queryByText(/^PR/)).not.toBeInTheDocument();
+    });
+
+    it('lists every task it depends on and every task it blocks, in full, with status', () => {
+      const dependencies = [
+        other('spec', LONG, { status: 'complete' }),
+        other('api', 'Design the API', { status: 'in_progress' }),
+        other('auth', 'Add sign in', { status: 'blocked' }),
+        other('data', 'Model the data', { status: 'paused' }),
+      ];
+      const dependents = [
+        other('ship', 'Ship it', { status: 'review', dependencies: ['task-1'] }),
+        other('tell', 'Announce it', { status: 'cancelled', dependencies: ['task-1', 'ship'] }),
+      ];
+      renderLinked({ ...task, dependencies: dependencies.map((item) => item.id) }, [
+        ...dependencies,
+        ...dependents,
+      ]);
+
+      const depends = within(within(links()).getByRole('list', { name: 'Depends on' }));
+      const opens = depends.getAllByRole('button');
+      expect(opens.map((button) => button.getAttribute('aria-label'))).toEqual([
+        `Open ${LONG}`,
+        'Open Design the API',
+        'Open Add sign in',
+        'Open Model the data',
+      ]);
+      expect(opens[0].textContent).toBe(LONG);
+      expect(opens.map(description)).toEqual(['Completed', 'In progress', 'Blocked', 'Paused']);
+      expect(opens[2].querySelector('svg')).toHaveClass('status-icon-blocked');
+      expect(depends.queryByText(/more$/)).not.toBeInTheDocument();
+
+      const blocks = within(within(links()).getByRole('list', { name: 'Blocks' }));
+      expect(blocks.getAllByRole('button').map((button) => button.textContent)).toEqual([
+        'Ship it',
+        'Announce it',
+      ]);
+      expect(blocks.getAllByRole('button').map(description)).toEqual(['In review', 'Cancelled']);
+    });
+
+    it('counts a dependency that is not loaded instead of naming it', () => {
+      renderLinked({ ...task, dependencies: ['spec', 'gone', 'deleted'] }, [
+        other('spec', 'Write the spec'),
+      ]);
+
+      const depends = within(within(links()).getByRole('list', { name: 'Depends on' }));
+      expect(depends.getAllByRole('button')).toHaveLength(1);
+      expect(depends.getByText('2 unknown')).toBeInTheDocument();
+    });
+
+    it('opens the related task that was clicked', () => {
+      const spec = other('spec', 'Write the spec');
+      const ship = other('ship', 'Ship it', { dependencies: ['task-1'] });
+      const { onOpen, onSave } = renderLinked({ ...task, dependencies: ['spec'] }, [spec, ship]);
+
+      fireEvent.click(within(links()).getByRole('button', { name: 'Open Ship it' }));
+      expect(onOpen).toHaveBeenCalledTimes(1);
+      expect(onOpen).toHaveBeenCalledWith(ship);
+
+      fireEvent.click(within(links()).getByRole('button', { name: 'Open Write the spec' }));
+      expect(onOpen).toHaveBeenCalledTimes(2);
+      expect(onOpen).toHaveBeenLastCalledWith(spec);
+      expect(onSave).not.toHaveBeenCalled();
+    });
+
+    it('offers nothing to edit in the Links section', () => {
+      renderLinked({ ...task, dependencies: ['spec'], branch_name: 'feature/auth' }, [
+        other('spec', 'Write the spec'),
+      ]);
+
+      expect(links().querySelector('input, select, textarea')).toBeNull();
+      expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    });
+
+    it('reaches the links before the fields with the keyboard', () => {
+      renderLinked({ ...task, dependencies: ['spec'] }, [other('spec', 'Write the spec')]);
+
+      const open = screen.getByRole('button', { name: 'Open Write the spec' });
+      const field = screen.getByLabelText('Description');
+      expect(open.compareDocumentPosition(field) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
   });
 });

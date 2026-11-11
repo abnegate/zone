@@ -1,4 +1,5 @@
 import { memo, useLayoutEffect, useRef } from 'react';
+import type { Relations } from '../../relations';
 import type { TitleDraft } from '../../TitleDraft';
 import { awaitsTitle } from '../../title';
 import type { BoardActions, Task } from '../../types';
@@ -10,6 +11,7 @@ import { CardSensor } from './CardSensor';
 export interface CardContentProps {
   task: Task;
   projects: string;
+  relations: Relations;
   now: number;
   renaming: TitleDraft | null;
   actions: BoardActions;
@@ -18,6 +20,7 @@ export interface CardContentProps {
 export const CardContent = memo(function CardContent({
   task,
   projects,
+  relations,
   now,
   renaming,
   actions,
@@ -58,7 +61,14 @@ export const CardContent = memo(function CardContent({
 
   return (
     <>
-      <CardBody task={task} projects={projects} now={now} title={title} />
+      <CardBody
+        task={task}
+        projects={projects}
+        relations={relations}
+        now={now}
+        title={title}
+        onOpen={(related) => actions.open(related, task)}
+      />
       <div className="task-card-menu" onPointerDown={CardSensor.shield}>
         <CardMenu task={task} actions={actions} />
       </div>
