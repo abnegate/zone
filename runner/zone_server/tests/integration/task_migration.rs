@@ -773,6 +773,12 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
         tasks::BLOCKED,
     ];
     const GAVE_UP: &str = "task \"Backfill\" used its 3 runs";
+    const WAITING_ON_A_PERSON: &str =
+        "nothing can start until a person looks at: Task 1: needs a person";
+    const WAITING_ON_A_TASK: &str = "nothing can start: 1 task(s) remain but none is runnable; \
+        they wait on tasks that are not agentic or did not finish: Task 2";
+    const WITHOUT_ACCESS: &str =
+        "the person who turned automation on no longer has write access to the workspace";
     let database = Database::new(PREFIX).await;
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
     Migrator::new(directory.as_path())
@@ -802,6 +808,18 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
     )
     .bind(workspace)
     .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO projects(workspace_id, name, auto, auto_paused_reason) \
+         VALUES ($1, 'Stalled on a person', TRUE, $2), ($1, 'Stalled on a task', TRUE, $3), \
+                ($1, 'Without access', TRUE, $4)",
+    )
+    .bind(workspace)
+    .bind(WAITING_ON_A_PERSON)
+    .bind(WAITING_ON_A_TASK)
+    .bind(WITHOUT_ACCESS)
+    .execute(&database.pool)
     .await
     .unwrap();
     sqlx::query(
@@ -859,11 +877,17 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
     .fetch_all(&database.pool)
     .await
     .unwrap();
-    let (driven, stalled): (bool, bool) = sqlx::query_as(
-        "SELECT auto_driven_at IS NOT NULL, auto_stalled FROM projects WHERE id = $1",
+    let driven: bool =
+        sqlx::query_scalar("SELECT auto_driven_at IS NOT NULL FROM projects WHERE id = $1")
+            .bind(project)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    let stalled: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM projects WHERE workspace_id = $1 AND auto_stalled ORDER BY name",
     )
-    .bind(project)
-    .fetch_one(&database.pool)
+    .bind(workspace)
+    .fetch_all(&database.pool)
     .await
     .unwrap();
     database.cleanup().await;
@@ -902,9 +926,10 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
         "a row automation paused before the migration is not one a person parked"
     );
     assert!(!driven, "no project has had a pass under the new order");
-    assert!(
-        !stalled,
-        "no project is taken to have stalled before that was recorded"
+    assert_eq!(
+        stalled,
+        vec!["Stalled on a person", "Stalled on a task"],
+        "only a project paused for stalling is one a task given back starts again"
     );
 }
 
