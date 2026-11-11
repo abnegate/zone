@@ -627,10 +627,6 @@ pub async fn delete_workspace(
     }
 }
 
-// ============================================================================
-// Organization Member Management
-// ============================================================================
-
 /// Organization member response
 #[derive(Debug, Serialize)]
 pub struct OrganizationMemberResponse {
