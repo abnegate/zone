@@ -411,6 +411,16 @@ more at two runs than it did at three: distinct runs are counted, not distinct
 tasks, so a task run twice can supply both runs a convention or a lesson
 needs.
 
+Three occurrences in two chats is a bar two automations could clear on their
+own, so two guards came with it. `load_exchanges` reads only the questions
+`db::chats::typed` calls typed: a prompt that a reminder, a watch or another
+automation posts under the member's role is not an occurrence, and two watches
+asking the same thing in two chats promote nothing. And because chats are
+counted, not people, while the block now reaches every member's chat (G5,
+below), the standing-instruction preamble says that each entry answers a
+recurring question and never by itself permits a write, a send or a command
+the user did not ask for.
+
 ### G5 is closed: chats read what the workspace learned
 
 A chat's system prompt now carries the standing instructions, the repository
@@ -436,7 +446,9 @@ run calls, unasked, when it has verified something durable about the
 repository that the next run would otherwise rediscover. It writes a
 `knowledge_entries` row in a fourth reserved category, `agent-discovery`, with
 its kind (`convention` or `lesson`), the run or chat it came from and the date
-it was last confirmed in tags.
+it was recorded in tags. The prompt calls it the one workspace write made
+unasked. A chat's memory write of what a person says about themselves is also
+made unasked, but it is that person's entry and not the workspace's.
 
 - No bar. One agent's note from one run or one chat is stored as it is, which
   is why it has a category of its own and renders under its own heading,
@@ -448,16 +460,21 @@ it was last confirmed in tags.
   and an international telephone number, and narrows suppression to the verbs
   that are about what a reader is told. The memory rulebook, `rules::refused`,
   is unchanged and still screens the memory tools and the promotion pass; it
-  would refuse what a repository note exists to say.
+  would refuse what a repository note exists to say. A control character or
+  one that does not show is refused as well, so a person reviewing the entry
+  sees the text the model reads.
 - Bounded in bytes. A subject and its statement hold `MAX_ENTRY_BYTES`, 1,000
   bytes, together, and the rendered block holds `MAX_RENDERED_BYTES`, 6,000
-  bytes, dropping whole entries oldest first and saying how many.
+  bytes, dropping whole entries oldest first and saying how many. A source's
+  share of the block is bounded as well, so one chat or one run cannot fill
+  it.
 - One entry per subject. Recording a subject again replaces its entry, which
   is how a stale note is corrected.
 - Deletion is final. A subject whose entry was deleted through
-  `DELETE /api/knowledge/{id}` is refused when recorded again. The two
-  pass-derived families still revive a deleted row when a pass re-derives it
-  from fresh evidence.
+  `DELETE /api/knowledge/{id}` is refused when recorded again, and so is its
+  statement under a respelled subject: the entry keeps a fingerprint of each.
+  The two pass-derived families still revive a deleted row when a pass
+  re-derives it from fresh evidence.
 - Unconfirmed. The tool is in the write tier, so nobody approves the call in a
   chat or in a run; a plan hold still refuses it. Recording needs member
   standing, read on every call, and a run with no authorized initiator does
