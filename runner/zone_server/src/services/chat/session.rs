@@ -1532,8 +1532,8 @@ mod tests {
             config.mcp_commands = commands;
             tenant.configured(config)
         };
-        let state = configured(true);
-        let remote_only = configured(false);
+        let state = configured(true).await;
+        let remote_only = configured(false).await;
         let endpoint = crate::services::route::Route::for_workspace(&state, tenant.workspace)
             .await
             .into_endpoint()
@@ -1613,7 +1613,7 @@ mod tests {
         use crate::services::mcp_servers::testing::stub;
 
         let tenant = Tenant::new().await;
-        let state = tenant.replica();
+        let state = tenant.replica().await;
         load::organization(&state, tenant.organization).await;
         let settled = mcp_pending(&state, tenant.workspace).await;
         let silent = NewMcpServer {

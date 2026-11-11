@@ -2037,6 +2037,7 @@ mod tests {
         assert!(tools.has("read_file"));
     }
     use super::*;
+    use crate::services::mcp_servers::testing;
     use crate::state::{lazy_pool, test_config};
     use abnegate_agent::tool::job::{JobCommand, Jobs};
     use abnegate_agent::tool::{OFF_LIMITS, Preview, REASON_DESCRIPTION, REASON_PARAMETER};
@@ -3786,6 +3787,20 @@ mod tests {
 
     impl Tenant {
         async fn storing(allowlist: Option<&[&str]>) -> Self {
+            Self::serving(allowlist, testing::state).await
+        }
+
+        async fn switched_off() -> Self {
+            Self::serving(None, testing::switched_off).await
+        }
+
+        async fn serving<Made>(
+            allowlist: Option<&[&str]>,
+            state: impl FnOnce(crate::config::Config, sqlx::PgPool) -> Made,
+        ) -> Self
+        where
+            Made: Future<Output = AppState>,
+        {
             use crate::db::mcp_servers::NewMcpServer;
             use crate::db::mcp_servers::create_authorized;
             use crate::db::organization_members;
@@ -3827,15 +3842,14 @@ mod tests {
             )
             .await
             .expect("a workspace member");
-            let state = AppState::new(
+            let state = state(
                 crate::config::Config {
                     mcp_commands: true,
                     ..test_config()
                 },
                 pool.clone(),
-                None,
-            );
-            state.disable_mcp();
+            )
+            .await;
             let stub = Definition::stub(STUB).server;
             let server = create_authorized(
                 &pool,
@@ -4062,10 +4076,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_master_switch_keeps_an_organization_server_out_of_every_turn() {
-        const ENABLED: &str = "ZONE_MCP_ENABLED";
-        let mut variables = zone_core::variables::Variables::isolated(&[ENABLED]);
-        variables.set(ENABLED, "false");
-        let tenant = Tenant::storing(None).await;
+        let tenant = Tenant::switched_off().await;
 
         let chat = tenant.chat().await;
         let run = tenant.run().await;

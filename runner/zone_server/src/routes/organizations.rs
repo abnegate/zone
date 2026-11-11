@@ -1031,7 +1031,7 @@ mod tests {
     #[tokio::test]
     async fn deleting_an_organization_stops_its_mcp_servers() {
         let tenant = Tenant::new().await;
-        let state = tenant.replica();
+        let state = tenant.replica().await;
         tenant.store(&state, stub("stub")).await;
         let hub = load::organization(&state, tenant.organization)
             .await

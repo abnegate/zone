@@ -1664,7 +1664,7 @@ mod tests {
     #[tokio::test]
     async fn every_write_reaches_a_hub_that_is_already_built() {
         let tenant = Tenant::new().await;
-        let state = tenant.replica();
+        let state = tenant.replica().await;
         let hub = load::organization(&state, tenant.organization)
             .await
             .expect("the organization's hub");
@@ -1716,7 +1716,7 @@ mod tests {
     #[tokio::test]
     async fn a_reconnect_answers_with_the_servers_own_connection() {
         let tenant = Tenant::new().await;
-        let state = tenant.replica();
+        let state = tenant.replica().await;
         let remote = creating(
             &state,
             &tenant,
@@ -1763,8 +1763,8 @@ mod tests {
     #[tokio::test]
     async fn a_read_shows_what_another_replica_wrote() {
         let tenant = Tenant::new().await;
-        let writer = tenant.replica();
-        let reader = tenant.replica();
+        let writer = tenant.replica().await;
+        let reader = tenant.replica().await;
         load::organization(&reader, tenant.organization).await;
 
         let created = creating(&writer, &tenant, stub_body("stub")).await;

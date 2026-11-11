@@ -237,8 +237,8 @@ mod tests {
     #[tokio::test]
     async fn a_replica_converges_on_what_another_replica_wrote() {
         let tenant = Tenant::new().await;
-        let writer = tenant.replica();
-        let reader = tenant.replica();
+        let writer = tenant.replica().await;
+        let reader = tenant.replica().await;
         let hub = organization(&reader, tenant.organization)
             .await
             .expect("the reader's hub");
@@ -312,7 +312,7 @@ mod tests {
     #[tokio::test]
     async fn a_reconnect_reads_the_row_again() {
         let tenant = Tenant::new().await;
-        let state = tenant.replica();
+        let state = tenant.replica().await;
         let created = tenant.store(&state, stub("stub")).await;
         let unbuilt = reconnect(&state, tenant.organization, created.id)
             .await
@@ -340,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn a_server_whose_secrets_do_not_open_is_read_once_for_each_revision() {
         let tenant = Tenant::new().await;
-        let state = tenant.replica();
+        let state = tenant.replica().await;
         tenant.store(&state, stub("stub")).await;
         let sealed = tenant.store(&state, stub("sealed")).await;
         let other = MasterKey::generate().expect("a key");

@@ -239,6 +239,7 @@ mod tests {
     use crate::services::mcp_servers::status::MCP_DISABLED;
     use crate::services::mcp_servers::status::SSE_UNSUPPORTED;
     use crate::services::mcp_servers::status::Status;
+    use crate::services::mcp_servers::testing;
 
     const LIMIT: Duration = Duration::from_secs(30);
     const ENABLED: &str = "ZONE_MCP_ENABLED";
@@ -968,22 +969,16 @@ mod tests {
 
     #[tokio::test]
     async fn the_instance_configuration_is_read_once() {
-        let mut variables = Variables::isolated(&[
-            ENABLED,
-            "ZONE_MCP_SERVERS",
-            "ZONE_MCP_CONFIG",
-            "ZONE_MCP_AUTO_CONNECT",
-            "ZONE_MCP_AUTO_MAGENTS",
-        ]);
+        let mut variables = testing::isolated();
         variables.set(
-            "ZONE_MCP_SERVERS",
+            testing::SERVERS,
             r#"{"mcpServers":{"first":{"command":"true"}}}"#,
         );
         let hubs = hubs();
 
         let first = hubs.configured().await;
         variables.set(
-            "ZONE_MCP_SERVERS",
+            testing::SERVERS,
             r#"{"mcpServers":{"second":{"command":"true"}}}"#,
         );
         let second = hubs.configured().await;
