@@ -110,6 +110,8 @@ const RESPONSE_WORD: &str = "response";
 const WRAPPER_WORD: &str = "Transport";
 const CLIENT_PHRASE: &str = "unexpected server";
 const BAD_REQUEST: u16 = 400;
+/// How axum's JSON extractor opens a refusal of a body that does not fit its type.
+const UNREADABLE_BODY: &str = "Failed to deserialize the JSON body into the target type";
 const LOGGED: &str = "zone_server=debug,zone_core=debug,abnegate_agent=debug,rmcp=debug";
 /// How the hub names the second tool to claim a name in one catalog.
 const COLLIDED: &str = "_2";
@@ -1214,6 +1216,76 @@ async fn a_malformed_reference_is_a_bad_request() {
         .json_value();
     assert_eq!(names(&listed), ["remote"]);
     assert_eq!(listed["servers"][0]["workspace_enabled"], Value::Null);
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_body_naming_a_key_no_route_reads_is_a_bad_request() {
+    let _environment = isolated();
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let server = id(&tenant.create(&client, &remote("remote")).await);
+
+    let refusals = [
+        (
+            client
+                .post_json_auth(
+                    &tenant.servers(),
+                    &json!({
+                        "name": "spelled",
+                        "transport": HTTP,
+                        "url": REMOTE_URL,
+                        "header": { HEADER: HEADER_SECRET },
+                    }),
+                    token,
+                )
+                .await,
+            "header",
+        ),
+        (
+            client
+                .put_json_auth(
+                    &tenant.server(&server),
+                    &json!({ "env": { ENVIRONMENT: ENVIRONMENT_SECRET } }),
+                    token,
+                )
+                .await,
+            "env",
+        ),
+        (
+            client
+                .put_json_auth(
+                    &tenant.workspace_servers(),
+                    &json!({ "servers": {}, "enabled": false }),
+                    token,
+                )
+                .await,
+            "enabled",
+        ),
+    ];
+
+    for (response, key) in &refusals {
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "a body naming `{key}` was not refused: {}",
+            response.text()
+        );
+        let message = refusal(response);
+        assert!(
+            message.starts_with(UNREADABLE_BODY)
+                && message.contains(&format!("unknown field `{key}`")),
+            "the refusal does not name `{key}`: {message}"
+        );
+        assert!(
+            !message.contains(HEADER_SECRET) && !message.contains(ENVIRONMENT_SECRET),
+            "the refusal of `{key}` handed a value back: {message}"
+        );
+    }
+    let listed = client.get_auth(&tenant.servers(), token).await.json_value();
+    assert_eq!(names(&listed), ["remote"]);
 
     tenant.discard(&client, &[]).await;
 }

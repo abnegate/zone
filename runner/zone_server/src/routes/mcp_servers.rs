@@ -8,6 +8,7 @@ use abnegate_secret::SecretValue;
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
@@ -211,6 +212,7 @@ where
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateMcpServerRequest {
     pub name: String,
     pub transport: String,
@@ -282,6 +284,7 @@ impl CreateMcpServerRequest {
 /// The fields of a server to change. A server keeps the transport it was made with, so a body
 /// that names one is refused whatever it says.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateMcpServerRequest {
     #[serde(default, deserialize_with = "present")]
     pub transport: Option<Option<IgnoredAny>>,
@@ -376,6 +379,7 @@ impl UpdateMcpServerRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateWorkspaceMcpServersRequest {
     pub servers: BTreeMap<String, Option<bool>>,
 }
@@ -446,6 +450,8 @@ pub enum Refusal {
     Taken,
     #[error("`{0}` is not an MCP server id")]
     Identifier(String),
+    #[error("{0}")]
+    Unreadable(String),
     #[error(transparent)]
     Server(#[from] McpServerError),
 }
@@ -454,7 +460,9 @@ impl Refusal {
     fn status(&self) -> StatusCode {
         match self {
             Self::Caller => StatusCode::UNAUTHORIZED,
-            Self::Invalid(_) | Self::Transport | Self::Identifier(_) => StatusCode::BAD_REQUEST,
+            Self::Invalid(_) | Self::Transport | Self::Identifier(_) | Self::Unreadable(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::Commands => StatusCode::FORBIDDEN,
             Self::Taken => StatusCode::CONFLICT,
             Self::Server(error) => match error {
@@ -480,6 +488,12 @@ impl IntoResponse for Refusal {
             self.to_string()
         };
         (status, Json(ErrorResponse::new(message))).into_response()
+    }
+}
+
+impl From<JsonRejection> for Refusal {
+    fn from(rejection: JsonRejection) -> Self {
+        Self::Unreadable(rejection.body_text())
     }
 }
 
@@ -642,9 +656,10 @@ pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(org_id): Path<Uuid>,
-    Json(request): Json<CreateMcpServerRequest>,
+    request: Result<Json<CreateMcpServerRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<McpServerResponse>), Refusal> {
     let user = caller(&auth)?;
+    let Json(request) = request?;
     mcp_servers::authorize_admin(state.db(), org_id, user).await?;
     let new = request.validated(state.config().mcp_commands)?;
     if taken(&state, &new.name).await {
@@ -694,9 +709,10 @@ pub async fn update(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(path): Path<McpServerPath>,
-    Json(request): Json<UpdateMcpServerRequest>,
+    request: Result<Json<UpdateMcpServerRequest>, JsonRejection>,
 ) -> Result<Json<McpServerResponse>, Refusal> {
     let user = caller(&auth)?;
+    let Json(request) = request?;
     mcp_servers::authorize_admin(state.db(), path.org_id, user).await?;
     let stored = mcp_servers::get_authorized(
         state.db(),
@@ -833,9 +849,10 @@ pub async fn update_workspace(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(path): Path<WorkspaceMcpServersPath>,
-    Json(request): Json<UpdateWorkspaceMcpServersRequest>,
+    request: Result<Json<UpdateWorkspaceMcpServersRequest>, JsonRejection>,
 ) -> Result<Json<WorkspaceMcpServerListResponse>, Refusal> {
     let user = caller(&auth)?;
+    let Json(request) = request?;
     let changes = request.overrides()?;
     let stored = mcp_servers::set_workspace_overrides_authorized(
         state.db(),
@@ -1709,7 +1726,7 @@ mod tests {
             State(state.clone()),
             administrator(tenant),
             Path(tenant.organization),
-            Json(request),
+            Ok(Json(request)),
         )
         .await
         .expect("the server is created");
@@ -1727,7 +1744,7 @@ mod tests {
             State(state.clone()),
             administrator(tenant),
             path(tenant, server),
-            Json(update(body)),
+            Ok(Json(update(body))),
         )
         .await
         .expect("the server is updated");
