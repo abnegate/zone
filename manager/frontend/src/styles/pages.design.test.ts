@@ -397,6 +397,80 @@ describe('tasks page layout', () => {
     expect(cards).not.toContain('.task-card-overlay .task-card-heading');
   });
 
+  it('keeps the card details on one line that never wraps', () => {
+    const details = rule(cards, '.task-card-meta');
+    expect(details).toContain('white-space: nowrap');
+    expect(details).not.toContain('flex-wrap');
+    const project = rule(cards, '.task-card-project');
+    expect(project).toContain('min-width: 0');
+    expect(project).toContain('text-overflow: ellipsis');
+    expect(rule(cards, '.task-card-fact')).toContain('flex-shrink: 0');
+    expect(cards).not.toContain('.task-card-agentic::before');
+  });
+
+  it('lays each link on a card out as one row behind a shared label column', () => {
+    expect(rule(cards, '.task-card-links')).toContain('--task-card-link-label: 4rem');
+    expect(rule(cards, '.task-card-link-label,\n.task-card .task-relation-label')).toContain(
+      'flex: 0 0 var(--task-card-link-label)'
+    );
+    expect(rule(cards, '.task-card .task-relation')).toContain('flex-direction: row');
+    expect(rule(cards, '.task-card-pull-request')).toContain('min-height: var(--ui-space-6)');
+  });
+
+  it('stacks a relation into rows only while it is expanded', () => {
+    const relations = read(join(boardStyles, 'Relation.css'));
+    expect(rule(cards, '.task-card .task-relation-list')).toContain('flex-direction: row');
+    const expanded = rule(cards, '.task-card .task-relation[data-expanded] .task-relation-list');
+    expect(expanded).toContain('flex-direction: column');
+    expect(expanded).toContain('align-items: stretch');
+    const toggle = rule(relations, '.task-relation-toggle');
+    expect(toggle).toContain('z-index: 1');
+    expect(toggle).toContain('min-width: var(--ui-space-6)');
+    expect(toggle).toContain('min-height: var(--ui-space-6)');
+    expect(rule(relations, '.task-relation-toggle:focus-visible')).toContain(
+      'outline: 2px solid var(--ui-border-focus)'
+    );
+  });
+
+  it('gives the title the full width of the card unless the menu is always shown', () => {
+    expect(rule(cards, '.task-card-heading')).not.toContain('padding-right');
+    expect(rule(cards, '.task-card-heading:has(.task-title-edit)')).toContain(
+      'padding-right: var(--ui-control-height-sm)'
+    );
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-heading')).toContain(
+      'padding-right: var(--ui-control-height-sm)'
+    );
+    expect(rule(cards, '.task-card-menu')).toContain('background: var(--task-card-surface)');
+    expect(rule(cards, '.task-card-menu::before')).toContain(
+      'linear-gradient(to right, transparent, var(--task-card-surface))'
+    );
+    expect(rule(cards, ":root[data-theme='dark'] .task-card:hover")).toContain(
+      '--task-card-surface: var(--ui-bg-hover)'
+    );
+    expect(rule(touch, '.task-card-menu::before')).toContain('content: none');
+    expect(rule(cards, '.task-card:has(.task-title-edit) .task-card-menu::before')).toContain(
+      'content: none'
+    );
+  });
+
+  it('tints the pull request icon by status and leaves the rest of the row quiet', () => {
+    expect(rule(cards, '.task-card-pull-request .pull-request-icon')).toContain(
+      'color: var(--ui-text-muted)'
+    );
+    for (const [status, colour] of [
+      ['open', '--ui-success-600'],
+      ['merged', '--ui-accent'],
+      ['closed', '--ui-error-600'],
+    ]) {
+      expect(rule(cards, `.task-card-pull-request-${status} .pull-request-icon`)).toContain(
+        `color: var(${colour})`
+      );
+    }
+    expect(cards).not.toContain('.task-card-pull-request-pending');
+    expect(cards).not.toContain('.task-card-pull-request-untinted');
+  });
+
   it('makes room above a focused card for its ring without moving the card', () => {
     expect(rule(columns, '.board-column')).toContain('--board-column-ring: 3px');
     expect(rule(columns, '.board-column-body')).toContain(

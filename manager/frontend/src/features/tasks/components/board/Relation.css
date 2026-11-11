@@ -79,8 +79,54 @@
   color: var(--ui-text-muted);
 }
 
+.task-relation-fold {
+  display: flex;
+  min-width: 0;
+}
+
+.task-relation-toggle {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--ui-space-6);
+  min-height: var(--ui-space-6);
+  margin: 0;
+  padding: 0 var(--ui-space-1);
+  font-family: var(--ui-font-body);
+  font-size: var(--ui-text-2xs);
+  font-variant-numeric: tabular-nums;
+  line-height: var(--ui-space-4);
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  border-radius: var(--ui-radius-sm);
+  cursor: pointer;
+  transition:
+    background-color var(--ui-transition-fast),
+    color var(--ui-transition-fast);
+}
+
+.task-relation-toggle:hover {
+  color: var(--ui-text-primary);
+  background: var(--ui-bg-muted);
+}
+
+:root[data-theme='dark'] .task-relation-toggle:hover {
+  background: var(--ui-bg-active);
+}
+
+.task-relation-toggle:focus-visible {
+  outline: 2px solid var(--ui-border-focus);
+  outline-offset: -2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .task-relation-open {
+  .task-relation-open,
+  .task-relation-toggle {
     transition: none;
   }
 }

@@ -200,53 +200,43 @@ describe('Board', () => {
         .map((item) => item.textContent ?? '');
     }
 
-    it('lists on each card the loaded tasks it depends on, with their status', () => {
+    it('names on each card one loaded task it depends on, with its status, and counts the rest', () => {
       renderRelated();
 
       expect(related('Queue the build', 'Depends on')).toEqual(['Write the specCreated']);
       expect(related('Build the board', 'Depends on')).toEqual([
         'Write the specCreated',
-        'Queue the buildQueued',
-        '1 unknown',
+        '+2 more',
       ]);
       expect(related('Write the spec', 'Depends on')).toEqual([]);
     });
 
-    it('lists on each card the loaded tasks that depend on it, capped at three', () => {
+    it('names on each card one loaded task that depends on it and counts the rest', () => {
       renderRelated();
 
-      expect(related('Write the spec', 'Blocks')).toEqual([
-        'Queue the buildQueued',
-        'Build the boardIn progress',
-        'Ship itIn review',
-      ]);
+      expect(related('Write the spec', 'Blocks')).toEqual(['Queue the buildQueued', '+2 more']);
       expect(related('Queue the build', 'Blocks')).toEqual([
         'Build the boardIn progress',
-        'Ship itIn review',
+        '+1 more',
       ]);
       expect(related('Stop the old table', 'Blocks')).toEqual(['Ship itIn review']);
       expect(related('Ship it', 'Blocks')).toEqual([]);
     });
 
-    it('names three dependencies, then counts the rest and the unknown apart', () => {
+    it('names one dependency, then counts the rest and the unknown together', () => {
       renderRelated();
 
-      expect(related('Ship it', 'Depends on')).toEqual([
-        'Build the boardIn progress',
-        'Write the specCreated',
-        'Queue the buildQueued',
-        '+1 more, 2 unknown',
-      ]);
+      expect(related('Ship it', 'Depends on')).toEqual(['Build the boardIn progress', '+5 more']);
     });
 
     it('opens the related task from another card, not the card it is listed on', () => {
       const handlers = renderRelated();
 
       const host = within(card('Build the board'));
-      fireEvent.click(host.getByRole('button', { name: 'Open Queue the build' }));
+      fireEvent.click(host.getByRole('button', { name: 'Open Write the spec' }));
 
       expect(handlers.open).toHaveBeenCalledTimes(1);
-      expect(handlers.open).toHaveBeenCalledWith(RELATED[1], RELATED[2]);
+      expect(handlers.open).toHaveBeenCalledWith(RELATED[0], RELATED[2]);
     });
 
     it('shows no relation on a board whose tasks have none', () => {
@@ -280,7 +270,7 @@ describe('Board', () => {
       const restore = layOutBoard();
       const handlers = renderRelated();
       const open = within(card('Build the board')).getByRole('button', {
-        name: 'Open Queue the build',
+        name: 'Open Write the spec',
       });
       open.focus();
 
@@ -389,7 +379,7 @@ describe('Board', () => {
             actions={actions()}
           />
         );
-        expect(ages()).toEqual(AGED.map(() => '5 minutes ago'));
+        expect(ages()).toEqual(AGED.map(() => '5m5 minutes ago'));
         expect(ticks()).toHaveLength(1);
 
         setSystemTime(new Date(NOW.getTime() + 2 * MINUTE_MS));
@@ -397,7 +387,7 @@ describe('Board', () => {
           ticks()[0]();
         });
 
-        expect(ages()).toEqual(AGED.map(() => '7 minutes ago'));
+        expect(ages()).toEqual(AGED.map(() => '7m7 minutes ago'));
         expect(ticks()).toHaveLength(1);
       });
 
