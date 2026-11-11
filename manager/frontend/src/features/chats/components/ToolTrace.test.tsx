@@ -300,6 +300,60 @@ describe('ToolTrace', () => {
     expect(details.at(-1)).toBe('');
   });
 
+  it('names a recorded discovery by its subject, not the record it returned', () => {
+    render(
+      <ToolTrace
+        calls={[
+          call({
+            name: 'record_discovery',
+            arguments:
+              '{"kind":"lesson","subject":"Frontend tests need isolation","statement":"Run the suite with --isolate."}',
+            detail:
+              '{"id":"5d0c7e1a","title":"Frontend tests need isolation","kind":"lesson","outcome":"recorded"}',
+          }),
+        ]}
+      />
+    );
+
+    const row = screen.getByTestId('tool-call');
+    expect(row.querySelector('.tool-call-name')?.textContent).toBe('Recorded a discovery');
+    expect(row.querySelector('.tool-call-detail')?.textContent).toBe(
+      'Frontend tests need isolation'
+    );
+    expect(screen.queryByText('record_discovery')).not.toBeInTheDocument();
+    expect(screen.queryByText(/\{"/)).not.toBeInTheDocument();
+  });
+
+  it('labels a discovery by the state its call is in and keeps the server words for a refusal', () => {
+    const discovery = {
+      name: 'record_discovery',
+      arguments: '{"kind":"convention","subject":"Deploy token","statement":"Kept in the vault."}',
+    };
+    render(
+      <ToolTrace
+        calls={[
+          call({ ...discovery, id: 'running', pending: true, detail: 'Running…', duration_ms: 0 }),
+          call({
+            ...discovery,
+            id: 'refused',
+            success: false,
+            detail: 'Error: Not recorded: the entry reads like a credential.',
+          }),
+        ]}
+      />
+    );
+
+    const rows = screen.getAllByTestId('tool-call');
+    expect(rows.map((row) => row.querySelector('.tool-call-name')?.textContent)).toEqual([
+      'Recording a discovery',
+      'Failed to record a discovery',
+    ]);
+    expect(rows.map((row) => row.querySelector('.tool-call-detail')?.textContent)).toEqual([
+      'Running…',
+      'Error: Not recorded: the entry reads like a credential.',
+    ]);
+  });
+
   it('names the connected sources a listing returned, or counts them past three', () => {
     render(
       <ToolTrace
