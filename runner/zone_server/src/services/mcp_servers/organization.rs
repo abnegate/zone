@@ -127,15 +127,14 @@ impl OrganizationHub {
         slots.sort_by(|(_, left), (_, right)| left.definition.name.cmp(&right.definition.name));
         let mut registered = Registered::default();
         for (server, slot) in slots {
-            let mut tools = 0;
-            for tool in inner.sessions.tools_avoiding(server, &mut used) {
-                if allowed(&slot.definition, tool.name()) {
-                    registry.register(tool);
-                    tools += 1;
-                }
+            let tools = inner
+                .sessions
+                .tools_avoiding(server, &mut used, |tool| allowed(&slot.definition, tool));
+            registered.tools += tools.len();
+            registered.servers += usize::from(!tools.is_empty());
+            for tool in tools {
+                registry.register(tool);
             }
-            registered.tools += tools;
-            registered.servers += usize::from(tools > 0);
         }
         registered
     }
@@ -505,18 +504,40 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_collided_tool_does_not_match_its_allowlist_entry() {
+    async fn taken() -> ToolRegistry {
         let other = connected(vec![Definition::stub("stub")]).await;
         let mut registry = ToolRegistry::new();
         assert_eq!(other.register(&mut registry, &|_| true), one());
-        assert!(registry.get("stub__delegate").is_some());
-        let hub = connected(vec![allowing(Some(&["delegate"]))]).await;
+        assert_eq!(registry.names(), ["stub__delegate"]);
+        registry
+    }
 
-        let registered = hub.register(&mut registry, &|_| true);
+    #[tokio::test]
+    async fn an_allowlisted_tool_whose_name_is_taken_is_offered_under_a_suffixed_one() {
+        for tools in [None, Some(&["delegate"][..])] {
+            let mut registry = taken().await;
+            let hub = connected(vec![allowing(tools)]).await;
 
-        assert_eq!(registered, Registered::default(), "{:?}", registry.names());
-        assert!(registry.get("stub__delegate_2").is_none());
+            let registered = hub.register(&mut registry, &|_| true);
+
+            assert_eq!(registered, one(), "{tools:?}");
+            let mut names = registry.names();
+            names.sort_unstable();
+            assert_eq!(names, ["stub__delegate", "stub__delegate_2"], "{tools:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_allowlist_names_a_tool_as_its_server_does_whatever_name_it_is_offered_under() {
+        for tools in [&["other"][..], &["delegate_2"][..]] {
+            let mut registry = taken().await;
+            let hub = connected(vec![allowing(Some(tools))]).await;
+
+            let registered = hub.register(&mut registry, &|_| true);
+
+            assert_eq!(registered, Registered::default(), "{tools:?}");
+            assert_eq!(registry.names(), ["stub__delegate"], "{tools:?}");
+        }
     }
 
     #[tokio::test]

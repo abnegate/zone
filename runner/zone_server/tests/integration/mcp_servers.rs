@@ -2227,6 +2227,10 @@ async fn an_organization_row_sharing_an_instance_url_entrys_name_still_works() {
         .put_json_auth(&uri, &json!({ "tools": [STUB_TOOL] }), token)
         .await;
     let listing = ChatTools::build(scope(&client, &tenant)).await;
+    let narrowed = client
+        .put_json_auth(&uri, &json!({ "tools": ["other"] }), token)
+        .await;
+    let hiding = ChatTools::build(scope(&client, &tenant)).await;
 
     let sources: Vec<(&str, &Value, &Value)> = listed["servers"]
         .as_array()
@@ -2264,9 +2268,16 @@ async fn an_organization_row_sharing_an_instance_url_entrys_name_still_works() {
     assert_eq!(allowed["status"], CONNECTED);
     assert_eq!(allowed["available_tools"], json!([STUB_TOOL]));
     assert!(
-        listing.has(&first) && !listing.has(&second),
-        "an allowlist names the tool as the server does, so the suffixed one is dropped: {:?}",
+        listing.has(&first) && listing.has(&second),
+        "an allowlist names the tool as the server does, so the organization's is still \
+         offered under its suffixed name: {:?}",
         listing.names()
+    );
+    narrowed.assert_status(StatusCode::OK);
+    assert!(
+        hiding.has(&first) && !hiding.has(&second),
+        "an allowlist naming another tool leaves only the instance's: {:?}",
+        hiding.names()
     );
 
     tenant.discard(&client, &[]).await;

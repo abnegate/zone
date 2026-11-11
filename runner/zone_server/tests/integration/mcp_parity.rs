@@ -8,6 +8,9 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use abnegate_agent::mcp::McpConfig;
+use abnegate_agent::mcp::McpHub;
+use abnegate_agent::mcp::McpServer;
 use abnegate_agent_cli::AgentKind;
 use axum::http::StatusCode;
 use serde_json::Value;
@@ -46,6 +49,7 @@ const STDIO_SERVER: &str = "stub";
 const STDIO_TOOL: &str = "stub__delegate";
 const HTTP_SERVER: &str = "stub_http";
 const HTTP_TOOL: &str = "stub_http__delegate";
+const COLLIDED_TOOL: &str = "stub_http__delegate_2";
 const OFFERED: &str = "delegate";
 const UNOFFERED: &str = "other";
 const PYTHON: &str = "python3";
@@ -83,8 +87,7 @@ fn http(stub: &Stub) -> NewMcpServer {
     }
 }
 
-/// An organization whose one user administers it and holds `role` in its one workspace, on a
-/// server with no instance MCP server of its own.
+/// An organization whose one user administers it and holds `role` in its one workspace.
 struct Tenant {
     state: AppState,
     organization: Uuid,
@@ -93,7 +96,13 @@ struct Tenant {
 }
 
 impl Tenant {
+    /// A tenant of a server with no instance MCP server of its own.
     async fn new(commands: bool, role: WorkspaceRole) -> Self {
+        Self::beside(McpHub::new(), commands, role).await
+    }
+
+    /// A tenant of a server whose instance MCP servers are the ones `instance` connected.
+    async fn beside(instance: McpHub, commands: bool, role: WorkspaceRole) -> Self {
         let pool = common::create_test_pool().await;
         let (organization, workspace, user) = common::setup_test_data(&pool).await;
         organization_members::add_member(&pool, organization, user, OrgRole::Admin, None)
@@ -110,7 +119,7 @@ impl Tenant {
             pool,
             None,
         );
-        state.disable_mcp();
+        state.install_mcp(instance);
         Self {
             state,
             organization,
@@ -300,6 +309,33 @@ async fn an_organization_http_server_reaches_every_provider() {
     let tenant = Tenant::new(false, WorkspaceRole::Member).await;
 
     tenant.reaches_every_provider(http(&stub), HTTP_TOOL).await;
+
+    tenant.discard().await;
+}
+
+#[tokio::test]
+async fn an_allowlisted_tool_whose_name_an_instance_server_took_reaches_every_provider() {
+    let _variables = isolated();
+    let stub = Stub::start(&[]).await;
+    let instance = McpHub::connect(
+        &McpConfig::default().with_server(HTTP_SERVER, McpServer::remote(stub.url())),
+    )
+    .await;
+    assert_eq!(instance.server_count(), 1, "the stub server has to connect");
+    let tenant = Tenant::beside(instance, false, WorkspaceRole::Member).await;
+    let server = tenant.store(http(&stub)).await;
+
+    tenant.allow(server, &[OFFERED]).await;
+    assert_parity(&tenant.state, tenant.workspace, tenant.user, COLLIDED_TOOL).await;
+    let instance = tenant.offers(HTTP_TOOL).await;
+    tenant.allow(server, &[UNOFFERED]).await;
+    let hidden = tenant.offers(COLLIDED_TOOL).await;
+
+    assert!(instance, "the instance's own tool lost its name");
+    assert!(
+        !hidden,
+        "an allowlist naming another tool still offers the organization's"
+    );
 
     tenant.discard().await;
 }
