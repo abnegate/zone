@@ -1839,6 +1839,60 @@ async fn no_audit_row_holds_a_secret_value() {
 }
 
 #[tokio::test]
+async fn an_update_is_audited_with_the_server_it_replaced() {
+    let _environment = isolated();
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let mut created = remote("remote");
+    created["headers"] = json!({ HEADER: HEADER_SECRET });
+    let server = id(&tenant.create(&client, &created).await);
+
+    client
+        .put_json_auth(
+            &tenant.server(&server),
+            &json!({
+                "name": "renamed",
+                "tools": ["one"],
+                "headers": { HEADER: ROTATED_HEADER_SECRET },
+            }),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let (old, new): (String, String) = sqlx::query_as(
+        "SELECT old_values::text, new_values::text FROM audit_logs \
+         WHERE organization_id = $1 AND action = $2",
+    )
+    .bind(tenant.organization)
+    .bind(UPDATED)
+    .fetch_one(client.state().db())
+    .await
+    .expect("the update is audited");
+    let before: Value = serde_json::from_str(&old).expect("the old values are JSON");
+    let after: Value = serde_json::from_str(&new).expect("the new values are JSON");
+    tenant.discard(&client, &[]).await;
+
+    assert_eq!(fields(&before), fields(&after));
+    assert_eq!(before["id"], json!(server));
+    assert_eq!(before["name"], "remote");
+    assert_eq!(before["tools"], Value::Null);
+    assert_eq!(
+        before["headers"],
+        json!([{ "name": HEADER, "has_value": true }])
+    );
+    assert_eq!(after["name"], "renamed");
+    assert_eq!(after["tools"], json!(["one"]));
+    for secret in SECRETS {
+        assert!(
+            !old.contains(secret),
+            "the update's old values hold a secret value: {old}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn every_write_is_audited() {
     let _environment = isolated();
     let client = client(false).await;

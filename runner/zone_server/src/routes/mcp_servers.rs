@@ -729,6 +729,11 @@ pub async fn update(
     {
         return Err(Refusal::Taken);
     }
+    let before = row(
+        state.mcp().existing_organization(path.org_id).as_deref(),
+        state.mcp().policy(),
+        &stored,
+    );
     let record = mcp_servers::update_authorized(
         state.db(),
         state.master_key(),
@@ -749,7 +754,7 @@ pub async fn update(
             action: actions::MCP_SERVER_UPDATED,
             resource_type: resources::MCP_SERVER,
             resource_id: Some(record.id),
-            old_values: None,
+            old_values: serde_json::to_value(&before).ok(),
             new_values: serde_json::to_value(&response).ok(),
         },
     )
