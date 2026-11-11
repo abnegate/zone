@@ -45,14 +45,19 @@
 //! other segments are names. A code written in four or more dashed groups of
 //! one length is read as generated, which leaves at most one in nine hundred
 //! in capitals, one in eighty in lower case and one in eighteen in mixed
-//! case. A code grouped in threes, or with underscores or slashes between its
-//! groups, is written the way a list of regions, a constant and a path are,
-//! and between a quarter and three quarters of those are recorded. So is a
-//! passphrase of plain words and numbers that only its length gave away, and
-//! so is any unlabelled code under 32 characters, which the detector never
-//! read. The cost the other way is a name that changes case beside a number
-//! in a long path, `features/chats/ChatPanelV2.tsx`: that is what a base62
-//! secret looks like, and it is refused as one.
+//! case. A code cut by any separator is read as generated too when at least
+//! half its parts, and three at the fewest, mix letters with digits over four
+//! characters or more, which leaves of a code in groups of four or five
+//! between underscores or slashes at most one in six in capitals, one in
+//! forty-five in lower case and one in eleven in mixed case. A code grouped
+//! in threes is written the way a list of regions is, and between two fifths
+//! and three quarters of those are recorded. So is a passphrase of plain
+//! words and numbers that only its length gave away, and so is any unlabelled
+//! code under 32 characters, which the detector never read. The cost the
+//! other way is a name that changes case beside a number in a long path,
+//! `features/chats/ChatPanelV2.tsx`, which is what a base62 secret looks
+//! like, and a name whose parts mix letters with digits as a code's do,
+//! `crates/codecs/utf16_utf32_base64`: both are refused as secrets.
 
 use std::sync::LazyLock;
 
@@ -368,6 +373,29 @@ fn grouped(run: &str) -> bool {
     })
 }
 
+/// The fewest parts of a run, cut at any of its separators, that must mix
+/// letters with digits before the run is read as a code. Two is how a name
+/// lists platforms: `build-linux-arm64-amd64`.
+const MIXED_PARTS: usize = 3;
+
+/// Whether a long run reads as a code cut into parts of any length and by
+/// any separator, as `abcd1_efgh2_ijkl3_mnop4_qrst5` is: at least half its
+/// parts, and [`MIXED_PARTS`] at the fewest, mix letters with digits over
+/// [`SHORTEST_GROUP`] characters or more. [`grouped`] reads a code only in
+/// dashed groups of one length, and a name's parts seldom do this: a version
+/// or a region is too short, and a word holds no digit.
+fn coded(run: &str) -> bool {
+    let parts: Vec<&str> = run
+        .split(['/', '_', '+', '-'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let mixed = parts
+        .iter()
+        .filter(|part| part.len() >= SHORTEST_GROUP && mixes(part))
+        .count();
+    mixed >= MIXED_PARTS && mixed * 2 >= parts.len()
+}
+
 /// What a name's digits are respelt as: a letter no credential prefix and no
 /// key word holds, so that respelling cannot spell one.
 const RESPELT: &str = "q";
@@ -376,7 +404,7 @@ const RESPELT: &str = "q";
 /// and with its digits respelt when it reads as a name.
 fn respelt(captures: &Captures<'_>) -> String {
     let run = &captures[0];
-    if GENERATED.is_match(run) || grouped(run) {
+    if GENERATED.is_match(run) || grouped(run) || coded(run) {
         run.to_string()
     } else {
         run.replace(|character: char| character.is_ascii_digit(), RESPELT)
@@ -431,12 +459,17 @@ pub(crate) mod test_support {
     use super::Refusal;
 
     /// What a repository note says every day.
-    pub(crate) const RECORDED: [&str; 26] = [
+    pub(crate) const RECORDED: [&str; 31] = [
         "runner/zone_server/migrations/0002_search_knowledge_active_candidates.sql",
         "target/x86_64-unknown-linux-gnu/release/zone_server",
         "/api/v1/workspaces/knowledge/refresh-all-entries",
         "feature/PR-1234-add-inline-learning-path",
         "TEST_DATABASE_URL_FOR_INTEGRATION_SUITE_V2",
+        "docker/build-linux-arm64-amd64-release-images",
+        "migrations/20261111093000_add_discovery_fingerprints.sql",
+        "docs/upgrades/from-v1-2-3-to-v2-0-0-for-older-clients",
+        "releases/v1-v2-v3-v4-v5-compatibility-matrix-for-clients",
+        "crates/crypto/sha256/hmac_sha512_base64_encoder",
         "The docs do not mention that TEST_DATABASE_URL is required",
         "CI logs never tell you which shard failed",
         "Hold back the release until the backfill finishes",
@@ -463,7 +496,7 @@ pub(crate) mod test_support {
     /// What no note should carry, with the reason each is turned away for.
     /// An issued prefix is spelt apart from its body so that no scanner reads
     /// a fixture as a leak.
-    pub(crate) const NOT_RECORDED: [(&str, Refusal); 36] = [
+    pub(crate) const NOT_RECORDED: [(&str, Refusal); 40] = [
         (
             concat!(
                 "The deploy token is ghp_",
@@ -616,6 +649,22 @@ pub(crate) mod test_support {
                 "The vault opens with A3-",
                 "KJWJKW-AT2GTM-Q9CPZ-AF3NN-TG33P-WQJRD"
             ),
+            Refusal::Secret,
+        ),
+        (
+            "The signing key is abcd1_efgh2_ijkl3_mnop4_qrst5_uvwx6",
+            Refusal::Secret,
+        ),
+        (
+            "The signing key is abcd1/efgh2/ijkl3/mnop4/qrst5/uvwx6",
+            Refusal::Secret,
+        ),
+        (
+            "The signing key is abcd1-efgh2-ijkl3-mnop4-qrst5-uvwx6",
+            Refusal::Secret,
+        ),
+        (
+            "The signing key is ab1cd-efgh23-ijk4lmn-op5qrs-tuv6wx",
             Refusal::Secret,
         ),
     ];
@@ -930,6 +979,49 @@ mod tests {
             "backups/2026/LLEA-2TDJ-KHV2-WGWM-YS6T-ZVPE-PFVT-ODF3",
         ] {
             assert_eq!(refused_discovery(text), Some(Refusal::Secret), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_code_cut_into_parts_that_mix_letters_and_digits_is_not_a_name() {
+        for text in [
+            "abcd1_efgh2_ijkl3_mnop4_qrst5_uvwx6",
+            "abcd1/efgh2/ijkl3/mnop4/qrst5/uvwx6",
+            "ab1cd-efgh23-ijk4lmn-op5qrs-tuv6wx",
+            "keys/2026/abcd1_efgh2_ijkl3_mnop4",
+        ] {
+            assert!(
+                contains_credential(text),
+                "the detector reads {text} as generated by itself"
+            );
+            assert_eq!(refused_discovery(text), Some(Refusal::Secret), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_name_whose_parts_mix_letters_and_digits_as_a_code_s_do_reads_as_generated() {
+        let text = "crates/codecs/utf16_utf32_base64";
+
+        assert!(
+            contains_credential(text),
+            "the detector reads {text} as generated by itself"
+        );
+        assert_eq!(refused_discovery(text), Some(Refusal::Secret));
+    }
+
+    #[test]
+    fn a_name_with_fewer_parts_that_mix_letters_and_digits_than_a_code_is_recorded() {
+        for text in [
+            "docker/build-linux-arm64-amd64-release-images",
+            "crates/crypto/sha256/hmac_sha512_base64_encoder",
+            "releases/v1-v2-v3-v4-v5-compatibility-matrix-for-clients",
+            "docs/upgrades/from-v1-2-3-to-v2-0-0-for-older-clients",
+        ] {
+            assert!(
+                contains_credential(text),
+                "the detector reads {text} as a name by itself"
+            );
+            assert_eq!(refused_discovery(text), None, "{text}");
         }
     }
 
