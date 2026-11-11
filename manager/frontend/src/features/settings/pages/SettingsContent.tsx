@@ -70,7 +70,11 @@ function workspaceContent(
         />
       );
     case SettingsSection.Sources:
-      return <SourcesSection />;
+      return (
+        <SourcesSection
+          readOnly={!allowsWorkspace(access.workspaceRole, WORKSPACE_EDIT_ROLE.sources)}
+        />
+      );
     case SettingsSection.Members:
       return workspaceId !== null && organizationId !== null ? (
         <WorkspaceMembersSection workspaceId={workspaceId} orgId={organizationId} />

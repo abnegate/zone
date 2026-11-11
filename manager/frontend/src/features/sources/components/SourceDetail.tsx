@@ -15,6 +15,7 @@ interface SourceDetailProps {
   onSaved: () => Promise<void> | void;
   updateSource: (request: UpdateSourceRequest) => Promise<Source>;
   verifySource: () => Promise<SourceVerifyResponse>;
+  readOnly: boolean;
 }
 
 function configChanged(
@@ -31,6 +32,7 @@ export function SourceDetail({
   onSaved,
   updateSource,
   verifySource,
+  readOnly,
 }: SourceDetailProps) {
   const definition = getSourceById(source.source_type);
   const { currentOrganization } = useWorkspace();
@@ -62,7 +64,7 @@ export function SourceDetail({
     credentials !== '';
 
   const handleFieldChange = useCallback((id: string, value: unknown) => {
-    setFormState((prev) => ({ ...prev, [id]: value }));
+    setFormState((previous) => ({ ...previous, [id]: value }));
   }, []);
 
   const handleSave = async () => {
@@ -92,8 +94,8 @@ export function SourceDetail({
       await updateSource(request);
       setCredentials('');
       await onSaved();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update source');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to update source');
     } finally {
       setSaving(false);
     }
@@ -107,8 +109,8 @@ export function SourceDetail({
       if (!result.verified) {
         setError(result.message || 'Verification failed');
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to verify source');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to verify source');
     } finally {
       setVerifying(false);
     }
@@ -175,6 +177,7 @@ export function SourceDetail({
             updateSource={updateSource}
             onSaved={onSaved}
             onError={setError}
+            readOnly={readOnly}
           />
         )}
         <div className="form-group">
@@ -183,6 +186,7 @@ export function SourceDetail({
             type="text"
             id="source-name"
             value={name}
+            disabled={readOnly}
             onChange={(event) => setName(event.target.value)}
           />
         </div>
@@ -194,6 +198,7 @@ export function SourceDetail({
           <textarea
             id="source-description"
             value={description}
+            disabled={readOnly}
             onChange={(event) => setDescription(event.target.value)}
             rows={3}
           />
@@ -207,15 +212,17 @@ export function SourceDetail({
           }}
           value={isActive}
           onChange={(_, value) => setIsActive(value as boolean)}
+          disabled={readOnly}
         />
         {definition && definition.formFields.length > 0 && (
           <FormFieldsRenderer
             fields={definition.formFields}
             state={formState}
             onChange={handleFieldChange}
+            disabled={readOnly}
           />
         )}
-        {definition?.credentialField && !isAppBacked(source) && (
+        {definition?.credentialField && !isAppBacked(source) && !readOnly && (
           <FormFieldRenderer
             field={{ ...definition.credentialField, required: false }}
             value={credentials}
@@ -224,17 +231,19 @@ export function SourceDetail({
         )}
       </div>
 
-      <footer className="source-details-actions">
-        <Button variant="ghost" size="sm" onClick={handleVerify} loading={verifying}>
-          {verifying ? 'Verifying...' : 'Verify'}
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onClose}>
-          Cancel
-        </Button>
-        <Button onClick={handleSave} disabled={!dirty || saving} loading={saving}>
-          Save
-        </Button>
-      </footer>
+      {!readOnly && (
+        <footer className="source-details-actions">
+          <Button variant="ghost" size="sm" onClick={handleVerify} loading={verifying}>
+            {verifying ? 'Verifying...' : 'Verify'}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={handleSave} disabled={!dirty || saving} loading={saving}>
+            Save
+          </Button>
+        </footer>
+      )}
     </section>
   );
 }

@@ -123,7 +123,7 @@ function repositoriesResponse(
   return { repositories, installations, total: repositories.length, next_page: null };
 }
 
-function renderDetail(source: Source) {
+function renderDetail(source: Source, readOnly = false) {
   return render(
     <MemoryRouter>
       <SourceDetail
@@ -132,6 +132,7 @@ function renderDetail(source: Source) {
         onSaved={onSaved}
         updateSource={updateSource}
         verifySource={verifySource}
+        readOnly={readOnly}
       />
     </MemoryRouter>
   );
@@ -587,6 +588,46 @@ describe('SourceDetail access token field', () => {
   it('is present for a source from an older backend without the new fields', () => {
     renderDetail(gitHubSource());
 
+    expect(accessTokenField()).toBeTruthy();
+  });
+});
+
+describe('SourceDetail read-only', () => {
+  it('shows a viewer every field disabled', () => {
+    const { container } = renderDetail(gitHubSource({ description: 'API' }), true);
+
+    const editable = [...container.querySelectorAll('input, textarea')].filter(
+      (field) => !(field as HTMLInputElement | HTMLTextAreaElement).disabled
+    );
+    expect(editable).toEqual([]);
+    expect(screen.getByLabelText('Name')).toHaveValue('acme/api');
+    expect(screen.getByLabelText(/^Description/)).toHaveValue('API');
+  });
+
+  it('gives a viewer no Save, Verify, Cancel or access token, only Close', () => {
+    renderDetail(gitHubSource(), true);
+
+    for (const name of ['Save', 'Verify', 'Cancel']) {
+      expect(screen.queryByRole('button', { name })).toBeNull();
+    }
+    expect(accessTokenField()).toBeNull();
+    expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
+  });
+
+  it('tells a viewer how the source connects to GitHub without offering to change it', () => {
+    renderDetail(gitHubSource({ github_installation_id: null, has_credentials: true }), true);
+
+    expect(within(connectionRegion()).getByText('Connected with an access token.')).toBeTruthy();
+    expect(within(connectionRegion()).queryByRole('button')).toBeNull();
+  });
+
+  it('leaves the fields and every action to whoever can write', () => {
+    renderDetail(gitHubSource({ github_installation_id: null, has_credentials: true }));
+
+    expect(screen.getByLabelText('Name')).not.toBeDisabled();
+    for (const name of ['Save', 'Verify', 'Cancel', 'Switch to GitHub App']) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument();
+    }
     expect(accessTokenField()).toBeTruthy();
   });
 });

@@ -22,6 +22,7 @@ interface GitHubSourceConnectionProps {
   updateSource: (request: UpdateSourceRequest) => Promise<Source>;
   onSaved: () => Promise<void> | void;
   onError: (message: string | null) => void;
+  readOnly: boolean;
 }
 
 function connectionSummary(state: GitHubSourceState, login: string | null): string {
@@ -65,13 +66,14 @@ export function GitHubSourceConnection({
   updateSource,
   onSaved,
   onError,
+  readOnly,
 }: GitHubSourceConnectionProps) {
   const [connecting, setConnecting] = useState(false);
   const [unreachable, setUnreachable] = useState(false);
   const hintId = useId();
 
   const state = resolveGitHubSourceState(source);
-  const action = connectAction(state);
+  const action = readOnly ? null : connectAction(state);
   const hint = connectionHint(state);
   const fullName = repositoryFullName(source);
 

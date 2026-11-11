@@ -6,7 +6,7 @@ import { useSource, useSources } from '../hooks';
 import type { Source } from '../types';
 import { CreateSourceWizard } from './CreateSourceWizard';
 import { SourceDetail } from './SourceDetail';
-import { COLUMNS, SourceSkeleton } from './SourceSkeleton';
+import { COLUMNS, READ_COLUMNS, SourceSkeleton } from './SourceSkeleton';
 import { SourceStatusBadge } from './SourceStatusBadge';
 import './SourcesSection.css';
 
@@ -26,6 +26,14 @@ function stopRowActivation(event: { stopPropagation: () => void }): void {
   event.stopPropagation();
 }
 
+const READ_ONLY_HINT = "Viewers can't change sources.";
+
+const EMPTY_DESCRIPTION =
+  'Add code repositories, calendars, email inboxes, web URLs, or text content';
+
+const READ_ONLY_EMPTY_DESCRIPTION =
+  'Workspace members can add code repositories, calendars, email inboxes, web URLs, or text content';
+
 function formatVerified(at: string): string {
   return new Date(at).toLocaleDateString(undefined, {
     year: 'numeric',
@@ -34,7 +42,7 @@ function formatVerified(at: string): string {
   });
 }
 
-export function SourcesSection(): ReactElement {
+export function SourcesSection({ readOnly = false }: { readOnly?: boolean }): ReactElement {
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
@@ -63,7 +71,8 @@ export function SourcesSection(): ReactElement {
   const showEditor =
     Boolean(selectedId) && selected?.id === selectedId && !sourceError && !sourceLoading;
   const showSpinner = Boolean(selectedId) && !showEditor && !sourceError;
-  const showAddSource = !showSpinner && !showEditor;
+  const showAddSource = !readOnly && !showSpinner && !showEditor;
+  const columns = readOnly ? READ_COLUMNS : COLUMNS;
   const displayError = error || operationError || (selectedId && !showEditor ? sourceError : null);
   const unloaded = error !== null && sources.length === 0;
 
@@ -142,6 +151,8 @@ export function SourcesSection(): ReactElement {
         )}
       </div>
 
+      {readOnly && <p className="sources-hint">{READ_ONLY_HINT}</p>}
+
       {displayError && (
         <div className="sources-banner sources-banner--error" role="alert">
           <span>{displayError}</span>
@@ -165,9 +176,10 @@ export function SourcesSection(): ReactElement {
           onSaved={refresh}
           updateSource={updateSelected}
           verifySource={verifySelected}
+          readOnly={readOnly}
         />
       ) : loading ? (
-        <SourceSkeleton />
+        <SourceSkeleton columns={columns} />
       ) : unloaded ? null : sources.length === 0 ? (
         <EmptyState
           icon={
@@ -177,15 +189,19 @@ export function SourcesSection(): ReactElement {
             </svg>
           }
           title="No sources configured"
-          description="Add code repositories, calendars, email inboxes, web URLs, or text content"
-          action={<Button onClick={() => setShowCreateModal(true)}>Add source</Button>}
+          description={readOnly ? READ_ONLY_EMPTY_DESCRIPTION : EMPTY_DESCRIPTION}
+          action={
+            readOnly ? undefined : (
+              <Button onClick={() => setShowCreateModal(true)}>Add source</Button>
+            )
+          }
         />
       ) : (
         <div className="sources-table-wrapper">
           <table className="sources-table" aria-label="Sources">
             <thead>
               <tr>
-                {COLUMNS.map((column) => (
+                {columns.map((column) => (
                   <th key={column}>{column}</th>
                 ))}
               </tr>
@@ -197,13 +213,7 @@ export function SourcesSection(): ReactElement {
                   <tr
                     key={source.id}
                     className={`source-card ${source.is_active ? '' : 'source-inactive'}`.trim()}
-                    tabIndex={0}
                     onClick={() => openSource(source.id)}
-                    onKeyDown={(event) => {
-                      if (event.key !== 'Enter' && event.key !== ' ') return;
-                      event.preventDefault();
-                      openSource(source.id);
-                    }}
                   >
                     <td>
                       <div className="source-name-cell">
@@ -216,7 +226,16 @@ export function SourcesSection(): ReactElement {
                           </span>
                         )}
                         <div className="source-name-copy">
-                          <span className="source-name">{source.name}</span>
+                          <button
+                            type="button"
+                            className="source-name"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              openSource(source.id);
+                            }}
+                          >
+                            {source.name}
+                          </button>
                           {source.description && (
                             <span className="source-description">{source.description}</span>
                           )}
@@ -251,47 +270,49 @@ export function SourcesSection(): ReactElement {
                           : 'Never verified'}
                       </span>
                     </td>
-                    <td>
-                      <div
-                        className="source-actions"
-                        role="group"
-                        onClick={stopRowActivation}
-                        onKeyDown={stopRowActivation}
-                      >
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleVerify(source.id);
-                          }}
-                          loading={verifying === source.id}
+                    {!readOnly && (
+                      <td>
+                        <div
+                          className="source-actions"
+                          role="group"
+                          onClick={stopRowActivation}
+                          onKeyDown={stopRowActivation}
                         >
-                          {verifying === source.id ? 'Verifying...' : 'Verify'}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleToggleActive(source);
-                          }}
-                        >
-                          {source.is_active ? 'Disable' : 'Enable'}
-                        </Button>
-                        <Button
-                          className="source-delete"
-                          variant="ghost"
-                          size="sm"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleDelete(source.id);
-                          }}
-                        >
-                          Delete
-                        </Button>
-                      </div>
-                    </td>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleVerify(source.id);
+                            }}
+                            loading={verifying === source.id}
+                          >
+                            {verifying === source.id ? 'Verifying...' : 'Verify'}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleToggleActive(source);
+                            }}
+                          >
+                            {source.is_active ? 'Disable' : 'Enable'}
+                          </Button>
+                          <Button
+                            className="source-delete"
+                            variant="ghost"
+                            size="sm"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleDelete(source.id);
+                            }}
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 );
               })}
@@ -300,11 +321,13 @@ export function SourcesSection(): ReactElement {
         </div>
       )}
 
-      <CreateSourceWizard
-        isOpen={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        createSource={createSource}
-      />
+      {!readOnly && (
+        <CreateSourceWizard
+          isOpen={showCreateModal}
+          onClose={() => setShowCreateModal(false)}
+          createSource={createSource}
+        />
+      )}
     </div>
   );
 }
