@@ -363,7 +363,7 @@ export function CreateTaskWizard({
                 )}
                 {!projectSource && activeSources.length === 0 && (
                   <span className="form-hint form-hint-warning">
-                    No sources configured. Add one in Sources page.
+                    No sources configured. Add one in Settings › Workspace › Sources.
                   </span>
                 )}
               </div>

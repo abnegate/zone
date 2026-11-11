@@ -169,7 +169,7 @@ describe('CreateProjectWizard new source', () => {
     expect(within(projectDialog()).queryByRole('button', { name: /New source/ })).toBeNull();
   });
 
-  it('points a viewer in an empty workspace to the Sources page', async () => {
+  it('points a viewer in an empty workspace to workspace settings', async () => {
     role = 'viewer';
     mockGetSources.mockImplementation(() => Promise.resolve([]));
     const user = userEvent.setup();
@@ -183,6 +183,11 @@ describe('CreateProjectWizard new source', () => {
     );
 
     expect(await within(projectDialog()).findByText('No sources available.')).toBeTruthy();
+    expect(
+      within(projectDialog()).getByText(
+        'You can add sources in Settings › Workspace › Sources and link them later.'
+      )
+    ).toBeTruthy();
     expect(within(projectDialog()).queryByRole('button', { name: /New source/ })).toBeNull();
   });
 

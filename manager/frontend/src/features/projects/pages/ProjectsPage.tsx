@@ -973,7 +973,7 @@ export default function ProjectsPage() {
             wrapperClassName="form-group"
             helpText={
               sources.length === 0
-                ? 'No sources configured. Add one in the Sources page.'
+                ? 'No sources configured. Add one in Settings › Workspace › Sources.'
                 : undefined
             }
             options={[

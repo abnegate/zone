@@ -40,7 +40,7 @@ export function SourceStep({
         <div className="wizard-empty-state">
           <p>No sources available.</p>
           <p className="wizard-empty-hint">
-            You can add sources from the Sources page and link them later.
+            You can add sources in Settings › Workspace › Sources and link them later.
           </p>
         </div>
       ) : (

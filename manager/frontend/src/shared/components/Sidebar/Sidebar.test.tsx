@@ -272,10 +272,24 @@ describe('Sidebar', () => {
       expect(screen.getByText('Chats')).toBeInTheDocument();
       expect(screen.getByText('Projects')).toBeInTheDocument();
       expect(screen.getByText('Tasks')).toBeInTheDocument();
-      expect(screen.getByText('Sources')).toBeInTheDocument();
       expect(screen.getByText('Models')).toBeInTheDocument();
       expect(screen.getByText('Wiki')).toBeInTheDocument();
       expect(screen.getByText('Settings')).toBeInTheDocument();
+    });
+
+    it('leaves Sources to workspace settings', () => {
+      renderSidebar();
+
+      expect(screen.queryByText('Sources')).not.toBeInTheDocument();
+      const links = Array.from(document.querySelectorAll('.sidebar-nav a'));
+      expect(links.map((link) => link.textContent?.trim())).toEqual([
+        'Chats',
+        'Projects',
+        'Tasks',
+        'Models',
+        'Wiki',
+        'Settings',
+      ]);
     });
 
     it('renders theme toggle button', () => {
@@ -328,7 +342,6 @@ describe('Sidebar', () => {
       expect(screen.getByText('Chats').closest('a')).toHaveAttribute('href', '/chats');
       expect(screen.getByText('Projects').closest('a')).toHaveAttribute('href', '/projects');
       expect(screen.getByText('Tasks').closest('a')).toHaveAttribute('href', '/tasks');
-      expect(screen.getByText('Sources').closest('a')).toHaveAttribute('href', '/sources');
       expect(screen.getByText('Models').closest('a')).toHaveAttribute('href', '/models');
       expect(screen.getByText('Wiki').closest('a')).toHaveAttribute('href', '/wiki');
     });

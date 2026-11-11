@@ -672,6 +672,24 @@ describe('ProjectsPage', () => {
     expect(screen.getByRole('heading', { name: 'Link Source' })).toBeInTheDocument();
   });
 
+  it('points to workspace settings when there is no source to link', async () => {
+    mockGetSources.mockImplementation(() => Promise.resolve([]));
+    renderWithQueryClient(<ProjectsPage />);
+    await waitFor(() => {
+      expect(screen.getByText('Project Beta')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('Project Beta'));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Link Source' })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Link Source' }));
+    expect(
+      await screen.findByText('No sources configured. Add one in Settings › Workspace › Sources.')
+    ).toBeInTheDocument();
+  });
+
   it('links source to project', async () => {
     const updatedProject: Project = {
       ...mockProjects[1],

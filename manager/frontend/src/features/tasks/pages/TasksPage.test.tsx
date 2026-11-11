@@ -1287,6 +1287,38 @@ describe('TasksPage', () => {
     expect(screen.getByText(/Project uses:/)).toBeInTheDocument();
   });
 
+  it('points to workspace settings when agentic mode has no source to use', async () => {
+    mockGetSources.mockImplementation(() => Promise.resolve([]));
+    renderTasksPage();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'New task' })).not.toBeDisabled();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'New task' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Project Beta/i })).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Project Beta/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/^Title/)).toBeInTheDocument();
+    });
+    fireEvent.change(screen.getByLabelText(/^Title/), { target: { value: 'Test Task' } });
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Test description' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    const checkbox = await screen.findByRole('checkbox', { name: /Enable Agentic Mode/i });
+    fireEvent.click(checkbox);
+
+    expect(
+      screen.getByText('No sources configured. Add one in Settings › Workspace › Sources.')
+    ).toBeInTheDocument();
+  });
+
   it('does not show fictional phases or logs after a failed start', async () => {
     mockRunTask.mockRejectedValueOnce(new Error('Worker unavailable'));
     renderTasksPage();
