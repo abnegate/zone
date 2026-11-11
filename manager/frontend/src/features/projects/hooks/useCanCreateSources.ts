@@ -1,7 +1,6 @@
-import type { WorkspaceRole } from '../../auth/types';
+import { meetsWorkspaceRole } from '../../../shared/roles';
+import { SOURCES_WRITE_ROLE } from '../../sources/access';
 import { useWorkspaceRole } from './useWorkspaceRole';
-
-const WRITING_ROLES: ReadonlySet<WorkspaceRole> = new Set(['owner', 'admin', 'member']);
 
 /**
  * Whether the signed-in user may add sources to the workspace: the server lets
@@ -12,5 +11,5 @@ const WRITING_ROLES: ReadonlySet<WorkspaceRole> = new Set(['owner', 'admin', 'me
 export function useCanCreateSources(workspaceId: string | undefined): boolean {
   const { data: role, isError } = useWorkspaceRole(workspaceId);
   if (isError) return true;
-  return role != null && WRITING_ROLES.has(role);
+  return role != null && meetsWorkspaceRole(role, SOURCES_WRITE_ROLE);
 }

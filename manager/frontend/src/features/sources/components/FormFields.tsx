@@ -4,10 +4,12 @@ export function FormFieldRenderer({
   field,
   value,
   onChange,
+  disabled = false,
 }: {
   field: FormField;
   value: unknown;
   onChange: (id: string, value: unknown) => void;
+  disabled?: boolean;
 }) {
   if (field.type === 'toggle') {
     return (
@@ -17,7 +19,8 @@ export function FormFieldRenderer({
             <input
               type="checkbox"
               checked={value as boolean}
-              onChange={(e) => onChange(field.id, e.target.checked)}
+              disabled={disabled}
+              onChange={(event) => onChange(field.id, event.target.checked)}
             />
             <span className="toggle-slider" />
           </span>
@@ -42,7 +45,8 @@ export function FormFieldRenderer({
         <textarea
           id={field.id}
           value={value as string}
-          onChange={(e) => onChange(field.id, e.target.value)}
+          disabled={disabled}
+          onChange={(event) => onChange(field.id, event.target.value)}
           placeholder={field.placeholder}
           required={field.required}
           rows={6}
@@ -62,10 +66,13 @@ export function FormFieldRenderer({
         type={field.type}
         id={field.id}
         value={value as string | number}
-        onChange={(e) =>
+        disabled={disabled}
+        onChange={(event) =>
           onChange(
             field.id,
-            field.type === 'number' ? Number.parseInt(e.target.value, 10) || 0 : e.target.value
+            field.type === 'number'
+              ? Number.parseInt(event.target.value, 10) || 0
+              : event.target.value
           )
         }
         placeholder={field.placeholder}
@@ -81,16 +88,18 @@ export function FormFieldsRenderer({
   fields,
   state,
   onChange,
+  disabled = false,
 }: {
   fields: (FormField | FormRow)[];
   state: Record<string, unknown>;
   onChange: (id: string, value: unknown) => void;
+  disabled?: boolean;
 }) {
   return (
     <>
       {fields.map((item) => {
         if ('fields' in item) {
-          const rowKey = item.fields.map((f) => f.id).join('-');
+          const rowKey = item.fields.map((field) => field.id).join('-');
           return (
             <div key={rowKey} className="form-row">
               {item.fields.map((field) => (
@@ -99,6 +108,7 @@ export function FormFieldsRenderer({
                   field={field}
                   value={state[field.id]}
                   onChange={onChange}
+                  disabled={disabled}
                 />
               ))}
             </div>
@@ -110,6 +120,7 @@ export function FormFieldsRenderer({
             field={item}
             value={state[item.id]}
             onChange={onChange}
+            disabled={disabled}
           />
         );
       })}

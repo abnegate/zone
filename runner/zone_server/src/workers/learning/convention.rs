@@ -2,7 +2,7 @@
 //!
 //! Signals arrive one file at a time and most of them mean nothing. A convention is
 //! only recorded when the same answer keeps coming back: enough observations, from
-//! enough separate runs, and with few enough observations disagreeing.
+//! more than one run, and with few enough observations disagreeing.
 //!
 //! The disagreement bar is the important one. A directory holding four Rust files and
 //! three TypeScript ones has no convention about what it holds, and writing one down
@@ -16,9 +16,9 @@ use uuid::Uuid;
 
 use super::observation::{ConventionKind, ConventionSignal};
 
-const MINIMUM_OBSERVATIONS: usize = 4;
-const MINIMUM_DISTINCT_RUNS: usize = 3;
-const MINIMUM_AGREEMENT: f32 = 0.75;
+const MINIMUM_OBSERVATIONS: usize = 3;
+const MINIMUM_DISTINCT_RUNS: usize = 2;
+const MINIMUM_AGREEMENT: f32 = 0.70;
 const OBSERVATION_SATURATION: usize = 8;
 const MINIMUM_CONFIDENCE: f32 = 0.6;
 const MAXIMUM_CONVENTIONS: usize = 24;
@@ -37,6 +37,7 @@ pub struct ConventionPolicy {
     pub minimum_agreement: f32,
     /// Observations beyond this add no further confidence.
     pub observation_saturation: usize,
+    /// High enough that the minimum number of observations must be unanimous.
     pub minimum_confidence: f32,
     pub maximum_conventions: usize,
 }
@@ -231,6 +232,58 @@ mod tests {
         assert!(
             learn(&single_run, &ConventionPolicy::default()).is_empty(),
             "twenty files from one run is one observation of one moment, not a pattern"
+        );
+    }
+
+    #[test]
+    fn two_separate_runs_suffice_and_one_never_does() {
+        let policy = ConventionPolicy::default();
+
+        let learned = learn(&agreeing(3, 2), &policy);
+        assert_eq!(
+            learned.len(),
+            1,
+            "three agreeing files across two runs is a pattern"
+        );
+        assert_eq!(learned[0].observations, 3);
+        assert_eq!(learned[0].distinct_runs, 2);
+
+        assert!(
+            learn(&agreeing(3, 1), &policy).is_empty(),
+            "the same three files from one run are one diff, not a pattern"
+        );
+        assert_eq!(policy.minimum_distinct_runs, 2);
+    }
+
+    #[test]
+    fn three_of_four_is_refused_by_confidence_alone() {
+        let policy = ConventionPolicy::default();
+        let mut contested = agreeing(3, 2);
+        contested.push(signal(ConventionKind::FileNaming, "src/db", "camelCase", 2));
+
+        assert!(
+            learn(&contested, &policy).is_empty(),
+            "at the minimum count the evidence must be unanimous"
+        );
+
+        let unbarred = ConventionPolicy {
+            minimum_confidence: 0.0,
+            ..policy
+        };
+        let learned = learn(&contested, &unbarred);
+        assert_eq!(
+            learned.len(),
+            1,
+            "count, runs and agreement all pass, so confidence is what refused it"
+        );
+        assert!((learned[0].agreement - 0.75).abs() < 1e-6);
+        assert!((learned[0].confidence - 0.525).abs() < 1e-6);
+
+        let unanimous = learn(&agreeing(3, 2), &policy);
+        assert!((unanimous[0].confidence - 0.625).abs() < 1e-6);
+        assert!(
+            (policy.minimum_confidence - 0.6).abs() < 1e-6,
+            "kept at 0.6: 0.5 would admit three of four, the thinnest contested evidence"
         );
     }
 

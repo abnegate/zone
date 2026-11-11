@@ -2068,13 +2068,19 @@ use zone_server::agent::memory::{
 };
 use zone_server::db::memory::{MemoryCategory, remembered};
 
-/// The section's heading, and the nine rules under it that name no tool, as
+/// The section's heading, and the eleven rules under it that name no tool, as
 /// literals because the constants carrying them are private to that section.
 const MEMORY_SECTION: &str = "Memory:";
 
-const MEMORY_RULES: [&str; 9] = [
+const MEMORY_RULES: [&str; 11] = [
     "- \"Remember that\", \"forget that\" and \"from now on\" are always a write: call the tool \
      before you say you have noted it.",
+    "- Do not wait to be asked: when the user tells you something durable about themselves, \
+     such as who they are, how they want you to work or a fact a later conversation will need, \
+     write it, then say in a line that you did. Unasked, what the rules below keep out you \
+     leave unwritten, without saying so.",
+    "- Never write again what the user asked you to forget, whether in this conversation or as \
+     an entry you deleted, unless they ask for it again.",
     "- Write what will still be true and worth reading in a month. A passing mention is not \
      one; a durable phrasing beats a precise figure.",
     "- Only what the user said about themselves. Not what you concluded about them, and not \
@@ -2093,7 +2099,7 @@ const MEMORY_RULES: [&str; 9] = [
     "- Forget only what the user asked you to forget.",
 ];
 
-/// The tenth rule is built from the tool names, as the section builds it, so a
+/// The twelfth rule is built from the tool names, as the section builds it, so a
 /// renamed tool moves this with it rather than leaving it matching nothing.
 fn memory_rules() -> Vec<String> {
     let mut rules: Vec<String> = MEMORY_RULES

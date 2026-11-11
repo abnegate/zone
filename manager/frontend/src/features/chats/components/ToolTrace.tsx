@@ -42,6 +42,7 @@ const CANCEL = verb('cancel', 'cancelling', 'cancelled');
 const WRITE = verb('write', 'writing', 'wrote');
 const APPEND = verb('append', 'appending', 'appended');
 const FORGET = verb('forget', 'forgetting', 'forgot');
+const RECORD = verb('record', 'recording', 'recorded');
 const GENERATE = verb('generate', 'generating', 'generated');
 const EDIT = verb('edit', 'editing', 'edited');
 const QUERY = verb('query', 'querying', 'queried');
@@ -101,6 +102,7 @@ const TOOL_ACTIONS: Record<string, Action> = {
   memory_delete: action(FORGET, 'memory'),
   memory_read: action(READ, 'memory'),
   memory_list: action(LIST, 'memories'),
+  record_discovery: action(RECORD, 'a discovery'),
   finalize_project: action(CREATE, 'a project'),
   generate_image: action(GENERATE, 'an image'),
   edit_image: action(EDIT, 'an image'),
@@ -340,6 +342,7 @@ const DETAIL_FROM_ARGUMENTS: Partial<Record<string, Derive>> = {
   update_document: (args, _, titles) => documentTitle(args, titles),
   create_reminder: (args) =>
     join([text(args.content), isString(args.due_at) ? formatDue(args.due_at) : null], ' · '),
+  record_discovery: (args) => text(args.subject),
 };
 
 const JSON_LINE = /^\s*(?:\{\s*(?:"|\})|\[\s*(?:[{["\]]|\d))/;

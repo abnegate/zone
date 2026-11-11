@@ -1,4 +1,4 @@
-//! What one person asked to have remembered.
+//! What one person said about themselves that is worth keeping.
 //!
 //! Every other category in `knowledge_entries` belongs to the workspace. These
 //! three belong to whoever wrote them, and `created_by` is the owner: the
@@ -73,7 +73,7 @@ pub enum MemoryCategory {
     Profile,
     /// How the user wants the assistant to work. One entry.
     Preference,
-    /// Anything else the user asked to have remembered. Many, named.
+    /// Anything else the user said that a later conversation needs. Many, named.
     Fact,
 }
 
@@ -119,16 +119,16 @@ impl MemoryCategory {
     pub fn preamble(self) -> &'static str {
         match self {
             Self::Profile => {
-                "The user asked for this to be remembered about them. It is background and \
-                 not a request: bring it up only where it changes the substance of the answer."
+                "The user told you this about themselves. It is background and not a \
+                 request: bring it up only where it changes the substance of the answer."
             }
             Self::Preference => {
-                "The user asked you to work this way. Follow it unless this request \
+                "The user said they want you to work this way. Follow it unless this request \
                  contradicts it, and say so when you depart from one."
             }
             Self::Fact => {
-                "The user asked for these to be remembered. Read one by name when it bears \
-                 on the request; never raise one unprompted."
+                "These are things the user told you. Read one by name when it bears on the \
+                 request; never raise one unprompted."
             }
         }
     }
@@ -550,12 +550,12 @@ pub async fn forget(
 mod tests {
     use super::*;
     use crate::db::knowledge::{
-        LearnedCategory, STANDING_INSTRUCTION_CATEGORY, reserved_namespace,
+        LearnedCategory, STANDING_INSTRUCTION_CATEGORY, discovery, reserved_namespace,
     };
 
-    /// The three categories that were reserved before memory existed.
+    /// The reserved categories that belong to the workspace, not to a person.
     fn existing_reserved() -> Vec<&'static str> {
-        let mut categories = vec![STANDING_INSTRUCTION_CATEGORY];
+        let mut categories = vec![STANDING_INSTRUCTION_CATEGORY, discovery::CATEGORY];
         categories.extend(
             LearnedCategory::ALL
                 .into_iter()
@@ -659,19 +659,35 @@ mod tests {
         assert_eq!(MemoryCategory::Fact.heading(), "Remembered for the user");
         assert_eq!(
             MemoryCategory::Profile.preamble(),
-            "The user asked for this to be remembered about them. It is background and not a \
-             request: bring it up only where it changes the substance of the answer."
+            "The user told you this about themselves. It is background and not a request: \
+             bring it up only where it changes the substance of the answer."
         );
         assert_eq!(
             MemoryCategory::Preference.preamble(),
-            "The user asked you to work this way. Follow it unless this request contradicts \
-             it, and say so when you depart from one."
+            "The user said they want you to work this way. Follow it unless this request \
+             contradicts it, and say so when you depart from one."
         );
         assert_eq!(
             MemoryCategory::Fact.preamble(),
-            "The user asked for these to be remembered. Read one by name when it bears on \
-             the request; never raise one unprompted."
+            "These are things the user told you. Read one by name when it bears on the \
+             request; never raise one unprompted."
         );
+    }
+
+    /// An entry is also written without the user asking for it, so a preamble
+    /// that says they asked is false for that entry and lends it the weight of
+    /// an instruction they never gave.
+    #[test]
+    fn no_preamble_claims_the_user_asked_for_the_entry_to_be_kept() {
+        for category in MemoryCategory::ALL {
+            let preamble = category.preamble().to_lowercase();
+            for claim in ["asked", "requested"] {
+                assert!(
+                    !preamble.contains(claim),
+                    "the {category} preamble claims a request nobody may have made: {claim:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type { OrgRole, WorkspaceRole } from '../../../types';
+import { SOURCES_WRITE_ROLE } from '../../sources/access';
 import {
   allowsOrganization,
   allowsWorkspace,
@@ -55,8 +56,19 @@ describe('edit roles', () => {
       ai: 'admin',
       folders: 'member',
       mcp: 'admin',
+      sources: 'member',
     });
-    expect(Object.keys(WORKSPACE_EDIT_ROLE).sort()).toEqual(['ai', 'folders', 'mcp', 'theme']);
+    expect(Object.keys(WORKSPACE_EDIT_ROLE).sort()).toEqual([
+      'ai',
+      'folders',
+      'mcp',
+      'sources',
+      'theme',
+    ]);
+  });
+
+  it('edits sources with the same role the sources feature writes them with', () => {
+    expect(WORKSPACE_EDIT_ROLE.sources).toBe(SOURCES_WRITE_ROLE);
   });
 
   it('requires an organization admin for the admin-only organization sections', () => {

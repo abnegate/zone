@@ -100,13 +100,20 @@ describe('SettingsContent', () => {
   });
 
   describe('workspace editability', () => {
-    const cases: { role: WorkspaceRole; theme: boolean; ai: boolean; folders: boolean }[] = [
-      { role: 'viewer', theme: false, ai: false, folders: false },
-      { role: 'member', theme: true, ai: false, folders: true },
-      { role: 'admin', theme: true, ai: true, folders: true },
+    const cases: {
+      role: WorkspaceRole;
+      theme: boolean;
+      ai: boolean;
+      folders: boolean;
+      sources: boolean;
+    }[] = [
+      { role: 'viewer', theme: false, ai: false, folders: false, sources: false },
+      { role: 'member', theme: true, ai: false, folders: true, sources: true },
+      { role: 'admin', theme: true, ai: true, folders: true, sources: true },
+      { role: 'owner', theme: true, ai: true, folders: true, sources: true },
     ];
 
-    for (const { role, theme, ai, folders } of cases) {
+    for (const { role, theme, ai, folders, sources } of cases) {
       it(`lets a workspace ${role} edit only what the role allows`, () => {
         renderSection(SettingsGroup.Workspace, SettingsSection.General, access(role));
         expect(propsOf('general-section')).toEqual({ editable: theme });
@@ -124,6 +131,11 @@ describe('SettingsContent', () => {
           orgId: organizationId,
           readOnly: !folders,
         });
+      });
+
+      it(`makes sources ${sources ? 'writable' : 'read-only'} for a workspace ${role}`, () => {
+        renderSection(SettingsGroup.Workspace, SettingsSection.Sources, access(role));
+        expect(propsOf('sources-section')).toEqual({ readOnly: !sources });
       });
     }
 
@@ -309,7 +321,7 @@ describe('SettingsContent', () => {
         group: SettingsGroup.Workspace,
         section: SettingsSection.Sources,
         testId: 'sources-section',
-        props: {},
+        props: { readOnly: false },
       },
       {
         group: SettingsGroup.Workspace,
