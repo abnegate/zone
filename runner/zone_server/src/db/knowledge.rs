@@ -114,6 +114,19 @@ pub(crate) use not_memory;
 /// The same text as a value, for tests and for any site that formats rather than concatenates.
 pub const NOT_MEMORY: &str = not_memory!();
 
+/// The predicate the document writer carries so it cannot rewrite a learned entry, and the one the
+/// document union reports `editable` by. Every row it excludes reaches later prompts, and was written by
+/// something that decided what it may say: a pass that counted evidence, or a tool that screened the text.
+/// An edit through `update_document` would be seen by neither. A literal and bind-free for the reasons
+/// `not_memory!` gives; a test pins the names to [`RESERVED_CATEGORIES`] less [`PRIVATE_CATEGORIES`].
+/// `category IS NULL OR` is load-bearing here too: `NOT IN` is NULL for a NULL category.
+macro_rules! not_learned {
+    () => {
+        "AND (category IS NULL OR category NOT IN \
+         ('standing-instruction', 'repository-convention', 'strategy-lesson', 'agent-discovery'))"
+    };
+}
+
 /// Categories that belong to one person, not to the workspace. Every one
 /// carries `MEMORY_CATEGORY_PREFIX`, which a test pins, because `NOT_MEMORY`
 /// matches on the prefix rather than on this list.
@@ -680,6 +693,39 @@ mod tests {
         }
     }
 
+    /// `not_learned!` has to be a literal, so it spells the categories out
+    /// where the constants cannot reach. A learned family added to
+    /// [`RESERVED_CATEGORIES`] and not to the literal would be a row that
+    /// reaches every prompt and that `update_document` still rewrites.
+    #[test]
+    fn the_learned_literal_names_exactly_the_reserved_categories_that_are_not_a_person_s() {
+        let mut named: Vec<&str> = not_learned!().split('\'').skip(1).step_by(2).collect();
+        named.sort_unstable();
+
+        let mut learned: Vec<&str> = RESERVED_CATEGORIES
+            .iter()
+            .copied()
+            .filter(|category| !PRIVATE_CATEGORIES.contains(category))
+            .collect();
+        learned.sort_unstable();
+
+        assert_eq!(named, learned);
+        assert_eq!(
+            learned,
+            vec![
+                "agent-discovery",
+                "repository-convention",
+                "standing-instruction",
+                "strategy-lesson",
+            ]
+        );
+        assert!(
+            not_learned!().starts_with("AND (category IS NULL OR category NOT IN ("),
+            "an ordinary document has no category, and NOT IN alone is NULL for it: {}",
+            not_learned!()
+        );
+    }
+
     #[test]
     fn a_reserved_category_is_refused_without_naming_what_owns_it() {
         let later = format!(
@@ -1216,7 +1262,8 @@ macro_rules! documents {
     () => { concat!(r#"
     SELECT id, title, content, 'knowledge'::text AS source, NULL::uuid AS source_id,
            COALESCE(source_url, 'knowledge://' || id::text) AS uri,
-           updated_at, last_fetched_at AS fetched_at, source_url IS NULL AS editable,
+           updated_at, last_fetched_at AS fetched_at,
+           (source_url IS NULL "#, not_learned!(), r#") AS editable,
            content_hash AS revision
     FROM knowledge_entries
     WHERE workspace_id = $1 AND is_active = TRUE
@@ -1323,6 +1370,8 @@ pub async fn update_document(
          WHERE id = $3 AND workspace_id = $1 AND is_active = TRUE AND source_url IS NULL
            ",
         not_memory!(),
+        " ",
+        not_learned!(),
         " AND get_workspace_role($2, $1) IN ('member', 'admin', 'owner')",
     ))
     .bind(workspace_id)
@@ -1361,6 +1410,19 @@ mod document_union_tests {
         assert!(
             documents!().contains(NOT_MEMORY),
             "read_document and list_documents select content through this union: {}",
+            documents!()
+        );
+    }
+
+    #[test]
+    fn the_document_union_reports_a_learned_entry_as_not_editable() {
+        assert!(
+            documents!().contains(concat!(
+                "(source_url IS NULL ",
+                not_learned!(),
+                ") AS editable"
+            )),
+            "a document the writer refuses must not be listed as one it accepts: {}",
             documents!()
         );
     }
