@@ -997,6 +997,7 @@ mod tests {
         mask(&mut remote);
         let failed = Connection::failed(status::summary(
             "referring",
+            &referring(),
             &format!("MCP handshake failed for 'referring': JSON-RPC error: -32000: {CREDENTIAL}"),
         ));
         vec![

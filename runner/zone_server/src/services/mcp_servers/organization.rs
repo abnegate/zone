@@ -106,7 +106,7 @@ impl OrganizationHub {
         if slot.definition.server.url.is_some()
             && let Some(error) = inner.sessions.failure(server, name)
         {
-            return Connection::failed(summary(name, &error));
+            return Connection::failed(summary(name, &slot.definition.server, &error));
         }
         Connection::failed(UNCONNECTED)
     }

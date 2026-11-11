@@ -1,6 +1,9 @@
 use std::ops::RangeInclusive;
 
+use abnegate_agent::mcp::McpServer;
 use abnegate_agent::mcp::McpTransport;
+use abnegate_secret::REDACTED;
+use abnegate_secret::SecretValue;
 use serde::Serialize;
 
 use super::definition::Definition;
@@ -33,8 +36,11 @@ const WRAPPERS: [&str; 2] = [
     "Transport send error: Transport [",
 ];
 const WRAPPED: &str = "] error: ";
+const RELAYED: &str = "unexpected server response: ";
+const ANSWER: &str = "HTTP ";
 const STATUS_DIGITS: usize = 3;
 const STATUSES: RangeInclusive<u16> = 100..=999;
+const SCRUBBED_LENGTH: usize = 6;
 
 const REFUSALS: [(&str, Failure); 2] = [
     (
@@ -62,23 +68,13 @@ const TRANSPORTS: [Lead; 6] = [
     Lead::Fixed("could not build an HTTP client", Failure::Client),
 ];
 
-const HANDSHAKES: [Lead; 20] = [
+const HANDSHAKES: [Lead; 16] = [
     Lead::Fixed("handshake timed out", Failure::Timeout),
     Lead::Fixed("request timeout after ", Failure::Timeout),
     Lead::Fixed("Auth required", Failure::Unauthorized),
     Lead::Fixed("Insufficient scope", Failure::Forbidden),
-    Lead::Status("HTTP "),
-    Lead::Status("unexpected server response: HTTP "),
-    Lead::Status("Session expired (HTTP "),
-    Lead::Fixed(
-        "unexpected server response: refused a redirect to ",
-        Failure::Redirect,
-    ),
-    Lead::Fixed(
-        "unexpected server response: refused more than ",
-        Failure::Redirect,
-    ),
-    Lead::Fixed("unexpected server response: ", Failure::Protocol),
+    Lead::Status(""),
+    Lead::Status("Session expired ("),
     Lead::Fixed("Unexpected content type: ", Failure::Protocol),
     Lead::Fixed("Unexpected response type", Failure::Protocol),
     Lead::Fixed("Deserialize error: ", Failure::Protocol),
@@ -89,6 +85,11 @@ const HANDSHAKES: [Lead; 20] = [
     Lead::Fixed("JSON-RPC error: ", Failure::Rejected),
     Lead::Fixed("Mcp error: ", Failure::Rejected),
     Lead::Fixed("Client error: ", Failure::Unreachable),
+];
+
+const REDIRECTS: [Lead; 2] = [
+    Lead::Fixed("refused a redirect to ", Failure::Redirect),
+    Lead::Fixed("refused more than ", Failure::Redirect),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -167,15 +168,22 @@ pub fn static_status(definition: &Definition, policy: Policy) -> Option<Connecti
 
 /// What a tenant is told about a server reached by URL that did not connect: one of this
 /// module's own sentences and, where the server answered with one, its HTTP status. `error` is
-/// the hub's failure text for the server it knows as `name`.
+/// the failure text of the hub that connected `server` as `name`.
 ///
 /// Nothing else of `error` is ever copied. The client reads up to 64 KiB of a refusal's body
 /// into that text and private hosts are reachable on purpose, so the text itself would hand an
 /// organization's administrator whatever any host this server can reach says back. The
 /// sentence is chosen by the words the hub and its client open the text with, which precede
 /// anything a remote supplied; the rest is never searched, so a remote cannot choose it.
-pub fn summary(name: &str, error: &str) -> String {
-    Failure::of(name, error).sentence()
+///
+/// The hub scrubs every value `server` binds out of its message, the client's own opening
+/// words included wherever a piece of the URL or a header's value spells one. Those words are
+/// read through the scrub: [`REDACTED`] stands for a stretch of an opening only where that
+/// opening spells one of the server's own bound values whole, never for anything else. A
+/// status is only ever the digits the text itself holds after a plain `HTTP `, and a text
+/// that two kinds could have opened names neither.
+pub fn summary(name: &str, server: &McpServer, error: &str) -> String {
+    Failure::of(name, &Scrub::of(server), error).sentence()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,17 +208,42 @@ enum Failure {
 }
 
 impl Failure {
-    fn of(name: &str, error: &str) -> Self {
+    fn of(name: &str, scrub: &Scrub<'_>, error: &str) -> Self {
         if let Some(message) = staged(HANDSHAKE, name, error) {
-            return Lead::longest(&HANDSHAKES, unwrapped(message)).unwrap_or(Self::Incomplete);
+            return Self::handshake(scrub, message);
         }
         if let Some(message) = staged(TRANSPORT, name, error) {
-            return Lead::longest(&TRANSPORTS, message).unwrap_or(Self::Unknown);
+            return Lead::agreed(&TRANSPORTS, message, scrub).unwrap_or(Self::Unknown);
         }
         REFUSALS
             .iter()
             .find(|(text, _)| *text == error)
             .map_or(Self::Unknown, |(_, failure)| *failure)
+    }
+
+    fn handshake(scrub: &Scrub<'_>, message: &str) -> Self {
+        let mut named = Vec::new();
+        for message in scrub.unwrapped(message) {
+            named.extend(
+                HANDSHAKES
+                    .iter()
+                    .flat_map(|lead| lead.named(message, scrub)),
+            );
+            let relayed = scrub.after(message, RELAYED);
+            named.extend(
+                relayed
+                    .into_iter()
+                    .map(|message| Self::relayed(scrub, message)),
+            );
+        }
+        agreed(named).unwrap_or(Self::Incomplete)
+    }
+
+    /// What the client's transport reports as a response it did not expect: a response it
+    /// could not use, a redirect the hub refused, and any other failure of its own whose text
+    /// the hub scrubbed, which the hub hands back as one of these.
+    fn relayed(scrub: &Scrub<'_>, message: &str) -> Self {
+        Lead::agreed(HANDSHAKES.iter().chain(&REDIRECTS), message, scrub).unwrap_or(Self::Protocol)
     }
 
     fn sentence(self) -> String {
@@ -237,49 +270,108 @@ impl Failure {
     }
 }
 
-/// Words a failure's text opens with, and the failure they name.
+/// Words a failure's text opens with, and the failure they name: a fixed one, or the status
+/// that follows them as `HTTP ` and its digits.
 #[derive(Debug, Clone, Copy)]
 enum Lead {
     Fixed(&'static str, Failure),
     Status(&'static str),
 }
 
-struct Opened {
-    length: usize,
-    failure: Failure,
+impl Lead {
+    fn agreed<'a>(
+        leads: impl IntoIterator<Item = &'a Self>,
+        text: &str,
+        scrub: &Scrub<'_>,
+    ) -> Option<Failure> {
+        agreed(leads.into_iter().flat_map(|lead| lead.named(text, scrub)))
+    }
+
+    fn named(self, text: &str, scrub: &Scrub<'_>) -> Vec<Failure> {
+        match self {
+            Self::Fixed(words, failure) => {
+                scrub.after(text, words).iter().map(|_| failure).collect()
+            }
+            Self::Status(words) => scrub
+                .after(text, words)
+                .into_iter()
+                .filter_map(|answer| status(answer.strip_prefix(ANSWER)?))
+                .map(Failure::Status)
+                .collect(),
+        }
+    }
 }
 
-impl Lead {
-    fn longest(leads: &[Self], text: &str) -> Option<Failure> {
-        leads
-            .iter()
-            .filter_map(|lead| lead.opened(text))
-            .max_by_key(|opened| opened.length)
-            .map(|opened| opened.failure)
+/// The values the hub scrubs from one server's failure text: each the server binds that is
+/// long enough for it to.
+struct Scrub<'a> {
+    values: Vec<&'a str>,
+}
+
+impl<'a> Scrub<'a> {
+    fn of(server: &'a McpServer) -> Self {
+        let mut values: Vec<&str> = server
+            .secrets
+            .values()
+            .map(SecretValue::expose)
+            .filter(|value| value.len() >= SCRUBBED_LENGTH)
+            .collect();
+        values.sort_unstable();
+        values.dedup();
+        Self { values }
     }
 
-    fn opened(self, text: &str) -> Option<Opened> {
-        let (words, failure) = match self {
-            Self::Fixed(words, failure) => (words, failure),
-            Self::Status(words) => (words, Failure::Status(status(text.strip_prefix(words)?)?)),
-        };
-        text.starts_with(words).then_some(Opened {
-            length: words.len(),
-            failure,
-        })
+    /// Each way `text` goes on once it has opened with `words`. Where the text holds
+    /// [`REDACTED`], the words have to spell one of the scrubbed values whole in its place.
+    fn after<'t>(&self, mut text: &'t str, mut words: &str) -> Vec<&'t str> {
+        loop {
+            let Some(letter) = words.chars().next() else {
+                return vec![text];
+            };
+            if let Some(text) = text.strip_prefix(REDACTED) {
+                return self
+                    .values
+                    .iter()
+                    .filter_map(|value| words.strip_prefix(*value))
+                    .flat_map(|words| self.after(text, words))
+                    .collect();
+            }
+            let Some(rest) = text.strip_prefix(letter) else {
+                return Vec::new();
+            };
+            text = rest;
+            words = &words[letter.len_utf8()..];
+        }
     }
+
+    fn unwrapped<'t>(&self, message: &'t str) -> Vec<&'t str> {
+        let inner: Vec<&str> = WRAPPERS
+            .iter()
+            .flat_map(|wrapper| self.after(message, wrapper))
+            .flat_map(|named| {
+                named
+                    .char_indices()
+                    .map(|(start, _)| self.after(&named[start..], WRAPPED))
+                    .find(|inner| !inner.is_empty())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if inner.is_empty() {
+            vec![message]
+        } else {
+            inner
+        }
+    }
+}
+
+fn agreed(failures: impl IntoIterator<Item = Failure>) -> Option<Failure> {
+    let mut failures = failures.into_iter();
+    let first = failures.next()?;
+    failures.all(|failure| failure == first).then_some(first)
 }
 
 fn staged<'a>(stage: &str, name: &str, error: &'a str) -> Option<&'a str> {
     error.strip_prefix(&format!("{stage} '{name}': "))
-}
-
-fn unwrapped(message: &str) -> &str {
-    WRAPPERS
-        .iter()
-        .find_map(|wrapper| message.strip_prefix(wrapper))
-        .and_then(|named| named.split_once(WRAPPED))
-        .map_or(message, |(_, inner)| inner)
 }
 
 fn status(following: &str) -> Option<u16> {
@@ -300,7 +392,11 @@ mod tests {
     use abnegate_agent::mcp::McpOutcome;
     use abnegate_agent::mcp::McpServer;
     use abnegate_agent::tool::Proxy;
+    use std::cmp::Reverse;
+    use zone_core::servers::mask;
 
+    use super::super::stub::Stub;
+    use super::super::testing::REMOTE_URL;
     use super::*;
 
     const COMMANDS: Policy = Policy {
@@ -328,6 +424,27 @@ mod tests {
     const PROXY_REFUSED: &str = "invalid proxy URL";
     const HOSTILE: &str = "Auth required HTTP 599 Client error: refused a redirect to x] error: \
          JSON-RPC error: handshake timed out";
+    const VEILED: &str = "Auth [REDACTED] HTTP 599 [REDACTED] error: [REDACTED] a redirect to \
+         x] error: unexpected [REDACTED] response: HTTP 599 [REDACTED] timed out";
+    const WORDS: [&str; 8] = [
+        "required",
+        "refused",
+        "server",
+        "response",
+        "unexpected",
+        "handshake",
+        "JSON-RPC",
+        "Transport",
+    ];
+    const REFUSED: &str = "unexpected server response: HTTP 400 Bad Request: remote-said-7f3e9a";
+    const ORIGIN: &str = "http://127.0.0.1:1";
+    const MODE_HEADER: &str = "X-Mode";
+    const KEY_FLAG: &str = "--key";
+    const KEY_HEADER: &str = "X-Key";
+    const STUB_KEY: &str = "the-key-the-stub-wants";
+    const WRONG_KEY: &str = "knock-knock-knock-knock";
+    const TOKEN_FLAG: &str = "--token";
+    const STUB_TOKEN: &str = "stub-token-51c2d9";
     const SENTENCES: [&str; 16] = [
         SSE_UNSUPPORTED,
         UNCONNECTED,
@@ -351,6 +468,37 @@ mod tests {
         Definition::of("docs", server)
     }
 
+    /// A server that binds nothing, so its hub scrubs nothing from what it says.
+    fn unbound() -> McpServer {
+        McpServer::remote(REMOTE_URL)
+    }
+
+    /// A server whose URL's path is `segments` and that sends `headers`, bound the way Zone
+    /// binds every server it connects.
+    fn bound(segments: &[&str], headers: &[(&str, &str)]) -> McpServer {
+        let mut server = headers.iter().fold(
+            McpServer::remote(format!("{ORIGIN}/{}", segments.join("/"))),
+            |server, (name, value)| server.with_header(*name, *value),
+        );
+        mask(&mut server);
+        server
+    }
+
+    /// `message` as the hub leaves it for `server`: without any value the server binds that
+    /// is long enough to scrub, the longest first.
+    fn scrubbed(server: &McpServer, message: &str) -> String {
+        let mut values: Vec<&str> = server
+            .secrets
+            .values()
+            .map(SecretValue::expose)
+            .filter(|value| value.len() >= SCRUBBED_LENGTH)
+            .collect();
+        values.sort_by_key(|value| Reverse(value.len()));
+        values.iter().fold(message.to_string(), |message, value| {
+            message.replace(value, REDACTED)
+        })
+    }
+
     fn handshake(message: &str) -> String {
         format!("MCP handshake failed for '{NAME}': {message}")
     }
@@ -359,16 +507,22 @@ mod tests {
         format!("MCP transport failed for '{NAME}': {message}")
     }
 
-    fn initializing(inner: &str) -> String {
-        handshake(&format!(
+    fn initialize(inner: &str) -> String {
+        format!(
             "Send message error Transport [{WORKER}] error: {inner}, when send initialize request"
-        ))
+        )
+    }
+
+    fn list(inner: &str) -> String {
+        format!("Transport send error: Transport [{WORKER}] error: {inner}")
+    }
+
+    fn initializing(inner: &str) -> String {
+        handshake(&initialize(inner))
     }
 
     fn listing(inner: &str) -> String {
-        handshake(&format!(
-            "Transport send error: Transport [{WORKER}] error: {inner}"
-        ))
+        handshake(&list(inner))
     }
 
     fn answered(status: u16) -> String {
@@ -659,23 +813,33 @@ mod tests {
     #[test]
     fn each_failure_shape_reads_as_its_sentence() {
         for (text, sentence) in shapes() {
-            assert_eq!(summary(NAME, &text), sentence, "{text}");
+            assert_eq!(summary(NAME, &unbound(), &text), sentence, "{text}");
         }
     }
 
     #[test]
     fn a_summary_is_one_line_of_zones_own_words() {
-        let hostile = [
-            handshake(HOSTILE),
-            transport(HOSTILE),
-            initializing(HOSTILE),
-            listing(HOSTILE),
-            HOSTILE.to_string(),
-            String::new(),
-        ];
+        let hostile = [HOSTILE, VEILED].into_iter().flat_map(|hostile| {
+            [
+                handshake(hostile),
+                transport(hostile),
+                initializing(hostile),
+                listing(hostile),
+                hostile.to_string(),
+            ]
+        });
+        let texts: Vec<String> = shapes()
+            .into_iter()
+            .map(|(text, _)| text)
+            .chain(hostile)
+            .chain([String::new()])
+            .collect();
 
-        for text in shapes().into_iter().map(|(text, _)| text).chain(hostile) {
-            let summary = summary(NAME, &text);
+        for (server, text) in [unbound(), bound(&WORDS, &[])]
+            .iter()
+            .flat_map(|server| texts.iter().map(move |text| (server, text)))
+        {
+            let summary = summary(NAME, server, text);
             let status = summary
                 .strip_prefix(ANSWERED)
                 .and_then(|status| status.strip_prefix(' '))
@@ -691,81 +855,89 @@ mod tests {
         }
     }
 
+    /// A remote that knows what it was sent can write those values, which the hub scrubs, or
+    /// the redaction itself. Neither is read: both stand after the words that named the kind.
     #[test]
     fn a_remote_body_cannot_choose_its_kind() {
-        let cases = [
-            (
-                initializing(&format!(
-                    "unexpected server response: HTTP 400 Bad Request: {HOSTILE}"
-                )),
-                answered(400),
-            ),
-            (
-                listing(&format!(
-                    "unexpected server response: HTTP 400 Bad Request: {HOSTILE}"
-                )),
-                answered(400),
-            ),
-            (
-                initializing(&format!(
-                    "unexpected server response: refused a redirect to http://{HOSTILE}"
-                )),
-                REDIRECTED.to_string(),
-            ),
-            (
-                initializing(&format!(
-                    "unexpected server response: could not parse JSON response as \
-                     ServerJsonRpcMessage: expected value at line 1 column 1: {HOSTILE}"
-                )),
-                NOT_MCP.to_string(),
-            ),
-            (
-                initializing(&format!("Unexpected content type: Some(\"{HOSTILE}\")")),
-                NOT_MCP.to_string(),
-            ),
-            (
-                handshake(&format!(
-                    "uncorrelated error response: expected id 0, error response carried {HOSTILE}"
-                )),
-                NOT_MCP.to_string(),
-            ),
-            (
-                handshake(&format!("JSON-RPC error: -32000: {HOSTILE}")),
-                REJECTED.to_string(),
-            ),
-            (
-                handshake(&format!(
-                    "JSON-RPC error: -32000: Send message error Transport [x] error: {HOSTILE}"
-                )),
-                REJECTED.to_string(),
-            ),
-            (
-                handshake(&format!("Mcp error: -32000: {HOSTILE}")),
-                REJECTED.to_string(),
-            ),
-        ];
+        for (server, hostile) in [unbound(), bound(&WORDS, &[])]
+            .iter()
+            .flat_map(|server| [HOSTILE, VEILED].map(|hostile| (server, hostile)))
+        {
+            let refused = format!("unexpected server response: HTTP 400 Bad Request: {hostile}");
+            let cases = [
+                (initialize(&refused), answered(400)),
+                (list(&refused), answered(400)),
+                (
+                    initialize(&format!(
+                        "unexpected server response: refused a redirect to http://{hostile}"
+                    )),
+                    REDIRECTED.to_string(),
+                ),
+                (
+                    initialize(&format!(
+                        "unexpected server response: could not parse JSON response as \
+                         ServerJsonRpcMessage: expected value at line 1 column 1: {hostile}"
+                    )),
+                    NOT_MCP.to_string(),
+                ),
+                (
+                    initialize(&format!("Unexpected content type: Some(\"{hostile}\")")),
+                    NOT_MCP.to_string(),
+                ),
+                (
+                    format!(
+                        "uncorrelated error response: expected id 0, error response carried \
+                         {hostile}"
+                    ),
+                    NOT_MCP.to_string(),
+                ),
+                (
+                    format!("JSON-RPC error: -32000: {hostile}"),
+                    REJECTED.to_string(),
+                ),
+                (format!("JSON-RPC error: {hostile}"), REJECTED.to_string()),
+                (
+                    format!(
+                        "JSON-RPC error: -32000: Send message error Transport [x] error: \
+                         {hostile}"
+                    ),
+                    REJECTED.to_string(),
+                ),
+                (
+                    format!("Mcp error: -32000: {hostile}"),
+                    REJECTED.to_string(),
+                ),
+            ];
 
-        for (text, sentence) in cases {
-            assert_eq!(summary(NAME, &text), sentence, "{text}");
+            for (message, sentence) in cases {
+                let text = handshake(&scrubbed(server, &message));
+                assert_eq!(summary(NAME, server, &text), sentence, "{text}");
+            }
         }
     }
 
     #[test]
     fn a_shape_this_build_does_not_know_is_never_searched() {
-        for text in [
-            handshake(&format!("task cancelled for reason {HOSTILE}")),
-            handshake(&format!("connection closed: {HOSTILE}")),
-            initializing(&format!("SSE error: {HOSTILE}")),
-            listing(&format!("something new: {HOSTILE}")),
-        ] {
-            assert_eq!(summary(NAME, &text), INCOMPLETE, "{text}");
-        }
-        for text in [
-            transport(&format!("something new: {HOSTILE}")),
-            HOSTILE.to_string(),
-            format!("{SSE_REFUSED} {HOSTILE}"),
-        ] {
-            assert_eq!(summary(NAME, &text), UNCONNECTED, "{text}");
+        for (server, hostile) in [unbound(), bound(&WORDS, &[])]
+            .iter()
+            .flat_map(|server| [HOSTILE, VEILED].map(|hostile| (server, hostile)))
+        {
+            for message in [
+                format!("task cancelled for reason {hostile}"),
+                format!("connection closed: {hostile}"),
+                initialize(&format!("SSE error: {hostile}")),
+                list(&format!("something new: {hostile}")),
+            ] {
+                let text = handshake(&scrubbed(server, &message));
+                assert_eq!(summary(NAME, server, &text), INCOMPLETE, "{text}");
+            }
+            for text in [
+                transport(&format!("something new: {hostile}")),
+                hostile.to_string(),
+                format!("{SSE_REFUSED} {hostile}"),
+            ] {
+                assert_eq!(summary(NAME, server, &text), UNCONNECTED, "{text}");
+            }
         }
     }
 
@@ -783,14 +955,296 @@ mod tests {
             );
             let unparsed = format!("MCP transport failed for '{name}': invalid URL");
 
-            assert_eq!(summary(name, &refused), FORBIDDEN, "{name}");
-            assert_eq!(summary(name, &unparsed), INVALID_URL, "{name}");
+            assert_eq!(summary(name, &unbound(), &refused), FORBIDDEN, "{name}");
+            assert_eq!(summary(name, &unbound(), &unparsed), INVALID_URL, "{name}");
         }
         assert_eq!(
-            summary("other", &initializing("HTTP 500")),
+            summary("other", &unbound(), &initializing("HTTP 500")),
             UNCONNECTED,
             "the text names a server the caller did not ask about"
         );
+    }
+
+    /// The hub scrubs a failure's message and leaves the name before it as it is, so a name
+    /// spelled like something the server binds is read as written, and never as a redaction.
+    #[test]
+    fn a_name_the_server_also_binds_is_read_as_written() {
+        for name in ["server", "response", "Transport"] {
+            let server = bound(&[name, "mcp"], &[]);
+            let message = scrubbed(&server, &initialize(REFUSED));
+            let named = format!("MCP handshake failed for '{name}': {message}");
+            let hidden = format!("MCP handshake failed for '{REDACTED}': {message}");
+
+            assert!(message.contains(REDACTED), "{message}");
+            assert_eq!(summary(name, &server, &named), answered(400), "{named}");
+            assert_eq!(summary(name, &server, &hidden), UNCONNECTED, "{hidden}");
+        }
+    }
+
+    #[test]
+    fn a_bound_value_spelled_like_the_clients_words_keeps_the_kind() {
+        let timed = "request timeout after PT30S";
+        let redirected = "unexpected server response: refused a redirect to \
+             http://127.0.0.1:1/remote-said-7f3e9a";
+        let looped = "unexpected server response: refused more than 10 redirects";
+        let typed = "Unexpected content type: Some(\"text/html\")";
+        let unparsed = "unexpected server response: could not parse JSON response as \
+             ServerJsonRpcMessage: expected value at line 1 column 1: remote-said-7f3e9a";
+        let versioned = "no compatible protocol version (client: [ProtocolVersion(\
+             \"2025-11-25\")], server: [ProtocolVersion(\"1999-01-01\")])";
+        let rejected = "JSON-RPC error: -32000: remote-said-7f3e9a(\"remote-said-7f3e9a\")";
+        let cases = [
+            ("server", initialize(REFUSED), answered(400)),
+            ("response", initialize(REFUSED), answered(400)),
+            ("unexpected", initialize(REFUSED), answered(400)),
+            ("Transport", initialize(REFUSED), answered(400)),
+            ("message", initialize(REFUSED), answered(400)),
+            ("transport", initialize(REFUSED), answered(400)),
+            ("Remote", initialize(REFUSED), answered(400)),
+            ("error:", initialize(REFUSED), answered(400)),
+            ("initialize", initialize(REFUSED), answered(400)),
+            ("server", list(REFUSED), answered(400)),
+            ("Transport", list(REFUSED), answered(400)),
+            ("error:", list(REFUSED), answered(400)),
+            ("Session", list("Session expired (HTTP 404)"), answered(404)),
+            ("expired", list("Session expired (HTTP 404)"), answered(404)),
+            (
+                "handshake",
+                "handshake timed out".to_string(),
+                TIMED_OUT.to_string(),
+            ),
+            ("timeout", timed.to_string(), TIMED_OUT.to_string()),
+            ("request", timed.to_string(), TIMED_OUT.to_string()),
+            ("refused", initialize(redirected), REDIRECTED.to_string()),
+            ("redirect", initialize(redirected), REDIRECTED.to_string()),
+            ("response", initialize(redirected), REDIRECTED.to_string()),
+            ("refused", list(looped), REDIRECTED.to_string()),
+            ("content", initialize(typed), NOT_MCP.to_string()),
+            ("Unexpected", initialize(typed), NOT_MCP.to_string()),
+            ("response", initialize(unparsed), NOT_MCP.to_string()),
+            ("protocol", versioned.to_string(), NOT_MCP.to_string()),
+            ("version", versioned.to_string(), NOT_MCP.to_string()),
+            ("JSON-RPC", rejected.to_string(), REJECTED.to_string()),
+        ];
+
+        for (word, message, sentence) in cases {
+            for server in [
+                bound(&["api", word, "mcp"], &[]),
+                bound(&["mcp"], &[(MODE_HEADER, word)]),
+                bound(&["mcp"], &[("Authorization", &format!("Bearer {word}"))]),
+            ] {
+                let text = handshake(&scrubbed(&server, &message));
+
+                assert!(text.contains(REDACTED), "{word} is not in {message}");
+                assert_eq!(summary(NAME, &server, &text), sentence, "{text}");
+            }
+        }
+    }
+
+    /// The hub's client hands back, as a response it did not expect, any failure of its own
+    /// whose text the hub scrubbed. The failure it was is still read behind those words.
+    #[test]
+    fn a_failure_the_hub_scrubbed_and_relayed_keeps_its_kind() {
+        let cases = [
+            (
+                bound(&["required", "mcp"], &[]),
+                initialize("unexpected server response: Auth [REDACTED]"),
+                UNAUTHORIZED.to_string(),
+            ),
+            (
+                bound(&["response", "required", "mcp"], &[]),
+                initialize("unexpected server [REDACTED]: Auth [REDACTED]"),
+                UNAUTHORIZED.to_string(),
+            ),
+            (
+                bound(&["mcp"], &[(MODE_HEADER, "Insufficient")]),
+                initialize("unexpected server response: [REDACTED] scope"),
+                FORBIDDEN.to_string(),
+            ),
+            (
+                bound(&["sending", "mcp"], &[]),
+                initialize("unexpected server response: Client error: error [REDACTED] request"),
+                UNREACHABLE.to_string(),
+            ),
+            (
+                bound(&["Client", "mcp"], &[]),
+                initialize("unexpected server response: [REDACTED] error: error sending request"),
+                UNREACHABLE.to_string(),
+            ),
+            (
+                bound(&["expired", "mcp"], &[]),
+                list("unexpected server response: Session [REDACTED] (HTTP 404)"),
+                answered(404),
+            ),
+            (
+                bound(&["content", "mcp"], &[]),
+                initialize(
+                    "unexpected server response: Unexpected [REDACTED] type: Some(\"text/html\")",
+                ),
+                NOT_MCP.to_string(),
+            ),
+            (
+                bound(&["exceeded", "mcp"], &[]),
+                initialize(
+                    "unexpected server response: HTTP response body [REDACTED] the maximum \
+                     size of 65536 bytes",
+                ),
+                NOT_MCP.to_string(),
+            ),
+        ];
+
+        for (server, message, sentence) in cases {
+            let text = handshake(&message);
+
+            assert_eq!(summary(NAME, &server, &text), sentence, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_redaction_stands_only_for_a_value_the_server_binds() {
+        let server = bound(&["server", "mcp"], &[]);
+        let cases = [
+            ("unexpected [REDACTED] response: HTTP 400", answered(400)),
+            (
+                "[REDACTED] server response: HTTP 400",
+                INCOMPLETE.to_string(),
+            ),
+            (
+                "unexpected server [REDACTED]: HTTP 400",
+                INCOMPLETE.to_string(),
+            ),
+            ("unexpected [REDACTED]: HTTP 400", INCOMPLETE.to_string()),
+            (
+                "unexpected [REDACTED][REDACTED] response: HTTP 400",
+                INCOMPLETE.to_string(),
+            ),
+            ("[REDACTED]", INCOMPLETE.to_string()),
+            ("Auth [REDACTED]", INCOMPLETE.to_string()),
+            ("[REDACTED] error: remote-said", INCOMPLETE.to_string()),
+            ("[REDACTED] timed out", INCOMPLETE.to_string()),
+            (
+                "unexpected [REDACTED] response: [REDACTED] a redirect to x",
+                NOT_MCP.to_string(),
+            ),
+        ];
+
+        for (inner, sentence) in cases {
+            for text in [handshake(inner), initializing(inner), listing(inner)] {
+                assert_eq!(summary(NAME, &server, &text), sentence, "{text}");
+            }
+        }
+        for text in [
+            transport("invalid [REDACTED]"),
+            "[REDACTED]".to_string(),
+            format!("MCP handshake failed for '{NAME}'[REDACTED] HTTP 400"),
+        ] {
+            assert_eq!(summary(NAME, &server, &text), UNCONNECTED, "{text}");
+        }
+        let unwrapped = handshake(&format!(
+            "Send message error Transport [{WORKER}[REDACTED]HTTP 400"
+        ));
+        assert_eq!(summary(NAME, &server, &unwrapped), INCOMPLETE);
+    }
+
+    /// The hub leaves a value shorter than six bytes where it is, so a redaction is never one.
+    #[test]
+    fn a_value_too_short_for_the_hub_to_scrub_is_never_read_for_a_redaction() {
+        let server = bound(&["error", "scope", "Auth", "mcp"], &[(MODE_HEADER, "HTTP")]);
+        let plain = initialize(REFUSED);
+
+        assert_eq!(scrubbed(&server, &plain), plain);
+        assert_eq!(summary(NAME, &server, &handshake(&plain)), answered(400));
+        for inner in [
+            "Insufficient [REDACTED]",
+            "[REDACTED] required",
+            "JSON-RPC [REDACTED]: remote-said",
+            "[REDACTED] 400",
+        ] {
+            let text = initializing(inner);
+            assert_eq!(summary(NAME, &server, &text), INCOMPLETE, "{text}");
+        }
+    }
+
+    /// Scrubbing can leave a text that two kinds would both have opened. Nothing in it says
+    /// which one did, so it names neither.
+    #[test]
+    fn a_text_two_kinds_could_have_opened_names_neither() {
+        let rejected = "JSON-RPC error: -32000: remote-said-7f3e9a";
+        let unreached = "Client error: error sending request";
+        let either = bound(&["JSON-RPC", "Client", "mcp"], &[]);
+        let phrased = bound(&["Auth%20required", "Insufficient%20scope", "mcp"], &[]);
+
+        for (word, message, sentence) in [
+            ("JSON-RPC", rejected, REJECTED),
+            ("Client", unreached, UNREACHABLE),
+        ] {
+            let server = bound(&[word, "mcp"], &[]);
+            let text = handshake(&scrubbed(&server, message));
+            assert_eq!(summary(NAME, &server, &text), sentence, "{text}");
+
+            let text = handshake(&scrubbed(&either, message));
+            assert_eq!(summary(NAME, &either, &text), INCOMPLETE, "{text}");
+        }
+        for message in ["Auth required", "Insufficient scope"] {
+            let text = handshake(&scrubbed(&phrased, &initialize(message)));
+            assert_eq!(summary(NAME, &phrased, &text), INCOMPLETE, "{text}");
+
+            let relayed = format!("unexpected server response: {message}");
+            let text = handshake(&scrubbed(&phrased, &initialize(&relayed)));
+            assert_eq!(summary(NAME, &phrased, &text), NOT_MCP, "{text}");
+        }
+    }
+
+    /// A status is the digits the text holds after a plain `HTTP `. A value the server binds
+    /// can hide them, which leaves the kind without a status, and can never supply them: not
+    /// its own digits, and not the remote's, which a value ending where the client's words end
+    /// would otherwise put straight after a redaction.
+    #[test]
+    fn a_bound_value_never_makes_or_changes_a_status() {
+        let bare = "HTTP 400";
+        let cases = [
+            ("400%20Bad%20Request", initialize(REFUSED), NOT_MCP),
+            ("HTTP%20400", initialize(REFUSED), NOT_MCP),
+            ("HTTP%204", initialize(REFUSED), NOT_MCP),
+            ("0%20Bad%20Request", initialize(REFUSED), NOT_MCP),
+            ("TP%20400", initialize(REFUSED), NOT_MCP),
+            ("response:%20HTTP%20400", initialize(REFUSED), INCOMPLETE),
+            ("HTTP%20400", initialize(bare), INCOMPLETE),
+            ("TP%20400", list(bare), INCOMPLETE),
+            (
+                "(HTTP%20404)",
+                list("Session expired (HTTP 404)"),
+                INCOMPLETE,
+            ),
+        ];
+
+        for (segment, message, sentence) in cases {
+            let server = bound(&[segment, "mcp"], &[]);
+            let text = handshake(&scrubbed(&server, &message));
+
+            assert!(text.contains(REDACTED), "{segment} is not in {message}");
+            assert_eq!(summary(NAME, &server, &text), sentence, "{text}");
+        }
+
+        let ending = bound(
+            &[
+                "response:%20HTTP%20",
+                "server%20response:%20HTTP",
+                "Session%20expired%20(HTTP%20",
+                "mcp",
+            ],
+            &[],
+        );
+        for inner in [
+            "unexpected server [REDACTED]599 remote-said",
+            "unexpected [REDACTED] 599 remote-said",
+            "unexpected server [REDACTED]599",
+            "[REDACTED]404)",
+        ] {
+            for text in [initializing(inner), listing(inner)] {
+                assert_eq!(summary(NAME, &ending, &text), INCOMPLETE, "{text}");
+            }
+        }
     }
 
     #[test]
@@ -822,7 +1276,11 @@ mod tests {
                 NOT_MCP.to_string(),
             ),
         ] {
-            assert_eq!(summary(NAME, &initializing(inner)), sentence, "{inner}");
+            assert_eq!(
+                summary(NAME, &unbound(), &initializing(inner)),
+                sentence,
+                "{inner}"
+            );
         }
     }
 
@@ -847,8 +1305,12 @@ mod tests {
                 NOT_MCP.to_string(),
             ),
         ] {
-            assert_eq!(summary(NAME, &initializing(inner)), sentence, "{inner}");
-            assert_eq!(summary(NAME, &listing(inner)), sentence, "{inner}");
+            for server in [unbound(), bound(&["server", "response", "refused"], &[])] {
+                for message in [initialize(inner), list(inner)] {
+                    let text = handshake(&scrubbed(&server, &message));
+                    assert_eq!(summary(NAME, &server, &text), sentence, "{text}");
+                }
+            }
         }
     }
 
@@ -900,10 +1362,88 @@ mod tests {
         for (name, text, sentence) in expected {
             let refusal = refusal(&hub, name);
             assert_eq!(refusal, text, "{name}");
-            assert_eq!(summary(name, &refusal), sentence, "{name}");
+            assert_eq!(
+                summary(name, &configuration.servers[name], &refusal),
+                sentence,
+                "{name}"
+            );
         }
         let refusal = refusal(&unrouted, "proxied");
         assert_eq!(refusal, staged("proxied", PROXY_REFUSED));
-        assert_eq!(summary("proxied", &refusal), CLIENT_UNBUILT);
+        assert_eq!(
+            summary("proxied", &proxied.servers["proxied"], &refusal),
+            CLIENT_UNBUILT
+        );
+    }
+
+    /// What `summary` takes the hub to do is the hub's to change: it scrubs a failure's
+    /// message and not the name before it, of every value its server binds that is six bytes
+    /// or longer and of none shorter, its client's own words among them.
+    #[tokio::test]
+    async fn the_hub_scrubs_its_own_words_the_way_summary_reads_them() {
+        let stub = Stub::start(&[KEY_FLAG, STUB_KEY]).await;
+        let origin = format!("http://127.0.0.1:{}", stub.port());
+        let rows = [
+            ("server", "server", WRONG_KEY),
+            ("short", "error", WRONG_KEY),
+            ("headed", "lane", "Transport"),
+            ("phrased", "response", "unexpected server"),
+        ];
+        let servers: Vec<(&str, McpServer, String)> = rows
+            .into_iter()
+            .map(|(name, segment, key)| {
+                let mut server = McpServer::remote(format!("{origin}/{segment}/mcp"))
+                    .with_header(KEY_HEADER, key);
+                mask(&mut server);
+                let said = initialize(&format!(
+                    "unexpected server response: HTTP 400 Bad Request: refused {key} at \
+                     /{segment}/mcp"
+                ));
+                (name, server, said)
+            })
+            .collect();
+        let configuration = servers
+            .iter()
+            .fold(McpConfig::default(), |configuration, (name, server, _)| {
+                configuration.with_server(*name, server.clone())
+            });
+
+        let hub = McpHub::connect_through(&configuration, &Proxy::default()).await;
+
+        for (name, server, said) in &servers {
+            let refusal = refusal(&hub, name);
+            assert_eq!(
+                refusal,
+                format!(
+                    "MCP handshake failed for '{name}': {}",
+                    scrubbed(server, said)
+                )
+            );
+            assert_eq!(summary(name, server, &refusal), answered(400), "{name}");
+        }
+        let redactions = |name: &str| refusal(&hub, name).matches(REDACTED).count();
+        assert_eq!(redactions("server"), 3);
+        assert_eq!(redactions("short"), 2);
+        assert_eq!(redactions("headed"), 4);
+        assert_eq!(redactions("phrased"), 4);
+    }
+
+    /// A failure of the client's own that the hub scrubbed reaches `summary` as a response
+    /// the client did not expect.
+    #[tokio::test]
+    async fn the_hub_relays_a_scrubbed_failure_the_way_summary_reads_it() {
+        let stub = Stub::start(&[TOKEN_FLAG, STUB_TOKEN]).await;
+        let mut server = McpServer::remote(stub.url()).with_header(MODE_HEADER, "required");
+        mask(&mut server);
+        let configuration = McpConfig::default().with_server(NAME, server.clone());
+
+        let hub = McpHub::connect_through(&configuration, &Proxy::default()).await;
+
+        let refusal = refusal(&hub, NAME);
+        assert_eq!(
+            refusal,
+            initializing("unexpected server response: Auth [REDACTED]")
+        );
+        assert_eq!(summary(NAME, &server, &refusal), UNAUTHORIZED);
     }
 }

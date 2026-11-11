@@ -28,7 +28,6 @@ use zone_server::db::mcp_servers::NewMcpServer;
 use zone_server::db::tasks::Origin;
 use zone_server::services::mcp_servers::status::ANSWERED;
 use zone_server::services::mcp_servers::status::Connection;
-use zone_server::services::mcp_servers::status::INCOMPLETE;
 use zone_server::services::mcp_servers::status::SSE_UNSUPPORTED;
 use zone_server::services::mcp_servers::status::UNAUTHORIZED;
 use zone_server::services::mcp_servers::status::UNCONNECTED;
@@ -103,9 +102,13 @@ const PATH_MARKER: &str = "lane-lane-lane";
 const QUERY_MARKER: &str = "nook-nook-nook";
 const CLOSED_MARKER: &str = "moat-moat-moat";
 const SENT: [&str; 4] = [WRONG_KEY, PATH_MARKER, QUERY_MARKER, CLOSED_MARKER];
-/// A word the client's own failure text holds (`unexpected server response: …`), long enough
-/// for the hub to scrub when it is bound to a server as a segment of its URL's path.
+/// Words the client's own failure text holds (`Send message error Transport […] error:
+/// unexpected server response: …`), each long enough for the hub to scrub when it is bound to
+/// a server as a segment of its URL's path or as the value of a header.
 const CLIENT_WORD: &str = "server";
+const RESPONSE_WORD: &str = "response";
+const WRAPPER_WORD: &str = "Transport";
+const CLIENT_PHRASE: &str = "unexpected server";
 const BAD_REQUEST: u16 = 400;
 const LOGGED: &str = "zone_server=debug,zone_core=debug,abnegate_agent=debug,rmcp=debug";
 /// How the hub names the second tool to claim a name in one catalog.
@@ -2387,32 +2390,37 @@ async fn a_workspace_override_and_an_allowlist_apply_to_an_http_server() {
 }
 
 /// The hub scrubs what a server is sent out of its failure's message before the kind is read
-/// from how that message opens. A piece of the URL that is also one of the client's own words
-/// there is scrubbed with the rest, which leaves a sentence naming no kind. The server's name
-/// stands outside what is scrubbed, so a piece spelled like the name costs nothing.
+/// from how that message opens. A piece of the URL or a header's value that is also one of the
+/// client's own words there is scrubbed with the rest, and the kind is read through that all
+/// the same. The server's name stands outside what is scrubbed.
 #[tokio::test]
-async fn a_url_piece_in_the_clients_own_words_blunts_the_failure_kind() {
+async fn a_failure_keeps_its_kind_whatever_the_server_is_sent_spells() {
     let _environment = isolated();
     let stub = Stub::start(&[KEY_FLAG, STUB_KEY]).await;
     let client = client(false).await;
     let tenant = Tenant::new(&client).await;
     let token = tenant.owner.token.as_str();
     let rows = [
-        ("distinct", PATH_MARKER, answered(BAD_REQUEST)),
-        (PATH_MARKER, PATH_MARKER, answered(BAD_REQUEST)),
-        ("worded", CLIENT_WORD, INCOMPLETE.to_string()),
+        ("distinct", PATH_MARKER, WRONG_KEY),
+        (PATH_MARKER, PATH_MARKER, WRONG_KEY),
+        ("worded", CLIENT_WORD, WRONG_KEY),
+        (CLIENT_WORD, CLIENT_WORD, WRONG_KEY),
+        ("wrapped", PATH_MARKER, WRAPPER_WORD),
+        ("phrased", RESPONSE_WORD, CLIENT_PHRASE),
     ];
 
-    for (name, segment, sentence) in &rows {
+    for (name, segment, key) in &rows {
         let url = format!("{}/{segment}/mcp", origin(&stub));
         let created = tenant
-            .create(&client, &sending(name, &url, KEY_HEADER, WRONG_KEY))
+            .create(&client, &sending(name, &url, KEY_HEADER, key))
             .await;
         let failed = settle(&client, &tenant.server(&id(&created)), token, FAILED).await;
 
         assert_eq!(
-            failed[ERROR], *sentence,
-            "the server named {name} at /{segment}/mcp was refused as the others were"
+            failed[ERROR],
+            answered(BAD_REQUEST),
+            "the server named {name} at /{segment}/mcp, sending {key}, was refused as the \
+             others were"
         );
         assert_eq!(failed["available_tools"], json!([]), "{name}");
     }
