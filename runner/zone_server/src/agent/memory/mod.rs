@@ -1,9 +1,9 @@
-//! Remember what the user asked to have remembered, and nothing else.
+//! Remember what the user said about themselves, and nothing else.
 //!
 //! Zone's other memory is server-derived: the learning loop earns a standing
 //! instruction by clearing an occurrence and agreement bar. This is the other
-//! half — what a person said about themselves, written because they asked for
-//! it, read back under their own name.
+//! half — what a person said about themselves, written when they say it
+//! whether or not they asked for that, read back under their own name.
 //!
 //! Every tool here is chat-only. A background run reads the user's profile and
 //! preferences from the rendered block and can act on them, but it cannot
@@ -119,8 +119,9 @@ pub const LIST_DESCRIPTION: &str = "List what is remembered for this user: each 
 pub const READ_DESCRIPTION: &str = "Read one remembered entry in full. Do this before changing \
     an entry, so the version you write with is the version you read.";
 
-pub const WRITE_DESCRIPTION: &str = "Store something the user asked to have remembered, or \
-    replace an entry you have read. Their profile, how they want you to work, or a named fact.";
+pub const WRITE_DESCRIPTION: &str = "Store something durable the user told you about themselves, \
+    whether or not they asked you to, or replace an entry you have read. Their profile, how they \
+    want you to work, or a named fact.";
 
 pub const APPEND_DESCRIPTION: &str = "Add a line to a remembered entry without rewriting it. \
     Use this when the entry is a list and the user added to it.";
@@ -966,8 +967,9 @@ mod tests {
         );
         assert_eq!(
             WRITE_DESCRIPTION,
-            "Store something the user asked to have remembered, or replace an entry you have \
-             read. Their profile, how they want you to work, or a named fact."
+            "Store something durable the user told you about themselves, whether or not they \
+             asked you to, or replace an entry you have read. Their profile, how they want you \
+             to work, or a named fact."
         );
         assert_eq!(
             APPEND_DESCRIPTION,

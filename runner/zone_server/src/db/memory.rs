@@ -1,4 +1,4 @@
-//! What one person asked to have remembered.
+//! What one person said about themselves that is worth keeping.
 //!
 //! Every other category in `knowledge_entries` belongs to the workspace. These
 //! three belong to whoever wrote them, and `created_by` is the owner: the
@@ -73,7 +73,7 @@ pub enum MemoryCategory {
     Profile,
     /// How the user wants the assistant to work. One entry.
     Preference,
-    /// Anything else the user asked to have remembered. Many, named.
+    /// Anything else the user said that a later conversation needs. Many, named.
     Fact,
 }
 

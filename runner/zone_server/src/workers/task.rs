@@ -1573,8 +1573,8 @@ struct Guidance<'a> {
     review: &'a str,
     instructions: &'a str,
     facts: &'a str,
-    /// What the person who started this run asked to have remembered. A run
-    /// reads it and writes none of it, so it arrives as an index-free block.
+    /// What is remembered about the person who started this run. A run reads
+    /// it and writes none of it, so it arrives as an index-free block.
     memory: &'a str,
     /// The workspace's written procedures, by name and trigger. Operator text,
     /// so it sits before the repository block like the rest of it.
