@@ -69,18 +69,18 @@ struct Row {
     is_active: bool,
 }
 
-struct Fixture {
-    pool: PgPool,
+pub(crate) struct Fixture {
+    pub(crate) pool: PgPool,
     state: AppState,
     organization: Uuid,
-    workspace: Uuid,
-    member: Uuid,
-    chat: Uuid,
+    pub(crate) workspace: Uuid,
+    pub(crate) member: Uuid,
+    pub(crate) chat: Uuid,
     people: Vec<Uuid>,
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let pool = PgPool::connect(&common::context_database_url())
             .await
             .expect("the discovery tests need a migrated disposable database");
@@ -113,7 +113,7 @@ impl Fixture {
         .await
     }
 
-    async fn chat(&self) -> ChatTools {
+    pub(crate) async fn chat(&self) -> ChatTools {
         self.chat_as(self.member).await
     }
 
@@ -202,7 +202,7 @@ impl Fixture {
         rows.remove(0)
     }
 
-    async fn clean(self) {
+    pub(crate) async fn clean(self) {
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(self.organization)
             .execute(&self.pool)
@@ -220,20 +220,25 @@ fn arguments(kind: Kind, subject: &str, statement: &str) -> String {
     json!({"kind": kind.as_str(), "subject": subject, "statement": statement}).to_string()
 }
 
-async fn record(tools: &ChatTools, kind: Kind, subject: &str, statement: &str) -> ToolResult {
+pub(crate) async fn record(
+    tools: &ChatTools,
+    kind: Kind,
+    subject: &str,
+    statement: &str,
+) -> ToolResult {
     tools
         .execute(RECORD_DISCOVERY, &arguments(kind, subject, statement))
         .await
 }
 
 /// What a stored call answered with.
-fn stored(result: &ToolResult) -> Value {
+pub(crate) fn stored(result: &ToolResult) -> Value {
     assert!(result.success, "{result:?}");
     serde_json::from_str(result.output.as_deref().expect("a success carries output"))
         .expect("a stored call answers in JSON")
 }
 
-fn refusal(result: &ToolResult) -> &str {
+pub(crate) fn refusal(result: &ToolResult) -> &str {
     assert!(!result.success, "{result:?}");
     assert_eq!(result.output, None);
     result
