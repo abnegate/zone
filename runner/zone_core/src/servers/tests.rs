@@ -474,6 +474,50 @@ fn an_encoded_piece_of_a_url_is_masked_as_the_server_reads_it() {
 }
 
 #[test]
+fn the_user_info_a_url_carries_is_masked() {
+    let mut credentialed =
+        McpServer::remote("https://operator-5b2e:hunter2%40home%2Foffice@example.com/mcp");
+    let mut named = McpServer::remote("https://operator-5b2e@example.com/mcp");
+    let mut keyed = McpServer::remote("https://:password-3b9d@example.com/mcp");
+    let resolved = credentialed.endpoint();
+
+    mask(&mut credentialed);
+    mask(&mut named);
+    mask(&mut keyed);
+    let once = credentialed.secrets.clone();
+    mask(&mut credentialed);
+
+    assert_eq!(
+        bound(&credentialed),
+        [
+            ("path segment 0", "mcp"),
+            ("url password", "hunter2@home/office"),
+            ("url path", "/mcp"),
+            ("url username", "operator-5b2e"),
+        ]
+    );
+    assert_eq!(
+        bound(&named),
+        [
+            ("path segment 0", "mcp"),
+            ("url path", "/mcp"),
+            ("url username", "operator-5b2e"),
+        ]
+    );
+    assert_eq!(
+        bound(&keyed),
+        [
+            ("path segment 0", "mcp"),
+            ("url password", "password-3b9d"),
+            ("url path", "/mcp"),
+        ]
+    );
+    assert_eq!(credentialed.secrets, once);
+    assert_eq!(credentialed.endpoint(), resolved);
+    assert!(credentialed.secrets.keys().all(|key| spaced(key)));
+}
+
+#[test]
 fn a_header_named_like_its_own_reference_resolves_unchanged() {
     let written =
         McpServer::remote("https://example.com/mcp").with_header("TOKEN", "Bearer ${TOKEN}");

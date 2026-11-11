@@ -67,6 +67,10 @@ const HEADER_VALUE: &str = "header value";
 
 const HEADER_CREDENTIAL: &str = "header credential";
 
+const URL_USERNAME: &str = "url username";
+
+const URL_PASSWORD: &str = "url password";
+
 const URL_PATH: &str = "url path";
 
 const URL_QUERY: &str = "url query";
@@ -158,9 +162,9 @@ pub fn config() -> McpConfig {
 /// Binds everything `server` sends its remote endpoint as secrets of that
 /// server, so the hub scrubs each from the failure text it records and from
 /// what it logs: every resolved header value, the last word of one that has
-/// several (the credential in `Bearer <credential>`), the resolved URL's path
-/// and query as sent, and each path segment and query value as the server
-/// reads it.
+/// several (the credential in `Bearer <credential>`), the username and
+/// password the resolved URL carries, its path and query as sent, and each
+/// path segment and query value as the server reads it.
 ///
 /// For a server whose references are already bound, or that has none: an
 /// instance entry once its environment references are bound, an
@@ -190,6 +194,11 @@ pub fn mask(server: &mut McpServer) {
     let Ok(url) = Url::parse(&endpoint.url) else {
         return;
     };
+    hide(URL_USERNAME.to_string(), &decoded(url.username()));
+    hide(
+        URL_PASSWORD.to_string(),
+        &decoded(url.password().unwrap_or_default()),
+    );
     hide(URL_PATH.to_string(), url.path());
     for (index, segment) in url.path_segments().into_iter().flatten().enumerate() {
         hide(format!("{PATH_SEGMENT} {index}"), &decoded(segment));
