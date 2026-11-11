@@ -93,6 +93,7 @@ impl Hubs {
     pub async fn organization<F, Fut, E>(
         &self,
         organization: Uuid,
+        offered: impl Fn(Uuid) -> bool,
         load: F,
     ) -> Result<Arc<OrganizationHub>, E>
     where
@@ -108,7 +109,7 @@ impl Hubs {
             };
             reconcile(&entry, hub, None, load).await?
         };
-        hub.settled().await;
+        hub.settled(offered).await;
         Ok(hub)
     }
 
@@ -254,6 +255,7 @@ mod tests {
     const REMOTE: &str = "remote";
     const TOKEN: &str = "stub-token-51c2d9";
     const TOKEN_VARIABLE: &str = "ZONE_TEST_MCP_TOKEN";
+    const GATED: &str = r#"while [ ! -e "$0" ]; do sleep 0.05; done; exec "$@""#;
 
     const POLICY: Policy = Policy {
         enabled: true,
@@ -311,9 +313,13 @@ mod tests {
     }
 
     async fn built(hubs: &Hubs, organization: Uuid, rows: &Rows) -> Arc<OrganizationHub> {
-        hubs.organization(organization, rows.load())
+        hubs.organization(organization, every, rows.load())
             .await
             .expect("the rows load")
+    }
+
+    fn every(_: Uuid) -> bool {
+        true
     }
 
     async fn synced(hubs: &Hubs, organization: Uuid, rows: &Rows) -> Arc<OrganizationHub> {
@@ -335,7 +341,7 @@ mod tests {
     }
 
     async fn settled(hub: &OrganizationHub, name: &str) -> Connection {
-        tokio::time::timeout(LIMIT, hub.settled())
+        tokio::time::timeout(LIMIT, hub.settled(every))
             .await
             .expect("the connection settles");
         hub.named(name)
@@ -359,8 +365,8 @@ mod tests {
         let rows = Rows::storing(vec![Definition::stub("stub")]);
 
         let (first, second) = tokio::join!(
-            hubs.organization(organization, rows.load()),
-            hubs.organization(organization, rows.load())
+            hubs.organization(organization, every, rows.load()),
+            hubs.organization(organization, every, rows.load())
         );
         let (first, second) = (first.unwrap(), second.unwrap());
         let generation = first.generation("stub");
@@ -408,7 +414,9 @@ mod tests {
             definitions: vec![read.clone()],
         };
         let hub = hubs
-            .organization(organization, |_| ready(Loaded::Ok(Some(partial.clone()))))
+            .organization(organization, every, |_| {
+                ready(Loaded::Ok(Some(partial.clone())))
+            })
             .await
             .unwrap();
         let skipped = known(&hubs, organization).await;
@@ -561,6 +569,52 @@ mod tests {
         assert_eq!(hub.generation("other"), generation);
     }
 
+    /// The stub, started only once a file exists at `gate`.
+    fn gated(name: &str, gate: &std::path::Path) -> Definition {
+        let stub = Definition::stub(name).server;
+        let mut arguments = vec![
+            "-c".to_string(),
+            GATED.to_string(),
+            gate.to_string_lossy().into_owned(),
+            stub.command.expect("the stub is a command"),
+        ];
+        arguments.extend(stub.arguments);
+        Definition::of(name, McpServer::command("sh", arguments))
+    }
+
+    #[tokio::test]
+    async fn a_load_waits_only_on_the_servers_it_offers() {
+        let hubs = hubs();
+        let organization = Uuid::new_v4();
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let gate = directory.path().join("gate");
+        let held = gated("held", &gate);
+        let rows = Rows::storing(vec![Definition::stub("stub"), held.clone()]);
+
+        let unoffered = tokio::time::timeout(
+            LIMIT,
+            hubs.organization(organization, |server| server != held.id, rows.load()),
+        )
+        .await
+        .expect("a load that does not offer the held server waited on it")
+        .expect("the rows load");
+        let unheld = (unoffered.named("stub"), unoffered.named("held"));
+        let mut offering = pin!(hubs.organization(organization, every, rows.load()));
+        let waiting = poll!(offering.as_mut()).is_pending();
+        std::fs::write(&gate, "").expect("the gate opens");
+
+        assert_eq!(unheld, (delegate(), Connection::connecting()));
+        assert!(
+            waiting,
+            "a load that offers the held server did not wait on it"
+        );
+        let offered = tokio::time::timeout(LIMIT, offering)
+            .await
+            .expect("the held server settles")
+            .expect("the rows load");
+        assert_eq!(offered.named("held"), delegate());
+    }
+
     #[tokio::test]
     async fn reconnects_during_a_connect_of_the_same_revision_start_no_other() {
         let hubs = hubs();
@@ -642,7 +696,7 @@ mod tests {
             let started = Arc::clone(&started);
             let release = Arc::clone(&release);
             async move {
-                hubs.organization(organization, |known| async move {
+                hubs.organization(organization, every, |known| async move {
                     let read = rows.load()(known).await;
                     started.notify_one();
                     release.notified().await;
@@ -711,7 +765,7 @@ mod tests {
         release.notify_one();
         first.await.unwrap().unwrap();
         second.await.unwrap();
-        tokio::time::timeout(LIMIT, hub.settled())
+        tokio::time::timeout(LIMIT, hub.settled(every))
             .await
             .expect("the connections settle");
         hub
@@ -773,7 +827,7 @@ mod tests {
         let organization = Uuid::new_v4();
         let rows = Rows::storing(vec![Definition::stub("stub")]);
 
-        let failed = hubs.organization(organization, unreadable).await;
+        let failed = hubs.organization(organization, every, unreadable).await;
         let unbuilt = hubs.existing_organization(organization).is_none();
         let counted = hubs.organizations();
         let hub = built(&hubs, organization, &rows).await;

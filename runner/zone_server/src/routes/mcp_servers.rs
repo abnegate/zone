@@ -1292,9 +1292,11 @@ mod tests {
             ..read.clone().revised()
         };
         let hub = Hubs::new(Proxy::default(), POLICY)
-            .organization(Uuid::new_v4(), |_| {
-                ready(Ok::<_, Infallible>(Some(vec![stored].into())))
-            })
+            .organization(
+                Uuid::new_v4(),
+                |_| true,
+                |_| ready(Ok::<_, Infallible>(Some(vec![stored].into()))),
+            )
             .await
             .expect("the rows load");
 

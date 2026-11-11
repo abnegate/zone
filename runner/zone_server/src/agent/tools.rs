@@ -122,9 +122,10 @@ pub(crate) async fn task_writer(state: &AppState, workspace: Uuid, actor: Uuid) 
 }
 
 /// The hub of the workspace's organization and the workspace's overrides of
-/// its servers, when any of them is connected. A preview (`connect` false)
-/// reads only a hub a turn already built, and asks the database nothing while
-/// no organization has one.
+/// its servers, when any of them is connected. A turn waits only on the
+/// servers the workspace is offered. A preview (`connect` false) reads only a
+/// hub a turn already built, and asks the database nothing while no
+/// organization has one.
 async fn organization_servers(
     scope: &WorkspaceScope,
     connect: bool,
@@ -145,25 +146,30 @@ async fn organization_servers(
             return None;
         }
     };
-    let hub = if connect {
-        load::organization(state, organization).await?
+    let built = if connect {
+        None
     } else {
-        state.mcp().existing_organization(organization)?
+        Some(state.mcp().existing_organization(organization)?)
     };
-    if hub.connected() == 0 {
+    if built.as_ref().is_some_and(|hub| hub.connected() == 0) {
         return None;
     }
-    match mcp_servers::workspace_overrides(state.db(), workspace).await {
-        Ok(overrides) => Some((hub, overrides)),
+    let overrides = match mcp_servers::workspace_overrides(state.db(), workspace).await {
+        Ok(overrides) => overrides,
         Err(error) => {
             tracing::debug!(
                 %workspace,
                 %error,
                 "Could not read the workspace's MCP overrides; offering none of its organization's servers"
             );
-            None
+            return None;
         }
-    }
+    };
+    let hub = match built {
+        Some(hub) => hub,
+        None => load::workspace(state, organization, &overrides).await?,
+    };
+    (hub.connected() > 0).then_some((hub, overrides))
 }
 
 /// Where server tools start when the model gives a relative path.
@@ -732,9 +738,8 @@ impl ChatTools {
             connected_servers = hub.map_or(0, McpHub::server_count);
             let mut added = hub.map_or(0, |hub| mcp::register(&mut registry, hub));
             if let Some((organization, overrides)) = organization_servers(scope, connect).await {
-                let registered = organization.register(&mut registry, &|server| {
-                    overrides.get(&server).copied().unwrap_or(true)
-                });
+                let registered = organization
+                    .register(&mut registry, &|server| load::offered(&overrides, server));
                 added += registered.tools;
                 connected_servers += registered.servers;
             }
@@ -3908,13 +3913,17 @@ mod tests {
         }
 
         async fn overriding(&self, enabled: bool) {
+            self.switching(self.server, enabled).await;
+        }
+
+        async fn switching(&self, server: Uuid, enabled: bool) {
             sqlx::query(
                 "INSERT INTO workspace_mcp_servers (workspace_id, server_id, organization_id, enabled) \
                  VALUES ($1, $2, $3, $4) \
                  ON CONFLICT (workspace_id, server_id) DO UPDATE SET enabled = EXCLUDED.enabled",
             )
             .bind(self.workspace)
-            .bind(self.server)
+            .bind(server)
             .bind(self.organization)
             .bind(enabled)
             .execute(&self.pool)
@@ -3990,6 +3999,53 @@ mod tests {
         assert!(!run.has(STUB_TOOL), "{:?}", run.names());
         assert!(!chat.remote.contains(STUB_TOOL));
         assert!(restored.has(STUB_TOOL), "{:?}", restored.names());
+    }
+
+    #[tokio::test]
+    async fn a_turn_does_not_wait_on_a_server_its_workspace_switched_off() {
+        use crate::db::mcp_servers::NewMcpServer;
+        use crate::db::mcp_servers::create_authorized;
+        use crate::services::mcp_servers::status::Status;
+        use crate::services::mcp_servers::transport::Transport;
+
+        let tenant = Tenant::storing(None).await;
+        let silent = create_authorized(
+            &tenant.pool,
+            tenant.state.master_key(),
+            tenant.organization,
+            tenant.user,
+            NewMcpServer {
+                name: "silent".to_string(),
+                transport: Transport::Stdio.as_str().to_string(),
+                command: Some("sh".to_string()),
+                arguments: vec!["-c".to_string(), "exec sleep 3600".to_string()],
+                url: None,
+                tools: None,
+                enabled: true,
+                environment: Default::default(),
+                headers: Default::default(),
+            },
+        )
+        .await
+        .expect("the silent server is stored")
+        .id;
+        tenant.switching(silent, false).await;
+
+        let chat = tenant.chat().await;
+        let status = tenant
+            .state
+            .mcp()
+            .existing_organization(tenant.organization)
+            .map(|hub| hub.connection(silent).status);
+        tenant.state.mcp().forget(tenant.organization);
+        tenant.remove().await;
+
+        assert!(chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert_eq!(
+            status,
+            Some(Status::Connecting),
+            "the turn waited for a server its workspace switched off"
+        );
     }
 
     #[tokio::test]

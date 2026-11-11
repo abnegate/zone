@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use abnegate_agent::mcp::McpServer;
@@ -32,11 +33,29 @@ pub fn definition(record: &McpServerRecord) -> Definition {
 }
 
 pub async fn organization(state: &AppState, organization: Uuid) -> Option<Arc<OrganizationHub>> {
+    workspace(state, organization, &BTreeMap::new()).await
+}
+
+/// The organization's hub for a workspace with `overrides`, once every server the workspace is
+/// offered has settled. A server the workspace switched off may still be connecting.
+pub async fn workspace(
+    state: &AppState,
+    organization: Uuid,
+    overrides: &BTreeMap<Uuid, bool>,
+) -> Option<Arc<OrganizationHub>> {
     state
         .mcp()
-        .organization(organization, |known| changed(state, organization, known))
+        .organization(
+            organization,
+            |server| offered(overrides, server),
+            |known| changed(state, organization, known),
+        )
         .await
         .map_or_else(|error| stale(state, organization, &error), Some)
+}
+
+pub fn offered(overrides: &BTreeMap<Uuid, bool>, server: Uuid) -> bool {
+    overrides.get(&server).copied().unwrap_or(true)
 }
 
 pub async fn sync(state: &AppState, organization: Uuid) -> Option<Arc<OrganizationHub>> {

@@ -52,8 +52,12 @@ impl Inner {
             .map(|(server, slot)| (*server, slot))
     }
 
-    fn connecting(&self) -> bool {
-        self.slots.values().any(|slot| slot.connecting)
+    fn connecting(&self) -> BTreeSet<Uuid> {
+        self.slots
+            .iter()
+            .filter(|(_, slot)| slot.connecting)
+            .map(|(server, _)| *server)
+            .collect()
     }
 }
 
@@ -73,7 +77,7 @@ pub struct Registered {
 pub struct OrganizationHub {
     inner: RwLock<Inner>,
     policy: Policy,
-    connecting: watch::Sender<bool>,
+    connecting: watch::Sender<BTreeSet<Uuid>>,
     connects: watch::Sender<usize>,
 }
 
@@ -87,7 +91,7 @@ impl OrganizationHub {
                 generation: 0,
             }),
             policy,
-            connecting: watch::Sender::new(false),
+            connecting: watch::Sender::new(BTreeSet::new()),
             connects: watch::Sender::new(0),
         }
     }
@@ -155,12 +159,14 @@ impl OrganizationHub {
     }
 
     pub fn connecting(&self) -> bool {
-        *self.connecting.borrow()
+        !self.connecting.borrow().is_empty()
     }
 
-    pub(super) async fn settled(&self) {
+    pub(super) async fn settled(&self, offered: impl Fn(Uuid) -> bool) {
         let mut connecting = self.connecting.subscribe();
-        let _ = connecting.wait_for(|connecting| !connecting).await;
+        let _ = connecting
+            .wait_for(|connecting| !connecting.iter().any(|server| offered(*server)))
+            .await;
     }
 
     pub(super) fn revisions(&self) -> Revisions {
@@ -473,7 +479,7 @@ mod tests {
     async fn settled(definitions: Vec<Definition>) -> Arc<OrganizationHub> {
         let hub = Arc::new(OrganizationHub::new(Proxy::default(), POLICY));
         hub.apply(definitions.into(), None);
-        hub.settled().await;
+        hub.settled(|_| true).await;
         hub
     }
 
