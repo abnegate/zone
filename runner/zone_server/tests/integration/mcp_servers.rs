@@ -1,13 +1,17 @@
 //! Organization-managed MCP servers over the API: who may read and write them,
 //! that their secrets are sealed and never handed back, what a definition may
-//! hold, how an edit reaches the running connection, and how a workspace
-//! narrows what its organization offers.
+//! hold, how an edit reaches the running connection, how a workspace narrows
+//! what its organization offers, and what a tenant is shown of a server
+//! reached over HTTP, the organization's or the instance's, that connects or
+//! fails.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use abnegate_secret::MasterKey;
+use abnegate_secret::REDACTED;
 use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
 use axum::http::StatusCode;
@@ -16,14 +20,27 @@ use serde_json::json;
 use tokio::time::Instant;
 use uuid::Uuid;
 use zone_core::servers;
+use zone_server::agent::ChatTools;
+use zone_server::agent::WorkspaceScope;
 use zone_server::config::Config;
+use zone_server::db::mcp_servers;
+use zone_server::db::mcp_servers::NewMcpServer;
+use zone_server::db::tasks::Origin;
+use zone_server::services::mcp_servers::status::ANSWERED;
 use zone_server::services::mcp_servers::status::Connection;
+use zone_server::services::mcp_servers::status::INCOMPLETE;
 use zone_server::services::mcp_servers::status::SSE_UNSUPPORTED;
+use zone_server::services::mcp_servers::status::UNAUTHORIZED;
 use zone_server::services::mcp_servers::status::UNCONNECTED;
+use zone_server::services::mcp_servers::status::UNREACHABLE;
+use zone_server::services::mcp_servers::stub::Stub;
+use zone_server::services::mcp_servers::transport::Transport;
+use zone_server::state::AppState;
 
 use crate::common;
 use crate::common::TestClient;
 use crate::common::TestResponse;
+use crate::common::logs::capturing;
 use crate::common::mcp;
 use crate::common::mcp::isolated;
 use crate::common::test_email;
@@ -65,6 +82,34 @@ const SECRETS: [&str; 4] = [
 ];
 const SEALED_PREFIX: &str = "ENC[";
 const INSTANCE_SERVER: &str = "shared";
+const EVENTS_SERVER: &str = "events";
+const EVENTS_URL: &str = "http://127.0.0.1:1/sse";
+const HTTP: &str = "http";
+const SSE: &str = "sse";
+const HTTP_SERVER: &str = "stub_http";
+
+const TOKEN_FLAG: &str = "--token";
+const STUB_TOKEN: &str = "stub-token-51c2d9";
+const WRONG_TOKEN: &str = "another-token-7e1b";
+const TOKEN_VARIABLE: &str = "ZONE_TEST_MCP_TOKEN";
+const KEY_FLAG: &str = "--key";
+const KEY_HEADER: &str = "X-Key";
+const STUB_KEY: &str = "the-key-the-stub-wants";
+/// What a failing server is sent, which it echoes in its refusal. Each is long enough for the
+/// hub to scrub once it is bound to its server, and none is shaped like a credential, so nothing
+/// but that binding keeps one out of a failure's text and the log.
+const WRONG_KEY: &str = "knock-knock-knock-knock";
+const PATH_MARKER: &str = "lane-lane-lane";
+const QUERY_MARKER: &str = "nook-nook-nook";
+const CLOSED_MARKER: &str = "moat-moat-moat";
+const SENT: [&str; 4] = [WRONG_KEY, PATH_MARKER, QUERY_MARKER, CLOSED_MARKER];
+/// A word the client's own failure text holds (`unexpected server response: …`), long enough
+/// for the hub to scrub when it is bound to a server as a segment of its URL's path.
+const CLIENT_WORD: &str = "server";
+const BAD_REQUEST: u16 = 400;
+const LOGGED: &str = "zone_server=debug,zone_core=debug,abnegate_agent=debug,rmcp=debug";
+/// How the hub names the second tool to claim a name in one catalog.
+const COLLIDED: &str = "_2";
 
 const MCP_SERVER_RESOURCE: &str = "mcp_server";
 const WORKSPACE_MCP_SERVERS_RESOURCE: &str = "workspace_mcp_servers";
@@ -114,6 +159,13 @@ async fn client(commands: bool) -> TestClient {
         ..common::test_config()
     })
     .await
+}
+
+/// A client whose instance MCP servers are the ones the environment names, connected when a
+/// test first asks for them, where [`client`] has none.
+async fn live() -> TestClient {
+    let pool = common::create_test_pool().await;
+    TestClient::with_state(AppState::new(common::test_config(), pool, None))
 }
 
 struct Account {
@@ -299,7 +351,91 @@ fn recording(name: &str, offered: &Path) -> Value {
 }
 
 fn remote(name: &str) -> Value {
-    json!({ "name": name, "transport": "http", "url": REMOTE_URL })
+    http(name, REMOTE_URL)
+}
+
+fn http(name: &str, url: &str) -> Value {
+    json!({ "name": name, "transport": HTTP, "url": url })
+}
+
+/// An HTTP server that sends `value` in the header `header`.
+fn sending(name: &str, url: &str, header: &str, value: &str) -> Value {
+    let mut body = http(name, url);
+    body["headers"] = json!({ header: value });
+    body
+}
+
+fn bearer(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
+fn origin(stub: &Stub) -> String {
+    format!("http://127.0.0.1:{}", stub.port())
+}
+
+/// The instance configuration naming `servers`.
+fn configuration(servers: Value) -> String {
+    json!({ "mcpServers": servers }).to_string()
+}
+
+/// What a tenant is told of a server that answered `status` and nothing a client can use.
+fn answered(status: u16) -> String {
+    format!("{ANSWERED} {status}")
+}
+
+fn assert_unsent(text: &str, place: &str) {
+    for sent in SENT {
+        assert!(!text.contains(sent), "{place} holds {sent}: {text}");
+    }
+}
+
+/// What the server logged, which has to hold a redaction: a capture that silently caught
+/// nothing would otherwise pass for a log that holds no secret.
+fn assert_scrubbed(logged: &str) {
+    assert!(!logged.is_empty(), "nothing was logged");
+    assert!(
+        logged.contains(&format!("refused {REDACTED}")),
+        "the log does not hold the refusal with what it echoed redacted: {logged}"
+    );
+    assert_unsent(logged, "the log");
+}
+
+fn scope(client: &TestClient, tenant: &Tenant) -> WorkspaceScope {
+    WorkspaceScope {
+        state: client.state().clone(),
+        workspace_id: tenant.workspace,
+        chat_id: Some(Uuid::new_v4()),
+        user_id: tenant.owner.user,
+        offline: false,
+        origin: Origin::Member,
+    }
+}
+
+/// The audit rows written about the `kind` of resource that `resource` is, oldest first: each
+/// one's action and the values it recorded.
+async fn audited(
+    client: &TestClient,
+    tenant: &Tenant,
+    kind: &str,
+    resource: Uuid,
+) -> Vec<(String, Value)> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT action, new_values::text FROM audit_logs \
+         WHERE organization_id = $1 AND resource_type = $2 AND resource_id = $3 \
+         ORDER BY created_at, id",
+    )
+    .bind(tenant.organization)
+    .bind(kind)
+    .bind(resource)
+    .fetch_all(client.state().db())
+    .await
+    .expect("the audit log is readable");
+    rows.into_iter()
+        .map(|(action, values)| {
+            let values = serde_json::from_str(&values).expect("the audited values are JSON");
+            (action, values)
+        })
+        .collect()
 }
 
 fn id(server: &Value) -> String {
@@ -490,7 +626,7 @@ async fn an_organization_member_reads_but_only_an_administrator_writes() {
         .post_json_auth(&tenant.connection(&probe), &json!({}), &admin.token)
         .await;
     reconnecting.assert_status(StatusCode::ACCEPTED);
-    assert_eq!(reconnecting.json_value()["status"], FAILED);
+    assert_eq!(reconnecting.json_value()["status"], CONNECTING);
     client
         .delete_auth(&tenant.server(&id(&created.json_value())), &admin.token)
         .await
@@ -937,8 +1073,16 @@ async fn an_invalid_definition_is_refused() {
             "`environment`",
         ),
         (
-            json!({ "name": "events", "transport": "sse", "url": "http://127.0.0.1:1/sse" }),
+            json!({ "name": EVENTS_SERVER, "transport": SSE, "url": EVENTS_URL }),
             SSE_UNSUPPORTED,
+        ),
+        (
+            http("metadata", "http://169.254.169.254/mcp"),
+            "`url` must not point at a link-local or cloud metadata address",
+        ),
+        (
+            sending("flavored", REMOTE_URL, "Metadata-Flavor", "Google"),
+            "`headers` name `Metadata-Flavor` is set by the connection itself",
         ),
         (
             json!({ "name": "credentialed", "transport": "http", "url": "http://u:p@host/mcp" }),
@@ -1719,6 +1863,559 @@ async fn an_override_is_audited_even_when_the_servers_cannot_be_read_back() {
         [json!({ "overrides": { server.as_str(): false } })],
         "the stored override was not audited as stored"
     );
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn an_http_server_connects_with_its_tools() {
+    let _environment = isolated();
+    let stub = Stub::start(&[TOKEN_FLAG, STUB_TOKEN]).await;
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+
+    let created = client
+        .post_json_auth(
+            &tenant.servers(),
+            &sending(HTTP_SERVER, &stub.url(), HEADER, &bearer(STUB_TOKEN)),
+            token,
+        )
+        .await;
+
+    created.assert_status(StatusCode::CREATED);
+    let made = created.json_value();
+    assert_eq!(made["status"], CONNECTING);
+    assert_eq!(made["transport"], HTTP);
+    assert_eq!(made["url"], stub.url());
+    assert_eq!(made["available_tools"], json!([]));
+    let uri = tenant.server(&id(&made));
+    let connected = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(connected["available_tools"], json!([STUB_TOOL]));
+    assert_eq!(connected[ERROR], Value::Null);
+    assert_eq!(
+        connected["headers"],
+        json!([{ "name": HEADER, "has_value": true }])
+    );
+    held(&client, tenant.organization, HTTP_SERVER, &delegating()).await;
+    let listed = client.get_auth(&tenant.servers(), token).await;
+    assert_eq!(statuses(&listed.json_value()), [CONNECTED]);
+    for answer in [created.text(), connected.to_string(), listed.text()] {
+        assert!(
+            !answer.contains(STUB_TOKEN),
+            "a response handed the server's token back: {answer}"
+        );
+    }
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_wrong_token_fails_and_the_right_one_connects() {
+    let _environment = isolated();
+    let stub = Stub::start(&[TOKEN_FLAG, STUB_TOKEN]).await;
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let guarded = sending("guarded", &stub.url(), HEADER, &bearer(WRONG_TOKEN));
+    let server = id(&tenant.create(&client, &guarded).await);
+    let uri = tenant.server(&server);
+
+    let refused = settle(&client, &uri, token, FAILED).await;
+    assert_eq!(refused[ERROR], UNAUTHORIZED);
+    assert_eq!(refused["available_tools"], json!([]));
+
+    let corrected = client
+        .put_json_auth(
+            &uri,
+            &json!({ "headers": { HEADER: bearer(STUB_TOKEN) } }),
+            token,
+        )
+        .await;
+    corrected.assert_status(StatusCode::OK);
+    let corrected = corrected.json_value();
+    assert_eq!(corrected["status"], CONNECTING);
+    assert_eq!(corrected[ERROR], Value::Null);
+    let connected = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(connected["available_tools"], json!([STUB_TOOL]));
+    assert_eq!(connected[ERROR], Value::Null);
+
+    let requested = client
+        .post_json_auth(&tenant.connection(&server), &json!({}), token)
+        .await;
+    requested.assert_status(StatusCode::ACCEPTED);
+    assert_eq!(requested.json_value()["status"], CONNECTING);
+    let again = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(again["available_tools"], json!([STUB_TOOL]));
+
+    tenant.discard(&client, &[]).await;
+}
+
+/// The runtime is current-thread so every task the server spawns logs through the subscriber
+/// set as this thread's default.
+#[tokio::test(flavor = "current_thread")]
+async fn an_organization_failure_shows_its_kind_and_nothing_it_was_sent() {
+    let (captured, _capturing) = capturing(LOGGED);
+    let _environment = isolated();
+    let stub = Stub::start(&[KEY_FLAG, STUB_KEY]).await;
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let refused = answered(BAD_REQUEST);
+    let rows = [
+        (
+            sending(
+                "keyed",
+                &format!("{}/{PATH_MARKER}/mcp?probe={QUERY_MARKER}", origin(&stub)),
+                KEY_HEADER,
+                WRONG_KEY,
+            ),
+            refused.as_str(),
+        ),
+        (
+            http("closed", &format!("http://127.0.0.1:1/{CLOSED_MARKER}/mcp")),
+            UNREACHABLE,
+        ),
+    ];
+
+    for (body, sentence) in &rows {
+        let created = tenant.create(&client, body).await;
+        assert_eq!(created["status"], CONNECTING, "{body}");
+        assert_eq!(created[ERROR], Value::Null, "{body}");
+        let server = id(&created);
+        let uri = tenant.server(&server);
+        let failed = settle(&client, &uri, token, FAILED).await;
+        assert_eq!(failed[ERROR], *sentence, "{body}");
+
+        let narrowed = client
+            .put_json_auth(&uri, &json!({ "tools": ["one"] }), token)
+            .await;
+        narrowed.assert_status(StatusCode::OK);
+        let narrowed = narrowed.json_value();
+        assert_eq!(narrowed["status"], FAILED, "{body}");
+        assert_eq!(narrowed[ERROR], *sentence, "{body}");
+        let requested = client
+            .post_json_auth(&tenant.connection(&server), &json!({}), token)
+            .await;
+        requested.assert_status(StatusCode::ACCEPTED);
+        let requested = requested.json_value();
+        assert_eq!(requested["status"], CONNECTING, "{body}");
+        assert_eq!(requested[ERROR], Value::Null, "{body}");
+        let again = settle(&client, &uri, token, FAILED).await;
+        assert_eq!(again[ERROR], *sentence, "{body}");
+
+        let resource = Uuid::parse_str(&server).expect("a server id");
+        let audited = audited(&client, &tenant, MCP_SERVER_RESOURCE, resource).await;
+        let recorded: Vec<(&str, &Value)> = audited
+            .iter()
+            .map(|(action, values)| (action.as_str(), &values[ERROR]))
+            .collect();
+        assert_eq!(
+            recorded,
+            [
+                (CREATED, &Value::Null),
+                (UPDATED, &json!(sentence)),
+                (RECONNECTED, &Value::Null),
+            ],
+            "{body}"
+        );
+        for (action, values) in &audited {
+            assert!(
+                !values.to_string().contains(WRONG_KEY),
+                "the {action} audit row holds the header the server was sent: {values}"
+            );
+        }
+    }
+    let listed = client.get_auth(&tenant.servers(), token).await;
+    assert_eq!(statuses(&listed.json_value()), [FAILED, FAILED]);
+    assert!(
+        !listed.text().contains(WRONG_KEY),
+        "the list holds the header a server was sent: {}",
+        listed.text()
+    );
+    assert_scrubbed(&captured.text());
+
+    tenant.discard(&client, &[]).await;
+}
+
+/// The runtime is current-thread so every task the server spawns logs through the subscriber
+/// set as this thread's default.
+#[tokio::test(flavor = "current_thread")]
+async fn a_failing_instance_server_shows_tenants_its_kind_and_nothing_it_was_sent() {
+    let (captured, _capturing) = capturing(LOGGED);
+    let mut environment = isolated();
+    let stub = Stub::start(&[KEY_FLAG, STUB_KEY]).await;
+    environment.set(
+        mcp::SERVERS,
+        configuration(json!({
+            INSTANCE_SERVER: {
+                "url": format!("{}/{PATH_MARKER}/mcp?probe={QUERY_MARKER}", origin(&stub)),
+                "headers": { KEY_HEADER: WRONG_KEY },
+            },
+        })),
+    );
+    let client = live().await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    client.state().mcp().instance().await;
+
+    let listed = client.get_auth(&tenant.servers(), token).await;
+
+    listed.assert_status(StatusCode::OK);
+    let body = listed.json_value();
+    assert_eq!(names(&body), [INSTANCE_SERVER]);
+    let instance = &body["servers"][0];
+    assert_eq!(instance["source"], INSTANCE);
+    assert_eq!(instance["status"], FAILED);
+    assert_eq!(instance[ERROR], answered(BAD_REQUEST));
+    assert_eq!(instance["url"], origin(&stub));
+    assert_eq!(
+        instance["headers"],
+        json!([{ "name": KEY_HEADER, "has_value": true }])
+    );
+    assert_unsent(&listed.text(), "the organization's list");
+
+    let overridden = client
+        .put_json_auth(
+            &tenant.workspace_servers(),
+            &json!({ "servers": {} }),
+            token,
+        )
+        .await;
+    overridden.assert_status(StatusCode::OK);
+    assert_unsent(&overridden.text(), "the workspace's list");
+    let audited = audited(
+        &client,
+        &tenant,
+        WORKSPACE_MCP_SERVERS_RESOURCE,
+        tenant.workspace,
+    )
+    .await;
+    let recorded: Vec<(&str, &Value)> = audited
+        .iter()
+        .map(|(action, values)| (action.as_str(), &values["servers"][0][ERROR]))
+        .collect();
+    assert_eq!(
+        recorded,
+        [(WORKSPACE_UPDATED, &json!(answered(BAD_REQUEST)))],
+        "the override's audit row carries the instance server's failure"
+    );
+    for (_, values) in &audited {
+        assert_unsent(&values.to_string(), "the override's audit row");
+    }
+    assert_scrubbed(&captured.text());
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn an_instance_http_server_is_listed_redacted_and_connected() {
+    let mut environment = isolated();
+    let stub = Stub::start(&[TOKEN_FLAG, STUB_TOKEN]).await;
+    environment.set(TOKEN_VARIABLE, STUB_TOKEN);
+    environment.set(
+        mcp::SERVERS,
+        configuration(json!({
+            EVENTS_SERVER: { "type": SSE, "url": EVENTS_URL },
+            INSTANCE_SERVER: {
+                "url": stub.url(),
+                "headers": { HEADER: bearer(&format!("${{{TOKEN_VARIABLE}}}")) },
+            },
+        })),
+    );
+    let client = live().await;
+    let tenant = Tenant::new(&client).await;
+    client.state().mcp().instance().await;
+
+    let listed = client
+        .get_auth(&tenant.servers(), &tenant.owner.token)
+        .await;
+
+    listed.assert_status(StatusCode::OK);
+    let body = listed.json_value();
+    assert_eq!(names(&body), [EVENTS_SERVER, INSTANCE_SERVER]);
+    let events = &body["servers"][0];
+    assert_eq!(events["source"], INSTANCE);
+    assert_eq!(events["transport"], SSE);
+    assert_eq!(events["status"], FAILED);
+    assert_eq!(events[ERROR], SSE_UNSUPPORTED);
+    assert_eq!(events["available_tools"], json!([]));
+    let shared = &body["servers"][1];
+    assert_eq!(fields(shared), SERVER_FIELDS);
+    assert_eq!(shared["source"], INSTANCE);
+    assert_eq!(shared["id"], Value::Null);
+    assert_eq!(shared["transport"], HTTP);
+    assert_eq!(shared["status"], CONNECTED);
+    assert_eq!(shared[ERROR], Value::Null);
+    assert_eq!(shared["available_tools"], json!([STUB_TOOL]));
+    assert_eq!(shared["url"], origin(&stub));
+    assert_eq!(shared["arguments"], json!([]));
+    assert_eq!(
+        shared["headers"],
+        json!([{ "name": HEADER, "has_value": true }])
+    );
+    assert!(
+        !listed.text().contains(STUB_TOKEN),
+        "the list holds the token the instance sends: {}",
+        listed.text()
+    );
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn an_organization_row_sharing_an_instance_url_entrys_name_still_works() {
+    let mut environment = isolated();
+    let stub = Stub::start(&[]).await;
+    environment.set(
+        mcp::SERVERS,
+        configuration(json!({ INSTANCE_SERVER: { "url": stub.url() } })),
+    );
+    let client = live().await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    client
+        .post_json_auth(
+            &tenant.servers(),
+            &http(INSTANCE_SERVER, &stub.url()),
+            token,
+        )
+        .await
+        .assert_status(StatusCode::CONFLICT);
+    let stored = mcp_servers::create_authorized(
+        client.state().db(),
+        client.state().master_key(),
+        tenant.organization,
+        tenant.owner.user,
+        NewMcpServer {
+            name: INSTANCE_SERVER.to_string(),
+            transport: Transport::Http.as_str().to_string(),
+            command: None,
+            arguments: Vec::new(),
+            url: Some(stub.url()),
+            tools: None,
+            enabled: true,
+            environment: BTreeMap::new(),
+            headers: BTreeMap::new(),
+        },
+    )
+    .await
+    .expect("the row an upgrade left behind is stored");
+    let uri = tenant.server(&stored.id.to_string());
+    let mut other = remote("other");
+    other["enabled"] = json!(false);
+    let other = id(&tenant.create(&client, &other).await);
+    client.state().mcp().instance().await;
+    settle(&client, &uri, token, CONNECTED).await;
+
+    let listed = client.get_auth(&tenant.servers(), token).await.json_value();
+    let kept = client
+        .put_json_auth(&uri, &json!({ "name": INSTANCE_SERVER }), token)
+        .await;
+    let renamed = client
+        .put_json_auth(
+            &tenant.server(&other),
+            &json!({ "name": INSTANCE_SERVER }),
+            token,
+        )
+        .await;
+    let unlisted = ChatTools::build(scope(&client, &tenant)).await;
+    let allowed = client
+        .put_json_auth(&uri, &json!({ "tools": [STUB_TOOL] }), token)
+        .await;
+    let listing = ChatTools::build(scope(&client, &tenant)).await;
+
+    let sources: Vec<(&str, &Value, &Value)> = listed["servers"]
+        .as_array()
+        .expect("a list holds servers")
+        .iter()
+        .map(|server| {
+            (
+                server["name"].as_str().expect("every server is named"),
+                &server["source"],
+                &server["status"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        sources,
+        [
+            ("other", &json!(ORGANIZATION), &json!(DISABLED)),
+            (INSTANCE_SERVER, &json!(ORGANIZATION), &json!(CONNECTED)),
+            (INSTANCE_SERVER, &json!(INSTANCE), &json!(CONNECTED)),
+        ]
+    );
+    kept.assert_status(StatusCode::OK);
+    assert_eq!(kept.json_value()["status"], CONNECTED);
+    renamed.assert_status(StatusCode::CONFLICT);
+    let first = format!("{INSTANCE_SERVER}__{STUB_TOOL}");
+    let second = format!("{first}{COLLIDED}");
+    assert!(
+        unlisted.has(&first) && unlisted.has(&second),
+        "with no allowlist both servers' tools are offered, the organization's under a \
+         suffixed name: {:?}",
+        unlisted.names()
+    );
+    allowed.assert_status(StatusCode::OK);
+    let allowed = allowed.json_value();
+    assert_eq!(allowed["status"], CONNECTED);
+    assert_eq!(allowed["available_tools"], json!([STUB_TOOL]));
+    assert!(
+        listing.has(&first) && !listing.has(&second),
+        "an allowlist names the tool as the server does, so the suffixed one is dropped: {:?}",
+        listing.names()
+    );
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn an_http_server_stops_when_disabled_and_leaves_when_deleted() {
+    let _environment = isolated();
+    let stub = Stub::start(&[]).await;
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let server = id(&tenant
+        .create(&client, &http(HTTP_SERVER, &stub.url()))
+        .await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+    held(&client, tenant.organization, HTTP_SERVER, &delegating()).await;
+
+    let disabled = client
+        .put_json_auth(&uri, &json!({ "enabled": false }), token)
+        .await;
+    disabled.assert_status(StatusCode::OK);
+    let disabled = disabled.json_value();
+    assert_eq!(disabled["status"], DISABLED);
+    assert_eq!(disabled["enabled"], false);
+    assert_eq!(disabled["available_tools"], json!([]));
+    held(
+        &client,
+        tenant.organization,
+        HTTP_SERVER,
+        &Connection::disabled(),
+    )
+    .await;
+
+    let enabled = client
+        .put_json_auth(&uri, &json!({ "enabled": true }), token)
+        .await;
+    enabled.assert_status(StatusCode::OK);
+    assert_eq!(enabled.json_value()["status"], CONNECTING);
+    let restarted = settle(&client, &uri, token, CONNECTED).await;
+    assert_eq!(restarted["available_tools"], json!([STUB_TOOL]));
+    held(&client, tenant.organization, HTTP_SERVER, &delegating()).await;
+
+    client
+        .delete_auth(&uri, token)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    client
+        .get_auth(&uri, token)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    let listed = client.get_auth(&tenant.servers(), token).await.json_value();
+    assert_eq!(listed["servers"], json!([]));
+    held(&client, tenant.organization, HTTP_SERVER, &unknown()).await;
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn a_workspace_override_and_an_allowlist_apply_to_an_http_server() {
+    let _environment = isolated();
+    let stub = Stub::start(&[]).await;
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let server = id(&tenant
+        .create(&client, &http(HTTP_SERVER, &stub.url()))
+        .await);
+    let uri = tenant.server(&server);
+    settle(&client, &uri, token, CONNECTED).await;
+
+    let narrowed = client
+        .put_json_auth(&uri, &json!({ "tools": ["other"] }), token)
+        .await;
+    narrowed.assert_status(StatusCode::OK);
+    let narrowed = narrowed.json_value();
+    assert_eq!(narrowed["status"], CONNECTED);
+    assert_eq!(narrowed["tools"], json!(["other"]));
+    assert_eq!(narrowed["available_tools"], json!([STUB_TOOL]));
+
+    let offered = client
+        .get_auth(&tenant.workspace_servers(), token)
+        .await
+        .json_value();
+    let row = &offered["servers"][0];
+    assert_eq!(row["workspace_enabled"], Value::Null);
+    assert_eq!(row["effective"], true);
+    assert_eq!(row["tools"], json!(["other"]));
+    assert_eq!(row["available_tools"], json!([STUB_TOOL]));
+
+    let overridden = client
+        .put_json_auth(
+            &tenant.workspace_servers(),
+            &json!({ "servers": { server.as_str(): false } }),
+            token,
+        )
+        .await;
+    overridden.assert_status(StatusCode::OK);
+    let row = &overridden.json_value()["servers"][0];
+    assert_eq!(row["workspace_enabled"], false);
+    assert_eq!(row["effective"], false);
+    assert_eq!(row["enabled"], true);
+    assert_eq!(row["status"], CONNECTED);
+    assert_eq!(row["available_tools"], json!([STUB_TOOL]));
+
+    let cleared = client
+        .put_json_auth(
+            &tenant.workspace_servers(),
+            &json!({ "servers": { server.as_str(): null } }),
+            token,
+        )
+        .await;
+    cleared.assert_status(StatusCode::OK);
+    let row = &cleared.json_value()["servers"][0];
+    assert_eq!(row["workspace_enabled"], Value::Null);
+    assert_eq!(row["effective"], true);
+    assert_eq!(row["status"], CONNECTED);
+
+    tenant.discard(&client, &[]).await;
+}
+
+/// The hub scrubs what a server is sent out of its failure's message before the kind is read
+/// from how that message opens. A piece of the URL that is also one of the client's own words
+/// there is scrubbed with the rest, which leaves a sentence naming no kind. The server's name
+/// stands outside what is scrubbed, so a piece spelled like the name costs nothing.
+#[tokio::test]
+async fn a_url_piece_in_the_clients_own_words_blunts_the_failure_kind() {
+    let _environment = isolated();
+    let stub = Stub::start(&[KEY_FLAG, STUB_KEY]).await;
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let rows = [
+        ("distinct", PATH_MARKER, answered(BAD_REQUEST)),
+        (PATH_MARKER, PATH_MARKER, answered(BAD_REQUEST)),
+        ("worded", CLIENT_WORD, INCOMPLETE.to_string()),
+    ];
+
+    for (name, segment, sentence) in &rows {
+        let url = format!("{}/{segment}/mcp", origin(&stub));
+        let created = tenant
+            .create(&client, &sending(name, &url, KEY_HEADER, WRONG_KEY))
+            .await;
+        let failed = settle(&client, &tenant.server(&id(&created)), token, FAILED).await;
+
+        assert_eq!(
+            failed[ERROR], *sentence,
+            "the server named {name} at /{segment}/mcp was refused as the others were"
+        );
+        assert_eq!(failed["available_tools"], json!([]), "{name}");
+    }
 
     tenant.discard(&client, &[]).await;
 }
