@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use abnegate_agent::mcp::MAXIMUM_TOOL_NAME_CHARACTERS;
 use abnegate_agent::mcp::McpServer;
 use abnegate_http::metadata;
 use reqwest::Url;
@@ -9,7 +10,11 @@ use reqwest::header::HeaderValue;
 use crate::services::mcp_servers::status;
 use crate::services::mcp_servers::transport::Transport;
 
+/// The longest server name every tool keeps whole: a provider takes a tool name of at most
+/// [`MAXIMUM_TOOL_NAME_CHARACTERS`], and the crate gives the server half of it, cutting a longer
+/// name so two servers that share their first half would offer tools under one prefix.
 pub const NAME_LIMIT: usize = 32;
+const _: () = assert!(NAME_LIMIT == MAXIMUM_TOOL_NAME_CHARACTERS / 2);
 
 const NULL: char = '\0';
 const RESERVED: [&str; 24] = [
@@ -261,6 +266,9 @@ fn reserved(header: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use abnegate_agent::mcp::SEPARATOR;
+    use abnegate_agent::mcp::qualified_tool_name;
+
     use super::*;
 
     fn tool_list(tools: &[&str]) -> Vec<String> {
@@ -520,6 +528,17 @@ mod tests {
             })
         );
         assert_eq!(name("github-tools_2"), Ok(()));
+    }
+
+    #[test]
+    fn the_limit_is_the_longest_name_the_crate_keeps_whole_in_a_tool_name() {
+        let tool = "t".repeat(MAXIMUM_TOOL_NAME_CHARACTERS);
+        let prefix = |server: &str| format!("{server}{SEPARATOR}");
+        let kept = "a".repeat(NAME_LIMIT);
+        let cut = "a".repeat(NAME_LIMIT + 1);
+
+        assert!(qualified_tool_name(&kept, &tool).starts_with(&prefix(&kept)));
+        assert!(!qualified_tool_name(&cut, &tool).starts_with(&prefix(&cut)));
     }
 
     #[test]
