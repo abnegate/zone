@@ -70,7 +70,12 @@ export function SourcesSection(): ReactElement {
   const openSource = (id: string): void => {
     const next = new URLSearchParams(searchParams);
     next.set(SOURCE_PARAMETER, id);
-    setSearchParams(next, { state: LISTED_ENTRY });
+    setSearchParams(
+      next,
+      searchParams.has(SOURCE_PARAMETER)
+        ? { replace: true, state: location.state }
+        : { state: LISTED_ENTRY }
+    );
   };
 
   const closeSource = (): void => {

@@ -1038,6 +1038,62 @@ describe('SourcesSection', () => {
       expect(new URLSearchParams(window.location.search).get('source')).toBe('missing');
     });
 
+    it('closes an editor opened over an unknown source straight back to a clean list', async () => {
+      mockGetSource.mockImplementation((_workspace: string, id: string) =>
+        id === 'src-1'
+          ? Promise.resolve(mockSources[0])
+          : Promise.reject(new Error('Source not found'))
+      );
+      renderSection(`${SECTION_PATH}?source=missing`);
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent('Source not found');
+      });
+      const entries = window.history.length;
+
+      await openGitHubEditor();
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => {
+        expect(document.querySelector('.source-details')).toBeNull();
+        expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
+      });
+      expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(window.history.length).toBe(entries);
+    });
+
+    it('keeps returning to the list entry after opening a second source from an error', async () => {
+      mockGetSource.mockImplementation((_workspace: string, id: string) =>
+        id === 'src-1'
+          ? Promise.resolve(mockSources[0])
+          : Promise.reject(new Error('Source not found'))
+      );
+      window.history.pushState({}, '', '/chats');
+      renderSection();
+      const failing = await screen.findByText('Error Source');
+      fireEvent.click(failing.closest('.source-card') as HTMLElement);
+      await waitFor(() => {
+        expect(screen.getByRole('alert')).toHaveTextContent('Source not found');
+      });
+
+      await openGitHubEditor();
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => {
+        expect(document.querySelector('.source-details')).toBeNull();
+      });
+      expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
+      expect(screen.queryByRole('alert')).toBeNull();
+
+      act(() => {
+        window.history.back();
+      });
+
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/chats');
+      });
+    });
+
     it('opens the editor from Enter or Space on a focused row', async () => {
       renderSection();
       const row = (await screen.findByText('GitHub Repository')).closest(
