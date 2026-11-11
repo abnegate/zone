@@ -23,6 +23,13 @@ const HEADING: &str = "Memory:";
 const TRIGGER: &str = "- \"Remember that\", \"forget that\" and \"from now on\" are always a write: call the tool \
      before you say you have noted it.";
 
+/// Writing unasked is not raising unasked: `UNPROMPTED` still governs what is
+/// read back. The closing clause keeps a write nobody requested from being a
+/// silent one.
+const UNASKED: &str = "- Do not wait to be asked: when the user tells you something durable about themselves, \
+     such as who they are, how they want you to work or a fact a later conversation will need, \
+     write it, then say in a line that you did.";
+
 const HORIZON: &str = "- Write what will still be true and worth reading in a month. A passing mention is not \
      one; a durable phrasing beats a precise figure.";
 
@@ -66,6 +73,7 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
     }
     let rules = [
         TRIGGER,
+        UNASKED,
         HORIZON,
         STATED,
         SHAPE,
@@ -125,7 +133,7 @@ mod tests {
 
             assert_eq!(lines.next(), Some(HEADING), "{rendered}");
             let rules: Vec<&str> = lines.collect();
-            assert_eq!(rules.len(), 10, "{rendered}");
+            assert_eq!(rules.len(), 11, "{rendered}");
             for rule in rules {
                 assert!(rule.starts_with("- "), "{rule}");
             }
@@ -139,6 +147,35 @@ mod tests {
     fn a_remember_that_turn_is_a_write_before_it_is_an_acknowledgement() {
         for rendered in [chat(), task()] {
             assert!(rendered.contains(TRIGGER), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn what_the_user_states_about_themselves_is_written_without_being_asked() {
+        for rendered in [chat(), task()] {
+            assert!(rendered.contains(UNASKED), "{rendered}");
+        }
+    }
+
+    /// The trigger is the case where the user asked, so the rule for the case
+    /// where they did not reads directly after it and before what limits both.
+    #[test]
+    fn the_unasked_write_follows_the_trigger_and_precedes_its_limits() {
+        for rendered in [chat(), task()] {
+            let position = |rule: &str| {
+                rendered
+                    .find(rule)
+                    .unwrap_or_else(|| panic!("{rule} missing from {rendered}"))
+            };
+
+            assert_eq!(
+                position(UNASKED),
+                position(TRIGGER) + TRIGGER.len() + 1,
+                "{rendered}"
+            );
+            for limit in [HORIZON, STATED, NEVER, SUPPRESSION] {
+                assert!(position(UNASKED) < position(limit), "{limit}");
+            }
         }
     }
 
