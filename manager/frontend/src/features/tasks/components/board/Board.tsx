@@ -29,6 +29,7 @@ import './Board.css';
 
 export interface BoardProps {
   tasks: readonly Task[];
+  known?: readonly Task[];
   projects: ReadonlyMap<string, string>;
   renaming: Renaming | null;
   removed: string | null;
@@ -65,9 +66,17 @@ function carried(data: { current?: { task?: Task } } | undefined): Task | undefi
   return data?.current?.task;
 }
 
-export function Board({ tasks, projects, renaming, removed, view, actions }: BoardProps) {
+export function Board({
+  tasks,
+  known = tasks,
+  projects,
+  renaming,
+  removed,
+  view,
+  actions,
+}: BoardProps) {
   const groups = useMemo(() => groupByStage(tasks), [tasks]);
-  const relations = useMemo(() => relate(tasks), [tasks]);
+  const relations = useMemo(() => relate(known), [known]);
   const [active, setActive] = useState<UniqueIdentifier | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const announcedOver = useRef<UniqueIdentifier | null>(null);
@@ -135,8 +144,8 @@ export function Board({ tasks, projects, renaming, removed, view, actions }: Boa
     const scroller = root.current;
     if (!scroller) return undefined;
     scroller.scrollLeft = view.left;
-    if (view.opened !== null) focus.title(view.opened);
-    view.opened = null;
+    [...view.trail].reverse().some(focus.title);
+    view.trail.length = 0;
     return () => {
       view.left = scroller.scrollLeft;
     };

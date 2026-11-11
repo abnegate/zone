@@ -67,7 +67,7 @@ export const CardContent = memo(function CardContent({
         relations={relations}
         now={now}
         title={title}
-        onOpen={actions.open}
+        onOpen={(related) => actions.open(related, task)}
       />
       <div className="task-card-menu" onPointerDown={CardSensor.shield}>
         <CardMenu task={task} actions={actions} />

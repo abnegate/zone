@@ -1592,6 +1592,57 @@ describe('TasksPage', () => {
       await waitFor(() => expect(focusedTitle()).toBe('task-spec'));
     });
 
+    describe('with the project filter on', () => {
+      beforeEach(() => {
+        mockGetTasks.mockImplementation((_workspace: string, project?: string) =>
+          Promise.resolve(
+            project ? linked.filter((task) => task.project_ids.includes(project)) : linked
+          )
+        );
+      });
+
+      async function filterToAlpha(): Promise<void> {
+        renderTasksPage();
+        await openTitle('Implement login');
+        chooseSelect('Filter by project', 'Project Alpha');
+        await waitFor(() =>
+          expect(screen.queryByRole('button', { name: 'Write the spec' })).not.toBeInTheDocument()
+        );
+      }
+
+      it('names the related tasks of other projects', async () => {
+        await filterToAlpha();
+
+        const host = within(cardOf('Implement login'));
+        await waitFor(() =>
+          expect(
+            within(host.getByRole('list', { name: 'Depends on' }))
+              .getAllByRole('listitem')
+              .map((item) => item.textContent)
+          ).toEqual(['Write the specCompleted', '1 unknown'])
+        );
+        expect(
+          within(host.getByRole('list', { name: 'Blocks' }))
+            .getAllByRole('button')
+            .map((button) => button.getAttribute('aria-label'))
+        ).toEqual(['Open Ship the release']);
+      });
+
+      it('returns to the card a filtered-out related task was opened from', async () => {
+        await filterToAlpha();
+        fireEvent.click(
+          await within(cardOf('Implement login')).findByRole('button', {
+            name: 'Open Write the spec',
+          })
+        );
+        await screen.findByRole('button', { name: 'Rename Write the spec' });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+        await waitFor(() => expect(focusedTitle()).toBe('task-1'));
+      });
+    });
+
     it('lists the links in the editor from the tasks the board already loaded', async () => {
       renderTasksPage();
       fireEvent.click(await openTitle('Implement login'));

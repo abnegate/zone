@@ -376,10 +376,10 @@ describe('Card', () => {
 
   it('opens the related task, not the card it is listed on', () => {
     const spec = other('spec', 'Write the spec', 'complete');
-    const { actions } = renderCard({}, { relations: { ...UNRELATED, dependencies: [spec] } });
+    const { task, actions } = renderCard({}, { relations: { ...UNRELATED, dependencies: [spec] } });
     fireEvent.click(screen.getByRole('button', { name: 'Open Write the spec' }));
     expect(actions.open).toHaveBeenCalledTimes(1);
-    expect(actions.open).toHaveBeenCalledWith(spec);
+    expect(actions.open).toHaveBeenCalledWith(spec, task);
   });
 
   it('keeps the related tasks between the title and the menu for the keyboard', () => {

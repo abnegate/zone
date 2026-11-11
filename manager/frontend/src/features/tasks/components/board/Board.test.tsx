@@ -246,7 +246,7 @@ describe('Board', () => {
       fireEvent.click(host.getByRole('button', { name: 'Open Queue the build' }));
 
       expect(handlers.open).toHaveBeenCalledTimes(1);
-      expect(handlers.open).toHaveBeenCalledWith(RELATED[1]);
+      expect(handlers.open).toHaveBeenCalledWith(RELATED[1], RELATED[2]);
     });
 
     it('shows no relation on a board whose tasks have none', () => {

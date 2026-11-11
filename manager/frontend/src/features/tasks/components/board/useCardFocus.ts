@@ -12,7 +12,7 @@ interface Held {
 
 export interface CardFocus {
   release: () => void;
-  title: (id: string) => void;
+  title: (id: string) => boolean;
 }
 
 const CARD = 'li[data-task-id]';
@@ -133,7 +133,11 @@ export function useCardFocus(
       release: () => {
         held.current = null;
       },
-      title: (id: string) => controlIn(board.current, { id, control: TITLE })?.focus(),
+      title: (id: string) => {
+        const title = controlIn(board.current, { id, control: TITLE });
+        title?.focus();
+        return title !== null;
+      },
     }),
     [board]
   );

@@ -7,6 +7,10 @@ import type { CreateTaskRequest, Task, TaskStatus, UpdateTaskRequest } from '../
 
 export const TASKS_KEY = ['tasks'] as const;
 
+export function tasksKey(workspaceId?: string, projectId?: string) {
+  return [...TASKS_KEY, workspaceId, projectId] as const;
+}
+
 const LOAD_FAILED = 'Failed to load tasks';
 
 const NO_WORKSPACE = 'No workspace selected';
@@ -33,7 +37,7 @@ export function useTasks(projectId?: string) {
   const queryClient = useQueryClient();
   const { currentWorkspace, loading: workspaceLoading } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
-  const queryKey = [...TASKS_KEY, workspaceId, projectId];
+  const queryKey = tasksKey(workspaceId, projectId);
 
   const [moves, setMoves] = useState(NONE);
 
