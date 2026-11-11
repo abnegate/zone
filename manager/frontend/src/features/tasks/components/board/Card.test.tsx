@@ -8,6 +8,7 @@ import { TitleDraft } from '../../TitleDraft';
 import type { BoardActions, Task, TaskStatus } from '../../types';
 import { Card } from './Card';
 import { CardSensor } from './CardSensor';
+import { Unfolded } from './Unfolded';
 
 const NOW = new Date('2026-11-10T12:00:00Z');
 const PROJECTS = 'Website, Mobile';
@@ -370,6 +371,7 @@ describe('Card', () => {
 
     const count = dependencies.getByRole('button', { name: '+4 more' });
     expect(count).toHaveAttribute('aria-expanded', 'false');
+    expect(description(count)).toBe('Depends on');
     expect(relation('Depends on').parentElement).not.toHaveAttribute('data-expanded');
     count.focus();
     fireEvent.click(count);
@@ -388,6 +390,44 @@ describe('Card', () => {
     expect(document.activeElement).toBe(dependencies.getByRole('button', { name: '+4 more' }));
     expect(screen.queryByText('2 unknown')).not.toBeInTheDocument();
     expect(actions.open).not.toHaveBeenCalled();
+  });
+
+  it('remembers which relations are expanded in the set the board hands it', () => {
+    const many = ['One', 'Two'].map((title) => other(title.toLowerCase(), title));
+    const relations = { dependencies: many, dependents: many, unknown: 0 };
+    const unfolded = new Set<string>();
+    const show = () =>
+      render(
+        <Unfolded value={unfolded}>
+          <Board>
+            <Card
+              task={base}
+              projects={PROJECTS}
+              relations={relations}
+              now={NOW.getTime()}
+              renaming={null}
+              actions={makeActions()}
+            />
+          </Board>
+        </Unfolded>
+      );
+
+    const first = show();
+    fireEvent.click(within(relation('Blocks')).getByRole('button', { name: '+1 more' }));
+    expect(Array.from(unfolded)).toEqual(['task-1:Blocks']);
+    first.unmount();
+
+    show();
+    expect(within(relation('Blocks')).getByRole('button', { name: 'Show less' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    );
+    expect(within(relation('Depends on')).getByRole('button', { name: '+1 more' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    );
+    fireEvent.click(within(relation('Blocks')).getByRole('button', { name: 'Show less' }));
+    expect(unfolded.size).toBe(0);
   });
 
   it('opens a task that was only named after expanding', () => {
@@ -526,10 +566,13 @@ describe('Card', () => {
   });
 
   for (const [updated, brief, spoken] of [
-    ['2026-11-10T11:59:30Z', 'now', '30 seconds ago'],
+    ['2026-11-10T11:59:30Z', 'now', 'just now'],
+    ['2026-11-10T11:59:00Z', '1m', '1 minute ago'],
     ['2026-11-10T11:15:00Z', '45m', '45 minutes ago'],
     ['2026-11-10T09:10:00Z', '2h', '2 hours ago'],
+    ['2026-11-09T11:30:00Z', '1d', '1 day ago'],
     ['2026-11-08T00:00:00Z', '2d', '2 days ago'],
+    ['2026-10-11T12:00:00Z', '1mo', '1 month ago'],
     ['2026-08-01T12:00:00Z', '3mo', '3 months ago'],
     ['2024-11-01T12:00:00Z', '2y', '2 years ago'],
   ] as const) {
@@ -553,7 +596,7 @@ describe('Card', () => {
     renderCard({ updated_at: '2026-11-10T12:00:20Z' });
     const time = card().querySelector('time');
     expect(time).toHaveAttribute('dateTime', '2026-11-10T12:00:20Z');
-    expect(time).toHaveTextContent('now0 seconds ago');
+    expect(time).toHaveTextContent('nowjust now');
   });
 
   it('keeps tooltips off the details the open button covers', () => {

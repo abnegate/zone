@@ -9,7 +9,7 @@ import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard, DeleteTaskDialog, TaskDetail } from '../components';
-import { Board, Skeleton, View } from '../components/board';
+import { Board, Skeleton, Unfolded, View } from '../components/board';
 import { TASKS_KEY, useTask, useTasks, useWorkspaceTasks } from '../hooks';
 import { TitleDraft } from '../TitleDraft';
 import type { BoardActions, Renaming, Task, UpdateTaskRequest } from '../types';
@@ -223,15 +223,17 @@ export default function TasksPage() {
         ) : loading ? (
           <Skeleton />
         ) : tasks.length > 0 ? (
-          <Board
-            tasks={tasks}
-            known={known}
-            projects={projectNames}
-            renaming={renaming}
-            removed={removed}
-            view={view}
-            actions={actions}
-          />
+          <Unfolded value={view.unfolded}>
+            <Board
+              tasks={tasks}
+              known={known}
+              projects={projectNames}
+              renaming={renaming}
+              removed={removed}
+              view={view}
+              actions={actions}
+            />
+          </Unfolded>
         ) : tasksError ? null : (
           <EmptyState
             className="tasks-empty"

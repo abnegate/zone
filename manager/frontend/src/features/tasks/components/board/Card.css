@@ -167,6 +167,10 @@
   content: '';
 }
 
+.task-card:has(.task-title-edit) .task-card-menu::before {
+  content: none;
+}
+
 .task-card:hover .task-card-handle,
 .task-card:hover .task-card-menu,
 .task-card:focus-within .task-card-menu,
@@ -422,6 +426,10 @@ a.task-card-pull-request:hover .task-card-pull-request-number {
 
   .task-card-heading {
     padding-right: var(--ui-control-height-sm);
+  }
+
+  .task-card-menu::before {
+    content: none;
   }
 
   .task-card-handle {

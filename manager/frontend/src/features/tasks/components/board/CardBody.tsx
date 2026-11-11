@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { type ReactNode, useContext } from 'react';
 import { PullRequest } from '../../PullRequest';
 import { BLOCKS, DEPENDS_ON, type Relations, related } from '../../relations';
 import { statusLabel, type TaskStatus, unsettledFirst } from '../../status';
@@ -8,6 +8,7 @@ import { Priority } from './Priority';
 import { PullRequestRow } from './PullRequestRow';
 import { Relation } from './Relation';
 import { Stamp } from './Stamp';
+import { Unfolded } from './Unfolded';
 
 export interface CardBodyProps {
   task: Task;
@@ -27,6 +28,17 @@ const RELATED_LIMIT = 1;
 export function CardBody({ task, projects, relations, now, title, onOpen }: CardBodyProps) {
   const stamp = task.updated_at ?? task.created_at;
   const pullRequest = PullRequest.of(task);
+  const unfolded = useContext(Unfolded);
+  const fold = (label: string) => {
+    const key = `${task.id}:${label}`;
+    return {
+      defaultExpanded: unfolded?.has(key),
+      onExpand: (expanded: boolean) => {
+        if (expanded) unfolded?.add(key);
+        else unfolded?.delete(key);
+      },
+    };
+  };
 
   return (
     <>
@@ -53,12 +65,14 @@ export function CardBody({ task, projects, relations, now, title, onOpen }: Card
             unknown={relations.unknown}
             limit={RELATED_LIMIT}
             onOpen={onOpen}
+            {...fold(DEPENDS_ON)}
           />
           <Relation
             label={BLOCKS}
             tasks={unsettledFirst(relations.dependents)}
             limit={RELATED_LIMIT}
             onOpen={onOpen}
+            {...fold(BLOCKS)}
           />
         </div>
       )}

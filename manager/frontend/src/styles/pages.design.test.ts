@@ -448,6 +448,27 @@ describe('tasks page layout', () => {
     expect(rule(cards, ":root[data-theme='dark'] .task-card:hover")).toContain(
       '--task-card-surface: var(--ui-bg-hover)'
     );
+    expect(rule(touch, '.task-card-menu::before')).toContain('content: none');
+    expect(rule(cards, '.task-card:has(.task-title-edit) .task-card-menu::before')).toContain(
+      'content: none'
+    );
+  });
+
+  it('tints the pull request icon by status and leaves the rest of the row quiet', () => {
+    expect(rule(cards, '.task-card-pull-request .pull-request-icon')).toContain(
+      'color: var(--ui-text-muted)'
+    );
+    for (const [status, colour] of [
+      ['open', '--ui-success-600'],
+      ['merged', '--ui-accent'],
+      ['closed', '--ui-error-600'],
+    ]) {
+      expect(rule(cards, `.task-card-pull-request-${status} .pull-request-icon`)).toContain(
+        `color: var(${colour})`
+      );
+    }
+    expect(cards).not.toContain('.task-card-pull-request-pending');
+    expect(cards).not.toContain('.task-card-pull-request-untinted');
   });
 
   it('makes room above a focused card for its ring without moving the card', () => {

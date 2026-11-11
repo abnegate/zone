@@ -94,7 +94,11 @@ export function useCardFocus(
     if (before !== groups && Array.from(ids(before)).some((id) => !present.has(id))) {
       departed.current = before;
     }
-    const kept = lost() && held.current && controlIn(board.current, held.current);
+    const kept =
+      lost() &&
+      held.current &&
+      (controlIn(board.current, held.current) ??
+        controlIn(board.current, { id: held.current.id, control: TITLE }));
     if (kept) {
       kept.focus();
       return;

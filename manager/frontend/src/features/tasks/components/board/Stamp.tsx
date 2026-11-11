@@ -1,41 +1,41 @@
-import { type FormatDistanceToken, formatDistanceStrict } from 'date-fns';
-
 export interface StampProps {
   value: string;
   now: number;
 }
 
-const ROUNDING = 'floor';
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const MONTH = 30 * DAY;
+const YEAR = 365 * DAY;
 
-const JUST_NOW = 'now';
+const SPANS = [
+  { unit: 'year', length: YEAR, suffix: 'y' },
+  { unit: 'month', length: MONTH, suffix: 'mo' },
+  { unit: 'day', length: DAY, suffix: 'd' },
+  { unit: 'hour', length: HOUR, suffix: 'h' },
+  { unit: 'minute', length: MINUTE, suffix: 'm' },
+] as const;
 
-const SUFFIXES: Partial<Record<FormatDistanceToken, string>> = {
-  xMinutes: 'm',
-  xHours: 'h',
-  xDays: 'd',
-  xMonths: 'mo',
-  xYears: 'y',
-};
+const SPOKEN = new Intl.RelativeTimeFormat('en', { numeric: 'always' });
 
-const BRIEF = {
-  formatDistance: (token: FormatDistanceToken, count: number): string => {
-    const suffix = SUFFIXES[token];
-    return suffix ? `${count}${suffix}` : JUST_NOW;
-  },
-};
+const JUST_NOW = { brief: 'now', spoken: 'just now' };
+
+function age(elapsed: number): { brief: string; spoken: string } {
+  const span = SPANS.find(({ length }) => elapsed >= length);
+  if (!span) return JUST_NOW;
+  const count = Math.floor(elapsed / span.length);
+  return { brief: `${count}${span.suffix}`, spoken: SPOKEN.format(-count, span.unit) };
+}
 
 export function Stamp({ value, now }: StampProps) {
   const time = new Date(value).getTime();
   if (Number.isNaN(time)) return null;
-  const moment = Math.min(time, now);
+  const { brief, spoken } = age(now - Math.min(time, now));
   return (
     <time className="task-card-time" dateTime={value}>
-      <span aria-hidden="true">
-        {formatDistanceStrict(moment, now, { roundingMethod: ROUNDING, locale: BRIEF })}
-      </span>
-      <span className="sr-only">
-        {formatDistanceStrict(moment, now, { roundingMethod: ROUNDING, addSuffix: true })}
-      </span>
+      <span aria-hidden="true">{brief}</span>
+      <span className="sr-only">{spoken}</span>
     </time>
   );
 }

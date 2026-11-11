@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import type { Task } from '../../types';
 import { CardSensor } from './CardSensor';
 import { RelatedTask } from './RelatedTask';
@@ -9,6 +9,8 @@ export interface RelationProps {
   tasks: readonly Task[];
   unknown?: number;
   limit?: number;
+  defaultExpanded?: boolean;
+  onExpand?: (expanded: boolean) => void;
   onOpen: (task: Task) => void;
 }
 
@@ -23,14 +25,27 @@ export function Relation({
   tasks,
   unknown = 0,
   limit = tasks.length,
+  defaultExpanded = false,
+  onExpand,
   onOpen,
 }: RelationProps) {
   const heading = useId();
-  const [expanded, setExpanded] = useState(false);
-  if (tasks.length === 0 && unknown === 0) return null;
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const folds = tasks.length > limit;
+
+  useEffect(() => {
+    if (folds || !expanded) return;
+    setExpanded(false);
+    onExpand?.(false);
+  }, [folds, expanded, onExpand]);
+
+  if (tasks.length === 0 && unknown === 0) return null;
   const shown = folds && !expanded ? tasks.slice(0, limit) : tasks;
   const hidden = tasks.length - shown.length;
+  const toggle = () => {
+    setExpanded(!expanded);
+    onExpand?.(!expanded);
+  };
 
   return (
     <div className="task-relation" data-expanded={(folds && expanded) || undefined}>
@@ -53,8 +68,9 @@ export function Relation({
               className="task-relation-toggle"
               data-related={label}
               aria-expanded={expanded}
+              aria-describedby={heading}
               onPointerDown={CardSensor.shield}
-              onClick={() => setExpanded((open) => !open)}
+              onClick={toggle}
             >
               {expanded ? (
                 LESS

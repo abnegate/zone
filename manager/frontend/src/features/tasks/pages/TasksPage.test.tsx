@@ -1729,6 +1729,136 @@ describe('TasksPage', () => {
         within(column('In progress')).getByRole('button', { name: 'Open Ship the release' })
       );
     });
+
+    describe('a card that folds a relation', () => {
+      const plan: Task = { ...mockTasks[0], id: 'task-plan', title: 'Plan the work' };
+      const host: Task = {
+        ...login,
+        dependencies: ['task-spec', 'task-plan'],
+        pr_url: 'https://github.com/test/repo/pull/9',
+        pr_status: 'open',
+      };
+      let stored: Task[];
+
+      beforeEach(() => {
+        stored = [host, spec, plan, release];
+        mockGetTasks.mockImplementation(() => Promise.resolve(stored));
+        mockGetTask.mockImplementation((id: string) => {
+          const found = stored.find((task) => task.id === id);
+          return found ? Promise.resolve(found) : Promise.reject(new Error('Task not found'));
+        });
+      });
+
+      async function reload(changed: Partial<Task> & Pick<Task, 'id'>): Promise<void> {
+        stored = stored.map((task) => (task.id === changed.id ? { ...task, ...changed } : task));
+        const loads = mockGetTasks.mock.calls.length;
+        await act(async () => {
+          window.dispatchEvent(new Event('visibilitychange'));
+          await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(loads + 1));
+          await mockGetTasks.mock.results[loads].value;
+        });
+      }
+
+      function named(): (string | null)[] {
+        const list = within(cardOf('Implement login')).getByRole('list', { name: 'Depends on' });
+        return within(list)
+          .getAllByRole('button', { name: /^Open / })
+          .map((button) => button.textContent);
+      }
+
+      it('stays expanded after a task it only named once expanded is opened and closed', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        expect(named()).toEqual(['Plan the work']);
+
+        fireEvent.click(within(cardOf('Implement login')).getByRole('button', { name: '+1 more' }));
+        expect(named()).toEqual(['Plan the work', 'Write the spec']);
+        fireEvent.click(
+          within(cardOf('Implement login')).getByRole('button', { name: 'Open Write the spec' })
+        );
+        await editing('Write the spec');
+        fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+        await openTitle('Implement login');
+
+        expect(named()).toEqual(['Plan the work', 'Write the spec']);
+        const fold = within(cardOf('Implement login')).getByRole('button', { name: 'Show less' });
+        expect(fold).toHaveAttribute('aria-expanded', 'true');
+
+        fireEvent.click(fold);
+        expect(named()).toEqual(['Plan the work']);
+      });
+
+      it('stays expanded on a card that a reload moves, and keeps focus on its count', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        const count = within(cardOf('Implement login')).getByRole('button', { name: '+1 more' });
+        fireEvent.click(count);
+        count.focus();
+
+        await reload({ id: 'task-1', status: 'in_progress' });
+        await waitFor(() => {
+          expect(column('In progress').querySelector('[data-task-id="task-1"]')).not.toBeNull();
+        });
+
+        expect(named()).toEqual(['Plan the work', 'Write the spec']);
+        expect(document.activeElement).toBe(
+          within(column('In progress')).getByRole('button', { name: 'Show less' })
+        );
+      });
+
+      it('keeps focus on the pull request of a card that a reload moves', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        within(cardOf('Implement login'))
+          .getByRole('link', { name: 'Pull request #9 open' })
+          .focus();
+
+        await reload({ id: 'task-1', status: 'in_progress' });
+        await waitFor(() => {
+          expect(column('In progress').querySelector('[data-task-id="task-1"]')).not.toBeNull();
+        });
+
+        expect(document.activeElement).toBe(
+          within(column('In progress')).getByRole('link', { name: 'Pull request #9 open' })
+        );
+      });
+
+      it('moves focus to the title when the related task that had it is no longer named', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        within(cardOf('Implement login'))
+          .getByRole('button', { name: 'Open Plan the work' })
+          .focus();
+
+        await reload({ id: 'task-plan', status: 'complete' });
+        await waitFor(() => expect(named()).toEqual(['Write the spec']));
+
+        expect(focusedTitle()).toBe('task-1');
+      });
+
+      it('moves focus to the title when the count that had it has nothing left to fold', async () => {
+        renderTasksPage();
+        await openTitle('Implement login');
+        const count = within(cardOf('Implement login')).getByRole('button', { name: '+1 more' });
+        fireEvent.click(count);
+        count.focus();
+
+        await reload({ id: 'task-1', dependencies: ['task-plan'] });
+        await waitFor(() => expect(named()).toEqual(['Plan the work']));
+        expect(
+          within(cardOf('Implement login')).queryByRole('button', { name: /more|Show less/ })
+        ).toBeNull();
+        expect(focusedTitle()).toBe('task-1');
+
+        await reload({ id: 'task-1', dependencies: ['task-spec', 'task-plan'] });
+        await waitFor(() =>
+          expect(
+            within(cardOf('Implement login')).getByRole('button', { name: '+1 more' })
+          ).toHaveAttribute('aria-expanded', 'false')
+        );
+        expect(named()).toEqual(['Plan the work']);
+      });
+    });
   });
 
   it('shows the receipt a run recorded, not the log line it arrived on', async () => {
