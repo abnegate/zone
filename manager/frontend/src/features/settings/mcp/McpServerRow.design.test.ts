@@ -11,6 +11,13 @@ describe('MCP server row layout', () => {
     );
   });
 
+  it('dims a switch that commands being off has locked', () => {
+    expect(rule(css, '.mcp-server-toggle--locked')).toContain('opacity: 0.5');
+    expect(
+      rule(css, '.mcp-server-toggle--locked, .mcp-server-toggle--locked .toggle-slider')
+    ).toContain('cursor: not-allowed');
+  });
+
   it('drops the empty actions column so a row without controls ends at the row edge', () => {
     expect(rule(css, '.mcp-server:not(:has(> .mcp-server-actions))')).toContain(
       'grid-template-columns: minmax(0, 1fr) auto'

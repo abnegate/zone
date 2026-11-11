@@ -1,15 +1,17 @@
 import { ActionMenu, Badge, buttonVariants, Checkbox } from '@zone/ui';
 import { useId, useState } from 'react';
 import { Source, Status } from './constants';
+import { usesCommand } from './draft';
 import { STATUS_BADGES } from './status';
 import { toggledTools, toolSummary } from './tools';
-import { TRANSPORT_LABELS } from './transport';
+import { COMMANDS_OFF_HINT, TRANSPORT_LABELS } from './transport';
 import type { McpServer } from './types';
 import './McpServerRow.css';
 
 interface McpServerRowProps {
   server: McpServer;
   canManage: boolean;
+  commands: boolean;
   busy: boolean;
   onToggle(enabled: boolean): void;
   onTools(tools: string[] | null): void;
@@ -21,6 +23,7 @@ interface McpServerRowProps {
 export function McpServerRow({
   server,
   canManage,
+  commands,
   busy,
   onToggle,
   onTools,
@@ -33,7 +36,9 @@ export function McpServerRow({
   const panelId = `${base}-tools`;
   const instance = server.source === Source.Instance;
   const controls = canManage && server.source === Source.Organization;
-  const locked = !canManage || busy || instance;
+  const blocked = usesCommand(server.transport) && !commands;
+  const hint = blocked ? COMMANDS_OFF_HINT : undefined;
+  const locked = !canManage || busy || instance || blocked;
   const badge = STATUS_BADGES[server.status];
   const summary = toolSummary(server);
 
@@ -55,7 +60,10 @@ export function McpServerRow({
       </div>
       {controls && (
         <div className="mcp-server-actions">
-          <label className="toggle-label mcp-server-toggle">
+          <label
+            className={`toggle-label mcp-server-toggle${blocked ? ' mcp-server-toggle--locked' : ''}`}
+            title={hint}
+          >
             <span className="toggle-wrapper">
               <input
                 type="checkbox"
@@ -63,7 +71,8 @@ export function McpServerRow({
                 aria-label={`Enable ${server.name}`}
                 checked={server.enabled}
                 aria-checked={server.enabled}
-                disabled={busy}
+                aria-description={hint}
+                disabled={busy || blocked}
                 onChange={(event) => onToggle(event.target.checked)}
               />
               <span className="toggle-slider" />
@@ -73,7 +82,12 @@ export function McpServerRow({
             label={`Actions for ${server.name}`}
             items={[
               { label: 'Edit', onSelect: onEdit },
-              { label: 'Reconnect', onSelect: onReconnect, disabled: !server.enabled },
+              {
+                label: 'Reconnect',
+                onSelect: onReconnect,
+                disabled: !server.enabled || blocked,
+                hint,
+              },
               { label: 'Remove', onSelect: onRemove, destructive: true },
             ]}
           />

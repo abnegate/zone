@@ -13,6 +13,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ComponentType } from 'react';
 import { chooseMenuItem } from '../../../test/menu';
+import { fakeTimers } from '../../../test/timers';
 import { POLL_INTERVAL } from './constants';
 import type { McpServer, McpServerList, McpServerStatus } from './types';
 
@@ -220,6 +221,27 @@ describe('McpServersSection', () => {
     renderSection();
     await findRow('docs');
     expect(statusTexts()).toContain(COMMANDS_OFF);
+  });
+
+  it('locks the switch of a command server while commands are off, and no other', async () => {
+    const files = server('files', {
+      transport: 'stdio',
+      command: 'npx',
+      url: null,
+      status: 'failed',
+      error: 'Command servers are turned off on this instance (ZONE_MCP_COMMANDS)',
+      available_tools: [],
+    });
+    mcpApi.list.mockResolvedValue(listing([docs, files], false));
+    renderSection();
+    await findRow('files');
+
+    const locked = screen.getByRole('switch', { name: 'Enable files' });
+    expect(locked).toHaveProperty('disabled', true);
+    expect(locked.getAttribute('aria-description')).toBe(COMMANDS_OFF);
+    expect(screen.getByRole('switch', { name: 'Enable docs' })).toHaveProperty('disabled', false);
+    fireEvent.click(locked);
+    expect(mcpApi.update).not.toHaveBeenCalled();
   });
 
   it('does not show the commands notice when commands are on', async () => {
@@ -497,7 +519,7 @@ describe('McpServersSection', () => {
   });
 
   it('polls every interval while a server is connecting and stops once it connects', async () => {
-    vi.useFakeTimers();
+    await fakeTimers();
     mcpApi.list
       .mockResolvedValueOnce(
         listing([server('wiki', { status: 'connecting', available_tools: [] })])

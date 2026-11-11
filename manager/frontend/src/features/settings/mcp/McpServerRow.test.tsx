@@ -1,7 +1,8 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, within } from '@testing-library/react';
-import { chooseMenuItem } from '../../../test/menu';
+import { chooseMenuItem, openMenu } from '../../../test/menu';
 import { McpServerRow } from './McpServerRow';
+import { COMMANDS_OFF_HINT } from './transport';
 import type { McpServer, McpServerStatus } from './types';
 
 function server(overrides: Partial<McpServer> = {}): McpServer {
@@ -28,10 +29,14 @@ function server(overrides: Partial<McpServer> = {}): McpServer {
 
 interface Options {
   canManage?: boolean;
+  commands?: boolean;
   busy?: boolean;
 }
 
-function renderRow(value: McpServer, { canManage = true, busy = false }: Options = {}) {
+function renderRow(
+  value: McpServer,
+  { canManage = true, commands = true, busy = false }: Options = {}
+) {
   const handlers = {
     onToggle: mock((_enabled: boolean) => {}),
     onTools: mock((_tools: string[] | null) => {}),
@@ -41,7 +46,13 @@ function renderRow(value: McpServer, { canManage = true, busy = false }: Options
   };
   const view = render(
     <ul>
-      <McpServerRow server={value} canManage={canManage} busy={busy} {...handlers} />
+      <McpServerRow
+        server={value}
+        canManage={canManage}
+        commands={commands}
+        busy={busy}
+        {...handlers}
+      />
     </ul>
   );
   return { ...view, ...handlers };
@@ -137,6 +148,7 @@ describe('McpServerRow', () => {
             key={name}
             server={server({ name })}
             canManage
+            commands
             busy={false}
             onToggle={() => {}}
             onTools={() => {}}
@@ -175,6 +187,81 @@ describe('McpServerRow', () => {
     );
     await chooseMenuItem('Actions for docs', 'Reconnect');
     expect(onReconnect).not.toHaveBeenCalled();
+  });
+
+  it('locks the switch and Reconnect of a command server while commands are off', async () => {
+    const { onToggle, onReconnect } = renderRow(
+      server({
+        transport: 'stdio',
+        command: 'npx',
+        url: null,
+        enabled: false,
+        status: 'disabled',
+        available_tools: [],
+      }),
+      { commands: false }
+    );
+    const toggle = screen.getByRole('switch', { name: 'Enable docs' });
+    expect(toggle).toHaveProperty('disabled', true);
+    expect(toggle.getAttribute('aria-description')).toBe(COMMANDS_OFF_HINT);
+    expect(toggle.closest('label')?.title).toBe(COMMANDS_OFF_HINT);
+    expect(toggle.closest('label')?.classList.contains('mcp-server-toggle--locked')).toBe(true);
+    fireEvent.click(toggle);
+    expect(onToggle).not.toHaveBeenCalled();
+
+    await openMenu('Actions for docs');
+    const reconnect = screen.getByRole('menuitem', { name: /^Reconnect/ });
+    expect(reconnect.getAttribute('aria-disabled')).toBe('true');
+    expect(within(reconnect).getByText(COMMANDS_OFF_HINT)).toBeTruthy();
+    fireEvent.click(reconnect);
+    expect(onReconnect).not.toHaveBeenCalled();
+    expect(screen.getByRole('menuitem', { name: 'Edit' }).hasAttribute('aria-disabled')).toBe(
+      false
+    );
+    expect(screen.getByRole('menuitem', { name: 'Remove' }).hasAttribute('aria-disabled')).toBe(
+      false
+    );
+  });
+
+  it('locks the Reconnect of an enabled command server while commands are off', async () => {
+    renderRow(
+      server({
+        transport: 'stdio',
+        command: 'npx',
+        url: null,
+        status: 'failed',
+        error: 'Command servers are turned off on this instance (ZONE_MCP_COMMANDS)',
+        available_tools: [],
+      }),
+      { commands: false }
+    );
+    expect(screen.getByRole('switch', { name: 'Enable docs' })).toHaveProperty('disabled', true);
+    await openMenu('Actions for docs');
+    expect(screen.getByRole('menuitem', { name: /^Reconnect/ }).getAttribute('aria-disabled')).toBe(
+      'true'
+    );
+  });
+
+  it('keeps an http server changeable while commands are off', async () => {
+    const { onToggle, onReconnect } = renderRow(server(), { commands: false });
+    const toggle = screen.getByRole('switch', { name: 'Enable docs' });
+    expect(toggle).toHaveProperty('disabled', false);
+    expect(toggle.hasAttribute('aria-description')).toBe(false);
+    expect(toggle.closest('label')?.hasAttribute('title')).toBe(false);
+    expect(toggle.closest('label')?.classList.contains('mcp-server-toggle--locked')).toBe(false);
+    fireEvent.click(toggle);
+    expect(onToggle).toHaveBeenCalledWith(false);
+    await chooseMenuItem('Actions for docs', 'Reconnect');
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a command server changeable while commands are on', async () => {
+    const { onReconnect } = renderRow(
+      server({ transport: 'stdio', command: 'npx', url: null, available_tools: [] })
+    );
+    expect(screen.getByRole('switch', { name: 'Enable docs' })).toHaveProperty('disabled', false);
+    await chooseMenuItem('Actions for docs', 'Reconnect');
+    expect(onReconnect).toHaveBeenCalledTimes(1);
   });
 
   it('marks an instance server and offers no controls', () => {

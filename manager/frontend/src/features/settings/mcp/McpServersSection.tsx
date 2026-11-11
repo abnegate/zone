@@ -9,10 +9,10 @@ import { McpRemoveDialog } from './McpRemoveDialog';
 import { McpServerForm } from './McpServerForm';
 import { McpServerRow } from './McpServerRow';
 import { type McpServerSubmission, SubmissionKind } from './submission';
+import { COMMANDS_OFF_HINT } from './transport';
 import type { CreateMcpServerRequest, McpServer, UpdateMcpServerRequest } from './types';
 import './McpServersSection.css';
 
-export const COMMANDS_OFF_HINT = 'Command (stdio) servers are turned off on this instance.';
 export const READ_ONLY_HINT = 'Only organization admins can change MCP servers.';
 export const CHANGE_FAILED = 'Failed to update the MCP server';
 
@@ -240,6 +240,7 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
                 key={keyOf(server)}
                 server={server}
                 canManage={canManage && target !== null}
+                commands={commands}
                 busy={target !== null && busy.has(target.id)}
                 {...actionsFor(server)}
               />
