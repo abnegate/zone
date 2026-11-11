@@ -277,7 +277,7 @@ async fn a_chat_records_what_it_verified_under_the_chat_it_was_in() {
         answered,
         json!({
             "id": row.id,
-            "title": SUBJECT,
+            "subject": SUBJECT,
             "kind": "lesson",
             "outcome": RECORDED,
         })
@@ -293,6 +293,11 @@ async fn a_chat_records_what_it_verified_under_the_chat_it_was_in() {
             "kind:lesson".to_string(),
             format!("source:chat:{}", fixture.chat),
         ]
+    );
+    assert_eq!(
+        row.tags[5],
+        format!("stated:{}", fingerprint(STATEMENT)),
+        "what the entry says is tagged too, so a deleted statement is known by more than its subject"
     );
     let provenance = Provenance::from_tags(&row.tags).expect("the tags read back");
     assert_eq!(provenance.kind, Kind::Lesson);
@@ -432,6 +437,144 @@ async fn an_entry_is_held_to_the_store_s_bound_and_to_having_something_in_it() {
     fixture.clean().await;
 }
 
+/// One of each kind of character a person reading the wiki page would not see
+/// and the model reading the prompt would.
+const UNPRINTED: [(&str, char); 11] = [
+    ("a zero-width space", '\u{200b}'),
+    ("a zero-width joiner", '\u{200d}'),
+    ("a byte-order mark", '\u{feff}'),
+    ("a soft hyphen", '\u{ad}'),
+    ("a right-to-left override", '\u{202e}'),
+    ("a directional isolate", '\u{2066}'),
+    ("a tag character", '\u{e0041}'),
+    ("a null", '\u{0}'),
+    ("an escape", '\u{1b}'),
+    ("a delete", '\u{7f}'),
+    ("a C1 control", '\u{9b}'),
+];
+
+#[tokio::test]
+async fn text_that_does_not_print_is_refused_in_either_half() {
+    let fixture = Fixture::new().await;
+    let tools = fixture.chat().await;
+
+    for (name, unprinted) in UNPRINTED {
+        for (subject, statement) in [
+            (
+                format!("Running the{unprinted} tests"),
+                STATEMENT.to_string(),
+            ),
+            (
+                SUBJECT.to_string(),
+                format!("Use cargo{unprinted} nextest."),
+            ),
+        ] {
+            let result = record(&tools, Kind::Lesson, &subject, &statement).await;
+            assert_eq!(refusal(&result), Declined::Unprintable.message(), "{name}");
+        }
+    }
+    assert!(
+        fixture.rows().await.is_empty(),
+        "a refused call wrote a row"
+    );
+
+    fixture.clean().await;
+}
+
+/// The wiki page, a search hit, a read of the document and the prompt all
+/// show the row, so the row holds the one line the prompt would have made of
+/// it.
+#[tokio::test]
+async fn white_space_is_collapsed_before_the_entry_is_stored() {
+    let fixture = Fixture::new().await;
+    let tools = fixture.chat().await;
+
+    let result = record(
+        &tools,
+        Kind::Lesson,
+        "  Running\n# the   tests ",
+        "Use nextest.\r\n\r\n# A heading of its own\n\tAlways with\u{2028}a filter.",
+    )
+    .await;
+
+    let answered = stored(&result);
+    let row = fixture.row().await;
+    assert_eq!(row.title, "Running # the tests");
+    assert_eq!(
+        row.content,
+        "Use nextest. # A heading of its own Always with a filter."
+    );
+    assert_eq!(answered["subject"], "Running # the tests");
+    assert_eq!(
+        row.tags[1],
+        format!("recorded:{}", fingerprint("running # the tests"))
+    );
+
+    fixture.clean().await;
+}
+
+#[tokio::test]
+async fn a_field_the_tool_does_not_take_is_refused() {
+    let fixture = Fixture::new().await;
+    let tools = fixture.chat().await;
+
+    let result = tools
+        .execute(
+            RECORD_DISCOVERY,
+            &json!({
+                "kind": "lesson",
+                "subject": SUBJECT,
+                "statement": STATEMENT,
+                "reason": "So the next run starts with it.",
+            })
+            .to_string(),
+        )
+        .await;
+
+    assert_eq!(refusal(&result), Declined::Arguments.message());
+    assert!(
+        refusal(&result).ends_with("and no other field."),
+        "the model is told what to leave out: {}",
+        refusal(&result)
+    );
+    assert!(fixture.rows().await.is_empty());
+
+    fixture.clean().await;
+}
+
+async fn author(fixture: &Fixture) -> Option<Uuid> {
+    sqlx::query_scalar(
+        "SELECT created_by FROM knowledge_entries WHERE workspace_id = $1 AND category = $2",
+    )
+    .bind(fixture.workspace)
+    .bind(CATEGORY)
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("the workspace's one discovery is readable")
+}
+
+/// Nobody reviews this write and every later prompt carries it, so the row
+/// says whose call it was: the person the chat or the run was acting for.
+#[tokio::test]
+async fn an_entry_names_whoever_recorded_what_it_now_says() {
+    let mut fixture = Fixture::new().await;
+    let colleague = fixture.joins(WorkspaceRole::Member).await;
+
+    stored(&record(&fixture.chat().await, Kind::Lesson, SUBJECT, STATEMENT).await);
+    assert_eq!(author(&fixture).await, Some(fixture.member));
+
+    let theirs = fixture.chat_as(colleague).await;
+    let replaced = stored(&record(&theirs, Kind::Lesson, SUBJECT, REVISED).await);
+    assert_eq!(replaced["outcome"], REPLACED);
+    assert_eq!(
+        author(&fixture).await,
+        Some(colleague),
+        "the statement is the colleague's now, and so is the row"
+    );
+
+    fixture.clean().await;
+}
+
 #[tokio::test]
 async fn a_viewer_is_offered_the_tool_and_told_once_not_to_use_it() {
     let mut fixture = Fixture::new().await;
@@ -477,6 +620,18 @@ async fn a_subject_somebody_deleted_stays_deleted() {
     .await;
 
     assert_eq!(refusal(&again), Declined::Retired.message());
+    let respelled = record(
+        &tools,
+        Kind::Lesson,
+        "Running the integration tests.",
+        STATEMENT,
+    )
+    .await;
+    assert_eq!(
+        refusal(&respelled),
+        Declined::Retired.message(),
+        "the deleted statement came back under a subject spelled another way"
+    );
     let row = fixture.row().await;
     assert_eq!(row.id, id);
     assert!(!row.is_active, "the deleted entry came back");
@@ -495,11 +650,22 @@ async fn a_repeat_changes_nothing_and_a_correction_replaces_the_entry() {
     assert_eq!(first["outcome"], RECORDED);
     assert_eq!(repeat["outcome"], UNCHANGED);
     assert_eq!(repeat["id"], first["id"]);
+    for answered in [&first, &repeat] {
+        assert_eq!(
+            answered.get("superseded"),
+            None,
+            "nothing was written over: {answered}"
+        );
+    }
     assert_eq!(fixture.row().await.content, STATEMENT);
 
     let corrected = stored(&record(&tools, Kind::Lesson, SUBJECT, REVISED).await);
     assert_eq!(corrected["outcome"], REPLACED);
     assert_eq!(corrected["id"], first["id"]);
+    assert_eq!(
+        corrected["superseded"], STATEMENT,
+        "the model is shown what it wrote over, so an overwrite it did not mean is one it can see"
+    );
     let row = fixture.row().await;
     assert_eq!(row.content, REVISED);
     assert!(row.is_active);
@@ -508,8 +674,9 @@ async fn a_repeat_changes_nothing_and_a_correction_replaces_the_entry() {
     let confirmed = stored(&record(&leased, Kind::Lesson, SUBJECT, REVISED).await);
     assert_eq!(
         confirmed["outcome"], REPLACED,
-        "the same words from a run are a confirmation, and the entry now names the run"
+        "the same words from a run are recorded again, and the entry now names the run"
     );
+    assert_eq!(confirmed["superseded"], REVISED);
     let row = fixture.row().await;
     assert_eq!(row.content, REVISED);
     assert_eq!(row.tags[3], format!("source:run:{run}"));
@@ -639,7 +806,7 @@ async fn a_recorded_discovery_reaches_the_next_prompt_of_its_own_workspace() {
     );
     assert!(
         prompt.contains(&format!(
-            "\n- {SUBJECT}: {STATEMENT} (lesson, recorded in a chat, last confirmed "
+            "\n- {SUBJECT}: {STATEMENT} (lesson, recorded in a chat on "
         )),
         "{prompt}"
     );

@@ -391,7 +391,7 @@ mod tests {
             .collect();
         assert!(positions.is_sorted(), "{positions:?}: {block}");
         assert!(
-            block.ends_with("(lesson, recorded during a task run, last confirmed 2026-11-11)"),
+            block.ends_with("(lesson, recorded during a task run on 2026-11-11)"),
             "{block}"
         );
         assert!(!block.contains("\n\n\n"), "{block}");
