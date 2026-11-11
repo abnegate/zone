@@ -7,6 +7,7 @@ const PYTHON: &str = "python3";
 const ISOLATED: &str = "-I";
 const SELF_TEST: &str = "--self-test";
 const TOKEN: &str = "--token";
+const KEY: &str = "--key";
 const SECRET: &str = "secret";
 const PASSED: &str = "self-test passed";
 
@@ -38,4 +39,9 @@ fn the_http_stub_passes_its_self_test() {
 #[test]
 fn the_http_stub_passes_its_self_test_behind_a_token() {
     passes(&[TOKEN, SECRET, SELF_TEST]);
+}
+
+#[test]
+fn the_http_stub_passes_its_self_test_behind_a_key() {
+    passes(&[KEY, SECRET, SELF_TEST]);
 }
