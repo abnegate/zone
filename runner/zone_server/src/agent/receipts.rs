@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::discovery::RECORD_DISCOVERY;
+use super::discovery::{self, RECORD_DISCOVERY};
 use super::memory::{MEMORY_APPEND, MEMORY_DELETE, MEMORY_WRITE};
 use super::planner::FINALIZE_PROJECT;
 use crate::db::memory::MemoryCategory;
@@ -125,15 +125,13 @@ pub fn from_write(
         success: result.success,
         outcome,
         href,
-        reason: super::reason(arguments),
+        reason: discovery::trace_reason(name, super::reason(arguments)),
     })
 }
 
 fn target_type(name: &str) -> Option<ActionTarget> {
     Some(match name {
         "create_task" | "update_task" => ActionTarget::Task,
-        // A discovery is a knowledge row with a wiki page of its own, so it
-        // is receipted as the document a reader can open and delete.
         "create_document" | "update_document" | RECORD_DISCOVERY => ActionTarget::Document,
         "send_message" => ActionTarget::Message,
         "create_reminder" | "cancel_reminder" => ActionTarget::Reminder,
@@ -198,8 +196,8 @@ fn target_label(name: &str, args: &Value, output: Option<&Value>) -> String {
         // Never from the call's arguments. A refused call has no output, and
         // what it was refused for may be the credential in its subject, so the
         // label is the subject only once the store has taken it.
-        RECORD_DISCOVERY => output
-            .and_then(|value| text_field(value, "title"))
+        RECORD_DISCOVERY => recorded(output)
+            .map(|stored| stored.subject)
             .unwrap_or_else(|| fallback_label(name).to_string()),
         "create_task" | "update_task" | "create_document" | "update_document" => title
             .or(content)
@@ -259,10 +257,8 @@ fn outcome(name: &str, result: &ToolResult, output: Option<&Value>) -> String {
         "send_message" => "Message sent".to_string(),
         "create_reminder" => "Reminder scheduled".to_string(),
         "cancel_reminder" => "Reminder cancelled".to_string(),
-        // The tool's own line, which tells a new entry from one recorded over
-        // an earlier entry and from a repeat that changed nothing.
-        RECORD_DISCOVERY => output
-            .and_then(|value| text_field(value, "outcome"))
+        RECORD_DISCOVERY => recorded(output)
+            .map(|stored| stored.outcome)
             .unwrap_or_else(|| "Discovery recorded".to_string()),
         MEMORY_WRITE => "Memory written".to_string(),
         MEMORY_APPEND => "Memory appended".to_string(),
@@ -270,6 +266,11 @@ fn outcome(name: &str, result: &ToolResult, output: Option<&Value>) -> String {
         FINALIZE_PROJECT => "Project created and started".to_string(),
         _ => "Write completed".to_string(),
     }
+}
+
+/// What `record_discovery` answered a stored call with.
+fn recorded(output: Option<&Value>) -> Option<discovery::Stored> {
+    serde_json::from_value(output?.clone()).ok()
 }
 
 /// What a failed memory call puts on its receipt: which kind of write was
@@ -754,13 +755,14 @@ mod tests {
 
     const DISCOVERY: &str = r#"{"kind":"lesson","subject":"Frontend tests need isolation","statement":"Run bun test with --isolate."}"#;
 
-    fn recorded(outcome: &str) -> ToolResult {
+    fn answered(outcome: &str) -> ToolResult {
         ToolResult::success(
-            json!({
-                "id": "33333333-3333-3333-3333-333333333333",
-                "title": "Frontend tests need isolation",
-                "kind": "lesson",
-                "outcome": outcome,
+            json!(discovery::Stored {
+                id: Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+                subject: "Frontend tests need isolation".to_string(),
+                kind: crate::db::knowledge::discovery::Kind::Lesson,
+                outcome: outcome.to_string(),
+                superseded: Some("Run bun test.".to_string()),
             })
             .to_string(),
         )
@@ -771,7 +773,7 @@ mod tests {
         let built = receipt(
             RECORD_DISCOVERY,
             DISCOVERY,
-            recorded(crate::agent::discovery::RECORDED),
+            answered(crate::agent::discovery::RECORDED),
         );
 
         assert!(is_write_tool(RECORD_DISCOVERY));
@@ -797,7 +799,7 @@ mod tests {
             crate::agent::discovery::UNCHANGED,
         ] {
             assert_eq!(
-                receipt(RECORD_DISCOVERY, DISCOVERY, recorded(line)).outcome,
+                receipt(RECORD_DISCOVERY, DISCOVERY, answered(line)).outcome,
                 line
             );
         }
@@ -815,8 +817,8 @@ mod tests {
     /// The refused subject may be the credential it was refused for, and a
     /// receipt is stored on a message the whole workspace reads. So nothing on
     /// it comes from the call's arguments: not the label, which every other
-    /// document receipt falls back to them for, and not a title a call slipped
-    /// in beside them.
+    /// document receipt falls back to them for, not a title a call slipped in
+    /// beside them, and not a reason, which restates what the call carried.
     #[test]
     fn a_refused_discovery_is_receipted_without_any_of_what_it_carried() {
         let refusal = crate::agent::discovery::Declined::Screened(
@@ -828,6 +830,7 @@ mod tests {
             r#"{"kind":"lesson","subject":"The deploy token","statement":"It is ghp_abcdefgh1234"}"#,
             r#"{"kind":"lesson","subject":"ghp_abcdefgh1234","statement":"The deploy token"}"#,
             r#"{"kind":"lesson","subject":"The deploy token","statement":"It is ghp_abcdefgh1234","title":"ghp_abcdefgh1234","content":"ghp_abcdefgh1234","id":"ghp_abcdefgh1234"}"#,
+            r#"{"kind":"lesson","subject":"The deploy token","statement":"Kept in the vault.","reason":"The deploy token is ghp_abcdefgh1234"}"#,
         ] {
             let built = receipt(RECORD_DISCOVERY, arguments, ToolResult::error(&refusal));
 
@@ -837,6 +840,7 @@ mod tests {
             assert_eq!(built.target_label, "Discovery");
             assert_eq!(built.outcome, refusal);
             assert_eq!(built.href, "");
+            assert_eq!(built.reason, None);
             let on_the_message = serde_json::to_string(&built).expect("a receipt serialises");
             for carried in ["ghp_abcdefgh1234", "The deploy token"] {
                 assert!(
@@ -845,6 +849,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_discovery_receipt_never_carries_a_stated_reason() {
+        let built = receipt(
+            RECORD_DISCOVERY,
+            r#"{"kind":"lesson","subject":"Frontend tests need isolation","statement":"Run bun test with --isolate.","reason":"So the next run starts with it."}"#,
+            answered(crate::agent::discovery::RECORDED),
+        );
+
+        assert!(built.success);
+        assert_eq!(built.reason, None);
+        assert!(
+            !serde_json::to_string(&built)
+                .unwrap()
+                .contains("Run bun test."),
+            "what an entry said before is the model's to read, not the receipt's to carry"
+        );
+        assert_eq!(
+            serde_json::to_value(&built).unwrap().get("reason"),
+            None,
+            "the tool takes no reason, so one that arrives is not its to show"
+        );
     }
 
     /// A kind this build does not know is not a memory entry it can name, so

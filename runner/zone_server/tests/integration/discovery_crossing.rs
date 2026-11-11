@@ -137,7 +137,7 @@ async fn line(fixture: &Fixture) -> String {
         "the entry names the chat that recorded it, not the one reading it"
     );
     format!(
-        "{BULLET}{SUBJECT}: {STATEMENT} ({}, recorded in a chat, last confirmed {})",
+        "{BULLET}{SUBJECT}: {STATEMENT} ({}, recorded in a chat on {})",
         Kind::Lesson.as_str(),
         provenance.last_confirmed
     )

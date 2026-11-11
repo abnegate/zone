@@ -21,7 +21,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::db::knowledge::discovery::{
-    self, CATEGORY, Discovery, Kind, Outcome, Provenance, Source,
+    self, CATEGORY, Discovery, Kind, MAX_LISTED, Outcome, Provenance, Source,
 };
 use zone_server::db::knowledge::{
     self, DocumentUpdate, KnowledgeUpsertOutcome, LearnedCategory, LearnedFact, LearningProvenance,
@@ -38,6 +38,7 @@ struct Fixture {
     workspace: Uuid,
     elsewhere: Uuid,
     run: Uuid,
+    author: Uuid,
 }
 
 impl Fixture {
@@ -58,6 +59,7 @@ impl Fixture {
             workspace: workspace(&pool, organization).await,
             elsewhere: workspace(&pool, organization).await,
             run: Uuid::new_v4(),
+            author: person(&pool).await,
             organization,
             pool,
         }
@@ -68,6 +70,7 @@ impl Fixture {
             workspace_id: self.workspace,
             subject: subject.to_string(),
             statement: statement.to_string(),
+            author: self.author,
             provenance: Provenance {
                 kind: Kind::Lesson,
                 source: Source::Run(self.run),
@@ -83,14 +86,25 @@ impl Fixture {
     }
 
     /// Workspaces cascade off the organization and knowledge entries off the
-    /// workspace, so one delete takes everything these tests wrote.
+    /// workspace, so one delete takes everything these tests wrote but the
+    /// person they wrote it as.
     async fn clean(self) {
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(self.organization)
             .execute(&self.pool)
             .await
             .expect("the workspaces and everything in them go");
+        remove(&self.pool, self.author).await;
     }
+}
+
+async fn person(pool: &PgPool) -> Uuid {
+    sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
+        .bind(format!("{}@example.test", Uuid::new_v4()))
+        .bind("x")
+        .fetch_one(pool)
+        .await
+        .expect("a user")
 }
 
 async fn workspace(pool: &PgPool, organization: Uuid) -> Uuid {
@@ -118,12 +132,13 @@ struct Stored {
     category: Option<String>,
     tags: Vec<String>,
     is_active: Option<bool>,
+    created_by: Option<Uuid>,
     updated_at: Option<NaiveDateTime>,
 }
 
 async fn stored(pool: &PgPool, id: Uuid) -> Stored {
     sqlx::query_as(
-        "SELECT title, content, category, tags, is_active, updated_at
+        "SELECT title, content, category, tags, is_active, created_by, updated_at
          FROM knowledge_entries WHERE id = $1",
     )
     .bind(id)
@@ -181,6 +196,7 @@ async fn the_first_record_is_stored_and_an_identical_one_writes_nothing() {
     assert_eq!(first.content, STATEMENT);
     assert_eq!(first.category.as_deref(), Some(CATEGORY));
     assert_eq!(first.is_active, Some(true));
+    assert_eq!(first.created_by, Some(fixture.author));
     assert_eq!(
         first.tags,
         vec![
@@ -189,6 +205,7 @@ async fn the_first_record_is_stored_and_an_identical_one_writes_nothing() {
             "kind:lesson".to_string(),
             format!("source:run:{}", fixture.run),
             "confirmed:2026-11-11".to_string(),
+            format!("stated:{}", discovery::fingerprint(STATEMENT)),
         ]
     );
 
@@ -210,7 +227,16 @@ async fn a_changed_statement_replaces_the_subject_s_one_row() {
     let (id, _) = fixture.record(SUBJECT, STATEMENT).await;
 
     let replaced = fixture.record(SUBJECT, REVISED).await;
-    assert_eq!(replaced, (id, Outcome::Replaced));
+    assert_eq!(
+        replaced,
+        (
+            id,
+            Outcome::Replaced {
+                superseded: STATEMENT.to_string()
+            }
+        ),
+        "whoever wrote over the entry is handed what it said"
+    );
 
     let row = stored(&fixture.pool, id).await;
     assert_eq!(row.content, REVISED);
@@ -243,7 +269,15 @@ async fn a_change_of_kind_or_source_is_a_replacement_too() {
     let outcome = discovery::record(&fixture.pool, &discovery)
         .await
         .expect("recording a discovery");
-    assert_eq!(outcome, (id, Outcome::Replaced));
+    assert_eq!(
+        outcome,
+        (
+            id,
+            Outcome::Replaced {
+                superseded: STATEMENT.to_string()
+            }
+        )
+    );
 
     let row = stored(&fixture.pool, id).await;
     assert_eq!(row.tags[2], "kind:convention");
@@ -261,7 +295,12 @@ async fn the_casing_and_spacing_of_a_subject_do_not_split_it_in_two() {
     let respelled = "  running   THE integration\ttests ";
     assert_eq!(
         fixture.record(respelled, REVISED).await,
-        (id, Outcome::Replaced)
+        (
+            id,
+            Outcome::Replaced {
+                superseded: STATEMENT.to_string()
+            }
+        )
     );
 
     let row = stored(&fixture.pool, id).await;
@@ -442,7 +481,12 @@ async fn the_list_is_most_recently_recorded_first() {
         fixture
             .record("Migration names", "Timestamped, snake_case.")
             .await,
-        (first, Outcome::Replaced)
+        (
+            first,
+            Outcome::Replaced {
+                superseded: "Timestamped.".to_string()
+            }
+        )
     );
     assert_eq!(
         order(
@@ -485,8 +529,7 @@ async fn the_learned_prompt_carries_the_block_after_what_the_passes_derived() {
     );
     assert!(
         prompt.ends_with(&format!(
-            "\n\n- {SUBJECT}: {STATEMENT} (lesson, recorded during a task run, last confirmed \
-             2026-11-11)\n"
+            "\n\n- {SUBJECT}: {STATEMENT} (lesson, recorded during a task run on 2026-11-11)\n"
         )),
         "{prompt}"
     );
@@ -502,16 +545,266 @@ async fn the_learned_prompt_carries_the_block_after_what_the_passes_derived() {
     fixture.clean().await;
 }
 
+/// A person threw the statement away, not the words it was filed under. The
+/// same statement under a subject spelled another way has to stay gone, or
+/// deleting an entry only deletes it until the next run adds a full stop.
+#[tokio::test]
+async fn a_deleted_statement_stays_deleted_under_a_respelled_subject() {
+    let fixture = Fixture::new().await;
+    let (id, _) = fixture.record(SUBJECT, STATEMENT).await;
+    assert!(
+        knowledge::delete_knowledge(&fixture.pool, id)
+            .await
+            .expect("the wiki's delete")
+    );
+    let retired = stored(&fixture.pool, id).await;
+
+    for (subject, statement) in [
+        ("Running the integration tests.", STATEMENT),
+        (
+            "How the suite is run",
+            "  use CARGO nextest;   cargo test takes a single filter. ",
+        ),
+    ] {
+        assert_eq!(
+            fixture.record(subject, statement).await,
+            (id, Outcome::Retired),
+            "{subject}"
+        );
+    }
+    assert_eq!(stored(&fixture.pool, id).await, retired);
+    assert_eq!(rows_in(&fixture.pool, fixture.workspace).await, 1);
+
+    assert_eq!(
+        fixture.record("Lint command", "cargo clippy.").await.1,
+        Outcome::Recorded,
+        "what was never deleted is still recordable"
+    );
+    let mut elsewhere = fixture.discovery("Running the integration tests.", STATEMENT);
+    elsewhere.workspace_id = fixture.elsewhere;
+    assert_eq!(
+        discovery::record(&fixture.pool, &elsewhere)
+            .await
+            .expect("recording a discovery")
+            .1,
+        Outcome::Recorded,
+        "a deletion is one workspace's"
+    );
+
+    fixture.clean().await;
+}
+
+/// A coding agent makes its calls several at a time, so the same subject can
+/// arrive twice before either write has landed.
+#[tokio::test]
+async fn records_of_one_subject_racing_each_other_leave_one_row() {
+    const RACING: usize = 8;
+    let fixture = Fixture::new().await;
+
+    let racing: Vec<_> = (0..RACING)
+        .map(|_| {
+            let pool = fixture.pool.clone();
+            let discovery = fixture.discovery(SUBJECT, STATEMENT);
+            tokio::spawn(async move { discovery::record(&pool, &discovery).await })
+        })
+        .collect();
+    let mut ids = Vec::with_capacity(RACING);
+    let mut outcomes = Vec::with_capacity(RACING);
+    for record in racing {
+        let (id, outcome) = record
+            .await
+            .expect("the record ran to its end")
+            .expect("recording a discovery");
+        ids.push(id);
+        outcomes.push(outcome);
+    }
+
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == Outcome::Recorded)
+            .count(),
+        1,
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| **outcome == Outcome::Unchanged)
+            .count(),
+        RACING - 1,
+        "{outcomes:?}"
+    );
+    ids.dedup();
+    assert_eq!(ids.len(), 1, "every record was answered with the one row");
+    assert_eq!(rows_in(&fixture.pool, fixture.workspace).await, 1);
+
+    fixture.clean().await;
+}
+
+async fn vectors(pool: &PgPool, id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM knowledge_embeddings WHERE knowledge_entry_id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("a count")
+}
+
+/// Search finds an entry by the vector of its content. A corrected entry that
+/// kept the old vector would still be found by what it no longer says.
+#[tokio::test]
+async fn a_replaced_statement_drops_the_vector_of_the_one_it_replaced() {
+    let fixture = Fixture::new().await;
+    let (id, _) = fixture.record(SUBJECT, STATEMENT).await;
+    knowledge::store_knowledge_embedding(&fixture.pool, id, fixture.workspace, &[0.5; 8], "test")
+        .await
+        .expect("a stored vector");
+
+    let mut confirmed_elsewhere = fixture.discovery(SUBJECT, STATEMENT);
+    confirmed_elsewhere.provenance.source = Source::Chat(Uuid::new_v4());
+    discovery::record(&fixture.pool, &confirmed_elsewhere)
+        .await
+        .expect("recording a discovery");
+    assert_eq!(
+        vectors(&fixture.pool, id).await,
+        1,
+        "the same words from another source are still the words the vector was made from"
+    );
+
+    fixture.record(SUBJECT, REVISED).await;
+    assert_eq!(
+        vectors(&fixture.pool, id).await,
+        0,
+        "the recovery pass embeds a row with no vector, so dropping it is how it is re-indexed"
+    );
+
+    fixture.clean().await;
+}
+
+/// One run that records a block's worth is the persistence step of an
+/// injection, and in ordinary use it is fresh trivia burying older
+/// conventions. Either way the next prompt has to keep showing what the
+/// other runs and chats wrote down.
+#[tokio::test]
+async fn a_flood_from_one_run_leaves_room_for_what_other_sources_recorded() {
+    const FLOOD: usize = 40;
+    let fixture = Fixture::new().await;
+
+    let mut from_a_chat = fixture.discovery("Migration names", "Timestamped, snake_case.");
+    from_a_chat.provenance.source = Source::Chat(Uuid::new_v4());
+    let mut from_an_earlier_run = fixture.discovery("Lint command", "cargo clippy.");
+    from_an_earlier_run.provenance.source = Source::Run(Uuid::new_v4());
+    for discovery in [&from_a_chat, &from_an_earlier_run] {
+        discovery::record(&fixture.pool, discovery)
+            .await
+            .expect("recording a discovery");
+    }
+    for index in 0..FLOOD {
+        fixture
+            .record(&format!("Flood {index:02}"), &"s".repeat(500))
+            .await;
+    }
+
+    let listed: Vec<String> = discovery::list(&fixture.pool, fixture.workspace)
+        .await
+        .expect("listing discoveries")
+        .into_iter()
+        .map(|row| row.title)
+        .collect();
+    assert_eq!(
+        listed[..5],
+        [
+            "Flood 39",
+            "Lint command",
+            "Migration names",
+            "Flood 38",
+            "Flood 37"
+        ],
+        "every source shows its most recent entry before any source shows a second"
+    );
+
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
+        .await
+        .expect("rendering the learned block");
+    for kept in [
+        "\n- Migration names: Timestamped, snake_case. (lesson, recorded in a chat on 2026-11-11)\n",
+        "\n- Lint command: cargo clippy. (lesson, recorded during a task run on 2026-11-11)\n",
+    ] {
+        assert!(prompt.contains(kept), "{kept} is missing from {prompt}");
+    }
+    let flooded = prompt.matches("\n- Flood ").count();
+    assert_eq!(
+        flooded, 9,
+        "the flood takes the room that is left, and no more"
+    );
+    for index in FLOOD - flooded..FLOOD {
+        assert!(
+            prompt.contains(&format!("\n- Flood {index:02}: ")),
+            "Flood {index:02}"
+        );
+    }
+    assert!(
+        prompt.ends_with(&format!(
+            "\n\n{} older entries are recorded here but not shown.\n",
+            FLOOD - flooded
+        )),
+        "{}",
+        &prompt[prompt.len() - 120..]
+    );
+
+    fixture.clean().await;
+}
+
+/// The block reads a bounded number of rows, so what it leaves out cannot be
+/// counted from the rows it read.
+#[tokio::test]
+async fn entries_past_the_most_a_block_reads_are_still_counted() {
+    const RECORDED: usize = MAX_LISTED + 13;
+    let fixture = Fixture::new().await;
+    for index in 0..RECORDED {
+        fixture
+            .record(&format!("Subject {index:03}"), "Stated.")
+            .await;
+    }
+
+    let listing = discovery::listing(&fixture.pool, fixture.workspace)
+        .await
+        .expect("listing discoveries");
+    assert_eq!(listing.rows.len(), MAX_LISTED);
+    assert_eq!(listing.recorded, RECORDED);
+    assert_eq!(
+        listing.rows[0].title,
+        format!("Subject {:03}", RECORDED - 1),
+        "one source's entries come most recent first"
+    );
+
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
+        .await
+        .expect("rendering the learned block");
+
+    assert!(
+        prompt.len() <= discovery::MAX_RENDERED_BYTES,
+        "{} bytes",
+        prompt.len()
+    );
+    let shown = prompt.matches("\n- Subject ").count();
+    assert_eq!(shown, 73, "as many whole entries as the block holds");
+    assert!(
+        prompt.ends_with(&format!(
+            "\n\n{} older entries are recorded here but not shown.\n",
+            RECORDED - shown
+        )),
+        "{}",
+        &prompt[prompt.len() - 120..]
+    );
+
+    fixture.clean().await;
+}
+
 /// Someone with member standing in the workspace: everything the document
 /// writer asks of whoever calls it.
 async fn member(pool: &PgPool, workspace: Uuid) -> Uuid {
-    let user: Uuid =
-        sqlx::query_scalar("INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id")
-            .bind(format!("{}@example.test", Uuid::new_v4()))
-            .bind("x")
-            .fetch_one(pool)
-            .await
-            .expect("a user");
+    let user = person(pool).await;
     sqlx::query(
         "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'member')",
     )

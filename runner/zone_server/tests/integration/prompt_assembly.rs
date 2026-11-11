@@ -700,6 +700,7 @@ use zone_server::db::knowledge::discovery::{self, Discovery};
 use zone_server::db::knowledge::{
     self, LearnedFact, LearningProvenance, PromotionProvenance, StandingInstruction,
 };
+use zone_server::db::users;
 use zone_server::services::chat::session::{self, Generation, Mode};
 use zone_server::services::route::Route;
 
@@ -788,12 +789,23 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
     )
     .await
     .expect("a repository convention");
+    let author = users::create_user(
+        &pool,
+        &format!("{}@example.com", Uuid::new_v4()),
+        "hash",
+        None,
+        false,
+    )
+    .await
+    .expect("whoever the recording chat was acting for")
+    .id;
     discovery::record(
         &pool,
         &Discovery {
             workspace_id: workspace,
             subject: "Test database port".to_string(),
             statement: DISCOVERY.to_string(),
+            author,
             provenance: discovery::Provenance {
                 kind: discovery::Kind::Lesson,
                 source: discovery::Source::Chat(Uuid::new_v4()),
@@ -858,6 +870,11 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
         .execute(&pool)
         .await
         .expect("the workspace and everything in it go");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(author)
+        .execute(&pool)
+        .await
+        .expect("the author goes");
 
     let rendered = rendered.expect("the learned block");
     assert_eq!(

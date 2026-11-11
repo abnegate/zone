@@ -1622,15 +1622,19 @@ struct KnowledgeUpsertRow {
     created: bool,
     superseded: bool,
     inactive: bool,
+    previous: Option<String>,
 }
 
 /// What [`upsert_learned_entry`] did, and what it found.
 struct LearnedUpsert {
     id: Uuid,
     outcome: KnowledgeUpsertOutcome,
-    /// Whether the row this identity addresses was inactive when the upsert
-    /// ran. With `revive` off that row was left as it was.
+    /// Whether a deleted row stood in the way: the one this identity
+    /// addresses, or one carrying the entry's `content_tag`. With `revive` off
+    /// that row was left as it was.
     inactive: bool,
+    /// What the identity's row said before the upsert ran, if it had one.
+    previous: Option<String>,
 }
 
 fn advisory_lock_key(workspace_id: Uuid, fingerprint: &str) -> i64 {
@@ -1657,6 +1661,13 @@ struct LearnedEntry<'a> {
     /// a writer with no evidence to re-earn it by has not, and for that
     /// writer a deletion stands.
     revive: bool,
+    /// A tag naming what the entry says rather than what it is about. With
+    /// `revive` off, a deleted row carrying it stands as the identity's own
+    /// deleted row would, so deleted words do not come back under another
+    /// name.
+    content_tag: Option<&'a str>,
+    /// Whose write this is, for a writer that has one. A pass has none.
+    author: Option<Uuid>,
 }
 
 /// Create or supersede the knowledge entry a learning pass derived.
@@ -1669,6 +1680,10 @@ struct LearnedEntry<'a> {
 /// A deleted row is brought back only when the entry says `revive`. Otherwise it is
 /// left as the delete left it, and the caller is told the row was inactive so it can
 /// tell a deletion that stood from an entry that already said the same thing.
+///
+/// A row whose content changed loses its stored vector in the same statement, as
+/// `update_document` drops one, so the recovery pass embeds what the row says now
+/// and search stops finding it by what it used to say.
 async fn upsert_learned_entry(pool: &PgPool, entry: LearnedEntry<'_>) -> DbResult<LearnedUpsert> {
     let token_count = entry.content.chars().count().div_ceil(CHARACTERS_PER_TOKEN) as i32;
 
@@ -1690,17 +1705,29 @@ async fn upsert_learned_entry(pool: &PgPool, entry: LearnedEntry<'_>) -> DbResul
         WITH existing AS (
             SELECT id, title, content, tags, is_active
             FROM knowledge_entries
-            WHERE workspace_id = $1 AND category = $2 AND $3 = ANY(tags)
+            WHERE workspace_id = $1 AND category = $2 AND tags @> ARRAY[$3]::text[]
             ORDER BY created_at, id
             LIMIT 1
             FOR UPDATE
+        ),
+        buried AS (
+            SELECT id
+            FROM knowledge_entries
+            WHERE NOT $8
+              AND $9::text IS NOT NULL
+              AND workspace_id = $1
+              AND category = $2
+              AND tags @> ARRAY[$9]::text[]
+              AND is_active IS NOT TRUE
+            ORDER BY created_at, id
+            LIMIT 1
         ),
         retired AS (
             UPDATE knowledge_entries AS extra
             SET is_active = FALSE, updated_at = NOW()
             WHERE extra.workspace_id = $1
               AND extra.category = $2
-              AND $3 = ANY(extra.tags)
+              AND extra.tags @> ARRAY[$3]::text[]
               AND extra.is_active
               AND extra.id <> (SELECT id FROM existing)
             RETURNING extra.id
@@ -1711,36 +1738,50 @@ async fn upsert_learned_entry(pool: &PgPool, entry: LearnedEntry<'_>) -> DbResul
                 content = $5,
                 tags = $6,
                 token_count = $7,
+                created_by = COALESCE($10, entry.created_by),
                 is_active = TRUE,
                 updated_at = NOW()
             FROM existing
             WHERE entry.id = existing.id
               AND ($8 OR existing.is_active IS NOT DISTINCT FROM TRUE)
+              AND NOT EXISTS (SELECT 1 FROM buried)
               AND (existing.title IS DISTINCT FROM $4
                    OR existing.content IS DISTINCT FROM $5
                    OR existing.tags IS DISTINCT FROM $6
                    OR existing.is_active IS DISTINCT FROM TRUE)
             RETURNING entry.id
         ),
+        stale AS (
+            DELETE FROM knowledge_embeddings AS stored
+            USING superseded, existing
+            WHERE stored.knowledge_entry_id = superseded.id
+              AND stored.workspace_id = $1
+              AND existing.content IS DISTINCT FROM $5
+        ),
         created AS (
             INSERT INTO knowledge_entries (
-                workspace_id, title, content, category, tags, token_count
+                workspace_id, title, content, category, tags, token_count, created_by
             )
-            SELECT $1, $4, $5, $2, $6, $7
+            SELECT $1, $4, $5, $2, $6, $7, $10
             WHERE NOT EXISTS (SELECT 1 FROM existing)
+              AND NOT EXISTS (SELECT 1 FROM buried)
             RETURNING id
         )
         SELECT
             COALESCE(
                 (SELECT id FROM created),
                 (SELECT id FROM superseded),
+                (SELECT id FROM existing WHERE is_active IS NOT TRUE),
+                (SELECT id FROM buried),
                 (SELECT id FROM existing)
             ) AS id,
             EXISTS (SELECT 1 FROM created) AS created,
             EXISTS (SELECT 1 FROM superseded) AS superseded,
-            EXISTS (
-                SELECT 1 FROM existing WHERE is_active IS DISTINCT FROM TRUE
-            ) AS inactive
+            (
+                EXISTS (SELECT 1 FROM existing WHERE is_active IS NOT TRUE)
+                OR EXISTS (SELECT 1 FROM buried)
+            ) AS inactive,
+            (SELECT content FROM existing) AS previous
         "#,
     )
     .bind(entry.workspace_id)
@@ -1751,6 +1792,8 @@ async fn upsert_learned_entry(pool: &PgPool, entry: LearnedEntry<'_>) -> DbResul
     .bind(entry.tags)
     .bind(token_count)
     .bind(entry.revive)
+    .bind(entry.content_tag)
+    .bind(entry.author)
     .fetch_one(&mut *transaction)
     .await?;
 
@@ -1766,6 +1809,7 @@ async fn upsert_learned_entry(pool: &PgPool, entry: LearnedEntry<'_>) -> DbResul
         id: row.id,
         outcome,
         inactive: row.inactive,
+        previous: row.previous,
     })
 }
 
@@ -1788,6 +1832,8 @@ pub async fn upsert_standing_instruction(
             content: &instruction.content,
             tags: &tags,
             revive: true,
+            content_tag: None,
+            author: None,
         },
     )
     .await?;
@@ -2007,6 +2053,8 @@ pub async fn upsert_learned_fact(
             content: &fact.content,
             tags: &tags,
             revive: true,
+            content_tag: None,
+            author: None,
         },
     )
     .await?;
@@ -2111,8 +2159,11 @@ pub async fn learned_facts_prompt(pool: &PgPool, workspace_id: Uuid) -> DbResult
         let facts = list_learned_facts(pool, workspace_id, category).await?;
         blocks.push(render_learned_facts(category, &facts));
     }
-    let discoveries = discovery::list(pool, workspace_id).await?;
-    blocks.push(discovery::render(&discoveries));
+    let discoveries = discovery::listing(pool, workspace_id).await?;
+    blocks.push(discovery::render_among(
+        &discoveries.rows,
+        discoveries.recorded,
+    ));
     Ok(join_blocks(&blocks))
 }
 
