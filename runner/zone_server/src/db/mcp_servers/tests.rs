@@ -341,6 +341,85 @@ async fn no_secrets_store_null() {
     );
 }
 
+fn sealed_document(secrets: &Secrets) -> String {
+    let key = MasterKey::generate().expect("a key");
+    let sealed = seal(secrets, &key)
+        .expect("secrets that seal")
+        .expect("a sealed document");
+    assert!(sealed.starts_with(ENVELOPE_OPENING), "{sealed}");
+    assert_eq!(
+        &open(Uuid::new_v4(), Some(&sealed), &key).expect("a document that opens"),
+        secrets
+    );
+    key.open_strict(&sealed)
+        .expect("an envelope that opens")
+        .expose()
+        .to_owned()
+}
+
+#[test]
+fn the_sealed_document_keeps_its_bytes() {
+    assert_eq!(
+        sealed_document(&Secrets {
+            environment: secrets(&[
+                ("NPM_TOKEN", "npm \"quoted\" \\ and\nbroken é"),
+                ("GITHUB_TOKEN", TOKEN),
+                ("A\tTAB", ""),
+            ]),
+            headers: secrets(&[("X-Api-Key", "key"), ("Authorization", AUTHORIZATION)]),
+        }),
+        concat!(
+            r#"{"environment":{"A\tTAB":"","GITHUB_TOKEN":"ghp_mcp_server_token","#,
+            r#""NPM_TOKEN":"npm \"quoted\" \\ and\nbroken é"},"#,
+            r#""headers":{"Authorization":"Bearer mcp-header-secret","X-Api-Key":"key"}}"#,
+        )
+    );
+    assert_eq!(
+        sealed_document(&Secrets {
+            environment: secrets(&[("GITHUB_TOKEN", TOKEN)]),
+            headers: BTreeMap::new(),
+        }),
+        r#"{"environment":{"GITHUB_TOKEN":"ghp_mcp_server_token"},"headers":{}}"#
+    );
+    assert_eq!(
+        sealed_document(&Secrets {
+            environment: BTreeMap::new(),
+            headers: secrets(&[("Authorization", AUTHORIZATION)]),
+        }),
+        r#"{"environment":{},"headers":{"Authorization":"Bearer mcp-header-secret"}}"#
+    );
+}
+
+#[test]
+fn a_document_sealed_by_an_earlier_build_opens() {
+    let key = MasterKey::generate().expect("a key");
+    let server = Uuid::new_v4();
+    let sealed = |document: &str| {
+        encrypt_value(&SecretValue::new(document), &key).expect("a document that seals")
+    };
+
+    let both = sealed(concat!(
+        r#"{"environment":{"GITHUB_TOKEN":"ghp_mcp_server_token"},"#,
+        r#""headers":{"Authorization":"Bearer mcp-header-secret"}}"#,
+    ));
+    assert_eq!(
+        open(server, Some(&both), &key).expect("a document that opens"),
+        Secrets {
+            environment: secrets(&[("GITHUB_TOKEN", TOKEN)]),
+            headers: secrets(&[("Authorization", AUTHORIZATION)]),
+        }
+    );
+
+    let without_headers = sealed(r#"{"environment":{"GITHUB_TOKEN":"ghp_mcp_server_token"}}"#);
+    assert_eq!(
+        open(server, Some(&without_headers), &key).expect("a document that opens"),
+        Secrets {
+            environment: secrets(&[("GITHUB_TOKEN", TOKEN)]),
+            headers: BTreeMap::new(),
+        }
+    );
+}
+
 #[tokio::test]
 async fn secrets_sealed_under_another_key_do_not_open() {
     let fixture = tenant().await;

@@ -9,7 +9,6 @@ use abnegate_secret::encrypt_value;
 use chrono::DateTime;
 use chrono::Utc;
 use serde::Deserialize;
-use serde::Serialize;
 use sqlx::Executor;
 use sqlx::PgConnection;
 use sqlx::PgPool;
@@ -49,6 +48,8 @@ const FOREIGN_SERVER: &str = "An MCP server in the overrides does not belong to 
 const UNSEALABLE_SECRETS: &str = "The MCP server secrets could not be sealed";
 const ENVIRONMENT_FIELD: &str = "Environment variable";
 const HEADER_FIELD: &str = "Header";
+const ENVIRONMENT_KEY: &str = "environment";
+const HEADERS_KEY: &str = "headers";
 
 /// The credentials a server holds, opened.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -61,12 +62,6 @@ impl Secrets {
     fn is_empty(&self) -> bool {
         self.environment.is_empty() && self.headers.is_empty()
     }
-}
-
-#[derive(Serialize)]
-struct Sealing<'a> {
-    environment: &'a BTreeMap<String, SecretValue>,
-    headers: &'a BTreeMap<String, SecretValue>,
 }
 
 #[derive(Deserialize)]
@@ -189,11 +184,21 @@ fn seal(secrets: &Secrets, key: &MasterKey) -> McpServerResult<Option<String>> {
     if secrets.is_empty() {
         return Ok(None);
     }
-    let json = serde_json::to_string(&Sealing {
-        environment: &secrets.environment,
-        headers: &secrets.headers,
+    let document: BTreeMap<&str, BTreeMap<&str, &str>> = [
+        (ENVIRONMENT_KEY, &secrets.environment),
+        (HEADERS_KEY, &secrets.headers),
+    ]
+    .into_iter()
+    .map(|(field, values)| {
+        let exposed = values
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.expose()))
+            .collect();
+        (field, exposed)
     })
-    .map_err(|_| McpServerError::Sealing(UNSEALABLE_SECRETS.to_owned()))?;
+    .collect();
+    let json = serde_json::to_string(&document)
+        .map_err(|_| McpServerError::Sealing(UNSEALABLE_SECRETS.to_owned()))?;
     encrypt_value(&SecretValue::new(json), key)
         .map(Some)
         .map_err(|error| McpServerError::Sealing(format!("{UNSEALABLE_SECRETS}: {error}")))
