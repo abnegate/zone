@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useMemo, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
-import { awaitsTitle, TITLE_POLL_MS } from '../title';
+import { titlePoll } from '../title';
 import type { CreateTaskRequest, Task, TaskStatus, UpdateTaskRequest } from '../types';
 
 export const TASKS_KEY = ['tasks'] as const;
@@ -11,7 +11,7 @@ export function tasksKey(workspaceId?: string, projectId?: string) {
   return [...TASKS_KEY, workspaceId, projectId] as const;
 }
 
-const LOAD_FAILED = 'Failed to load tasks';
+export const LOAD_FAILED = 'Failed to load tasks';
 
 const NO_WORKSPACE = 'No workspace selected';
 
@@ -55,10 +55,7 @@ export function useTasks(projectId?: string) {
       return tasksApi.getTasks(workspaceId, projectId);
     },
     enabled: !!workspaceId,
-    refetchInterval: (query) =>
-      (query.state.data as Task[] | undefined)?.some((task) => awaitsTitle(task))
-        ? TITLE_POLL_MS
-        : false,
+    refetchInterval: (query) => titlePoll(query.state.data),
   });
 
   const createTaskMutation = useMutation({

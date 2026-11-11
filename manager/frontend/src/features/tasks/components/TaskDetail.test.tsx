@@ -238,6 +238,64 @@ describe('TaskDetail', () => {
       expect(onSave).not.toHaveBeenCalled();
     });
 
+    it('asks before a related task replaces unsaved edits', async () => {
+      const ship = other('ship', 'Ship it', { dependencies: ['task-1'] });
+      const { onOpen } = renderLinked(task, [ship]);
+      const field = screen.getByLabelText('Description');
+      fireEvent.change(field, { target: { value: 'Draft nobody saved' } });
+
+      fireEvent.click(within(links()).getByRole('button', { name: 'Open Ship it' }));
+      const dialog = await screen.findByRole('dialog', {
+        name: 'Discard your changes to Ship the board?',
+      });
+      expect(onOpen).not.toHaveBeenCalled();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(onOpen).not.toHaveBeenCalled();
+      expect(screen.getByLabelText('Description')).toHaveValue('Draft nobody saved');
+
+      fireEvent.click(within(links()).getByRole('button', { name: 'Open Ship it' }));
+      fireEvent.click(
+        within(await screen.findByRole('dialog')).getByRole('button', { name: 'Discard changes' })
+      );
+      expect(onOpen).toHaveBeenCalledTimes(1);
+      expect(onOpen).toHaveBeenCalledWith(ship);
+    });
+
+    it('does not count a stored description that only differs by surrounding space as an edit', () => {
+      const ship = other('ship', 'Ship it', { dependencies: ['task-1'] });
+      const { onOpen } = renderLinked({ ...task, description: `${task.description}\n` }, [ship]);
+
+      expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+      fireEvent.click(within(links()).getByRole('button', { name: 'Open Ship it' }));
+
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(onOpen).toHaveBeenCalledWith(ship);
+    });
+
+    it('drops the question when the editor moves to another task', async () => {
+      const ship = other('ship', 'Ship it', { dependencies: ['task-1'] });
+      const props = {
+        tasks: [task, ship],
+        projects: [],
+        sources: [],
+        onOpen: mock((_task: Task) => {}),
+        onClose: () => {},
+        onExecute: () => {},
+        onSave: () => Promise.resolve(),
+      };
+      const { rerender } = render(<TaskDetail task={task} {...props} />);
+      fireEvent.change(screen.getByLabelText('Description'), { target: { value: 'Unsaved' } });
+      fireEvent.click(within(links()).getByRole('button', { name: 'Open Ship it' }));
+      await screen.findByRole('dialog');
+
+      rerender(<TaskDetail task={ship} {...props} />);
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(props.onOpen).not.toHaveBeenCalled();
+    });
+
     it('offers nothing to edit in the Links section', () => {
       renderLinked({ ...task, dependencies: ['spec'], branch_name: 'feature/auth' }, [
         other('spec', 'Write the spec'),

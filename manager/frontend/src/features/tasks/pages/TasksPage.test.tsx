@@ -1628,6 +1628,24 @@ describe('TasksPage', () => {
         ).toEqual(['Open Ship the release']);
       });
 
+      it('says so when the tasks of other projects cannot be read', async () => {
+        mockGetTasks.mockImplementation((_workspace: string, project?: string) =>
+          project
+            ? Promise.resolve(linked.filter((task) => task.project_ids.includes(project)))
+            : Promise.reject(new Error('The workspace could not be read'))
+        );
+        renderTasksPage();
+        await screen.findByRole('alert');
+        chooseSelect('Filter by project', 'Project Alpha');
+
+        await waitFor(() =>
+          expect(screen.getByRole('alert')).toHaveTextContent(
+            'Tasks in other projects could not be loaded'
+          )
+        );
+        expect(screen.getByRole('button', { name: 'Implement login' })).toBeInTheDocument();
+      });
+
       it('returns to the card a filtered-out related task was opened from', async () => {
         await filterToAlpha();
         fireEvent.click(
@@ -1698,6 +1716,28 @@ describe('TasksPage', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Close' }));
       await waitFor(() => expect(focusedTitle()).toBe('task-release'));
+    });
+
+    it('takes focus to the title of the related task the editor switched to', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+      const related = within(await editing('Implement login')).getByRole('button', {
+        name: 'Open Ship the release',
+      });
+      related.focus();
+
+      fireEvent.click(related);
+
+      const title = await screen.findByRole('button', { name: 'Rename Ship the release' });
+      await waitFor(() => expect(document.activeElement).toBe(title));
+    });
+
+    it('leaves focus alone when the editor opens from the board', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+
+      const title = await screen.findByRole('button', { name: 'Rename Implement login' });
+      expect(document.activeElement).not.toBe(title);
     });
 
     it('keeps focus on the related task of a card that a reload moves', async () => {

@@ -20,6 +20,9 @@ const ALL_PROJECTS = '';
 
 const MOVE_FAILED = 'The task could not be moved';
 
+const RELATIONS_FAILED =
+  'Tasks in other projects could not be loaded, so related tasks outside this project are missing';
+
 export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
@@ -49,7 +52,8 @@ export default function TasksPage() {
     deleteTask,
   } = useTasks(filterProject || undefined);
   const filtered = filterProject !== ALL_PROJECTS;
-  const known = useWorkspaceTasks(filtered) ?? tasks;
+  const workspace = useWorkspaceTasks(filtered);
+  const known = workspace.tasks ?? tasks;
 
   const { projects, loading: projectsLoading } = useProjects('all');
   const { data: sources = [] } = useQuery({
@@ -67,6 +71,7 @@ export default function TasksPage() {
   const [executionTask, setExecutionTask] = useState<Task | null>(null);
   const [deleting, setDeleting] = useState<Task | null>(null);
   const [removed, setRemoved] = useState<string | null>(null);
+  const [followed, setFollowed] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
 
   const projectNames = useMemo(
@@ -114,7 +119,13 @@ export default function TasksPage() {
     [view, openEditor]
   );
 
+  const follow = (task: Task) => {
+    setFollowed(task.id);
+    open(task);
+  };
+
   const closeEditor = () => {
+    setFollowed(null);
     setExecutionTask(null);
     const next = new URLSearchParams(searchParams);
     next.delete('task');
@@ -167,7 +178,10 @@ export default function TasksPage() {
   );
 
   const loading = tasksLoading || projectsLoading;
-  const displayError = tasksError || (editorFailed ? editorError : null);
+  const displayError =
+    tasksError ||
+    (editorFailed ? editorError : null) ||
+    (workspace.error ? RELATIONS_FAILED : null);
 
   return (
     <div className="page page--workspace tasks-page">
@@ -215,7 +229,8 @@ export default function TasksPage() {
             tasks={known}
             projects={projects}
             sources={sources}
-            onOpen={open}
+            focusTitle={followed === editorTask.id}
+            onOpen={follow}
             onClose={closeEditor}
             onExecute={() => setExecutionTask(editorTask)}
             onSave={handleSave}

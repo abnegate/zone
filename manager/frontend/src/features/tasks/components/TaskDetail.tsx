@@ -7,6 +7,7 @@ import { relationsOf } from '../relations';
 import { STATUS_OPTIONS } from '../status';
 import { awaitsTitle } from '../title';
 import type { Task, TaskStatus, UpdateTaskRequest } from '../types';
+import { DiscardChangesDialog } from './DiscardChangesDialog';
 import { Links } from './Links';
 import { TaskTitleInput } from './TaskTitleInput';
 
@@ -27,6 +28,7 @@ type TaskDetailProps = {
   tasks: readonly Task[];
   projects: Project[];
   sources: Source[];
+  focusTitle?: boolean;
   onOpen: (task: Task) => void;
   onClose: () => void;
   onExecute: () => void;
@@ -73,7 +75,7 @@ function rebase(draft: Draft, previous: Draft, next: Draft): Draft {
 function changed(task: Task, draft: Draft): UpdateTaskRequest {
   const request: UpdateTaskRequest = {};
   const description = draft.description.trim();
-  if (description !== task.description) request.description = description;
+  if (description !== task.description.trim()) request.description = description;
   if (draft.acceptance_criteria !== (task.acceptance_criteria ?? '')) {
     request.acceptance_criteria = draft.acceptance_criteria;
   }
@@ -103,6 +105,7 @@ export function TaskDetail({
   tasks,
   projects,
   sources,
+  focusTitle = false,
   onOpen,
   onClose,
   onExecute,
@@ -112,9 +115,14 @@ export function TaskDetail({
   const [saving, setSaving] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [leaving, setLeaving] = useState<Task | null>(null);
   const hydrated = useRef(task);
   const renameButton = useRef<HTMLButtonElement>(null);
   const wasRenaming = useRef(false);
+
+  useEffect(() => {
+    if (focusTitle) renameButton.current?.focus();
+  }, [focusTitle]);
 
   useEffect(() => {
     if (wasRenaming.current && !renaming) renameButton.current?.focus();
@@ -128,6 +136,7 @@ export function TaskDetail({
     if (previous.id !== task.id) {
       setDraft(hydrate(task));
       setError(null);
+      setLeaving(null);
       return;
     }
     setDraft((current) => rebase(current, hydrate(previous), hydrate(task)));
@@ -135,7 +144,13 @@ export function TaskDetail({
 
   const request = useMemo(() => changed(task, draft), [task, draft]);
   const relations = useMemo(() => relationsOf(task, tasks), [task, tasks]);
-  const canSave = Object.keys(request).length > 0 && draft.description.trim().length > 0 && !saving;
+  const edited = Object.keys(request).length > 0;
+  const canSave = edited && draft.description.trim().length > 0 && !saving;
+
+  const openRelated = (related: Task) => {
+    if (edited) setLeaving(related);
+    else onOpen(related);
+  };
 
   const toggleProject = (id: string) => {
     setDraft((current) => {
@@ -196,7 +211,7 @@ export function TaskDetail({
           </div>
         )}
 
-        <Links task={task} relations={relations} onOpen={onOpen} />
+        <Links task={task} relations={relations} onOpen={openRelated} />
 
         <div className="form-group">
           <label htmlFor="task-detail-description">Description</label>
@@ -365,6 +380,16 @@ export function TaskDetail({
           Save
         </Button>
       </footer>
+      {leaving && (
+        <DiscardChangesDialog
+          task={task}
+          onDiscard={() => {
+            setLeaving(null);
+            onOpen(leaving);
+          }}
+          onClose={() => setLeaving(null)}
+        />
+      )}
     </section>
   );
 }
