@@ -102,7 +102,9 @@ impl Drive<'_> {
                 )
                 .await;
             }
-            Ok(false) => {}
+            Ok(false) => {
+                tracing::debug!(project_id = %self.project.project_id, reason, "Auto project pause was not applied");
+            }
             Err(error) => {
                 tracing::warn!(project_id = %self.project.project_id, %error, "Could not pause the project")
             }
@@ -291,6 +293,8 @@ pub async fn drive_project(
                 )
                 .await;
             tracing::info!(%project_id, merged, "Auto project complete");
+        } else {
+            tracing::debug!(%project_id, "Auto project completion was not applied");
         }
         return Ok(());
     }
@@ -721,7 +725,7 @@ mod tests {
     /// Drive the project while its row is held, and have a person's move of
     /// `task` to `status` commit once the pass has read the project and
     /// queued to stop it: the move lands between the pass's read and its write.
-    async fn drive_as_a_task_is_given_back(
+    async fn drive_as_a_task_is_moved(
         driven: &Driven,
         project: &Project,
         task: Uuid,
@@ -748,7 +752,7 @@ mod tests {
         project.move_to(open, tasks::CANCELLED).await;
         let driven = Driven::without_room(&project);
 
-        let drove = drive_as_a_task_is_given_back(&driven, &project, open, tasks::CREATED).await;
+        let drove = drive_as_a_task_is_moved(&driven, &project, open, tasks::CREATED).await;
         let after = automation(&project).await;
         let announced = project.notices().await;
         let second = driven.drive(&project).await;
@@ -778,7 +782,7 @@ mod tests {
         project.move_to(blocker, tasks::PAUSED).await;
         let driven = Driven::without_room(&project);
 
-        let drove = drive_as_a_task_is_given_back(&driven, &project, blocker, tasks::CREATED).await;
+        let drove = drive_as_a_task_is_moved(&driven, &project, blocker, tasks::CREATED).await;
         let after = automation(&project).await;
         let announced = project.notices().await;
         let second = driven.drive(&project).await;
@@ -794,6 +798,62 @@ mod tests {
         assert_eq!(announced, Vec::<String>::new(), "nothing is announced");
         second.expect("the next drive");
         assert_eq!(next, Some(blocker), "the next pass starts it");
+    }
+
+    #[tokio::test]
+    async fn a_task_a_person_pauses_as_the_pass_stops_the_project_leaves_it_waiting_on_them() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project
+            .place(task, tasks::BLOCKED, None, Stage::Paused)
+            .await;
+        let driven = Driven::without_room(&project);
+
+        let drove = drive_as_a_task_is_moved(&driven, &project, task, tasks::PAUSED).await;
+        let after = automation(&project).await;
+        let announced = project.notices().await;
+        let second = driven.drive(&project).await;
+        let waiting = automation(&project).await;
+        project.remove().await;
+
+        drove.expect("the drive the move landed in");
+        assert_eq!(
+            after.paused_reason, None,
+            "the project waits on the person who paused its last task"
+        );
+        assert_eq!(announced, Vec::<String>::new(), "nothing is announced");
+        second.expect("the next drive");
+        assert_eq!(waiting.paused_reason, None);
+        assert_eq!(waiting.completed_at, None);
+    }
+
+    #[tokio::test]
+    async fn a_task_a_person_cancels_as_the_pass_stops_the_project_finishes_it_instead() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project
+            .place(task, tasks::BLOCKED, None, Stage::Paused)
+            .await;
+        let driven = Driven::without_room(&project);
+
+        let drove = drive_as_a_task_is_moved(&driven, &project, task, tasks::CANCELLED).await;
+        let after = automation(&project).await;
+        let announced = project.notices().await;
+        let second = driven.drive(&project).await;
+        let finished = automation(&project).await;
+        project.remove().await;
+
+        drove.expect("the drive the move landed in");
+        assert_eq!(
+            after.paused_reason, None,
+            "the project is not paused over a task that is no longer left to do"
+        );
+        assert_eq!(announced, Vec::<String>::new(), "nothing is announced");
+        second.expect("the next drive");
+        assert!(
+            finished.completed_at.is_some(),
+            "the next pass finds nothing left and finishes the project"
+        );
     }
 
     /// A pool whose connections find a `tasks` table no task can be read

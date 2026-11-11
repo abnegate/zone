@@ -160,11 +160,8 @@ pub async fn pause(pool: &PgPool, project_id: Uuid, reason: &str) -> DbResult<bo
         == 1)
 }
 
-/// Hold a project's row until the transaction ends. The driver decides to
-/// stop a project from what it read a moment ago, and [`reopen`] undoes that
-/// decision for a task a person just gave back; each takes this lock and only
-/// then reads, in a statement of its own, so whichever comes second sees what
-/// the first committed. Neither waits on anything else while it holds the row.
+/// Hold a project's row until the transaction ends. Read what the write
+/// depends on in a later statement, never this one, or it predates the lock.
 async fn hold(connection: &mut PgConnection, project_id: Uuid) -> DbResult<()> {
     sqlx::query("SELECT id FROM projects WHERE id = $1 FOR NO KEY UPDATE")
         .bind(project_id)
@@ -173,20 +170,23 @@ async fn hold(connection: &mut PgConnection, project_id: Uuid) -> DbResult<()> {
     Ok(())
 }
 
-/// Pause a project nothing can start in, unless something can by now: false
-/// when a task became runnable or went in flight after the driver looked, as
-/// when a person un-pauses one mid-pass. The next pass then decides afresh.
+/// Pause a project nothing can start in, unless the driver would no longer
+/// stop it: false when a task became runnable or went in flight after the
+/// driver looked, or when every task left to do is by now one a person paused
+/// or cancelled. The next pass then decides afresh.
 pub async fn pause_stalled(pool: &PgPool, project_id: Uuid, reason: &str) -> DbResult<bool> {
     let mut transaction = pool.begin().await?;
     hold(&mut transaction, project_id).await?;
     let paused = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE projects SET auto_paused_reason = $3, auto_claimed_at = NULL, updated_at = NOW() \
          WHERE id = $1 AND auto AND auto_paused_reason IS NULL \
-           AND NOT EXISTS (SELECT 1 {IN_FLIGHT}) AND NOT EXISTS (SELECT 1 {RUNNABLE})"
+           AND NOT EXISTS (SELECT 1 {IN_FLIGHT}) AND NOT EXISTS (SELECT 1 {RUNNABLE}) \
+           AND EXISTS (SELECT 1 {REMAINING} AND t.status <> $4)"
     )))
     .bind(project_id)
     .bind(tasks::CLOSED.as_slice())
     .bind(reason)
+    .bind(tasks::PAUSED)
     .execute(&mut *transaction)
     .await?
     .rows_affected()
@@ -278,12 +278,8 @@ pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
 /// Open the auto projects an agentic task belongs to again: one that stopped
 /// or finished while a person withheld the task has work to do once they move
 /// it back. Called after that move has committed, never inside it, so no
-/// project row is locked while a task row is held.
-///
-/// The rows are locked before they are read for a stop to undo, as [`hold`]
-/// has it: a stop the driver is writing at this moment is waited for and then
-/// undone, where one statement would read the project as still open and leave
-/// the stop standing. Locked in id order, so two of these cannot deadlock.
+/// project row is locked while a task row is held. The rows are locked in id
+/// order, and read for a stop to undo only once locked, as [`hold`] has it.
 pub async fn reopen(pool: &PgPool, task_id: Uuid) -> DbResult<()> {
     let mut transaction = pool.begin().await?;
     let held: Vec<Uuid> = sqlx::query_scalar(
@@ -772,8 +768,8 @@ pub async fn remaining(pool: &PgPool, project_id: Uuid) -> DbResult<i64> {
 }
 
 /// The agentic tasks of project `$1` with work left, given [`tasks::CLOSED`]
-/// as `$2`. Shared by the driver's read and by [`complete`], which finishes
-/// the project only while that read still holds.
+/// as `$2`. Shared by the driver's read and by [`complete`] and
+/// [`pause_stalled`], which stop the project only while that read still holds.
 const REMAINING: &str = "FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
      WHERE tp.project_id = $1 AND t.is_agentic AND t.status <> ALL($2)";
 
@@ -2028,7 +2024,7 @@ mod tests {
         let in_flight = pause_stalled(&project.pool, project.id, STALLED)
             .await
             .expect("the pause");
-        tasks::complete_task_run(&project.pool, run.id, "failed", None, None)
+        tasks::complete_task_run(&project.pool, run.id, tasks::FAILED, None, None)
             .await
             .expect("the run ends");
         let ended = project.status(blocker).await;
@@ -2053,6 +2049,36 @@ mod tests {
             "a project is stalled only when nothing is in flight and nothing can start"
         );
         assert_eq!(after.paused_reason.as_deref(), Some(STALLED));
+    }
+
+    #[tokio::test]
+    async fn a_project_is_not_paused_as_stalled_over_tasks_a_person_paused_or_cancelled() {
+        const STALLED: &str = "nothing can start";
+        let project = Project::new(2).await;
+        let [first, second] = project.tasks[..] else {
+            panic!("two tasks");
+        };
+        project.set_status(first, tasks::CANCELLED).await;
+
+        project.set_status(second, tasks::PAUSED).await;
+        let held = pause_stalled(&project.pool, project.id, STALLED)
+            .await
+            .expect("the pause");
+        project.set_status(second, tasks::CANCELLED).await;
+        let finished = pause_stalled(&project.pool, project.id, STALLED)
+            .await
+            .expect("the pause");
+        project.set_status(second, tasks::BLOCKED).await;
+        let stalled = pause_stalled(&project.pool, project.id, STALLED)
+            .await
+            .expect("the pause");
+        project.remove().await;
+
+        assert_eq!(
+            (held, finished, stalled),
+            (false, false, true),
+            "a project waiting on a person, or with nothing left, is not one that stalled"
+        );
     }
 
     #[tokio::test]
