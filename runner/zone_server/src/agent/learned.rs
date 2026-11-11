@@ -14,6 +14,13 @@
 //! is held to. Bytes, because the prompt ceilings are `String::len()` and the
 //! context estimate is byte-length based.
 //!
+//! That ceiling is a large window's. A small one cannot carry it: on a
+//! 4,096-token model the reply's reservation leaves 3,072 tokens of input, and
+//! 8,000 bytes is two thousand of them before the prompt itself, so a turn
+//! whose history has nothing left to compact would fail to prepare. The bound
+//! a chat renders against is therefore [`budget`]: an eighth of the input the
+//! model's window leaves, and never more than the ceiling.
+//!
 //! Past the bound, an entry too large to be shown even alone under its
 //! family's heading goes first, so the entries filed before it are not spent
 //! making room it could never use. Then whichever family currently renders
@@ -60,6 +67,17 @@ use crate::db::knowledge::{self, LearnedCategory, LearnedEntryRow, discovery};
 /// and sends again with every turn, so what either may add to a prompt is one
 /// number, changed in one place.
 pub const MAX_RENDERED_BYTES: usize = skills::MAX_RENDERED_BYTES;
+
+/// The block may take one part in this many of a model's input. It is one of
+/// three workspace blocks a chat's system entry carries beside the prompt and
+/// the tool definitions, and the input also has to hold the conversation: an
+/// eighth each leaves those the larger part of a small window. The ceiling
+/// binds from 16,000 tokens of input, so the default 32,768-token window and
+/// anything larger render exactly as before.
+const SHARE_OF_INPUT: u64 = 8;
+
+/// What the context estimate counts as one token (`context::tokens`).
+const BYTES_PER_TOKEN: u64 = 4;
 
 const HEADING: &str = "Learned in this workspace";
 
@@ -117,10 +135,11 @@ impl Family {
     }
 
     /// Whether `entry` can be shown at all: alone under its family's heading
-    /// it is within the bound. A discovery always answers that it can, because
-    /// its block leaves out one too large for it and counts it there.
-    fn fits(self, entry: &LearnedEntryRow) -> bool {
-        self.render(std::slice::from_ref(entry)).trim_end().len() <= MAX_RENDERED_BYTES
+    /// it is within `budget`. A discovery too large for its own block's bound
+    /// is left out there and counted, so it is measured by that block's
+    /// closing line.
+    fn fits(self, entry: &LearnedEntryRow, budget: usize) -> bool {
+        self.render(std::slice::from_ref(entry)).trim_end().len() <= budget
     }
 
     /// Which of `entries` the family's block for them shows. Every family
@@ -161,14 +180,14 @@ impl<'a> Section<'a> {
         }
     }
 
-    fn withhold_oversized(&mut self) {
+    fn withhold_oversized(&mut self, budget: usize) {
         let family = self.family;
-        if self.entries.iter().all(|entry| family.fits(entry)) {
+        if self.entries.iter().all(|entry| family.fits(entry, budget)) {
             return;
         }
         let entries = self.entries.to_mut();
         let filed = entries.len();
-        entries.retain(|entry| family.fits(entry));
+        entries.retain(|entry| family.fits(entry, budget));
         self.withheld += filed - entries.len();
         self.handed = entries.len();
         self.block = family.render(entries);
@@ -257,15 +276,29 @@ fn yielding<'sections, 'entries>(
         .max_by_key(|section| section.block.len())
 }
 
-/// The block for a chat's system prompt, and the entries it shows.
-pub fn render(learned: &Learned) -> Block {
+/// The bound a chat's block renders against, for a model whose window leaves
+/// `input` tokens once the reply is reserved: a [`SHARE_OF_INPUT`] share of
+/// it, held to [`MAX_RENDERED_BYTES`]. A window of unknown size gets the
+/// ceiling.
+pub fn budget(input: Option<u64>) -> usize {
+    input.map_or(MAX_RENDERED_BYTES, |tokens| {
+        let share = tokens.saturating_mul(BYTES_PER_TOKEN) / SHARE_OF_INPUT;
+        usize::try_from(share).map_or(MAX_RENDERED_BYTES, |share| share.min(MAX_RENDERED_BYTES))
+    })
+}
+
+/// The block for a chat's system prompt, held to `budget` bytes, and the
+/// entries it shows.
+pub fn render(learned: &Learned, budget: usize) -> Block {
     let mut sections = learned.sections();
     let mut text = assemble(&sections, learned.unread);
-    if text.len() > MAX_RENDERED_BYTES {
-        sections.iter_mut().for_each(Section::withhold_oversized);
+    if text.len() > budget {
+        sections
+            .iter_mut()
+            .for_each(|section| section.withhold_oversized(budget));
         text = assemble(&sections, learned.unread);
     }
-    while text.len() > MAX_RENDERED_BYTES {
+    while text.len() > budget {
         let Some(section) = yielding(&mut sections) else {
             break;
         };
@@ -340,10 +373,11 @@ pub async fn load(pool: &PgPool, workspace_id: Uuid) -> Learned {
     }
 }
 
-/// What a workspace has learned, rendered for a chat in it. A store that
-/// cannot be read costs the turn what it held and nothing else.
-pub async fn prompt(pool: &PgPool, workspace_id: Uuid) -> Block {
-    render(&load(pool, workspace_id).await)
+/// What a workspace has learned, rendered for a chat in it within `budget`
+/// bytes. A store that cannot be read costs the turn what it held and nothing
+/// else.
+pub async fn prompt(pool: &PgPool, workspace_id: Uuid, budget: usize) -> Block {
+    render(&load(pool, workspace_id).await, budget)
 }
 
 #[cfg(test)]
@@ -539,9 +573,15 @@ mod tests {
 
     #[test]
     fn a_workspace_that_has_learned_nothing_pays_nothing() {
-        assert_eq!(render(&Learned::default()), Block::default());
         assert_eq!(
-            render(&learned(Vec::new(), Vec::new(), Vec::new(), Vec::new())),
+            render(&Learned::default(), MAX_RENDERED_BYTES),
+            Block::default()
+        );
+        assert_eq!(
+            render(
+                &learned(Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                MAX_RENDERED_BYTES
+            ),
             Block::default()
         );
     }
@@ -557,7 +597,7 @@ mod tests {
             vec![fact(LearnedCategory::StrategyLesson, 0, 60)],
             vec![recorded(0, 60)],
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let text = &block.text;
 
         assert_eq!(
@@ -608,7 +648,7 @@ mod tests {
             vec![fact(LearnedCategory::StrategyLesson, 0, 60)],
             Vec::new(),
         );
-        let block = render(&alone);
+        let block = render(&alone, MAX_RENDERED_BYTES);
         assert_eq!(
             block.text,
             knowledge::render_learned_facts(
@@ -636,7 +676,7 @@ mod tests {
             Vec::new(),
             (0..2).map(|index| recorded(index, 80)).collect(),
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let text = &block.text;
         let shown = Shown::of(text);
 
@@ -696,7 +736,7 @@ mod tests {
                 .collect(),
             Vec::new(),
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let shown = Shown::of(&block.text);
 
         assert!(
@@ -727,7 +767,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let text = &block.text;
         let shown = Shown::of(text);
 
@@ -763,7 +803,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let kept = Shown {
             instructions: 0,
             conventions: 1,
@@ -789,7 +829,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let kept = Shown {
             instructions: 1,
             conventions: 0,
@@ -818,15 +858,18 @@ mod tests {
     /// because there is nothing it is more than.
     #[test]
     fn with_nothing_shown_the_closing_line_stands_under_its_own_heading() {
-        let block = render(&learned(
-            vec![instruction(0, MAX_RENDERED_BYTES)],
-            vec![
-                fact(LearnedCategory::RepositoryConvention, 0, MAX_RENDERED_BYTES),
-                fact(LearnedCategory::RepositoryConvention, 1, MAX_RENDERED_BYTES),
-            ],
-            Vec::new(),
-            Vec::new(),
-        ));
+        let block = render(
+            &learned(
+                vec![instruction(0, MAX_RENDERED_BYTES)],
+                vec![
+                    fact(LearnedCategory::RepositoryConvention, 0, MAX_RENDERED_BYTES),
+                    fact(LearnedCategory::RepositoryConvention, 1, MAX_RENDERED_BYTES),
+                ],
+                Vec::new(),
+                Vec::new(),
+            ),
+            MAX_RENDERED_BYTES,
+        );
         assert_eq!(
             block.text,
             "\n\n# Learned in this workspace\n3 learned entries are filed in this workspace but \
@@ -834,12 +877,15 @@ mod tests {
         );
         assert_eq!(block.shown, HashSet::new());
 
-        let one = render(&learned(
-            vec![instruction(0, MAX_RENDERED_BYTES)],
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-        ));
+        let one = render(
+            &learned(
+                vec![instruction(0, MAX_RENDERED_BYTES)],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ),
+            MAX_RENDERED_BYTES,
+        );
         assert_eq!(
             one.text,
             "\n\n# Learned in this workspace\n1 learned entry is filed in this workspace but \
@@ -861,7 +907,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
 
         assert!(
             block.text.len() <= MAX_RENDERED_BYTES,
@@ -902,7 +948,10 @@ mod tests {
             lessons: 0,
             discoveries: 0,
         };
-        assert_eq!(render(&under).text, expected(&under, all, &more(3)));
+        assert_eq!(
+            render(&under, MAX_RENDERED_BYTES).text,
+            expected(&under, all, &more(3))
+        );
 
         let mut past = learned(
             (0..12).map(|index| instruction(index, 800)).collect(),
@@ -911,7 +960,7 @@ mod tests {
             Vec::new(),
         );
         past.unread = 7;
-        let block = render(&past);
+        let block = render(&past, MAX_RENDERED_BYTES);
         let shown = Shown::of(&block.text);
         assert!(
             shown.instructions > 0 && shown.instructions < 12,
@@ -963,7 +1012,7 @@ mod tests {
                 .map(|index| recorded(index, discovery::MAX_ENTRY_BYTES - "Subject 00".len()))
                 .collect(),
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let shown = Shown::of(&block.text);
 
         assert_eq!(
@@ -998,7 +1047,7 @@ mod tests {
                 recorded(2, 60),
             ],
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
 
         assert_eq!(
             block.text,
@@ -1041,7 +1090,7 @@ mod tests {
                 .collect(),
         );
         learned.discoveries.recorded = 130;
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let shown = Shown::of(&block.text);
 
         assert!(shown.discoveries > 0 && shown.discoveries < 12, "{shown:?}");
@@ -1081,7 +1130,7 @@ mod tests {
                 .collect(),
         );
         learned.discoveries.recorded = RECORDED;
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let shown = Shown::of(&block.text);
 
         assert!(
@@ -1120,7 +1169,7 @@ mod tests {
             vec![recorded(0, 5_200)],
         );
         learned.discoveries.recorded = 4;
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
 
         assert_eq!(
             block.text,
@@ -1147,7 +1196,7 @@ mod tests {
                 .map(|index| recorded(index, discovery::MAX_ENTRY_BYTES - "Subject 00".len()))
                 .collect(),
         );
-        let block = render(&learned);
+        let block = render(&learned, MAX_RENDERED_BYTES);
         let shown = Shown::of(&block.text);
 
         assert!(
@@ -1172,6 +1221,63 @@ mod tests {
         );
         assert_eq!(block.text.matches("not shown").count(), 1, "{}", block.text);
         assert_eq!(block.shown, ids(&learned, shown));
+    }
+
+    /// A 4,096-token window leaves 3,072 tokens of input once a quarter is
+    /// reserved for the reply, and the default 32,768-token window leaves
+    /// 28,672.
+    #[test]
+    fn the_bound_is_a_share_of_a_small_window_and_the_ceiling_of_a_large_one() {
+        assert_eq!(budget(Some(3_072)), 1_536);
+        assert_eq!(budget(Some(15_996)), 7_998);
+        assert_eq!(budget(Some(16_000)), MAX_RENDERED_BYTES);
+        assert_eq!(budget(Some(28_672)), MAX_RENDERED_BYTES);
+        assert_eq!(budget(Some(u64::MAX)), MAX_RENDERED_BYTES);
+        assert_eq!(budget(None), MAX_RENDERED_BYTES);
+    }
+
+    #[test]
+    fn a_small_window_shows_fewer_whole_entries_and_names_exactly_those() {
+        let learned = learned(
+            (0..12).map(|index| instruction(index, 120)).collect(),
+            (0..12)
+                .map(|index| fact(LearnedCategory::RepositoryConvention, index, 120))
+                .collect(),
+            (0..12)
+                .map(|index| fact(LearnedCategory::StrategyLesson, index, 120))
+                .collect(),
+            (0..12).map(|index| recorded(index, 120)).collect(),
+        );
+        let large = render(&learned, budget(Some(28_672)));
+        assert_eq!(large, render(&learned, MAX_RENDERED_BYTES));
+
+        let small = render(&learned, budget(Some(3_072)));
+        let shown = Shown::of(&small.text);
+
+        assert!(small.text.len() <= 1_536, "{} bytes", small.text.len());
+        assert!(
+            shown.total() > 0 && shown.total() < Shown::of(&large.text).total(),
+            "{shown:?}"
+        );
+        assert_eq!(
+            small.text,
+            expected(&learned, shown, &more(entries(&learned) - shown.total())),
+            "what is kept is the front of each family, every entry whole, and the rest counted"
+        );
+        assert_eq!(small.shown, ids(&learned, shown));
+        let every = learned
+            .instructions
+            .iter()
+            .chain(learned.facts.iter().flat_map(|facts| &facts.entries))
+            .chain(&learned.discoveries.rows);
+        for entry in every {
+            assert_eq!(
+                small.shown.contains(&entry.id),
+                small.text.contains(&entry.content),
+                "{} is named as shown exactly when its text is",
+                entry.title
+            );
+        }
     }
 
     #[tokio::test]
@@ -1201,7 +1307,7 @@ mod tests {
         assert!(failed.is_empty(), "{failed:?}");
         let learned = learned(failed, kept, Vec::new(), Vec::new());
         assert_eq!(
-            render(&learned).text,
+            render(&learned, MAX_RENDERED_BYTES).text,
             knowledge::render_learned_facts(LearnedCategory::RepositoryConvention, &conventions)
                 .trim_end()
         );
@@ -1228,6 +1334,9 @@ mod tests {
         assert!(loaded.discoveries.rows.is_empty());
         assert_eq!(loaded.discoveries.recorded, 0);
         assert_eq!(loaded.unread, 0);
-        assert_eq!(prompt(&pool, workspace).await, Block::default());
+        assert_eq!(
+            prompt(&pool, workspace, MAX_RENDERED_BYTES).await,
+            Block::default()
+        );
     }
 }

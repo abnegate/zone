@@ -4892,7 +4892,7 @@ mod tests {
             documents.insert(document);
         }
 
-        let findings = learned::prompt(&pool, workspace).await;
+        let findings = learned::prompt(&pool, workspace, learned::MAX_RENDERED_BYTES).await;
         let retrieved = retrieve_knowledge(&pool, None, QUESTION, workspace, &findings).await;
         let unshown =
             retrieve_knowledge(&pool, None, QUESTION, workspace, &learned::Block::default()).await;
