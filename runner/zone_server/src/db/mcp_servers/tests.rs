@@ -1534,6 +1534,43 @@ async fn overrides_on_a_workspace_of_another_organization_are_not_found() {
 }
 
 #[tokio::test]
+async fn a_non_member_cannot_tell_a_workspace_that_exists_from_one_that_does_not() {
+    let fixture = tenant().await;
+    let server = fixture.create(stdio("github")).await;
+
+    for workspace in [fixture.workspace, Uuid::new_v4()] {
+        let read = workspace_list_authorized(
+            &fixture.pool,
+            &fixture.key,
+            fixture.organization,
+            workspace,
+            fixture.outsider,
+        )
+        .await;
+        let written = set_workspace_overrides_authorized(
+            &fixture.pool,
+            fixture.organization,
+            workspace,
+            fixture.outsider,
+            BTreeMap::from([(server.id, Some(false))]),
+        )
+        .await;
+
+        assert!(
+            matches!(read, Err(McpServerError::NotFound(ORGANIZATION_NOT_FOUND))),
+            "{workspace}: {read:?}"
+        );
+        assert!(
+            matches!(
+                written,
+                Err(McpServerError::NotFound(ORGANIZATION_NOT_FOUND))
+            ),
+            "{workspace}: {written:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn deleting_the_organization_removes_its_servers_and_overrides() {
     let fixture = tenant().await;
     join_workspace(

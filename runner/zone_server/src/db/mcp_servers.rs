@@ -1,4 +1,4 @@
-//! Organization MCP servers and the workspace overrides that switch them on or off.
+//! Organization MCP servers and the workspace overrides that switch them off for one workspace.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -286,6 +286,7 @@ async fn authorize_workspace(
     user: Uuid,
     write: bool,
 ) -> McpServerResult<()> {
+    authorize_organization(&mut *connection, organization, user, OrgRole::Member).await?;
     let owned: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM workspaces WHERE id = $1 AND organization_id = $2 FOR SHARE",
     )
@@ -296,7 +297,6 @@ async fn authorize_workspace(
     if owned.is_none() {
         return Err(McpServerError::NotFound(WORKSPACE_NOT_FOUND));
     }
-    authorize_organization(&mut *connection, organization, user, OrgRole::Member).await?;
     match workspace_members::lock_role(connection, workspace, user).await? {
         Some(WorkspaceRole::Owner | WorkspaceRole::Admin) => Ok(()),
         Some(_) if !write => Ok(()),
@@ -582,7 +582,9 @@ pub async fn organization_for_workspace(
     )
 }
 
-/// The servers `workspace` switches on (`true`) or off (`false`) against the organization's.
+/// The override `workspace` stores for each server it chose about: `false` switches the server
+/// off for the workspace, and `true` changes nothing, since the organization's own switch still
+/// decides.
 pub async fn workspace_overrides(
     pool: &PgPool,
     workspace: Uuid,
