@@ -490,6 +490,7 @@ fn block(recall: render::Recall) -> String {
             PREFERENCES,
         )),
         &facts(),
+        render::MAX_RENDERED_BYTES,
     )
 }
 
@@ -624,6 +625,7 @@ async fn a_chat_with_the_agent_off_reads_the_profile_and_no_index() {
         false,
         CAPABILITY,
         &environment(),
+        "",
         &memory,
         "",
     );
@@ -666,6 +668,7 @@ async fn a_chat_reads_the_remembered_block_after_the_capability_tail() {
         true,
         CAPABILITY,
         &environment(),
+        "",
         &memory,
         "",
     );
@@ -687,4 +690,640 @@ async fn a_chat_reads_the_remembered_block_after_the_capability_tail() {
     assert!(composed.contains(MEMORY_SECTION), "{composed}");
     assert_eq!(composed.matches(SANDBOX).count(), 0, "{composed}");
     assert!(!composed.contains("\n\n\n"), "{composed}");
+}
+
+use abnegate_agent::context::{self, Coverage, Entry, Summary};
+use chrono::NaiveDate;
+use sqlx::PgPool;
+use zone_core::llm::LlmBackend;
+use zone_server::agent::learned;
+use zone_server::db::chats;
+use zone_server::db::knowledge::discovery::{self, Discovery};
+use zone_server::db::knowledge::{
+    self, LearnedFact, LearningProvenance, PromotionProvenance, StandingInstruction,
+};
+use zone_server::db::users;
+use zone_server::services::chat::session::{self, Generation, Mode};
+use zone_server::services::route::Route;
+
+const INSTRUCTION: &str = "Run cargo nextest from the runner directory.";
+
+const CONVENTION: &str = "Migrations are timestamped and named in snake_case.";
+
+const DISCOVERY: &str = "The disposable test database listens on 55471.";
+
+/// A loopback port nothing listens on, so preparing a turn asks no real model
+/// server how large its window is.
+pub(crate) const UNREACHABLE: &str = "http://127.0.0.1:9";
+
+/// What `session::build` made of one chat, kept so the rows can be removed
+/// before anything is asserted.
+struct Prepared {
+    agent: bool,
+    agentic: bool,
+    system: String,
+    findings: learned::Block,
+    memory: String,
+    skills: String,
+}
+
+/// A workspace of its own in a new organization, which is what a test deletes
+/// to take everything it filed with it.
+async fn workspace(pool: &PgPool) -> (Uuid, Uuid) {
+    let organization: Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING id")
+            .bind("Learned")
+            .bind(Uuid::new_v4().to_string())
+            .fetch_one(pool)
+            .await
+            .expect("an organization");
+    let workspace: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (organization_id, name, slug) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(organization)
+    .bind("Learned")
+    .bind(Uuid::new_v4().to_string())
+    .fetch_one(pool)
+    .await
+    .expect("a workspace");
+    (organization, workspace)
+}
+
+fn confirmed() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 11, 11).expect("a real date")
+}
+
+/// The one claim only the real builder can make: a chat's system entry carries
+/// what its workspace learned, read from the store the promotion pass, the
+/// learning pass and `record_discovery` write to, whether or not its agent is
+/// on. Until this block a chat reached those rows only by searching for them.
+///
+/// The run-side readers are asked for the same workspace, because under the
+/// bound the chat's block is their bytes and nothing else.
+#[tokio::test]
+async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a migrated disposable database");
+    let confirmed = confirmed();
+    let (organization, workspace) = workspace(&pool).await;
+
+    knowledge::upsert_standing_instruction(
+        &pool,
+        &StandingInstruction {
+            workspace_id: workspace,
+            title: "Repeated answer: how do I run the tests".to_string(),
+            content: INSTRUCTION.to_string(),
+            provenance: PromotionProvenance {
+                fingerprint: "promoted-tests".to_string(),
+                occurrences: 4,
+                distinct_chats: 3,
+                last_confirmed: confirmed,
+            },
+        },
+    )
+    .await
+    .expect("a standing instruction");
+    knowledge::upsert_learned_fact(
+        &pool,
+        &LearnedFact {
+            workspace_id: workspace,
+            category: LearnedCategory::RepositoryConvention,
+            title: "Migration names".to_string(),
+            content: CONVENTION.to_string(),
+            provenance: LearningProvenance {
+                fingerprint: "learned-migrations".to_string(),
+                observations: 9,
+                distinct_runs: 4,
+                confidence: 0.82,
+                last_confirmed: confirmed,
+            },
+        },
+    )
+    .await
+    .expect("a repository convention");
+    let author = users::create_user(
+        &pool,
+        &format!("{}@example.com", Uuid::new_v4()),
+        "hash",
+        None,
+        false,
+    )
+    .await
+    .expect("whoever the recording chat was acting for")
+    .id;
+    discovery::record(
+        &pool,
+        &Discovery {
+            workspace_id: workspace,
+            subject: "Test database port".to_string(),
+            statement: DISCOVERY.to_string(),
+            author,
+            provenance: discovery::Provenance {
+                kind: discovery::Kind::Lesson,
+                source: discovery::Source::Chat(Uuid::new_v4()),
+                last_confirmed: confirmed,
+            },
+        },
+    )
+    .await
+    .expect("a discovery");
+
+    let mut config = common::test_config();
+    config.litellm_host = UNREACHABLE.to_string();
+    config.ollama_host = UNREACHABLE.to_string();
+    let state = common::create_test_state(config, pool.clone());
+
+    let mut prepared = Vec::new();
+    for agent in [true, false] {
+        let chat = chats::create_chat(
+            &pool,
+            Some(workspace),
+            "Learned",
+            "fixture-model",
+            agent,
+            false,
+        )
+        .await
+        .expect("a chat");
+        let endpoint = Route::for_workspace(&state, workspace)
+            .await
+            .into_endpoint()
+            .expect("a usable route");
+        let preparation = session::build(
+            &state,
+            &chat,
+            Uuid::new_v4(),
+            None,
+            Mode::Generation(Generation::unrouted(LlmBackend::Http)),
+            endpoint,
+            None,
+        )
+        .await;
+        prepared.push(preparation.map(|preparation| {
+            Prepared {
+                agent,
+                agentic: preparation.agentic,
+                system: preparation.context.entries[0]
+                    .message
+                    .content
+                    .clone()
+                    .unwrap_or_default(),
+                findings: preparation.findings,
+                memory: preparation.memory,
+                skills: preparation.skills,
+            }
+        }));
+    }
+    let rendered = learned::prompt(&pool, workspace, learned::MAX_RENDERED_BYTES).await;
+    let instructions = knowledge::standing_instructions_prompt(&pool, workspace).await;
+    let facts = knowledge::learned_facts_prompt(&pool, workspace).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("the workspace and everything in it go");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(author)
+        .execute(&pool)
+        .await
+        .expect("the author goes");
+
+    assert_eq!(
+        rendered.text,
+        format!(
+            "{}{}",
+            instructions.expect("what a run reads").trim_end(),
+            facts.trim_end()
+        ),
+        "under the bound a chat reads the bytes a run reads"
+    );
+    assert!(rendered.text.len() <= learned::MAX_RENDERED_BYTES);
+    assert_eq!(
+        rendered.shown.len(),
+        3,
+        "one entry of each family is shown: {:?}",
+        rendered.shown
+    );
+
+    for preparation in prepared {
+        let Prepared {
+            agent,
+            agentic,
+            system,
+            findings,
+            memory,
+            skills,
+        } = preparation.unwrap_or_else(|error| panic!("the turn is prepared: {error}"));
+        assert_eq!(agentic, agent, "the chat's agent setting decides the arm");
+        assert_eq!(
+            system.contains("You can call these tools"),
+            agent,
+            "{system}"
+        );
+        assert_eq!(findings, rendered);
+        assert_eq!((memory.as_str(), skills.as_str()), ("", ""));
+        assert!(
+            system.ends_with(&findings.text),
+            "with nothing remembered and no skill filed the block closes the entry: {system}"
+        );
+
+        let positions = [
+            "\n\n# Standing instructions\n",
+            INSTRUCTION,
+            "\n\n# Repository conventions\n",
+            CONVENTION,
+            "\n\n# Recorded while working here\n",
+            DISCOVERY,
+        ]
+        .map(|text| {
+            system
+                .rfind(text)
+                .unwrap_or_else(|| panic!("{text:?} is missing from {system}"))
+        });
+        assert!(positions.is_sorted(), "{positions:?}: {system}");
+        assert_eq!(
+            system.matches("\n\n# Standing instructions\n").count(),
+            1,
+            "{system}"
+        );
+        assert!(!system.contains("\n\n\n"), "{system}");
+    }
+}
+
+/// One workspace that has learned more than any block shows, prepared for a
+/// chat on an 8,192-token window and for one whose window nothing reports. The
+/// small window's block is held to what the turn leaves under the compaction
+/// threshold once the room a checkpoint needs is kept, so the preserved turn
+/// and the largest checkpoint stay under that threshold; the other is held to
+/// the ceiling, as every chat was before.
+#[tokio::test]
+async fn a_chat_is_given_a_learned_block_its_window_can_carry() {
+    const FILED: usize = 30;
+
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a migrated disposable database");
+    let (organization, workspace) = workspace(&pool).await;
+    for index in 0..FILED {
+        knowledge::upsert_standing_instruction(
+            &pool,
+            &StandingInstruction {
+                workspace_id: workspace,
+                title: format!("Repeated answer {index:02}"),
+                content: format!("Answer {index:02}: {}", "a".repeat(200)),
+                provenance: PromotionProvenance {
+                    fingerprint: format!("promoted-{index:02}"),
+                    occurrences: 4,
+                    distinct_chats: 3,
+                    last_confirmed: confirmed(),
+                },
+            },
+        )
+        .await
+        .expect("a standing instruction");
+    }
+
+    let mut config = common::test_config();
+    config.litellm_host = UNREACHABLE.to_string();
+    config.ollama_host = UNREACHABLE.to_string();
+    let state = common::create_test_state(config, pool.clone());
+
+    let mut prepared = Vec::new();
+    for window in [Some(8_192), None] {
+        let mut chat = chats::create_chat(
+            &pool,
+            Some(workspace),
+            "Learned",
+            "fixture-model",
+            false,
+            false,
+        )
+        .await
+        .expect("a chat");
+        chat.context_tokens = window;
+        let endpoint = Route::for_workspace(&state, workspace)
+            .await
+            .into_endpoint()
+            .expect("a usable route");
+        let preparation = session::build(
+            &state,
+            &chat,
+            Uuid::new_v4(),
+            None,
+            Mode::Generation(Generation::unrouted(LlmBackend::Http)),
+            endpoint,
+            None,
+        )
+        .await;
+        prepared.push(preparation.map(|preparation| {
+            let preserved: Vec<Entry> = preparation
+                .context
+                .entries
+                .iter()
+                .filter(|entry| entry.preserve)
+                .cloned()
+                .collect();
+            (
+                preparation.context.policy.clone(),
+                preserved,
+                preparation.findings,
+            )
+        }));
+    }
+    let ceiling = learned::prompt(&pool, workspace, learned::MAX_RENDERED_BYTES).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("the workspace and everything in it go");
+
+    let mut prepared = prepared.into_iter().map(|preparation| {
+        preparation.unwrap_or_else(|error| panic!("the turn is prepared: {error}"))
+    });
+    let (policy, preserved, small) = prepared.next().expect("the small window's turn");
+    let (unknown, _, large) = prepared.next().expect("the unknown window's turn");
+
+    let system = preserved[0].message.content.clone().unwrap_or_default();
+    assert!(system.ends_with(&small.text), "{system}");
+    let checkpoint = Summary::new(String::new(), Coverage::new(Vec::new(), String::new()), 1);
+    let compacted = context::estimate(
+        "fixture-model",
+        &preserved,
+        None,
+        &policy,
+        Some(&checkpoint),
+    )
+    .used
+        + u64::from(policy.reserved);
+    assert!(
+        compacted < policy.threshold().expect("a known window"),
+        "{compacted} tokens once compacted against {:?}",
+        policy.threshold()
+    );
+    let bullets = small.text.matches("\n## Repeated answer ").count();
+    assert!(bullets > 0 && bullets < FILED, "{}", small.text);
+    assert_eq!(small.shown.len(), bullets, "{}", small.text);
+    assert!(
+        small.text.ends_with(&format!(
+            "\n\n{} more learned entries are filed in this workspace but not shown here.",
+            FILED - bullets
+        )),
+        "{}",
+        small.text
+    );
+
+    assert_eq!(unknown.limit, None);
+    assert_eq!(
+        large, ceiling,
+        "a window nothing reports small is held to the ceiling"
+    );
+    assert!(large.shown.len() > bullets, "{}", large.text);
+    assert!(small.shown.is_subset(&large.shown));
+}
+
+/// The standing instructions are read to a row limit. A workspace that has
+/// filed more than that gets a block well under the byte bound that is still
+/// not the whole list, and the closing line has to count the rows nothing
+/// read: the ones a run in the same workspace is not shown either.
+#[tokio::test]
+async fn a_chat_is_told_how_many_entries_a_row_limit_kept_from_it() {
+    const FILED: usize = 43;
+
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a migrated disposable database");
+    let (organization, workspace) = workspace(&pool).await;
+    for index in 0..FILED {
+        knowledge::upsert_standing_instruction(
+            &pool,
+            &StandingInstruction {
+                workspace_id: workspace,
+                title: format!("Repeated answer {index:02}"),
+                content: format!("Answer {index:02}."),
+                provenance: PromotionProvenance {
+                    fingerprint: format!("promoted-{index:02}"),
+                    occurrences: 4,
+                    distinct_chats: 3,
+                    last_confirmed: confirmed(),
+                },
+            },
+        )
+        .await
+        .expect("a standing instruction");
+    }
+
+    let loaded = learned::load(&pool, workspace).await;
+    let block = learned::render(&loaded, learned::MAX_RENDERED_BYTES);
+    let run = knowledge::standing_instructions_prompt(&pool, workspace).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("the workspace and everything in it go");
+
+    let read = loaded.instructions.len();
+    assert!(
+        read > 0 && read < FILED,
+        "the store reads to a row limit: {read} of {FILED}"
+    );
+    assert_eq!(loaded.unread, FILED - read);
+    assert_eq!(
+        block.text,
+        format!(
+            "{}\n\n{} more learned entries are filed in this workspace but not shown here.",
+            run.expect("what a run reads").trim_end(),
+            FILED - read
+        )
+    );
+    assert!(block.text.len() <= learned::MAX_RENDERED_BYTES);
+    assert_eq!(block.shown.len(), read);
+}
+
+/// The discoveries are read to a row limit of their own and their block says
+/// how many entries it does not show. In a workspace that has recorded more
+/// than the limit a chat's count has to be of everything recorded, the rows
+/// nothing read included, which is the count a run in the same workspace
+/// reads.
+#[tokio::test]
+async fn a_chat_is_told_how_many_discoveries_it_is_not_shown() {
+    const RECORDED: usize = discovery::MAX_LISTED + 6;
+
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a migrated disposable database");
+    let (organization, workspace) = workspace(&pool).await;
+    let author = users::create_user(
+        &pool,
+        &format!("{}@example.com", Uuid::new_v4()),
+        "hash",
+        None,
+        false,
+    )
+    .await
+    .expect("whoever the recording chats were acting for")
+    .id;
+    let chats = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    for index in 0..RECORDED {
+        discovery::record(
+            &pool,
+            &Discovery {
+                workspace_id: workspace,
+                subject: format!("Subject {index:03}"),
+                statement: format!("Statement {index:03}."),
+                author,
+                provenance: discovery::Provenance {
+                    kind: discovery::Kind::Lesson,
+                    source: discovery::Source::Chat(chats[index % chats.len()]),
+                    last_confirmed: confirmed(),
+                },
+            },
+        )
+        .await
+        .expect("a discovery");
+    }
+
+    let loaded = learned::load(&pool, workspace).await;
+    let block = learned::render(&loaded, learned::MAX_RENDERED_BYTES);
+    let run = knowledge::learned_facts_prompt(&pool, workspace).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("the workspace and everything in it go");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(author)
+        .execute(&pool)
+        .await
+        .expect("the author goes");
+
+    assert_eq!(loaded.discoveries.rows.len(), discovery::MAX_LISTED);
+    assert_eq!(loaded.discoveries.recorded, RECORDED);
+    assert_eq!(loaded.unread, 0, "the discoveries block counts its own");
+    let shown = block.shown.len();
+    assert!(
+        shown > 0 && shown < discovery::MAX_LISTED,
+        "the block's own bound shows {shown} of the {} rows read",
+        discovery::MAX_LISTED
+    );
+    assert_eq!(block.text.matches("\n- Subject ").count(), shown);
+    assert!(
+        block.text.ends_with(&format!(
+            "\n\n{} older entries are recorded here but not shown.",
+            RECORDED - shown
+        )),
+        "{}",
+        &block.text[block.text.len() - 160..]
+    );
+    assert_eq!(
+        block.text,
+        run.trim_end(),
+        "a chat reads the count a run reads"
+    );
+    assert!(!block.text.contains("learned entr"), "{}", block.text);
+    assert!(block.text.len() <= learned::MAX_RENDERED_BYTES);
+}
+
+/// The count a chat's closing line is built from: what is still filed, by
+/// category, and none of the discoveries, which their own block counts. A
+/// withdrawn entry or a counted discovery would have the line claim an entry
+/// nothing withheld.
+#[tokio::test]
+async fn the_learned_count_is_of_active_pass_derived_entries_by_category() {
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a migrated disposable database");
+    let (organization, workspace) = workspace(&pool).await;
+    let mut instructions = Vec::new();
+    for index in 0..3 {
+        let (instruction, _) = knowledge::upsert_standing_instruction(
+            &pool,
+            &StandingInstruction {
+                workspace_id: workspace,
+                title: format!("Repeated answer {index}"),
+                content: format!("Answer {index}."),
+                provenance: PromotionProvenance {
+                    fingerprint: format!("promoted-{index}"),
+                    occurrences: 4,
+                    distinct_chats: 3,
+                    last_confirmed: confirmed(),
+                },
+            },
+        )
+        .await
+        .expect("a standing instruction");
+        instructions.push(instruction);
+    }
+    let withdrawn = knowledge::retire_standing_instruction(&pool, instructions[0]).await;
+    knowledge::upsert_learned_fact(
+        &pool,
+        &LearnedFact {
+            workspace_id: workspace,
+            category: LearnedCategory::RepositoryConvention,
+            title: "Migration names".to_string(),
+            content: CONVENTION.to_string(),
+            provenance: LearningProvenance {
+                fingerprint: "learned-migrations".to_string(),
+                observations: 9,
+                distinct_runs: 4,
+                confidence: 0.82,
+                last_confirmed: confirmed(),
+            },
+        },
+    )
+    .await
+    .expect("a repository convention");
+    let author = users::create_user(
+        &pool,
+        &format!("{}@example.com", Uuid::new_v4()),
+        "hash",
+        None,
+        false,
+    )
+    .await
+    .expect("whoever the recording chat was acting for")
+    .id;
+    discovery::record(
+        &pool,
+        &Discovery {
+            workspace_id: workspace,
+            subject: "Test database port".to_string(),
+            statement: DISCOVERY.to_string(),
+            author,
+            provenance: discovery::Provenance {
+                kind: discovery::Kind::Lesson,
+                source: discovery::Source::Chat(Uuid::new_v4()),
+                last_confirmed: confirmed(),
+            },
+        },
+    )
+    .await
+    .expect("a discovery");
+
+    let filed = knowledge::count_learned_entries(&pool, workspace).await;
+    let elsewhere = knowledge::count_learned_entries(&pool, Uuid::new_v4()).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("the workspace and everything in it go");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(author)
+        .execute(&pool)
+        .await
+        .expect("the author goes");
+
+    assert!(withdrawn.expect("the instruction is withdrawn"));
+    assert_eq!(
+        filed.expect("the count"),
+        std::collections::HashMap::from([
+            (knowledge::STANDING_INSTRUCTION_CATEGORY.to_string(), 2),
+            (LearnedCategory::RepositoryConvention.to_string(), 1),
+        ])
+    );
+    assert_eq!(
+        elsewhere.expect("the count"),
+        std::collections::HashMap::new(),
+        "a workspace that has filed nothing has no category to count"
+    );
 }

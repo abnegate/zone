@@ -181,4 +181,48 @@ describe('ActionReceipts', () => {
     expect(screen.getByText('Version conflict')).toBeInTheDocument();
     expect(screen.queryByTestId('action-receipt-link')).not.toBeInTheDocument();
   });
+
+  it('labels a recorded discovery and links it to its wiki page', () => {
+    renderReceipts([
+      receipt({
+        action: 'record_discovery',
+        target_type: 'document',
+        target_id: '5d0c7e1a-6b2f-4c3d-9e8a-1f2b3c4d5e6f',
+        target_label: 'Frontend tests need isolation',
+        outcome: 'Recorded as a new entry.',
+        href: '/wiki?id=5d0c7e1a-6b2f-4c3d-9e8a-1f2b3c4d5e6f',
+      }),
+    ]);
+
+    expect(screen.getByText('Recorded discovery')).toBeInTheDocument();
+    expect(screen.queryByText('record_discovery')).not.toBeInTheDocument();
+    expect(screen.getByText('Frontend tests need isolation')).toBeInTheDocument();
+    expect(screen.getByText('Recorded as a new entry.')).toBeInTheDocument();
+    const link = screen.getByTestId('action-receipt-link');
+    expect(link).toHaveTextContent('Open document');
+    expect(link).toHaveAttribute('href', '/wiki?id=5d0c7e1a-6b2f-4c3d-9e8a-1f2b3c4d5e6f');
+  });
+
+  it('marks a discovery that was not recorded', () => {
+    const refusal =
+      'Not recorded: that looks like a credential, a connection string carrying a password, or a long run of letters and digits such as a full commit hash. Name the variable rather than its value, or shorten the value.';
+    renderReceipts([
+      receipt({
+        action: 'record_discovery',
+        target_type: 'document',
+        target_id: '',
+        target_label: 'Discovery',
+        success: false,
+        outcome: refusal,
+        href: '',
+      }),
+    ]);
+
+    expect(screen.getByTestId('action-receipt')).toHaveClass('action-receipt--failed');
+    expect(screen.getByText('Record discovery failed')).toBeInTheDocument();
+    expect(screen.getByText('Discovery')).toBeInTheDocument();
+    expect(screen.getByText(refusal)).toBeInTheDocument();
+    expect(screen.queryByText('record_discovery failed')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('action-receipt-link')).not.toBeInTheDocument();
+  });
 });

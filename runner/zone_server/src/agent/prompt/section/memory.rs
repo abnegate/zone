@@ -23,6 +23,23 @@ const HEADING: &str = "Memory:";
 const TRIGGER: &str = "- \"Remember that\", \"forget that\" and \"from now on\" are always a write: call the tool \
      before you say you have noted it.";
 
+/// Writing unasked is not raising unasked: `UNPROMPTED` still governs what is
+/// read back. The first sentence closes on the clause that keeps a write
+/// nobody requested from being a silent one. The second is scoped to the
+/// unasked case because `NEVER` ends on a refusal written for a request: read
+/// beside this rule without it, the model announces that it will not keep
+/// something nobody asked it to keep.
+const UNASKED: &str = "- Do not wait to be asked: when the user tells you something durable about themselves, \
+     such as who they are, how they want you to work or a fact a later conversation will need, \
+     write it, then say in a line that you did. Unasked, what the rules below keep out you \
+     leave unwritten, without saying so.";
+
+/// A request to forget leaves what it was about in the conversation, where
+/// `UNASKED` would find it again; the server cannot tell that write from one
+/// the user asked for, so the limit is stated here.
+const FORGOTTEN: &str = "- Never write again what the user asked you to forget, whether in this conversation or \
+     as an entry you deleted, unless they ask for it again.";
+
 const HORIZON: &str = "- Write what will still be true and worth reading in a month. A passing mention is not \
      one; a durable phrasing beats a precise figure.";
 
@@ -66,6 +83,8 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
     }
     let rules = [
         TRIGGER,
+        UNASKED,
+        FORGOTTEN,
         HORIZON,
         STATED,
         SHAPE,
@@ -125,7 +144,7 @@ mod tests {
 
             assert_eq!(lines.next(), Some(HEADING), "{rendered}");
             let rules: Vec<&str> = lines.collect();
-            assert_eq!(rules.len(), 10, "{rendered}");
+            assert_eq!(rules.len(), 12, "{rendered}");
             for rule in rules {
                 assert!(rule.starts_with("- "), "{rule}");
             }
@@ -140,6 +159,77 @@ mod tests {
         for rendered in [chat(), task()] {
             assert!(rendered.contains(TRIGGER), "{rendered}");
         }
+    }
+
+    #[test]
+    fn what_the_user_states_about_themselves_is_written_without_being_asked() {
+        for rendered in [chat(), task()] {
+            assert!(rendered.contains(UNASKED), "{rendered}");
+        }
+    }
+
+    /// The trigger is the case where the user asked, so the rule for the case
+    /// where they did not reads directly after it and before what limits both.
+    #[test]
+    fn the_unasked_write_follows_the_trigger_and_precedes_its_limits() {
+        for rendered in [chat(), task()] {
+            let position = |rule: &str| {
+                rendered
+                    .find(rule)
+                    .unwrap_or_else(|| panic!("{rule} missing from {rendered}"))
+            };
+
+            assert_eq!(
+                position(UNASKED),
+                position(TRIGGER) + TRIGGER.len() + 1,
+                "{rendered}"
+            );
+            for limit in [FORGOTTEN, HORIZON, STATED, NEVER, SUPPRESSION] {
+                assert!(position(UNASKED) < position(limit), "{limit}");
+            }
+        }
+    }
+
+    /// Asking to forget something leaves it in the conversation, so the rule
+    /// that has the model write unasked would find it there again.
+    #[test]
+    fn what_the_user_asked_to_forget_is_not_written_again_unasked() {
+        for rendered in [chat(), task()] {
+            let position = |rule: &str| {
+                rendered
+                    .find(rule)
+                    .unwrap_or_else(|| panic!("{rule} missing from {rendered}"))
+            };
+
+            assert_eq!(
+                position(FORGOTTEN),
+                position(UNASKED) + UNASKED.len() + 1,
+                "{rendered}"
+            );
+        }
+        assert_eq!(
+            FORGOTTEN,
+            "- Never write again what the user asked you to forget, whether in this conversation \
+             or as an entry you deleted, unless they ask for it again."
+        );
+    }
+
+    /// `NEVER` ends on a refusal written for a request. Read beside a rule to
+    /// write unasked, it had the model announce that it would not keep
+    /// something nobody had asked it to keep.
+    #[test]
+    fn what_the_limits_keep_out_of_an_unasked_write_goes_unwritten_and_unannounced() {
+        assert!(
+            UNASKED.ends_with(
+                " then say in a line that you did. Unasked, what the rules below keep out you \
+                 leave unwritten, without saying so."
+            ),
+            "{UNASKED}"
+        );
+        assert!(
+            NEVER.ends_with(" Decline and say you did."),
+            "a refusal of something asked for is still spoken: {NEVER}"
+        );
     }
 
     #[test]

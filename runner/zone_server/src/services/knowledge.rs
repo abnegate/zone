@@ -25,6 +25,12 @@ pub enum Unindexed {
     Embed(#[from] ContextError),
     #[error("Failed to store knowledge embedding: {0}")]
     Store(#[from] sqlx::Error),
+    /// The entry no longer holds the text that was embedded, rewritten while
+    /// the service worked or gone, so the vector was not stored. A rewrite
+    /// that drops the entry's vector leaves it to the recovery pass, which
+    /// embeds what it says now.
+    #[error("The knowledge entry changed while it was being embedded")]
+    Changed,
 }
 
 /// Embed an entry's content and store the vector semantic search reads.
@@ -37,14 +43,19 @@ pub async fn index(
     let service = state.embedding_service().ok_or(Unindexed::NoService)?;
     let vector = service.embed(content).await?;
 
-    knowledge::store_knowledge_embedding(
+    let stored = knowledge::store_knowledge_embedding(
         state.db(),
         entry_id,
         workspace_id,
+        content,
         &vector,
         service.model(),
     )
     .await?;
 
-    Ok(())
+    if stored {
+        Ok(())
+    } else {
+        Err(Unindexed::Changed)
+    }
 }

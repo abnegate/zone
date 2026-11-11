@@ -9,7 +9,9 @@ use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 use zone_server::agent::ChatTools;
+use zone_server::agent::discovery::RECORD_DISCOVERY;
 use zone_server::auth::jwt::create_session_access_token;
+use zone_server::db::knowledge::discovery::CATEGORY;
 use zone_server::db::{sessions, task_access, tasks, workspace_members};
 use zone_server::state::AppState;
 
@@ -82,6 +84,7 @@ async fn task_scope_checks_writer_each_time_and_never_invents_a_chat() {
         "create_document",
         "list_projects",
         "list_sources",
+        RECORD_DISCOVERY,
     ] {
         assert!(tools.names().contains(&name.to_string()), "missing {name}");
     }
@@ -155,8 +158,29 @@ async fn task_scope_checks_writer_each_time_and_never_invents_a_chat() {
             .await
             .success
     );
+    let demoted = tools
+        .execute(
+            RECORD_DISCOVERY,
+            r#"{"kind":"lesson","subject":"Scope","statement":"Recorded after a demotion"}"#,
+        )
+        .await;
+    assert_eq!(
+        demoted.error.as_deref(),
+        Some("Workspace write access denied."),
+        "a run whose initiator lost standing records nothing"
+    );
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM knowledge_entries WHERE workspace_id = $1 AND category = $2",
+    )
+    .bind(workspace)
+    .bind(CATEGORY)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(recorded, 0);
     let viewer = ChatTools::for_task(&state, std::env::temp_dir(), workspace, Some(user)).await;
     assert!(!viewer.names().contains(&"create_task".into()));
+    assert!(!viewer.has(RECORD_DISCOVERY));
     workspace_members::remove_member(&pool, workspace, user)
         .await
         .unwrap();
@@ -167,6 +191,7 @@ async fn task_scope_checks_writer_each_time_and_never_invents_a_chat() {
         ChatTools::for_task(&state, std::env::temp_dir(), Uuid::new_v4(), Some(user)).await;
     for denied in [missing, legacy, foreign] {
         assert!(!denied.names().contains(&"create_document".into()));
+        assert!(!denied.has(RECORD_DISCOVERY));
         assert!(denied.names().contains(&"read_file".into()));
     }
     sqlx::query("DELETE FROM users WHERE id = $1")

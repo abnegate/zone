@@ -5,6 +5,7 @@
 
 use abnegate_agent::AgentPhase;
 use abnegate_agent::ToolResult;
+use abnegate_agent::chat::ReplayMessage;
 use abnegate_agent::context::Entry;
 use abnegate_agent::tool::MAXIMUM_SLEEP;
 use abnegate_agent::tool::Session;
@@ -820,10 +821,14 @@ impl DatabaseTaskCallback {
         });
     }
 
+    /// Recorded as the call starts, in a table and a log the workspace reads,
+    /// so a discovery its tool is about to refuse is reduced first: what it
+    /// is refused for may be the credential in it.
     fn on_tool_call(&self, id: &str, name: &str, arguments: &str) {
         let callback = self.clone();
         let name = name.to_string();
-        let arguments = arguments.to_string();
+        let arguments = crate::agent::discovery::trace_arguments(&name, arguments)
+            .unwrap_or_else(|| arguments.to_string());
         let (call_id, input) = self.open_call(id, &arguments);
         tokio::spawn(async move {
             if let Err(error) =
@@ -1573,8 +1578,8 @@ struct Guidance<'a> {
     review: &'a str,
     instructions: &'a str,
     facts: &'a str,
-    /// What the person who started this run asked to have remembered. A run
-    /// reads it and writes none of it, so it arrives as an index-free block.
+    /// What is remembered about the person who started this run. A run reads
+    /// it and writes none of it, so it arrives as an index-free block.
     memory: &'a str,
     /// The workspace's written procedures, by name and trigger. Operator text,
     /// so it sits before the repository block like the rest of it.
@@ -1625,17 +1630,12 @@ impl Guidance<'_> {
 
 /// Appends one guidance block, which owns the blank line that opens it.
 ///
-/// Trimming what is already there rather than adding a separator is what keeps
-/// adjacent blocks exactly one blank line apart: the knowledge renderers close
-/// with a newline and the next block opens with two, which would otherwise run
-/// the appended guidance past the blank line the prompt is assembled with.
+/// The join is the knowledge store's own, the one a chat's learned block is
+/// assembled with: what is already there gives up its closing newline rather
+/// than gaining a separator, which keeps adjacent blocks exactly one blank
+/// line apart and a run and a chat reading the same bytes.
 fn push_block(guidance: &mut String, block: &str) {
-    let block = block.trim_end();
-    if block.is_empty() {
-        return;
-    }
-    guidance.truncate(guidance.trim_end().len());
-    guidance.push_str(block);
+    *guidance = crate::db::knowledge::join_blocks(&[guidance.as_str(), block.trim_end()]);
 }
 
 /// The remembered block follows `actor`, whoever started this run, rather than
@@ -1665,18 +1665,7 @@ async fn guidance(
             }
         };
 
-    let facts =
-        match crate::db::knowledge::learned_facts_prompt(state.db(), task.workspace_id).await {
-            Ok(facts) => facts,
-            Err(error) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    %error,
-                    "Failed to load learned facts; continuing without them"
-                );
-                String::new()
-            }
-        };
+    let facts = crate::db::knowledge::learned_facts_prompt(state.db(), task.workspace_id).await;
 
     let memory = match actor {
         Some(user) => {
@@ -1904,6 +1893,7 @@ mod guidance_tests {
                 "Answer with the command first and the reasoning after it.",
             )),
             &[],
+            crate::agent::memory::render::MAX_RENDERED_BYTES,
         )
     }
 
@@ -1916,6 +1906,7 @@ mod guidance_tests {
                 head: "---\ndescription: Use when shipping to production.\n---\n".into(),
             }],
             1,
+            crate::agent::skills::MAX_RENDERED_BYTES,
         )
     }
 
@@ -2967,6 +2958,25 @@ where
     }
 }
 
+/// A canonical message as the run's log keeps it.
+///
+/// The log is streamed whole to whoever watches the run, and an assistant
+/// message carries the calls it made with their arguments, so a discovery its
+/// tool is about to refuse is reduced in this copy as
+/// [`DatabaseTaskCallback::on_tool_call`] reduces it. The replay the next turn
+/// is handed is [`accumulate`]'s, which is never this copy and stays whole.
+fn logged(message: &ReplayMessage) -> ReplayMessage {
+    let mut logged = message.clone();
+    for call in logged.tool_calls.iter_mut().flatten() {
+        if let Some(shown) =
+            crate::agent::discovery::trace_arguments(&call.function.name, &call.function.arguments)
+        {
+            call.function.arguments = shown;
+        }
+    }
+    logged
+}
+
 /// Keep a consumer-side replay in step with the context the generator owns.
 ///
 /// A parked run has to hand the next turn a context, and the generator was
@@ -3084,7 +3094,7 @@ async fn run_task_loop(
                 callback.on_phase_change(AgentPhase::Observing, None);
             }
             AgentEvent::Canonical(entry) => {
-                callback.log("acting","agent","info","Canonical conversation event",Some(serde_json::json!({"entry_id":entry.id,"message":entry.message,"mutations":entry.mutations}))).await.map_err(|error|error.to_string())?;
+                callback.log("acting","agent","info","Canonical conversation event",Some(serde_json::json!({"entry_id":entry.id,"message":logged(&entry.message),"mutations":entry.mutations}))).await.map_err(|error|error.to_string())?;
             }
             AgentEvent::Checkpoint { summary, .. } => {
                 callback
@@ -3689,6 +3699,289 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    /// What a run keeps of a call is its `task_tool_calls` row and its log,
+    /// which is streamed whole to whoever watches the run: the call's start,
+    /// its receipt, its result, and the model's own message that made it. All
+    /// but the result are written before the tool has refused anything, so a
+    /// discovery refused for the credential in it must leave that credential
+    /// in none of them.
+    #[tokio::test]
+    async fn a_refused_discovery_leaves_none_of_its_text_in_what_a_run_keeps() {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use serde_json::{Value, json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        const SECRET: &str = "ghp_abcdefgh1234";
+        const SUBJECT: &str = "The deploy token";
+        const WAIT: Duration = Duration::from_secs(60);
+
+        let database =
+            std::env::var("TEST_DATABASE_URL").expect("explicit disposable TEST_DATABASE_URL");
+        let pool = PgPool::connect(&database).await.unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Refused discovery",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Refused discovery",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Task actor"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Records what it verifies",
+            "Run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+        let provider = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let refused = [
+            json!({"kind": "lesson", "subject": format!("{SUBJECT} is {SECRET}"),
+                "statement": "Kept in the vault."}),
+            json!({"kind": "lesson", "subject": SUBJECT, "statement": format!("It is {SECRET}")}),
+            json!({"kind": "lesson", "subject": SUBJECT, "statement": "Kept in the vault.",
+                "reason": format!("So the next run knows it is {SECRET}")}),
+        ];
+        let calls: Vec<Value> = refused
+            .iter()
+            .enumerate()
+            .map(|(index, arguments)| {
+                json!({"index": index, "id": format!("discovery-call-{index}"),
+                    "type": "function",
+                    "function": {"name": RECORD_DISCOVERY, "arguments": arguments.to_string()}})
+            })
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |_: &Request| {
+                let delta = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    json!({"tool_calls": calls})
+                } else {
+                    json!({"content": "Nothing was recorded."})
+                };
+                let chunk = json!({"id": "completion", "object": "chat.completion.chunk",
+                    "created": 0, "model": "test",
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": null}]});
+                let end = json!({"id": "completion", "object": "chat.completion.chunk",
+                    "created": 0, "model": "test",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+            })
+            .mount(&provider)
+            .await;
+        let tools =
+            ChatTools::for_task(&state, std::env::temp_dir(), workspace.id, Some(user.id)).await;
+        let callback = DatabaseTaskCallback::new(pool.clone(), run.id);
+
+        let outcome = tokio::time::timeout(
+            WAIT,
+            run_task_loop(
+                LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", "")),
+                "test".into(),
+                tools,
+                RunContext::from_messages(vec![LlmMessage::user("Write down what you verified.")]),
+                LoopBudget::task(),
+                &callback,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("the turn ends")
+        .expect("the turn finishes");
+        let TurnOutcome::Finished(outcome) = outcome else {
+            panic!("a run that asked nothing finishes its turn");
+        };
+        assert_eq!(outcome.tool_calls, refused.len());
+
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let recorded = loop {
+            let finished: Vec<(Value, Option<String>)> = sqlx::query_as(
+                "SELECT tool_input, error_message FROM task_tool_calls \
+                 WHERE task_run_id = $1 AND tool_name = $2 AND completed_at IS NOT NULL",
+            )
+            .bind(run.id)
+            .bind(RECORD_DISCOVERY)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            if finished.len() == refused.len() {
+                break finished;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the calls were never all recorded: {finished:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        for (input, failure) in recorded {
+            assert_eq!(input, json!({"kind": "lesson"}));
+            assert!(
+                failure
+                    .as_deref()
+                    .is_some_and(|failure| failure.contains("Not recorded: ")),
+                "the call was refused: {failure:?}"
+            );
+        }
+
+        let logged: Vec<(String, String, Value)> = loop {
+            let rows: Vec<(String, String, Value)> = sqlx::query_as(
+                "SELECT agent_type, message, COALESCE(metadata, '{}'::jsonb) \
+                 FROM task_run_logs WHERE task_run_id = $1 ORDER BY created_at",
+            )
+            .bind(run.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let traced = rows.iter().filter(|(agent, ..)| agent == "tool").count();
+            if traced == refused.len() * 3 {
+                break rows;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "each call's start, receipt and result were never all logged: {rows:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        for (_, message, metadata) in &logged {
+            let written = metadata.to_string();
+            for carried in [SECRET, SUBJECT, "Kept in the vault."] {
+                assert!(
+                    !written.contains(carried),
+                    "{carried} in {message}: {written}"
+                );
+            }
+        }
+        let receipts: Vec<&Value> = logged
+            .iter()
+            .filter_map(|(.., metadata)| metadata.get("action_receipt"))
+            .collect();
+        assert_eq!(receipts.len(), refused.len());
+        for receipt in receipts {
+            assert_eq!(receipt["action"], RECORD_DISCOVERY);
+            assert_eq!(receipt["success"], false);
+            assert_eq!(receipt.get("reason"), None);
+        }
+        let started: Vec<&str> = logged
+            .iter()
+            .filter_map(|(.., metadata)| metadata.get("args")?.as_str())
+            .collect();
+        assert_eq!(started, [r#"{"kind":"lesson"}"#; 3]);
+        let conversed: Vec<&str> = logged
+            .iter()
+            .filter_map(|(.., metadata)| metadata["message"]["tool_calls"].as_array())
+            .flatten()
+            .filter_map(|call| call["function"]["arguments"].as_str())
+            .collect();
+        assert_eq!(
+            conversed, [r#"{"kind":"lesson"}"#; 3],
+            "the logged copy of the model's own message carries its calls too"
+        );
+
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// The tool reads a field written twice by its last copy, so a discovery
+    /// whose earlier copy carries a credential is taken. Its tool-call record
+    /// and the logged copy of the model's message keep the entry it stores,
+    /// and not the copy no screen read.
+    #[tokio::test]
+    async fn a_discovery_with_a_field_written_twice_leaves_the_unread_copy_out_of_what_a_run_keeps()
+    {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use serde_json::json;
+        const SECRET: &str = "ghp_abcdefgh1234";
+        let arguments = format!(
+            r#"{{"kind":"lesson","subject":"The deploy token","statement":"It is {SECRET}","statement":"Kept in the vault."}}"#
+        );
+        let stored = json!({
+            "kind": "lesson",
+            "subject": "The deploy token",
+            "statement": "Kept in the vault.",
+        });
+        let pool =
+            PgPool::connect_lazy("postgres://zone@127.0.0.1:1/unreachable").expect("a lazy pool");
+        let callback = DatabaseTaskCallback::new(pool, Uuid::new_v4());
+
+        callback.on_tool_call("call_1", RECORD_DISCOVERY, &arguments);
+        let (_, recorded) = callback.close_call("call_1");
+        let message: ReplayMessage = serde_json::from_value(json!({
+            "version": 1,
+            "role": "assistant",
+            "content": null,
+            "name": null,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": RECORD_DISCOVERY, "arguments": arguments},
+            }],
+            "tool_call_id": null,
+            "images": [],
+            "generated_images": [],
+        }))
+        .expect("an assistant message that made one call");
+        let conversed = logged(&message);
+
+        assert_eq!(recorded, stored);
+        let conversed = conversed
+            .tool_calls
+            .expect("the logged copy keeps its calls")
+            .remove(0)
+            .function
+            .arguments;
+        assert_eq!(conversed, stored.to_string());
+        assert!(!conversed.contains(SECRET), "{conversed}");
     }
 
     #[tokio::test]

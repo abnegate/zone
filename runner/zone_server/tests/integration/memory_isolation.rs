@@ -549,10 +549,11 @@ async fn a_task_tool_set_built_for_a_writer_cannot_read_memory_through_read_docu
     fixture.clean().await;
 }
 
-/// `update_document`'s predicate is exactly `source_url IS NULL`, which every
-/// memory row satisfies, and it does not touch `version` -- so before this
-/// change one member could overwrite another's profile and the compare-and-set
-/// the memory writer relies on would never see it happen.
+/// `update_document`'s predicate was once only `source_url IS NULL`, which
+/// every memory row satisfies, and the statement does not touch `version` --
+/// so until it also excluded memory one member could overwrite another's
+/// profile and the compare-and-set the memory writer relies on would never see
+/// it happen.
 #[tokio::test]
 async fn the_document_writer_cannot_overwrite_memory_for_anyone() {
     let fixture = Fixture::new().await;

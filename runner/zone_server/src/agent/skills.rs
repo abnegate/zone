@@ -33,7 +33,9 @@ pub const MAX_SKILLS: usize = 40;
 /// two; past this it is the procedure, which the skill itself is for.
 pub const MAX_TRIGGER_CHARS: usize = 160;
 
-/// The whole block, lines and notice included, never exceeds this.
+/// The whole block, lines and notice included, never exceeds this. A chat on a
+/// small window renders against less, its share of what the window leaves
+/// (`services::chat::session::allowance`).
 pub const MAX_RENDERED_BYTES: usize = 8_000;
 
 const HEADING: &str = "\n\n# Skills";
@@ -173,10 +175,11 @@ fn omitted(count: usize) -> String {
 ///
 /// `filed` is how many skills the workspace has in all, which may exceed the
 /// rows handed in. The bound is absolute: past [`MAX_SKILLS`] lines, or past
-/// [`MAX_RENDERED_BYTES`], the index says how many it left out rather than
-/// listing them, because an index that reads as complete and is not would
-/// have the model believe a procedure does not exist.
-pub fn render(skills: &[SkillRow], filed: usize) -> String {
+/// `budget` bytes, the index says how many it left out rather than listing
+/// them, because an index that reads as complete and is not would have the
+/// model believe a procedure does not exist. A bound too small for even the
+/// rule and that notice renders nothing.
+pub fn render(skills: &[SkillRow], filed: usize, budget: usize) -> String {
     if skills.is_empty() {
         return String::new();
     }
@@ -186,7 +189,7 @@ pub fn render(skills: &[SkillRow], filed: usize) -> String {
     let mut used = head.len();
     let mut kept = 0;
     for line in &lines {
-        if used + line.len() > MAX_RENDERED_BYTES {
+        if used + line.len() > budget {
             break;
         }
         used += line.len();
@@ -197,20 +200,46 @@ pub fn render(skills: &[SkillRow], filed: usize) -> String {
         rendered.truncate(rendered.trim_end().len());
         return rendered;
     }
-    while kept > 0 && used + omitted(filed - kept).len() > MAX_RENDERED_BYTES {
+    while kept > 0 && used + omitted(filed - kept).len() > budget {
         kept -= 1;
         used -= lines[kept].len();
     }
     let mut rendered = format!("{head}{}{}", lines[..kept].concat(), omitted(filed - kept));
     rendered.truncate(rendered.trim_end().len());
+    if rendered.len() > budget {
+        return String::new();
+    }
     rendered
 }
 
+/// The skills a workspace has filed, read once so the index can be rendered
+/// against whatever bound the reader's window leaves.
+#[derive(Debug, Clone, Default)]
+pub struct Listing {
+    /// The rows read, at most one past [`MAX_SKILLS`].
+    pub skills: Vec<SkillRow>,
+    /// How many are filed in all.
+    pub filed: usize,
+}
+
+impl Listing {
+    /// The index, held to `budget` bytes.
+    pub fn render(&self, budget: usize) -> String {
+        render(&self.skills, self.filed, budget)
+    }
+}
+
 /// Every skill this workspace has filed, rendered for a reader that holds
-/// `read_document`. The store reaches one row past the bound, and only when
-/// that row exists is the workspace asked how many it has, so the notice can
-/// state a count without the common case paying for one.
+/// `read_document`, at the index's ceiling.
 pub async fn prompt(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+    Ok(load(pool, workspace_id).await?.render(MAX_RENDERED_BYTES))
+}
+
+/// Every skill this workspace has filed, not yet rendered. The store reaches
+/// one row past the bound, and only when that row exists is the workspace
+/// asked how many it has, so the notice can state a count without the common
+/// case paying for one.
+pub async fn load(pool: &PgPool, workspace_id: Uuid) -> DbResult<Listing> {
     let limit = i64::try_from(MAX_SKILLS).unwrap_or(i64::MAX);
     let skills = knowledge::skills(pool, workspace_id, limit).await?;
     let filed = if skills.len() > MAX_SKILLS {
@@ -218,7 +247,7 @@ pub async fn prompt(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
     } else {
         skills.len()
     };
-    Ok(render(&skills, filed))
+    Ok(Listing { skills, filed })
 }
 
 #[cfg(test)]
@@ -279,7 +308,7 @@ mod tests {
 
     #[test]
     fn a_workspace_with_no_skills_pays_nothing() {
-        assert_eq!(render(&[], 0), "");
+        assert_eq!(render(&[], 0, MAX_RENDERED_BYTES), "");
     }
 
     #[test]
@@ -292,7 +321,7 @@ mod tests {
             "PHP house style",
             "Every class is final unless it is a base class.",
         );
-        let rendered = render(&[deploy.clone(), php.clone()], 2);
+        let rendered = render(&[deploy.clone(), php.clone()], 2, MAX_RENDERED_BYTES);
         assert!(rendered.starts_with("\n\n# Skills\n"), "{rendered}");
         assert!(rendered.contains("read_document"), "{rendered}");
         assert!(
@@ -322,7 +351,7 @@ mod tests {
                 )
             })
             .collect();
-        let rendered = render(&skills, skills.len());
+        let rendered = render(&skills, skills.len(), MAX_RENDERED_BYTES);
         assert_eq!(rendered.matches("\n- Skill ").count(), MAX_SKILLS);
         assert!(
             rendered.ends_with("3 more skills are filed under skill but not listed here; list_documents shows them."),
@@ -331,10 +360,13 @@ mod tests {
         let one_over: Vec<SkillRow> = (0..MAX_SKILLS + 1)
             .map(|index| skill(&format!("Skill {index:02}"), ""))
             .collect();
-        assert!(render(&one_over, one_over.len()).contains("1 more skill is filed"));
+        assert!(
+            render(&one_over, one_over.len(), MAX_RENDERED_BYTES).contains("1 more skill is filed")
+        );
         // The store hands over one row past the bound; the count says the rest.
         assert!(
-            render(&one_over, MAX_SKILLS + 7).contains("7 more skills are filed"),
+            render(&one_over, MAX_SKILLS + 7, MAX_RENDERED_BYTES)
+                .contains("7 more skills are filed"),
             "the notice states what is filed, not what was fetched"
         );
     }
@@ -349,7 +381,7 @@ mod tests {
                 )
             })
             .collect();
-        let rendered = render(&skills, skills.len());
+        let rendered = render(&skills, skills.len(), MAX_RENDERED_BYTES);
         assert!(rendered.len() <= MAX_RENDERED_BYTES, "{}", rendered.len());
         assert!(rendered.contains("more skills are filed"), "{rendered}");
     }
@@ -364,6 +396,7 @@ mod tests {
                 skill("---", "---\ndescription: ==\n---\n"),
             ],
             2,
+            MAX_RENDERED_BYTES,
         );
         let lines: Vec<&str> = rendered.lines().filter(|line| line.contains('[')).collect();
         assert_eq!(lines.len(), 2, "{rendered}");
@@ -375,5 +408,50 @@ mod tests {
             lines[1].starts_with("- --- [") && lines[1].ends_with("]: =="),
             "{rendered}"
         );
+    }
+
+    fn listing(count: usize) -> Listing {
+        Listing {
+            skills: (0..count)
+                .map(|index| {
+                    skill(
+                        &format!("Skill {index:02}"),
+                        "---\ndescription: Use when shipping to production.\n---\n",
+                    )
+                })
+                .collect(),
+            filed: count,
+        }
+    }
+
+    /// A chat on a small window hands the index less than its ceiling: it
+    /// lists the skills that fit, each line whole, and counts the rest.
+    #[test]
+    fn a_smaller_bound_lists_fewer_whole_skills_and_says_how_many_it_left_out() {
+        let listing = listing(12);
+        let ceiling = listing.render(MAX_RENDERED_BYTES);
+        assert_eq!(ceiling.matches("\n- Skill ").count(), 12, "{ceiling}");
+        let budget = ceiling.len() / 2 + RULE.len() / 2;
+
+        let rendered = listing.render(budget);
+
+        let kept = rendered.matches("\n- Skill ").count();
+        assert!(kept > 0 && kept < 12, "{rendered}");
+        let lines: String = listing.skills[..kept].iter().map(line).collect();
+        let mut expected = format!("{HEADING}\n{RULE}\n{lines}{}", omitted(12 - kept));
+        expected.truncate(expected.trim_end().len());
+        assert_eq!(rendered, expected);
+        assert!(rendered.len() <= budget, "{} bytes", rendered.len());
+    }
+
+    /// Below what the rule and the notice under it cost, the index is left
+    /// out rather than sent over its bound.
+    #[test]
+    fn a_bound_too_small_for_the_rule_renders_nothing() {
+        let listing = listing(3);
+
+        assert_eq!(listing.render(RULE.len()), "");
+        assert_eq!(listing.render(0), "");
+        assert_eq!(Listing::default().render(MAX_RENDERED_BYTES), "");
     }
 }
