@@ -95,7 +95,7 @@ const readOnly = 'Only organization admins can change MCP servers.';
 const workspaceReadOnly = 'Only workspace admins can change MCP servers.';
 const commandsDisabled = 'Command servers are turned off on this instance (ZONE_MCP_COMMANDS)';
 const unconnected = 'did not connect; see the server log';
-const transportFixed ='`transport` cannot be changed; remove the server and add it again';
+const transportFixed = '`transport` cannot be changed; remove the server and add it again';
 const workspaceMissing = 'Workspace not found';
 const reservedHeaders = ['accept', 'content-type', 'host', 'mcp-session-id'];
 const metadataAddress = 'Do not use a link-local or cloud metadata address';
@@ -1165,6 +1165,24 @@ test.describe('screenshots', () => {
       await dialog.getByRole('combobox', { name: 'Transport' }).click();
       await expect(page.getByRole('listbox').getByRole('option')).toHaveText(['Streamable HTTP']);
       await still(page, 'form-no-stdio', theme);
+    });
+
+    test(`URL refusals in ${theme}`, async ({ page }) => {
+      await themed(page, theme);
+      await openOrganization(page);
+      await expectTheme(page, theme);
+      const dialog = await fillHttpServer(page);
+      const url = dialog.getByLabel('URL', { exact: true });
+
+      await url.fill('http://169.254.169.254/mcp');
+      await dialog.getByRole('button', { name: 'Add server', exact: true }).click();
+      await expect(url).toHaveAccessibleDescription(metadataAddress);
+      await still(page, 'form-metadata', theme);
+
+      await url.fill(`https://${refusedHost}/mcp`);
+      await dialog.getByRole('button', { name: 'Add server', exact: true }).click();
+      await expect(url).toHaveAccessibleDescription(metadataRefused);
+      await still(page, 'form-server-refusal', theme);
     });
 
     test(`organization member in ${theme}`, async ({ page }) => {
