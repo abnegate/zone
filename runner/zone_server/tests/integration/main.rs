@@ -56,6 +56,7 @@ mod cross_tenant_authorization;
 mod deferred_tool;
 mod devices;
 mod discovery;
+mod discovery_crossing;
 mod discovery_store;
 mod email_verification;
 mod gathering_worker;

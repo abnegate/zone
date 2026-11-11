@@ -711,7 +711,7 @@ const DISCOVERY: &str = "The disposable test database listens on 55471.";
 
 /// A loopback port nothing listens on, so preparing a turn asks no real model
 /// server how large its window is.
-const UNREACHABLE: &str = "http://127.0.0.1:9";
+pub(crate) const UNREACHABLE: &str = "http://127.0.0.1:9";
 
 /// What `session::build` made of one chat, kept so the rows can be removed
 /// before anything is asserted.
