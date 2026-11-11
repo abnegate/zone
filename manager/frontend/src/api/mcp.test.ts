@@ -206,6 +206,19 @@ describe('mcpApi.reconnect', () => {
     });
   });
 
+  it.each([
+    [{ status: 'disabled', enabled: false, error: null }],
+    [{ status: 'failed', error: 'Streamable HTTP servers are not connected by this build yet' }],
+  ] satisfies [Partial<McpServer>][])(
+    'resolves an accepted reconnect to the status the server reports: %o',
+    async (reported) => {
+      const answered = { ...server, ...reported, available_tools: [] };
+      respond(answered, 202);
+
+      expect(await mcpApi.reconnect('org-1', 's-1')).toEqual(answered);
+    }
+  );
+
   it('names the action when reconnecting fails', async () => {
     respond({ error: 'forbidden' }, 403);
 
@@ -237,6 +250,18 @@ describe('mcpApi.workspace', () => {
     await expect(mcpApi.workspace('org-1', 'ws-1')).rejects.toThrow(
       'Failed to load workspace MCP servers: not found'
     );
+  });
+
+  it('reports a caller with no role in the workspace as not found', async () => {
+    respond({ error: 'Workspace not found' }, 404);
+
+    const failure = await mcpApi.workspace('org-1', 'ws-1').catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ApiError);
+    expect(failure).toMatchObject({
+      status: 404,
+      message: 'Failed to load workspace MCP servers: Workspace not found',
+    });
   });
 });
 

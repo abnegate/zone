@@ -14,7 +14,7 @@ const instance: McpServer = {
   source: 'instance',
   transport: 'stdio',
   command: 'magents',
-  arguments: ['mcp'],
+  arguments: [],
   url: null,
   tools: null,
   enabled: true,
@@ -31,6 +31,15 @@ describe('McpServerSchema', () => {
   it('parses an instance server with no id and no dates', () => {
     expect(parse(McpServerSchema, instance)).toEqual(instance);
   });
+
+  it.each([['https://mcp.internal:8443'], [null]])(
+    'parses a redacted remote instance server whose url is %p',
+    (url) => {
+      const remote = { ...instance, transport: 'http', command: null, url, environment: [] };
+
+      expect(parse(McpServerSchema, remote)).toEqual(remote);
+    }
+  );
 
   it('refuses an unknown status', () => {
     expect(() => parse(McpServerSchema, { ...instance, status: 'weird' })).toThrow(

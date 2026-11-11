@@ -28,7 +28,7 @@ interface WireServer extends Omit<McpServer, 'environment' | 'headers'> {
 
 interface Scenario {
   role?: OrgRole;
-  workspaceRole?: WorkspaceRole;
+  workspaceRole?: WorkspaceRole | null;
   commands?: boolean;
   servers?: WireServer[];
   overrides?: Record<string, boolean>;
@@ -93,6 +93,10 @@ const fixtureSecret = 'Bearer fixture-docs-secret';
 const commandsOff = 'Command (stdio) servers are turned off on this instance.';
 const readOnly = 'Only organization admins can change MCP servers.';
 const workspaceReadOnly = 'Only workspace admins can change MCP servers.';
+const commandsDisabled = 'Command servers are turned off on this instance (ZONE_MCP_COMMANDS)';
+const transportFixed = '`transport` cannot be changed; remove the server and add it again';
+const workspaceMissing = 'Workspace not found';
+const reservedHeaders = ['accept', 'content-type', 'host', 'mcp-session-id'];
 const directory = process.env.MCP_SCREENSHOTS;
 
 function server(changes: Partial<WireServer> & Pick<WireServer, 'name'>): WireServer {
@@ -154,7 +158,7 @@ function fixtures(): WireServer[] {
       source: 'instance',
       transport: 'stdio',
       command: 'magents',
-      arguments: ['mcp'],
+      arguments: [],
       available_tools: ['send_message', 'list_sessions'],
       created_at: null,
       updated_at: null,
@@ -178,11 +182,46 @@ function storeSecrets(
   });
 }
 
+function has(value: object | undefined): boolean {
+  return value !== undefined && Object.keys(value).length > 0;
+}
+
+function refusal(
+  transport: McpServer['transport'],
+  fields: CreateMcpServerRequest | UpdateMcpServerRequest
+): string | null {
+  const unused =
+    transport === 'stdio'
+      ? { url: fields.url !== undefined, headers: has(fields.headers) }
+      : {
+          command: fields.command !== undefined,
+          arguments: has(fields.arguments),
+          environment: has(fields.environment),
+        };
+  const field = Object.entries(unused).find(([, present]) => present)?.[0];
+  if (field) {
+    return `\`${field}\` is not allowed for \`${transport}\` servers`;
+  }
+  const reserved = Object.keys(fields.headers ?? {}).find((name) =>
+    reservedHeaders.includes(name.toLowerCase())
+  );
+  return reserved
+    ? `\`headers\` name \`${reserved}\` is set by the connection itself and cannot be configured`
+    : null;
+}
+
 async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
   const role = scenario.role ?? 'admin';
-  const workspaceRole = scenario.workspaceRole ?? 'admin';
+  const workspaceRole = scenario.workspaceRole === undefined ? 'admin' : scenario.workspaceRole;
   const commands = scenario.commands ?? true;
   const servers = scenario.servers ?? fixtures();
+  for (const entry of servers) {
+    if (!commands && entry.source === 'organization' && entry.transport === 'stdio') {
+      entry.status = entry.enabled ? 'failed' : 'disabled';
+      entry.error = entry.enabled ? commandsDisabled : null;
+      entry.available_tools = [];
+    }
+  }
   const overrides = new Map(Object.entries(scenario.overrides ?? {}));
   const captured: Captured[] = [];
   const secrets = new Map<string, string>([[`${docsId}:headers:Authorization`, fixtureSecret]]);
@@ -271,17 +310,19 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
     if (pathname === `/api/workspaces/${workspaceId}/members`) {
       await route.fulfill({
         json: {
-          members: [
-            {
-              id: '00000000-0000-0000-0000-0000000000a1',
-              user_id: userId,
-              workspace_id: workspaceId,
-              role: workspaceRole,
-              email: 'user@example.com',
-              display_name: null,
-              joined_at: '2024-01-01T00:00:00Z',
-            },
-          ],
+          members: workspaceRole
+            ? [
+                {
+                  id: '00000000-0000-0000-0000-0000000000a1',
+                  user_id: userId,
+                  workspace_id: workspaceId,
+                  role: workspaceRole,
+                  email: 'user@example.com',
+                  display_name: null,
+                  joined_at: '2024-01-01T00:00:00Z',
+                },
+              ]
+            : [],
         },
       });
       return;
@@ -293,6 +334,15 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
     }
     if (pathname === serversPath && method === 'POST') {
       const posted = CreateRequestSchema.parse(body);
+      if (posted.transport === 'stdio' && !commands) {
+        await route.fulfill({ status: 403, json: { error: commandsDisabled } });
+        return;
+      }
+      const refused = refusal(posted.transport, posted);
+      if (refused) {
+        await route.fulfill({ status: 400, json: { error: refused } });
+        return;
+      }
       created += 1;
       const id = `22222222-2222-4222-8222-${String(created).padStart(12, '0')}`;
       const entry = server({
@@ -320,8 +370,13 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
         return;
       }
       const target = servers[index];
+      const locked = target.transport === 'stdio' && !commands;
       if (action === 'connection' && method === 'POST') {
-        connect(target);
+        if (locked) {
+          await route.fulfill({ status: 403, json: { error: commandsDisabled } });
+          return;
+        }
+        if (target.enabled) connect(target);
         await route.fulfill({ status: 202, json: target });
         return;
       }
@@ -331,7 +386,20 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
         return;
       }
       if (method === 'PUT') {
+        if (typeof body === 'object' && body !== null && 'transport' in body) {
+          await route.fulfill({ status: 400, json: { error: transportFixed } });
+          return;
+        }
         const changes = UpdateRequestSchema.parse(body);
+        if (locked) {
+          await route.fulfill({ status: 403, json: { error: commandsDisabled } });
+          return;
+        }
+        const refused = refusal(target.transport, changes);
+        if (refused) {
+          await route.fulfill({ status: 400, json: { error: refused } });
+          return;
+        }
         let reconnect = false;
         for (const key of ['name', 'command', 'arguments', 'url'] as const) {
           if (changes[key] !== undefined) {
@@ -363,6 +431,10 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
       }
     }
     if (pathname === workspacePath) {
+      if (workspaceRole === null) {
+        await route.fulfill({ status: 404, json: { error: workspaceMissing } });
+        return;
+      }
       if (method === 'PUT') {
         const { servers: changes } = UpdateWorkspaceRequestSchema.parse(body);
         for (const [id, value] of Object.entries(changes)) {
@@ -664,6 +736,62 @@ test.describe('MCP servers', () => {
     ]);
   });
 
+  test('with commands off a command server cannot be switched or reconnected', async ({ page }) => {
+    const mock = await openOrganization(page, { commands: false });
+
+    const github = row(page, 'github');
+    await expect(github.getByRole('status')).toHaveText('Failed');
+    await expect(github).toContainText(commandsDisabled);
+    const toggle = page.getByRole('switch', { name: 'Enable github' });
+    await expect(toggle).toBeDisabled();
+    await expect(toggle).toHaveAccessibleDescription(commandsOff);
+    await expect(github.locator('label.mcp-server-toggle')).toHaveAttribute('title', commandsOff);
+
+    await page.getByRole('button', { name: 'Actions for github', exact: true }).click();
+    const reconnect = page.getByRole('menuitem', { name: /^Reconnect/ });
+    await expect(reconnect).toBeDisabled();
+    await expect(reconnect).toContainText(commandsOff);
+    await expect(page.getByRole('menuitem', { name: 'Remove', exact: true })).toBeEnabled();
+    await page.keyboard.press('Escape');
+
+    await expect(page.getByRole('switch', { name: 'Enable docs' })).toBeEnabled();
+    await chooseAction(page, 'docs', 'Reconnect');
+    await expect(row(page, 'docs').getByRole('status')).toHaveText('Connecting');
+    expect(writes(mock)).toEqual([
+      { method: 'POST', path: `${serversPath}/${docsId}/connection`, body: null },
+    ]);
+  });
+
+  test('a header the connection sets itself is refused before anything is posted', async ({
+    page,
+  }) => {
+    const mock = await openOrganization(page);
+
+    const dialog = await fillHttpServer(page);
+    await dialog.getByLabel('Header name 1', { exact: true }).fill('Content-Type');
+    await dialog.getByRole('button', { name: 'Add server', exact: true }).click();
+
+    await expect(dialog.getByText('The connection sets this header itself')).toBeVisible();
+    await expect(dialog).toBeVisible();
+    expect(writes(mock)).toEqual([]);
+
+    await dialog.getByLabel('Header name 1', { exact: true }).fill('Authorization');
+    await dialog.getByRole('button', { name: 'Add server', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(writes(mock)).toEqual([
+      {
+        method: 'POST',
+        path: serversPath,
+        body: {
+          name: 'wiki',
+          transport: 'http',
+          url: 'https://wiki.example/mcp',
+          headers: { Authorization: 'Bearer t' },
+        },
+      },
+    ]);
+  });
+
   test('with commands on a stdio server posts its command, arguments and environment', async ({
     page,
   }) => {
@@ -795,6 +923,16 @@ test.describe('MCP servers', () => {
     }
   });
 
+  test('a caller with no role in the workspace is told it was not found', async ({ page }) => {
+    await open(page, workspacePage, { workspaceRole: null });
+
+    await expect(
+      page.getByText(`Failed to load workspace MCP servers: ${workspaceMissing}`)
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry', exact: true })).toBeVisible();
+    await expect(page.getByRole('radiogroup')).toHaveCount(0);
+  });
+
   test('nothing scrolls sideways at phone width', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
     await openOrganization(page);
@@ -907,6 +1045,10 @@ test.describe('screenshots', () => {
       await themed(page, theme);
       await openOrganization(page, { commands: false });
       await expectTheme(page, theme);
+      await page.getByRole('button', { name: 'Actions for github', exact: true }).click();
+      await expect(page.getByRole('menuitem', { name: /^Reconnect/ })).toBeDisabled();
+      await still(page, 'org-list-no-stdio', theme);
+      await page.keyboard.press('Escape');
       await page.getByRole('button', { name: 'Add server', exact: true }).click();
       const dialog = page.getByRole('dialog', { name: 'Add MCP server' });
       await dialog.getByRole('combobox', { name: 'Transport' }).click();
