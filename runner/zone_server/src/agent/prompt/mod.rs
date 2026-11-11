@@ -64,17 +64,17 @@ const PLAIN: &[Section] = &[
 
 /// Bounds the chat prompt over the worst-case catalog in a workspace with a
 /// GitHub source, whose bullets send a pull request to zone's own tool. It
-/// measures 24,834 characters, and 24,878 as served to a coding agent, which
+/// measures 24,918 characters, and 24,962 as served to a coding agent, which
 /// is told its tools by their qualified names. The ceiling is the next round
 /// hundred above the larger, so a section that grows has to measure itself.
-pub const CHAT_MAX_CHARS: usize = 24_900;
+pub const CHAT_MAX_CHARS: usize = 25_000;
 /// Bounds the prompt of a planner chat, which adds the interview section and
-/// its two tools to the chat prompt: 27,194 characters, and 27,238 as served
+/// its two tools to the chat prompt: 27,278 characters, and 27,322 as served
 /// to a coding agent.
-pub const PLANNER_MAX_CHARS: usize = 27_300;
+pub const PLANNER_MAX_CHARS: usize = 27_400;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
 /// Bounds the task prompt over the catalog the budget test gives an authorized
-/// run that requires its plan approved: 14,967 characters, 584 of them added
+/// run that requires its plan approved: 14,972 characters, 584 of them added
 /// by the plan paragraph, served to a coding agent or not, since no section a
 /// run renders qualifies a tool name.
 pub const TASK_MAX_CHARS: usize = 15_000;
@@ -1057,6 +1057,22 @@ mod tests {
                 served.len()
             );
         }
+    }
+
+    /// A chat holds both rules that have it write without being asked, so the
+    /// workspace's may not read as the only one.
+    #[test]
+    fn a_chat_told_to_write_memory_unasked_is_told_discovery_is_only_the_workspaces_exception() {
+        let prompt = chat(&chat_tools(), false, &github());
+
+        assert_eq!(occurrences(&prompt, "- Do not wait to be asked: "), 1);
+        assert_eq!(
+            occurrences(
+                &prompt,
+                "- record_discovery is the one workspace write you make unasked: "
+            ),
+            1
+        );
     }
 
     #[test]

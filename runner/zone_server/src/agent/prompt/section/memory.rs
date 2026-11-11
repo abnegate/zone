@@ -24,11 +24,15 @@ const TRIGGER: &str = "- \"Remember that\", \"forget that\" and \"from now on\" 
      before you say you have noted it.";
 
 /// Writing unasked is not raising unasked: `UNPROMPTED` still governs what is
-/// read back. The closing clause keeps a write nobody requested from being a
-/// silent one.
+/// read back. The first sentence closes on the clause that keeps a write
+/// nobody requested from being a silent one. The second is scoped to the
+/// unasked case because `NEVER` ends on a refusal written for a request: read
+/// beside this rule without it, the model announces that it will not keep
+/// something nobody asked it to keep.
 const UNASKED: &str = "- Do not wait to be asked: when the user tells you something durable about themselves, \
      such as who they are, how they want you to work or a fact a later conversation will need, \
-     write it, then say in a line that you did.";
+     write it, then say in a line that you did. Unasked, what the rules below keep out you \
+     leave unwritten, without saying so.";
 
 const HORIZON: &str = "- Write what will still be true and worth reading in a month. A passing mention is not \
      one; a durable phrasing beats a precise figure.";
@@ -177,6 +181,24 @@ mod tests {
                 assert!(position(UNASKED) < position(limit), "{limit}");
             }
         }
+    }
+
+    /// `NEVER` ends on a refusal written for a request. Read beside a rule to
+    /// write unasked, it had the model announce that it would not keep
+    /// something nobody had asked it to keep.
+    #[test]
+    fn what_the_limits_keep_out_of_an_unasked_write_goes_unwritten_and_unannounced() {
+        assert!(
+            UNASKED.ends_with(
+                " then say in a line that you did. Unasked, what the rules below keep out you \
+                 leave unwritten, without saying so."
+            ),
+            "{UNASKED}"
+        );
+        assert!(
+            NEVER.ends_with(" Decline and say you did."),
+            "a refusal of something asked for is still spoken: {NEVER}"
+        );
     }
 
     #[test]
