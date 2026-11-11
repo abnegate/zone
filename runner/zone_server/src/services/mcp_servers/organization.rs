@@ -366,6 +366,7 @@ mod tests {
     use crate::services::mcp_servers::status::UNAUTHORIZED;
     use crate::services::mcp_servers::status::UNREACHABLE;
     use crate::services::mcp_servers::stub::Stub;
+    use crate::services::mcp_servers::testing;
 
     const POLICY: Policy = Policy {
         enabled: true,
@@ -574,7 +575,7 @@ mod tests {
             enabled: false,
             ..Definition::stub("off")
         };
-        let http = Definition::of("remote", McpServer::remote("http://127.0.0.1:1/mcp"));
+        let http = Definition::of("remote", McpServer::remote(testing::REMOTE_URL));
         let sse = Definition::of(
             "events",
             McpServer::remote("http://127.0.0.1:1/sse").with_transport(McpTransport::Sse),
@@ -633,10 +634,6 @@ mod tests {
 
     #[tokio::test]
     async fn each_failure_reaches_a_tenant_as_its_kind() {
-        let closed = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
-            format!("http://{}/mcp", listener.local_addr().expect("its address"))
-        };
         let servers = [
             (
                 "unchallenged",
@@ -762,7 +759,11 @@ mod tests {
         let cases: Vec<(&str, String, String)> = servers
             .iter()
             .map(|(name, server, expected)| (*name, server.uri(), expected.clone()))
-            .chain([("closed", closed, UNREACHABLE.to_string())])
+            .chain([(
+                "closed",
+                testing::REMOTE_URL.to_string(),
+                UNREACHABLE.to_string(),
+            )])
             .collect();
         let definitions = cases
             .iter()
