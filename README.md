@@ -35,7 +35,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 - **Role-Based Access Control**: Fine-grained permissions with users, roles, and policies
 - **Project & Task Management**: Organize work with agentic task execution
 - **Auto projects**: Describe a project, answer the interview, and Zone plans, builds, reviews with a second model, merges and reports every task until the project is complete
-- **MCP tools**: Attach stdio MCP servers (magents by default) so tasks can spawn or message other coding agents
+- **MCP tools**: Attach stdio and streamable HTTP MCP servers (magents by default) so tasks can spawn or message other coding agents
 - **Source Integration**: Connect and manage various data sources
 - **Wiki & Documentation**: Built-in knowledge base per workspace
 - **Theme Customization**: Workspace-specific theming
