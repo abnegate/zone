@@ -311,6 +311,7 @@ async function finger(page: Page): Promise<Finger> {
 async function shrinkToPhone(page: Page): Promise<void> {
   await page.setViewportSize(PHONE);
   await expect(page.locator('.main-content')).toHaveCSS('margin-left', '0px');
+  await expect(page.locator('.sidebar')).not.toBeInViewport();
 }
 
 async function recordAnnouncements(page: Page): Promise<() => Promise<string[]>> {
@@ -716,7 +717,7 @@ test.describe('Tasks Page', () => {
       ]);
     });
 
-    test('a reload of the list before a move is answered leaves the card where it was dropped', async ({
+    test('a reload before a move is answered leaves the card where it was dropped', async ({
       context,
       page,
     }) => {
@@ -773,6 +774,7 @@ test.describe('Tasks Page', () => {
     });
 
     test('a card reached by keyboard has room for its focus ring without moving', async ({
+      browserName,
       context,
       page,
     }) => {
@@ -793,7 +795,7 @@ test.describe('Tasks Page', () => {
       expect(await measure()).toEqual({ underHeader: 0, clear: 0 });
 
       await page.getByRole('button', { name: 'Move Implement login page', exact: true }).focus();
-      await page.keyboard.press('Tab');
+      await page.keyboard.press(browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
       await expect(
         page.getByRole('button', { name: 'Implement login page', exact: true })
       ).toBeFocused();
@@ -850,7 +852,10 @@ test.describe('Tasks Page', () => {
       await expect(page.locator('.task-details')).toBeVisible();
     });
 
-    test('a card is renamed from its menu without opening the editor', async ({ context, page }) => {
+    test('a card is renamed from its menu without opening the editor', async ({
+      context,
+      page,
+    }) => {
       const server = await serveTasks(context, page);
 
       await chooseFromMenu(page, 'Ship onboarding', 'Rename');
@@ -880,7 +885,9 @@ test.describe('Tasks Page', () => {
       await input.press('Escape');
 
       await expect(input).toHaveCount(0);
-      await expect(page.getByRole('button', { name: 'Ship onboarding', exact: true })).toBeFocused();
+      await expect(
+        page.getByRole('button', { name: 'Ship onboarding', exact: true })
+      ).toBeFocused();
       expect(server.mutations).toEqual([]);
       await expect(page).toHaveURL('/tasks');
     });
@@ -923,7 +930,10 @@ test.describe('Tasks Page', () => {
       ]);
     });
 
-    test('focus follows a card that a reload moves to another column', async ({ context, page }) => {
+    test('focus follows a card that a reload moves to another column', async ({
+      context,
+      page,
+    }) => {
       const server = await serveTasks(context, page);
       const title = page.getByRole('button', { name: 'Queue nightly build', exact: true });
       await title.focus();
@@ -957,7 +967,7 @@ test.describe('Tasks Page', () => {
       ).toBeFocused();
     });
 
-    test('closing the editor returns to the card and the scroll position it was opened from', async ({
+    test('closing the editor returns to the card and scroll position it left', async ({
       context,
       page,
     }) => {
@@ -1023,7 +1033,7 @@ test.describe('Tasks Page', () => {
 
       test('a grip can be hit anywhere in a 44px square around it', async ({ context, page }) => {
         await serveTasks(context, page);
-        await page.setViewportSize(PHONE);
+        await shrinkToPhone(page);
         const grip = page.getByRole('button', { name: 'Move Implement login page', exact: true });
         await expect(grip).toBeVisible();
 
@@ -1060,71 +1070,84 @@ test.describe('Tasks Page', () => {
         });
       });
 
-      test('swiping across a card scrolls the board without picking the card up', async ({
-        context,
-        page,
-      }) => {
-        const server = await serveTasks(context, page);
-        await shrinkToPhone(page);
-        const board = page.getByRole('region', { name: 'Tasks', exact: true });
-        const announced = await recordAnnouncements(page);
-        const from = await center(card(page, 'Implement login page').locator('.task-card-project'));
-        const touch = await finger(page);
-
-        await touch.down(from);
-        await touch.slide(from, { x: from.x - 160, y: from.y });
-        await expect.poll(() => board.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
-        await touch.up();
-
-        expect(await announced()).toEqual([]);
-        await expect(page.locator('.task-card-overlay')).toHaveCount(0);
-        await expect(page).toHaveURL('/tasks');
-        expect(moves(server)).toEqual([]);
-      });
-
-      test('a card dragged by its grip to the edge stops two columns over', async ({
-        context,
-        page,
-      }) => {
-        const server = await serveTasks(context, page);
-        await shrinkToPhone(page);
-        const bounds = await page.getByRole('region', { name: 'Tasks', exact: true }).boundingBox();
-        if (!bounds) throw new Error('The board has no layout box');
-        const from = await center(
-          page.getByRole('button', { name: 'Move Implement login page', exact: true })
+      test.describe('with a finger', () => {
+        test.skip(
+          ({ browserName }) => browserName !== 'chromium',
+          'Touch gestures are sent through the Chrome DevTools Protocol.'
         );
-        const edge = { x: bounds.x + bounds.width - 12, y: from.y };
-        const rest = { x: bounds.x + bounds.width * 0.75, y: from.y };
-        const touch = await finger(page);
 
-        await touch.down(from);
-        await touch.slide(from, edge);
-        await column(page, 'Blocked').evaluate(
-          (section, reach) =>
-            new Promise<void>((resolve) => {
-              const watch = () =>
-                section.getBoundingClientRect().left < reach
-                  ? resolve()
-                  : requestAnimationFrame(watch);
-              watch();
-            }),
-          rest.x - 20
-        );
-        await touch.move(rest);
-        await expect(announcer(page)).toHaveText('Implement login page is over Blocked.');
-        await touch.up();
+        test('swiping across a card scrolls the board without picking the card up', async ({
+          context,
+          page,
+        }) => {
+          const server = await serveTasks(context, page);
+          await shrinkToPhone(page);
+          const board = page.getByRole('region', { name: 'Tasks', exact: true });
+          const announced = await recordAnnouncements(page);
+          const from = await center(
+            card(page, 'Implement login page').locator('.task-card-project')
+          );
+          const touch = await finger(page);
 
-        await expect.poll(() => moves(server)).toEqual([
-          { method: 'PUT', id: 'task-1', body: { status: 'blocked' } },
-        ]);
-        await expect(card(column(page, 'Blocked'), 'Implement login page')).toBeInViewport();
+          await touch.down(from);
+          await touch.slide(from, { x: from.x - 160, y: from.y });
+          await expect
+            .poll(() => board.evaluate((element) => element.scrollLeft))
+            .toBeGreaterThan(0);
+          await touch.up();
+
+          expect(await announced()).toEqual([]);
+          await expect(page.locator('.task-card-overlay')).toHaveCount(0);
+          await expect(page).toHaveURL('/tasks');
+          expect(moves(server)).toEqual([]);
+        });
+
+        test('a card dragged by its grip to the edge stops two columns over', async ({
+          context,
+          page,
+        }) => {
+          const server = await serveTasks(context, page);
+          await shrinkToPhone(page);
+          const bounds = await page
+            .getByRole('region', { name: 'Tasks', exact: true })
+            .boundingBox();
+          if (!bounds) throw new Error('The board has no layout box');
+          const from = await center(
+            page.getByRole('button', { name: 'Move Implement login page', exact: true })
+          );
+          const edge = { x: bounds.x + bounds.width - 12, y: from.y };
+          const rest = { x: bounds.x + bounds.width * 0.75, y: from.y };
+          const touch = await finger(page);
+
+          await touch.down(from);
+          await touch.slide(from, edge);
+          await column(page, 'Blocked').evaluate(
+            (section, reach) =>
+              new Promise<void>((resolve) => {
+                const watch = () =>
+                  section.getBoundingClientRect().left < reach
+                    ? resolve()
+                    : requestAnimationFrame(watch);
+                watch();
+              }),
+            rest.x - 20
+          );
+          await touch.move(rest);
+          await expect(announcer(page)).toHaveText('Implement login page is over Blocked.');
+          await touch.up();
+
+          await expect.poll(() => moves(server)).toEqual([
+            { method: 'PUT', id: 'task-1', body: { status: 'blocked' } },
+          ]);
+          await expect(card(column(page, 'Blocked'), 'Implement login page')).toBeInViewport();
+        });
       });
     });
 
     test.describe('on a phone', () => {
       test('only the board scrolls sideways, one column at a time', async ({ context, page }) => {
         await serveTasks(context, page);
-        await page.setViewportSize(PHONE);
+        await shrinkToPhone(page);
         const board = page.getByRole('region', { name: 'Tasks', exact: true });
 
         const scroll = await board.evaluate((element) => ({
