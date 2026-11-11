@@ -525,8 +525,11 @@ mod tests {
                 "{error}"
             );
             assert_eq!(sentence, answered(400), "{name}");
-            for sent in [segment, key, "tenant"] {
-                assert!(!sentence.contains(sent), "{name} told {sentence}");
+            for (label, sent) in [("path", segment), ("key", key), ("query", "tenant")] {
+                assert!(
+                    !sentence.contains(sent),
+                    "{name} told the tenant its {label}"
+                );
             }
         }
     }

@@ -74,11 +74,11 @@ const ROTATED_HEADER_SECRET: &str = "r0t4ted";
 const ENVIRONMENT: &str = "TOKEN";
 const ENVIRONMENT_SECRET: &str = "v4lue";
 const ROTATED_ENVIRONMENT_SECRET: &str = "ch4nged";
-const SECRETS: [&str; 4] = [
-    HEADER_SECRET,
-    ROTATED_HEADER_SECRET,
-    ENVIRONMENT_SECRET,
-    ROTATED_ENVIRONMENT_SECRET,
+const SECRETS: [(&str, &str); 4] = [
+    ("the header secret", HEADER_SECRET),
+    ("the rotated header secret", ROTATED_HEADER_SECRET),
+    ("the environment secret", ENVIRONMENT_SECRET),
+    ("the rotated environment secret", ROTATED_ENVIRONMENT_SECRET),
 ];
 const SEALED_PREFIX: &str = "ENC[";
 const INSTANCE_SERVER: &str = "shared";
@@ -104,7 +104,12 @@ const WRONG_KEY: &str = "knock-knock-knock-knock";
 const PATH_MARKER: &str = "lane-lane-lane";
 const QUERY_MARKER: &str = "nook-nook-nook";
 const CLOSED_MARKER: &str = "moat-moat-moat";
-const SENT: [&str; 4] = [WRONG_KEY, PATH_MARKER, QUERY_MARKER, CLOSED_MARKER];
+const SENT: [(&str, &str); 4] = [
+    ("the wrong key", WRONG_KEY),
+    ("the path marker", PATH_MARKER),
+    ("the query marker", QUERY_MARKER),
+    ("the closed marker", CLOSED_MARKER),
+];
 /// Words the client's own failure text holds (`Send message error Transport […] error:
 /// unexpected server response: …`), each long enough for the hub to scrub when it is bound to
 /// a server as a segment of its URL's path or as the value of a header.
@@ -387,10 +392,18 @@ fn answered(status: u16) -> String {
     format!("{ANSWERED} {status}")
 }
 
+/// The labels of the `values` that `text` holds, so a failure names a value without printing it.
+fn found<'a>(text: &str, values: &[(&'a str, &str)]) -> Vec<&'a str> {
+    values
+        .iter()
+        .filter(|(_, value)| text.contains(value))
+        .map(|(label, _)| *label)
+        .collect()
+}
+
 fn assert_unsent(text: &str, place: &str) {
-    for sent in SENT {
-        assert!(!text.contains(sent), "{place} holds {sent}: {text}");
-    }
+    let sent = found(text, &SENT);
+    assert!(sent.is_empty(), "{place} holds {sent:?}");
 }
 
 /// What the server logged, which has to hold a redaction: a capture that silently caught
@@ -399,7 +412,7 @@ fn assert_scrubbed(logged: &str) {
     assert!(!logged.is_empty(), "nothing was logged");
     assert!(
         logged.contains(&format!("refused {REDACTED}")),
-        "the log does not hold the refusal with what it echoed redacted: {logged}"
+        "the log does not hold the refusal with what it echoed redacted"
     );
     assert_unsent(logged, "the log");
 }
@@ -483,10 +496,10 @@ fn fields(server: &Value) -> Vec<&str> {
 }
 
 fn assert_sealed(response: &TestResponse) {
-    let text = response.text();
+    let secrets = found(&response.text(), &SECRETS);
     assert!(
-        !text.contains(HEADER_SECRET) && !text.contains(ENVIRONMENT_SECRET),
-        "a response handed a secret value back: {text}"
+        secrets.is_empty(),
+        "a response handed a secret value back: {secrets:?}"
     );
 }
 
@@ -1278,9 +1291,10 @@ async fn a_body_naming_a_key_no_route_reads_is_a_bad_request() {
                 && message.contains(&format!("unknown field `{key}`")),
             "the refusal does not name `{key}`: {message}"
         );
+        let secrets = found(&message, &SECRETS);
         assert!(
-            !message.contains(HEADER_SECRET) && !message.contains(ENVIRONMENT_SECRET),
-            "the refusal of `{key}` handed a value back: {message}"
+            secrets.is_empty(),
+            "the refusal of `{key}` handed a value back: {secrets:?}"
         );
     }
     let listed = client.get_auth(&tenant.servers(), token).await.json_value();
@@ -1863,12 +1877,11 @@ async fn no_audit_row_holds_a_secret_value() {
     );
     for (action, old, new) in &audited {
         for values in [old, new].into_iter().flatten() {
-            for secret in SECRETS {
-                assert!(
-                    !values.contains(secret),
-                    "the {action} audit row holds a secret value: {values}"
-                );
-            }
+            let secrets = found(values, &SECRETS);
+            assert!(
+                secrets.is_empty(),
+                "the {action} audit row holds a secret value: {secrets:?}"
+            );
         }
     }
 
@@ -1921,12 +1934,11 @@ async fn an_update_is_audited_with_the_server_it_replaced() {
     );
     assert_eq!(after["name"], "renamed");
     assert_eq!(after["tools"], json!(["one"]));
-    for secret in SECRETS {
-        assert!(
-            !old.contains(secret),
-            "the update's old values hold a secret value: {old}"
-        );
-    }
+    let secrets = found(&old, &SECRETS);
+    assert!(
+        secrets.is_empty(),
+        "the update's old values hold a secret value: {secrets:?}"
+    );
 }
 
 #[tokio::test]
@@ -2205,30 +2217,31 @@ async fn an_organization_failure_shows_its_kind_and_nothing_it_was_sent() {
     ];
 
     for (body, sentence) in &rows {
+        let name = &body["name"];
         let created = tenant.create(&client, body).await;
-        assert_eq!(created["status"], CONNECTING, "{body}");
-        assert_eq!(created[ERROR], Value::Null, "{body}");
+        assert_eq!(created["status"], CONNECTING, "{name}");
+        assert_eq!(created[ERROR], Value::Null, "{name}");
         let server = id(&created);
         let uri = tenant.server(&server);
         let failed = settle(&client, &uri, token, FAILED).await;
-        assert_eq!(failed[ERROR], *sentence, "{body}");
+        assert_eq!(failed[ERROR], *sentence, "{name}");
 
         let narrowed = client
             .put_json_auth(&uri, &json!({ "tools": ["one"] }), token)
             .await;
         narrowed.assert_status(StatusCode::OK);
         let narrowed = narrowed.json_value();
-        assert_eq!(narrowed["status"], FAILED, "{body}");
-        assert_eq!(narrowed[ERROR], *sentence, "{body}");
+        assert_eq!(narrowed["status"], FAILED, "{name}");
+        assert_eq!(narrowed[ERROR], *sentence, "{name}");
         let requested = client
             .post_json_auth(&tenant.connection(&server), &json!({}), token)
             .await;
         requested.assert_status(StatusCode::ACCEPTED);
         let requested = requested.json_value();
-        assert_eq!(requested["status"], CONNECTING, "{body}");
-        assert_eq!(requested[ERROR], Value::Null, "{body}");
+        assert_eq!(requested["status"], CONNECTING, "{name}");
+        assert_eq!(requested[ERROR], Value::Null, "{name}");
         let again = settle(&client, &uri, token, FAILED).await;
-        assert_eq!(again[ERROR], *sentence, "{body}");
+        assert_eq!(again[ERROR], *sentence, "{name}");
 
         let resource = Uuid::parse_str(&server).expect("a server id");
         let audited = audited(&client, &tenant, MCP_SERVER_RESOURCE, resource).await;
@@ -2243,12 +2256,12 @@ async fn an_organization_failure_shows_its_kind_and_nothing_it_was_sent() {
                 (UPDATED, &json!(sentence)),
                 (RECONNECTED, &Value::Null),
             ],
-            "{body}"
+            "{name}"
         );
         for (action, values) in &audited {
             assert!(
                 !values.to_string().contains(WRONG_KEY),
-                "the {action} audit row holds the header the server was sent: {values}"
+                "the {action} audit row of {name} holds the header the server was sent"
             );
         }
     }

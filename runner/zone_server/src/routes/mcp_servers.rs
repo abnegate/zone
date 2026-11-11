@@ -1048,17 +1048,20 @@ mod tests {
 
     fn sealed(body: &Value) {
         let text = body.to_string();
-        for secret in [
-            CREDENTIAL,
-            ENVIRONMENT_SECRET,
-            "s3cr3t",
-            "tenants/acme",
-            BOUND_TOKEN,
-            "MCP_",
-            "${",
-        ] {
-            assert!(!text.contains(secret), "{secret} is published: {text}");
-        }
+        let published: Vec<&str> = [
+            ("the credential in the URL", CREDENTIAL),
+            ("the environment secret", ENVIRONMENT_SECRET),
+            ("the header secret", "s3cr3t"),
+            ("the tenant's path", "tenants/acme"),
+            ("the bound token", BOUND_TOKEN),
+            ("a variable's name", "MCP_"),
+            ("a reference", "${"),
+        ]
+        .into_iter()
+        .filter(|(_, secret)| text.contains(secret))
+        .map(|(label, _)| label)
+        .collect();
+        assert!(published.is_empty(), "published: {published:?}");
     }
 
     #[test]
@@ -1077,9 +1080,10 @@ mod tests {
         );
 
         let body = serde_json::to_string(&response).unwrap();
+        assert!(!body.contains("s3cr3t"), "the header secret is published");
         assert!(
-            !body.contains("s3cr3t") && !body.contains(ENVIRONMENT_SECRET),
-            "{body}"
+            !body.contains(ENVIRONMENT_SECRET),
+            "the environment secret is published"
         );
         assert_eq!(
             serde_json::to_value(&response).unwrap(),

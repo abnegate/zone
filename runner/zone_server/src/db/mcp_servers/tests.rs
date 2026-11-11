@@ -437,7 +437,10 @@ async fn secrets_sealed_under_another_key_do_not_open() {
     .expect_err("another key opens nothing");
 
     assert!(matches!(&error, McpServerError::Sealing(_)), "{error:?}");
-    assert!(!error.to_string().contains(TOKEN), "{error}");
+    assert!(
+        !error.to_string().contains(TOKEN),
+        "the error names the token"
+    );
 }
 
 #[tokio::test]
