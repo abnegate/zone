@@ -26,11 +26,7 @@ export function Skeleton() {
                 {PLACEHOLDERS.map((placeholder) => (
                   <div key={placeholder} className="task-card board-skeleton-card">
                     <div className="board-skeleton board-skeleton-title" />
-                    <div className="board-skeleton board-skeleton-text" />
-                    <div className="board-skeleton-meta">
-                      <div className="board-skeleton board-skeleton-badge" />
-                      <div className="board-skeleton board-skeleton-tag" />
-                    </div>
+                    <div className="board-skeleton board-skeleton-tag" />
                   </div>
                 ))}
               </div>

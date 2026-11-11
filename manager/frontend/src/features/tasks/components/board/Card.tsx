@@ -21,13 +21,7 @@ export function Card({ task, projects, relations, now, renaming, actions }: Card
     data: { task },
     disabled: renaming !== null,
   });
-  const className = [
-    'task-card',
-    task.is_agentic && 'task-card-agentic',
-    isDragging && 'task-card-dragging',
-  ]
-    .filter(Boolean)
-    .join(' ');
+  const className = isDragging ? 'task-card task-card-dragging' : 'task-card';
 
   return (
     <li ref={setNodeRef} className={className} data-task-id={task.id} {...listeners}>

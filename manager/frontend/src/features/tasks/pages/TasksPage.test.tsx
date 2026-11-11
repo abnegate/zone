@@ -217,7 +217,9 @@ const mockTasks: Task[] = [
   },
 ];
 
-const PULL_REQUEST = 'PR #123 · merged';
+const PULL_REQUEST = 'Pull request #123 merged';
+
+const PULL_REQUEST_CHIP = 'PR #123 · merged';
 
 const TITLES: Record<TaskStatus, string> = {
   created: 'Draft the spec',
@@ -799,11 +801,10 @@ describe('TasksPage', () => {
     expect(screen.getByText('Autonomous agent workflows')).toBeInTheDocument();
   });
 
-  it('displays agentic badge for agentic tasks', async () => {
+  it('marks agentic tasks on their cards', async () => {
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText('Agentic')).toBeInTheDocument();
-    });
+    const mark = await screen.findByRole('img', { name: 'Agentic' });
+    expect(mark.closest('.task-card')).toHaveTextContent('Implement login');
   });
 
   it('names the projects on each card, with a fallback for unknown and nothing for none', async () => {
@@ -1212,17 +1213,16 @@ describe('TasksPage', () => {
     });
   });
 
-  it('shows agentic styling for agentic task cards', async () => {
+  it('leaves the agentic mark off manual task cards', async () => {
     renderTasksPage();
     await waitFor(() => {
       expect(screen.getByText('Implement login')).toBeInTheDocument();
     });
 
-    const agenticCard = screen.getByText('Implement login').closest('.task-card');
-    expect(agenticCard).toHaveClass('task-card-agentic');
-    expect(screen.getByText('Fix button styling').closest('.task-card')).not.toHaveClass(
-      'task-card-agentic'
-    );
+    const manual = screen.getByText('Fix button styling').closest<HTMLElement>('.task-card');
+    expect(manual).not.toBeNull();
+    expect(within(manual as HTMLElement).queryByRole('img', { name: 'Agentic' })).toBeNull();
+    expect(screen.getAllByRole('img', { name: 'Agentic' })).toHaveLength(1);
   });
 
   it('enables agentic mode in create wizard', async () => {
@@ -1456,15 +1456,15 @@ describe('TasksPage', () => {
     });
   });
 
-  it('displays the pull request number and status in one chip when a PR exists', async () => {
+  it('displays the pull request number and status in one row when a PR exists', async () => {
     renderTasksPage();
-    await waitFor(() => {
-      expect(screen.getByText(PULL_REQUEST)).toHaveClass('ui-badge-accent');
-    });
-    expect(screen.getAllByText(/PR/)).toHaveLength(1);
+    const link = await screen.findByRole('link', { name: PULL_REQUEST });
+    expect(link).toHaveClass('task-card-pull-request-merged');
+    expect(link).toHaveTextContent('Pull request#123merged');
+    expect(screen.getAllByText('Pull request')).toHaveLength(1);
   });
 
-  it('links the pull request chip when pr_url exists', async () => {
+  it('links the pull request row when pr_url exists', async () => {
     renderTasksPage();
     await waitFor(() => {
       const link = screen.getByRole('link', { name: PULL_REQUEST });
@@ -1481,7 +1481,8 @@ describe('TasksPage', () => {
     );
 
     renderTasksPage();
-    expect(await screen.findByText('PR · pending')).toBeInTheDocument();
+    const label = await screen.findByText('Pull request');
+    expect(label.closest('.task-card-pull-request')).toHaveTextContent('Pull requestpending');
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 
@@ -1491,7 +1492,7 @@ describe('TasksPage', () => {
     renderTasksPage();
     await screen.findByText('Implement login');
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
-    expect(screen.queryByText(/^PR/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Pull request')).not.toBeInTheDocument();
   });
 
   it('displays every pull request status', async () => {
@@ -1505,9 +1506,12 @@ describe('TasksPage', () => {
 
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('PR · pending')).toBeInTheDocument();
-      expect(screen.getByText('PR · open')).toBeInTheDocument();
-      expect(screen.getByText('PR · closed')).toBeInTheDocument();
+      const rows = Array.from(document.querySelectorAll('.task-card-pull-request'));
+      expect(rows.map((row) => row.textContent)).toEqual([
+        'Pull requestpending',
+        'Pull requestopen',
+        'Pull requestclosed',
+      ]);
     });
   });
 
@@ -1665,7 +1669,7 @@ describe('TasksPage', () => {
       renderTasksPage('/tasks?task=task-spec');
 
       const links = within(await editing('Write the spec'));
-      expect(links.getByRole('link', { name: PULL_REQUEST })).toHaveAttribute(
+      expect(links.getByRole('link', { name: PULL_REQUEST_CHIP })).toHaveAttribute(
         'href',
         'https://github.com/test/repo/pull/123'
       );

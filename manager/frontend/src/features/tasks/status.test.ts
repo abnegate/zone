@@ -5,10 +5,12 @@ import {
   STAGE_IDS,
   STAGES,
   STATUS_OPTIONS,
+  settled,
   stageOf,
   statusLabel,
   statusTint,
   TASK_STATUSES,
+  unsettledFirst,
 } from './status';
 
 describe('stages', () => {
@@ -102,5 +104,36 @@ describe('groupByStage', () => {
     expect(ids('cancelled')).toEqual(['d']);
     expect(ids('paused')).toEqual(['f']);
     expect(ids('in_progress')).toEqual([]);
+  });
+});
+
+describe('settled', () => {
+  it('is true only for work that has ended', () => {
+    expect(TASK_STATUSES.filter(settled)).toEqual(['complete', 'cancelled']);
+  });
+});
+
+describe('unsettledFirst', () => {
+  it('moves work still in the way ahead of work that has ended, keeping each in order', () => {
+    const tasks = [
+      { id: 'a', status: 'complete' },
+      { id: 'b', status: 'blocked' },
+      { id: 'c', status: 'cancelled' },
+      { id: 'd', status: 'created' },
+    ] as const;
+    expect(unsettledFirst(tasks).map((task) => task.id)).toEqual(['b', 'd', 'a', 'c']);
+  });
+
+  it('leaves the list it was given untouched', () => {
+    const tasks = [
+      { id: 'a', status: 'complete' },
+      { id: 'b', status: 'queued' },
+    ] as const;
+    unsettledFirst(tasks);
+    expect(tasks.map((task) => task.id)).toEqual(['a', 'b']);
+  });
+
+  it('returns nothing for nothing', () => {
+    expect(unsettledFirst([])).toEqual([]);
   });
 });

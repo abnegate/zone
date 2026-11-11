@@ -39,22 +39,6 @@
   max-width: 75%;
 }
 
-.board-skeleton-text {
-  width: 40%;
-  height: var(--ui-space-3);
-}
-
-.board-skeleton-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--ui-space-2);
-}
-
-.board-skeleton-badge {
-  width: 3.5rem;
-  height: var(--ui-badge-height);
-}
-
 .board-skeleton-tag {
   width: 5rem;
   height: var(--ui-space-3);

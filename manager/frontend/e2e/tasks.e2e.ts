@@ -12,7 +12,8 @@ const workspaceId = '00000000-0000-0000-0000-000000000001';
 
 const NOW = new Date('2026-11-10T12:00:00.000Z');
 const UPDATED = '2026-11-10T10:00:00.000Z';
-const UPDATED_RELATIVE = 'about 2 hours ago';
+const UPDATED_BRIEF = '2h';
+const UPDATED_SPOKEN = '2 hours ago';
 
 const STAGE_LABELS = [
   'Planned',
@@ -30,6 +31,7 @@ const PHONE = { width: 375, height: 812 };
 
 const PULL_REQUEST = 'https://github.com/test/test/pull/7';
 const PULL_REQUEST_CHIP = 'PR #7 · open';
+const PULL_REQUEST_ROW = 'Pull request #7 open';
 
 const LONG_TITLE =
   'Migrate the notification service from the legacy queue to the event bus without dropping in-flight messages';
@@ -491,13 +493,18 @@ test.describe('Tasks Page', () => {
       const login = card(page, 'Implement login page');
       await expect(login.locator('.task-card-project')).toHaveText('Frontend App');
       await expect(login.getByRole('img', { name: 'Priority 1', exact: true })).toBeVisible();
-      await expect(login.getByText('Agentic', { exact: true })).toBeVisible();
-      await expect(login.locator('time.task-card-time')).toHaveText(UPDATED_RELATIVE);
-      await expect(login.locator('time.task-card-time')).toHaveAttribute('datetime', UPDATED);
+      await expect(login.getByRole('img', { name: 'Agentic', exact: true })).toBeVisible();
+      const age = login.locator('time.task-card-time');
+      await expect(age.locator('[aria-hidden="true"]')).toHaveText(UPDATED_BRIEF);
+      await expect(age.locator('.sr-only')).toHaveText(UPDATED_SPOKEN);
+      await expect(age).toHaveAttribute('datetime', UPDATED);
+      await expect(login.locator('.ui-badge')).toHaveCount(0);
+      const details = await login.locator('.task-card-meta').boundingBox();
+      expect(details?.height).toBe(16);
 
       const review = card(column(page, 'In review'), 'Add API endpoint');
       await expect(review.getByRole('link')).toHaveCount(1);
-      const link = review.getByRole('link', { name: PULL_REQUEST_CHIP, exact: true });
+      const link = review.getByRole('link', { name: PULL_REQUEST_ROW, exact: true });
       await expect(link).toBeVisible();
       await expect(link).toHaveAttribute('href', PULL_REQUEST);
       await expect(link).toHaveAttribute('target', '_blank');
@@ -864,7 +871,7 @@ test.describe('Tasks Page', () => {
       await expect(page.locator('.task-details')).toBeVisible();
     });
 
-    test('a card lists what it depends on and what it blocks, with each status', async ({
+    test('a card names one task it depends on and one it blocks, with each status', async ({
       context,
       page,
     }) => {
@@ -872,15 +879,19 @@ test.describe('Tasks Page', () => {
 
       const host = card(page, 'Fix navigation bug');
       const depends = host.getByRole('list', { name: 'Depends on', exact: true });
-      await expect(depends.getByRole('button')).toHaveText(['Ship onboarding', 'Wait on API keys']);
-      await expect(depends.getByRole('listitem')).toHaveCount(3);
-      await expect(depends.getByRole('listitem').last()).toHaveText('1 unknown');
-      const shipped = depends.getByRole('button', { name: 'Open Ship onboarding', exact: true });
-      await expect(shipped).toHaveAccessibleDescription('Completed');
-      await expect(shipped.locator('svg.status-icon-complete')).toBeVisible();
-      await expect(
-        depends.getByRole('button', { name: 'Open Wait on API keys', exact: true })
-      ).toHaveAccessibleDescription('Blocked');
+      await expect(depends.getByRole('button', { name: /^Open / })).toHaveText([
+        'Wait on API keys',
+      ]);
+      await expect(depends.getByRole('listitem')).toHaveCount(2);
+      await expect(depends.getByRole('listitem').last()).toHaveText('+2 more');
+      const waiting = depends.getByRole('button', { name: 'Open Wait on API keys', exact: true });
+      await expect(waiting).toHaveAccessibleDescription('Blocked');
+      await expect(waiting.locator('svg.status-icon-blocked')).toBeVisible();
+      await expect(host.getByRole('button', { name: 'Open Ship onboarding' })).toHaveCount(0);
+      const rows = await host
+        .locator('.task-relation')
+        .evaluateAll((items) => items.map((item) => item.getBoundingClientRect().height));
+      expect(rows).toEqual([24, 24]);
 
       const blocks = host.getByRole('list', { name: 'Blocks', exact: true });
       await expect(blocks.getByRole('button')).toHaveText(['Add API endpoint']);
@@ -893,6 +904,55 @@ test.describe('Tasks Page', () => {
 
       const unrelated = card(page, 'Implement login page');
       await expect(unrelated.getByRole('list')).toHaveCount(0);
+    });
+
+    test('the count on a relation expands it to name every task, and folds it back', async ({
+      context,
+      page,
+    }) => {
+      const server = await serveTasks(context, page);
+      const host = card(page, 'Fix navigation bug');
+      const depends = host.getByRole('list', { name: 'Depends on', exact: true });
+      const named = depends.getByRole('button', { name: /^Open / });
+      const height = async () => (await host.boundingBox())?.height ?? 0;
+      const folded = await height();
+
+      const count = depends.getByRole('button', { name: '+2 more', exact: true });
+      await expect(count).toHaveAttribute('aria-expanded', 'false');
+      await count.click();
+
+      await expect(named).toHaveText(['Wait on API keys', 'Ship onboarding']);
+      await expect(depends.getByRole('listitem')).toHaveText([
+        /Wait on API keys/,
+        /Ship onboarding/,
+        '1 unknown',
+        'Show less',
+      ]);
+      const fold = depends.getByRole('button', { name: 'Show less', exact: true });
+      await expect(fold).toHaveAttribute('aria-expanded', 'true');
+      await expect(fold).toBeFocused();
+      expect(await height()).toBe(folded + 72);
+      await expect(page).toHaveURL('/tasks');
+      await expect(page.locator('.task-card-overlay')).toHaveCount(0);
+      const fit = await host.evaluate((item) => {
+        const outer = item.getBoundingClientRect();
+        return Array.from(item.querySelectorAll('.task-relation-list > li')).every((row) => {
+          const box = row.getBoundingClientRect();
+          return box.left >= outer.left && box.right <= outer.right;
+        });
+      });
+      expect(fit).toBe(true);
+
+      await page.keyboard.press('Enter');
+      await expect(named).toHaveText(['Wait on API keys']);
+      await expect(count).toBeFocused();
+      expect(await height()).toBe(folded);
+
+      await page.keyboard.press('Space');
+      await expect(named).toHaveCount(2);
+      await depends.getByRole('button', { name: 'Open Ship onboarding', exact: true }).click();
+      await expect(page).toHaveURL('/tasks?task=task-7');
+      expect(moves(server)).toEqual([]);
     });
 
     test('a related task opens from a card with the mouse, then from the editor', async ({
@@ -947,12 +1007,10 @@ test.describe('Tasks Page', () => {
       await page.getByRole('button', { name: 'Fix navigation bug', exact: true }).focus();
       await page.keyboard.press(tab);
       await expect(
-        host.getByRole('button', { name: 'Open Ship onboarding', exact: true })
-      ).toBeFocused();
-      await page.keyboard.press(tab);
-      await expect(
         host.getByRole('button', { name: 'Open Wait on API keys', exact: true })
       ).toBeFocused();
+      await page.keyboard.press(tab);
+      await expect(host.getByRole('button', { name: '+2 more', exact: true })).toBeFocused();
       await page.keyboard.press(tab);
       await expect(
         host.getByRole('button', { name: 'Open Add API endpoint', exact: true })
@@ -962,11 +1020,11 @@ test.describe('Tasks Page', () => {
         host.getByRole('button', { name: 'Actions for Fix navigation bug', exact: true })
       ).toBeFocused();
 
-      await host.getByRole('button', { name: 'Open Ship onboarding', exact: true }).focus();
+      await host.getByRole('button', { name: 'Open Wait on API keys', exact: true }).focus();
       await page.keyboard.press('Enter');
-      await expect(page).toHaveURL('/tasks?task=task-7');
+      await expect(page).toHaveURL('/tasks?task=task-4');
       await expect(
-        page.getByRole('button', { name: 'Rename Ship onboarding', exact: true })
+        page.getByRole('button', { name: 'Rename Wait on API keys', exact: true })
       ).toBeVisible();
 
       await page.locator('.task-details').getByRole('button', { name: 'Close' }).click();
@@ -985,7 +1043,7 @@ test.describe('Tasks Page', () => {
       const server = await serveTasks(context, page);
       const host = card(page, 'Fix navigation bug');
 
-      const related = host.getByRole('button', { name: 'Open Ship onboarding', exact: true });
+      const related = host.getByRole('button', { name: 'Open Wait on API keys', exact: true });
       const from = await center(related);
       await page.mouse.move(from.x, from.y);
       await page.mouse.down();
@@ -1001,7 +1059,7 @@ test.describe('Tasks Page', () => {
         { method: 'PUT', id: 'task-3', body: { status: 'blocked' } },
       ]);
       const moved = card(column(page, 'Blocked'), 'Fix navigation bug');
-      await expect(moved.getByRole('button', { name: /^Open / })).toHaveCount(3);
+      await expect(moved.getByRole('button', { name: /^Open / })).toHaveCount(2);
 
       const label = await center(moved.getByText('Depends on', { exact: true }));
       await page.mouse.move(label.x, label.y);
@@ -1366,10 +1424,10 @@ test.describe('Tasks Page', () => {
           item.evaluate((element) => element.scrollWidth - element.clientWidth);
 
         const host = card(page, 'Implement login page');
-        await expect(host.getByRole('button', { name: /^Open / })).toHaveCount(4);
+        await expect(host.getByRole('button', { name: /^Open / })).toHaveCount(2);
         await expect(
           host.getByRole('list', { name: 'Depends on', exact: true }).getByRole('listitem').last()
-        ).toHaveText('+1 more, 1 unknown');
+        ).toHaveText('+4 more');
 
         const fit = await host.evaluate((item) => {
           const body = item.closest<HTMLElement>('.board-column-body');
@@ -1378,7 +1436,7 @@ test.describe('Tasks Page', () => {
           const column = body.getBoundingClientRect();
           const parts = Array.from(
             item.querySelectorAll<HTMLElement>(
-              '.task-relation-label, .task-relation-open, .task-relation-rest, .task-pull-request'
+              '.task-card-meta, .task-relation-label, .task-relation-open, .task-relation-toggle, .task-card-pull-request'
             )
           );
           const titles = Array.from(item.querySelectorAll<HTMLElement>('.task-relation-title'));
@@ -1396,13 +1454,25 @@ test.describe('Tasks Page', () => {
         });
 
         expect(fit).toEqual({
-          parts: 8,
+          parts: 7,
           column: true,
           within: true,
           contained: true,
-          clipped: [true, true, false, true],
+          clipped: [true, true],
           ellipsis: true,
         });
+        expect(await overflow(host)).toBe(await overflow(card(page, 'Ship onboarding')));
+
+        await host.getByRole('button', { name: '+4 more', exact: true }).click();
+        await expect(host.getByRole('button', { name: /^Open / })).toHaveCount(5);
+        const expanded = await host.evaluate((item) => {
+          const outer = item.getBoundingClientRect();
+          return Array.from(item.querySelectorAll('.task-relation-list > li')).every((row) => {
+            const box = row.getBoundingClientRect();
+            return box.left >= outer.left && box.right <= outer.right;
+          });
+        });
+        expect(expanded).toBe(true);
         expect(await overflow(host)).toBe(await overflow(card(page, 'Ship onboarding')));
         expect(
           await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)

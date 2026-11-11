@@ -23,7 +23,14 @@ const TITLE = '.task-card-open';
 
 const MENU = '.task-card-menu button';
 
-const CONTROLS = ['.task-card-handle', TITLE, '.task-pull-request', '.task-relation-open', MENU];
+const CONTROLS = [
+  '.task-card-handle',
+  TITLE,
+  '.task-card-pull-request',
+  '.task-relation-open',
+  '.task-relation-toggle',
+  MENU,
+];
 
 const POPUP = '[role="menu"]';
 
