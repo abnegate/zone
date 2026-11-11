@@ -2094,7 +2094,7 @@ pub fn render_learned_facts(category: LearnedCategory, facts: &[LearnedEntryRow]
 /// newline, so concatenating two populated blocks leaves two blank lines
 /// where they meet. What has been joined so far gives up its closing newline
 /// to the block that follows.
-fn join_blocks(blocks: &[String]) -> String {
+pub(crate) fn join_blocks(blocks: &[impl std::ops::Deref<Target = str>]) -> String {
     let mut joined = String::new();
     for block in blocks.iter().filter(|block| !block.is_empty()) {
         joined.truncate(joined.trim_end().len());
