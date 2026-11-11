@@ -789,17 +789,13 @@ async fn a_recorded_discovery_reaches_the_next_prompt_of_its_own_workspace() {
     let other = Fixture::new().await;
     let tools = fixture.chat().await;
     assert_eq!(
-        knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-            .await
-            .expect("an empty workspace renders"),
+        knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await,
         ""
     );
 
     stored(&record(&tools, Kind::Lesson, SUBJECT, STATEMENT).await);
 
-    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("the workspace's learned block renders");
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
     assert!(
         prompt.starts_with("\n\n# Recorded while working here\n"),
         "{prompt}"
@@ -811,9 +807,7 @@ async fn a_recorded_discovery_reaches_the_next_prompt_of_its_own_workspace() {
         "{prompt}"
     );
     assert_eq!(
-        knowledge::learned_facts_prompt(&other.pool, other.workspace)
-            .await
-            .expect("another workspace renders"),
+        knowledge::learned_facts_prompt(&other.pool, other.workspace).await,
         "",
         "a discovery crossed into a workspace it was not recorded in"
     );

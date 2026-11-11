@@ -892,7 +892,7 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
         format!(
             "{}{}",
             instructions.expect("what a run reads").trim_end(),
-            facts.expect("what a run reads").trim_end()
+            facts.trim_end()
         ),
         "under the bound a chat reads the bytes a run reads"
     );
@@ -1084,7 +1084,7 @@ async fn a_chat_is_told_how_many_discoveries_it_is_not_shown() {
     );
     assert_eq!(
         block.text,
-        run.expect("what a run reads").trim_end(),
+        run.trim_end(),
         "a chat reads the count a run reads"
     );
     assert!(!block.text.contains("learned entr"), "{}", block.text);

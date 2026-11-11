@@ -96,9 +96,7 @@ fn system(preparation: &Preparation) -> &str {
 
 /// What a run of the fixture's workspace is handed.
 async fn run_reads(fixture: &Fixture) -> String {
-    knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("the workspace's learned block renders")
+    knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await
 }
 
 /// The entries a prompt lists after the discoveries heading, one per line, and

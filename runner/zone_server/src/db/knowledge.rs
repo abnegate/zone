@@ -2182,20 +2182,49 @@ pub(crate) fn join_blocks(blocks: &[impl std::ops::Deref<Target = str>]) -> Stri
     joined
 }
 
+/// What one learned family's store read, or nothing and a warning when it
+/// cannot be read: a failed family costs a prompt that family and no other.
+pub(crate) async fn read_family<Rows: Default>(
+    workspace_id: Uuid,
+    category: &str,
+    rows: impl Future<Output = DbResult<Rows>>,
+) -> Rows {
+    rows.await.unwrap_or_else(|error| {
+        tracing::warn!(
+            %workspace_id,
+            category,
+            %error,
+            "Failed to load a learned family; continuing without it"
+        );
+        Rows::default()
+    })
+}
+
 /// Everything a workspace has learned and everything its agents recorded while
-/// working in it, ready to append to a system prompt.
-pub async fn learned_facts_prompt(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+/// working in it, ready to append to a system prompt. Each family is read on
+/// its own, so one whose store cannot be read leaves the others in place.
+pub async fn learned_facts_prompt(pool: &PgPool, workspace_id: Uuid) -> String {
     let mut blocks = Vec::with_capacity(LearnedCategory::ALL.len() + 1);
     for category in LearnedCategory::ALL {
-        let facts = list_learned_facts(pool, workspace_id, category).await?;
+        let facts = read_family(
+            workspace_id,
+            category.as_str(),
+            list_learned_facts(pool, workspace_id, category),
+        )
+        .await;
         blocks.push(render_learned_facts(category, &facts));
     }
-    let discoveries = discovery::listing(pool, workspace_id).await?;
+    let discoveries = read_family(
+        workspace_id,
+        discovery::CATEGORY,
+        discovery::listing(pool, workspace_id),
+    )
+    .await;
     blocks.push(discovery::render_among(
         &discoveries.rows,
         discoveries.recorded,
     ));
-    Ok(join_blocks(&blocks))
+    join_blocks(&blocks)
 }
 
 #[cfg(test)]

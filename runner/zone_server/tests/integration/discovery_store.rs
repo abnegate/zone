@@ -427,9 +427,7 @@ async fn another_workspace_sees_nothing_and_keeps_its_own_entry_for_the_subject(
             .is_empty()
     );
     assert_eq!(
-        knowledge::learned_facts_prompt(&fixture.pool, fixture.elsewhere)
-            .await
-            .expect("rendering the learned block"),
+        knowledge::learned_facts_prompt(&fixture.pool, fixture.elsewhere).await,
         ""
     );
 
@@ -511,9 +509,7 @@ async fn the_learned_prompt_carries_the_block_after_what_the_passes_derived() {
     }
     fixture.record(SUBJECT, STATEMENT).await;
 
-    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("rendering the learned block");
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
 
     let headings: Vec<&str> = prompt
         .lines()
@@ -681,6 +677,47 @@ async fn a_replaced_statement_drops_the_vector_of_the_one_it_replaced() {
     fixture.clean().await;
 }
 
+/// A family whose read fails costs a run that family and nothing else. A
+/// discovery row the store cannot decode stands in for the failure: the
+/// discoveries' read errs while every other family reads as it always does.
+#[tokio::test]
+async fn a_failed_discovery_read_keeps_the_learned_facts_in_the_block() {
+    let fixture = Fixture::new().await;
+    for category in LearnedCategory::ALL {
+        knowledge::upsert_learned_fact(&fixture.pool, &learned_fact(fixture.workspace, category))
+            .await
+            .expect("learning a fact");
+    }
+    let (id, _) = fixture.record(SUBJECT, STATEMENT).await;
+    sqlx::query("UPDATE knowledge_entries SET tags = NULL WHERE id = $1")
+        .bind(id)
+        .execute(&fixture.pool)
+        .await
+        .expect("a discovery the store cannot read back");
+    assert!(
+        discovery::listing(&fixture.pool, fixture.workspace)
+            .await
+            .is_err(),
+        "the discoveries' read must fail for this to prove anything"
+    );
+
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
+
+    let mut expected = String::new();
+    for category in LearnedCategory::ALL {
+        let facts = knowledge::list_learned_facts(&fixture.pool, fixture.workspace, category)
+            .await
+            .expect("listing learned facts");
+        assert_eq!(facts.len(), 1, "{category}");
+        expected.push_str(knowledge::render_learned_facts(category, &facts).trim_end());
+    }
+    expected.push('\n');
+    assert_eq!(prompt, expected);
+    assert!(!prompt.contains(STATEMENT), "{prompt}");
+
+    fixture.clean().await;
+}
+
 /// One run that records a block's worth is the persistence step of an
 /// injection, and in ordinary use it is fresh trivia burying older
 /// conventions. Either way the next prompt has to keep showing what the
@@ -725,9 +762,7 @@ async fn a_flood_from_one_run_leaves_room_for_what_other_sources_recorded() {
         "a source leads with its allowance, and the rest waits behind every other source"
     );
 
-    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("rendering the learned block");
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
     for kept in [
         "\n- Migration names: Timestamped, snake_case. (lesson, recorded in a chat on 2026-11-11)\n",
         "\n- Lint command: cargo clippy. (lesson, recorded during a task run on 2026-11-11)\n",
@@ -792,9 +827,7 @@ async fn a_run_s_recent_entries_lead_however_many_older_sources_recorded_one() {
         "a source's allowance comes by recency alone, ahead of anything older"
     );
 
-    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("rendering the learned block");
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
     for subject in &today {
         assert!(
             prompt.contains(&format!(
@@ -843,9 +876,7 @@ async fn entries_past_the_most_a_block_reads_are_still_counted() {
         "one source's entries come most recent first"
     );
 
-    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("rendering the learned block");
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
 
     assert!(
         prompt.len() <= discovery::MAX_RENDERED_BYTES,

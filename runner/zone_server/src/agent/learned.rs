@@ -46,14 +46,12 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 
 use futures::future::join_all;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::agent::skills;
-use crate::db::DbResult;
 use crate::db::knowledge::{self, LearnedCategory, LearnedEntryRow, discovery};
 
 /// The whole block, every family and the closing line included, never exceeds
@@ -278,24 +276,6 @@ pub fn render(learned: &Learned) -> Block {
     Block { text, shown }
 }
 
-/// What one family's store read, or nothing and a warning when it cannot be
-/// read: a failed family costs a chat that family, as it costs a run.
-async fn read<Rows: Default>(
-    workspace_id: Uuid,
-    category: &str,
-    rows: impl Future<Output = DbResult<Rows>>,
-) -> Rows {
-    rows.await.unwrap_or_else(|error| {
-        tracing::warn!(
-            %workspace_id,
-            category,
-            %error,
-            "Failed to load a learned family; continuing without it"
-        );
-        Rows::default()
-    })
-}
-
 /// How many of a category's entries its store's row limit kept from being
 /// read. A family that arrived empty was either never filed or could not be
 /// read, and counts for nothing either way.
@@ -313,7 +293,7 @@ fn unread(filed: &HashMap<String, i64>, category: &str, entries: &[LearnedEntryR
 /// row limits.
 pub async fn load(pool: &PgPool, workspace_id: Uuid) -> Learned {
     let (instructions, facts, discoveries, filed) = tokio::join!(
-        read(
+        knowledge::read_family(
             workspace_id,
             knowledge::STANDING_INSTRUCTION_CATEGORY,
             knowledge::list_standing_instructions(pool, workspace_id),
@@ -321,7 +301,7 @@ pub async fn load(pool: &PgPool, workspace_id: Uuid) -> Learned {
         join_all(LearnedCategory::ALL.map(|category| async move {
             Facts {
                 category,
-                entries: read(
+                entries: knowledge::read_family(
                     workspace_id,
                     category.as_str(),
                     knowledge::list_learned_facts(pool, workspace_id, category),
@@ -329,7 +309,7 @@ pub async fn load(pool: &PgPool, workspace_id: Uuid) -> Learned {
                 .await,
             }
         })),
-        read(
+        knowledge::read_family(
             workspace_id,
             discovery::CATEGORY,
             discovery::listing(pool, workspace_id),
@@ -1200,17 +1180,18 @@ mod tests {
         let conventions = vec![fact(LearnedCategory::RepositoryConvention, 0, 60)];
 
         let failed: Vec<LearnedEntryRow> =
-            read(workspace, knowledge::STANDING_INSTRUCTION_CATEGORY, async {
+            knowledge::read_family(workspace, knowledge::STANDING_INSTRUCTION_CATEGORY, async {
                 Err(sqlx::Error::PoolTimedOut)
             })
             .await;
-        let unlisted: discovery::Listing = read(workspace, discovery::CATEGORY, async {
-            Err(sqlx::Error::PoolTimedOut)
-        })
-        .await;
+        let unlisted: discovery::Listing =
+            knowledge::read_family(workspace, discovery::CATEGORY, async {
+                Err(sqlx::Error::PoolTimedOut)
+            })
+            .await;
         assert!(unlisted.rows.is_empty(), "{unlisted:?}");
         assert_eq!(unlisted.recorded, 0);
-        let kept = read(
+        let kept = knowledge::read_family(
             workspace,
             LearnedCategory::RepositoryConvention.as_str(),
             async { Ok(conventions.clone()) },
