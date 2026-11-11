@@ -484,9 +484,13 @@ made unasked, but it is that person's entry and not the workspace's.
   space collapsed to the one line a prompt renders, and that line holds
   `MAX_ENTRY_BYTES`, 1,000 bytes, for the two together. The rendered block
   holds `MAX_RENDERED_BYTES`, 6,000 bytes, and is read from at most
-  `MAX_LISTED`, 117, rows. They are dealt a source at a time, each run's or
-  chat's most recent first, so one chat or one run cannot fill the block; the
-  share is settled at the read, and nothing limits how many a source writes.
+  `MAX_LISTED`, 117, rows. They come most recent first, and only a source's
+  `ALLOWANCE`, its three most recent, are ordered that way: what a run or
+  chat recorded beyond it comes after every source's allowance, dealt a
+  source at a time. So one chat or one run cannot fill the block, and a run's
+  second and third entries are not hidden behind what older sources each
+  recorded once; the share is settled at the read, and nothing limits how
+  many a source writes.
   Entries that do not fit are left out whole and the block says how many,
   counted against everything recorded.
 - One entry per subject. Recording a subject again replaces its entry, which

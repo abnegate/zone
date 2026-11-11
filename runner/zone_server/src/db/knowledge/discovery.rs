@@ -30,14 +30,17 @@
 //! [`record`] stores what it is given. Deciding what may be recorded belongs
 //! to the caller, which is why this module holds no screen and no size check.
 //!
-//! No one run or chat takes the block. [`listing`] deals the entries out a
-//! source at a time, each source's most recent first, so every source shows
-//! one entry before any source shows a second, and a run that records forty
-//! is one voice among however many there are. The share is settled where the
-//! block is read and not where an entry is written: a quota at the write
-//! would need a number of its own, would refuse a long-lived chat for good
-//! once the chat reached it, and would leave the rows already stored as they
-//! are.
+//! No one run or chat takes the block, and none is held to a single line of
+//! it. [`listing`] puts the most recent first, but only [`ALLOWANCE`] of any
+//! one source's entries are ordered that way. Whatever else the source
+//! recorded is surplus, and comes after every source's allowance, dealt a
+//! source at a time. So a run that records forty leads with its allowance and
+//! waits behind the other sources with the rest, while a run that records two
+//! shows both ahead of anything older, however many chats each recorded one
+//! thing before it. The share is settled where the block is read and not
+//! where an entry is written: a quota at the write would refuse a long-lived
+//! chat for good once the chat reached it, and would leave the rows already
+//! stored as they are.
 //!
 //! The renderer sits here beside [`super::render_standing_instructions`] and
 //! [`super::render_learned_facts`], and like them it imports nothing from
@@ -76,6 +79,13 @@ const SHORTEST_LINE: &str = "\n- s: s (lesson, recorded in a chat on 2026-11-11)
 /// The most rows [`listing`] reads. No block shows more, because this many of
 /// the shortest line there is fill one with nothing else in it.
 pub const MAX_LISTED: usize = MAX_RENDERED_BYTES / SHORTEST_LINE.len();
+
+/// How many of a source's most recent entries [`listing`] orders by recency
+/// alone. Half of how many entries of the most one may hold the block's bytes
+/// divide into, so a run or chat whose allowance is all of that size still
+/// leaves the other sources two of the five such entries a block renders
+/// whole.
+pub const ALLOWANCE: usize = MAX_RENDERED_BYTES / MAX_ENTRY_BYTES / 2;
 
 const FINGERPRINT_CHARACTERS: usize = 32;
 
@@ -278,12 +288,15 @@ struct Listed {
     recorded: i64,
 }
 
-/// A workspace's active discoveries, dealt out a source at a time.
+/// A workspace's active discoveries, most recent first, each source's surplus
+/// behind.
 ///
-/// Each source's entries are numbered from its most recent, and the rows come
-/// back by that number and then by recency: the latest entry of every run and
-/// chat, then the one before it from each, and on until [`MAX_LISTED`]. The
-/// count is of every active entry, read in the same statement.
+/// Each source's entries are numbered from its most recent. The rows come
+/// back by how far past its [`ALLOWANCE`] an entry's number is, and then by
+/// recency: every entry inside its source's allowance, then the first one
+/// past it from every run and chat, then the one before that from each, and
+/// on until [`MAX_LISTED`]. The count is of every active entry, read in the
+/// same statement.
 pub async fn listing(pool: &PgPool, workspace_id: Uuid) -> DbResult<Listing> {
     let listed = sqlx::query_as::<_, Listed>(
         r#"
@@ -302,7 +315,7 @@ pub async fn listing(pool: &PgPool, workspace_id: Uuid) -> DbResult<Listing> {
             FROM knowledge_entries
             WHERE workspace_id = $1 AND category = $2 AND is_active = TRUE
         ) AS dealt
-        ORDER BY turn, updated_at DESC NULLS LAST, id
+        ORDER BY GREATEST(turn - $5, 0), updated_at DESC NULLS LAST, id
         LIMIT $4
         "#,
     )
@@ -310,6 +323,7 @@ pub async fn listing(pool: &PgPool, workspace_id: Uuid) -> DbResult<Listing> {
     .bind(CATEGORY)
     .bind(tag(SOURCE_TAG, ""))
     .bind(MAX_LISTED as i64)
+    .bind(ALLOWANCE as i64)
     .fetch_all(pool)
     .await?;
 
@@ -509,6 +523,21 @@ mod tests {
                 && (MAX_LISTED + 1) * SHORTEST_LINE.len() > MAX_RENDERED_BYTES,
             "one more row than this could not be shown by any block"
         );
+    }
+
+    /// The allowance is what one source may put at the front of a block, so
+    /// what it leaves of a block of the largest entries is what the other
+    /// sources are sure of.
+    #[test]
+    fn a_source_s_allowance_at_its_largest_leaves_other_sources_two_entries() {
+        let divided = MAX_RENDERED_BYTES / MAX_ENTRY_BYTES;
+        assert_eq!(divided, 6);
+        assert_eq!(ALLOWANCE, 3);
+
+        let rows: Vec<LearnedEntryRow> = (0..divided).map(maximal).collect();
+        let whole = block(&rows, rows.len()).shown.len();
+        assert_eq!(whole, 5);
+        assert_eq!(whole - ALLOWANCE, 2);
     }
 
     #[test]
