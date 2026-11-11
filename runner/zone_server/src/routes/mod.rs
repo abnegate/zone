@@ -469,7 +469,6 @@ pub fn create_router(state: AppState) -> Router {
             "/api/organizations/{org_id}/workspaces/{ws_id}/settings/ai/effective",
             get(ai_settings::get_effective),
         )
-        // Organization MCP servers
         .route(
             "/api/organizations/{org_id}/mcp-servers",
             get(mcp_servers::list).post(mcp_servers::create),
@@ -484,7 +483,6 @@ pub fn create_router(state: AppState) -> Router {
             "/api/organizations/{org_id}/mcp-servers/{server_id}/connection",
             post(mcp_servers::reconnect),
         )
-        // Workspace MCP server overrides
         .route(
             "/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers",
             get(mcp_servers::list_workspace).put(mcp_servers::update_workspace),
