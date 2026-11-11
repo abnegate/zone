@@ -94,7 +94,8 @@ const commandsOff = 'Command (stdio) servers are turned off on this instance.';
 const readOnly = 'Only organization admins can change MCP servers.';
 const workspaceReadOnly = 'Only workspace admins can change MCP servers.';
 const commandsDisabled = 'Command servers are turned off on this instance (ZONE_MCP_COMMANDS)';
-const transportFixed = '`transport` cannot be changed; remove the server and add it again';
+const unconnected = 'did not connect; see the server log';
+const transportFixed ='`transport` cannot be changed; remove the server and add it again';
 const workspaceMissing = 'Workspace not found';
 const reservedHeaders = ['accept', 'content-type', 'host', 'mcp-session-id'];
 const metadataAddress = 'Do not use a link-local or cloud metadata address';
@@ -141,7 +142,7 @@ function fixtures(): WireServer[] {
       arguments: ['-y', '@modelcontextprotocol/server-github'],
       environment: [{ name: 'GITHUB_TOKEN', has_value: true }],
       status: 'failed',
-      error: 'spawn npx ENOENT',
+      error: unconnected,
     }),
     server({
       id: searchId,
@@ -563,7 +564,7 @@ test.describe('MCP servers', () => {
     await expect(row(page, 'docs').getByRole('status')).toHaveText('Connected');
     await expect(row(page, 'docs')).toContainText('2 of 3 tools');
     await expect(row(page, 'github').getByRole('status')).toHaveText('Failed');
-    await expect(row(page, 'github')).toContainText('spawn npx ENOENT');
+    await expect(row(page, 'github')).toContainText(unconnected);
     await expect(row(page, 'search').getByRole('status')).toHaveText('Connecting');
     await expect(row(page, 'search').locator('.spinner')).toBeVisible();
     await expect(row(page, 'notes').getByRole('status')).toHaveText('Disabled');

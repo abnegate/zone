@@ -42,6 +42,7 @@ afterAll(() => {
 const ORGANIZATION_ID = 'org-1';
 const COMMANDS_OFF = 'Command (stdio) servers are turned off on this instance.';
 const READ_ONLY = 'Only organization admins can change MCP servers.';
+const UNREACHABLE = 'Zone could not reach the server';
 
 function server(name: string, overrides: Partial<McpServer> = {}): McpServer {
   return {
@@ -160,7 +161,7 @@ describe('McpServersSection', () => {
           server(status, {
             status,
             enabled: status !== 'disabled',
-            error: status === 'failed' ? 'connection refused' : null,
+            error: status === 'failed' ? UNREACHABLE : null,
           })
         )
       )
@@ -172,7 +173,7 @@ describe('McpServersSection', () => {
     expect(statusOf(await findRow('failed'))).toBe('Failed');
     expect(statusOf(await findRow('connecting'))).toBe('Connecting');
     expect(statusOf(await findRow('disabled'))).toBe('Disabled');
-    expect(screen.getByText('connection refused')).toBeTruthy();
+    expect(screen.getByText(UNREACHABLE)).toBeTruthy();
   });
 
   it('shows the empty state when there are no servers', async () => {

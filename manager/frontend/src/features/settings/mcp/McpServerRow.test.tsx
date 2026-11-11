@@ -6,6 +6,7 @@ import { COMMANDS_OFF_HINT } from './transport';
 import type { McpServer, McpServerStatus } from './types';
 
 const HINT_ID = 'commands-hint';
+const UNREACHABLE = 'Zone could not reach the server';
 
 function server(overrides: Partial<McpServer> = {}): McpServer {
   return {
@@ -88,8 +89,8 @@ describe('McpServerRow', () => {
   });
 
   it('shows why a failed server failed', () => {
-    renderRow(server({ status: 'failed', error: 'connection refused', available_tools: [] }));
-    expect(screen.getByText('connection refused').className).toBe('mcp-server-error');
+    renderRow(server({ status: 'failed', error: UNREACHABLE, available_tools: [] }));
+    expect(screen.getByText(UNREACHABLE).className).toBe('mcp-server-error');
   });
 
   it('spins while connecting', () => {
