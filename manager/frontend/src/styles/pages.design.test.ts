@@ -561,9 +561,7 @@ describe('sources section layout', () => {
     expect(footer).toContain('bottom: 0;');
     expect(footer).toContain('background: var(--ui-bg-elevated)');
     expect(footer).toContain('border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card)');
-    expect(rule(css, '.settings-page .page-body:has(.source-details-actions)')).toContain(
-      'padding-bottom: 0'
-    );
+    expect(css).not.toContain('.page-body');
     expect(rule(css, '.source-details')).not.toContain('flex: 1');
     expect(rule(css, '.source-details')).not.toContain('min-height');
     expect(rule(css, '.source-details-body')).not.toContain('overflow');
@@ -610,6 +608,12 @@ describe('settings page layout', () => {
     const body = rule(css, '.settings-page .page-body:has(.settings-actions)');
     expect(body).toContain('padding-bottom: 0');
     expect(body).toContain('flex-direction: column');
+  });
+
+  it('pads the scroller under the source editor footer so a focused field scrolls clear of it', () => {
+    const body = rule(css, '.settings-page .page-body:has(.source-details-actions)');
+    expect(body).toContain('padding-bottom: 0');
+    expect(body).toContain('scroll-padding-bottom: var(--ui-header-height)');
   });
 
   it('keeps feature setup in a settings section without a content card', () => {

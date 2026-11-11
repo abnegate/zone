@@ -647,6 +647,8 @@ test.describe('Sources Section', () => {
   });
 
   test.describe('Source Editor', () => {
+    test.use({ reducedMotion: 'reduce' });
+
     test('keeps Save in view when a tall editor first opens, before any scroll', async ({
       page,
     }) => {
@@ -678,6 +680,48 @@ test.describe('Sources Section', () => {
       expect(editorBox!.y + editorBox!.height).toBeGreaterThan(SHORT_VIEWPORT.height);
       expect(saveBox!.y + saveBox!.height).toBeLessThanOrEqual(SHORT_VIEWPORT.height);
       expect(footerBox!.y + footerBox!.height).toBeCloseTo(SHORT_VIEWPORT.height, 0);
+    });
+
+    test('scrolls a focused field clear of the sticky footer', async ({ page }) => {
+      await routeApi(page, sourceDetailPattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ source: mockSources[0] }),
+          });
+        } else {
+          route.continue();
+        }
+      });
+      await page.setViewportSize(SHORT_VIEWPORT);
+
+      await page.goto(`${SOURCES_PATH}?source=src-1`);
+
+      const editor = page.locator('.source-details');
+      const branch = editor.getByLabel('Branch');
+      const token = editor.getByLabel('Access Token');
+      const footer = editor.locator('.source-details-actions');
+      await expect(token).toBeAttached();
+      await page.locator('.page-body').evaluate((body) => {
+        const field = body.querySelector('#credentials')!.getBoundingClientRect();
+        const bar = body.querySelector('.source-details-actions')!.getBoundingClientRect();
+        body.scrollTop += field.top - bar.top - (bar.height - field.height) / 2;
+      });
+      const hidden = await token.boundingBox();
+      const bar = await footer.boundingBox();
+      expect(hidden!.y).toBeGreaterThanOrEqual(bar!.y);
+      expect(hidden!.y + hidden!.height).toBeLessThanOrEqual(bar!.y + bar!.height);
+      await branch.focus();
+
+      await page.keyboard.press('Tab');
+
+      await expect(token).toBeFocused();
+      const tokenBox = await token.boundingBox();
+      const footerBox = await footer.boundingBox();
+      expect(tokenBox).not.toBeNull();
+      expect(footerBox).not.toBeNull();
+      expect(tokenBox!.y + tokenBox!.height).toBeLessThanOrEqual(footerBox!.y);
     });
   });
 

@@ -247,10 +247,6 @@
   font-size: var(--ui-text-sm);
 }
 
-.settings-page .page-body:has(.source-details-actions) {
-  padding-bottom: 0;
-}
-
 .source-details-actions {
   position: sticky;
   bottom: 0;
