@@ -217,6 +217,8 @@ const mockTasks: Task[] = [
   },
 ];
 
+const PULL_REQUEST = 'PR #123 · merged';
+
 const TITLES: Record<TaskStatus, string> = {
   created: 'Draft the spec',
   queued: 'Wait for a worker',
@@ -671,9 +673,9 @@ describe('TasksPage', () => {
     expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
   });
 
-  it('does not open the editor from View PR', async () => {
+  it('does not open the editor from the pull request link', async () => {
     renderTasksPage();
-    const link = await screen.findByRole('link', { name: 'View PR' });
+    const link = await screen.findByRole('link', { name: PULL_REQUEST });
     fireEvent.click(link);
     expect(document.querySelector('section.task-details')).toBeNull();
     fireEvent.keyDown(link, { key: 'Enter' });
@@ -804,7 +806,7 @@ describe('TasksPage', () => {
     });
   });
 
-  it('names the projects on each card, with fallbacks for none and unknown', async () => {
+  it('names the projects on each card, with a fallback for unknown and nothing for none', async () => {
     mockGetTasks.mockImplementation(() =>
       Promise.resolve([
         ...mockTasks,
@@ -818,8 +820,10 @@ describe('TasksPage', () => {
     const board = screen.getByRole('region', { name: 'Tasks' });
     expect(within(board).getByText('Project Alpha')).toBeInTheDocument();
     expect(within(board).getByText('Project Beta')).toBeInTheDocument();
-    expect(within(board).getByText('No projects')).toBeInTheDocument();
     expect(within(board).getByText('Unknown')).toBeInTheDocument();
+    expect(within(board).queryByText('No projects')).not.toBeInTheDocument();
+    const orphan = (await openTitle('Orphan')).closest('li.task-card');
+    expect(orphan?.querySelector('.task-card-project')).toBeNull();
   });
 
   it('displays task priority', async () => {
@@ -1452,21 +1456,22 @@ describe('TasksPage', () => {
     });
   });
 
-  it('displays PR status badge when PR exists', async () => {
+  it('displays the pull request number and status in one chip when a PR exists', async () => {
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('PR merged')).toBeInTheDocument();
+      expect(screen.getByText(PULL_REQUEST)).toHaveClass('ui-badge-accent');
     });
+    expect(screen.getAllByText(/PR/)).toHaveLength(1);
   });
 
-  it('displays PR link when pr_url exists', async () => {
+  it('links the pull request chip when pr_url exists', async () => {
     renderTasksPage();
     await waitFor(() => {
-      const prLink = screen.getByRole('link', { name: 'View PR' });
-      expect(prLink).toHaveAttribute('href', 'https://github.com/test/repo/pull/123');
-      expect(prLink).toHaveAttribute('target', '_blank');
-      expect(prLink).toHaveAttribute('rel', 'noopener noreferrer');
-      expect(prLink.closest('.task-card')).not.toBeNull();
+      const link = screen.getByRole('link', { name: PULL_REQUEST });
+      expect(link).toHaveAttribute('href', 'https://github.com/test/repo/pull/123');
+      expect(link).toHaveAttribute('target', '_blank');
+      expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+      expect(link.closest('.task-card')).not.toBeNull();
     });
   });
 
@@ -1476,8 +1481,8 @@ describe('TasksPage', () => {
     );
 
     renderTasksPage();
-    expect(await screen.findByText('PR pending')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
+    expect(await screen.findByText('PR · pending')).toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
   });
 
   it('shows no pull request on a card without one', async () => {
@@ -1485,8 +1490,8 @@ describe('TasksPage', () => {
 
     renderTasksPage();
     await screen.findByText('Implement login');
-    expect(screen.queryByRole('link', { name: 'View PR' })).not.toBeInTheDocument();
-    expect(screen.queryByText(/^PR /)).not.toBeInTheDocument();
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(screen.queryByText(/^PR/)).not.toBeInTheDocument();
   });
 
   it('displays every pull request status', async () => {
@@ -1500,9 +1505,174 @@ describe('TasksPage', () => {
 
     renderTasksPage();
     await waitFor(() => {
-      expect(screen.getByText('PR pending')).toBeInTheDocument();
-      expect(screen.getByText('PR open')).toBeInTheDocument();
-      expect(screen.getByText('PR closed')).toBeInTheDocument();
+      expect(screen.getByText('PR · pending')).toBeInTheDocument();
+      expect(screen.getByText('PR · open')).toBeInTheDocument();
+      expect(screen.getByText('PR · closed')).toBeInTheDocument();
+    });
+  });
+
+  describe('related tasks', () => {
+    const spec: Task = { ...mockTasks[1], id: 'task-spec', title: 'Write the spec' };
+    const login: Task = { ...mockTasks[0], dependencies: ['task-spec', 'task-gone'] };
+    const release: Task = {
+      ...mockTasks[1],
+      id: 'task-release',
+      title: 'Ship the release',
+      status: 'review',
+      dependencies: ['task-1'],
+      pr_url: null,
+      pr_status: null,
+      branch_name: null,
+    };
+    const linked: Task[] = [login, spec, release];
+
+    beforeEach(() => {
+      mockGetTasks.mockImplementation(() => Promise.resolve(linked));
+      mockGetTask.mockImplementation((id: string) => {
+        const found = linked.find((task) => task.id === id);
+        return found ? Promise.resolve(found) : Promise.reject(new Error('Task not found'));
+      });
+    });
+
+    function cardOf(title: string): HTMLElement {
+      const item = screen.getByRole('button', { name: title }).closest<HTMLElement>('li.task-card');
+      if (!item) throw new Error(`No card for ${title}`);
+      return item;
+    }
+
+    async function editing(title: string): Promise<HTMLElement> {
+      await screen.findByRole('button', { name: `Rename ${title}` });
+      return screen.getByRole('region', { name: 'Links' });
+    }
+
+    it('lists on a card what it depends on and what it blocks', async () => {
+      renderTasksPage();
+      await openTitle('Implement login');
+
+      const host = within(cardOf('Implement login'));
+      expect(
+        within(host.getByRole('list', { name: 'Depends on' }))
+          .getAllByRole('listitem')
+          .map((item) => item.textContent)
+      ).toEqual(['Write the specCompleted', '1 unknown']);
+      expect(
+        within(host.getByRole('list', { name: 'Blocks' }))
+          .getAllByRole('button')
+          .map((button) => button.getAttribute('aria-label'))
+      ).toEqual(['Open Ship the release']);
+      expect(
+        within(cardOf('Write the spec')).getByRole('button', { name: 'Open Implement login' })
+      ).toBeInTheDocument();
+    });
+
+    it('opens the related task from a card, not the card it is listed on', async () => {
+      renderTasksPage();
+      await openTitle('Implement login');
+
+      fireEvent.click(
+        within(cardOf('Implement login')).getByRole('button', { name: 'Open Write the spec' })
+      );
+
+      await screen.findByRole('button', { name: 'Rename Write the spec' });
+      expect(new URLSearchParams(window.location.search).get('task')).toBe('task-spec');
+      expect(mockGetTask).toHaveBeenCalledWith('task-spec');
+      expect(mockGetTask).not.toHaveBeenCalledWith('task-1');
+    });
+
+    it('returns to the card of the related task that was opened when the editor closes', async () => {
+      renderTasksPage();
+      await openTitle('Implement login');
+      fireEvent.click(
+        within(cardOf('Implement login')).getByRole('button', { name: 'Open Write the spec' })
+      );
+      await screen.findByRole('button', { name: 'Rename Write the spec' });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => expect(focusedTitle()).toBe('task-spec'));
+    });
+
+    it('lists the links in the editor from the tasks the board already loaded', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+
+      const links = within(await editing('Implement login'));
+      expect(
+        within(links.getByRole('list', { name: 'Depends on' }))
+          .getAllByRole('listitem')
+          .map((item) => item.textContent)
+      ).toEqual(['Write the specCompleted', '1 unknown']);
+      expect(
+        within(links.getByRole('list', { name: 'Blocks' }))
+          .getAllByRole('listitem')
+          .map((item) => item.textContent)
+      ).toEqual(['Ship the releaseIn review']);
+      expect(mockGetTasks).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows the pull request and branch in the editor', async () => {
+      renderTasksPage('/tasks?task=task-spec');
+
+      const links = within(await editing('Write the spec'));
+      expect(links.getByRole('link', { name: PULL_REQUEST })).toHaveAttribute(
+        'href',
+        'https://github.com/test/repo/pull/123'
+      );
+      expect(links.getByText('feature/fix-button-styling')).toBeInTheDocument();
+      expect(links.getByRole('button', { name: 'Open Implement login' })).toBeInTheDocument();
+    });
+
+    it('leaves the Links section out of the editor of a task with nothing linked', async () => {
+      mockGetTasks.mockImplementation(() => Promise.resolve([mockTasks[0]]));
+      mockGetTask.mockImplementation(() => Promise.resolve(mockTasks[0]));
+      renderTasksPage('/tasks?task=task-1');
+
+      await screen.findByRole('button', { name: 'Rename Implement login' });
+      expect(screen.queryByRole('region', { name: 'Links' })).not.toBeInTheDocument();
+    });
+
+    it('switches the editor to a related task and back to its card on close', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+      const links = within(await editing('Implement login'));
+
+      fireEvent.click(links.getByRole('button', { name: 'Open Ship the release' }));
+
+      const next = within(await editing('Ship the release'));
+      expect(new URLSearchParams(window.location.search).get('task')).toBe('task-release');
+      expect(mockGetTask).toHaveBeenCalledWith('task-release');
+      expect(screen.queryByRole('button', { name: 'Rename Implement login' })).toBeNull();
+      expect(next.getByRole('button', { name: 'Open Implement login' })).toBeInTheDocument();
+      expect(mockUpdateTask).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+      await waitFor(() => expect(focusedTitle()).toBe('task-release'));
+    });
+
+    it('keeps focus on the related task of a card that a reload moves', async () => {
+      let stored = linked;
+      mockGetTasks.mockImplementation(() => Promise.resolve(stored));
+      renderTasksPage();
+      await openTitle('Implement login');
+      const host = within(cardOf('Implement login'));
+      host.getByRole('button', { name: 'Open Ship the release' }).focus();
+
+      stored = stored.map((task) =>
+        task.id === 'task-1' ? { ...task, status: 'in_progress' } : task
+      );
+      const loads = mockGetTasks.mock.calls.length;
+      await act(async () => {
+        window.dispatchEvent(new Event('visibilitychange'));
+        await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(loads + 1));
+        await mockGetTasks.mock.results[loads].value;
+      });
+      await waitFor(() => {
+        expect(column('In progress').querySelector('[data-task-id="task-1"]')).not.toBeNull();
+      });
+
+      expect(document.activeElement).toBe(
+        within(column('In progress')).getByRole('button', { name: 'Open Ship the release' })
+      );
     });
   });
 

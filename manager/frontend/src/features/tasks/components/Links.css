@@ -1,0 +1,44 @@
+.task-links-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  min-width: 0;
+}
+
+.task-links-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-1) var(--ui-space-2);
+  min-width: 0;
+}
+
+.task-links-branch {
+  min-width: 0;
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-space-5);
+  color: var(--ui-text-muted);
+}
+
+.task-links-branch code {
+  font-family: var(--ui-font-mono);
+  color: var(--ui-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.task-links .task-relation-open {
+  align-items: flex-start;
+  padding-block: var(--ui-space-0-5);
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-space-5);
+}
+
+.task-links .task-relation-title {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.task-links .status-icon {
+  margin-top: calc((var(--ui-space-5) - var(--ui-icon-size-sm)) / 2);
+}

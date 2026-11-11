@@ -103,6 +103,14 @@ export default function TasksPage() {
     [searchParams, setSearchParams]
   );
 
+  const open = useCallback(
+    (task: Task) => {
+      view.opened = task.id;
+      openEditor(task.id);
+    },
+    [view, openEditor]
+  );
+
   const closeEditor = () => {
     setExecutionTask(null);
     const next = new URLSearchParams(searchParams);
@@ -132,10 +140,7 @@ export default function TasksPage() {
 
   const actions = useMemo<BoardActions>(
     () => ({
-      open: (task) => {
-        view.opened = task.id;
-        openEditor(task.id);
-      },
+      open,
       run: setExecutionTask,
       rename: (task) => setRenaming({ id: task.id, draft: new TitleDraft(task.title) }),
       retitle: async (task, title) => {
@@ -155,7 +160,7 @@ export default function TasksPage() {
         }
       },
     }),
-    [openEditor, updateListedTask, moveTask, view]
+    [open, updateListedTask, moveTask]
   );
 
   const loading = tasksLoading || projectsLoading;
@@ -205,8 +210,10 @@ export default function TasksPage() {
         ) : editorReady && editorTask ? (
           <TaskDetail
             task={editorTask}
+            tasks={tasks}
             projects={projects}
             sources={sources}
+            onOpen={open}
             onClose={closeEditor}
             onExecute={() => setExecutionTask(editorTask)}
             onSave={handleSave}

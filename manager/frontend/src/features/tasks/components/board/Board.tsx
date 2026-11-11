@@ -14,6 +14,7 @@ import {
 import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useMediaQuery } from '../../../../shared/hooks';
+import { relate, UNRELATED } from '../../relations';
 import { groupByStage, STAGES, type StageId, stageOf } from '../../status';
 import type { BoardActions, Renaming, Task } from '../../types';
 import { Card } from './Card';
@@ -39,8 +40,6 @@ const POINTER = { activationConstraint: { distance: 5 } };
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
 
-const NO_PROJECTS = 'No projects';
-
 const UNKNOWN_PROJECT = 'Unknown';
 
 const INSTRUCTIONS =
@@ -55,7 +54,6 @@ const SILENT: Announcements = {
 };
 
 function projectNames(task: Task, projects: ReadonlyMap<string, string>): string {
-  if (task.project_ids.length === 0) return NO_PROJECTS;
   return task.project_ids.map((id) => projects.get(id) ?? UNKNOWN_PROJECT).join(', ');
 }
 
@@ -69,6 +67,7 @@ function carried(data: { current?: { task?: Task } } | undefined): Task | undefi
 
 export function Board({ tasks, projects, renaming, removed, view, actions }: BoardProps) {
   const groups = useMemo(() => groupByStage(tasks), [tasks]);
+  const relations = useMemo(() => relate(tasks), [tasks]);
   const [active, setActive] = useState<UniqueIdentifier | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const announcedOver = useRef<UniqueIdentifier | null>(null);
@@ -171,6 +170,7 @@ export function Board({ tasks, projects, renaming, removed, view, actions }: Boa
                   key={task.id}
                   task={task}
                   projects={projectNames(task, projects)}
+                  relations={relations.get(task.id) ?? UNRELATED}
                   now={now}
                   renaming={renaming?.id === task.id ? renaming.draft : null}
                   actions={actions}
@@ -192,8 +192,10 @@ export function Board({ tasks, projects, renaming, removed, view, actions }: Boa
                 <CardBody
                   task={dragged}
                   projects={projectNames(dragged, projects)}
+                  relations={relations.get(dragged.id) ?? UNRELATED}
                   now={now}
                   title={<span className="task-card-title">{dragged.title}</span>}
+                  onOpen={actions.open}
                 />
               </div>
             )}

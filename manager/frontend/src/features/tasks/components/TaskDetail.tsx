@@ -3,9 +3,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import PencilIcon from '../../../shared/components/PencilIcon/PencilIcon';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
+import { relationsOf } from '../relations';
 import { STATUS_OPTIONS } from '../status';
 import { awaitsTitle } from '../title';
 import type { Task, TaskStatus, UpdateTaskRequest } from '../types';
+import { Links } from './Links';
 import { TaskTitleInput } from './TaskTitleInput';
 
 type Draft = {
@@ -22,8 +24,10 @@ type Draft = {
 
 type TaskDetailProps = {
   task: Task;
+  tasks: readonly Task[];
   projects: Project[];
   sources: Source[];
+  onOpen: (task: Task) => void;
   onClose: () => void;
   onExecute: () => void;
   onSave: (request: UpdateTaskRequest) => Promise<void>;
@@ -96,8 +100,10 @@ function changed(task: Task, draft: Draft): UpdateTaskRequest {
 
 export function TaskDetail({
   task,
+  tasks,
   projects,
   sources,
+  onOpen,
   onClose,
   onExecute,
   onSave,
@@ -128,6 +134,7 @@ export function TaskDetail({
   }, [task]);
 
   const request = useMemo(() => changed(task, draft), [task, draft]);
+  const relations = useMemo(() => relationsOf(task, tasks), [task, tasks]);
   const canSave = Object.keys(request).length > 0 && draft.description.trim().length > 0 && !saving;
 
   const toggleProject = (id: string) => {
@@ -188,6 +195,8 @@ export function TaskDetail({
             {error}
           </div>
         )}
+
+        <Links task={task} relations={relations} onOpen={onOpen} />
 
         <div className="form-group">
           <label htmlFor="task-detail-description">Description</label>
