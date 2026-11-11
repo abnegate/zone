@@ -9,6 +9,7 @@ import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import SubNav from '../../../shared/components/SubNav/SubNav';
 import { getErrors } from '../../../validation';
+import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 import { sourcesQueryKey } from '../../sources/hooks/sourcesQueryKey';
 import {
   AutomationPanel,
@@ -973,7 +974,7 @@ export default function ProjectsPage() {
             wrapperClassName="form-group"
             helpText={
               sources.length === 0
-                ? 'No sources configured. Add one in the Sources page.'
+                ? `No sources configured. Add one in ${SOURCES_LOCATION}.`
                 : undefined
             }
             options={[

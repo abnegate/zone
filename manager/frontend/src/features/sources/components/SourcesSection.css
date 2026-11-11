@@ -1,17 +1,8 @@
-.sources-page {
-  background: var(--ui-bg-base);
-  color: var(--ui-text-primary);
-}
-
-.sources-body {
+.sources-section {
   display: flex;
   flex-direction: column;
   min-width: 0;
   gap: var(--ui-space-3);
-}
-
-.sources-empty {
-  margin: auto;
 }
 
 .sources-banner {
@@ -40,6 +31,7 @@
   width: 100%;
   min-width: 0;
   overflow-x: auto;
+  container-type: inline-size;
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-card);
   background: var(--ui-bg-elevated);
@@ -159,6 +151,11 @@
   text-overflow: ellipsis;
 }
 
+.sources-table .source-url-cell {
+  width: 100%;
+  max-width: 0;
+}
+
 .source-url {
   display: block;
   max-width: 18rem;
@@ -211,8 +208,6 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
-  min-height: 0;
-  flex: 1;
   background: var(--ui-bg-elevated);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-card);
@@ -229,7 +224,7 @@
   border-bottom: 1px solid var(--ui-border);
 }
 
-.source-details-header h2 {
+.source-details-header h3 {
   margin: 0;
   min-width: 0;
   overflow: hidden;
@@ -241,9 +236,6 @@
 }
 
 .source-details-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
   padding: var(--ui-panel-padding) var(--ui-gutter);
 }
 
@@ -257,6 +249,8 @@
 }
 
 .source-details-actions {
+  position: sticky;
+  bottom: 0;
   display: flex;
   justify-content: flex-end;
   align-items: center;
@@ -264,7 +258,15 @@
   flex-shrink: 0;
   height: var(--ui-header-height);
   padding: 0 var(--ui-gutter);
+  background: var(--ui-bg-elevated);
   border-top: 1px solid var(--ui-border);
+  border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card);
+}
+
+.settings-page .source-details .form-hint {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
 }
 
 .github-configuration > .ui-btn-link {
@@ -520,6 +522,27 @@
 .input-mono {
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-sm);
+}
+
+@media (min-width: 769px) {
+  @container (max-width: 48rem) {
+    .sources-table th:nth-child(4),
+    .sources-table td:nth-child(4),
+    .sources-table th:nth-child(5),
+    .sources-table td:nth-child(5) {
+      display: none;
+    }
+
+    .sources-table td:first-child {
+      width: 100%;
+      max-width: 0;
+    }
+
+    .source-name-cell {
+      min-width: 0;
+      max-width: none;
+    }
+  }
 }
 
 @media (max-width: 768px) {

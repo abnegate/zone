@@ -1,4 +1,4 @@
-import { api, expect, signIn, state, test, tokenFor } from './harness';
+import { api, expect, signIn, SOURCES_PATH, state, test, tokenFor } from './harness';
 
 /**
  * The layout contract every page is held to, measured live at the smallest
@@ -13,7 +13,7 @@ const ROUTES = [
   '/chats',
   '/projects',
   '/tasks',
-  '/sources',
+  SOURCES_PATH,
   '/models',
   '/wiki',
   '/settings/organization/ai',
@@ -198,8 +198,12 @@ test('chat titles keep the row width and the conversation header stays one row',
 
 test('the add source tiles are one 56px row each', async ({ page }) => {
   await signIn(page);
-  await page.goto('/sources');
-  await page.getByRole('button', { name: /Add source/i }).first().click();
+  await page.goto(SOURCES_PATH);
+  await page
+    .locator('.settings-content')
+    .getByRole('button', { name: /Add source/i })
+    .first()
+    .click();
 
   const tiles = page.locator('.source-type-option');
   await expect(tiles.first()).toBeVisible();

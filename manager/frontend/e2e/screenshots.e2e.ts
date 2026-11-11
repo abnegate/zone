@@ -1,6 +1,6 @@
 import { test, expect } from './fixtures';
 import type { Page } from '@playwright/test';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 import { mockTasks, setupAdminAuth, setupCommonRoutes, tasksNow } from './layout-fixtures';
 
 const runScreenshots = process.env.RUN_SCREENSHOTS === 'true';
@@ -236,15 +236,15 @@ describeScreenshots('Screenshots - Empty States', () => {
     });
   });
 
-  test('Sources page (empty)', async ({ page }) => {
+  test('Sources section (empty)', async ({ page }) => {
     await setupCommonRoutes(page, false);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -639,15 +639,15 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   }
 
-  test('Sources page (populated)', async ({ page }) => {
+  test('Sources section (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -824,15 +824,15 @@ describeScreenshots('Screenshots - Dark Mode', () => {
     });
   });
 
-  test('Sources page (dark)', async ({ page }) => {
+  test('Sources section (dark)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -940,16 +940,15 @@ describeScreenshots('Screenshots - Modals', () => {
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
 
-    // Click add source button
-    const addSourceBtn = page
-      .locator('button')
-      .filter({ hasText: /Add Source/i });
-    await expect(addSourceBtn).toBeVisible();
-    await addSourceBtn.click();
+    const addSource = page
+      .locator('.sources-section .section-row-actions')
+      .getByRole('button', { name: 'Add source' });
+    await expect(addSource).toBeVisible();
+    await addSource.click();
     await page.waitForTimeout(300);
     await capturePage(page, {
       path: 'screenshots/modal-add-source.png',

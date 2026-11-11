@@ -150,10 +150,11 @@ describe('settings surfaces', () => {
 });
 
 describe('sources surfaces', () => {
-  const css = read(join(sources, 'pages', 'SourcesPage.css'));
+  const css = read(join(sources, 'components', 'SourcesSection.css'));
 
-  it('paints a flat page whose cards are list cards', () => {
+  it('paints a flat section whose cards are list cards', () => {
     expect(css).not.toContain('radial-gradient');
+    expect(css).not.toContain('.sources-page');
     expect(css).not.toContain('.sources-header');
     expect(css).not.toContain('.sources-list');
     expect(css).not.toContain('card--list');
@@ -173,7 +174,9 @@ describe('sources surfaces', () => {
     const lines = rule(css, '.source-type-name,\n.source-type-desc');
     expect(lines).toContain('white-space: nowrap');
     expect(lines).toContain('text-overflow: ellipsis');
-    expect(css).not.toContain('line-clamp');
+    expect([...css.matchAll(/line-clamp:\s*([^;]+);/g)].map(([, value]) => value)).toEqual([
+      'unset',
+    ]);
   });
 });
 

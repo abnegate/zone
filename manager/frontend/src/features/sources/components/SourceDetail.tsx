@@ -117,7 +117,7 @@ export function SourceDetail({
   return (
     <section className="source-details">
       <header className="source-details-header">
-        <h2>{source.name}</h2>
+        <h3>{source.name}</h3>
         <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
           <svg
             viewBox="0 0 24 24"

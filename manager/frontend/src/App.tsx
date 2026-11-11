@@ -36,7 +36,6 @@ const ProjectsPage = lazyRoute(loaders.projects);
 const SettingsPage = lazyRoute(loaders.settings);
 const SetupGate = lazyRoute(loaders.setupGate);
 const SetupPage = lazyRoute(loaders.setup);
-const SourcesPage = lazyRoute(loaders.sources);
 const TasksPage = lazyRoute(loaders.tasks);
 const WikiPage = lazyRoute(loaders.wiki);
 
@@ -177,14 +176,6 @@ function App({
                             </ProtectedRoute>
                           }
                         />
-                        <Route
-                          path="sources"
-                          element={
-                            <ProtectedRoute requiredPermission={PERMISSIONS.SOURCES.READ}>
-                              <SourcesPage />
-                            </ProtectedRoute>
-                          }
-                        />
                         <Route path="search" element={<Navigate to="/wiki" replace />} />
                         <Route
                           path="wiki"
@@ -209,6 +200,10 @@ function App({
                         <Route
                           path="sessions"
                           element={<SettingsRedirect from={LegacySettings.Sessions} />}
+                        />
+                        <Route
+                          path="sources"
+                          element={<SettingsRedirect from={LegacySettings.Sources} />}
                         />
                       </Route>
                     </Route>

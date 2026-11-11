@@ -1,7 +1,6 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker, routeApi } from './test-utils';
-
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 const tasksRoutePattern = /\/api\/workspaces\/[^/]+\/tasks/;
 const tasksListPattern = /\/api\/workspaces\/[^/]+\/tasks\/?$/;
 const sourcesRoutePattern = /\/api\/workspaces\/[^/]+\/sources/;
@@ -148,14 +147,14 @@ test.describe('Navigation', () => {
 
   test('sidebar shows all navigation items', async ({ page }) => {
     const navItems = page.locator('.nav-item');
-    await expect(navItems).toHaveCount(7);
+    await expect(navItems).toHaveCount(6);
     await expect(navItems.nth(0)).toContainText('Chats');
     await expect(navItems.nth(1)).toContainText('Projects');
     await expect(navItems.nth(2)).toContainText('Tasks');
-    await expect(navItems.nth(3)).toContainText('Sources');
-    await expect(navItems.nth(4)).toContainText('Models');
-    await expect(navItems.nth(5)).toContainText('Wiki');
-    await expect(navItems.nth(6)).toContainText('Settings');
+    await expect(navItems.nth(3)).toContainText('Models');
+    await expect(navItems.nth(4)).toContainText('Wiki');
+    await expect(navItems.nth(5)).toContainText('Settings');
+    await expect(page.locator('a[href="/sources"]')).toHaveCount(0);
   });
 
   test('Chats page is default route', async ({ page }) => {
@@ -197,12 +196,31 @@ test.describe('Navigation', () => {
     ).toBeVisible();
   });
 
-  test('navigates to Sources page', async ({ page }) => {
-    await page.click('a[href="/sources"]');
-    await expect(page).toHaveURL('/sources');
+  test('redirects Sources to workspace settings', async ({ page }) => {
+    await page.goto('/sources');
+    await expect(page).toHaveURL(SOURCES_PATH);
     await expect(
-      page.getByRole('heading', { name: 'Sources', exact: true })
+      page
+        .getByRole('region', { name: 'Sources', exact: true })
+        .getByRole('heading', { level: 2, name: 'Sources', exact: true })
     ).toBeVisible();
+    await expect(page.locator('.nav-item:has-text("Settings")')).toHaveClass(/active/);
+  });
+
+  test('lists Sources under workspace settings', async ({ page }) => {
+    await page.click('a[href="/settings"]');
+    const workspace = page
+      .getByRole('navigation', { name: 'Settings' })
+      .getByRole('group', { name: 'Workspace' });
+    await expect(workspace.getByRole('link')).toHaveText([
+      'General',
+      'AI',
+      'Folders',
+      'Sources',
+      'Members',
+    ]);
+    await workspace.getByRole('link', { name: 'Sources', exact: true }).click();
+    await expect(page).toHaveURL(SOURCES_PATH);
   });
 
   test('redirects Search to Wiki', async ({ page }) => {

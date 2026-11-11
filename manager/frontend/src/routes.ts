@@ -13,7 +13,6 @@ export const loaders = {
   settings: () => import('./features/settings/pages/SettingsPage'),
   setup: () => import('./features/models/pages/SetupPage'),
   setupGate: () => import('./features/models/components/SetupGate'),
-  sources: () => import('./features/sources/pages/SourcesPage'),
   tasks: () => import('./features/tasks/pages/TasksPage'),
   wiki: () => import('./features/knowledge/pages/WikiPage'),
 };
@@ -30,7 +29,7 @@ const SIGNED_IN_ROUTES: Record<string, Loader[]> = {
   '/sessions': [...SHELL, loaders.settings],
   '/settings': [...SHELL, loaders.settings],
   '/setup': [loaders.authenticatedProviders, loaders.setup],
-  '/sources': [...SHELL, loaders.sources],
+  '/sources': [...SHELL, loaders.settings],
   '/tasks': [...SHELL, loaders.tasks],
   '/wiki': [...SHELL, loaders.wiki],
 };

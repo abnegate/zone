@@ -606,8 +606,8 @@ describe('projects page layout', () => {
   });
 });
 
-describe('sources page layout', () => {
-  const css = read(join(features, 'sources', 'pages', 'SourcesPage.css'));
+describe('sources section layout', () => {
+  const css = read(join(features, 'sources', 'components', 'SourcesSection.css'));
 
   it('lays sources out as a 56px-row table with a 32px header', () => {
     expect(rule(css, '.sources-table-wrapper')).toContain('border: 1px solid var(--ui-border)');
@@ -627,10 +627,58 @@ describe('sources page layout', () => {
       'padding: var(--ui-panel-padding) var(--ui-gutter)'
     );
     expect(rule(css, '.source-details-actions')).toContain('height: var(--ui-header-height)');
+    expect(rule(css, '.source-details-header h3')).toContain('font-size: var(--ui-heading-size)');
+  });
+
+  it('sticks the editor footer to the settings scroller instead of scrolling a body of its own', () => {
+    const footer = rule(css, '.source-details-actions');
+    expect(footer).toContain('position: sticky');
+    expect(footer).toContain('bottom: 0;');
+    expect(footer).toContain('background: var(--ui-bg-elevated)');
+    expect(footer).toContain('border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card)');
+    expect(css).not.toContain('.page-body');
+    expect(rule(css, '.source-details')).not.toContain('flex: 1');
+    expect(rule(css, '.source-details')).not.toContain('min-height');
+    expect(rule(css, '.source-details-body')).not.toContain('overflow');
+    expect(rule(css, '.source-details-body')).not.toContain('flex: 1');
+  });
+
+  it('shows source form hints in full over the two-line settings clamp in any import order', () => {
+    const settings = read(join(features, 'settings', 'pages', 'SettingsPage.css'));
+    expect(rule(settings, '.settings-page .form-hint')).toContain('display: -webkit-box');
+    const hint = rule(css, '.settings-page .source-details .form-hint');
+    expect(hint).toContain('display: block');
+    expect(hint).toContain('overflow: visible');
+    expect(hint).toContain('-webkit-line-clamp: unset');
+  });
+
+  it('leaves the empty state to sit in the section flow like its sibling sections', () => {
+    expect(css).not.toContain('.sources-empty');
   });
 
   it('aligns the access token disclosure with the field labels', () => {
     expect(rule(css, '.github-configuration > .ui-btn-link')).toContain('padding-inline: 0');
+  });
+
+  it('drops the URL and verified columns when the settings column is too narrow for the actions', () => {
+    expect(rule(css, '.sources-table-wrapper')).toContain('container-type: inline-size');
+    const desktop = media(css, '(min-width: 769px)');
+    expect(desktop).toContain('@container (max-width: 48rem)');
+    expect(
+      rule(
+        desktop,
+        '.sources-table th:nth-child(4),\n.sources-table td:nth-child(4),\n.sources-table th:nth-child(5),\n.sources-table td:nth-child(5)'
+      )
+    ).toContain('display: none');
+    const name = rule(desktop, '.sources-table td:first-child');
+    expect(name).toContain('width: 100%');
+    expect(name).toContain('max-width: 0');
+  });
+
+  it('lets the URL column absorb the spare width so the actions fit the settings column', () => {
+    const cell = rule(css, '.sources-table .source-url-cell');
+    expect(cell).toContain('width: 100%');
+    expect(cell).toContain('max-width: 0');
   });
 });
 
@@ -647,6 +695,14 @@ describe('settings page layout', () => {
     const body = rule(css, '.settings-page .page-body:has(.settings-actions)');
     expect(body).toContain('padding-bottom: 0');
     expect(body).toContain('flex-direction: column');
+  });
+
+  it('pads the scroller under the source editor footer so a focused field scrolls clear of it', () => {
+    const body = rule(css, '.settings-page .page-body:has(.source-details-actions)');
+    expect(body).toContain('padding-bottom: 0');
+    expect(body).toContain(
+      'scroll-padding-bottom: calc(var(--ui-header-height) + var(--ui-space-2))'
+    );
   });
 
   it('keeps feature setup in a settings section without a content card', () => {

@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 import { Link, Navigate, useLocation, useParams } from 'react-router-dom';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
@@ -9,6 +9,7 @@ import {
   COMPACT_QUERY,
   findSection,
   SETTINGS_ROOT,
+  SETTINGS_TITLE,
   type SectionDefinition,
   settingsPath,
   visibleSections,
@@ -17,14 +18,12 @@ import { useSettingsAccess } from '../navigation/useSettingsAccess';
 import SettingsContent from './SettingsContent';
 import './SettingsPage.css';
 
-const TITLE = 'Settings';
-
 function firstPath(sections: SectionDefinition[]): string {
   const [first] = sections;
   return first ? settingsPath(first.group, first.section) : SETTINGS_ROOT;
 }
 
-export default function SettingsPage() {
+export default function SettingsPage(): ReactElement {
   const location = useLocation();
   const [group, section, ...rest] = (useParams()['*'] ?? '').split('/').filter(Boolean);
   const compact = useMediaQuery(COMPACT_QUERY);
@@ -33,7 +32,7 @@ export default function SettingsPage() {
   const loadingState = <div className="loading-state">Loading settings...</div>;
   const bare = group === undefined;
 
-  let title = TITLE;
+  let title = SETTINGS_TITLE;
   let body: ReactNode;
 
   if (loading) {
@@ -80,7 +79,7 @@ export default function SettingsPage() {
     if (bare && compact) {
       body = nav;
     } else if (compact) {
-      title = label ?? TITLE;
+      title = label ?? SETTINGS_TITLE;
       body = (
         <>
           <Link to={SETTINGS_ROOT} className="settings-back" aria-label="Back to settings">
