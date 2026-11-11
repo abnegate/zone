@@ -238,6 +238,31 @@ describe('TaskDetail', () => {
       expect(onSave).not.toHaveBeenCalled();
     });
 
+    it('asks before a related task replaces unsaved edits', async () => {
+      const ship = other('ship', 'Ship it', { dependencies: ['task-1'] });
+      const { onOpen } = renderLinked(task, [ship]);
+      const field = screen.getByLabelText('Description');
+      fireEvent.change(field, { target: { value: 'Draft nobody saved' } });
+
+      fireEvent.click(within(links()).getByRole('button', { name: 'Open Ship it' }));
+      const dialog = await screen.findByRole('dialog', {
+        name: 'Discard your changes to Ship the board?',
+      });
+      expect(onOpen).not.toHaveBeenCalled();
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Keep editing' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(onOpen).not.toHaveBeenCalled();
+      expect(screen.getByLabelText('Description')).toHaveValue('Draft nobody saved');
+
+      fireEvent.click(within(links()).getByRole('button', { name: 'Open Ship it' }));
+      fireEvent.click(
+        within(await screen.findByRole('dialog')).getByRole('button', { name: 'Discard changes' })
+      );
+      expect(onOpen).toHaveBeenCalledTimes(1);
+      expect(onOpen).toHaveBeenCalledWith(ship);
+    });
+
     it('offers nothing to edit in the Links section', () => {
       renderLinked({ ...task, dependencies: ['spec'], branch_name: 'feature/auth' }, [
         other('spec', 'Write the spec'),
