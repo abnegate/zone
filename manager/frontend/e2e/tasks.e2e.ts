@@ -753,10 +753,8 @@ test.describe('Tasks Page', () => {
       page,
     }) => {
       await serveTasks(context, page);
-      const login = card(page, 'Implement login page');
-      await login.hover();
 
-      const hit = await login.evaluate((item) => {
+      const hit = await card(page, 'Implement login page').evaluate((item) => {
         const handle = item.querySelector<HTMLElement>('.task-card-handle');
         const title = item.querySelector<HTMLElement>('.task-card-open');
         if (!handle || !title) throw new Error('The card has no grip or title');
@@ -961,16 +959,23 @@ test.describe('Tasks Page', () => {
     }) => {
       await serveTasks(context, page);
       const board = page.getByRole('region', { name: 'Tasks', exact: true });
-      await board.evaluate((element) =>
-        element.scrollTo({ left: element.scrollWidth, behavior: 'instant' })
-      );
-      const left = await board.evaluate((element) => element.scrollLeft);
-      expect(left).toBeGreaterThan(0);
+      await board.evaluate((element) => {
+        element.scrollTo({ left: element.scrollWidth, behavior: 'instant' });
+        element.addEventListener(
+          'click',
+          () => Object.assign(window, { leftWhenOpened: element.scrollLeft }),
+          { capture: true, once: true }
+        );
+      });
 
       const title = page.getByRole('button', { name: 'Drop legacy export', exact: true });
       await title.click();
       const editor = page.locator('.task-details');
       await expect(editor).toBeVisible();
+      const left = await page.evaluate(
+        () => (window as unknown as { leftWhenOpened: number }).leftWhenOpened
+      );
+      expect(left).toBeGreaterThan(0);
       await editor.getByRole('button', { name: 'Close', exact: true }).click();
 
       await expect(title).toBeFocused();
