@@ -208,7 +208,7 @@ describe('mcpApi.reconnect', () => {
 
   it.each([
     [{ status: 'disabled', enabled: false, error: null }],
-    [{ status: 'failed', error: 'Streamable HTTP servers are not connected by this build yet' }],
+    [{ status: 'failed', error: 'The server refused the credentials (HTTP 401)' }],
   ] satisfies [Partial<McpServer>][])(
     'resolves an accepted reconnect to the status the server reports: %o',
     async (reported) => {
