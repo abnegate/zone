@@ -550,12 +550,12 @@ pub async fn forget(
 mod tests {
     use super::*;
     use crate::db::knowledge::{
-        LearnedCategory, STANDING_INSTRUCTION_CATEGORY, reserved_namespace,
+        LearnedCategory, STANDING_INSTRUCTION_CATEGORY, discovery, reserved_namespace,
     };
 
-    /// The three categories that were reserved before memory existed.
+    /// The reserved categories that belong to the workspace, not to a person.
     fn existing_reserved() -> Vec<&'static str> {
-        let mut categories = vec![STANDING_INSTRUCTION_CATEGORY];
+        let mut categories = vec![STANDING_INSTRUCTION_CATEGORY, discovery::CATEGORY];
         categories.extend(
             LearnedCategory::ALL
                 .into_iter()
