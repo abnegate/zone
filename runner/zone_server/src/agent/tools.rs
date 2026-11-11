@@ -484,19 +484,39 @@ impl ChatTools {
         workspace_id: Uuid,
         actor: Option<Uuid>,
     ) -> Self {
-        let scope = match actor {
-            Some(user_id) if task_writer(state, workspace_id, user_id).await => {
-                Some(WorkspaceScope {
-                    state: state.clone(),
-                    workspace_id,
-                    user_id,
-                    chat_id: None,
-                    offline: false,
-                    origin: Origin::Automation,
-                })
-            }
+        let writer = match actor {
+            Some(user_id) if task_writer(state, workspace_id, user_id).await => Some(user_id),
             _ => None,
         };
+        Self::task(state, cwd, workspace_id, writer).await
+    }
+
+    /// The catalog [`Self::for_task`] assembles for a writer it authorized,
+    /// for a prompt test with no membership to read.
+    #[cfg(test)]
+    pub(crate) async fn for_task_writer(
+        state: &AppState,
+        cwd: std::path::PathBuf,
+        workspace_id: Uuid,
+        writer: Uuid,
+    ) -> Self {
+        Self::task(state, cwd, workspace_id, Some(writer)).await
+    }
+
+    async fn task(
+        state: &AppState,
+        cwd: std::path::PathBuf,
+        workspace_id: Uuid,
+        writer: Option<Uuid>,
+    ) -> Self {
+        let scope = writer.map(|user_id| WorkspaceScope {
+            state: state.clone(),
+            workspace_id,
+            user_id,
+            chat_id: None,
+            offline: false,
+            origin: Origin::Automation,
+        });
         let denied = state.config().agents.state.clone();
         Self::assemble(scope, ToolProfile::Task, Some(cwd), true, denied).await
     }
