@@ -50,8 +50,13 @@ describe('allowsWorkspace', () => {
 
 describe('edit roles', () => {
   it('names the workspace role each editable section needs, leaving members to manage its own', () => {
-    expect(WORKSPACE_EDIT_ROLE).toEqual({ theme: 'member', ai: 'admin', folders: 'member' });
-    expect(Object.keys(WORKSPACE_EDIT_ROLE).sort()).toEqual(['ai', 'folders', 'theme']);
+    expect(WORKSPACE_EDIT_ROLE).toEqual({
+      theme: 'member',
+      ai: 'admin',
+      folders: 'member',
+      mcp: 'admin',
+    });
+    expect(Object.keys(WORKSPACE_EDIT_ROLE).sort()).toEqual(['ai', 'folders', 'mcp', 'theme']);
   });
 
   it('requires an organization admin for the admin-only organization sections', () => {

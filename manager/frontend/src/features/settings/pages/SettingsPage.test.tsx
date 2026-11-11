@@ -194,8 +194,14 @@ describe('SettingsPage', () => {
 
       renderAt('/settings/workspace/general');
 
-      expect(linkLabels('Workspace')).toEqual(['General', 'AI', 'Folders', 'Members']);
-      expect(linkLabels('Organization')).toEqual(['Members', 'GitHub']);
+      expect(linkLabels('Workspace')).toEqual([
+        'General',
+        'AI',
+        'Folders',
+        'Members',
+        'MCP servers',
+      ]);
+      expect(linkLabels('Organization')).toEqual(['Members', 'GitHub', 'MCP servers']);
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
@@ -213,6 +219,7 @@ describe('SettingsPage', () => {
         'Billing',
         'Audit log',
         'GitHub',
+        'MCP servers',
       ]);
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
@@ -237,12 +244,18 @@ describe('SettingsPage', () => {
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
     });
 
-    it('shows an organization owner and workspace admin all thirteen sections', () => {
+    it('shows an organization owner and workspace admin all fifteen sections', () => {
       signInAs('owner', 'admin');
 
       renderAt('/settings/workspace/general');
 
-      expect(linkLabels('Workspace')).toEqual(['General', 'AI', 'Folders', 'Members']);
+      expect(linkLabels('Workspace')).toEqual([
+        'General',
+        'AI',
+        'Folders',
+        'Members',
+        'MCP servers',
+      ]);
       expect(linkLabels('Organization')).toEqual([
         'AI defaults',
         'Members',
@@ -250,6 +263,7 @@ describe('SettingsPage', () => {
         'Billing',
         'Audit log',
         'GitHub',
+        'MCP servers',
       ]);
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
@@ -505,7 +519,13 @@ describe('SettingsPage', () => {
       renderAt('/settings/workspace/general');
 
       expect(screen.getByRole('navigation', { name: 'Settings' })).toBeInTheDocument();
-      expect(linkLabels('Workspace')).toEqual(['General', 'AI', 'Folders', 'Members']);
+      expect(linkLabels('Workspace')).toEqual([
+        'General',
+        'AI',
+        'Folders',
+        'Members',
+        'MCP servers',
+      ]);
       expect(screen.getByText('Loading settings...')).toBeInTheDocument();
       expect(screen.queryByTestId('settings-content')).not.toBeInTheDocument();
     });

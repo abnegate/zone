@@ -23,6 +23,7 @@ export const SettingsSection = {
   Billing: 'billing',
   Audit: 'audit',
   GitHub: 'github',
+  Mcp: 'mcp',
   Features: 'features',
   Connect: 'connect',
   Sessions: 'sessions',
@@ -91,6 +92,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     visible: inWorkspace,
   },
   {
+    group: SettingsGroup.Workspace,
+    section: SettingsSection.Mcp,
+    label: 'MCP servers',
+    visible: inWorkspace,
+  },
+  {
     group: SettingsGroup.Organization,
     section: SettingsSection.Ai,
     label: 'AI defaults',
@@ -124,6 +131,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     group: SettingsGroup.Organization,
     section: SettingsSection.GitHub,
     label: 'GitHub',
+    visible: inOrganization,
+  },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.Mcp,
+    label: 'MCP servers',
     visible: inOrganization,
   },
   {

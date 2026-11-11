@@ -5,6 +5,7 @@ export const WORKSPACE_EDIT_ROLE = {
   theme: 'member',
   ai: 'admin',
   folders: 'member',
+  mcp: 'admin',
 } as const satisfies Record<string, WorkspaceRole>;
 
 export const ORGANIZATION_ADMIN_ROLE: OrgRole = 'admin';

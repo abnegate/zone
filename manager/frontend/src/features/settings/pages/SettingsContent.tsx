@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { SessionsSection } from '../../auth/components';
+import { McpServersSection, WorkspaceMcpServersSection } from '../mcp';
 import {
   allowsOrganization,
   allowsWorkspace,
@@ -72,6 +73,14 @@ function workspaceContent(
       return workspaceId !== null && organizationId !== null ? (
         <WorkspaceMembersSection workspaceId={workspaceId} orgId={organizationId} />
       ) : null;
+    case SettingsSection.Mcp:
+      return workspaceId !== null && organizationId !== null ? (
+        <WorkspaceMcpServersSection
+          organizationId={organizationId}
+          workspaceId={workspaceId}
+          editable={allowsWorkspace(access.workspaceRole, WORKSPACE_EDIT_ROLE.mcp)}
+        />
+      ) : null;
     default:
       return null;
   }
@@ -94,6 +103,13 @@ function organizationContent(
     case SettingsSection.GitHub:
       return (
         <GitHubSection
+          organizationId={organizationId}
+          canManage={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
+        />
+      );
+    case SettingsSection.Mcp:
+      return (
+        <McpServersSection
           organizationId={organizationId}
           canManage={allowsOrganization(access.organizationRole, ORGANIZATION_ADMIN_ROLE)}
         />

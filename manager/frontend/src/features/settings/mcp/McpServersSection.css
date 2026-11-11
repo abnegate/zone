@@ -1,0 +1,39 @@
+.mcp-servers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-3);
+}
+
+.mcp-servers > p,
+.mcp-remove p {
+  margin: 0;
+}
+
+.mcp-servers-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-lg);
+  background: var(--ui-bg-elevated);
+}
+
+.mcp-servers-failures {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
+.mcp-remove p {
+  font-size: var(--ui-text-sm);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+}
+
+.mcp-remove .modal-actions {
+  margin-top: var(--ui-space-4);
+}
