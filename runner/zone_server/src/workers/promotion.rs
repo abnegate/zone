@@ -483,8 +483,13 @@ async fn active_workspaces(pool: &PgPool, since: NaiveDateTime) -> DbResult<Vec<
     .await
 }
 
-/// Each user question in the workspace paired with the assistant reply it drew,
-/// skipping any question whose reply is separated from it by another question.
+/// Each question a member typed in the workspace paired with the assistant reply it
+/// drew, skipping any question whose reply is separated from it by another user message.
+///
+/// A prompt that a reminder, a watch or another automation posts under the member's
+/// role is not a question anybody asked, and it repeats by construction: two watches in
+/// two chats would clear every bar on their own. The predicate is
+/// `db::chats::typed`, stated in the form `idx_messages_typed` indexes.
 ///
 /// The cap keeps the most recent exchanges, so a busy workspace keeps learning rather
 /// than freezing on its oldest history.
@@ -533,6 +538,10 @@ pub async fn load_exchanges(
             ON answer_embedding.message_id = reply.id
         WHERE chat.workspace_id = $1
           AND question.role = 'user'
+          AND NOT COALESCE(
+              jsonb_typeof(question.metadata) = 'object' AND question.metadata ? 'source',
+              FALSE
+          )
           AND question.created_at >= $2
           AND char_length(question.content) >= $3
         ORDER BY question.created_at DESC, question.id DESC
@@ -645,7 +654,10 @@ pub async fn run_cycle(state: &AppState, policy: &PromotionPolicy) -> DbResult<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::chats::typed;
+    use crate::db::message_embeddings::store_message_embedding;
     use chrono::NaiveDate;
+    use serde_json::{Value, json};
 
     const EMBEDDING_DIMENSION: usize = 4;
     const TESTS_QUESTION: [f32; 4] = [1.0, 0.05, 0.0, 0.0];
@@ -1178,8 +1190,204 @@ mod tests {
         );
     }
 
+    const WATCH_PROMPT: &str = "What changed in the deploy queue since the last reading?";
+    const WATCH_ANSWER: &str = "Nothing has changed in the deploy queue since the last reading.";
+
+    /// A workspace of its own in the test database, so a pass reads only the
+    /// exchanges its test stored.
+    struct Stored {
+        pool: PgPool,
+        workspace: Uuid,
+    }
+
+    impl Stored {
+        async fn workspace() -> Self {
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("isolated test database"),
+            )
+            .await
+            .expect("the test database accepts connections");
+            let organization = Uuid::new_v4();
+            let workspace = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Promotion', $1::text)",
+            )
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+            sqlx::query(
+                "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Promotion', $1::text)",
+            )
+            .bind(workspace)
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("a workspace");
+            Self { pool, workspace }
+        }
+
+        async fn chat(&self) -> Uuid {
+            sqlx::query_scalar(
+                "INSERT INTO chats (workspace_id, title, model_name) VALUES ($1, 'Work', 'test') RETURNING id",
+            )
+            .bind(self.workspace)
+            .fetch_one(&self.pool)
+            .await
+            .expect("a chat")
+        }
+
+        /// A user-role message stored `minutes_ago` and the reply it drew a
+        /// second later, both embedded.
+        async fn exchange(
+            &self,
+            chat: Uuid,
+            question: &str,
+            metadata: Option<Value>,
+            minutes_ago: i32,
+        ) {
+            let asked: Uuid = sqlx::query_scalar(
+                "INSERT INTO messages (chat_id, role, content, metadata, created_at)
+                 VALUES ($1, 'user', $2, $3, NOW() - make_interval(mins => $4))
+                 RETURNING id",
+            )
+            .bind(chat)
+            .bind(question)
+            .bind(metadata)
+            .bind(minutes_ago)
+            .fetch_one(&self.pool)
+            .await
+            .expect("a question");
+            let replied: Uuid = sqlx::query_scalar(
+                "INSERT INTO messages (chat_id, role, content, created_at)
+                 VALUES ($1, 'assistant', $2, NOW() - make_interval(mins => $3) + INTERVAL '1 second')
+                 RETURNING id",
+            )
+            .bind(chat)
+            .bind(WATCH_ANSWER)
+            .bind(minutes_ago)
+            .fetch_one(&self.pool)
+            .await
+            .expect("a reply");
+            for (message, embedding) in [(asked, TESTS_QUESTION), (replied, TESTS_ANSWER)] {
+                store_message_embedding(&self.pool, message, chat, &embedding, "test")
+                    .await
+                    .expect("an embedding");
+            }
+        }
+
+        async fn promote(&self) -> PromotionReport {
+            promote_workspace(&self.pool, self.workspace, &PromotionPolicy::default())
+                .await
+                .expect("the pass runs")
+        }
+
+        async fn instructions(&self) -> Vec<String> {
+            knowledge::list_standing_instructions(&self.pool, self.workspace)
+                .await
+                .expect("the standing instructions")
+                .into_iter()
+                .map(|instruction| instruction.content)
+                .collect()
+        }
+    }
+
+    /// A condition watch asks the same thing at every firing, and each firing is
+    /// stored under the member's role in the chat it reports to. Two watches in
+    /// two chats cleared every bar without anybody having asked anything.
+    #[tokio::test]
+    async fn a_prompt_a_reminder_repeats_across_chats_is_not_promoted() {
+        let stored = Stored::workspace().await;
+        let first = stored.chat().await;
+        let second = stored.chat().await;
+        for (chat, minutes_ago) in [(first, 30), (first, 20), (second, 10)] {
+            let fired = json!({"source": "reminder", "reminder_id": Uuid::new_v4()});
+            stored
+                .exchange(chat, WATCH_PROMPT, Some(fired), minutes_ago)
+                .await;
+        }
+
+        assert_eq!(stored.promote().await, PromotionReport::default());
+        assert_eq!(stored.instructions().await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn the_same_question_typed_across_chats_is_still_promoted() {
+        let stored = Stored::workspace().await;
+        let first = stored.chat().await;
+        let second = stored.chat().await;
+        for (chat, metadata, minutes_ago) in [
+            (first, None, 30),
+            (first, Some(json!({})), 20),
+            (second, Some(json!({"actor_id": Uuid::new_v4()})), 10),
+        ] {
+            stored
+                .exchange(chat, WATCH_PROMPT, metadata, minutes_ago)
+                .await;
+        }
+
+        assert_eq!(
+            stored.promote().await,
+            PromotionReport {
+                exchanges: 3,
+                candidates: 1,
+                created: 1,
+                ..PromotionReport::default()
+            }
+        );
+        assert_eq!(stored.instructions().await, [WATCH_ANSWER]);
+    }
+
+    /// The query states in SQL what `db::chats::typed` states in Rust, so the
+    /// two are held together over every shape metadata is stored in.
+    #[tokio::test]
+    async fn a_question_is_read_exactly_when_the_chat_store_calls_it_typed() {
+        let stored = Stored::workspace().await;
+        let chat = stored.chat().await;
+        let shapes = [
+            ("nothing", None),
+            ("an empty object", Some(json!({}))),
+            ("an actor", Some(json!({"actor_id": Uuid::new_v4()}))),
+            ("a reminder", Some(json!({"source": "reminder"}))),
+            ("a project", Some(json!({"source": "auto_project"}))),
+            ("a null source", Some(json!({"source": null}))),
+            ("a list", Some(json!(["source"]))),
+        ];
+        let question = |label: &str| format!("A question stored with {label} as its metadata");
+        let mut expected = Vec::new();
+        for (minutes_ago, (label, metadata)) in (1..).zip(shapes) {
+            if typed("user", metadata.as_ref()) {
+                expected.push(question(label));
+            }
+            stored
+                .exchange(chat, &question(label), metadata, minutes_ago)
+                .await;
+        }
+
+        let mut read: Vec<String> =
+            load_exchanges(&stored.pool, stored.workspace, &PromotionPolicy::default())
+                .await
+                .expect("the exchanges")
+                .into_iter()
+                .map(|exchange| exchange.question)
+                .collect();
+        read.sort();
+        expected.sort();
+
+        assert_eq!(read, expected);
+        assert_eq!(
+            expected,
+            [
+                question("a list"),
+                question("an actor"),
+                question("an empty object"),
+                question("nothing"),
+            ]
+        );
+    }
+
     #[test]
-    fn default_policy_keeps_a_high_bar() {
+    fn the_default_policy_asks_for_three_occurrences_in_two_chats_and_keeps_its_similarity_bars() {
         let policy = PromotionPolicy::default();
         assert_eq!(policy.minimum_occurrences, 3);
         assert_eq!(policy.minimum_distinct_chats, 2);
