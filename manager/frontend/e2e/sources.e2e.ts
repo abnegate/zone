@@ -647,7 +647,9 @@ test.describe('Sources Section', () => {
   });
 
   test.describe('Source Editor', () => {
-    test.use({ reducedMotion: 'reduce' });
+    test.beforeEach(async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+    });
 
     test('keeps Save in view when a tall editor first opens, before any scroll', async ({
       page,
