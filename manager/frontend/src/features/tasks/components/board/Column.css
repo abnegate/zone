@@ -53,14 +53,18 @@
   flex: 1;
   flex-direction: column;
   min-height: var(--ui-space-24);
-  margin-top: calc(-1 * var(--board-column-ring));
-  padding: var(--board-column-ring) var(--ui-space-2) var(--ui-space-2);
+  padding: 0 var(--ui-space-2) var(--ui-space-2);
   overflow-y: auto;
   overscroll-behavior-y: contain;
   border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card);
   transition:
     background-color var(--ui-transition-fast),
     box-shadow var(--ui-transition-fast);
+}
+
+.board-column-body:has(.task-card-open:focus-visible) {
+  margin-top: calc(-1 * var(--board-column-ring));
+  padding-top: var(--board-column-ring);
 }
 
 .board-column-body[data-over] {

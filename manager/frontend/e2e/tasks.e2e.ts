@@ -772,29 +772,33 @@ test.describe('Tasks Page', () => {
       expect(hit).toEqual({ target: 24, grip: true, beside: true, title: true });
     });
 
-    test('the first card of a column has room for its focus ring where it already was', async ({
+    test('a card reached by keyboard has room for its focus ring without moving', async ({
       context,
       page,
     }) => {
       await serveTasks(context, page);
       const planned = column(page, 'Planned');
-      const title = page.getByRole('button', { name: 'Implement login page', exact: true });
-      await title.focus();
+      const measure = () =>
+        planned.evaluate((section) => {
+          const header = section.querySelector('.board-column-header');
+          const body = section.querySelector('.board-column-body');
+          const first = section.querySelector('li.task-card');
+          if (!header || !body || !first) throw new Error('The column is not laid out');
+          const top = first.getBoundingClientRect().top;
+          return {
+            underHeader: top - header.getBoundingClientRect().bottom,
+            clear: top - body.getBoundingClientRect().top,
+          };
+        });
+      expect(await measure()).toEqual({ underHeader: 0, clear: 0 });
 
-      const room = await planned.evaluate((section) => {
-        const header = section.querySelector('.board-column-header');
-        const body = section.querySelector('.board-column-body');
-        const first = section.querySelector('li.task-card');
-        if (!header || !body || !first) throw new Error('The column is not laid out');
-        const top = first.getBoundingClientRect().top;
-        return {
-          rests: top - header.getBoundingClientRect().bottom,
-          above: top - body.getBoundingClientRect().top,
-          scrolled: body.scrollTop,
-        };
-      });
+      await page.getByRole('button', { name: 'Move Implement login page', exact: true }).focus();
+      await page.keyboard.press('Tab');
+      await expect(
+        page.getByRole('button', { name: 'Implement login page', exact: true })
+      ).toBeFocused();
 
-      expect(room).toEqual({ rests: 0, above: 3, scrolled: 0 });
+      expect(await measure()).toEqual({ underHeader: 0, clear: 3 });
     });
 
     test('the card left behind while dragging stays muted and dashed in the dark theme', async ({

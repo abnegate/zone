@@ -397,11 +397,14 @@ describe('tasks page layout', () => {
     expect(cards).not.toContain('.task-card-overlay .task-card-heading');
   });
 
-  it('leaves room above the first card for its focus ring without moving the card', () => {
+  it('makes room above a focused card for its ring without moving the card', () => {
     expect(rule(columns, '.board-column')).toContain('--board-column-ring: 3px');
-    const body = rule(columns, '.board-column-body');
-    expect(body).toContain('margin-top: calc(-1 * var(--board-column-ring))');
-    expect(body).toContain('padding: var(--board-column-ring) var(--ui-space-2) var(--ui-space-2)');
+    expect(rule(columns, '.board-column-body')).toContain(
+      'padding: 0 var(--ui-space-2) var(--ui-space-2)'
+    );
+    const focused = rule(columns, '.board-column-body:has(.task-card-open:focus-visible)');
+    expect(focused).toContain('margin-top: calc(-1 * var(--board-column-ring))');
+    expect(focused).toContain('padding-top: var(--board-column-ring)');
     expect(rule(cards, '.task-card-open:focus-visible::after')).toContain(
       '0 0 0 var(--board-column-ring) var(--ui-border-focus)'
     );
