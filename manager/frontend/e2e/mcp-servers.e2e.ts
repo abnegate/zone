@@ -357,7 +357,8 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
         environment: storeSecrets(secrets, id, 'environment', [], posted.environment),
         headers: storeSecrets(secrets, id, 'headers', [], posted.headers),
       });
-      connect(entry);
+      if (entry.enabled) connect(entry);
+      else entry.status = 'disabled';
       servers.push(entry);
       await route.fulfill({ status: 201, json: entry });
       return;
@@ -725,6 +726,61 @@ test.describe('MCP servers', () => {
     await expect(row(page, 'legacy')).toHaveCount(0);
   });
 
+  test('importing keeps a disabled server off and names the keys it leaves out', async ({
+    page,
+  }) => {
+    const mock = await openOrganization(page);
+
+    await page.getByRole('button', { name: 'Import JSON', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Import MCP servers' });
+    await dialog.getByLabel('mcpServers JSON').fill(
+      JSON.stringify({
+        mcpServers: {
+          files: { command: 'npx', args: ['-y', 'server-files'], cwd: '/srv', timeout: 30 },
+          wiki: {
+            url: 'https://wiki.example/mcp',
+            headers: { Authorization: 'Bearer t' },
+            disabled: true,
+          },
+        },
+      })
+    );
+
+    const items = dialog.getByRole('list', { name: 'Servers to add' }).getByRole('listitem');
+    await expect(items).toHaveCount(2);
+    await expect(items.nth(0)).toContainText('Not imported: cwd, timeout');
+    await expect(items.nth(1).getByText('Disabled', { exact: true })).toBeVisible();
+    await expect(items.nth(1)).not.toContainText('Not imported');
+    await dialog.getByRole('button', { name: 'Import 2 servers', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+
+    expect(writes(mock)).toEqual([
+      {
+        method: 'POST',
+        path: serversPath,
+        body: {
+          name: 'files',
+          transport: 'stdio',
+          command: 'npx',
+          arguments: ['-y', 'server-files'],
+        },
+      },
+      {
+        method: 'POST',
+        path: serversPath,
+        body: {
+          name: 'wiki',
+          transport: 'http',
+          url: 'https://wiki.example/mcp',
+          headers: { Authorization: 'Bearer t' },
+          enabled: false,
+        },
+      },
+    ]);
+    await expect(row(page, 'wiki').getByRole('status')).toHaveText('Disabled');
+    await expect(page.getByRole('switch', { name: 'Enable wiki' })).not.toBeChecked();
+  });
+
   test('with commands off only streamable http is offered', async ({ page }) => {
     await openOrganization(page, { commands: false });
 
@@ -1028,8 +1084,13 @@ test.describe('screenshots', () => {
         JSON.stringify(
           {
             mcpServers: {
-              files: { command: 'npx', args: ['-y', 'server-files'], env: { ROOT: '/srv' } },
-              wiki: { url: 'https://wiki.example/mcp' },
+              files: {
+                command: 'npx',
+                args: ['-y', 'server-files'],
+                env: { ROOT: '/srv' },
+                cwd: '/srv',
+              },
+              wiki: { url: 'https://wiki.example/mcp', disabled: true },
               legacy: { type: 'sse', url: 'https://legacy.example/sse' },
             },
           },
@@ -1038,6 +1099,7 @@ test.describe('screenshots', () => {
         )
       );
       await expect(dialog.getByRole('list', { name: 'Skipped' })).toBeVisible();
+      await expect(dialog.getByText('Not imported: cwd')).toBeVisible();
       await still(page, 'import-dialog', theme);
     });
 

@@ -24,12 +24,21 @@
   overflow-wrap: anywhere;
 }
 
+.mcp-import-server {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-1) var(--ui-space-2);
+  min-width: 0;
+}
+
 .mcp-import-name {
   font-family: var(--ui-font-mono);
   color: var(--ui-text-primary);
 }
 
-.mcp-import-skipped {
+.mcp-import-skipped,
+.mcp-import-note {
   color: var(--ui-text-secondary);
 }
 

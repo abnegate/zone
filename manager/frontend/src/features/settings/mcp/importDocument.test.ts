@@ -37,6 +37,7 @@ describe('parseMcpDocument', () => {
         },
       ],
       errors: ['legacy: SSE servers are not supported; use streamable HTTP (http)'],
+      ignored: [],
     });
   });
 
@@ -51,6 +52,7 @@ describe('parseMcpDocument', () => {
         { name: 'local', transport: Transport.Stdio, command: 'zone-mcp', arguments: [] },
       ],
       errors: [],
+      ignored: [],
     });
   });
 
@@ -58,6 +60,7 @@ describe('parseMcpDocument', () => {
     expect(parseMcpDocument('{ "mcpServers": ', true)).toEqual({
       requests: [],
       errors: [UNREADABLE],
+      ignored: [],
     });
   });
 
@@ -65,11 +68,12 @@ describe('parseMcpDocument', () => {
     expect(parseMcpDocument('[1, 2]', true)).toEqual({
       requests: [],
       errors: ['The JSON must be an object of servers'],
+      ignored: [],
     });
   });
 
   it('returns nothing for blank text', () => {
-    expect(parseMcpDocument('  \n', true)).toEqual({ requests: [], errors: [] });
+    expect(parseMcpDocument('  \n', true)).toEqual({ requests: [], errors: [], ignored: [] });
   });
 
   it('skips command servers when the instance turns them off', () => {
@@ -86,6 +90,7 @@ describe('parseMcpDocument', () => {
         'github: command servers are turned off on this instance',
         'legacy: SSE servers are not supported; use streamable HTTP (http)',
       ],
+      ignored: [],
     });
   });
 
@@ -96,6 +101,7 @@ describe('parseMcpDocument', () => {
     expect(parseMcpDocument(json, true)).toEqual({
       requests: [],
       errors: [`github: replace \${…} references with the value`],
+      ignored: [],
     });
   });
 
@@ -120,6 +126,7 @@ describe('parseMcpDocument', () => {
         'typed: unsupported type websocket',
         'empty: give a command or a url',
       ],
+      ignored: [],
     });
   });
 
@@ -136,6 +143,7 @@ describe('parseMcpDocument', () => {
         'split: args must not be empty or span several lines',
         'carriage: args must not be empty or span several lines',
       ],
+      ignored: [],
     });
   });
 
@@ -155,6 +163,7 @@ describe('parseMcpDocument', () => {
         'header: header values must not be empty',
         'repeated: header names must differ by more than case (authorization)',
       ],
+      ignored: [],
     });
   });
 
@@ -163,6 +172,7 @@ describe('parseMcpDocument', () => {
     expect(parseMcpDocument(json, true)).toEqual({
       requests: [],
       errors: ['metadata: do not use the cloud metadata address'],
+      ignored: [],
     });
   });
 
@@ -180,10 +190,11 @@ describe('parseMcpDocument', () => {
         'typed: the connection sets this header itself (Content-Type)',
         'scoped: the connection sets this header itself (Mcp-Param-Region)',
       ],
+      ignored: [],
     });
   });
 
-  it('keeps only the fields the transport of each server uses', () => {
+  it('keeps only the fields the transport of each server uses and names the rest', () => {
     const json = JSON.stringify({
       local: {
         command: 'npx',
@@ -198,6 +209,99 @@ describe('parseMcpDocument', () => {
         { name: 'remote', transport: Transport.Http, url: 'https://x.example/mcp' },
       ],
       errors: [],
+      ignored: [
+        { name: 'local', keys: ['url', 'headers'] },
+        { name: 'remote', keys: ['args', 'env'] },
+      ],
+    });
+  });
+
+  it('adds a disabled server turned off, whatever its transport', () => {
+    const json = JSON.stringify({
+      local: { command: 'npx', args: ['-y'], disabled: true },
+      remote: {
+        type: 'http',
+        url: 'https://x.example/mcp',
+        headers: { Authorization: 'Bearer x' },
+        disabled: true,
+      },
+      running: { url: 'https://y.example/mcp', disabled: false },
+    });
+    expect(parseMcpDocument(json, true)).toEqual({
+      requests: [
+        {
+          name: 'local',
+          transport: Transport.Stdio,
+          command: 'npx',
+          arguments: ['-y'],
+          enabled: false,
+        },
+        {
+          name: 'remote',
+          transport: Transport.Http,
+          url: 'https://x.example/mcp',
+          headers: { Authorization: 'Bearer x' },
+          enabled: false,
+        },
+        { name: 'running', transport: Transport.Http, url: 'https://y.example/mcp' },
+      ],
+      errors: [],
+      ignored: [],
+    });
+  });
+
+  it('refuses a disabled flag that is not a boolean rather than guessing', () => {
+    const json = JSON.stringify({
+      quoted: { url: 'https://x.example/mcp', disabled: 'true' },
+      numbered: { command: 'npx', disabled: 1 },
+      empty: { command: 'npx', disabled: null },
+    });
+    expect(parseMcpDocument(json, true)).toEqual({
+      requests: [],
+      errors: [
+        'quoted: disabled must be true or false',
+        'numbered: disabled must be true or false',
+        'empty: disabled must be true or false',
+      ],
+      ignored: [],
+    });
+  });
+
+  it('names every key of a server it does not carry, in document order', () => {
+    const json = JSON.stringify({
+      files: {
+        command: 'npx',
+        cwd: '/srv/files',
+        args: ['-y'],
+        timeout: 30,
+        autoApprove: ['read_file'],
+      },
+      wiki: { url: 'https://wiki.example/mcp', alwaysAllow: [], disabled: true },
+      plain: { type: 'stdio', command: 'zone-mcp', env: { TOKEN: 't' } },
+      broken: { url: 'ftp://x.example', cwd: '/tmp' },
+    });
+    expect(parseMcpDocument(json, true)).toEqual({
+      requests: [
+        { name: 'files', transport: Transport.Stdio, command: 'npx', arguments: ['-y'] },
+        {
+          name: 'wiki',
+          transport: Transport.Http,
+          url: 'https://wiki.example/mcp',
+          enabled: false,
+        },
+        {
+          name: 'plain',
+          transport: Transport.Stdio,
+          command: 'zone-mcp',
+          arguments: [],
+          environment: { TOKEN: 't' },
+        },
+      ],
+      errors: ['broken: use an http or https URL'],
+      ignored: [
+        { name: 'files', keys: ['cwd', 'timeout', 'autoApprove'] },
+        { name: 'wiki', keys: ['alwaysAllow'] },
+      ],
     });
   });
 
@@ -206,6 +310,7 @@ describe('parseMcpDocument', () => {
     expect(parseMcpDocument(json, true)).toEqual({
       requests: [{ name: 'local', transport: Transport.Stdio, command: 'zone-mcp', arguments: [] }],
       errors: [],
+      ignored: [],
     });
   });
 });

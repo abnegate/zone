@@ -1,16 +1,25 @@
-import { Button, Modal } from '@zone/ui';
+import { Badge, Button, Modal } from '@zone/ui';
 import { useId, useMemo, useState } from 'react';
+import { Status } from './constants';
 import { messageOf } from './failure';
 import { parseMcpDocument } from './importDocument';
+import { STATUS_BADGES } from './status';
 import type { CreateMcpServerRequest } from './types';
 import { REFERENCE } from './validation';
 import './McpImportDialog.css';
 
 export const IMPORT_HINT = `Paste a document with an mcpServers object, or a bare map of servers. Replace ${REFERENCE}…} references with their values first.`;
 export const IMPORT_FAILED = 'Failed to import the MCP servers';
+export const NOT_IMPORTED = 'Not imported';
+
+const DISABLED = STATUS_BADGES[Status.Disabled];
 
 export function importLabel(count: number): string {
   return count === 1 ? 'Import 1 server' : `Import ${count} servers`;
+}
+
+export function ignoredNote(keys: readonly string[]): string {
+  return `${NOT_IMPORTED}: ${keys.join(', ')}`;
 }
 
 interface McpImportDialogProps {
@@ -29,6 +38,10 @@ export function McpImportDialog({ commands, onImport, onClose }: McpImportDialog
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const document = useMemo(() => parseMcpDocument(text, commands), [text, commands]);
+  const ignored = useMemo(
+    () => new Map(document.ignored.map(({ name, keys }) => [name, keys])),
+    [document]
+  );
   const count = document.requests.length;
 
   const submit = async () => {
@@ -72,11 +85,20 @@ export function McpImportDialog({ commands, onImport, onClose }: McpImportDialog
               Servers to add
             </p>
             <ul className="mcp-import-list" aria-labelledby={addId}>
-              {document.requests.map((request) => (
-                <li key={request.name} className="mcp-import-name">
-                  {request.name}
-                </li>
-              ))}
+              {document.requests.map((request) => {
+                const keys = ignored.get(request.name);
+                return (
+                  <li key={request.name} className="mcp-import-server">
+                    <span className="mcp-import-name">{request.name}</span>
+                    {request.enabled === false && (
+                      <Badge variant={DISABLED.variant}>{DISABLED.label}</Badge>
+                    )}
+                    {keys !== undefined && (
+                      <span className="mcp-import-note">{ignoredNote(keys)}</span>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}

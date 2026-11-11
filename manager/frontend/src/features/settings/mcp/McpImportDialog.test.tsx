@@ -83,6 +83,58 @@ describe('McpImportDialog', () => {
     expect(onImport.mock.calls[0]?.[0]).toEqual(REQUESTS);
   });
 
+  it('marks a disabled server and imports it turned off', async () => {
+    const onImport = mock((_requests: CreateMcpServerRequest[]) => Promise.resolve());
+    render(<McpImportDialog commands onImport={onImport} onClose={() => {}} />);
+    paste(
+      JSON.stringify({
+        mcpServers: {
+          docs: { url: 'https://docs.example/mcp', headers: { Authorization: 'Bearer x' } },
+          wiki: { url: 'https://wiki.example/mcp', disabled: true },
+        },
+      })
+    );
+    const list = screen.getByRole('list', { name: 'Servers to add' });
+    const [docs, wiki] = within(list).getAllByRole('listitem');
+    expect(within(docs).queryByText('Disabled')).toBeNull();
+    expect(within(wiki).getByText('wiki').className).toBe('mcp-import-name');
+    expect(within(wiki).getByText('Disabled').classList.contains('ui-badge-outline')).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import 2 servers' }));
+    await waitFor(() => expect(onImport).toHaveBeenCalledTimes(1));
+    expect(onImport.mock.calls[0]?.[0]).toEqual([
+      {
+        name: 'docs',
+        transport: Transport.Http,
+        url: 'https://docs.example/mcp',
+        headers: { Authorization: 'Bearer x' },
+      },
+      { name: 'wiki', transport: Transport.Http, url: 'https://wiki.example/mcp', enabled: false },
+    ]);
+  });
+
+  it('names the keys of each server that are not imported', () => {
+    render(<McpImportDialog commands onImport={() => Promise.resolve()} onClose={() => {}} />);
+    paste(
+      JSON.stringify({
+        mcpServers: {
+          files: { command: 'npx', cwd: '/srv/files', timeout: 30 },
+          wiki: { url: 'https://wiki.example/mcp', alwaysAllow: [], disabled: true },
+          docs: { url: 'https://docs.example/mcp' },
+        },
+      })
+    );
+    expect(items('Servers to add')).toEqual([
+      'filesNot imported: cwd, timeout',
+      'wikiDisabledNot imported: alwaysAllow',
+      'docs',
+    ]);
+    const note = screen.getByText('Not imported: cwd, timeout');
+    expect(note.className).toBe('mcp-import-note');
+    expect(screen.queryByRole('list', { name: 'Skipped' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Import 3 servers' })).toBeTruthy();
+  });
+
   it('shows a rejected import and stays open', async () => {
     const onImport = mock((_requests: CreateMcpServerRequest[]) =>
       Promise.reject(new Error('Failed to add the MCP server: name taken'))

@@ -25,17 +25,48 @@ export const ENVIRONMENT_EMPTY = 'env values must not be empty';
 export const HEADERS_NOT_STRINGS = 'headers must map names to string values';
 export const HEADERS_EMPTY = 'header values must not be empty';
 export const HEADERS_REPEATED = 'header names must differ by more than case';
+export const DISABLED_NOT_A_BOOLEAN = 'disabled must be true or false';
 
 const SERVERS_KEY = 'mcpServers';
 const SSE_TYPE = 'sse';
 const HTTP_TYPES: readonly unknown[] = [undefined, 'http', 'streamable-http', 'streamableHttp'];
 
+const Key = {
+  Command: 'command',
+  Arguments: 'args',
+  Environment: 'env',
+  Url: 'url',
+  Headers: 'headers',
+  Type: 'type',
+  Disabled: 'disabled',
+} as const;
+
+const COMMAND_KEYS: readonly string[] = [
+  Key.Command,
+  Key.Arguments,
+  Key.Environment,
+  Key.Type,
+  Key.Disabled,
+];
+const URL_KEYS: readonly string[] = [Key.Url, Key.Headers, Key.Type, Key.Disabled];
+
+export interface McpIgnoredKeys {
+  name: string;
+  keys: string[];
+}
+
 export interface McpDocument {
   requests: CreateMcpServerRequest[];
   errors: string[];
+  ignored: McpIgnoredKeys[];
 }
 
 type Entry = Record<string, unknown>;
+
+interface Imported {
+  request: CreateMcpServerRequest;
+  ignored: string[];
+}
 
 interface MapErrors {
   type: string;
@@ -123,18 +154,18 @@ function commandEntry(
   if (!commands) {
     return COMMANDS_OFF;
   }
-  const { command } = entry;
+  const command = entry[Key.Command];
   if (typeof command !== 'string' || command.trim() === '') {
     return COMMAND_NOT_A_STRING;
   }
-  const parameters = entry.args ?? [];
+  const parameters = entry[Key.Arguments] ?? [];
   if (!isStrings(parameters)) {
     return ARGUMENTS_NOT_STRINGS;
   }
   if (!parameters.every(isLine)) {
     return ARGUMENTS_NOT_LINES;
   }
-  const environment = stringMap(entry.env, ENVIRONMENT_ERRORS);
+  const environment = stringMap(entry[Key.Environment], ENVIRONMENT_ERRORS);
   if (typeof environment === 'string') {
     return environment;
   }
@@ -155,7 +186,8 @@ function commandEntry(
 }
 
 function urlEntry(name: string, entry: Entry): CreateMcpServerRequest | string {
-  const { url, type } = entry;
+  const url = entry[Key.Url];
+  const type = entry[Key.Type];
   if (type === SSE_TYPE) {
     return SSE_UNSUPPORTED;
   }
@@ -165,7 +197,7 @@ function urlEntry(name: string, entry: Entry): CreateMcpServerRequest | string {
   if (typeof url !== 'string') {
     return URL_NOT_A_STRING;
   }
-  const headers = stringMap(entry.headers, HEADER_ERRORS);
+  const headers = stringMap(entry[Key.Headers], HEADER_ERRORS);
   if (typeof headers === 'string') {
     return headers;
   }
@@ -185,11 +217,21 @@ function urlEntry(name: string, entry: Entry): CreateMcpServerRequest | string {
   };
 }
 
-function entryRequest(
+function targetEntry(
   name: string,
-  entry: unknown,
+  entry: Entry,
   commands: boolean
 ): CreateMcpServerRequest | string {
+  if (Key.Command in entry) {
+    return commandEntry(name, entry, commands);
+  }
+  if (Key.Url in entry) {
+    return urlEntry(name, entry);
+  }
+  return entry[Key.Type] === SSE_TYPE ? SSE_UNSUPPORTED : TARGET_MISSING;
+}
+
+function importedEntry(name: string, entry: unknown, commands: boolean): Imported | string {
   if (!isRecord(entry)) {
     return ENTRY_NOT_AN_OBJECT;
   }
@@ -197,13 +239,19 @@ function entryRequest(
   if (invalid !== null) {
     return lowered(invalid);
   }
-  if ('command' in entry) {
-    return commandEntry(name, entry, commands);
+  const request = targetEntry(name, entry, commands);
+  if (typeof request === 'string') {
+    return request;
   }
-  if ('url' in entry) {
-    return urlEntry(name, entry);
+  const disabled = entry[Key.Disabled];
+  if (disabled !== undefined && typeof disabled !== 'boolean') {
+    return DISABLED_NOT_A_BOOLEAN;
   }
-  return entry.type === SSE_TYPE ? SSE_UNSUPPORTED : TARGET_MISSING;
+  const carried = request.transport === Transport.Stdio ? COMMAND_KEYS : URL_KEYS;
+  return {
+    request: disabled ? { ...request, enabled: false } : request,
+    ignored: Object.keys(entry).filter((key) => !carried.includes(key)),
+  };
 }
 
 function serversOf(root: unknown): Entry | string {
@@ -218,26 +266,29 @@ function serversOf(root: unknown): Entry | string {
 }
 
 export function parseMcpDocument(json: string, commands: boolean): McpDocument {
+  const document: McpDocument = { requests: [], errors: [], ignored: [] };
   if (json.trim() === '') {
-    return { requests: [], errors: [] };
+    return document;
   }
   let root: unknown;
   try {
     root = JSON.parse(json);
   } catch {
-    return { requests: [], errors: [UNREADABLE] };
+    return { ...document, errors: [UNREADABLE] };
   }
   const servers = serversOf(root);
   if (typeof servers === 'string') {
-    return { requests: [], errors: [servers] };
+    return { ...document, errors: [servers] };
   }
-  const document: McpDocument = { requests: [], errors: [] };
   for (const [name, entry] of Object.entries(servers)) {
-    const result = entryRequest(name, entry, commands);
+    const result = importedEntry(name, entry, commands);
     if (typeof result === 'string') {
       document.errors.push(`${name}: ${result}`);
-    } else {
-      document.requests.push(result);
+      continue;
+    }
+    document.requests.push(result.request);
+    if (result.ignored.length > 0) {
+      document.ignored.push({ name, keys: result.ignored });
     }
   }
   return document;
