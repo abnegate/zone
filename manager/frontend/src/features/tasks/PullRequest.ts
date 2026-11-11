@@ -4,6 +4,13 @@ const WEB_PROTOCOLS: ReadonlySet<string> = new Set(['http:', 'https:']);
 
 const NUMERIC = /^\d+$/;
 
+const REQUEST_SEGMENTS: ReadonlySet<string> = new Set([
+  'pull',
+  'pulls',
+  'merge_requests',
+  'pull-requests',
+]);
+
 const NAME = 'PR';
 
 const SEPARATOR = ' · ';
@@ -19,8 +26,12 @@ function parse(address: string | null): URL | null {
 }
 
 function numberIn(address: URL): string | null {
-  const segments = address.pathname.split('/').reverse();
-  return segments.find((segment) => NUMERIC.test(segment)) ?? null;
+  const segments = address.pathname.split('/');
+  const marked = segments.findIndex(
+    (segment, index) => REQUEST_SEGMENTS.has(segment) && NUMERIC.test(segments[index + 1] ?? '')
+  );
+  if (marked !== -1) return segments[marked + 1];
+  return [...segments].reverse().find((segment) => NUMERIC.test(segment)) ?? null;
 }
 
 export class PullRequest {

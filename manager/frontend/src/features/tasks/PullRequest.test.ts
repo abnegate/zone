@@ -24,6 +24,27 @@ describe('PullRequest', () => {
     expect(pullRequest?.label).toBe('PR #7 · merged');
   });
 
+  it('numbers the pull request, not a later number in its address', () => {
+    expect(
+      PullRequest.of({
+        pr_url: 'https://github.com/zone/app/pull/220/files/3',
+        pr_status: 'open',
+      })?.label
+    ).toBe('PR #220 · open');
+    expect(
+      PullRequest.of({
+        pr_url: 'http://git.internal/zone/app/-/merge_requests/7/diffs/2',
+        pr_status: 'open',
+      })?.label
+    ).toBe('PR #7 · open');
+    expect(
+      PullRequest.of({
+        pr_url: 'https://bitbucket.org/zone/app/pull-requests/12/commits/4',
+        pr_status: 'open',
+      })?.label
+    ).toBe('PR #12 · open');
+  });
+
   it('takes the last numeric segment when the address goes on past the number', () => {
     const pullRequest = PullRequest.of({
       pr_url: 'https://github.com/zone/2048/pull/220/files?diff=split#top',
