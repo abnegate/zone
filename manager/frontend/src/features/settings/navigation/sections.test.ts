@@ -16,6 +16,7 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Workspace, section: SettingsSection.General, label: 'General' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Ai, label: 'AI' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Folders, label: 'Folders' },
+  { group: SettingsGroup.Workspace, section: SettingsSection.Sources, label: 'Sources' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Organization, section: SettingsSection.Ai, label: 'AI defaults' },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
@@ -41,6 +42,7 @@ const ORGANIZATION_GITHUB = settingsPath(SettingsGroup.Organization, SettingsSec
 const FEATURES = settingsPath(SettingsGroup.Server, SettingsSection.Features);
 const CONNECT = settingsPath(SettingsGroup.Server, SettingsSection.Connect);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
+const SOURCES = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
 
 describe('settings constants', () => {
   it('roots settings at /settings and switches to the compact layout at the app breakpoint', () => {
@@ -59,6 +61,7 @@ describe('settings constants', () => {
       General: 'general',
       Ai: 'ai',
       Folders: 'folders',
+      Sources: 'sources',
       Members: 'members',
       Devices: 'devices',
       Billing: 'billing',
@@ -152,6 +155,7 @@ describe('visibleSections', () => {
         workspace: true,
         workspaceRole: 'viewer',
         installsModels: false,
+        readsSources: true,
       })
     ).toEqual([
       ...pathsOf(SettingsGroup.Workspace),
@@ -170,20 +174,22 @@ describe('visibleSections', () => {
         workspace: false,
         workspaceRole: undefined,
         installsModels: true,
+        readsSources: true,
       })
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all thirteen sections to an organization owner who administers the workspace', () => {
+  it('shows all fourteen sections to an organization owner who administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
       workspace: true,
       workspaceRole: 'admin',
       installsModels: true,
+      readsSources: true,
     });
 
-    expect(visible).toHaveLength(13);
+    expect(visible).toHaveLength(14);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -195,6 +201,7 @@ describe('visibleSections', () => {
         workspace: true,
         workspaceRole: undefined,
         installsModels: true,
+        readsSources: true,
       })
     ).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
@@ -207,6 +214,7 @@ describe('visibleSections', () => {
         workspace: false,
         workspaceRole: undefined,
         installsModels: false,
+        readsSources: false,
       })
     ).toEqual([CONNECT, SESSIONS]);
   });
@@ -222,6 +230,7 @@ describe('visibleSections', () => {
         workspace: true,
         workspaceRole: 'member',
         installsModels,
+        readsSources: true,
       }).includes(FEATURES);
 
     for (const organizationRole of ['owner', 'admin', 'member', undefined] as const) {
@@ -238,6 +247,7 @@ describe('visibleSections', () => {
         workspace: false,
         workspaceRole: undefined,
         installsModels: true,
+        readsSources: false,
       })
     ).toEqual([FEATURES, CONNECT, SESSIONS]);
   });
@@ -251,6 +261,7 @@ describe('visibleSections', () => {
           workspace: false,
           workspaceRole: undefined,
           installsModels: false,
+          readsSources: false,
         }),
         String(organizationRole)
       ).toContain(CONNECT);
@@ -266,9 +277,73 @@ describe('visibleSections', () => {
           workspace: true,
           workspaceRole,
           installsModels: false,
+          readsSources: true,
         }).filter((path) => path.startsWith(`${SETTINGS_ROOT}/${SettingsGroup.Workspace}/`)),
         workspaceRole
       ).toEqual(pathsOf(SettingsGroup.Workspace));
     }
+  });
+
+  it('shows Sources in a workspace to whoever can read sources', () => {
+    expect(
+      paths({
+        organization: true,
+        organizationRole: 'member',
+        workspace: true,
+        workspaceRole: 'member',
+        installsModels: false,
+        readsSources: true,
+      })
+    ).toContain(SOURCES);
+  });
+
+  it('hides Sources in a workspace from whoever cannot read sources', () => {
+    const visible = paths({
+      organization: true,
+      organizationRole: 'owner',
+      workspace: true,
+      workspaceRole: 'admin',
+      installsModels: true,
+      readsSources: false,
+    });
+
+    expect(visible).not.toContain(SOURCES);
+    expect(
+      visible.filter((path) => path.startsWith(`${SETTINGS_ROOT}/${SettingsGroup.Workspace}/`))
+    ).toEqual(pathsOf(SettingsGroup.Workspace).filter((path) => path !== SOURCES));
+  });
+
+  it('hides Sources outside a workspace even from whoever can read sources', () => {
+    expect(
+      paths({
+        organization: true,
+        organizationRole: 'owner',
+        workspace: false,
+        workspaceRole: undefined,
+        installsModels: true,
+        readsSources: true,
+      })
+    ).not.toContain(SOURCES);
+  });
+
+  it('shows Sources to a workspace viewer who can read sources', () => {
+    expect(
+      paths({
+        organization: true,
+        organizationRole: 'member',
+        workspace: true,
+        workspaceRole: 'viewer',
+        installsModels: false,
+        readsSources: true,
+      })
+    ).toContain(SOURCES);
+  });
+
+  it('finds the Sources section in the workspace group', () => {
+    expect(findSection('workspace', 'sources')).toMatchObject({
+      group: SettingsGroup.Workspace,
+      section: SettingsSection.Sources,
+      label: 'Sources',
+    });
   });
 });

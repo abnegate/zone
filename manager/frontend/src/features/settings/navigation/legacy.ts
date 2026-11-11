@@ -23,6 +23,8 @@ const WORKSPACE_TABS: ReadonlyMap<string, string> = new Map([
 
 export const SESSIONS_PATH = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 
+export const SOURCES_PATH = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
+
 function withoutTab(path: string, parameters: URLSearchParams, hash: string): string {
   parameters.delete(TAB_PARAMETER);
   const remaining = parameters.toString();

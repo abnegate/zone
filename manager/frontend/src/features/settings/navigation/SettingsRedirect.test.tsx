@@ -31,6 +31,7 @@ function renderAt(entry: string) {
           element={<SettingsRedirect from={LegacySettings.Organization} />}
         />
         <Route path="/sessions" element={<SettingsRedirect from={LegacySettings.Sessions} />} />
+        <Route path="/sources" element={<SettingsRedirect from={LegacySettings.Sources} />} />
         <Route path="*" element={<LocationProbe />} />
       </Routes>
     </MemoryRouter>
@@ -74,6 +75,38 @@ describe('SettingsRedirect', () => {
     renderAt('/sessions?x=1#y');
 
     expect(screen.getByTestId('location').textContent).toBe('/settings/you/sessions?x=1#y');
+  });
+
+  it('sends the sources page to the workspace sources section', () => {
+    renderAt('/sources');
+
+    expect(screen.getByTestId('location').textContent).toBe('/settings/workspace/sources');
+  });
+
+  it('keeps the selected source and the hash when sending the sources page on', () => {
+    renderAt('/sources?source=abc#details');
+
+    expect(screen.getByTestId('location').textContent).toBe(
+      '/settings/workspace/sources?source=abc#details'
+    );
+  });
+
+  it('replaces the sources page entry instead of pushing a new one', () => {
+    const router = createMemoryRouter(
+      [
+        { path: '/', element: <LocationProbe /> },
+        { path: '/sources', element: <SettingsRedirect from={LegacySettings.Sources} /> },
+        { path: '*', element: <LocationProbe /> },
+      ],
+      { initialEntries: ['/', '/sources?source=abc#details'], initialIndex: 1 }
+    );
+
+    render(<RouterProvider router={router} />);
+
+    expect(router.state.location.pathname).toBe('/settings/workspace/sources');
+    expect(router.state.location.search).toBe('?source=abc');
+    expect(router.state.location.hash).toBe('#details');
+    expect(router.state.historyAction).toBe(NavigationType.Replace);
   });
 
   it('replaces the legacy entry instead of pushing a new one', () => {

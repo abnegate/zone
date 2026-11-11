@@ -67,6 +67,7 @@ const ownerAccess: SettingsAccess = {
   workspace: true,
   workspaceRole: 'admin',
   installsModels: true,
+  readsSources: true,
 };
 
 function renderNav(access: SettingsAccess, entry = '/settings/workspace/general') {
@@ -112,6 +113,7 @@ describe('SettingsNav', () => {
       ['General', '/settings/workspace/general'],
       ['AI', '/settings/workspace/ai'],
       ['Folders', '/settings/workspace/folders'],
+      ['Sources', '/settings/workspace/sources'],
       ['Members', '/settings/workspace/members'],
       ['AI defaults', '/settings/organization/ai'],
       ['Members', '/settings/organization/members'],
@@ -146,6 +148,7 @@ describe('SettingsNav', () => {
       workspace: false,
       workspaceRole: undefined,
       installsModels: true,
+      readsSources: true,
     });
 
     expect(screen.queryByRole('group', { name: 'Workspace' })).not.toBeInTheDocument();

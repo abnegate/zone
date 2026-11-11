@@ -18,6 +18,7 @@ export const SettingsSection = {
   General: 'general',
   Ai: 'ai',
   Folders: 'folders',
+  Sources: 'sources',
   Members: 'members',
   Devices: 'devices',
   Billing: 'billing',
@@ -36,6 +37,7 @@ export interface SettingsAccess {
   workspace: boolean;
   workspaceRole: WorkspaceRole | undefined;
   installsModels: boolean;
+  readsSources: boolean;
 }
 
 export interface SectionDefinition {
@@ -63,6 +65,9 @@ export const administersOrganization = (
 
 const installsModels = (access: SettingsAccess): boolean => access.installsModels;
 
+const readsWorkspaceSources = (access: SettingsAccess): boolean =>
+  access.workspace && access.readsSources;
+
 const always = (): boolean => true;
 
 export const SECTIONS: readonly SectionDefinition[] = [
@@ -83,6 +88,12 @@ export const SECTIONS: readonly SectionDefinition[] = [
     section: SettingsSection.Folders,
     label: 'Folders',
     visible: inWorkspace,
+  },
+  {
+    group: SettingsGroup.Workspace,
+    section: SettingsSection.Sources,
+    label: 'Sources',
+    visible: readsWorkspaceSources,
   },
   {
     group: SettingsGroup.Workspace,
