@@ -5,6 +5,8 @@ import { McpServerRow } from './McpServerRow';
 import { COMMANDS_OFF_HINT } from './transport';
 import type { McpServer, McpServerStatus } from './types';
 
+const HINT_ID = 'commands-hint';
+
 function server(overrides: Partial<McpServer> = {}): McpServer {
   return {
     id: 's-1',
@@ -45,15 +47,19 @@ function renderRow(
     onReconnect: mock(() => {}),
   };
   const view = render(
-    <ul>
-      <McpServerRow
-        server={value}
-        canManage={canManage}
-        commands={commands}
-        busy={busy}
-        {...handlers}
-      />
-    </ul>
+    <>
+      <p id={HINT_ID}>{COMMANDS_OFF_HINT}</p>
+      <ul>
+        <McpServerRow
+          server={value}
+          canManage={canManage}
+          commands={commands}
+          hintId={HINT_ID}
+          busy={busy}
+          {...handlers}
+        />
+      </ul>
+    </>
   );
   return { ...view, ...handlers };
 }
@@ -100,6 +106,7 @@ describe('McpServerRow', () => {
     const { onToggle } = renderRow(server());
     const toggle = screen.getByRole('switch', { name: 'Enable docs' });
     expect(toggle).toHaveProperty('checked', true);
+    expect(toggle.hasAttribute('aria-checked')).toBe(false);
     fireEvent.click(toggle);
     expect(onToggle).toHaveBeenCalledTimes(1);
     expect(onToggle).toHaveBeenCalledWith(false);
@@ -149,6 +156,7 @@ describe('McpServerRow', () => {
             server={server({ name })}
             canManage
             commands
+            hintId={HINT_ID}
             busy={false}
             onToggle={() => {}}
             onTools={() => {}}
@@ -203,7 +211,9 @@ describe('McpServerRow', () => {
     );
     const toggle = screen.getByRole('switch', { name: 'Enable docs' });
     expect(toggle).toHaveProperty('disabled', true);
-    expect(toggle.getAttribute('aria-description')).toBe(COMMANDS_OFF_HINT);
+    expect(toggle.getAttribute('aria-describedby')).toBe(HINT_ID);
+    expect(document.getElementById(HINT_ID)?.textContent).toBe(COMMANDS_OFF_HINT);
+    expect(toggle.hasAttribute('aria-description')).toBe(false);
     expect(toggle.closest('label')?.title).toBe(COMMANDS_OFF_HINT);
     expect(toggle.closest('label')?.classList.contains('mcp-server-toggle--locked')).toBe(true);
     fireEvent.click(toggle);
@@ -246,7 +256,7 @@ describe('McpServerRow', () => {
     const { onToggle, onReconnect } = renderRow(server(), { commands: false });
     const toggle = screen.getByRole('switch', { name: 'Enable docs' });
     expect(toggle).toHaveProperty('disabled', false);
-    expect(toggle.hasAttribute('aria-description')).toBe(false);
+    expect(toggle.hasAttribute('aria-describedby')).toBe(false);
     expect(toggle.closest('label')?.hasAttribute('title')).toBe(false);
     expect(toggle.closest('label')?.classList.contains('mcp-server-toggle--locked')).toBe(false);
     fireEvent.click(toggle);

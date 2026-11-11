@@ -51,6 +51,7 @@ interface McpServersSectionProps {
 
 export function McpServersSection({ organizationId, canManage }: McpServersSectionProps) {
   const headingId = useId();
+  const hintId = useId();
   const {
     servers,
     commands,
@@ -184,7 +185,7 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
         )}
       </div>
       {loaded && !commands && (
-        <p className="form-hint" role="status">
+        <p id={hintId} className="form-hint" role="status">
           {COMMANDS_OFF_HINT}
         </p>
       )}
@@ -241,6 +242,7 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
                 server={server}
                 canManage={canManage && target !== null}
                 commands={commands}
+                hintId={hintId}
                 busy={target !== null && busy.has(target.id)}
                 {...actionsFor(server)}
               />

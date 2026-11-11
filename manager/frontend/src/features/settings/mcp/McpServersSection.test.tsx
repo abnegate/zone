@@ -238,8 +238,12 @@ describe('McpServersSection', () => {
 
     const locked = screen.getByRole('switch', { name: 'Enable files' });
     expect(locked).toHaveProperty('disabled', true);
-    expect(locked.getAttribute('aria-description')).toBe(COMMANDS_OFF);
-    expect(screen.getByRole('switch', { name: 'Enable docs' })).toHaveProperty('disabled', false);
+    const hint = document.getElementById(locked.getAttribute('aria-describedby') ?? '');
+    expect(hint?.textContent).toBe(COMMANDS_OFF);
+    expect(hint?.getAttribute('role')).toBe('status');
+    const open = screen.getByRole('switch', { name: 'Enable docs' });
+    expect(open).toHaveProperty('disabled', false);
+    expect(open.hasAttribute('aria-describedby')).toBe(false);
     fireEvent.click(locked);
     expect(mcpApi.update).not.toHaveBeenCalled();
   });
@@ -384,7 +388,7 @@ describe('McpServersSection', () => {
     mcpApi.list.mockImplementation(() => new Promise(() => {}));
     const toggle = within(row).getByRole('switch', { name: 'Enable docs' });
     fireEvent.click(toggle);
-    await waitFor(() => expect(toggle.getAttribute('aria-checked')).toBe('false'));
+    await waitFor(() => expect(toggle).toHaveProperty('checked', false));
     expect(statusOf(row)).toBe('Disabled');
     expect(mcpApi.list).toHaveBeenCalledTimes(2);
   });

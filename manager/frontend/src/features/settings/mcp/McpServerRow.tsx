@@ -12,6 +12,7 @@ interface McpServerRowProps {
   server: McpServer;
   canManage: boolean;
   commands: boolean;
+  hintId: string;
   busy: boolean;
   onToggle(enabled: boolean): void;
   onTools(tools: string[] | null): void;
@@ -24,6 +25,7 @@ export function McpServerRow({
   server,
   canManage,
   commands,
+  hintId,
   busy,
   onToggle,
   onTools,
@@ -67,11 +69,11 @@ export function McpServerRow({
             <span className="toggle-wrapper">
               <input
                 type="checkbox"
+                // biome-ignore lint/a11y/useAriaPropsForRole: a native checkbox reports its own checked state, which aria-checked must not restate
                 role="switch"
                 aria-label={`Enable ${server.name}`}
                 checked={server.enabled}
-                aria-checked={server.enabled}
-                aria-description={hint}
+                aria-describedby={blocked ? hintId : undefined}
                 disabled={busy || blocked}
                 onChange={(event) => onToggle(event.target.checked)}
               />
