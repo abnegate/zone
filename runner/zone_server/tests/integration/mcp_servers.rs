@@ -26,6 +26,7 @@ use zone_server::config::Config;
 use zone_server::db::mcp_servers;
 use zone_server::db::mcp_servers::NewMcpServer;
 use zone_server::db::tasks::Origin;
+use zone_server::services::mcp_servers::hubs::EXPOSED;
 use zone_server::services::mcp_servers::status::ANSWERED;
 use zone_server::services::mcp_servers::status::Connection;
 use zone_server::services::mcp_servers::status::SSE_UNSUPPORTED;
@@ -115,6 +116,7 @@ const BAD_REQUEST: u16 = 400;
 /// How axum's JSON extractor opens a refusal of a body that does not fit its type.
 const UNREADABLE_BODY: &str = "Failed to deserialize the JSON body into the target type";
 const LOGGED: &str = "zone_server=debug,zone_core=debug,abnegate_agent=debug,rmcp=debug";
+const WARNED: &str = "zone_server=warn";
 /// How the hub names the second tool to claim a name in one catalog.
 const COLLIDED: &str = "_2";
 
@@ -1333,6 +1335,39 @@ async fn a_name_is_unique_in_the_organization_and_against_instance_servers() {
     assert_eq!(listed["servers"][0]["source"], ORGANIZATION);
 
     tenant.discard(&client, &[]).await;
+}
+
+/// The runtime is current-thread so the configuration read logs through the subscriber set as
+/// this thread's default.
+#[tokio::test(flavor = "current_thread")]
+async fn commands_beside_an_inheriting_instance_server_are_warned_of_once() {
+    let (captured, _capturing) = capturing(WARNED);
+    let mut environment = isolated();
+    environment.set(
+        mcp::SERVERS,
+        configuration(json!({ "local": { "command": "python3", "args": [stub()] } })),
+    );
+    let pool = common::create_test_pool().await;
+    let commanding = AppState::new(
+        Config {
+            mcp_commands: true,
+            ..common::test_config()
+        },
+        pool.clone(),
+        None,
+    );
+    commanding.mcp().configured().await;
+    commanding.mcp().configured().await;
+    let warned = captured.text().matches(EXPOSED).count();
+    AppState::new(common::test_config(), pool, None)
+        .mcp()
+        .configured()
+        .await;
+    let unwarned = captured.text().matches(EXPOSED).count() - warned;
+    drop(environment);
+
+    assert_eq!(warned, 1, "{}", captured.text());
+    assert_eq!(unwarned, 0, "{}", captured.text());
 }
 
 #[tokio::test]

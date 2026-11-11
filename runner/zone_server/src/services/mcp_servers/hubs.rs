@@ -10,6 +10,7 @@ use abnegate_agent::tool::Proxy;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
+use tokio::task::JoinError;
 use uuid::Uuid;
 use zone_core::servers;
 
@@ -21,6 +22,19 @@ use super::status::Connection;
 use super::status::Policy;
 use super::status::UNCONNECTED;
 use super::status::summary;
+
+pub const EXPOSED: &str = "ZONE_MCP_COMMANDS is on while an instance stdio MCP server inherits \
+     the server's environment: any organization admin's command server can read that process's \
+     environment, the instance's keys included, while it runs. Turn ZONE_MCP_COMMANDS off unless \
+     this is a single-tenant install.";
+
+pub fn exposed(policy: Policy, configuration: &McpConfig) -> bool {
+    policy.enabled
+        && policy.commands
+        && configuration.servers.values().any(|server| {
+            !server.disabled && server.command.is_some() && server.inherit_environment
+        })
+}
 
 pub struct Hubs {
     proxy: Proxy,
@@ -57,9 +71,11 @@ impl Hubs {
         let read = self
             .configuration
             .get_or_try_init(|| async {
-                tokio::task::spawn_blocking(servers::config)
-                    .await
-                    .map(Arc::new)
+                let configuration = tokio::task::spawn_blocking(servers::config).await?;
+                if exposed(self.policy, &configuration) {
+                    tracing::warn!("{EXPOSED}");
+                }
+                Ok::<_, JoinError>(Arc::new(configuration))
             })
             .await;
         match read {
@@ -567,6 +583,32 @@ mod tests {
         assert!(!Arc::ptr_eq(&earlier, &hub.session("stub").unwrap()));
         assert!(Arc::ptr_eq(&untouched, &hub.session("other").unwrap()));
         assert_eq!(hub.generation("other"), generation);
+    }
+
+    #[test]
+    fn only_commands_beside_an_inheriting_instance_command_are_exposed() {
+        let inheriting = McpServer::command("magents", ["mcp"]).inherit_environment();
+        let configured = |server: McpServer| McpConfig::default().with_server("instance", server);
+        let commands_off = Policy {
+            commands: false,
+            ..POLICY
+        };
+        let mcp_off = Policy {
+            enabled: false,
+            ..POLICY
+        };
+
+        let exposures = [
+            exposed(POLICY, &configured(inheriting.clone())),
+            exposed(commands_off, &configured(inheriting.clone())),
+            exposed(mcp_off, &configured(inheriting.clone())),
+            exposed(POLICY, &configured(inheriting.disable())),
+            exposed(POLICY, &configured(McpServer::command("magents", ["mcp"]))),
+            exposed(POLICY, &configured(McpServer::remote(testing::REMOTE_URL))),
+            exposed(POLICY, &McpConfig::default()),
+        ];
+
+        assert_eq!(exposures, [true, false, false, false, false, false, false]);
     }
 
     /// The stub, started only once a file exists at `gate`.

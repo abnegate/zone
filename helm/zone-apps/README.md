@@ -71,7 +71,7 @@ The following table lists the configurable parameters and their default values.
 | `server.env.ZONE_MCP_ENABLED` | Master switch for every MCP server, instance and organization alike; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) | `"true"` |
 | `server.env.ZONE_MCP_AUTO_CONNECT` | Attach `magents mcp` when no enabled instance server is configured and `magents` is on `PATH`; the image does not ship it | `"true"` |
 | `server.env.ZONE_MCP_AUTO_MAGENTS` | The older name for `ZONE_MCP_AUTO_CONNECT`; either one off keeps the fallback off | `"true"` |
-| `server.env.ZONE_MCP_COMMANDS` | Let organization admins add stdio (command) servers, which run as zone-server's user in the pod | `"false"` |
+| `server.env.ZONE_MCP_COMMANDS` | Let organization admins add stdio (command) servers, which run as zone-server's user in the pod and can read any running child's environment from `/proc`. On, it gives every organization admin every other organization's stdio MCP secrets and, while an instance stdio server that inherits the environment runs (a `command` entry or the `magents` fallback), zone-server's own keys. Single-tenant installs only; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) | `"false"` |
 | `server.env.ZONE_MCP_CONFIG` | Path inside the pod to a JSON file of instance MCP servers | `""` |
 | `server.env.ZONE_MCP_SERVERS` | Inline JSON of instance MCP servers; takes precedence over `ZONE_MCP_CONFIG` | `""` |
 

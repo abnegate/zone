@@ -1572,7 +1572,10 @@ What stands in the way:
   and the `rg`, `git`, `ffmpeg` and `ffprobe` it runs start from an
   allowlisted environment, without those secrets, and so do organization
   stdio MCP servers, plus their own `environment`. Instance-layer stdio MCP
-  servers start from the server's full environment, so they carry them. An
+  servers start from the server's full environment, so they carry them. With
+  `ZONE_MCP_COMMANDS` on, an organization admin's stdio server is a process of
+  that user too, so it can read those secrets from a running instance stdio
+  server, and every other organization's stdio server `environment`. An
   instance-layer URL server is not a process and inherits nothing, but its
   `url` and `headers` may refer to any variable of the server's environment,
   and what a reference resolves to is sent to that server.
@@ -2170,7 +2173,7 @@ The Helm chart passes each value under `server.env` to zone-server as written, s
 
 ### `ZONE_MCP_COMMANDS`
 - **Default**: `false`. Compose passes `false` unless `.env` says otherwise, and the Helm chart sets `"false"` in `server.env`.
-- **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on`, trimmed and in any case, turns it on; anything else leaves it off. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `environment`, never the server's full environment, but it still runs as the server's user, so turn this on only when you trust every organization admin to run commands on the host. Instance-layer servers are not affected.
+- **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on`, trimmed and in any case, turns it on; anything else leaves it off. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `environment`, never the server's full environment, but that does not isolate it: it runs as the server's user, and any process of that user can read the environment of every other process of that user while it runs, from `/proc/<pid>/environ` (see [Security: every organization is the same OS user](#security-every-organization-is-the-same-os-user)). A command as plain as `sh -c 'cat /proc/*/environ'` is enough. **Turning this on gives every organization admin every other organization's MCP secrets, the `environment` of each of their running stdio servers, and the instance's own keys, the database URL, the JWT and encryption keys and the LiteLLM key, whenever an instance stdio server that inherits the server's environment is running**: any `command` entry in `ZONE_MCP_SERVERS` or `ZONE_MCP_CONFIG`, and the `magents mcp` fallback that `ZONE_MCP_AUTO_CONNECT` attaches. Turn it on for single-tenant installs only. While it is on and such an instance server is configured, Zone logs a warning at startup that begins "ZONE_MCP_COMMANDS is on while an instance stdio MCP server inherits the server's environment". Instance-layer servers are not affected.
 
 ### Organization-managed servers
 
@@ -2229,6 +2232,7 @@ Rules for every organization server:
 
 - Authentication is static headers only, a bearer token in `Authorization` included. OAuth is not supported.
 - Put credentials in headers, never in the URL: query strings are stored, returned and audited as entered.
+- Put a `stdio` server's secrets in `environment`, never in `arguments`: arguments are stored, returned to every organization member and audited as entered.
 - A URL is `http` or `https` with a host. Private and loopback addresses are allowed, so a server on the host or the LAN works. Cloud metadata and link-local addresses, credentials embedded in the URL, fragments and other schemes are refused. The URL is stored as the parser normalises it.
 - A cloud metadata or link-local address is refused again at every connect, and so is every such address a host name resolves to: a name that resolves to nothing else is not reached. Behind `TOOL_RUNNER_PROXY_URL` the proxy resolves host names, so there only an address or metadata host written in the URL is refused.
 - Only a 307 or 308 redirect to the same origin is followed, at most 10 in a row. Any other redirect fails the connect.
