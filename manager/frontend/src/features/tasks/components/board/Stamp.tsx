@@ -6,11 +6,11 @@ export interface StampProps {
 }
 
 export function Stamp({ value, now }: StampProps) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) return null;
   return (
     <time className="task-card-time" dateTime={value}>
-      {formatDistance(date, now, { addSuffix: true })}
+      {formatDistance(Math.min(time, now), now, { addSuffix: true })}
     </time>
   );
 }

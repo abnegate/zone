@@ -225,6 +225,13 @@ describe('Card', () => {
     expect(time).toHaveTextContent('9 days ago');
   });
 
+  it('never dates an update ahead of the clock the board last read', () => {
+    renderCard({ updated_at: '2026-11-10T12:00:20Z' });
+    const time = card().querySelector('time');
+    expect(time).toHaveAttribute('dateTime', '2026-11-10T12:00:20Z');
+    expect(time).toHaveTextContent('less than a minute ago');
+  });
+
   it('keeps tooltips off the details the open button covers', () => {
     renderCard({ priority: 2 });
     expect(card().querySelector('time')).not.toHaveAttribute('title');
