@@ -147,8 +147,9 @@ impl Status {
 
 /// The stamps a status write leaves, as `SET` clauses for an `UPDATE` in
 /// which `status` still reads the value being replaced. `shipped_at` is when
-/// the task last reached `complete`, and outlives the move back out so that
-/// move stays visible as a reopen; only a new run clears it.
+/// the task last reached `complete`. It outlives the move back out and every
+/// run after it, so the move stays visible as a reopen and those runs as what
+/// followed the fix; only reaching `complete` again replaces it.
 pub(crate) fn completion_stamps(status: &str) -> String {
     format!(
         "completed_at = CASE WHEN {status}::text IS NULL OR {status} = status THEN completed_at \
@@ -1213,7 +1214,7 @@ async fn insert_task_run(
     )
     .fetch_one(&mut *connection)
     .await?;
-    sqlx::query("UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), completed_at = NULL, shipped_at = NULL, updated_at = NOW() WHERE id = $1")
+    sqlx::query("UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), completed_at = NULL, updated_at = NOW() WHERE id = $1")
         .bind(task_id)
         .bind(row.id)
         .execute(&mut *connection)

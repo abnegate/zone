@@ -127,12 +127,16 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::checker::fixtures::{moment, subject};
-    use super::super::worker::{RegressionSettings, scan_workspace};
+    use super::super::worker::{RegressionSettings, checkers, scan_workspace, watched};
     use super::*;
     use crate::db::analytics;
     use crate::db::auto_projects::testing::Project;
     use crate::db::tasks;
+    use crate::workers::learning::attempt::AttemptOutcome;
     use crate::workers::learning::error_category::ErrorCategory;
+
+    const RUN_COMPLETED: &str = "completed";
+    const RUN_FAILED: &str = "failed";
 
     fn reopened(status: &str, last_touched_at: NaiveDateTime) -> FixSubject {
         FixSubject {
@@ -369,5 +373,148 @@ mod tests {
             result.summary(),
             "Reopened as paused 2 hours after it was completed"
         );
+    }
+
+    async fn watched_fixes(project: &Project) -> Vec<FixSubject> {
+        watched(
+            &project.pool,
+            project.workspace,
+            &RegressionSettings::default(),
+            database_now(project).await + Duration::seconds(1),
+        )
+        .await
+        .expect("the watched fixes")
+    }
+
+    async fn shipped_at(project: &Project, task: Uuid) -> Option<NaiveDateTime> {
+        sqlx::query_scalar("SELECT shipped_at FROM tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&project.pool)
+            .await
+            .expect("the task's stamp")
+    }
+
+    async fn run_ends(project: &Project, run: Uuid, status: &str) {
+        tasks::complete_task_run(&project.pool, run, status, None, None)
+            .await
+            .expect("the run ends")
+            .expect("a run that was live");
+    }
+
+    #[tokio::test]
+    async fn a_run_that_fails_after_the_fix_shipped_is_one_that_followed_it() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+        let shipped = shipped_at(&project, task).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the shipped task");
+        let admitted = shipped_at(&project, task).await;
+        run_ends(&project, run.id, RUN_FAILED).await;
+        let fixes = watched_fixes(&project).await;
+        project.remove().await;
+
+        assert!(shipped.is_some(), "completing the task stamps it");
+        assert_eq!(admitted, shipped, "a new run leaves the stamp alone");
+        let [fix] = &fixes[..] else {
+            panic!("one watched fix: {fixes:?}");
+        };
+        assert_eq!(fix.status, tasks::BLOCKED);
+        assert_eq!(Some(fix.shipped_at), shipped);
+        assert_eq!(
+            fix.later_runs
+                .iter()
+                .map(|later| (later.run_id, later.outcome))
+                .collect::<Vec<_>>(),
+            vec![(run.id, AttemptOutcome::Failed)],
+            "the recurrence checker is shown the run that failed after the fix"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shipped_task_moved_back_out_and_run_again_is_still_a_reopen() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+
+        project.move_to(task, tasks::CREATED).await;
+        let admitted = tasks::create_unattended_task_run(&project.pool, task, project.actor)
+            .await
+            .expect("the admission");
+        let running = scanned(&project).await;
+        let tasks::Unattended::Created(run) = admitted else {
+            panic!("the driver admits the task a person moved back: {admitted:?}");
+        };
+        run_ends(&project, run, RUN_FAILED).await;
+        let ended = scanned(&project).await;
+        project.remove().await;
+
+        let reported: Vec<(Verdict, String)> = [running, ended]
+            .into_iter()
+            .flatten()
+            .map(|result| (result.verdict, result.summary()))
+            .collect();
+        assert_eq!(
+            reported,
+            vec![
+                (
+                    Verdict::Regressed,
+                    "Reopened as queued 2 hours after it was completed".to_string()
+                ),
+                (
+                    Verdict::Regressed,
+                    "Reopened as blocked 2 hours after it was completed".to_string()
+                ),
+            ],
+            "the run the reopen led to does not hide the reopen"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_that_completes_again_is_watched_from_its_new_completion() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+        let first = shipped_at(&project, task).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the shipped task");
+        run_ends(&project, run.id, RUN_COMPLETED).await;
+        let reviewed = project.status(task).await;
+        project.move_to(task, COMPLETE).await;
+        let second = shipped_at(&project, task).await;
+        let fixes = watched_fixes(&project).await;
+        let results = scan_workspace(
+            &project.pool,
+            project.workspace,
+            &checkers(&RegressionSettings::default()),
+            &RegressionSettings::default(),
+            database_now(&project).await + Duration::seconds(1),
+        )
+        .await
+        .expect("the scan");
+        project.remove().await;
+
+        assert_eq!(reviewed, REVIEW);
+        assert!(
+            first.is_some() && second > first,
+            "completing again replaces the stamp: {first:?} then {second:?}"
+        );
+        let [fix] = &fixes[..] else {
+            panic!("one watched fix: {fixes:?}");
+        };
+        assert_eq!(Some(fix.shipped_at), second);
+        assert!(
+            fix.later_runs.is_empty(),
+            "the run that led to the new completion did not follow it: {:?}",
+            fix.later_runs
+        );
+        assert_eq!(results, Vec::new(), "a task complete again is clear");
     }
 }

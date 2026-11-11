@@ -159,6 +159,18 @@ pub async fn scan_workspace(
     settings: &RegressionSettings,
     now: NaiveDateTime,
 ) -> DbResult<Vec<RegressionResult>> {
+    let fixes = watched(pool, workspace_id, settings, now).await?;
+    Ok(check_all(checkers, &fixes, now).await)
+}
+
+/// The fixes one workspace shipped that are still watched, each with the runs
+/// that followed it.
+pub async fn watched(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    settings: &RegressionSettings,
+    now: NaiveDateTime,
+) -> DbResult<Vec<FixSubject>> {
     let start = now - settings.policy.monitoring;
     let tasks = analytics::shipped_tasks(
         pool,
@@ -181,8 +193,7 @@ pub async fn scan_workspace(
     )
     .await?;
 
-    let watched = subjects(workspace_id, &tasks, &runs, &settings.policy, now);
-    Ok(check_all(checkers, &watched, now).await)
+    Ok(subjects(workspace_id, &tasks, &runs, &settings.policy, now))
 }
 
 /// Ask every checker about every fix, keeping only what they had to say.
