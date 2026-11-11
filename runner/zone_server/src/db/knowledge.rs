@@ -11,6 +11,8 @@ use zone_context::embeddings::align_vector;
 
 use super::DbResult;
 
+pub mod discovery;
+
 /// Knowledge entry row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct KnowledgeRow {
@@ -111,6 +113,19 @@ pub(crate) use not_memory;
 
 /// The same text as a value, for tests and for any site that formats rather than concatenates.
 pub const NOT_MEMORY: &str = not_memory!();
+
+/// The predicate the document writer carries so it cannot rewrite a learned entry, and the one the
+/// document union reports `editable` by. Every row it excludes reaches later prompts, and was written by
+/// something that decided what it may say: a pass that counted evidence, or a tool that screened the text.
+/// An edit through `update_document` would be seen by neither. A literal and bind-free for the reasons
+/// `not_memory!` gives; a test pins the names to [`RESERVED_CATEGORIES`] less [`PRIVATE_CATEGORIES`].
+/// `category IS NULL OR` is load-bearing here too: `NOT IN` is NULL for a NULL category.
+macro_rules! not_learned {
+    () => {
+        "AND (category IS NULL OR category NOT IN \
+         ('standing-instruction', 'repository-convention', 'strategy-lesson', 'agent-discovery'))"
+    };
+}
 
 /// Categories that belong to one person, not to the workspace. Every one
 /// carries `MEMORY_CATEGORY_PREFIX`, which a test pins, because `NOT_MEMORY`
@@ -678,6 +693,39 @@ mod tests {
         }
     }
 
+    /// `not_learned!` has to be a literal, so it spells the categories out
+    /// where the constants cannot reach. A learned family added to
+    /// [`RESERVED_CATEGORIES`] and not to the literal would be a row that
+    /// reaches every prompt and that `update_document` still rewrites.
+    #[test]
+    fn the_learned_literal_names_exactly_the_reserved_categories_that_are_not_a_person_s() {
+        let mut named: Vec<&str> = not_learned!().split('\'').skip(1).step_by(2).collect();
+        named.sort_unstable();
+
+        let mut learned: Vec<&str> = RESERVED_CATEGORIES
+            .iter()
+            .copied()
+            .filter(|category| !PRIVATE_CATEGORIES.contains(category))
+            .collect();
+        learned.sort_unstable();
+
+        assert_eq!(named, learned);
+        assert_eq!(
+            learned,
+            vec![
+                "agent-discovery",
+                "repository-convention",
+                "standing-instruction",
+                "strategy-lesson",
+            ]
+        );
+        assert!(
+            not_learned!().starts_with("AND (category IS NULL OR category NOT IN ("),
+            "an ordinary document has no category, and NOT IN alone is NULL for it: {}",
+            not_learned!()
+        );
+    }
+
     #[test]
     fn a_reserved_category_is_refused_without_naming_what_owns_it() {
         let later = format!(
@@ -700,6 +748,14 @@ mod tests {
                  path already excludes, so accepting it would store a row nothing can reach"
             );
         }
+        assert_eq!(
+            reserved_namespace(Some("agent-discovery"), &[]).as_deref(),
+            Some(
+                "The category agent-discovery is written elsewhere and cannot be set through this route"
+            ),
+            "what an agent records reaches every prompt, so only the writer that screens it may \
+             file under its category"
+        );
         assert!(reserved_namespace(Some("release-notes"), &[]).is_none());
         assert!(
             reserved_namespace(Some("memorandum"), &[]).is_none(),
@@ -1206,7 +1262,8 @@ macro_rules! documents {
     () => { concat!(r#"
     SELECT id, title, content, 'knowledge'::text AS source, NULL::uuid AS source_id,
            COALESCE(source_url, 'knowledge://' || id::text) AS uri,
-           updated_at, last_fetched_at AS fetched_at, source_url IS NULL AS editable,
+           updated_at, last_fetched_at AS fetched_at,
+           (source_url IS NULL "#, not_learned!(), r#") AS editable,
            content_hash AS revision
     FROM knowledge_entries
     WHERE workspace_id = $1 AND is_active = TRUE
@@ -1313,6 +1370,8 @@ pub async fn update_document(
          WHERE id = $3 AND workspace_id = $1 AND is_active = TRUE AND source_url IS NULL
            ",
         not_memory!(),
+        " ",
+        not_learned!(),
         " AND get_workspace_role($2, $1) IN ('member', 'admin', 'owner')",
     ))
     .bind(workspace_id)
@@ -1351,6 +1410,19 @@ mod document_union_tests {
         assert!(
             documents!().contains(NOT_MEMORY),
             "read_document and list_documents select content through this union: {}",
+            documents!()
+        );
+    }
+
+    #[test]
+    fn the_document_union_reports_a_learned_entry_as_not_editable() {
+        assert!(
+            documents!().contains(concat!(
+                "(source_url IS NULL ",
+                not_learned!(),
+                ") AS editable"
+            )),
+            "a document the writer refuses must not be listed as one it accepts: {}",
             documents!()
         );
     }
@@ -1416,14 +1488,18 @@ pub async fn skills(pool: &PgPool, workspace_id: Uuid, limit: i64) -> DbResult<V
 /// repeatedly in this workspace". The promotion and learning workers earn that
 /// by clearing an occurrence, distinct-run and agreement bar. A client posting
 /// to the knowledge route earns nothing, so it must not be able to write here.
+/// The fourth, [`discovery::CATEGORY`], claims no evidence, but its rows reach
+/// every prompt too, and the only writer allowed to put one there is the one
+/// that screens what it stores and names the run or chat it came from.
 /// The three memory categories are refused for the opposite reason: they
 /// belong to one person, and this route is the workspace's. They are named
 /// here for the same pinning [`PRIVATE_CATEGORIES`] gets, but what refuses
 /// them is `owned_by_a_person`, on the prefix the reads exclude.
 pub const RESERVED_CATEGORIES: &[&str] = &[
     STANDING_INSTRUCTION_CATEGORY,
-    "repository-convention",
-    "strategy-lesson",
+    LearnedCategory::RepositoryConvention.as_str(),
+    LearnedCategory::StrategyLesson.as_str(),
+    discovery::CATEGORY,
     super::memory::PROFILE_CATEGORY,
     super::memory::PREFERENCE_CATEGORY,
     super::memory::FACT_CATEGORY,
@@ -1545,6 +1621,16 @@ struct KnowledgeUpsertRow {
     id: Uuid,
     created: bool,
     superseded: bool,
+    inactive: bool,
+}
+
+/// What [`upsert_learned_entry`] did, and what it found.
+struct LearnedUpsert {
+    id: Uuid,
+    outcome: KnowledgeUpsertOutcome,
+    /// Whether the row this identity addresses was inactive when the upsert
+    /// ran. With `revive` off that row was left as it was.
+    inactive: bool,
 }
 
 fn advisory_lock_key(workspace_id: Uuid, fingerprint: &str) -> i64 {
@@ -1566,6 +1652,11 @@ struct LearnedEntry<'a> {
     title: &'a str,
     content: &'a str,
     tags: &'a [String],
+    /// Whether writing the entry again brings back a row that was deleted.
+    /// A pass that re-derives a fact from fresh evidence has earned it again;
+    /// a writer with no evidence to re-earn it by has not, and for that
+    /// writer a deletion stands.
+    revive: bool,
 }
 
 /// Create or supersede the knowledge entry a learning pass derived.
@@ -1574,10 +1665,11 @@ struct LearnedEntry<'a> {
 /// instead of accumulating near-duplicates, and an unchanged derivation reports
 /// [`KnowledgeUpsertOutcome::Unchanged`] without writing. The advisory lock keeps
 /// concurrent server instances from racing the existence check.
-async fn upsert_learned_entry(
-    pool: &PgPool,
-    entry: LearnedEntry<'_>,
-) -> DbResult<(Uuid, KnowledgeUpsertOutcome)> {
+///
+/// A deleted row is brought back only when the entry says `revive`. Otherwise it is
+/// left as the delete left it, and the caller is told the row was inactive so it can
+/// tell a deletion that stood from an entry that already said the same thing.
+async fn upsert_learned_entry(pool: &PgPool, entry: LearnedEntry<'_>) -> DbResult<LearnedUpsert> {
     let token_count = entry.content.chars().count().div_ceil(CHARACTERS_PER_TOKEN) as i32;
 
     let mut transaction = pool.begin().await?;
@@ -1623,6 +1715,7 @@ async fn upsert_learned_entry(
                 updated_at = NOW()
             FROM existing
             WHERE entry.id = existing.id
+              AND ($8 OR existing.is_active IS NOT DISTINCT FROM TRUE)
               AND (existing.title IS DISTINCT FROM $4
                    OR existing.content IS DISTINCT FROM $5
                    OR existing.tags IS DISTINCT FROM $6
@@ -1644,7 +1737,10 @@ async fn upsert_learned_entry(
                 (SELECT id FROM existing)
             ) AS id,
             EXISTS (SELECT 1 FROM created) AS created,
-            EXISTS (SELECT 1 FROM superseded) AS superseded
+            EXISTS (SELECT 1 FROM superseded) AS superseded,
+            EXISTS (
+                SELECT 1 FROM existing WHERE is_active IS DISTINCT FROM TRUE
+            ) AS inactive
         "#,
     )
     .bind(entry.workspace_id)
@@ -1654,6 +1750,7 @@ async fn upsert_learned_entry(
     .bind(entry.content)
     .bind(entry.tags)
     .bind(token_count)
+    .bind(entry.revive)
     .fetch_one(&mut *transaction)
     .await?;
 
@@ -1665,7 +1762,11 @@ async fn upsert_learned_entry(
         _ => KnowledgeUpsertOutcome::Unchanged,
     };
 
-    Ok((row.id, outcome))
+    Ok(LearnedUpsert {
+        id: row.id,
+        outcome,
+        inactive: row.inactive,
+    })
 }
 
 /// Create or supersede the standing instruction identified by its promotion fingerprint.
@@ -1676,7 +1777,7 @@ pub async fn upsert_standing_instruction(
     let tags = instruction.provenance.tags();
     let identity_tag = tag(PROMOTION_TAG, &instruction.provenance.fingerprint);
 
-    upsert_learned_entry(
+    let upsert = upsert_learned_entry(
         pool,
         LearnedEntry {
             workspace_id: instruction.workspace_id,
@@ -1686,9 +1787,12 @@ pub async fn upsert_standing_instruction(
             title: &instruction.title,
             content: &instruction.content,
             tags: &tags,
+            revive: true,
         },
     )
-    .await
+    .await?;
+
+    Ok((upsert.id, upsert.outcome))
 }
 
 /// Active standing instructions for a workspace, most recently confirmed first.
@@ -1798,7 +1902,7 @@ impl LearnedCategory {
         LearnedCategory::StrategyLesson,
     ];
 
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             LearnedCategory::RepositoryConvention => "repository-convention",
             LearnedCategory::StrategyLesson => "strategy-lesson",
@@ -1892,7 +1996,7 @@ pub async fn upsert_learned_fact(
     let tags = fact.provenance.tags(fact.category);
     let identity_tag = tag(LEARNED_TAG, &fact.provenance.fingerprint);
 
-    upsert_learned_entry(
+    let upsert = upsert_learned_entry(
         pool,
         LearnedEntry {
             workspace_id: fact.workspace_id,
@@ -1902,9 +2006,12 @@ pub async fn upsert_learned_fact(
             title: &fact.title,
             content: &fact.content,
             tags: &tags,
+            revive: true,
         },
     )
-    .await
+    .await?;
+
+    Ok((upsert.id, upsert.outcome))
 }
 
 /// Active learned facts of one kind, most recently confirmed first.
@@ -1981,14 +2088,32 @@ pub fn render_learned_facts(category: LearnedCategory, facts: &[LearnedEntryRow]
     rendered
 }
 
-/// Everything a workspace has learned, ready to append to a system prompt.
+/// Rendered blocks, one blank line apart.
+///
+/// Every renderer here opens its block with a blank line and closes it with a
+/// newline, so concatenating two populated blocks leaves two blank lines
+/// where they meet. What has been joined so far gives up its closing newline
+/// to the block that follows.
+fn join_blocks(blocks: &[String]) -> String {
+    let mut joined = String::new();
+    for block in blocks.iter().filter(|block| !block.is_empty()) {
+        joined.truncate(joined.trim_end().len());
+        joined.push_str(block);
+    }
+    joined
+}
+
+/// Everything a workspace has learned and everything its agents recorded while
+/// working in it, ready to append to a system prompt.
 pub async fn learned_facts_prompt(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
-    let mut rendered = String::new();
+    let mut blocks = Vec::with_capacity(LearnedCategory::ALL.len() + 1);
     for category in LearnedCategory::ALL {
         let facts = list_learned_facts(pool, workspace_id, category).await?;
-        rendered.push_str(&render_learned_facts(category, &facts));
+        blocks.push(render_learned_facts(category, &facts));
     }
-    Ok(rendered)
+    let discoveries = discovery::list(pool, workspace_id).await?;
+    blocks.push(discovery::render(&discoveries));
+    Ok(join_blocks(&blocks))
 }
 
 #[cfg(test)]
@@ -2141,6 +2266,40 @@ mod learned_fact_tests {
             render_learned_facts(LearnedCategory::StrategyLesson, &[row("Body", Vec::new())]);
         assert!(rendered.contains("Body"));
         assert!(!rendered.contains("seen "));
+    }
+
+    #[test]
+    fn populated_categories_are_joined_one_blank_line_apart() {
+        let blocks: Vec<String> = LearnedCategory::ALL
+            .into_iter()
+            .map(|category| render_learned_facts(category, &[row("Body", Vec::new())]))
+            .collect();
+
+        let joined = join_blocks(&blocks);
+
+        assert!(
+            !joined.contains("\n\n\n"),
+            "each block closes with a newline and the next opens with a blank line, so two \
+             populated categories must not meet two blank lines apart: {joined:?}"
+        );
+        assert_eq!(
+            joined,
+            format!("{}{}", blocks[0].trim_end(), blocks[1]),
+            "nothing but the separator may change"
+        );
+    }
+
+    #[test]
+    fn an_empty_category_leaves_no_gap_where_it_would_have_been() {
+        let convention = render_learned_facts(
+            LearnedCategory::RepositoryConvention,
+            &[row("Body", Vec::new())],
+        );
+        assert_eq!(
+            join_blocks(&[String::new(), convention.clone(), String::new()]),
+            convention
+        );
+        assert_eq!(join_blocks(&[String::new(), String::new()]), "");
     }
 }
 
