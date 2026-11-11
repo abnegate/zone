@@ -14,6 +14,7 @@ const ACTION_LABELS: Record<string, { ok: string; failed: string }> = {
   memory_write: { ok: 'Wrote memory', failed: 'Write memory failed' },
   memory_append: { ok: 'Appended to memory', failed: 'Append to memory failed' },
   memory_delete: { ok: 'Forgot memory', failed: 'Forget memory failed' },
+  record_discovery: { ok: 'Recorded discovery', failed: 'Record discovery failed' },
   finalize_project: { ok: 'Created project', failed: 'Create project failed' },
 };
 

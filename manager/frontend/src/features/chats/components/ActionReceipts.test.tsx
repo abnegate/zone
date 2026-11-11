@@ -181,4 +181,43 @@ describe('ActionReceipts', () => {
     expect(screen.getByText('Version conflict')).toBeInTheDocument();
     expect(screen.queryByTestId('action-receipt-link')).not.toBeInTheDocument();
   });
+
+  it('labels a recorded discovery and links it to its wiki page', () => {
+    renderReceipts([
+      receipt({
+        action: 'record_discovery',
+        target_type: 'document',
+        target_id: 'doc-7',
+        target_label: 'Frontend tests need isolation',
+        outcome: 'Recorded',
+        href: '/wiki?id=doc-7',
+      }),
+    ]);
+
+    expect(screen.getByText('Recorded discovery')).toBeInTheDocument();
+    expect(screen.queryByText('record_discovery')).not.toBeInTheDocument();
+    expect(screen.getByText('Frontend tests need isolation')).toBeInTheDocument();
+    const link = screen.getByTestId('action-receipt-link');
+    expect(link).toHaveTextContent('Open document');
+    expect(link).toHaveAttribute('href', '/wiki?id=doc-7');
+  });
+
+  it('marks a discovery that was not recorded', () => {
+    renderReceipts([
+      receipt({
+        action: 'record_discovery',
+        target_type: 'document',
+        target_id: '',
+        target_label: 'Discovery',
+        success: false,
+        outcome: 'Not recorded',
+        href: '',
+      }),
+    ]);
+
+    expect(screen.getByTestId('action-receipt')).toHaveClass('action-receipt--failed');
+    expect(screen.getByText('Record discovery failed')).toBeInTheDocument();
+    expect(screen.queryByText('record_discovery failed')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('action-receipt-link')).not.toBeInTheDocument();
+  });
 });
