@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zone_core::llm::LlmClient;
 
+use crate::agent::learned;
 use crate::agent::prompt::Environment;
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
 use crate::db::chats::ChatRow;
@@ -308,9 +309,10 @@ pub struct Preparation {
     /// the retrieval-augmented reassembly in `ws::chat`, all read one clock.
     pub environment: Environment,
     /// What the workspace has learned, bounded for a chat and read once here
-    /// so the reassembly in `ws::chat` composes the same bytes. Empty for a
-    /// character card with its agent off.
-    pub learned: String,
+    /// so the reassembly in `ws::chat` composes the same bytes and retrieves
+    /// none of the entries it already shows. Empty for a character card with
+    /// its agent off.
+    pub findings: learned::Block,
     /// What this user's memory adds to the system prompt, read once here so
     /// the reassembly in `ws::chat` composes the same bytes rather than a
     /// second read of a table that may have moved between the two.
@@ -458,7 +460,11 @@ pub async fn build(
             ),
         }
     }
-    let learned = learned(state.db(), chat, workspace, agentic).await;
+    let findings = if reads_learned(chat, agentic) {
+        learned::prompt(state.db(), workspace).await
+    } else {
+        learned::Block::default()
+    };
     // Every chat reads what is remembered about the person it is talking to:
     // a profile and a set of preferences describe them and how they want to be
     // worked with, and a chat with its agent off is still a chat with them.
@@ -508,7 +514,7 @@ pub async fn build(
                 agentic,
                 &SearchContext::new(&state.config().web_search).capability(),
                 &environment,
-                &learned,
+                &findings.text,
                 &memory,
                 &skills,
             )),
@@ -617,7 +623,7 @@ pub async fn build(
         budget: settings.budget(),
         timeout: settings.timeout,
         environment,
-        learned,
+        findings,
         memory,
         skills,
         session,
@@ -654,31 +660,12 @@ fn reads_learned(chat: &ChatRow, agentic: bool) -> bool {
     agentic || chat.character.is_none()
 }
 
-/// What the workspace has learned, for a chat that reads it. A store that
-/// cannot be read costs the turn the block and nothing else.
-async fn learned(pool: &sqlx::PgPool, chat: &ChatRow, workspace: Uuid, agentic: bool) -> String {
-    if !reads_learned(chat, agentic) {
-        return String::new();
-    }
-    match crate::agent::learned::prompt(pool, workspace).await {
-        Ok(learned) => learned,
-        Err(error) => {
-            tracing::warn!(
-                chat_id = %chat.id,
-                %error,
-                "Failed to load what the workspace has learned; continuing without it"
-            );
-            String::new()
-        }
-    }
-}
-
 /// The whole system entry: a character card if there is one, the built prompt
 /// for this surface, the web-search capability tail, then what the workspace
 /// has learned, then what is remembered about this user, then the workspace's
 /// skills index. The same order a run reads them in.
 ///
-/// `learned`, `memory` and `skills` are required rather than optional so the
+/// `findings`, `memory` and `skills` are required rather than optional so the
 /// compiler enumerates every caller: a turn that quietly lost a block would
 /// ask again what the workspace has already answered, answer a person the
 /// server knows about as if it had never met them, or start work the
@@ -692,7 +679,7 @@ pub fn system_prompt(
     agentic: bool,
     capability: &str,
     environment: &Environment,
-    learned: &str,
+    findings: &str,
     memory: &str,
     skills: &str,
 ) -> String {
@@ -709,12 +696,12 @@ pub fn system_prompt(
         (None, true) => crate::agent::prompt::chat(tools, chat.auto_approve, environment),
         (None, false) => crate::agent::prompt::plain(environment),
     };
-    let learned = if reads_learned(chat, agentic) {
-        learned
+    let findings = if reads_learned(chat, agentic) {
+        findings
     } else {
         ""
     };
-    format!("{prompt}\n\n{capability}{learned}{memory}{skills}")
+    format!("{prompt}\n\n{capability}{findings}{memory}{skills}")
 }
 
 /// A minimal chat row, so prompt tests do not need a database.
@@ -749,6 +736,12 @@ pub(crate) fn chat_row(
 /// compare prompts a clock apart.
 #[cfg(test)]
 pub(crate) fn composed(at: &str, memory: &str) -> String {
+    informed(at, "", memory)
+}
+
+/// The same prompt in a workspace that has learned `findings`.
+#[cfg(test)]
+pub(crate) fn informed(at: &str, findings: &str, memory: &str) -> String {
     system_prompt(
         &chat_row(None, true, false),
         &ChatTools::with_names(crate::agent::ToolProfile::Chat, &["read_file"], None),
@@ -759,7 +752,7 @@ pub(crate) fn composed(at: &str, memory: &str) -> String {
             "Pacific/Auckland",
             PathBuf::from("/srv/zone"),
         ),
-        "",
+        findings,
         memory,
         "",
     )
@@ -916,7 +909,7 @@ mod tests {
 
         fn entry(title: &str, content: &str) -> LearnedEntryRow {
             LearnedEntryRow {
-                id: Uuid::nil(),
+                id: Uuid::new_v4(),
                 workspace_id: Uuid::nil(),
                 title: title.to_string(),
                 content: content.to_string(),
@@ -925,14 +918,16 @@ mod tests {
             }
         }
 
-        crate::agent::learned::render(&crate::agent::learned::Learned {
+        learned::render(&learned::Learned {
             instructions: vec![entry("How do I run the tests", INSTRUCTION)],
-            facts: vec![(
-                LearnedCategory::RepositoryConvention,
-                vec![entry("Migration names", CONVENTION)],
-            )],
+            facts: vec![learned::Facts {
+                category: LearnedCategory::RepositoryConvention,
+                entries: vec![entry("Migration names", CONVENTION)],
+            }],
             discoveries: vec![entry("Test database port", DISCOVERY)],
+            unread: 0,
         })
+        .text
     }
 
     /// A fixed clock, so every prompt these tests compose is comparable with
@@ -1304,11 +1299,11 @@ mod tests {
         let environment = environment();
         let tools = tools();
         let chat = chat_row(None, true, false);
-        let learned = learned_block();
+        let findings = learned_block();
         let memory = memory();
         assert!(
-            learned.starts_with("\n\n# Standing instructions\n"),
-            "{learned}"
+            findings.starts_with("\n\n# Standing instructions\n"),
+            "{findings}"
         );
 
         let bare = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "", "");
@@ -1318,14 +1313,14 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
-            &learned,
+            &findings,
             &memory,
             "",
         );
 
-        assert_eq!(with, format!("{bare}{learned}{memory}"));
+        assert_eq!(with, format!("{bare}{findings}{memory}"));
         assert!(
-            with.contains(&format!("{CAPABILITY}{learned}{memory}")),
+            with.contains(&format!("{CAPABILITY}{findings}{memory}")),
             "each block carries its own blank line, so nothing separates the three: {with}"
         );
         let positions = [
@@ -1354,7 +1349,7 @@ mod tests {
         let environment = environment();
         let tools = tools();
         let chat = chat_row(None, true, false);
-        let learned = learned_block();
+        let findings = learned_block();
         let memory = memory();
         let skills = crate::agent::skills::render(
             &[crate::db::knowledge::SkillRow {
@@ -1372,13 +1367,13 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
-            &learned,
+            &findings,
             &memory,
             &skills,
         );
 
-        assert_eq!(composed, format!("{bare}{learned}{memory}{skills}"));
-        for block in [&learned, &memory, &skills] {
+        assert_eq!(composed, format!("{bare}{findings}{memory}{skills}"));
+        for block in [&findings, &memory, &skills] {
             assert!(block.starts_with("\n\n"), "{block}");
             assert!(!block.ends_with('\n'), "{block}");
         }
@@ -1402,7 +1397,7 @@ mod tests {
             system_prompt: Some(CARD.into()),
             ..Default::default()
         };
-        let learned = learned_block();
+        let findings = learned_block();
         let memory = memory();
         let boundary = crate::agent::prompt::boundary();
 
@@ -1423,7 +1418,7 @@ mod tests {
             false,
             CAPABILITY,
             &environment,
-            &learned,
+            &findings,
             &memory,
             "",
         );
@@ -1443,38 +1438,14 @@ mod tests {
                 agentic,
                 CAPABILITY,
                 &environment,
-                &learned,
+                &findings,
                 &memory,
                 "",
             );
             assert!(
-                composed.ends_with(&format!("{CAPABILITY}{learned}{memory}")),
+                composed.ends_with(&format!("{CAPABILITY}{findings}{memory}")),
                 "{composed}"
             );
-        }
-    }
-
-    /// A pool that can reach no server stands in for a store that is down: the
-    /// turn goes ahead without the block.
-    #[tokio::test]
-    async fn an_unreadable_store_costs_the_turn_its_learned_block_and_nothing_else() {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(250))
-            .connect_lazy("postgres://127.0.0.1:1/zone")
-            .expect("a lazy pool needs no server");
-        let workspace = Uuid::new_v4();
-
-        assert!(
-            crate::agent::learned::prompt(&pool, workspace)
-                .await
-                .is_err(),
-            "the store must be unreachable for this to prove anything"
-        );
-        for (chat, agentic) in [
-            (chat_row(None, true, false), true),
-            (chat_row(None, false, false), false),
-        ] {
-            assert_eq!(learned(&pool, &chat, workspace, agentic).await, "");
         }
     }
 

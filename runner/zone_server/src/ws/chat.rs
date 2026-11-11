@@ -3398,7 +3398,7 @@ async fn prepare_chat(
         agentic,
         &search.capability(),
         &preparation.environment,
-        &preparation.learned,
+        &preparation.findings.text,
         &preparation.memory,
         &preparation.skills,
     );
@@ -3632,7 +3632,7 @@ async fn handle_chat_generation(
         mut budget,
         timeout,
         environment: _,
-        learned: _,
+        findings: _,
         memory: _,
         skills: _,
         session: mut pinned,
