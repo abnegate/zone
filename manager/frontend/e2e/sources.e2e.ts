@@ -727,6 +727,82 @@ test.describe('Sources Section', () => {
     });
   });
 
+  test.describe('Workspace Roles', () => {
+    const routeRole = (page: Page, role: 'member' | 'viewer') =>
+      routeApi(page, /\/api\/workspaces\/[^/]+\/members$/, (route) =>
+        route.fulfill({
+          json: {
+            members: [
+              {
+                id: 'member-1',
+                user_id: 'user-1',
+                workspace_id: '00000000-0000-0000-0000-000000000001',
+                role,
+              },
+            ],
+          },
+        })
+      );
+
+    test.beforeEach(async ({ page }) => {
+      await page.unroute(sourcesRoutePattern);
+      await routeApi(page, sourcesRoutePattern, (route) => {
+        if (route.request().method() === 'GET' && isSourcesListRequest(route.request().url())) {
+          route.fulfill({ json: { sources: mockSources } });
+        } else {
+          route.continue();
+        }
+      });
+      await routeApi(page, sourceDetailPattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({ json: { source: mockSources[0] } });
+        } else {
+          route.continue();
+        }
+      });
+    });
+
+    test('shows a viewer the sources without write controls and a read-only editor', async ({
+      page,
+    }) => {
+      await routeRole(page, 'viewer');
+      await page.reload();
+
+      const table = page.getByRole('table', { name: 'Sources' });
+      await expect(table.locator('.source-card')).toHaveCount(3);
+      await expect(page.getByText("Viewers can't change sources.")).toBeVisible();
+      await expect(table.getByRole('columnheader', { name: 'Actions' })).toHaveCount(0);
+      for (const name of ['Add source', 'Verify', 'Disable', 'Enable', 'Delete']) {
+        await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0);
+      }
+
+      await table.getByRole('button', { name: 'acme/frontend' }).focus();
+      await page.keyboard.press('Enter');
+
+      const editor = page.locator('.source-details');
+      await expect(editor.getByLabel('Name')).toBeDisabled();
+      for (const name of ['Save', 'Verify', 'Cancel']) {
+        await expect(editor.getByRole('button', { name, exact: true })).toHaveCount(0);
+      }
+    });
+
+    test('opens a member the editor from the source name by keyboard', async ({ page }) => {
+      await routeRole(page, 'member');
+      await page.reload();
+
+      const table = page.getByRole('table', { name: 'Sources' });
+      await expect(table.getByRole('button', { name: 'Delete' })).toHaveCount(3);
+      await expect(page.getByText("Viewers can't change sources.")).toHaveCount(0);
+
+      await table.getByRole('button', { name: 'acme/frontend' }).focus();
+      await page.keyboard.press('Space');
+
+      const editor = page.locator('.source-details');
+      await expect(editor.getByLabel('Name')).toBeEnabled();
+      await expect(editor.getByRole('button', { name: 'Save' })).toBeVisible();
+    });
+  });
+
   test.describe('Error Handling', () => {
     test('shows error when loading sources fails', async ({ page }) => {
       await page.unroute(sourcesRoutePattern);

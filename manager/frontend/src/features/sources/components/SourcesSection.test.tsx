@@ -85,7 +85,7 @@ afterEach(() => {
   window.history.pushState({}, '', '/');
 });
 
-const renderSection = (path = SECTION_PATH) => {
+const renderSection = (path = SECTION_PATH, readOnly = false) => {
   window.history.pushState({}, '', path);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
@@ -93,7 +93,7 @@ const renderSection = (path = SECTION_PATH) => {
   return render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <SourcesSection />
+        <SourcesSection readOnly={readOnly} />
       </BrowserRouter>
     </QueryClientProvider>
   );
@@ -1094,31 +1094,31 @@ describe('SourcesSection', () => {
       });
     });
 
-    it('opens the editor from Enter or Space on a focused row', async () => {
+    it('names each row by a button that opens its editor in one history entry', async () => {
       renderSection();
-      const row = (await screen.findByText('GitHub Repository')).closest(
-        '.source-card'
-      ) as HTMLElement;
+      await screen.findByText('GitHub Repository');
+      const entries = window.history.length;
 
-      row.focus();
-      fireEvent.keyDown(row, { key: 'Enter' });
+      fireEvent.click(screen.getByRole('button', { name: 'GitHub Repository' }));
+
       await waitFor(() => {
         expect(document.querySelector('.source-details')).not.toBeNull();
       });
+      expect(new URLSearchParams(window.location.search).get('source')).toBe('src-1');
+      expect(window.history.length).toBe(entries + 1);
+    });
 
-      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
-      await waitFor(() => {
-        expect(document.querySelector('.source-details')).toBeNull();
-      });
+    it('gives every source a named button and leaves rows out of the tab order', async () => {
+      renderSection();
+      const table = await screen.findByRole('table', { name: 'Sources' });
 
-      const closedRow = (await screen.findByText('GitHub Repository')).closest(
-        '.source-card'
-      ) as HTMLElement;
-      closedRow.focus();
-      fireEvent.keyDown(closedRow, { key: ' ' });
-      await waitFor(() => {
-        expect(document.querySelector('.source-details')).not.toBeNull();
-      });
+      for (const { name } of mockSources) {
+        expect(within(table).getByRole('button', { name })).toHaveAttribute('type', 'button');
+      }
+      for (const row of table.querySelectorAll('tbody tr')) {
+        expect(row).not.toHaveAttribute('tabindex');
+        expect(row).not.toHaveAttribute('role');
+      }
     });
 
     it('omits blank credentials from the save payload', async () => {
@@ -1138,6 +1138,99 @@ describe('SourcesSection', () => {
       });
       const payload = mockUpdateSource.mock.calls[0][2] as Record<string, unknown>;
       expect(payload).not.toHaveProperty('credentials');
+    });
+  });
+
+  describe('read-only', () => {
+    const WRITE_ACTIONS = ['Add source', 'Verify', 'Disable', 'Enable', 'Delete'];
+
+    it('shows a viewer the sources and their statuses without a write control', async () => {
+      renderSection(SECTION_PATH, true);
+      const table = await screen.findByRole('table', { name: 'Sources' });
+
+      expect(within(table).getByText('GitHub Repository')).toBeInTheDocument();
+      expect(within(table).getByText('Authentication failed')).toBeInTheDocument();
+      for (const name of WRITE_ACTIONS) {
+        expect(screen.queryByRole('button', { name })).toBeNull();
+      }
+      expect(screen.getByText("Viewers can't change sources.")).toBeInTheDocument();
+    });
+
+    it('heads the skeleton and the loaded table without an Actions column', async () => {
+      const columns = ['Name', 'Type', 'Status', 'URL', 'Verified'];
+      let finish: (sources: Source[]) => void = () => {};
+      mockGetSources.mockImplementation(
+        () =>
+          new Promise<Source[]>((resolve) => {
+            finish = resolve;
+          })
+      );
+      renderSection(SECTION_PATH, true);
+      const skeleton = [...document.querySelectorAll('.sources-table th')].map(
+        (header) => header.textContent
+      );
+      const skeletonCells = document.querySelector('.skeleton-card')?.children.length;
+
+      await act(async () => {
+        finish(mockSources);
+      });
+
+      const table = await screen.findByRole('table', { name: 'Sources' });
+      expect(skeleton).toEqual(columns);
+      expect(skeletonCells).toBe(columns.length);
+      expect(
+        within(table)
+          .getAllByRole('columnheader')
+          .map((header) => header.textContent)
+      ).toEqual(columns);
+      for (const row of table.querySelectorAll('tbody tr')) {
+        expect(row.children.length).toBe(columns.length);
+      }
+    });
+
+    it('offers a viewer no Add source on an empty workspace', async () => {
+      mockGetSources.mockImplementation(() => Promise.resolve([]));
+      renderSection(SECTION_PATH, true);
+
+      expect(await screen.findByText('No sources configured')).toBeInTheDocument();
+      expect(screen.getByText(/Workspace members can add/)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Add source' })).toBeNull();
+    });
+
+    it('opens the editor for a viewer with every field disabled and nothing to save', async () => {
+      renderSection(SECTION_PATH, true);
+      fireEvent.click(await screen.findByRole('button', { name: 'GitHub Repository' }));
+
+      const editor = await waitFor(() => {
+        const section = document.querySelector('.source-details');
+        expect(section).not.toBeNull();
+        return section as HTMLElement;
+      });
+      expect(within(editor).getByLabelText('Name')).toBeDisabled();
+      for (const name of ['Save', 'Verify', 'Cancel']) {
+        expect(within(editor).queryByRole('button', { name })).toBeNull();
+      }
+      expect(screen.getByText("Viewers can't change sources.")).toBeInTheDocument();
+
+      fireEvent.click(within(editor).getByRole('button', { name: 'Close' }));
+      await waitFor(() => {
+        expect(document.querySelector('.source-details')).toBeNull();
+      });
+      expect(mockUpdateSource).not.toHaveBeenCalled();
+      expect(mockVerifySource).not.toHaveBeenCalled();
+    });
+
+    it('keeps every write control for whoever can write', async () => {
+      renderSection();
+      const row = (await screen.findByText('GitLab Project')).closest(
+        '.source-card'
+      ) as HTMLElement;
+
+      expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
+      for (const name of ['Verify', 'Enable', 'Delete']) {
+        expect(within(row).getByRole('button', { name })).toBeInTheDocument();
+      }
+      expect(screen.queryByText("Viewers can't change sources.")).toBeNull();
     });
   });
 });
