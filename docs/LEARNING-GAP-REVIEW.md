@@ -534,7 +534,16 @@ Checked against the code on the date above.
   seeds a standing instruction, a convention and a discovery and finds each
   in the system entry a chat is prepared with, and
   `tests/integration/discovery.rs` takes a `record_discovery` call through to
-  the block `learned_facts_prompt` renders for its workspace.
+  the block `learned_facts_prompt` renders for its workspace. Neither joins
+  the tool to a chat's reader, so `tests/integration/discovery_crossing.rs`
+  does, with nothing between the two but the database. In
+  `what_one_chat_records_the_next_chat_and_the_next_run_of_its_workspace_read`
+  one chat records through the tool, and the entry is the one line listed in
+  the system entry a second chat of the workspace is prepared with and in the
+  block a run of it is handed, and in neither for another workspace. In
+  `a_deleted_discovery_leaves_the_next_prompt_and_cannot_be_recorded_back_into_it`
+  the entry is deleted from the store, leaves both, and is refused when a
+  chat records it again.
 - Items 1, 3, 5 to 8, 10 and 11 are not addressed by this work.
 
 In "Suggested order", step 2 (G5) is done. Nothing else in that list has
