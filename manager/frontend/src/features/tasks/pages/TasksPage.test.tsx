@@ -1628,6 +1628,25 @@ describe('TasksPage', () => {
         ).toEqual(['Open Ship the release']);
       });
 
+      it('says so when the tasks of other projects cannot be read', async () => {
+        mockGetTasks.mockImplementation((_workspace: string, project?: string) =>
+          project
+            ? Promise.resolve(linked.filter((task) => task.project_ids.includes(project)))
+            : Promise.reject(new Error('The workspace could not be read'))
+        );
+        renderTasksPage();
+        await screen.findByRole('alert');
+        mockGetTasks.mockClear();
+        chooseSelect('Filter by project', 'Project Alpha');
+
+        await waitFor(() =>
+          expect(screen.getByRole('alert')).toHaveTextContent(
+            'Tasks in other projects could not be loaded'
+          )
+        );
+        expect(screen.getByRole('button', { name: 'Implement login' })).toBeInTheDocument();
+      });
+
       it('returns to the card a filtered-out related task was opened from', async () => {
         await filterToAlpha();
         fireEvent.click(

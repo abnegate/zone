@@ -20,6 +20,9 @@ const ALL_PROJECTS = '';
 
 const MOVE_FAILED = 'The task could not be moved';
 
+const RELATIONS_FAILED =
+  'Tasks in other projects could not be loaded, so related tasks outside this project are missing';
+
 export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
@@ -49,7 +52,8 @@ export default function TasksPage() {
     deleteTask,
   } = useTasks(filterProject || undefined);
   const filtered = filterProject !== ALL_PROJECTS;
-  const known = useWorkspaceTasks(filtered) ?? tasks;
+  const workspace = useWorkspaceTasks(filtered);
+  const known = workspace.tasks ?? tasks;
 
   const { projects, loading: projectsLoading } = useProjects('all');
   const { data: sources = [] } = useQuery({
@@ -167,7 +171,10 @@ export default function TasksPage() {
   );
 
   const loading = tasksLoading || projectsLoading;
-  const displayError = tasksError || (editorFailed ? editorError : null);
+  const displayError =
+    tasksError ||
+    (editorFailed ? editorError : null) ||
+    (workspace.error ? RELATIONS_FAILED : null);
 
   return (
     <div className="page page--workspace tasks-page">
