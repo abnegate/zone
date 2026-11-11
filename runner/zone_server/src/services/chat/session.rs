@@ -648,7 +648,7 @@ async fn mcp_pending(state: &AppState, workspace: Uuid) -> bool {
     let policy = state.mcp().policy();
     match mcp_servers::offered(state.db(), organization, workspace).await {
         Ok(records) => records.iter().any(|record| match &hub {
-            Some(hub) => hub.connection(&record.name).status == Status::Connecting,
+            Some(hub) => hub.connection(record.id).status == Status::Connecting,
             None => status::static_status(&load::definition(record), policy).is_none(),
         }),
         Err(error) => {

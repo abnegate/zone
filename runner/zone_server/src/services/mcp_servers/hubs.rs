@@ -328,7 +328,7 @@ mod tests {
         tokio::time::timeout(LIMIT, hub.settled())
             .await
             .expect("the connection settles");
-        hub.connection(name)
+        hub.named(name)
     }
 
     fn delegate() -> Connection {
@@ -360,7 +360,7 @@ mod tests {
         assert_eq!(rows.loads.load(Ordering::SeqCst), 3);
         assert!(Arc::ptr_eq(&first, &second));
         assert!(Arc::ptr_eq(&first, &third));
-        assert_eq!(first.connection("stub"), delegate());
+        assert_eq!(first.named("stub"), delegate());
         assert_eq!(hubs.organizations(), 1);
         assert_eq!(third.generation("stub"), generation);
         assert!(Arc::ptr_eq(&session, &third.session("stub").unwrap()));
@@ -382,7 +382,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(hub.connection("stub"), delegate());
+        assert_eq!(hub.named("stub"), delegate());
         assert_eq!(hub.generation("stub"), generation);
         assert!(Arc::ptr_eq(&session, &hub.session("stub").unwrap()));
     }
@@ -425,7 +425,7 @@ mod tests {
         rows.store(vec![Definition::stub("stub")]);
         synced(&hubs, organization, &rows).await;
 
-        assert_eq!(hub.connection("stub"), Connection::connecting());
+        assert_eq!(hub.named("stub"), Connection::connecting());
         assert!(hub.connecting());
         assert_eq!(settled(&hub, "stub").await, delegate());
         assert!(!hub.connecting());
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(hub.connected(), 0);
         assert!(hub.names().is_empty());
         assert!(session.upgrade().is_none(), "the session was not dropped");
-        assert_eq!(hub.connection("stub"), Connection::failed(UNCONNECTED));
+        assert_eq!(hub.named("stub"), Connection::failed(UNCONNECTED));
         let mut registry = ToolRegistry::new();
         assert_eq!(
             hub.register(&mut registry, &|_| true),
@@ -516,8 +516,8 @@ mod tests {
         synced(&hubs, organization, &rows).await;
 
         assert_eq!(hub.names(), ["new"]);
-        assert_eq!(hub.connection("old"), Connection::failed(UNCONNECTED));
-        assert_eq!(hub.connection("new"), Connection::connecting());
+        assert_eq!(hub.named("old"), Connection::failed(UNCONNECTED));
+        assert_eq!(hub.named("new"), Connection::connecting());
         assert!(earlier.upgrade().is_none(), "the old session was kept");
         assert_eq!(settled(&hub, "new").await, delegate());
         let mut registry = ToolRegistry::new();
@@ -541,8 +541,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(hub.connection("stub"), Connection::connecting());
-        assert_eq!(hub.connection("other"), delegate());
+        assert_eq!(hub.named("stub"), Connection::connecting());
+        assert_eq!(hub.named("other"), delegate());
         assert_eq!(settled(&hub, "stub").await, delegate());
         assert!(!Arc::ptr_eq(&earlier, &hub.session("stub").unwrap()));
         assert!(Arc::ptr_eq(&untouched, &hub.session("other").unwrap()));
@@ -562,7 +562,7 @@ mod tests {
         rows.store(vec![narrowed(&definition)]);
         synced(&hubs, organization, &rows).await;
 
-        assert_eq!(hub.connection("stub"), delegate());
+        assert_eq!(hub.named("stub"), delegate());
         assert_eq!(hub.generation("stub"), generation);
         assert!(Arc::ptr_eq(&session, &hub.session("stub").unwrap()));
         let mut registry = ToolRegistry::new();
@@ -696,8 +696,8 @@ mod tests {
         let hub = raced(vec![stored], vec![first], vec![second]).await;
 
         assert_eq!(hub.names(), ["z"]);
-        assert_eq!(hub.connection("z"), delegate());
-        assert_eq!(hub.connection("y"), Connection::failed(UNCONNECTED));
+        assert_eq!(hub.named("z"), delegate());
+        assert_eq!(hub.named("y"), Connection::failed(UNCONNECTED));
     }
 
     #[tokio::test]
@@ -745,7 +745,7 @@ mod tests {
         assert_eq!(failed.err(), Some(UNREADABLE));
         assert!(unbuilt, "a failed load left a hub behind");
         assert_eq!(counted, 0);
-        assert_eq!(hub.connection("stub"), delegate());
+        assert_eq!(hub.named("stub"), delegate());
         assert_eq!(hubs.organizations(), 1);
     }
 
@@ -759,7 +759,7 @@ mod tests {
         let failed = hubs.sync(organization, unreadable).await;
 
         assert_eq!(failed.err(), Some(UNREADABLE));
-        assert_eq!(hub.connection("stub"), delegate());
+        assert_eq!(hub.named("stub"), delegate());
     }
 
     #[tokio::test]
@@ -879,12 +879,9 @@ mod tests {
 
         rows.store(vec![sse, http]);
         synced(&hubs, organization, &rows).await;
-        let connecting = hub.connection("remote");
+        let connecting = hub.named("remote");
 
-        assert_eq!(
-            hub.connection("events"),
-            Connection::failed(SSE_UNSUPPORTED)
-        );
+        assert_eq!(hub.named("events"), Connection::failed(SSE_UNSUPPORTED));
         assert_eq!(connecting, Connection::connecting());
         assert_eq!(
             settled(&hub, "remote").await,
@@ -984,7 +981,7 @@ mod tests {
         }]);
         synced(&hubs, organization, &rows).await;
 
-        assert_eq!(hub.connection("stub"), Connection::disabled());
+        assert_eq!(hub.named("stub"), Connection::disabled());
         assert!(hub.session("stub").is_none());
     }
 
@@ -993,8 +990,8 @@ mod tests {
         let hubs = hubs();
         let hub = built(&hubs, Uuid::new_v4(), &Rows::default()).await;
 
-        assert_eq!(hub.connection("absent"), Connection::failed(UNCONNECTED));
-        assert_eq!(hub.connection("absent").status, Status::Failed);
+        assert_eq!(hub.named("absent"), Connection::failed(UNCONNECTED));
+        assert_eq!(hub.named("absent").status, Status::Failed);
     }
 
     #[tokio::test]

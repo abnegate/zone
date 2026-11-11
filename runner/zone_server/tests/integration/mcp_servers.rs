@@ -561,7 +561,7 @@ async fn held(client: &TestClient, organization: Uuid, name: &str, expected: &Co
             .mcp()
             .existing_organization(organization)
             .expect("the organization's hub is running")
-            .connection(name);
+            .named(name);
         if connection == *expected {
             return;
         }

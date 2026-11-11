@@ -511,7 +511,7 @@ fn connection(
     policy: Policy,
 ) -> Connection {
     match hub {
-        Some(hub) => hub.connection(&definition.name),
+        Some(hub) => hub.connection(definition.id),
         None => status::static_status(definition, policy).unwrap_or_else(Connection::connecting),
     }
 }
@@ -881,8 +881,11 @@ pub async fn update_workspace(
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+    use std::future::ready;
     use std::sync::Arc;
 
+    use abnegate_agent::tool::Proxy;
     use chrono::Utc;
     use serde_json::Value;
     use serde_json::json;
@@ -891,6 +894,7 @@ mod tests {
     use super::*;
     use crate::auth::jwt::Claims;
     use crate::db::mcp_servers::Secrets;
+    use crate::services::mcp_servers::hubs::Hubs;
     use crate::services::mcp_servers::testing;
     use crate::services::mcp_servers::testing::Tenant;
 
@@ -1257,6 +1261,23 @@ mod tests {
             connection(None, &load::definition(&disabled), POLICY),
             Connection::disabled()
         );
+    }
+
+    #[tokio::test]
+    async fn a_connection_is_read_by_the_rows_id_whatever_name_the_reader_holds() {
+        let read = Definition::stub("before");
+        let stored = Definition {
+            name: "after".to_string(),
+            ..read.clone().revised()
+        };
+        let hub = Hubs::new(Proxy::default(), POLICY)
+            .organization(Uuid::new_v4(), |_| {
+                ready(Ok::<_, Infallible>(Some(vec![stored].into())))
+            })
+            .await
+            .expect("the rows load");
+
+        assert_eq!(connection(Some(&hub), &read, POLICY), delegate());
     }
 
     #[test]
@@ -1767,14 +1788,14 @@ mod tests {
 
         let created = creating(&state, &tenant, stub_body("stub")).await;
         load::organization(&state, tenant.organization).await;
-        let connected = hub.connection("stub");
+        let connected = hub.named("stub");
         let generation = hub.generation("stub");
 
         let narrowed = updating(&state, &tenant, &created, json!({ "tools": ["other"] })).await;
         let kept = hub.generation("stub");
 
         let renamed = updating(&state, &tenant, &created, json!({ "name": "renamed" })).await;
-        let ghost = hub.connection("stub");
+        let ghost = hub.named("stub");
         load::organization(&state, tenant.organization).await;
         let session = hub
             .session("renamed")

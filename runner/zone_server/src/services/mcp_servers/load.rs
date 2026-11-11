@@ -309,9 +309,9 @@ mod tests {
 
         let created = tenant.store(&writer, stub("stub")).await;
         sync(&reader, tenant.organization).await;
-        let connecting = hub.connection("stub");
+        let connecting = hub.named("stub");
         organization(&reader, tenant.organization).await;
-        let connected = hub.connection("stub");
+        let connected = hub.named("stub");
         let session = hub.session("stub").expect("the created server connected");
         let generation = hub.generation("stub");
 
@@ -326,17 +326,13 @@ mod tests {
         let kept = hub
             .session("stub")
             .is_some_and(|kept| Arc::ptr_eq(&kept, &session));
-        let narrowing = (hub.connection("stub"), hub.generation("stub"));
+        let narrowing = (hub.named("stub"), hub.generation("stub"));
 
         tenant
             .change(&writer, created.id, renaming("renamed"))
             .await;
         organization(&reader, tenant.organization).await;
-        let renamed = (
-            hub.names(),
-            hub.connection("stub"),
-            hub.connection("renamed"),
-        );
+        let renamed = (hub.names(), hub.named("stub"), hub.named("renamed"));
 
         let disabling = McpServerChanges {
             enabled: Some(false),
@@ -344,7 +340,7 @@ mod tests {
         };
         tenant.change(&writer, created.id, disabling).await;
         sync(&reader, tenant.organization).await;
-        let disabled = (hub.connection("renamed"), hub.session("renamed").is_none());
+        let disabled = (hub.named("renamed"), hub.session("renamed").is_none());
 
         tenant.delete(created.id).await;
         sync(&reader, tenant.organization).await;
@@ -386,9 +382,9 @@ mod tests {
         let session = hub.session("stub").expect("the server connected");
 
         reconnect(&state, tenant.organization, created.id).await;
-        let connecting = hub.connection("stub");
+        let connecting = hub.named("stub");
         organization(&state, tenant.organization).await;
-        let reconnected = hub.connection("stub");
+        let reconnected = hub.named("stub");
         let replaced = hub
             .session("stub")
             .is_some_and(|replaced| !Arc::ptr_eq(&replaced, &session));

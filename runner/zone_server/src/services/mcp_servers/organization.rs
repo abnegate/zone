@@ -44,6 +44,7 @@ impl Inner {
         self.generation
     }
 
+    #[cfg(any(test, feature = "testing"))]
     fn named(&self, name: &str) -> Option<(Uuid, &Slot)> {
         self.slots
             .iter()
@@ -89,11 +90,12 @@ impl OrganizationHub {
         }
     }
 
-    pub fn connection(&self, name: &str) -> Connection {
+    pub fn connection(&self, server: Uuid) -> Connection {
         let inner = self.read();
-        let Some((server, slot)) = inner.named(name) else {
+        let Some(slot) = inner.slots.get(&server) else {
             return Connection::failed(UNCONNECTED);
         };
+        let name = &slot.definition.name;
         if let Some(connection) = static_status(&slot.definition, self.policy) {
             return connection;
         }
@@ -288,6 +290,18 @@ fn allowed(definition: &Definition, tool: &str) -> bool {
     })
 }
 
+#[cfg(any(test, feature = "testing"))]
+impl OrganizationHub {
+    /// The connection of the server a test knows only by `name`.
+    pub fn named(&self, name: &str) -> Connection {
+        let server = self.read().named(name).map(|(server, _)| server);
+        server.map_or_else(
+            || Connection::failed(UNCONNECTED),
+            |server| self.connection(server),
+        )
+    }
+}
+
 #[cfg(test)]
 impl OrganizationHub {
     pub(crate) fn definition(&self, name: &str) -> Option<Definition> {
@@ -464,7 +478,7 @@ mod tests {
         let hub = connected(vec![Definition::stub("stub")]).await;
 
         assert_eq!(
-            hub.connection("stub"),
+            hub.named("stub"),
             Connection::connected(vec!["delegate".to_string()])
         );
     }
@@ -497,7 +511,7 @@ mod tests {
                 registry.names()
             );
             assert_eq!(
-                hub.connection("stub").tools,
+                hub.named("stub").tools,
                 ["delegate"],
                 "the allowlist hides nothing from the status"
             );
@@ -568,18 +582,15 @@ mod tests {
 
         let hub = connected(vec![Definition::stub("stub"), disabled, http, sse]).await;
 
-        assert_eq!(hub.connection("off").status, Status::Disabled);
+        assert_eq!(hub.named("off").status, Status::Disabled);
         assert!(hub.session("off").is_none());
-        assert_eq!(hub.connection("remote"), Connection::failed(UNREACHABLE));
+        assert_eq!(hub.named("remote"), Connection::failed(UNREACHABLE));
         assert_eq!(
             hub.session("remote").map(|session| session.server_count()),
             Some(0),
             "the hub of a connect that failed is kept, for the reason it holds"
         );
-        assert_eq!(
-            hub.connection("events"),
-            Connection::failed(SSE_UNSUPPORTED)
-        );
+        assert_eq!(hub.named("events"), Connection::failed(SSE_UNSUPPORTED));
         assert!(hub.session("events").is_none());
     }
 
@@ -592,7 +603,7 @@ mod tests {
         let registered = hub.register(&mut registry, &|_| true);
 
         assert_eq!(
-            hub.connection(REMOTE),
+            hub.named(REMOTE),
             Connection::connected(vec!["delegate".to_string()])
         );
         assert_eq!(registered, one());
@@ -614,10 +625,10 @@ mod tests {
         let hub = connected(vec![admitted, refused]).await;
 
         assert_eq!(
-            hub.connection("admitted"),
+            hub.named("admitted"),
             Connection::connected(vec!["delegate".to_string()])
         );
-        assert_eq!(hub.connection("refused"), Connection::failed(UNAUTHORIZED));
+        assert_eq!(hub.named("refused"), Connection::failed(UNAUTHORIZED));
     }
 
     #[tokio::test]
@@ -766,7 +777,7 @@ mod tests {
 
         for (name, _, expected) in cases {
             let text = hub.failure(name).expect("the connect failed");
-            assert_eq!(hub.connection(name), Connection::failed(expected), "{name}");
+            assert_eq!(hub.named(name), Connection::failed(expected), "{name}");
             assert!(!text.contains(KEY), "{name} kept the header it sent");
         }
         assert!(
@@ -785,7 +796,7 @@ mod tests {
             .await
             .expect("no request is made, so nothing is waited for");
 
-        assert_eq!(hub.connection(REMOTE), Connection::failed(METADATA_ADDRESS));
+        assert_eq!(hub.named(REMOTE), Connection::failed(METADATA_ADDRESS));
     }
 
     #[tokio::test]
@@ -799,7 +810,7 @@ mod tests {
 
         assert_eq!(hub.connected(), 0);
         assert!(!hub.connecting());
-        assert_eq!(hub.connection("missing"), Connection::failed(UNCONNECTED));
+        assert_eq!(hub.named("missing"), Connection::failed(UNCONNECTED));
     }
 
     #[tokio::test]
