@@ -10,6 +10,8 @@ const PNG_BASE64 =
 const TASK_CARD = '.task-card:not(.board-skeleton-card)';
 const SKELETON_CARD = '.skeleton-card, .board-skeleton-card';
 const PHONE = { width: 375, height: 812 };
+// document.getAnimations() omits ::file-selector-button, so animations: 'disabled' cannot settle it.
+const SETTLED_FILE_BUTTONS = '::file-selector-button { transition: none !important; }';
 
 const CardAction = {
   rename: 'Rename',
@@ -73,7 +75,7 @@ async function capturePage(
   if (options?.path?.includes('modal-'))
     await expect(page.getByRole('dialog')).toBeVisible();
   await fontsLoaded(page);
-  await page.screenshot({ ...options, animations: 'disabled' });
+  await page.screenshot({ ...options, animations: 'disabled', style: SETTLED_FILE_BUTTONS });
 }
 
 // Helper to verify no errors on page
