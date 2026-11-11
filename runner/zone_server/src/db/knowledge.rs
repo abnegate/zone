@@ -286,14 +286,26 @@ pub async fn delete_knowledge(pool: &PgPool, id: Uuid) -> DbResult<bool> {
     Ok(result.rows_affected() > 0)
 }
 
-/// Store embedding for a knowledge entry
+/// Store the vector of `content` for a knowledge entry, and say whether it was
+/// stored.
+///
+/// Embedding is slow, and an entry can be rewritten while its text is being
+/// embedded. The write drops nothing it finds, so a vector it stored over a
+/// rewrite would mark the entry indexed against what it used to say, and the
+/// recovery pass would never come back for it. So the vector is stored only
+/// while the entry still holds `content`. The check and the write are one
+/// statement that takes a share lock on the entry: a rewrite in flight holds
+/// the row until it commits, and the check then reads the rewritten text and
+/// refuses. A rewrite that comes second waits for the write in turn, and
+/// drops the vector in a statement of its own after it.
 pub async fn store_knowledge_embedding(
     pool: &PgPool,
     knowledge_entry_id: Uuid,
     workspace_id: Uuid,
+    content: &str,
     vector: &[f32],
     model: &str,
-) -> DbResult<Uuid> {
+) -> DbResult<bool> {
     let vector = align_vector(vector).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
     let vector_str = format!(
         "[{}]",
@@ -304,10 +316,13 @@ pub async fn store_knowledge_embedding(
             .join(",")
     );
 
-    let id = sqlx::query_scalar(
+    let stored: Option<Uuid> = sqlx::query_scalar(
         r#"
         INSERT INTO knowledge_embeddings (knowledge_entry_id, workspace_id, vector, model)
-        VALUES ($1, $2, $3::vector, $4)
+        SELECT entry.id, entry.workspace_id, $3::vector, $4
+        FROM knowledge_entries AS entry
+        WHERE entry.id = $1 AND entry.workspace_id = $2 AND entry.content = $5
+        FOR SHARE
         ON CONFLICT (knowledge_entry_id) DO UPDATE
         SET vector = EXCLUDED.vector, model = EXCLUDED.model
         RETURNING id
@@ -317,10 +332,11 @@ pub async fn store_knowledge_embedding(
     .bind(workspace_id)
     .bind(&vector_str)
     .bind(model)
-    .fetch_one(pool)
+    .bind(content)
+    .fetch_optional(pool)
     .await?;
 
-    Ok(id)
+    Ok(stored.is_some())
 }
 
 /// Hit from [`search_knowledge`] over user-authored knowledge entries.
@@ -1682,9 +1698,12 @@ struct LearnedEntry<'a> {
 /// left as the delete left it, and the caller is told the row was inactive so it can
 /// tell a deletion that stood from an entry that already said the same thing.
 ///
-/// A row whose content changed loses its stored vector in the same statement, as
+/// A row whose content changed loses its stored vector in the same transaction, as
 /// `update_document` drops one, so the recovery pass embeds what the row says now
-/// and search stops finding it by what it used to say.
+/// and search stops finding it by what it used to say. The drop is a statement of
+/// its own after the update: one inside the update would read with the update's
+/// snapshot, taken before it waited on a vector write holding the row, and miss
+/// the vector that write committed.
 async fn upsert_learned_entry(pool: &PgPool, entry: LearnedEntry<'_>) -> DbResult<LearnedUpsert> {
     let token_count = entry.content.chars().count().div_ceil(CHARACTERS_PER_TOKEN) as i32;
 
@@ -1752,13 +1771,6 @@ async fn upsert_learned_entry(pool: &PgPool, entry: LearnedEntry<'_>) -> DbResul
                    OR existing.is_active IS DISTINCT FROM TRUE)
             RETURNING entry.id
         ),
-        stale AS (
-            DELETE FROM knowledge_embeddings AS stored
-            USING superseded, existing
-            WHERE stored.knowledge_entry_id = superseded.id
-              AND stored.workspace_id = $1
-              AND existing.content IS DISTINCT FROM $5
-        ),
         created AS (
             INSERT INTO knowledge_entries (
                 workspace_id, title, content, category, tags, token_count, created_by
@@ -1797,6 +1809,16 @@ async fn upsert_learned_entry(pool: &PgPool, entry: LearnedEntry<'_>) -> DbResul
     .bind(entry.author)
     .fetch_one(&mut *transaction)
     .await?;
+
+    if row.superseded && row.previous.as_deref() != Some(entry.content) {
+        sqlx::query(
+            "DELETE FROM knowledge_embeddings WHERE knowledge_entry_id = $1 AND workspace_id = $2",
+        )
+        .bind(row.id)
+        .bind(entry.workspace_id)
+        .execute(&mut *transaction)
+        .await?;
+    }
 
     transaction.commit().await?;
 
@@ -2182,20 +2204,49 @@ pub(crate) fn join_blocks(blocks: &[impl std::ops::Deref<Target = str>]) -> Stri
     joined
 }
 
+/// What one learned family's store read, or nothing and a warning when it
+/// cannot be read: a failed family costs a prompt that family and no other.
+pub(crate) async fn read_family<Rows: Default>(
+    workspace_id: Uuid,
+    category: &str,
+    rows: impl Future<Output = DbResult<Rows>>,
+) -> Rows {
+    rows.await.unwrap_or_else(|error| {
+        tracing::warn!(
+            %workspace_id,
+            category,
+            %error,
+            "Failed to load a learned family; continuing without it"
+        );
+        Rows::default()
+    })
+}
+
 /// Everything a workspace has learned and everything its agents recorded while
-/// working in it, ready to append to a system prompt.
-pub async fn learned_facts_prompt(pool: &PgPool, workspace_id: Uuid) -> DbResult<String> {
+/// working in it, ready to append to a system prompt. Each family is read on
+/// its own, so one whose store cannot be read leaves the others in place.
+pub async fn learned_facts_prompt(pool: &PgPool, workspace_id: Uuid) -> String {
     let mut blocks = Vec::with_capacity(LearnedCategory::ALL.len() + 1);
     for category in LearnedCategory::ALL {
-        let facts = list_learned_facts(pool, workspace_id, category).await?;
+        let facts = read_family(
+            workspace_id,
+            category.as_str(),
+            list_learned_facts(pool, workspace_id, category),
+        )
+        .await;
         blocks.push(render_learned_facts(category, &facts));
     }
-    let discoveries = discovery::listing(pool, workspace_id).await?;
+    let discoveries = read_family(
+        workspace_id,
+        discovery::CATEGORY,
+        discovery::listing(pool, workspace_id),
+    )
+    .await;
     blocks.push(discovery::render_among(
         &discoveries.rows,
         discoveries.recorded,
     ));
-    Ok(join_blocks(&blocks))
+    join_blocks(&blocks)
 }
 
 #[cfg(test)]

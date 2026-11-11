@@ -308,10 +308,10 @@ pub struct Preparation {
     /// Built once here so a preview and the generation that follows it, and
     /// the retrieval-augmented reassembly in `ws::chat`, all read one clock.
     pub environment: Environment,
-    /// What the workspace has learned, bounded for a chat and read once here
-    /// so the reassembly in `ws::chat` composes the same bytes and retrieves
-    /// none of the entries it already shows. Empty for a character card with
-    /// its agent off.
+    /// What the workspace has learned, bounded for a chat on this model's
+    /// window and read once here so the reassembly in `ws::chat` composes the
+    /// same bytes and retrieves none of the entries it already shows. Empty
+    /// for a character card with its agent off.
     pub findings: learned::Block,
     /// What this user's memory adds to the system prompt, read once here so
     /// the reassembly in `ws::chat` composes the same bytes rather than a
@@ -461,7 +461,7 @@ pub async fn build(
         }
     }
     let findings = if reads_learned(chat, agentic) {
-        learned::prompt(state.db(), workspace).await
+        learned::prompt(state.db(), workspace, learned::budget(policy.input_limit())).await
     } else {
         learned::Block::default()
     };
@@ -918,18 +918,21 @@ mod tests {
             }
         }
 
-        learned::render(&learned::Learned {
-            instructions: vec![entry("How do I run the tests", INSTRUCTION)],
-            facts: vec![learned::Facts {
-                category: LearnedCategory::RepositoryConvention,
-                entries: vec![entry("Migration names", CONVENTION)],
-            }],
-            discoveries: crate::db::knowledge::discovery::Listing {
-                rows: vec![entry("Test database port", DISCOVERY)],
-                recorded: 1,
+        learned::render(
+            &learned::Learned {
+                instructions: vec![entry("How do I run the tests", INSTRUCTION)],
+                facts: vec![learned::Facts {
+                    category: LearnedCategory::RepositoryConvention,
+                    entries: vec![entry("Migration names", CONVENTION)],
+                }],
+                discoveries: crate::db::knowledge::discovery::Listing {
+                    rows: vec![entry("Test database port", DISCOVERY)],
+                    recorded: 1,
+                },
+                unread: 0,
             },
-            unread: 0,
-        })
+            learned::MAX_RENDERED_BYTES,
+        )
         .text
     }
 
@@ -973,6 +976,102 @@ mod tests {
         };
         assert_eq!(settings.reserved(Some(4096)), 512);
         assert_eq!(settings.budget(), LoopBudget::chat());
+    }
+
+    /// A workspace that has learned far more than any chat block shows.
+    fn full_store() -> learned::Learned {
+        use crate::db::knowledge::{LearnedCategory, LearnedEntryRow};
+
+        fn entries(family: &str, count: usize) -> Vec<LearnedEntryRow> {
+            (0..count)
+                .map(|index| LearnedEntryRow {
+                    id: Uuid::new_v4(),
+                    workspace_id: Uuid::nil(),
+                    title: format!("{family} {index:02}"),
+                    content: format!("{family}-{index:02} {}", "x".repeat(300)),
+                    tags: Vec::new(),
+                    updated_at: None,
+                })
+                .collect()
+        }
+
+        let discoveries = entries("discovery", 20);
+        learned::Learned {
+            instructions: entries("instruction", 20),
+            facts: LearnedCategory::ALL
+                .into_iter()
+                .map(|category| learned::Facts {
+                    category,
+                    entries: entries(category.as_str(), 20),
+                })
+                .collect(),
+            discoveries: crate::db::knowledge::discovery::Listing {
+                recorded: discoveries.len(),
+                rows: discoveries,
+            },
+            unread: 0,
+        }
+    }
+
+    /// A plain chat on a 4,096-token window whose system entry carries the
+    /// learned block and nothing else of the workspace's, and whose turn's
+    /// message is the only other entry, so nothing can be compacted to make
+    /// room.
+    #[tokio::test]
+    async fn a_small_window_prepares_a_turn_with_a_full_learned_store() {
+        let window = 4_096;
+        let policy = Policy::new(
+            Some(window),
+            Settings::default().reserved(Some(window)),
+            ContextSource::Runtime,
+        );
+        let input = policy.input_limit().expect("a known window");
+        let turn = |findings: &str| {
+            let system = system_prompt(
+                &chat_row(None, false, false),
+                &ChatTools::with_names(crate::agent::ToolProfile::Chat, &[], None),
+                false,
+                CAPABILITY,
+                &environment(),
+                findings,
+                "",
+                "",
+            );
+            [
+                Entry::new(INSTRUCTIONS, Message::system(system))
+                    .with_preserve(true)
+                    .with_consumed(true),
+                Entry::new(
+                    "draft",
+                    Message::user("Which branch do deploys go out from?"),
+                )
+                .with_preserve(true),
+            ]
+        };
+        let ceiling = learned::render(&full_store(), learned::MAX_RENDERED_BYTES);
+        assert!(
+            context::estimate("fixture-model", &turn(&ceiling.text), None, &policy, None).used
+                > input,
+            "the block a large window carries has to overflow this one for the test to prove \
+             anything"
+        );
+
+        let findings = learned::render(&full_store(), learned::budget(Some(input)));
+        assert!(findings.text.len() <= learned::budget(Some(input)));
+        let entries = turn(&findings.text);
+
+        let prepared = context::prepare(
+            &LlmClient::new(abnegate_llm::LlmConfig::default()).summarizer(),
+            "fixture-model",
+            &entries,
+            None,
+            &policy,
+            None,
+        )
+        .await;
+
+        let prepared = prepared.expect("the turn fits the window it runs in");
+        assert!(prepared.usage.used <= input, "{:?}", prepared.usage);
     }
 
     const PIXEL: &str = "data:image/png;base64,iVBORw0KGgo=";

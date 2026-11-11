@@ -427,9 +427,7 @@ async fn another_workspace_sees_nothing_and_keeps_its_own_entry_for_the_subject(
             .is_empty()
     );
     assert_eq!(
-        knowledge::learned_facts_prompt(&fixture.pool, fixture.elsewhere)
-            .await
-            .expect("rendering the learned block"),
+        knowledge::learned_facts_prompt(&fixture.pool, fixture.elsewhere).await,
         ""
     );
 
@@ -511,9 +509,7 @@ async fn the_learned_prompt_carries_the_block_after_what_the_passes_derived() {
     }
     fixture.record(SUBJECT, STATEMENT).await;
 
-    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("rendering the learned block");
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
 
     let headings: Vec<&str> = prompt
         .lines()
@@ -656,9 +652,18 @@ async fn vectors(pool: &PgPool, id: Uuid) -> i64 {
 async fn a_replaced_statement_drops_the_vector_of_the_one_it_replaced() {
     let fixture = Fixture::new().await;
     let (id, _) = fixture.record(SUBJECT, STATEMENT).await;
-    knowledge::store_knowledge_embedding(&fixture.pool, id, fixture.workspace, &[0.5; 8], "test")
+    assert!(
+        knowledge::store_knowledge_embedding(
+            &fixture.pool,
+            id,
+            fixture.workspace,
+            STATEMENT,
+            &[0.5; 8],
+            "test"
+        )
         .await
-        .expect("a stored vector");
+        .expect("a stored vector")
+    );
 
     let mut confirmed_elsewhere = fixture.discovery(SUBJECT, STATEMENT);
     confirmed_elsewhere.provenance.source = Source::Chat(Uuid::new_v4());
@@ -677,6 +682,159 @@ async fn a_replaced_statement_drops_the_vector_of_the_one_it_replaced() {
         0,
         "the recovery pass embeds a row with no vector, so dropping it is how it is re-indexed"
     );
+
+    fixture.clean().await;
+}
+
+/// A vector of the old statement is written while the replacement is on its
+/// way: the open transaction holds the row the way the store's write does
+/// until it commits. The replacement waits for it, and the vector it then
+/// finds is still of what the row no longer says, so it goes.
+#[tokio::test]
+async fn a_vector_stored_while_its_statement_is_replaced_is_dropped_by_the_replacement() {
+    let fixture = Fixture::new().await;
+    let (id, _) = fixture.record(SUBJECT, STATEMENT).await;
+
+    let mut storing = fixture.pool.begin().await.expect("a transaction");
+    sqlx::query("SELECT id FROM knowledge_entries WHERE id = $1 FOR SHARE")
+        .bind(id)
+        .execute(&mut *storing)
+        .await
+        .expect("holding the row as the store's write does");
+    sqlx::query(
+        "INSERT INTO knowledge_embeddings (knowledge_entry_id, workspace_id, vector, model)
+         VALUES ($1, $2, array_fill(0.5::real, ARRAY[1024])::vector, 'test')",
+    )
+    .bind(id)
+    .bind(fixture.workspace)
+    .execute(&mut *storing)
+    .await
+    .expect("a vector of the old statement");
+
+    let replacing = {
+        let pool = fixture.pool.clone();
+        let revised = fixture.discovery(SUBJECT, REVISED);
+        tokio::spawn(async move { discovery::record(&pool, &revised).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert!(
+        !replacing.is_finished(),
+        "the replacement waits for the write holding its row"
+    );
+    storing.commit().await.expect("the vector is written");
+
+    let (replaced, outcome) = replacing
+        .await
+        .expect("the replacement ran to its end")
+        .expect("recording a discovery");
+    assert_eq!(replaced, id);
+    assert!(matches!(outcome, Outcome::Replaced { .. }), "{outcome:?}");
+    assert_eq!(
+        vectors(&fixture.pool, id).await,
+        0,
+        "a vector of the replaced statement would keep the entry out of the recovery pass for \
+         good"
+    );
+
+    fixture.clean().await;
+}
+
+/// The store writes a vector only for the text it was computed from, and the
+/// write waits for a replacement in flight rather than reading past it: once
+/// the replacement commits, the old text's vector is refused and the new
+/// text's is stored.
+#[tokio::test]
+async fn a_vector_is_stored_only_for_the_statement_the_entry_still_holds() {
+    let fixture = Fixture::new().await;
+    let (id, _) = fixture.record(SUBJECT, STATEMENT).await;
+
+    let mut replacing = fixture.pool.begin().await.expect("a transaction");
+    sqlx::query("UPDATE knowledge_entries SET content = $2 WHERE id = $1")
+        .bind(id)
+        .bind(REVISED)
+        .execute(&mut *replacing)
+        .await
+        .expect("a replacement in flight");
+
+    let storing = {
+        let pool = fixture.pool.clone();
+        let workspace = fixture.workspace;
+        tokio::spawn(async move {
+            knowledge::store_knowledge_embedding(&pool, id, workspace, STATEMENT, &[0.5; 8], "test")
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert!(
+        !storing.is_finished(),
+        "the write waits for the replacement holding its row"
+    );
+    replacing.commit().await.expect("the replacement lands");
+
+    assert!(
+        !storing
+            .await
+            .expect("the write ran to its end")
+            .expect("storing a vector"),
+        "the old statement's vector is refused"
+    );
+    assert_eq!(vectors(&fixture.pool, id).await, 0);
+
+    assert!(
+        knowledge::store_knowledge_embedding(
+            &fixture.pool,
+            id,
+            fixture.workspace,
+            REVISED,
+            &[0.5; 8],
+            "test"
+        )
+        .await
+        .expect("storing a vector"),
+        "the statement the entry holds is stored"
+    );
+    assert_eq!(vectors(&fixture.pool, id).await, 1);
+
+    fixture.clean().await;
+}
+
+/// A family whose read fails costs a run that family and nothing else. A
+/// discovery row the store cannot decode stands in for the failure: the
+/// discoveries' read errs while every other family reads as it always does.
+#[tokio::test]
+async fn a_failed_discovery_read_keeps_the_learned_facts_in_the_block() {
+    let fixture = Fixture::new().await;
+    for category in LearnedCategory::ALL {
+        knowledge::upsert_learned_fact(&fixture.pool, &learned_fact(fixture.workspace, category))
+            .await
+            .expect("learning a fact");
+    }
+    let (id, _) = fixture.record(SUBJECT, STATEMENT).await;
+    sqlx::query("UPDATE knowledge_entries SET tags = NULL WHERE id = $1")
+        .bind(id)
+        .execute(&fixture.pool)
+        .await
+        .expect("a discovery the store cannot read back");
+    assert!(
+        discovery::listing(&fixture.pool, fixture.workspace)
+            .await
+            .is_err(),
+        "the discoveries' read must fail for this to prove anything"
+    );
+
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
+
+    let mut expected = String::new();
+    for category in LearnedCategory::ALL {
+        let facts = knowledge::list_learned_facts(&fixture.pool, fixture.workspace, category)
+            .await
+            .expect("listing learned facts");
+        assert_eq!(facts.len(), 1, "{category}");
+        expected.push_str(knowledge::render_learned_facts(category, &facts).trim_end());
+    }
+    expected.push('\n');
+    assert_eq!(prompt, expected);
+    assert!(!prompt.contains(STATEMENT), "{prompt}");
 
     fixture.clean().await;
 }
@@ -725,9 +883,7 @@ async fn a_flood_from_one_run_leaves_room_for_what_other_sources_recorded() {
         "a source leads with its allowance, and the rest waits behind every other source"
     );
 
-    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("rendering the learned block");
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
     for kept in [
         "\n- Migration names: Timestamped, snake_case. (lesson, recorded in a chat on 2026-11-11)\n",
         "\n- Lint command: cargo clippy. (lesson, recorded during a task run on 2026-11-11)\n",
@@ -792,9 +948,7 @@ async fn a_run_s_recent_entries_lead_however_many_older_sources_recorded_one() {
         "a source's allowance comes by recency alone, ahead of anything older"
     );
 
-    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("rendering the learned block");
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
     for subject in &today {
         assert!(
             prompt.contains(&format!(
@@ -843,9 +997,7 @@ async fn entries_past_the_most_a_block_reads_are_still_counted() {
         "one source's entries come most recent first"
     );
 
-    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace)
-        .await
-        .expect("rendering the learned block");
+    let prompt = knowledge::learned_facts_prompt(&fixture.pool, fixture.workspace).await;
 
     assert!(
         prompt.len() <= discovery::MAX_RENDERED_BYTES,

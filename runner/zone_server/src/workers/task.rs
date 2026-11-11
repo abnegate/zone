@@ -1665,18 +1665,7 @@ async fn guidance(
             }
         };
 
-    let facts =
-        match crate::db::knowledge::learned_facts_prompt(state.db(), task.workspace_id).await {
-            Ok(facts) => facts,
-            Err(error) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    %error,
-                    "Failed to load learned facts; continuing without them"
-                );
-                String::new()
-            }
-        };
+    let facts = crate::db::knowledge::learned_facts_prompt(state.db(), task.workspace_id).await;
 
     let memory = match actor {
         Some(user) => {

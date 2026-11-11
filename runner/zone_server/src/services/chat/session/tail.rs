@@ -84,20 +84,23 @@ mod tests {
     /// A chat's learned block in a workspace whose one learned fact is
     /// `convention`.
     fn conventions(convention: &str) -> String {
-        learned::render(&Learned {
-            facts: vec![Facts {
-                category: LearnedCategory::RepositoryConvention,
-                entries: vec![LearnedEntryRow {
-                    id: uuid::Uuid::new_v4(),
-                    workspace_id: uuid::Uuid::nil(),
-                    title: "Migration names".to_string(),
-                    content: convention.to_string(),
-                    tags: Vec::new(),
-                    updated_at: None,
+        learned::render(
+            &Learned {
+                facts: vec![Facts {
+                    category: LearnedCategory::RepositoryConvention,
+                    entries: vec![LearnedEntryRow {
+                        id: uuid::Uuid::new_v4(),
+                        workspace_id: uuid::Uuid::nil(),
+                        title: "Migration names".to_string(),
+                        content: convention.to_string(),
+                        tags: Vec::new(),
+                        updated_at: None,
+                    }],
                 }],
-            }],
-            ..Learned::default()
-        })
+                ..Learned::default()
+            },
+            learned::MAX_RENDERED_BYTES,
+        )
         .text
     }
 

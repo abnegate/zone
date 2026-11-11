@@ -15,10 +15,14 @@ use crate::common::{TestClient, test_email, test_password};
 use async_trait::async_trait;
 use axum::http::StatusCode;
 use serde_json::json;
+use sqlx::PgPool;
+use tokio::sync::Mutex;
 use uuid::Uuid;
 use zone_context::embeddings::EmbeddingService;
 use zone_context::error::{ContextError, Result as ContextResult};
 use zone_server::db::knowledge;
+use zone_server::db::knowledge::discovery::{self, Discovery, Kind, Provenance, Source};
+use zone_server::services;
 use zone_server::workers::knowledge_refresh;
 
 /// An embedding service that can be taken away and given back, and that counts
@@ -70,6 +74,61 @@ impl EmbeddingService for Embedding {
 
     async fn embed_batch(&self, texts: &[&str]) -> ContextResult<Vec<Vec<f32>>> {
         texts.iter().map(|text| self.vector(text)).collect()
+    }
+
+    fn dimension(&self) -> usize {
+        32
+    }
+
+    fn model(&self) -> &str {
+        "test-embedder"
+    }
+}
+
+/// The first entry for `stale` that the service is asked to embed is
+/// replaced while the service is still answering, the way an agent recording
+/// a revised statement lands while recovery is embedding the old one.
+struct Replacing {
+    stale: &'static str,
+    replacement: Mutex<Option<(PgPool, Discovery)>>,
+}
+
+impl Replacing {
+    fn of(stale: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            stale,
+            replacement: Mutex::new(None),
+        })
+    }
+
+    async fn replaces_with(&self, pool: PgPool, revised: Discovery) {
+        *self.replacement.lock().await = Some((pool, revised));
+    }
+
+    fn vector(text: &str) -> Vec<f32> {
+        let seed = text.len() as f32;
+        (0..32).map(|slot| (seed + slot as f32) / 1024.0).collect()
+    }
+}
+
+#[async_trait]
+impl EmbeddingService for Replacing {
+    async fn embed(&self, text: &str) -> ContextResult<Vec<f32>> {
+        let replacement = self
+            .replacement
+            .lock()
+            .await
+            .take_if(|_| text == self.stale);
+        if let Some((pool, revised)) = replacement {
+            discovery::record(&pool, &revised)
+                .await
+                .expect("replacing the statement mid-embedding");
+        }
+        Ok(Self::vector(text))
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> ContextResult<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|text| Self::vector(text)).collect())
     }
 
     fn dimension(&self) -> usize {
@@ -326,5 +385,85 @@ async fn a_recovery_pass_is_bounded_and_backs_off_while_embedding_stays_down() {
         after_first,
         "the first pass embedded nothing, so the next one has to sit out rather than ask a \
          service that is down another {after_first} times five minutes later"
+    );
+}
+
+/// The first element of the vector stored for `id`, which is the length of the
+/// text it was computed from at every embedder in this file. `None` when the
+/// entry has no vector.
+async fn computed_from(pool: &PgPool, id: Uuid) -> Option<f32> {
+    sqlx::query_scalar(
+        "SELECT (vector::real[])[1] FROM knowledge_embeddings WHERE knowledge_entry_id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .expect("reading a stored vector")
+}
+
+/// Recovery reads an entry's text, and the entry is replaced while that text
+/// is being embedded. The vector that comes back is of what the entry no
+/// longer says: stored, it would also mark the entry indexed, and no pass
+/// would look at it again.
+///
+/// Every test's recovery pass shares this database and indexes whatever it
+/// finds, so the race is run through the indexing each pass does per entry,
+/// and what is asserted after it holds whichever pass reaches the entry: no
+/// vector of the replaced text is ever stored, and the one that ends up stored
+/// is of the text the entry holds.
+#[tokio::test]
+async fn a_vector_of_text_replaced_mid_embedding_is_not_stored_and_the_next_pass_indexes_the_new() {
+    const STALE: &str = "Deploys go out from the release branch.";
+    const REVISED: &str = "Deploys go out from main, tagged, once the checklist is green.";
+
+    let embedding = Replacing::of(STALE);
+    let client =
+        TestClient::with_embedding(Arc::clone(&embedding) as Arc<dyn EmbeddingService>).await;
+    let (_token, workspace_id, user_id) = setup_user_and_workspace(&client).await;
+    let pool = client.state().db().clone();
+
+    let recorded = |statement: &str| Discovery {
+        workspace_id,
+        subject: "Where deploys come from".to_string(),
+        statement: statement.to_string(),
+        author: user_id,
+        provenance: Provenance {
+            kind: Kind::Lesson,
+            source: Source::Run(Uuid::new_v4()),
+            last_confirmed: chrono::NaiveDate::from_ymd_opt(2026, 11, 11).expect("a real date"),
+        },
+    };
+    let (id, _) = discovery::record(&pool, &recorded(STALE))
+        .await
+        .expect("recording a discovery");
+    embedding
+        .replaces_with(pool.clone(), recorded(REVISED))
+        .await;
+
+    let indexed = services::knowledge::index(client.state(), id, workspace_id, STALE).await;
+
+    assert!(
+        matches!(indexed, Err(services::knowledge::Unindexed::Changed)),
+        "{indexed:?}"
+    );
+    assert_ne!(
+        computed_from(&pool, id).await,
+        Some(Replacing::vector(STALE)[0]),
+        "the vector of the replaced statement must not be stored"
+    );
+
+    sort_first(&client, &[id], "1970-01-01 00:00:03").await;
+    knowledge_refresh::recover_unindexed(
+        client.state(),
+        &knowledge_refresh::permits(),
+        &knowledge_refresh::recovery(),
+    )
+    .await
+    .expect("the next pass");
+
+    assert_eq!(
+        computed_from(&pool, id).await,
+        Some(Replacing::vector(REVISED)[0]),
+        "the vector stored is of the statement the entry holds now"
     );
 }

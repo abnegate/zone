@@ -873,7 +873,7 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
             }
         }));
     }
-    let rendered = learned::prompt(&pool, workspace).await;
+    let rendered = learned::prompt(&pool, workspace, learned::MAX_RENDERED_BYTES).await;
     let instructions = knowledge::standing_instructions_prompt(&pool, workspace).await;
     let facts = knowledge::learned_facts_prompt(&pool, workspace).await;
     sqlx::query("DELETE FROM organizations WHERE id = $1")
@@ -892,7 +892,7 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
         format!(
             "{}{}",
             instructions.expect("what a run reads").trim_end(),
-            facts.expect("what a run reads").trim_end()
+            facts.trim_end()
         ),
         "under the bound a chat reads the bytes a run reads"
     );
@@ -949,6 +949,120 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
     }
 }
 
+/// One workspace that has learned more than any block shows, prepared for a
+/// chat on a 4,096-token window and for one whose window nothing reports. The
+/// small window's reply reservation leaves 3,072 tokens of input, and its
+/// block is held to the share of them [`learned::budget`] gives; the other is
+/// held to the ceiling, as every chat was before.
+#[tokio::test]
+async fn a_chat_is_given_a_learned_block_its_window_can_carry() {
+    const FILED: usize = 30;
+
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a migrated disposable database");
+    let (organization, workspace) = workspace(&pool).await;
+    for index in 0..FILED {
+        knowledge::upsert_standing_instruction(
+            &pool,
+            &StandingInstruction {
+                workspace_id: workspace,
+                title: format!("Repeated answer {index:02}"),
+                content: format!("Answer {index:02}: {}", "a".repeat(200)),
+                provenance: PromotionProvenance {
+                    fingerprint: format!("promoted-{index:02}"),
+                    occurrences: 4,
+                    distinct_chats: 3,
+                    last_confirmed: confirmed(),
+                },
+            },
+        )
+        .await
+        .expect("a standing instruction");
+    }
+
+    let mut config = common::test_config();
+    config.litellm_host = UNREACHABLE.to_string();
+    config.ollama_host = UNREACHABLE.to_string();
+    let state = common::create_test_state(config, pool.clone());
+
+    let mut prepared = Vec::new();
+    for window in [Some(4_096), None] {
+        let mut chat = chats::create_chat(
+            &pool,
+            Some(workspace),
+            "Learned",
+            "fixture-model",
+            false,
+            false,
+        )
+        .await
+        .expect("a chat");
+        chat.context_tokens = window;
+        let endpoint = Route::for_workspace(&state, workspace)
+            .await
+            .into_endpoint()
+            .expect("a usable route");
+        let preparation = session::build(
+            &state,
+            &chat,
+            Uuid::new_v4(),
+            None,
+            Mode::Generation(Generation::unrouted(LlmBackend::Http)),
+            endpoint,
+            None,
+        )
+        .await;
+        prepared.push(preparation.map(|preparation| {
+            (
+                preparation.context.policy.input_limit(),
+                preparation.findings,
+                preparation.context.entries[0]
+                    .message
+                    .content
+                    .clone()
+                    .unwrap_or_default(),
+            )
+        }));
+    }
+    let ceiling = learned::prompt(&pool, workspace, learned::MAX_RENDERED_BYTES).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("the workspace and everything in it go");
+
+    let mut prepared = prepared.into_iter().map(|preparation| {
+        preparation.unwrap_or_else(|error| panic!("the turn is prepared: {error}"))
+    });
+    let (input, small, system) = prepared.next().expect("the small window's turn");
+    let (unknown, large, _) = prepared.next().expect("the unknown window's turn");
+
+    assert_eq!(input, Some(3_072));
+    assert_eq!(learned::budget(input), 1_536);
+    assert!(small.text.len() <= 1_536, "{} bytes", small.text.len());
+    assert!(system.ends_with(&small.text), "{system}");
+    let bullets = small.text.matches("\n## Repeated answer ").count();
+    assert!(bullets > 0 && bullets < FILED, "{}", small.text);
+    assert_eq!(small.shown.len(), bullets, "{}", small.text);
+    assert!(
+        small.text.ends_with(&format!(
+            "\n\n{} more learned entries are filed in this workspace but not shown here.",
+            FILED - bullets
+        )),
+        "{}",
+        small.text
+    );
+
+    assert_eq!(learned::budget(unknown), learned::MAX_RENDERED_BYTES);
+    assert_eq!(
+        large, ceiling,
+        "a window nothing reports small is held to the ceiling"
+    );
+    assert!(large.shown.len() > bullets, "{}", large.text);
+    assert!(small.shown.is_subset(&large.shown));
+}
+
 /// The standing instructions are read to a row limit. A workspace that has
 /// filed more than that gets a block well under the byte bound that is still
 /// not the whole list, and the closing line has to count the rows nothing
@@ -981,7 +1095,7 @@ async fn a_chat_is_told_how_many_entries_a_row_limit_kept_from_it() {
     }
 
     let loaded = learned::load(&pool, workspace).await;
-    let block = learned::render(&loaded);
+    let block = learned::render(&loaded, learned::MAX_RENDERED_BYTES);
     let run = knowledge::standing_instructions_prompt(&pool, workspace).await;
     sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(organization)
@@ -1051,7 +1165,7 @@ async fn a_chat_is_told_how_many_discoveries_it_is_not_shown() {
     }
 
     let loaded = learned::load(&pool, workspace).await;
-    let block = learned::render(&loaded);
+    let block = learned::render(&loaded, learned::MAX_RENDERED_BYTES);
     let run = knowledge::learned_facts_prompt(&pool, workspace).await;
     sqlx::query("DELETE FROM organizations WHERE id = $1")
         .bind(organization)
@@ -1084,7 +1198,7 @@ async fn a_chat_is_told_how_many_discoveries_it_is_not_shown() {
     );
     assert_eq!(
         block.text,
-        run.expect("what a run reads").trim_end(),
+        run.trim_end(),
         "a chat reads the count a run reads"
     );
     assert!(!block.text.contains("learned entr"), "{}", block.text);
