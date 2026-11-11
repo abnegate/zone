@@ -33,6 +33,10 @@ const VALIDATION_RS = readFileSync(join(RUNNER, 'services/mcp_servers/validation
 const STATUS_RS = readFileSync(join(RUNNER, 'services/mcp_servers/status.rs'), 'utf8');
 const SOURCE_RS = readFileSync(join(RUNNER, 'services/mcp_servers/source.rs'), 'utf8');
 const TRANSPORT_RS = readFileSync(join(RUNNER, 'services/mcp_servers/transport.rs'), 'utf8');
+const CARGO_LOCK = readFileSync(join(RUNNER, '../../Cargo.lock'), 'utf8');
+
+const METADATA_CRATE = 'abnegate-http';
+const METADATA_MIRRORED = '0.1.5';
 
 const FLATTENED = 'server';
 
@@ -63,6 +67,12 @@ function rustTest(source: string, name: string): string {
   const end = source.indexOf('\n    }\n', start);
   if (start === -1 || end === -1) throw new Error(`${name} is not a test in the Rust source`);
   return source.slice(start, end);
+}
+
+function locked(lock: string, crate: string): string {
+  const version = lock.match(new RegExp(`\\nname = "${crate}"\\nversion = "([^"]+)"\\n`))?.[1];
+  if (version === undefined) throw new Error(`${crate} is not in runner/Cargo.lock`);
+  return version;
 }
 
 function urls(text: string): string[] {
@@ -123,7 +133,9 @@ describe('the form refuses what services/mcp_servers/validation.rs refuses', () 
 
 /**
  * The hosts and addresses themselves live in the `abnegate-http` crate, outside
- * this repository, so the form is held to the URLs the server's own tests name.
+ * this repository, so the form is held to the URLs the server's own tests name,
+ * and to the release its lists were copied from: a new lock fails here until
+ * validation.ts is checked against that release's `src/metadata.rs`.
  */
 describe('the form refuses the addresses services/mcp_servers/validation.rs refuses', () => {
   const refused = [
@@ -133,6 +145,10 @@ describe('the form refuses the addresses services/mcp_servers/validation.rs refu
     ...urls(rustTest(VALIDATION_RS, 'url_is_normalised_before_the_metadata_check')),
   ];
   const accepted = urls(rustTest(VALIDATION_RS, 'url_allows_private_loopback_and_public_hosts'));
+
+  test(`validation.ts mirrors src/metadata.rs of the ${METADATA_CRATE} release the server locks`, () => {
+    expect(locked(CARGO_LOCK, METADATA_CRATE)).toBe(METADATA_MIRRORED);
+  });
 
   test('every URL the server refuses as a metadata address is refused before it is sent', () => {
     for (const anchor of [
