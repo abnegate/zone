@@ -751,6 +751,13 @@ async fn the_schema_refuses_invalid_rows() {
         ),
         (
             NewMcpServer {
+                transport: Transport::Sse.as_str().to_owned(),
+                ..http("events")
+            },
+            INVALID_TRANSPORT,
+        ),
+        (
+            NewMcpServer {
                 url: Some("http://127.0.0.1/mcp".to_owned()),
                 ..stdio("both")
             },

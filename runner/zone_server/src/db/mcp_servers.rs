@@ -41,9 +41,9 @@ const WORKSPACE_FORBIDDEN: &str = "Only workspace admins can change MCP servers"
 const DUPLICATE_NAME: &str = "A server with this name already exists";
 const INVALID_NAME: &str =
     "A server name is 1 to 32 letters, digits, '-' or '_', with no '__' and no trailing '_'";
-const INVALID_TRANSPORT: &str = "The transport must be stdio, http or sse";
+const INVALID_TRANSPORT: &str = "The transport must be stdio or http";
 const INVALID_TARGET: &str =
-    "A stdio server needs a command and no URL; an http or sse server needs a URL and no command";
+    "A stdio server needs a command and no URL; an http server needs a URL and no command";
 const FOREIGN_SERVER: &str = "An MCP server in the overrides does not belong to this organization";
 const UNSEALABLE_SECRETS: &str = "The MCP server secrets could not be sealed";
 const ENVIRONMENT_FIELD: &str = "Environment variable";

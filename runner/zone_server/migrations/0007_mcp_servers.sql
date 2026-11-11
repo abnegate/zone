@@ -17,7 +17,7 @@ CREATE TABLE public.mcp_servers (
     CONSTRAINT mcp_servers_pkey PRIMARY KEY (id),
     CONSTRAINT mcp_servers_id_organization_key UNIQUE (id, organization_id),
     CONSTRAINT mcp_servers_organization_name_key UNIQUE (organization_id, name),
-    CONSTRAINT mcp_servers_transport_check CHECK ((transport = ANY (ARRAY['stdio'::text, 'http'::text, 'sse'::text]))),
+    CONSTRAINT mcp_servers_transport_check CHECK ((transport = ANY (ARRAY['stdio'::text, 'http'::text]))),
     CONSTRAINT mcp_servers_target_check CHECK (((transport = 'stdio' AND command IS NOT NULL AND url IS NULL) OR (transport <> 'stdio' AND url IS NOT NULL AND command IS NULL))),
     CONSTRAINT mcp_servers_name_check CHECK ((name ~ '^[A-Za-z0-9_-]{1,32}$' AND position('__' in name) = 0 AND name !~ '_$')),
     CONSTRAINT mcp_servers_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organizations(id) ON DELETE CASCADE,
