@@ -688,6 +688,30 @@ pub async fn revisions(
     Ok(rows.into_iter().collect())
 }
 
+/// For each of `organizations` that still exists, when each of its servers last changed, without
+/// opening any secrets. An organization that was deleted is left out.
+pub async fn existing_revisions(
+    pool: &PgPool,
+    organizations: &[Uuid],
+) -> McpServerResult<BTreeMap<Uuid, BTreeMap<Uuid, DateTime<Utc>>>> {
+    let rows: Vec<(Uuid, Option<Uuid>, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT organizations.id, mcp_servers.id, mcp_servers.updated_at FROM organizations \
+         LEFT JOIN mcp_servers ON mcp_servers.organization_id = organizations.id \
+         WHERE organizations.id = ANY($1)",
+    )
+    .bind(organizations)
+    .fetch_all(pool)
+    .await?;
+    let mut existing: BTreeMap<Uuid, BTreeMap<Uuid, DateTime<Utc>>> = BTreeMap::new();
+    for (organization, server, revision) in rows {
+        let revisions = existing.entry(organization).or_default();
+        if let (Some(server), Some(revision)) = (server, revision) {
+            revisions.insert(server, revision);
+        }
+    }
+    Ok(existing)
+}
+
 /// The servers `organization` has switched on and `workspace` has not switched off, their
 /// secrets left unopened.
 pub async fn offered(

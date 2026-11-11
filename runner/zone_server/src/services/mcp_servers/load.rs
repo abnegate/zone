@@ -15,6 +15,11 @@ use super::definition::Snapshot;
 use super::organization::OrganizationHub;
 use super::transport::Transport;
 
+/// How long a replica may go on serving what another replica changed: a row edited, switched off
+/// or deleted, or a whole organization deleted. Housekeeping runs nothing more often than once a
+/// minute, so a minute is the soonest it can bound that.
+pub const CONVERGENCE_INTERVAL_SECONDS: u64 = 60;
+
 pub fn definition(record: &McpServerRecord) -> Definition {
     Definition {
         id: record.id,
@@ -54,6 +59,32 @@ pub async fn reconnect(
         })
         .await
         .unwrap_or_else(|error| stale(state, organization, &error))
+}
+
+/// Brings every hub this replica holds level with the database, whichever replica wrote it: the
+/// hub of a deleted organization is dropped with its sessions, and a hub whose rows changed is
+/// reconciled. Returns how many hubs were dropped. Asks the database nothing while no hub is held.
+pub async fn converge(state: &AppState) -> Result<usize, McpServerError> {
+    let held = state.mcp().held();
+    if held.is_empty() {
+        return Ok(0);
+    }
+    let organizations: Vec<Uuid> = held.iter().map(|(organization, _)| *organization).collect();
+    let existing = mcp_servers::existing_revisions(state.db(), &organizations).await?;
+    let mut dropped = 0;
+    for (organization, hub) in held {
+        match existing.get(&organization) {
+            None => {
+                state.mcp().forget(organization);
+                dropped += 1;
+            }
+            Some(revisions) if *revisions != hub.revisions() => {
+                sync(state, organization).await;
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(dropped)
 }
 
 async fn changed(
@@ -115,6 +146,7 @@ fn server(record: &McpServerRecord) -> McpServer {
 mod tests {
     use std::collections::BTreeMap;
 
+    use abnegate_agent::ToolRegistry;
     use abnegate_agent::mcp::McpTransport;
     use abnegate_secret::MasterKey;
     use abnegate_secret::SecretValue;
@@ -125,6 +157,7 @@ mod tests {
     use crate::db::mcp_servers::McpServerChanges;
     use crate::db::mcp_servers::NewMcpServer;
     use crate::db::mcp_servers::Secrets;
+    use crate::services::mcp_servers::organization::Registered;
     use crate::services::mcp_servers::status;
     use crate::services::mcp_servers::status::Connection;
     use crate::services::mcp_servers::status::UNCONNECTED;
@@ -497,6 +530,86 @@ mod tests {
         assert_eq!(refused, vec![Connection::failed(status::INVALID); 3]);
         assert!(!spawned, "a command holding a reference was spawned");
         assert!(reached, "the command without a reference never ran");
+    }
+
+    #[tokio::test]
+    async fn a_replica_drops_the_hub_of_an_organization_deleted_elsewhere() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica().await;
+        let deleted = tenant.organization;
+        tenant.store(&state, stub("stub")).await;
+        let hub = organization(&state, deleted).await.expect("the hub");
+        let session = Arc::downgrade(&hub.session("stub").expect("the stub connected"));
+        let held = Arc::downgrade(&hub);
+        drop(hub);
+        let kept = converge(&state).await.expect("the replica converges");
+        tenant.remove().await;
+
+        let dropped = converge(&state).await.expect("the replica converges");
+
+        assert_eq!(kept, 0, "a live organization's hub was dropped");
+        assert_eq!(dropped, 1);
+        assert!(state.mcp().existing_organization(deleted).is_none());
+        assert_eq!(state.mcp().organizations(), 0);
+        assert!(
+            held.upgrade().is_none(),
+            "the hub outlived its organization"
+        );
+        assert!(
+            session.upgrade().is_none(),
+            "the session outlived its organization"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_row_switched_off_in_the_database_stops_being_offered_once_converged() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica().await;
+        let created = tenant.store(&state, stub("stub")).await;
+        let hub = organization(&state, tenant.organization)
+            .await
+            .expect("the hub");
+        let generation = hub.generation("stub");
+        converge(&state).await.expect("the replica converges");
+        let unchanged = hub.generation("stub");
+        let mut registry = ToolRegistry::new();
+        let offered = hub.register(&mut registry, &|_| true);
+        sqlx::query(
+            "UPDATE mcp_servers SET enabled = false, updated_at = updated_at + interval '1 microsecond' \
+             WHERE id = $1",
+        )
+        .bind(created.id)
+        .execute(&tenant.pool)
+        .await
+        .expect("the row is switched off");
+
+        converge(&state).await.expect("the replica converges");
+        let mut registry = ToolRegistry::new();
+        let withdrawn = hub.register(&mut registry, &|_| true);
+        let connection = hub.connection(created.id);
+        let session = hub.session("stub");
+        tenant.remove().await;
+
+        assert_eq!(unchanged, generation, "an unchanged row reconnected");
+        assert_eq!(
+            offered,
+            Registered {
+                servers: 1,
+                tools: 1
+            }
+        );
+        assert_eq!(withdrawn, Registered::default());
+        assert_eq!(connection, Connection::disabled());
+        assert!(session.is_none(), "the switched-off server kept running");
+    }
+
+    #[tokio::test]
+    async fn a_replica_holding_no_hub_converges_without_the_database() {
+        let state = testing::state(test_config(), unreachable_pool()).await;
+
+        let dropped = converge(&state).await;
+
+        assert_eq!(dropped.ok(), Some(0));
     }
 
     #[tokio::test]

@@ -22,6 +22,7 @@ use super::schedule::Schedule;
 use super::sweep::Sweep;
 use super::warmup::Warmup;
 use crate::config::SourceIndexConfig;
+use crate::services::mcp_servers::load;
 use crate::state::AppState;
 use crate::workers::analytics::AnalyticsPolicy;
 use crate::workers::promotion::PromotionPolicy;
@@ -44,11 +45,12 @@ pub enum Periodic {
     ScheduledReports,
     ReceptionSync,
     SubagentRecovery,
+    McpConvergence,
 }
 
 impl Periodic {
-    /// Every sweep, in the order the server used to spawn them.
-    pub const ALL: [Self; 9] = [
+    /// Every sweep, in the order the server used to spawn them, then those added since.
+    pub const ALL: [Self; 10] = [
         Self::KnowledgeRefresh,
         Self::SourceResync,
         Self::AnswerPromotion,
@@ -58,6 +60,7 @@ impl Periodic {
         Self::ScheduledReports,
         Self::ReceptionSync,
         Self::SubagentRecovery,
+        Self::McpConvergence,
     ];
 
     pub fn name(self) -> &'static str {
@@ -71,6 +74,7 @@ impl Periodic {
             Self::ScheduledReports => "scheduled-reports",
             Self::ReceptionSync => "reception-sync",
             Self::SubagentRecovery => "subagent-recovery",
+            Self::McpConvergence => "mcp-convergence",
         }
     }
 
@@ -87,6 +91,7 @@ impl Periodic {
             Self::ScheduledReports => reports::worker::REPORT_TICK_SECONDS,
             Self::ReceptionSync => reception::SYNC_INTERVAL_SECONDS,
             Self::SubagentRecovery => subagents::SWEEP_INTERVAL_SECONDS,
+            Self::McpConvergence => load::CONVERGENCE_INTERVAL_SECONDS,
         };
         Duration::from_secs(seconds)
     }
@@ -103,6 +108,8 @@ impl Periodic {
             | Self::ReceptionSync => Warmup::Period,
             // The server stopped every abandoned subagent it could as it booted.
             Self::SubagentRecovery => Warmup::Period,
+            // A starting server holds no MCP connection, so there is nothing to bring level.
+            Self::McpConvergence => Warmup::Period,
             // Long enough to be out of the way of start-up, short enough that a
             // server coming back up picks up files whose embeddings failed.
             Self::SourceResync => Warmup::After(source_resync::FIRST_POLL_DELAY),
@@ -134,7 +141,8 @@ impl Periodic {
             | Self::RegressionWatch
             | Self::ScheduledReports
             | Self::ReceptionSync
-            | Self::SubagentRecovery => Catchup::Skip,
+            | Self::SubagentRecovery
+            | Self::McpConvergence => Catchup::Skip,
             // These two never ticked on a grid at all. Both were `sleep` loops,
             // so the wait has always been measured from the end of the previous
             // pass rather than from a fixed alignment, and both queue work
@@ -187,6 +195,7 @@ pub fn periodic(state: AppState) -> Registry {
             ),
             Periodic::ReceptionSync => sync_reception(schedule, state.clone()),
             Periodic::SubagentRecovery => recover_subagents(schedule, state.clone()),
+            Periodic::McpConvergence => converge_mcp_servers(schedule, state.clone()),
         };
         registry.register(Arc::new(sweep));
     }
@@ -338,6 +347,25 @@ fn recover_subagents(schedule: Schedule, state: AppState) -> Sweep {
     })
 }
 
+fn converge_mcp_servers(schedule: Schedule, state: AppState) -> Sweep {
+    Sweep::new(Periodic::McpConvergence.name(), schedule, move || {
+        let state = state.clone();
+        async move {
+            match load::converge(&state).await {
+                Ok(0) => Ok(()),
+                Ok(dropped) => {
+                    tracing::info!(
+                        "Stopped the MCP servers of {} deleted organization(s)",
+                        dropped
+                    );
+                    Ok(())
+                }
+                Err(error) => Err(Failure::new(error)),
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -362,10 +390,11 @@ mod tests {
                 "scheduled-reports",
                 "reception-sync",
                 "subagent-recovery",
+                "mcp-convergence",
             ],
             "main.rs spawned nine workers; eight of them are periodic sweeps and the ninth, \
-             reminders, is a dispatch loop that stayed where it was. Dropping one here would \
-             silently stop that background work."
+             reminders, is a dispatch loop that stayed where it was. MCP convergence joined \
+             them later. Dropping one here would silently stop that background work."
         );
     }
 
@@ -390,6 +419,7 @@ mod tests {
             (Periodic::ScheduledReports, 15 * 60),
             (Periodic::ReceptionSync, 30 * 60),
             (Periodic::SubagentRecovery, 60),
+            (Periodic::McpConvergence, 60),
         ] {
             assert_eq!(
                 periodic.period(&sources),

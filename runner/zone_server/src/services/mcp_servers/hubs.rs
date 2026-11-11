@@ -146,6 +146,13 @@ impl Hubs {
             .and_then(|entry| entry.hub.get().cloned())
     }
 
+    pub fn held(&self) -> Vec<(Uuid, Arc<OrganizationHub>)> {
+        self.organizations
+            .iter()
+            .filter_map(|entry| entry.hub.get().map(|hub| (*entry.key(), Arc::clone(hub))))
+            .collect()
+    }
+
     pub fn organizations(&self) -> usize {
         self.organizations
             .iter()
