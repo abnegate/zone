@@ -68,6 +68,12 @@ The following table lists the configurable parameters and their default values.
 | `server.env.ZONE_AGENT_USAGE_TTL_SECONDS` | Whole seconds a sign-in's usage reading stays fresh before zone-server reads it again to pick the account a chat or task starts on; anything else is refused at boot | `"60"` |
 | `server.env.ZONE_CLAUDE_API_URL` | Where zone-server reads Claude sign-ins' usage and profile, for example through a proxy | unset (`https://api.anthropic.com`) |
 | `server.env.ZONE_CODEX_API_URL` | Where zone-server reads codex sign-ins' usage, for example through a proxy | unset (`https://chatgpt.com`) |
+| `server.env.ZONE_MCP_ENABLED` | Master switch for every MCP server, instance and organization alike; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) | `"true"` |
+| `server.env.ZONE_MCP_AUTO_CONNECT` | Attach `magents mcp` when no enabled instance server is configured and `magents` is on `PATH`; the image does not ship it | `"true"` |
+| `server.env.ZONE_MCP_AUTO_MAGENTS` | The older name for `ZONE_MCP_AUTO_CONNECT`; either one off keeps the fallback off | `"true"` |
+| `server.env.ZONE_MCP_COMMANDS` | Let organization admins add stdio (command) servers, which run as zone-server's user in the pod | `"false"` |
+| `server.env.ZONE_MCP_CONFIG` | Path inside the pod to a JSON file of instance MCP servers | `""` |
+| `server.env.ZONE_MCP_SERVERS` | Inline JSON of instance MCP servers; takes precedence over `ZONE_MCP_CONFIG` | `""` |
 
 ### Manager Configuration
 
