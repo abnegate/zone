@@ -1,11 +1,14 @@
 //! Thresholds and bounds that the in-tree tests state relative to their own
 //! constant, and so cannot hold in place. Each number here is written out, and
 //! each was seen to fail when its constant moved by one step: the convention
-//! gates at 4 observations / 3 distinct runs / 75% agreement, the error
-//! category's 0.05 margin over the runner-up, and the 64 KiB compiled-size
-//! limit -- which the regex crate's own 10 MB default hides, because the bomb
-//! the existing tests use is refused either way.
+//! gates at 3 observations / 2 distinct runs / 70% agreement, with the 0.6
+//! confidence bar that holds three observations to unanimity, the lesson's two
+//! runs above a 0.6 mean quality, the error category's 0.05 margin over the
+//! runner-up, and the 64 KiB compiled-size limit -- which the regex crate's own
+//! 10 MB default hides, because the bomb the existing tests use is refused
+//! either way.
 
+use chrono::NaiveDate;
 use regex::RegexBuilder;
 use std::time::Instant;
 use uuid::Uuid;
@@ -19,8 +22,13 @@ use zone_server::workers::learning::convention::{ConventionPolicy, learn};
 use zone_server::workers::learning::error_category::{
     CategorizationPolicy, CategoryReference, ErrorCategory, ReferenceEmbeddings, categorize,
 };
+use zone_server::workers::learning::lesson::{self, LessonPolicy, StrategyObservation};
 use zone_server::workers::learning::observation::{ConventionKind, ConventionSignal};
+use zone_server::workers::learning::quality::{
+    self, ChangeReception, QualityScore, QualityWeights,
+};
 use zone_server::workers::learning::review::{ReviewCategory, classify};
+use zone_server::workers::learning::strategy::{self, ToolInvocation};
 
 // Claim 1: regex size limits, and no backtracking on user patterns.
 
@@ -114,7 +122,8 @@ fn the_size_limit_sits_where_the_constant_says_it_does() {
 
 // Claim 2: exponential decay with a two-hour half-life.
 
-// Claim 3: four observations, three distinct runs, 75% agreement, conjunctively.
+// Claim 3: three observations, two distinct runs, 70% agreement, conjunctively, and
+// 0.6 confidence on top.
 
 fn signal(value: &str, run: u128) -> ConventionSignal {
     ConventionSignal {
@@ -138,12 +147,13 @@ fn evidence(winner: usize, competing: usize, runs: usize) -> Vec<ConventionSigna
 fn every_convention_threshold_refuses_independently() {
     let policy = ConventionPolicy::default();
     let refused = [
-        ("3 observations, 3 runs, 100%", evidence(3, 0, 3)),
-        ("4 observations, 2 runs, 100%", evidence(4, 0, 2)),
-        ("4 observations, 1 run, 100%", evidence(4, 0, 1)),
-        ("74 of 100 agreement over 3 runs", evidence(74, 26, 3)),
-        ("5 of 7 agreement (71%) over 3 runs", evidence(5, 2, 3)),
-        ("11 of 15 agreement (73%) over 3 runs", evidence(11, 4, 3)),
+        ("2 of 2 over 2 runs", evidence(2, 0, 2)),
+        ("3 of 3 from 1 run", evidence(3, 0, 1)),
+        ("4 of 4 from 1 run", evidence(4, 0, 1)),
+        ("69 of 100 over 2 runs", evidence(69, 31, 2)),
+        ("9 of 13 (0.692) over 2 runs", evidence(9, 4, 2)),
+        ("11 of 16 (0.6875) over 2 runs", evidence(11, 5, 2)),
+        ("3 of 4 over 2 runs", evidence(3, 1, 2)),
     ];
     for (label, signals) in refused {
         let learned = learn(&signals, &policy);
@@ -155,34 +165,45 @@ fn every_convention_threshold_refuses_independently() {
 
     let promoted = [
         (
-            "4 observations, 3 runs, 100%",
-            evidence(4, 0, 3),
-            4usize,
+            "3 of 3 over 2 runs",
+            evidence(3, 0, 2),
+            3usize,
+            2usize,
             1.0f32,
+            0.625f32,
         ),
         (
-            "75 of 100 agreement over 3 runs",
-            evidence(75, 25, 3),
-            75,
-            0.75,
+            "70 of 100 over 3 runs",
+            evidence(70, 30, 3),
+            70,
+            3,
+            0.70,
+            0.88,
         ),
         (
-            "6 of 8 agreement (exactly 75%) over 3 runs",
-            evidence(6, 2, 3),
-            6,
-            0.75,
+            "7 of 10 (exactly 70%) over 2 runs",
+            evidence(7, 3, 2),
+            7,
+            2,
+            0.70,
+            0.805,
         ),
     ];
-    for (label, signals, observations, agreement) in promoted {
+    for (label, signals, observations, distinct_runs, agreement, confidence) in promoted {
         let learned = learn(&signals, &policy);
         assert_eq!(learned.len(), 1, "{label} must promote");
         assert_eq!(learned[0].value, "snake_case", "{label}");
         assert_eq!(learned[0].observations, observations, "{label}");
-        assert_eq!(learned[0].distinct_runs, 3, "{label}");
+        assert_eq!(learned[0].distinct_runs, distinct_runs, "{label}");
         assert!(
             (learned[0].agreement - agreement).abs() < 1e-6,
             "{label}: agreement {} is not {agreement}",
             learned[0].agreement
+        );
+        assert!(
+            (learned[0].confidence - confidence).abs() < 1e-6,
+            "{label}: confidence {} is not {confidence}",
+            learned[0].confidence
         );
         println!(
             "{label}: observations={} runs={} agreement={:.6} confidence={:.6}",
@@ -193,21 +214,46 @@ fn every_convention_threshold_refuses_independently() {
         );
     }
 
-    assert_eq!(policy.minimum_observations, 4);
-    assert_eq!(policy.minimum_distinct_runs, 3);
-    assert!((policy.minimum_agreement - 0.75).abs() < 1e-6);
+    let unbarred = ConventionPolicy {
+        minimum_confidence: 0.0,
+        ..policy
+    };
+    let contested = learn(&evidence(3, 1, 2), &unbarred);
+    assert_eq!(
+        contested.len(),
+        1,
+        "3 of 4 clears count, runs and agreement, so confidence alone refuses it"
+    );
+    assert!(
+        (contested[0].confidence - 0.525).abs() < 1e-6,
+        "3 of 4 scores {}, not 0.525",
+        contested[0].confidence
+    );
+
+    assert_eq!(policy.minimum_observations, 3);
+    assert_eq!(policy.minimum_distinct_runs, 2);
+    assert!((policy.minimum_agreement - 0.70).abs() < 1e-6);
+    assert!(
+        (policy.minimum_confidence - 0.6).abs() < 1e-6,
+        "kept at 0.6: 0.5 would admit 3 of 4, the thinnest contested evidence"
+    );
 }
 
 #[test]
 fn the_convention_gates_are_conjunctive_not_disjunctive() {
-    let policy = ConventionPolicy::default();
+    // Confidence is switched off so that each refusal below belongs to one gate alone:
+    // two unanimous observations would otherwise fail it as well.
+    let policy = ConventionPolicy {
+        minimum_confidence: 0.0,
+        ..ConventionPolicy::default()
+    };
     // Each of these clears two gates and fails exactly one. All three must refuse.
     assert!(
-        learn(&evidence(3, 0, 3), &policy).is_empty(),
+        learn(&evidence(2, 0, 2), &policy).is_empty(),
         "runs and agreement pass, observations fail"
     );
     assert!(
-        learn(&evidence(8, 0, 2), &policy).is_empty(),
+        learn(&evidence(8, 0, 1), &policy).is_empty(),
         "observations and agreement pass, runs fail"
     );
     assert!(
@@ -407,5 +453,81 @@ fn a_full_rule_set_of_literal_patterns_evaluates_promptly() {
     assert!(
         elapsed.as_millis() < 500,
         "evaluating one change took {elapsed:?}, which is a denial of service surface"
+    );
+}
+
+// Claim 7: a lesson needs two separate runs and a mean quality above 0.6.
+
+fn worked_test_first(run: u128, quality: QualityScore) -> StrategyObservation {
+    StrategyObservation {
+        run_id: Uuid::from_u128(run),
+        fingerprint: strategy::fingerprint(
+            &[
+                ToolInvocation::new("read_file"),
+                ToolInvocation::new("write_file"),
+                ToolInvocation::with_command("bash", "cargo test"),
+            ],
+            1,
+        ),
+        quality,
+        observed_at: NaiveDate::from_ymd_opt(2026, 9, 1).expect("a real date"),
+    }
+}
+
+#[test]
+fn a_lesson_needs_two_runs_whose_changes_were_received() {
+    let policy = LessonPolicy::default();
+    let solid = quality::score(
+        ChangeReception {
+            minutes_to_merge: Some(30),
+            review_cycles: 0,
+            approvals: 2,
+        },
+        QualityWeights::default(),
+    );
+
+    assert!(
+        lesson::learn(&[worked_test_first(1, solid)], &policy).is_empty(),
+        "one solid run must not teach"
+    );
+
+    let learned = lesson::learn(
+        &[worked_test_first(1, solid), worked_test_first(2, solid)],
+        &policy,
+    );
+    assert_eq!(learned.len(), 1, "two solid runs must teach");
+    assert_eq!(learned[0].runs, 2);
+    assert!(
+        (learned[0].mean_quality - solid.value).abs() < 1e-9,
+        "mean quality {} is not {}",
+        learned[0].mean_quality,
+        solid.value
+    );
+
+    let neutral = quality::neutral();
+    assert!(
+        (neutral.value - 0.55).abs() < 1e-9,
+        "an unreviewed, unmerged change scores {}, not 0.55",
+        neutral.value
+    );
+    let unreceived = [worked_test_first(1, neutral), worked_test_first(2, neutral)];
+    assert!(
+        lesson::learn(&unreceived, &policy).is_empty(),
+        "two changes nobody reviewed or merged must not read as well received"
+    );
+    let unbarred = LessonPolicy {
+        minimum_mean_quality: 0.5,
+        ..policy
+    };
+    assert_eq!(
+        lesson::learn(&unreceived, &unbarred).len(),
+        1,
+        "the two runs pass the count, so mean quality alone refuses them"
+    );
+
+    assert_eq!(policy.minimum_runs, 2);
+    assert!(
+        (policy.minimum_mean_quality - 0.6).abs() < 1e-9,
+        "kept at 0.6: any move toward 0.55 lets two untouched pull requests teach"
     );
 }

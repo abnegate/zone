@@ -6,7 +6,7 @@
 //! than reading widely and editing once?
 //!
 //! The bar is the same as everywhere else in the loop. One well-received run proves
-//! nothing about an approach, so a lesson needs several separate runs that worked the
+//! nothing about an approach, so a lesson needs a second, separate run that worked the
 //! same way, and their changes must have been received well on average. Anything less
 //! and the loop would be advising future runs on the strength of a coincidence.
 
@@ -18,7 +18,7 @@ use uuid::Uuid;
 use super::quality::QualityScore;
 use super::strategy::{FixApproach, StrategyFingerprint};
 
-const MINIMUM_RUNS: usize = 3;
+const MINIMUM_RUNS: usize = 2;
 const MINIMUM_MEAN_QUALITY: f64 = 0.6;
 const RUN_SATURATION: usize = 6;
 const MAXIMUM_LESSONS: usize = 8;
@@ -39,7 +39,8 @@ pub struct StrategyObservation {
 pub struct LessonPolicy {
     /// Separate runs that must have worked this way.
     pub minimum_runs: usize,
-    /// The mean quality those runs' changes must have reached.
+    /// The mean quality those runs' changes must have reached. Above what an unreviewed,
+    /// unmerged change scores, so silence is never read as a good reception.
     pub minimum_mean_quality: f64,
     /// Runs beyond this add no further confidence.
     pub run_saturation: usize,
@@ -151,7 +152,7 @@ pub fn learn(observations: &[StrategyObservation], policy: &LessonPolicy) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workers::learning::quality::{ChangeReception, QualityWeights, score};
+    use crate::workers::learning::quality::{ChangeReception, QualityWeights, neutral, score};
     use crate::workers::learning::strategy::{ToolInvocation, fingerprint};
 
     fn day(day: u32) -> NaiveDate {
@@ -229,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn a_lesson_needs_several_separate_runs() {
+    fn a_lesson_needs_a_second_separate_run() {
         let policy = LessonPolicy::default();
         for count in 1..policy.minimum_runs as u128 {
             assert!(
@@ -242,6 +243,51 @@ mod tests {
         assert_eq!(learned.len(), 1);
         assert_eq!(learned[0].approach, FixApproach::TestDriven);
         assert_eq!(learned[0].runs, policy.minimum_runs);
+    }
+
+    #[test]
+    fn two_well_received_runs_are_a_lesson() {
+        let policy = LessonPolicy::default();
+
+        let learned = learn(&good_runs(2, test_loop), &policy);
+        assert_eq!(
+            learned.len(),
+            1,
+            "a second run confirming the first is a lesson"
+        );
+        assert_eq!(learned[0].runs, 2);
+        assert_eq!(policy.minimum_runs, 2);
+    }
+
+    #[test]
+    fn two_changes_nobody_received_are_not_a_lesson() {
+        let policy = LessonPolicy::default();
+        let unreceived: Vec<StrategyObservation> = (1..=2)
+            .map(|run| observation(run, test_loop(), neutral()))
+            .collect();
+        assert!(
+            (neutral().value - 0.55).abs() < 1e-9,
+            "an unreviewed, unmerged change scores 0.55"
+        );
+
+        assert!(
+            learn(&unreceived, &policy).is_empty(),
+            "silence about two changes is not evidence that they were well received"
+        );
+
+        let unbarred = LessonPolicy {
+            minimum_mean_quality: 0.5,
+            ..policy
+        };
+        assert_eq!(
+            learn(&unreceived, &unbarred).len(),
+            1,
+            "the run count passes, so mean quality is what refused them"
+        );
+        assert!(
+            (policy.minimum_mean_quality - 0.6).abs() < 1e-9,
+            "kept at 0.6: any move toward 0.55 lets two untouched pull requests teach"
+        );
     }
 
     #[test]
