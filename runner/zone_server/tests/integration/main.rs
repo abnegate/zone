@@ -17,6 +17,7 @@ mod authz_cross_tenant_coverage;
 mod authz_invitation_scope;
 mod authz_project_enumeration;
 mod authz_workspace_deletion;
+mod auto_project_turns;
 mod background_job;
 mod boundary_paths;
 mod boundary_ssrf;

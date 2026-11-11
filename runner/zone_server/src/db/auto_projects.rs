@@ -109,6 +109,10 @@ pub async fn set_brief(
 /// `FOR UPDATE SKIP LOCKED` keeps two instances from taking the same project in
 /// the same instant; the lease keeps an instance that died mid-drive from
 /// holding it for ever. A claim past its lease is offered again.
+///
+/// The projects longest undriven go first, and [`release`] stamps each pass,
+/// so every open project gets its turn however many of them a pass has
+/// nothing to do for.
 pub async fn claim_due(pool: &PgPool, lease: Duration, limit: i64) -> DbResult<Vec<Uuid>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
@@ -116,7 +120,7 @@ pub async fn claim_due(pool: &PgPool, lease: Duration, limit: i64) -> DbResult<V
         "SELECT id FROM projects WHERE auto AND status = 'active' \
            AND auto_paused_reason IS NULL AND auto_completed_at IS NULL \
            AND (auto_claimed_at IS NULL OR auto_claimed_at < NOW() - make_interval(secs => $1)) \
-         ORDER BY updated_at, id LIMIT $2 FOR UPDATE SKIP LOCKED",
+         ORDER BY auto_driven_at NULLS FIRST, id LIMIT $2 FOR UPDATE SKIP LOCKED",
     )
     .bind(seconds)
     .bind(limit)
@@ -132,9 +136,10 @@ pub async fn claim_due(pool: &PgPool, lease: Duration, limit: i64) -> DbResult<V
     Ok(due)
 }
 
-/// Give up the driver's lease on a project once its pass is over.
+/// Give up the driver's lease on a project once its pass is over, and send
+/// the project to the back of the order [`claim_due`] takes projects in.
 pub async fn release(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
-    sqlx::query("UPDATE projects SET auto_claimed_at = NULL WHERE id = $1")
+    sqlx::query("UPDATE projects SET auto_claimed_at = NULL, auto_driven_at = NOW() WHERE id = $1")
         .bind(project_id)
         .execute(pool)
         .await?;
