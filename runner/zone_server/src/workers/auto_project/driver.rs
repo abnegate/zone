@@ -10,6 +10,7 @@ use abnegate_notify::Notifier;
 use uuid::Uuid;
 
 use crate::config::AutoProjectConfig;
+use crate::db::DbResult;
 use crate::db::auto_projects::{
     self, Kind, ProjectAutomation, ProjectTask, SettledRun, Stage, TaskAutomation,
 };
@@ -78,7 +79,21 @@ impl Drive<'_> {
 
     /// Stop the whole project and say why, once.
     pub async fn pause_project(&self, reason: &str) {
-        match auto_projects::pause(self.state.db(), self.project.project_id, reason).await {
+        let paused = auto_projects::pause(self.state.db(), self.project.project_id, reason).await;
+        self.announce_pause(paused, reason).await;
+    }
+
+    /// Stop a project nothing can start in. Nothing is said when something
+    /// can start after all by the time the pause is written: the next pass
+    /// starts it.
+    async fn pause_stalled_project(&self, reason: &str) {
+        let paused =
+            auto_projects::pause_stalled(self.state.db(), self.project.project_id, reason).await;
+        self.announce_pause(paused, reason).await;
+    }
+
+    async fn announce_pause(&self, paused: DbResult<bool>, reason: &str) {
+        match paused {
             Ok(true) => {
                 tracing::warn!(project_id = %self.project.project_id, reason, "Auto project paused");
                 self.notify(
@@ -304,7 +319,7 @@ pub async fn drive_project(
         if runnable.is_none() && !held_by_a_person(&stuck) {
             if !paused.is_empty() {
                 drive
-                    .pause_project(&format!(
+                    .pause_stalled_project(&format!(
                         "nothing can start until a person looks at: {}",
                         paused.join("; ")
                     ))
@@ -327,7 +342,7 @@ pub async fn drive_project(
                     })
                     .collect();
                 drive
-                    .pause_project(&format!(
+                    .pause_stalled_project(&format!(
                         "nothing can start: {} task(s) remain but none is runnable; they wait on \
                          tasks that are not agentic or did not finish: {}",
                         remaining,
@@ -701,6 +716,84 @@ mod tests {
         second.expect("the drive after the dependency is un-paused");
         assert_eq!(after.paused_reason, None);
         assert_eq!(next, Some(blocker));
+    }
+
+    /// Drive the project while its row is held, and have a person's move of
+    /// `task` to `status` commit once the pass has read the project and
+    /// queued to stop it: the move lands between the pass's read and its write.
+    async fn drive_as_a_task_is_given_back(
+        driven: &Driven,
+        project: &Project,
+        task: Uuid,
+        status: &str,
+    ) -> Result<(), String> {
+        let hold = project.hold().await;
+        let (drove, ()) = tokio::join!(driven.drive(project), async move {
+            project.queued_behind(&hold).await;
+            project.set_status(task, status).await;
+            hold.release().await;
+        });
+        drove
+    }
+
+    #[tokio::test]
+    async fn a_task_un_cancelled_as_the_pass_finishes_the_project_keeps_it_open() {
+        let project = Project::new(2).await;
+        let [merged, open] = project.tasks[..] else {
+            panic!("two tasks");
+        };
+        project
+            .place(merged, tasks::COMPLETE, None, Stage::Merged)
+            .await;
+        project.move_to(open, tasks::CANCELLED).await;
+        let driven = Driven::without_room(&project);
+
+        let drove = drive_as_a_task_is_given_back(&driven, &project, open, tasks::CREATED).await;
+        let after = automation(&project).await;
+        let announced = project.notices().await;
+        let second = driven.drive(&project).await;
+        let next = runnable(&project).await;
+        project.remove().await;
+
+        drove.expect("the drive the move landed in");
+        assert_eq!(
+            after.completed_at, None,
+            "the project is not finished over a task that has work left"
+        );
+        assert_eq!(after.paused_reason, None);
+        assert_eq!(announced, Vec::<String>::new(), "nothing is announced");
+        second.expect("the next drive");
+        assert_eq!(next, Some(open), "the next pass starts it");
+    }
+
+    #[tokio::test]
+    async fn a_task_un_paused_as_the_pass_stops_the_project_keeps_it_going() {
+        let project = Project::new(2).await;
+        let [blocker, dependent] = project.tasks[..] else {
+            panic!("two tasks");
+        };
+        tasks::set_dependencies(&project.pool, dependent, &[blocker])
+            .await
+            .expect("the dependency");
+        project.move_to(blocker, tasks::PAUSED).await;
+        let driven = Driven::without_room(&project);
+
+        let drove = drive_as_a_task_is_given_back(&driven, &project, blocker, tasks::CREATED).await;
+        let after = automation(&project).await;
+        let announced = project.notices().await;
+        let second = driven.drive(&project).await;
+        let next = runnable(&project).await;
+        project.remove().await;
+
+        drove.expect("the drive the move landed in");
+        assert_eq!(
+            after.paused_reason, None,
+            "the project is not paused over a task that can start"
+        );
+        assert_eq!(after.completed_at, None);
+        assert_eq!(announced, Vec::<String>::new(), "nothing is announced");
+        second.expect("the next drive");
+        assert_eq!(next, Some(blocker), "the next pass starts it");
     }
 
     /// A pool whose connections find a `tasks` table no task can be read

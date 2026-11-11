@@ -155,6 +155,41 @@ pub async fn pause(pool: &PgPool, project_id: Uuid, reason: &str) -> DbResult<bo
         == 1)
 }
 
+/// Hold a project's row until the transaction ends. The driver decides to
+/// stop a project from what it read a moment ago, and [`reopen`] undoes that
+/// decision for a task a person just gave back; each takes this lock and only
+/// then reads, in a statement of its own, so whichever comes second sees what
+/// the first committed. Neither waits on anything else while it holds the row.
+async fn hold(connection: &mut PgConnection, project_id: Uuid) -> DbResult<()> {
+    sqlx::query("SELECT id FROM projects WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(project_id)
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
+/// Pause a project nothing can start in, unless something can by now: false
+/// when a task became runnable or went in flight after the driver looked, as
+/// when a person un-pauses one mid-pass. The next pass then decides afresh.
+pub async fn pause_stalled(pool: &PgPool, project_id: Uuid, reason: &str) -> DbResult<bool> {
+    let mut transaction = pool.begin().await?;
+    hold(&mut transaction, project_id).await?;
+    let paused = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE projects SET auto_paused_reason = $3, auto_claimed_at = NULL, updated_at = NOW() \
+         WHERE id = $1 AND auto AND auto_paused_reason IS NULL \
+           AND NOT EXISTS (SELECT 1 {IN_FLIGHT}) AND NOT EXISTS (SELECT 1 {RUNNABLE})"
+    )))
+    .bind(project_id)
+    .bind(tasks::CLOSED.as_slice())
+    .bind(reason)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected()
+        == 1;
+    transaction.commit().await?;
+    Ok(paused)
+}
+
 /// Clear a project's pause so the driver picks it up again; false when it does not exist.
 pub async fn resume(pool: &PgPool, project_id: Uuid) -> DbResult<bool> {
     Ok(sqlx::query(
@@ -239,17 +274,34 @@ pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
 /// or finished while a person withheld the task has work to do once they move
 /// it back. Called after that move has committed, never inside it, so no
 /// project row is locked while a task row is held.
+///
+/// The rows are locked before they are read for a stop to undo, as [`hold`]
+/// has it: a stop the driver is writing at this moment is waited for and then
+/// undone, where one statement would read the project as still open and leave
+/// the stop standing. Locked in id order, so two of these cannot deadlock.
 pub async fn reopen(pool: &PgPool, task_id: Uuid) -> DbResult<()> {
-    sqlx::query(
-        "UPDATE projects p SET auto_paused_reason = NULL, auto_completed_at = NULL, \
-           updated_at = NOW() \
-         FROM task_projects tp JOIN tasks t ON t.id = tp.task_id \
-         WHERE tp.task_id = $1 AND p.id = tp.project_id AND p.auto AND t.is_agentic \
-           AND (p.auto_paused_reason IS NOT NULL OR p.auto_completed_at IS NOT NULL)",
+    let mut transaction = pool.begin().await?;
+    let held: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT p.id FROM projects p JOIN task_projects tp ON tp.project_id = p.id \
+           JOIN tasks t ON t.id = tp.task_id \
+         WHERE tp.task_id = $1 AND p.auto AND t.is_agentic \
+         ORDER BY p.id FOR NO KEY UPDATE OF p",
     )
     .bind(task_id)
-    .execute(pool)
+    .fetch_all(&mut *transaction)
     .await?;
+    if !held.is_empty() {
+        sqlx::query(
+            "UPDATE projects SET auto_paused_reason = NULL, auto_completed_at = NULL, \
+               updated_at = NOW() \
+             WHERE id = ANY($1) AND auto \
+               AND (auto_paused_reason IS NOT NULL OR auto_completed_at IS NOT NULL)",
+        )
+        .bind(&held)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -296,17 +348,24 @@ pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u6
     Ok(checked + restarted)
 }
 
-/// Record that every agentic task merged; false when the project does not exist.
+/// Record that no agentic task of the project has work left; false when the
+/// project does not exist or one has by now, as when a person un-cancels a
+/// task mid-pass. The next pass then decides afresh.
 pub async fn complete(pool: &PgPool, project_id: Uuid) -> DbResult<bool> {
-    Ok(sqlx::query(
+    let mut transaction = pool.begin().await?;
+    hold(&mut transaction, project_id).await?;
+    let completed = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE projects SET auto_completed_at = NOW(), auto_claimed_at = NULL, updated_at = NOW() \
-         WHERE id = $1 AND auto_completed_at IS NULL",
-    )
+         WHERE id = $1 AND auto_completed_at IS NULL AND NOT EXISTS (SELECT 1 {REMAINING})"
+    )))
     .bind(project_id)
-    .execute(pool)
+    .bind(tasks::CLOSED.as_slice())
+    .execute(&mut *transaction)
     .await?
     .rows_affected()
-        == 1)
+        == 1;
+    transaction.commit().await?;
+    Ok(completed)
 }
 
 /// Where a task is in the pipeline that takes its change from a run to a merge.
@@ -661,48 +720,57 @@ pub async fn enrollable(pool: &PgPool, project_id: Uuid) -> DbResult<Vec<Settled
 /// of the plan, so nothing waits on it; a paused one is still to be done.
 /// Priority first, then age.
 pub async fn next_runnable(pool: &PgPool, project_id: Uuid) -> DbResult<Option<Uuid>> {
-    sqlx::query_scalar(
-        "SELECT t.id FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
-         WHERE tp.project_id = $1 AND t.status = 'created' AND t.is_agentic \
-           AND t.active_run_id IS NULL \
-           AND NOT EXISTS ( \
-             SELECT 1 FROM jsonb_array_elements_text( \
-               CASE WHEN jsonb_typeof(t.dependencies) = 'array' THEN t.dependencies ELSE '[]'::jsonb END \
-             ) AS d(id) JOIN tasks p ON p.id::text = d.id WHERE p.status <> ALL($2)) \
-         ORDER BY t.priority NULLS LAST, t.created_at, t.id LIMIT 1",
-    )
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT t.id {RUNNABLE} ORDER BY t.priority NULLS LAST, t.created_at, t.id LIMIT 1"
+    )))
     .bind(project_id)
     .bind(tasks::CLOSED.as_slice())
     .fetch_optional(pool)
     .await
 }
 
+/// The tasks project `$1` can start, given [`tasks::CLOSED`] as `$2`. Shared
+/// by the driver's read and by [`pause_stalled`], which stops the project
+/// only while that read still holds.
+const RUNNABLE: &str = "FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
+     WHERE tp.project_id = $1 AND t.status = 'created' AND t.is_agentic \
+       AND t.active_run_id IS NULL \
+       AND NOT EXISTS ( \
+         SELECT 1 FROM jsonb_array_elements_text( \
+           CASE WHEN jsonb_typeof(t.dependencies) = 'array' THEN t.dependencies ELSE '[]'::jsonb END \
+         ) AS d(id) JOIN tasks p ON p.id::text = d.id WHERE p.status <> ALL($2))";
+
 /// Tasks occupying one of the project's slots: running, or between a run and a merge.
 pub async fn in_flight(pool: &PgPool, project_id: Uuid) -> DbResult<i64> {
-    sqlx::query_scalar(
-        "SELECT COUNT(*) FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
-         LEFT JOIN task_automation a ON a.task_id = t.id \
-         WHERE tp.project_id = $1 AND t.status <> 'complete' \
-           AND (t.active_run_id IS NOT NULL \
-                OR a.stage IN ('running', 'awaiting_checks', 'awaiting_reviews', 'fixing', 'merging'))",
-    )
-    .bind(project_id)
-    .fetch_one(pool)
-    .await
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) {IN_FLIGHT}")))
+        .bind(project_id)
+        .fetch_one(pool)
+        .await
 }
+
+/// The tasks holding a slot of project `$1`, shared with [`pause_stalled`] as
+/// [`RUNNABLE`] is.
+const IN_FLIGHT: &str = "FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
+     LEFT JOIN task_automation a ON a.task_id = t.id \
+     WHERE tp.project_id = $1 AND t.status <> 'complete' \
+       AND (t.active_run_id IS NOT NULL \
+            OR a.stage IN ('running', 'awaiting_checks', 'awaiting_reviews', 'fixing', 'merging'))";
 
 /// Agentic tasks of the project not yet complete. A cancelled task is not
 /// left to do, so it does not hold the project open.
 pub async fn remaining(pool: &PgPool, project_id: Uuid) -> DbResult<i64> {
-    sqlx::query_scalar(
-        "SELECT COUNT(*) FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
-         WHERE tp.project_id = $1 AND t.is_agentic AND t.status <> ALL($2)",
-    )
-    .bind(project_id)
-    .bind(tasks::CLOSED.as_slice())
-    .fetch_one(pool)
-    .await
+    sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) {REMAINING}")))
+        .bind(project_id)
+        .bind(tasks::CLOSED.as_slice())
+        .fetch_one(pool)
+        .await
 }
+
+/// The agentic tasks of project `$1` with work left, given [`tasks::CLOSED`]
+/// as `$2`. Shared by the driver's read and by [`complete`], which finishes
+/// the project only while that read still holds.
+const REMAINING: &str = "FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
+     WHERE tp.project_id = $1 AND t.is_agentic AND t.status <> ALL($2)";
 
 /// Runs the driver started that are still going, across every project.
 pub async fn active_unattended_runs(pool: &PgPool) -> DbResult<i64> {
@@ -1267,7 +1335,8 @@ pub async fn insert_auto_task(
 #[cfg(test)]
 pub(crate) mod testing {
     use serde_json::json;
-    use sqlx::PgPool;
+    use sqlx::{PgPool, Postgres, Transaction};
+    use std::time::Duration;
     use uuid::Uuid;
 
     use super::{Kind, PlannedTask, ProjectPlan, Stage, TaskAutomation, finalize, set_stage};
@@ -1282,6 +1351,23 @@ pub(crate) mod testing {
         pub id: Uuid,
         pub tasks: Vec<Uuid>,
     }
+
+    /// A project row locked by a session of the test's own.
+    pub struct RowHold {
+        pub transaction: Transaction<'static, Postgres>,
+        backend: i32,
+    }
+
+    impl RowHold {
+        pub async fn release(self) {
+            self.transaction
+                .commit()
+                .await
+                .expect("the held row is released");
+        }
+    }
+
+    const QUEUES_WITHIN: Duration = Duration::from_secs(10);
 
     impl Project {
         pub async fn new(count: usize) -> Self {
@@ -1445,6 +1531,46 @@ pub(crate) mod testing {
                 .await
                 .expect("the task's automation")
                 .expect("an automated task")
+        }
+
+        /// Hold the project's row as a writer in mid-write does, until the
+        /// returned transaction ends.
+        pub async fn hold(&self) -> RowHold {
+            let mut transaction = self.pool.begin().await.expect("a transaction");
+            let backend = sqlx::query_scalar(
+                "SELECT pg_backend_pid() FROM projects WHERE id = $1 FOR NO KEY UPDATE",
+            )
+            .bind(self.id)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("the project's row");
+            RowHold {
+                transaction,
+                backend,
+            }
+        }
+
+        /// Wait until another session is queued behind `hold`.
+        pub async fn queued_behind(&self, hold: &RowHold) {
+            let queued = async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+                         WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))",
+                    )
+                    .bind(hold.backend)
+                    .fetch_one(&self.pool)
+                    .await
+                    .expect("the sessions waiting on a lock");
+                    if waiting {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            tokio::time::timeout(QUEUES_WITHIN, queued)
+                .await
+                .expect("a writer queues for the project's row");
         }
 
         pub async fn remove(self) {
@@ -1844,6 +1970,117 @@ mod tests {
 
         assert_eq!(with_paused, 1);
         assert_eq!(all_cancelled, 0);
+    }
+
+    #[tokio::test]
+    async fn a_project_is_not_finished_while_an_agentic_task_has_work_left() {
+        let project = Project::new(2).await;
+        let [merged, open] = project.tasks[..] else {
+            panic!("two tasks");
+        };
+        project
+            .place(merged, tasks::COMPLETE, None, Stage::Merged)
+            .await;
+
+        let with_work_left = complete(&project.pool, project.id)
+            .await
+            .expect("the completion");
+        project.set_status(open, tasks::CANCELLED).await;
+        let with_none = complete(&project.pool, project.id)
+            .await
+            .expect("the completion");
+        let again = complete(&project.pool, project.id)
+            .await
+            .expect("the completion");
+        let after = automation(&project.pool, project.id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        project.remove().await;
+
+        assert_eq!(
+            (with_work_left, with_none, again),
+            (false, true, false),
+            "only a project with nothing left to do is finished, and once"
+        );
+        assert!(after.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_project_is_not_paused_as_stalled_while_a_task_is_in_flight_or_can_start() {
+        const STALLED: &str = "nothing can start";
+        let project = Project::new(2).await;
+        let [blocker, dependent] = project.tasks[..] else {
+            panic!("two tasks");
+        };
+        tasks::set_dependencies(&project.pool, dependent, &[blocker])
+            .await
+            .expect("the dependency");
+
+        let run = tasks::create_task_run(&project.pool, blocker)
+            .await
+            .expect("a run a person started");
+        let in_flight = pause_stalled(&project.pool, project.id, STALLED)
+            .await
+            .expect("the pause");
+        tasks::complete_task_run(&project.pool, run.id, "failed", None, None)
+            .await
+            .expect("the run ends");
+        let ended = project.status(blocker).await;
+        project.set_status(blocker, tasks::CREATED).await;
+        let runnable = pause_stalled(&project.pool, project.id, STALLED)
+            .await
+            .expect("the pause");
+        project.set_status(blocker, tasks::BLOCKED).await;
+        let stalled = pause_stalled(&project.pool, project.id, STALLED)
+            .await
+            .expect("the pause");
+        let after = automation(&project.pool, project.id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        project.remove().await;
+
+        assert_eq!(ended, tasks::BLOCKED);
+        assert_eq!(
+            (in_flight, runnable, stalled),
+            (false, false, true),
+            "a project is stalled only when nothing is in flight and nothing can start"
+        );
+        assert_eq!(after.paused_reason.as_deref(), Some(STALLED));
+    }
+
+    #[tokio::test]
+    async fn giving_a_task_back_undoes_a_stop_the_driver_is_still_writing() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.set_status(task, tasks::CANCELLED).await;
+        let mut stop = project.hold().await;
+        sqlx::query("UPDATE projects SET auto_completed_at = NOW() WHERE id = $1")
+            .bind(project.id)
+            .execute(&mut *stop.transaction)
+            .await
+            .expect("the driver's stop, written and not yet committed");
+        project.set_status(task, tasks::CREATED).await;
+
+        let (reopened, ()) = {
+            let project = &project;
+            tokio::join!(reopen(&project.pool, task), async move {
+                project.queued_behind(&stop).await;
+                stop.release().await;
+            })
+        };
+        let after = automation(&project.pool, project.id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        project.remove().await;
+
+        reopened.expect("the reopen");
+        assert_eq!(
+            after.completed_at, None,
+            "the reopen waits for the stop and then undoes it"
+        );
     }
 
     #[tokio::test]
