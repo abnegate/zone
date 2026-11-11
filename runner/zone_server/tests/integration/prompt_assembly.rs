@@ -490,6 +490,7 @@ fn block(recall: render::Recall) -> String {
             PREFERENCES,
         )),
         &facts(),
+        render::MAX_RENDERED_BYTES,
     )
 }
 
@@ -691,6 +692,7 @@ async fn a_chat_reads_the_remembered_block_after_the_capability_tail() {
     assert!(!composed.contains("\n\n\n"), "{composed}");
 }
 
+use abnegate_agent::context::{self, Coverage, Entry, Summary};
 use chrono::NaiveDate;
 use sqlx::PgPool;
 use zone_core::llm::LlmBackend;
@@ -950,10 +952,11 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
 }
 
 /// One workspace that has learned more than any block shows, prepared for a
-/// chat on a 4,096-token window and for one whose window nothing reports. The
-/// small window's reply reservation leaves 3,072 tokens of input, and its
-/// block is held to the share of them [`learned::budget`] gives; the other is
-/// held to the ceiling, as every chat was before.
+/// chat on an 8,192-token window and for one whose window nothing reports. The
+/// small window's block is held to what the turn leaves under the compaction
+/// threshold once the room a checkpoint needs is kept, so the preserved turn
+/// and the largest checkpoint stay under that threshold; the other is held to
+/// the ceiling, as every chat was before.
 #[tokio::test]
 async fn a_chat_is_given_a_learned_block_its_window_can_carry() {
     const FILED: usize = 30;
@@ -987,7 +990,7 @@ async fn a_chat_is_given_a_learned_block_its_window_can_carry() {
     let state = common::create_test_state(config, pool.clone());
 
     let mut prepared = Vec::new();
-    for window in [Some(4_096), None] {
+    for window in [Some(8_192), None] {
         let mut chat = chats::create_chat(
             &pool,
             Some(workspace),
@@ -1014,14 +1017,17 @@ async fn a_chat_is_given_a_learned_block_its_window_can_carry() {
         )
         .await;
         prepared.push(preparation.map(|preparation| {
+            let preserved: Vec<Entry> = preparation
+                .context
+                .entries
+                .iter()
+                .filter(|entry| entry.preserve)
+                .cloned()
+                .collect();
             (
-                preparation.context.policy.input_limit(),
+                preparation.context.policy.clone(),
+                preserved,
                 preparation.findings,
-                preparation.context.entries[0]
-                    .message
-                    .content
-                    .clone()
-                    .unwrap_or_default(),
             )
         }));
     }
@@ -1035,13 +1041,26 @@ async fn a_chat_is_given_a_learned_block_its_window_can_carry() {
     let mut prepared = prepared.into_iter().map(|preparation| {
         preparation.unwrap_or_else(|error| panic!("the turn is prepared: {error}"))
     });
-    let (input, small, system) = prepared.next().expect("the small window's turn");
-    let (unknown, large, _) = prepared.next().expect("the unknown window's turn");
+    let (policy, preserved, small) = prepared.next().expect("the small window's turn");
+    let (unknown, _, large) = prepared.next().expect("the unknown window's turn");
 
-    assert_eq!(input, Some(3_072));
-    assert_eq!(learned::budget(input), 1_536);
-    assert!(small.text.len() <= 1_536, "{} bytes", small.text.len());
+    let system = preserved[0].message.content.clone().unwrap_or_default();
     assert!(system.ends_with(&small.text), "{system}");
+    let checkpoint = Summary::new(String::new(), Coverage::new(Vec::new(), String::new()), 1);
+    let compacted = context::estimate(
+        "fixture-model",
+        &preserved,
+        None,
+        &policy,
+        Some(&checkpoint),
+    )
+    .used
+        + u64::from(policy.reserved);
+    assert!(
+        compacted < policy.threshold().expect("a known window"),
+        "{compacted} tokens once compacted against {:?}",
+        policy.threshold()
+    );
     let bullets = small.text.matches("\n## Repeated answer ").count();
     assert!(bullets > 0 && bullets < FILED, "{}", small.text);
     assert_eq!(small.shown.len(), bullets, "{}", small.text);
@@ -1054,7 +1073,7 @@ async fn a_chat_is_given_a_learned_block_its_window_can_carry() {
         small.text
     );
 
-    assert_eq!(learned::budget(unknown), learned::MAX_RENDERED_BYTES);
+    assert_eq!(unknown.limit, None);
     assert_eq!(
         large, ceiling,
         "a window nothing reports small is held to the ceiling"

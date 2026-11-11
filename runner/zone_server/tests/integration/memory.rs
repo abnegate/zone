@@ -829,9 +829,13 @@ async fn a_credential_is_refused_and_nothing_is_stored() {
 /// Compaction rewrites the projection around the system message. The block
 /// lives on that message, so a turn long enough to compact is the one place it
 /// could silently go.
+///
+/// The window holds two pages past the prompt: a window carries the block
+/// only once it leaves room beside it for the checkpoint a compaction writes,
+/// which may take the reply's whole 4,096-token reservation, two pages of it.
 #[tokio::test]
 async fn the_block_survives_a_compaction() {
-    let remembering = Remembering::compacting(1).await;
+    let remembering = Remembering::compacting(2).await;
     remembering.script().push(calls(
         "Noting that.",
         vec![tool(
@@ -843,23 +847,32 @@ async fn the_block_survives_a_compaction() {
     remembering.script().push(answer("Remembered."));
     remembering.turn("Remember I review in the morning.").await;
 
-    let first = remembering
-        .harness
-        .file("first.txt", &format!("FIRST\n{}", "a".repeat(80_000)));
-    let second = remembering
-        .harness
-        .file("second.txt", &format!("SECOND\n{}", "b".repeat(80_000)));
-    remembering.script().push(calls(
-        "Reading the first.",
-        vec![tool("read-first", "read_file", json!({"path": first}))],
-    ));
-    remembering.script().push(calls(
-        "Reading the second.",
-        vec![tool("read-second", "read_file", json!({"path": second}))],
-    ));
-    remembering.script().push(answer("Read them both."));
+    for (name, fill) in [
+        ("first", 'a'),
+        ("second", 'b'),
+        ("third", 'c'),
+        ("fourth", 'd'),
+    ] {
+        let path = remembering.harness.file(
+            &format!("{name}.txt"),
+            &format!(
+                "{}\n{}",
+                name.to_uppercase(),
+                fill.to_string().repeat(80_000)
+            ),
+        );
+        remembering.script().push(calls(
+            &format!("Reading the {name}."),
+            vec![tool(
+                &format!("read-{name}"),
+                "read_file",
+                json!({"path": path}),
+            )],
+        ));
+    }
+    remembering.script().push(answer("Read them all."));
 
-    remembering.turn("Read both of those files.").await;
+    remembering.turn("Read all four of those files.").await;
 
     assert!(
         remembering.harness.history().await.summary.is_some(),

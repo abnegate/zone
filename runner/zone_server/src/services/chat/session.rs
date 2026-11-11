@@ -1,10 +1,16 @@
 //! Shared preparation, projection, and durable generation boundaries for both chat modes.
 
+pub mod allowance;
+pub mod blocks;
+pub mod fitted;
 mod generation;
 mod pinned;
 pub mod prompt;
 pub mod tail;
 
+pub use allowance::Allowance;
+pub use blocks::Blocks;
+pub use fitted::Fitted;
 pub use generation::Generation;
 pub use pinned::Pinned;
 
@@ -313,12 +319,14 @@ pub struct Preparation {
     /// same bytes and retrieves none of the entries it already shows. Empty
     /// for a character card with its agent off.
     pub findings: learned::Block,
-    /// What this user's memory adds to the system prompt, read once here so
-    /// the reassembly in `ws::chat` composes the same bytes rather than a
-    /// second read of a table that may have moved between the two.
+    /// What this user's memory adds to the system prompt, bounded the same
+    /// way and read once here so the reassembly in `ws::chat` composes the
+    /// same bytes rather than a second read of a table that may have moved
+    /// between the two.
     pub memory: String,
-    /// The workspace's skills index, read once here for the same reason. Empty
-    /// for a chat with no `read_document`, which could open none of them.
+    /// The workspace's skills index, bounded and read once here for the same
+    /// reasons. Empty for a chat with no `read_document`, which could open
+    /// none of them.
     pub skills: String,
     /// The coding agent session the turn runs in, on a login of the organization's.
     pub session: Option<Pinned>,
@@ -460,68 +468,26 @@ pub async fn build(
             ),
         }
     }
-    let findings = if reads_learned(chat, agentic) {
-        learned::prompt(state.db(), workspace, learned::budget(policy.input_limit())).await
-    } else {
-        learned::Block::default()
-    };
-    // Every chat reads what is remembered about the person it is talking to:
-    // a profile and a set of preferences describe them and how they want to be
-    // worked with, and a chat with its agent off is still a chat with them.
-    // Only a chat holding the memory tools is given the fact index, which
-    // names `memory_read` and is nothing without it.
-    let recall = if agentic {
-        crate::agent::memory::render::Recall::Indexed
-    } else {
-        crate::agent::memory::render::Recall::Passive
-    };
-    let memory =
-        match crate::agent::memory::render::prompt(state.db(), recall, workspace, user).await {
-            Ok(memory) => memory,
-            Err(error) => {
-                tracing::warn!(
-                    chat_id = %chat.id,
-                    %error,
-                    "Failed to load remembered entries; continuing without them"
-                );
-                String::new()
-            }
-        };
-    // A skill is opened with read_document, so only a chat that can call it
-    // is shown the index: a plain chat, or one with its agent off, has no
-    // loader in front of the model and is told of nothing.
-    let skills = if agentic && tools.has("read_document") {
-        match crate::agent::skills::prompt(state.db(), workspace).await {
-            Ok(skills) => skills,
-            Err(error) => {
-                tracing::warn!(
-                    chat_id = %chat.id,
-                    %error,
-                    "Failed to load the skills index; continuing without it"
-                );
-                String::new()
-            }
-        }
-    } else {
-        String::new()
-    };
-    let mut entries = vec![
+    let blocks = read_blocks(state, chat, agentic, &tools, workspace, user).await;
+    let capability = SearchContext::new(&state.config().web_search).capability();
+    let instructions = |fitted: &Fitted| {
         Entry::new(
             INSTRUCTIONS,
             Message::system(system_prompt(
                 chat,
                 &tools,
                 agentic,
-                &SearchContext::new(&state.config().web_search).capability(),
+                &capability,
                 &environment,
-                &findings.text,
-                &memory,
-                &skills,
+                &fitted.findings.text,
+                &fitted.memory,
+                &fitted.skills,
             )),
         )
         .with_preserve(true)
-        .with_consumed(true),
-    ];
+        .with_consumed(true)
+    };
+    let mut entries = vec![instructions(&Fitted::default())];
     entries.extend(history.entries.into_iter().map(|entry| {
         let preserve = pending.is_none() && history.latest_user.as_ref() == Some(&entry.id)
             || entry.message.role == Role::System;
@@ -610,6 +576,19 @@ pub async fn build(
         reported,
     };
     context.search(&SearchContext::new(&state.config().web_search));
+    let sent = agentic.then(|| tools.definitions());
+    let fitted = blocks.fit(Allowance::room(
+        &chat.model_name,
+        &context.entries,
+        sent.as_deref(),
+        &context.policy,
+    ));
+    context.entries[0] = instructions(&fitted);
+    let Fitted {
+        findings,
+        memory,
+        skills,
+    } = fitted;
     Ok(Preparation {
         model: chat.model_name.clone(),
         agentic,
@@ -632,6 +611,72 @@ pub async fn build(
         effort: chat.reasoning_effort,
         driver,
     })
+}
+
+/// What a chat's optional blocks are rendered from, read together. A store
+/// that cannot be read costs the turn its block and a logged warning, never
+/// the reply.
+async fn read_blocks(
+    state: &AppState,
+    chat: &ChatRow,
+    agentic: bool,
+    tools: &ChatTools,
+    workspace: Uuid,
+    user: Uuid,
+) -> Blocks {
+    let learned = async {
+        if reads_learned(chat, agentic) {
+            learned::load(state.db(), workspace).await
+        } else {
+            learned::Learned::default()
+        }
+    };
+    // Every chat reads what is remembered about the person it is talking to:
+    // a profile and a set of preferences describe them and how they want to be
+    // worked with, and a chat with its agent off is still a chat with them.
+    // Only a chat holding the memory tools is given the fact index, which
+    // names `memory_read` and is nothing without it.
+    let recall = if agentic {
+        crate::agent::memory::render::Recall::Indexed
+    } else {
+        crate::agent::memory::render::Recall::Passive
+    };
+    let memory = async {
+        crate::agent::memory::render::load(state.db(), recall, workspace, user)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    chat_id = %chat.id,
+                    %error,
+                    "Failed to load remembered entries; continuing without them"
+                );
+                Default::default()
+            })
+    };
+    // A skill is opened with read_document, so only a chat that can call it
+    // is shown the index: a plain chat, or one with its agent off, has no
+    // loader in front of the model and is told of nothing.
+    let skills = async {
+        if !(agentic && tools.has("read_document")) {
+            return Default::default();
+        }
+        crate::agent::skills::load(state.db(), workspace)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    chat_id = %chat.id,
+                    %error,
+                    "Failed to load the skills index; continuing without it"
+                );
+                Default::default()
+            })
+    };
+    let (learned, memory, skills) = tokio::join!(learned, memory, skills);
+    Blocks {
+        learned,
+        memory,
+        skills,
+    }
 }
 
 /// The content of the newest canonical user turn, read before `history.entries`
@@ -893,6 +938,7 @@ mod tests {
             )),
             None,
             &[],
+            crate::agent::memory::render::MAX_RENDERED_BYTES,
         )
     }
 
@@ -1013,65 +1059,406 @@ mod tests {
         }
     }
 
-    /// A plain chat on a 4,096-token window whose system entry carries the
-    /// learned block and nothing else of the workspace's, and whose turn's
-    /// message is the only other entry, so nothing can be compacted to make
-    /// room.
-    #[tokio::test]
-    async fn a_small_window_prepares_a_turn_with_a_full_learned_store() {
-        let window = 4_096;
-        let policy = Policy::new(
-            Some(window),
-            Settings::default().reserved(Some(window)),
-            ContextSource::Runtime,
-        );
-        let input = policy.input_limit().expect("a known window");
-        let turn = |findings: &str| {
-            let system = system_prompt(
-                &chat_row(None, false, false),
-                &ChatTools::with_names(crate::agent::ToolProfile::Chat, &[], None),
-                false,
-                CAPABILITY,
-                &environment(),
-                findings,
-                "",
-                "",
-            );
-            [
-                Entry::new(INSTRUCTIONS, Message::system(system))
-                    .with_preserve(true)
-                    .with_consumed(true),
-                Entry::new(
-                    "draft",
-                    Message::user("Which branch do deploys go out from?"),
-                )
-                .with_preserve(true),
-            ]
+    /// The windows a chat is tested on: the smallest a model ships with, the
+    /// one a plain chat's blocks first fit part of, the one an agentic chat's
+    /// do, and the default.
+    const WINDOWS: [u64; 4] = [4_096, 8_192, 24_576, 32_768];
+
+    /// The question every turn these tests prepare asks.
+    const QUESTION: &str = "Which branch do deploys go out from?";
+
+    /// The catalog a chat with its agent on is offered, built the way a
+    /// preview builds it: every registered tool, the deferred ones listed by
+    /// name and their schemas held back.
+    async fn catalog() -> ChatTools {
+        ChatTools::preview(WorkspaceScope {
+            state: crate::state::AppState::for_tests(),
+            user_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
+            offline: false,
+            origin: crate::db::tasks::Origin::Member,
+        })
+        .await
+    }
+
+    /// The search context a turn is built with when nobody asked for a
+    /// lookup, whose capability tail and supplement every turn carries.
+    fn search() -> SearchContext {
+        SearchContext::new(&crate::state::AppState::for_tests().config().web_search)
+    }
+
+    /// Everything one person can have remembered, each entry at its storage
+    /// limit and the index at its row limit.
+    fn full_memory() -> (
+        crate::db::memory::MemoryRow,
+        crate::db::memory::MemoryRow,
+        Vec<crate::db::memory::MemoryIndexRow>,
+    ) {
+        use crate::agent::memory::render::memory_row;
+        use crate::db::memory::{
+            MAX_ENTRY_CHARS, MAX_FACTS, MemoryCategory, MemoryIndexRow, PREFERENCES_TITLE,
+            PROFILE_TITLE,
         };
-        let ceiling = learned::render(&full_store(), learned::MAX_RENDERED_BYTES);
-        assert!(
-            context::estimate("fixture-model", &turn(&ceiling.text), None, &policy, None).used
-                > input,
-            "the block a large window carries has to overflow this one for the test to prove \
-             anything"
-        );
 
-        let findings = learned::render(&full_store(), learned::budget(Some(input)));
-        assert!(findings.text.len() <= learned::budget(Some(input)));
-        let entries = turn(&findings.text);
-
-        let prepared = context::prepare(
-            &LlmClient::new(abnegate_llm::LlmConfig::default()).summarizer(),
-            "fixture-model",
-            &entries,
-            None,
-            &policy,
-            None,
+        let facts = (0..MAX_FACTS)
+            .map(|index| MemoryIndexRow {
+                title: format!("Fact {index:02}"),
+                description: Some(format!("What fact {index:02} is for")),
+                category: MemoryCategory::Fact.as_str().to_string(),
+                version: 1,
+            })
+            .collect();
+        (
+            memory_row(
+                MemoryCategory::Profile,
+                PROFILE_TITLE,
+                &"p".repeat(MAX_ENTRY_CHARS),
+            ),
+            memory_row(
+                MemoryCategory::Preference,
+                PREFERENCES_TITLE,
+                &"q".repeat(MAX_ENTRY_CHARS),
+            ),
+            facts,
         )
-        .await;
+    }
 
-        let prepared = prepared.expect("the turn fits the window it runs in");
-        assert!(prepared.usage.used <= input, "{:?}", prepared.usage);
+    /// As many skills as the index lists, each with a trigger at its limit.
+    fn full_skills() -> Vec<crate::db::knowledge::SkillRow> {
+        (0..crate::agent::skills::MAX_SKILLS)
+            .map(|index| crate::db::knowledge::SkillRow {
+                id: Uuid::new_v4(),
+                title: format!("Skill {index:02}"),
+                head: format!(
+                    "---\ndescription: {}\n---\n",
+                    "w".repeat(crate::agent::skills::MAX_TRIGGER_CHARS)
+                ),
+            })
+            .collect()
+    }
+
+    /// A summarizer that writes the largest checkpoint `context::prepare`
+    /// accepts on `policy`, so a turn that compacts lands as high as any
+    /// compaction can leave it.
+    fn largest_checkpoint(policy: &Policy) -> abnegate_llm::provider::testing::StubProvider {
+        let empty = r#"{"objective":"","constraints":[],"corrections":[],"decisions":[],"completed":[],"evidence":[],"failed":[],"pending":[],"questions":[]}"#;
+        let bytes = usize::try_from(policy.reserved).expect("a reservation fits a usize") * 4;
+        let objective = "o".repeat(bytes - empty.len());
+        abnegate_llm::provider::testing::StubProvider::answering(
+            "summarizer",
+            empty.replacen(
+                r#""objective":"""#,
+                &format!(r#""objective":"{objective}""#),
+                1,
+            ),
+        )
+    }
+
+    /// A conversation already shown to the model that alone outweighs
+    /// `policy`'s input, so the turn has to compact it to be sent at all.
+    fn long_history(policy: &Policy) -> Vec<Message> {
+        let input = usize::try_from(policy.input_limit().expect("a known window"))
+            .expect("a window fits a usize");
+        (0..4)
+            .flat_map(|index| {
+                [
+                    Message::user(format!("Question {index}: {}", "u".repeat(input / 2))),
+                    Message::assistant(format!("Answer {index}: {}", "a".repeat(input / 2))),
+                ]
+            })
+            .collect()
+    }
+
+    /// One turn: the system entry, `history`, the question, and the search
+    /// supplement every turn is sent.
+    fn turn(system: &str, history: &[Message]) -> Vec<Entry> {
+        let mut messages = vec![Message::system(system)];
+        messages.extend(history.iter().cloned());
+        messages.push(Message::user(QUESTION));
+        let mut context = RunContext::from_messages(messages);
+        context.search(&search());
+        context.entries
+    }
+
+    /// What a chat's blocks are rendered from in a workspace that has learned
+    /// more than any block shows, for a person with everything remembered
+    /// that memory holds, and with skills enough to fill the index: each as
+    /// `build` reads it for a chat of this shape.
+    fn full_blocks(agentic: bool, tools: &ChatTools) -> Blocks {
+        let (profile, preferences, facts) = full_memory();
+        let recall = if agentic {
+            crate::agent::memory::render::Recall::Indexed
+        } else {
+            crate::agent::memory::render::Recall::Passive
+        };
+        let skills = if agentic && tools.has("read_document") {
+            crate::agent::skills::Listing {
+                skills: full_skills(),
+                filed: crate::agent::skills::MAX_SKILLS,
+            }
+        } else {
+            crate::agent::skills::Listing::default()
+        };
+        Blocks {
+            learned: full_store(),
+            memory: crate::agent::memory::render::Remembered::new(
+                recall,
+                Some(profile),
+                Some(preferences),
+                facts,
+            ),
+            skills,
+        }
+    }
+
+    /// One shape of chat on one window: its catalog, what it sends, and the
+    /// system entry with and without its blocks.
+    struct Shape {
+        policy: Policy,
+        agentic: bool,
+        sent: Option<Vec<abnegate_llm::ToolDefinition>>,
+        blocks: Blocks,
+        bare: String,
+        room: Option<usize>,
+        fitted: Fitted,
+        full: String,
+    }
+
+    impl Shape {
+        /// The blocks fitted the way `build` fits them: to what the turn the
+        /// chat would send with every block empty leaves.
+        fn of(window: Option<u64>, agentic: bool, tools: &ChatTools) -> Self {
+            let policy = Policy::new(
+                window,
+                Settings::default().reserved(window),
+                ContextSource::Runtime,
+            );
+            let chat = chat_row(None, agentic, false);
+            let capability = search().capability();
+            let compose = |fitted: &Fitted| {
+                system_prompt(
+                    &chat,
+                    tools,
+                    agentic,
+                    &capability,
+                    &environment(),
+                    &fitted.findings.text,
+                    &fitted.memory,
+                    &fitted.skills,
+                )
+            };
+            let sent = agentic.then(|| tools.definitions());
+            let bare = compose(&Fitted::default());
+            let room =
+                Allowance::room("fixture-model", &turn(&bare, &[]), sent.as_deref(), &policy);
+            let blocks = full_blocks(agentic, tools);
+            let fitted = blocks.fit(room);
+            let full = compose(&fitted);
+            Self {
+                policy,
+                agentic,
+                sent,
+                blocks,
+                bare,
+                room,
+                fitted,
+                full,
+            }
+        }
+
+        async fn prepare(
+            &self,
+            system: &str,
+            history: &[Message],
+            summarizer: &abnegate_llm::provider::testing::StubProvider,
+        ) -> Result<context::Prepared, context::ContextError> {
+            context::prepare(
+                summarizer,
+                "fixture-model",
+                &turn(system, history),
+                self.sent.as_deref(),
+                &self.policy,
+                None,
+            )
+            .await
+        }
+
+        fn kind(&self) -> &'static str {
+            if self.agentic { "agentic" } else { "plain" }
+        }
+    }
+
+    /// Whatever window a chat runs on and whatever its history, a turn that
+    /// prepares with nothing learned, remembered or indexed still prepares
+    /// with all three full: the summarizer writes the largest checkpoint it
+    /// may, and the agentic turn is sent the schemas a turn is handed.
+    #[tokio::test]
+    async fn the_optional_blocks_never_make_a_turn_unpreparable() {
+        let tools = catalog().await;
+        let mut proven = Vec::new();
+        for window in WINDOWS {
+            for agentic in [false, true] {
+                let shape = Shape::of(Some(window), agentic, &tools);
+                let room = shape.room.expect("a known window");
+                let fitted = &shape.fitted;
+                assert!(
+                    fitted.findings.text.len() + fitted.memory.len() + fitted.skills.len() <= room,
+                    "a {window}-token {} chat's blocks overrun the {room} bytes it has: {fitted:?}",
+                    shape.kind()
+                );
+                let summarizer = largest_checkpoint(&shape.policy);
+                for history in [Vec::new(), long_history(&shape.policy)] {
+                    if shape
+                        .prepare(&shape.bare, &history, &summarizer)
+                        .await
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let prepared = shape.prepare(&shape.full, &history, &summarizer).await;
+                    assert!(
+                        prepared.is_ok(),
+                        "a {window}-token {} chat with {} messages of history prepares bare and \
+                         fails once the blocks are added: {:?}",
+                        shape.kind(),
+                        history.len(),
+                        prepared.err()
+                    );
+                    proven.push((window, agentic, history.is_empty()));
+                }
+            }
+        }
+        assert!(
+            proven.contains(&(4_096, false, true)),
+            "the smallest window's plain turn has to prepare bare for this to prove anything \
+             there: {proven:?}"
+        );
+        assert!(
+            proven.contains(&(8_192, false, false)),
+            "a plain turn that compacts has to prepare bare somewhere: {proven:?}"
+        );
+        assert!(
+            proven.contains(&(24_576, true, false)),
+            "an agentic turn that compacts has to prepare bare somewhere: {proven:?}"
+        );
+    }
+
+    /// A window that leaves room for every whole block, and one of unknown
+    /// size, render each exactly as its renderer does at its ceiling.
+    #[tokio::test]
+    async fn a_large_window_renders_every_block_exactly_as_its_ceiling_does() {
+        let tools = catalog().await;
+        for window in [Some(32_768), None] {
+            for agentic in [false, true] {
+                let shape = Shape::of(window, agentic, &tools);
+                let blocks = &shape.blocks;
+                assert_eq!(
+                    shape.fitted,
+                    Fitted {
+                        findings: learned::render(&blocks.learned, learned::MAX_RENDERED_BYTES),
+                        memory: blocks
+                            .memory
+                            .render(crate::agent::memory::render::MAX_RENDERED_BYTES),
+                        skills: blocks
+                            .skills
+                            .render(crate::agent::skills::MAX_RENDERED_BYTES),
+                    },
+                    "{window:?} {}",
+                    shape.kind()
+                );
+                assert!(!shape.fitted.findings.text.is_empty());
+                assert!(!shape.fitted.memory.is_empty());
+                assert_eq!(shape.fitted.skills.is_empty(), !agentic);
+            }
+        }
+    }
+
+    /// A window that holds part of each block renders each against its share:
+    /// fewer whole entries, the omission stated, and the learned block naming
+    /// as shown exactly the entries its text carries.
+    #[tokio::test]
+    async fn a_middling_window_shows_part_of_every_block_it_reads() {
+        let tools = catalog().await;
+        for (window, agentic) in [(8_192, false), (24_576, true)] {
+            let shape = Shape::of(Some(window), agentic, &tools);
+            let blocks = &shape.blocks;
+            let fitted = &shape.fitted;
+            let ceiling = learned::render(&blocks.learned, learned::MAX_RENDERED_BYTES);
+            assert!(
+                !fitted.findings.text.is_empty() && fitted.findings.text.len() < ceiling.text.len(),
+                "{window}: {}",
+                fitted.findings.text
+            );
+            assert!(
+                fitted.findings.text.contains("not shown here."),
+                "{}",
+                fitted.findings.text
+            );
+            let every = blocks
+                .learned
+                .instructions
+                .iter()
+                .chain(blocks.learned.facts.iter().flat_map(|facts| &facts.entries))
+                .chain(&blocks.learned.discoveries.rows);
+            for entry in every {
+                assert_eq!(
+                    fitted.findings.shown.contains(&entry.id),
+                    fitted.findings.text.contains(&entry.content),
+                    "{} is named as shown exactly when its text is",
+                    entry.title
+                );
+            }
+            let memory = blocks
+                .memory
+                .render(crate::agent::memory::render::MAX_RENDERED_BYTES);
+            assert!(
+                !fitted.memory.is_empty() && fitted.memory.len() < memory.len(),
+                "{window}: {}",
+                fitted.memory
+            );
+            if agentic {
+                let skills = blocks
+                    .skills
+                    .render(crate::agent::skills::MAX_RENDERED_BYTES);
+                assert!(
+                    !fitted.skills.is_empty() && fitted.skills.len() < skills.len(),
+                    "{window}: {}",
+                    fitted.skills
+                );
+                assert!(
+                    fitted.skills.contains("more skills are filed"),
+                    "{}",
+                    fitted.skills
+                );
+            }
+        }
+    }
+
+    /// On a 4,096-token window an agentic chat's own prompt and the schemas
+    /// it is sent outweigh the input before any block is added, so it is
+    /// given none: that turn's overflow is the catalog's, not the blocks'. A
+    /// plain chat's prompt and the room a checkpoint keeps leave nothing
+    /// either.
+    #[tokio::test]
+    async fn the_smallest_window_carries_no_block_at_all() {
+        let tools = catalog().await;
+        for agentic in [false, true] {
+            let shape = Shape::of(Some(4_096), agentic, &tools);
+            assert_eq!(shape.room, Some(0), "{}", shape.kind());
+            assert_eq!(shape.fitted, Fitted::default(), "{}", shape.kind());
+            assert_eq!(shape.full, shape.bare, "{}", shape.kind());
+        }
+        let input = Shape::of(Some(4_096), true, &tools)
+            .policy
+            .input_limit()
+            .expect("a known window");
+        let schemas = serde_json::to_string(&tools.definitions()).expect("schemas serialize");
+        assert!(
+            context::tokens(&schemas) > input,
+            "{} tokens of schemas against {input} of input",
+            context::tokens(&schemas)
+        );
     }
 
     const PIXEL: &str = "data:image/png;base64,iVBORw0KGgo=";
@@ -1362,6 +1749,7 @@ mod tests {
                 head: "---\ndescription: Use when shipping to production.\n---\n".into(),
             }],
             1,
+            crate::agent::skills::MAX_RENDERED_BYTES,
         );
         assert!(skills.starts_with("\n\n# Skills"));
         let without = system_prompt(
@@ -1460,6 +1848,7 @@ mod tests {
                 head: "---\ndescription: Use when shipping to production.\n---\n".into(),
             }],
             1,
+            crate::agent::skills::MAX_RENDERED_BYTES,
         );
 
         let bare = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "", "");

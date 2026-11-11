@@ -1893,6 +1893,7 @@ mod guidance_tests {
                 "Answer with the command first and the reasoning after it.",
             )),
             &[],
+            crate::agent::memory::render::MAX_RENDERED_BYTES,
         )
     }
 
@@ -1905,6 +1906,7 @@ mod guidance_tests {
                 head: "---\ndescription: Use when shipping to production.\n---\n".into(),
             }],
             1,
+            crate::agent::skills::MAX_RENDERED_BYTES,
         )
     }
 

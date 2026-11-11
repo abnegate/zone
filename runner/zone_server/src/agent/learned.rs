@@ -14,12 +14,10 @@
 //! is held to. Bytes, because the prompt ceilings are `String::len()` and the
 //! context estimate is byte-length based.
 //!
-//! That ceiling is a large window's. A small one cannot carry it: on a
-//! 4,096-token model the reply's reservation leaves 3,072 tokens of input, and
-//! 8,000 bytes is two thousand of them before the prompt itself, so a turn
-//! whose history has nothing left to compact would fail to prepare. The bound
-//! a chat renders against is therefore [`budget`]: an eighth of the input the
-//! model's window leaves, and never more than the ceiling.
+//! That ceiling is a large window's. A small one cannot carry it, so the bound
+//! a chat renders against is the share of what its window leaves that the
+//! chat's session gives this block beside the memory block and the skills
+//! index (`services::chat::session::allowance`), never more than the ceiling.
 //!
 //! Past the bound, an entry too large to be shown even alone under its
 //! family's heading goes first, so the entries filed before it are not spent
@@ -33,7 +31,9 @@
 //! list that reads as complete and is not would have the reader take a missing
 //! entry for no entry. The count includes what the stores' own row limits
 //! never read, and with no entry shown at all the line stands under a heading
-//! of its own rather than under whatever the prompt said last.
+//! of its own rather than under whatever the prompt said last. A bound too
+//! small for even that line renders nothing at all: the window has no room
+//! for the block, and an empty block shows no entry.
 //!
 //! The discoveries block arrives already held to a bound of its own and says
 //! what that bound left out, the entries its store's row limit never read
@@ -67,17 +67,6 @@ use crate::db::knowledge::{self, LearnedCategory, LearnedEntryRow, discovery};
 /// and sends again with every turn, so what either may add to a prompt is one
 /// number, changed in one place.
 pub const MAX_RENDERED_BYTES: usize = skills::MAX_RENDERED_BYTES;
-
-/// The block may take one part in this many of a model's input. It is one of
-/// three workspace blocks a chat's system entry carries beside the prompt and
-/// the tool definitions, and the input also has to hold the conversation: an
-/// eighth each leaves those the larger part of a small window. The ceiling
-/// binds from 16,000 tokens of input, so the default 32,768-token window and
-/// anything larger render exactly as before.
-const SHARE_OF_INPUT: u64 = 8;
-
-/// What the context estimate counts as one token (`context::tokens`).
-const BYTES_PER_TOKEN: u64 = 4;
 
 const HEADING: &str = "Learned in this workspace";
 
@@ -276,19 +265,8 @@ fn yielding<'sections, 'entries>(
         .max_by_key(|section| section.block.len())
 }
 
-/// The bound a chat's block renders against, for a model whose window leaves
-/// `input` tokens once the reply is reserved: a [`SHARE_OF_INPUT`] share of
-/// it, held to [`MAX_RENDERED_BYTES`]. A window of unknown size gets the
-/// ceiling.
-pub fn budget(input: Option<u64>) -> usize {
-    input.map_or(MAX_RENDERED_BYTES, |tokens| {
-        let share = tokens.saturating_mul(BYTES_PER_TOKEN) / SHARE_OF_INPUT;
-        usize::try_from(share).map_or(MAX_RENDERED_BYTES, |share| share.min(MAX_RENDERED_BYTES))
-    })
-}
-
 /// The block for a chat's system prompt, held to `budget` bytes, and the
-/// entries it shows.
+/// entries it shows. Nothing, when `budget` cannot hold even the closing line.
 pub fn render(learned: &Learned, budget: usize) -> Block {
     let mut sections = learned.sections();
     let mut text = assemble(&sections, learned.unread);
@@ -304,6 +282,9 @@ pub fn render(learned: &Learned, budget: usize) -> Block {
         };
         section.withhold_oldest();
         text = assemble(&sections, learned.unread);
+    }
+    if text.len() > budget {
+        return Block::default();
     }
     let shown = sections.iter().flat_map(Section::shown).collect();
     Block { text, shown }
@@ -1223,21 +1204,31 @@ mod tests {
         assert_eq!(block.shown, ids(&learned, shown));
     }
 
-    /// A 4,096-token window leaves 3,072 tokens of input once a quarter is
-    /// reserved for the reply, and the default 32,768-token window leaves
-    /// 28,672.
+    /// Below what the closing line costs standing alone, the block is left
+    /// out rather than sent over its bound, and names no entry as shown.
     #[test]
-    fn the_bound_is_a_share_of_a_small_window_and_the_ceiling_of_a_large_one() {
-        assert_eq!(budget(Some(3_072)), 1_536);
-        assert_eq!(budget(Some(15_996)), 7_998);
-        assert_eq!(budget(Some(16_000)), MAX_RENDERED_BYTES);
-        assert_eq!(budget(Some(28_672)), MAX_RENDERED_BYTES);
-        assert_eq!(budget(Some(u64::MAX)), MAX_RENDERED_BYTES);
-        assert_eq!(budget(None), MAX_RENDERED_BYTES);
+    fn a_bound_too_small_for_the_closing_line_renders_nothing() {
+        let learned = learned(
+            vec![instruction(0, 120)],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let alone = omitted(1, true);
+
+        assert_eq!(
+            render(&learned, alone.trim_end().len()).text,
+            alone.trim_end()
+        );
+        assert_eq!(
+            render(&learned, alone.trim_end().len() - 1),
+            Block::default()
+        );
+        assert_eq!(render(&learned, 0), Block::default());
     }
 
     #[test]
-    fn a_small_window_shows_fewer_whole_entries_and_names_exactly_those() {
+    fn a_smaller_bound_shows_fewer_whole_entries_and_names_exactly_those() {
         let learned = learned(
             (0..12).map(|index| instruction(index, 120)).collect(),
             (0..12)
@@ -1248,10 +1239,9 @@ mod tests {
                 .collect(),
             (0..12).map(|index| recorded(index, 120)).collect(),
         );
-        let large = render(&learned, budget(Some(28_672)));
-        assert_eq!(large, render(&learned, MAX_RENDERED_BYTES));
+        let large = render(&learned, MAX_RENDERED_BYTES);
 
-        let small = render(&learned, budget(Some(3_072)));
+        let small = render(&learned, 1_536);
         let shown = Shown::of(&small.text);
 
         assert!(small.text.len() <= 1_536, "{} bytes", small.text.len());
