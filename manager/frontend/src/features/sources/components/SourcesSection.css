@@ -262,8 +262,9 @@
   border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card);
 }
 
-.source-details .form-hint {
+.settings-page .source-details .form-hint {
   display: block;
+  -webkit-line-clamp: unset;
   overflow: visible;
 }
 

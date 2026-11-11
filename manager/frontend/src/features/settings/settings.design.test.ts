@@ -174,7 +174,9 @@ describe('sources surfaces', () => {
     const lines = rule(css, '.source-type-name,\n.source-type-desc');
     expect(lines).toContain('white-space: nowrap');
     expect(lines).toContain('text-overflow: ellipsis');
-    expect(css).not.toContain('line-clamp');
+    expect([...css.matchAll(/line-clamp:\s*([^;]+);/g)].map(([, value]) => value)).toEqual([
+      'unset',
+    ]);
   });
 });
 

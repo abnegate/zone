@@ -568,16 +568,13 @@ describe('sources section layout', () => {
     expect(rule(css, '.source-details-body')).not.toContain('flex: 1');
   });
 
-  it('shows source form hints in full over the two-line settings clamp', () => {
+  it('shows source form hints in full over the two-line settings clamp in any import order', () => {
     const settings = read(join(features, 'settings', 'pages', 'SettingsPage.css'));
     expect(rule(settings, '.settings-page .form-hint')).toContain('display: -webkit-box');
-    const hint = rule(css, '.source-details .form-hint');
+    const hint = rule(css, '.settings-page .source-details .form-hint');
     expect(hint).toContain('display: block');
     expect(hint).toContain('overflow: visible');
-    const cascade = read(join(import.meta.dir, 'cascade.ts'));
-    expect(cascade.indexOf('/sources/components/SourcesSection.css')).toBeGreaterThan(
-      cascade.indexOf('/settings/pages/SettingsPage.css')
-    );
+    expect(hint).toContain('-webkit-line-clamp: unset');
   });
 
   it('leaves the empty state to sit in the section flow like its sibling sections', () => {
