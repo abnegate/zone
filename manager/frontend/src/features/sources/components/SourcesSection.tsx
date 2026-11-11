@@ -229,7 +229,7 @@ export function SourcesSection(): ReactElement {
                     <td>
                       <span className="source-meta">
                         {source.last_verified_at
-                          ? `Verified ${formatVerified(source.last_verified_at)}`
+                          ? formatVerified(source.last_verified_at)
                           : 'Never verified'}
                       </span>
                     </td>

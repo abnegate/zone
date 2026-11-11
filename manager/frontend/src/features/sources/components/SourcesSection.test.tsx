@@ -546,11 +546,17 @@ describe('SourcesSection', () => {
     });
   });
 
-  it('displays verified date', async () => {
+  it('displays the verified date without repeating the column heading', async () => {
     renderSection();
-    await waitFor(() => {
-      expect(screen.getByText(/^Verified \w{3} \d/)).toBeInTheDocument();
+    const row = await screen.findByText('GitHub Repository');
+    const verified = new Date('2024-01-15T00:00:00Z').toLocaleDateString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
     });
+    expect(
+      (row.closest('.source-card') as HTMLElement).querySelector('.source-meta')?.textContent
+    ).toBe(verified);
   });
 
   it('applies inactive styling to inactive sources', async () => {
