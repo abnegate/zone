@@ -924,7 +924,10 @@ mod tests {
                 category: LearnedCategory::RepositoryConvention,
                 entries: vec![entry("Migration names", CONVENTION)],
             }],
-            discoveries: vec![entry("Test database port", DISCOVERY)],
+            discoveries: crate::db::knowledge::discovery::Listing {
+                rows: vec![entry("Test database port", DISCOVERY)],
+                recorded: 1,
+            },
             unread: 0,
         })
         .text

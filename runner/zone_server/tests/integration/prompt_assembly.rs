@@ -1006,3 +1006,87 @@ async fn a_chat_is_told_how_many_entries_a_row_limit_kept_from_it() {
     assert!(block.text.len() <= learned::MAX_RENDERED_BYTES);
     assert_eq!(block.shown.len(), read);
 }
+
+/// The discoveries are read to a row limit of their own and their block says
+/// how many entries it does not show. In a workspace that has recorded more
+/// than the limit a chat's count has to be of everything recorded, the rows
+/// nothing read included, which is the count a run in the same workspace
+/// reads.
+#[tokio::test]
+async fn a_chat_is_told_how_many_discoveries_it_is_not_shown() {
+    const RECORDED: usize = discovery::MAX_LISTED + 6;
+
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a migrated disposable database");
+    let (organization, workspace) = workspace(&pool).await;
+    let author = users::create_user(
+        &pool,
+        &format!("{}@example.com", Uuid::new_v4()),
+        "hash",
+        None,
+        false,
+    )
+    .await
+    .expect("whoever the recording chats were acting for")
+    .id;
+    let chats = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+    for index in 0..RECORDED {
+        discovery::record(
+            &pool,
+            &Discovery {
+                workspace_id: workspace,
+                subject: format!("Subject {index:03}"),
+                statement: format!("Statement {index:03}."),
+                author,
+                provenance: discovery::Provenance {
+                    kind: discovery::Kind::Lesson,
+                    source: discovery::Source::Chat(chats[index % chats.len()]),
+                    last_confirmed: confirmed(),
+                },
+            },
+        )
+        .await
+        .expect("a discovery");
+    }
+
+    let loaded = learned::load(&pool, workspace).await;
+    let block = learned::render(&loaded);
+    let run = knowledge::learned_facts_prompt(&pool, workspace).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("the workspace and everything in it go");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(author)
+        .execute(&pool)
+        .await
+        .expect("the author goes");
+
+    assert_eq!(loaded.discoveries.rows.len(), discovery::MAX_LISTED);
+    assert_eq!(loaded.discoveries.recorded, RECORDED);
+    assert_eq!(loaded.unread, 0, "the discoveries block counts its own");
+    let shown = block.shown.len();
+    assert!(
+        shown > 0 && shown < discovery::MAX_LISTED,
+        "the block's own bound shows {shown} of the {} rows read",
+        discovery::MAX_LISTED
+    );
+    assert_eq!(block.text.matches("\n- Subject ").count(), shown);
+    assert!(
+        block.text.ends_with(&format!(
+            "\n\n{} older entries are recorded here but not shown.",
+            RECORDED - shown
+        )),
+        "{}",
+        &block.text[block.text.len() - 160..]
+    );
+    assert_eq!(
+        block.text,
+        run.expect("what a run reads").trim_end(),
+        "a chat reads the count a run reads"
+    );
+    assert!(!block.text.contains("learned entr"), "{}", block.text);
+    assert!(block.text.len() <= learned::MAX_RENDERED_BYTES);
+}

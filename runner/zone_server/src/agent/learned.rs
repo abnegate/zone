@@ -29,8 +29,13 @@
 //! of its own rather than under whatever the prompt said last.
 //!
 //! The discoveries block arrives already held to a bound of its own and says
-//! what that bound left out. The closing line here counts only what this bound
-//! took on top, so the two never count one entry twice.
+//! what that bound left out, the entries its store's row limit never read
+//! among them: it is rendered from the rows this bound hands it, out of those
+//! and the ones past the limit. The closing line here counts only what this
+//! bound took on top, so the two never count one entry twice, and between
+//! them every entry not shown is counted. Only when this bound takes the
+//! family's last entry, and its block with it, does the closing line answer
+//! for the ones past the limit too.
 //!
 //! The block opens with the blank line every block in a system prompt owns and
 //! ends without a newline, so whatever follows it sits one blank line below.
@@ -67,12 +72,14 @@ pub struct Facts {
     pub entries: Vec<LearnedEntryRow>,
 }
 
-/// Everything a workspace has learned, each family most recent first.
+/// Everything a workspace has learned, each family in the order its store
+/// lists it: the first entry is the last to go.
 #[derive(Debug, Clone, Default)]
 pub struct Learned {
     pub instructions: Vec<LearnedEntryRow>,
     pub facts: Vec<Facts>,
-    pub discoveries: Vec<LearnedEntryRow>,
+    /// The rows read, and how many are recorded in all.
+    pub discoveries: discovery::Listing,
     /// How many standing instructions and learned facts are filed past their
     /// stores' row limits and so were never read. The discoveries block
     /// accounts for its own.
@@ -93,7 +100,11 @@ pub struct Block {
 enum Family {
     Instructions,
     Facts(LearnedCategory),
-    Discoveries,
+    Discoveries {
+        /// How many are recorded past the store's row limit. The family's
+        /// block counts them among what it does not show.
+        unread: usize,
+    },
 }
 
 impl Family {
@@ -101,7 +112,9 @@ impl Family {
         match self {
             Family::Instructions => knowledge::render_standing_instructions(entries),
             Family::Facts(category) => knowledge::render_learned_facts(category, entries),
-            Family::Discoveries => discovery::render(entries),
+            Family::Discoveries { unread } => {
+                discovery::render_among(entries, entries.len() + unread)
+            }
         }
     }
 
@@ -120,7 +133,9 @@ impl Family {
             Family::Instructions | Family::Facts(_) => {
                 entries.iter().map(|entry| entry.id).collect()
             }
-            Family::Discoveries => discovery::block(entries, entries.len()).shown,
+            Family::Discoveries { unread } => {
+                discovery::block(entries, entries.len() + unread).shown
+            }
         }
     }
 }
@@ -170,6 +185,16 @@ impl<'a> Section<'a> {
     fn shown(&self) -> Vec<Uuid> {
         self.family.shown(&self.entries[..self.handed])
     }
+
+    /// How many of the family's entries the closing line answers for: the
+    /// ones this bound took, and once it has taken every discovery it was
+    /// handed, the ones past their row limit, which no block is left to count.
+    fn closing(&self) -> usize {
+        match self.family {
+            Family::Discoveries { unread } if self.handed == 0 => self.withheld + unread,
+            _ => self.withheld,
+        }
+    }
 }
 
 impl Learned {
@@ -179,7 +204,12 @@ impl Learned {
         for facts in &self.facts {
             sections.push(Section::new(Family::Facts(facts.category), &facts.entries));
         }
-        sections.push(Section::new(Family::Discoveries, &self.discoveries));
+        let discoveries = &self.discoveries;
+        let unread = discoveries.recorded.saturating_sub(discoveries.rows.len());
+        sections.push(Section::new(
+            Family::Discoveries { unread },
+            &discoveries.rows,
+        ));
         sections
     }
 }
@@ -205,11 +235,7 @@ fn assemble(sections: &[Section<'_>], unread: usize) -> String {
         .iter()
         .map(|section| section.block.as_str())
         .collect();
-    let withheld = unread
-        + sections
-            .iter()
-            .map(|section| section.withheld)
-            .sum::<usize>();
+    let withheld = unread + sections.iter().map(Section::closing).sum::<usize>();
     let notice = match withheld {
         0 => String::new(),
         count => omitted(count, blocks.iter().all(|block| block.is_empty())),
@@ -252,13 +278,13 @@ pub fn render(learned: &Learned) -> Block {
     Block { text, shown }
 }
 
-/// One family's rows, or none of them and a warning when its store cannot be
+/// What one family's store read, or nothing and a warning when it cannot be
 /// read: a failed family costs a chat that family, as it costs a run.
-async fn read(
+async fn read<Rows: Default>(
     workspace_id: Uuid,
     category: &str,
-    rows: impl Future<Output = DbResult<Vec<LearnedEntryRow>>>,
-) -> Vec<LearnedEntryRow> {
+    rows: impl Future<Output = DbResult<Rows>>,
+) -> Rows {
     rows.await.unwrap_or_else(|error| {
         tracing::warn!(
             %workspace_id,
@@ -266,7 +292,7 @@ async fn read(
             %error,
             "Failed to load a learned family; continuing without it"
         );
-        Vec::new()
+        Rows::default()
     })
 }
 
@@ -324,7 +350,7 @@ pub async fn load(pool: &PgPool, workspace_id: Uuid) -> Learned {
         read(
             workspace_id,
             discovery::CATEGORY,
-            discovery::list(pool, workspace_id),
+            discovery::listing(pool, workspace_id),
         ),
         tally(pool, workspace_id),
     );
@@ -448,7 +474,10 @@ mod tests {
                     entries: lessons,
                 },
             ],
-            discoveries,
+            discoveries: discovery::Listing {
+                recorded: discoveries.len(),
+                rows: discoveries,
+            },
             unread: 0,
         }
     }
@@ -492,7 +521,10 @@ mod tests {
                 LearnedCategory::StrategyLesson,
                 &learned.facts[1].entries[..shown.lessons],
             ),
-            discovery::render(&learned.discoveries[..shown.discoveries]),
+            discovery::render_among(
+                &learned.discoveries.rows[..shown.discoveries],
+                shown.discoveries + past_the_row_limit(learned),
+            ),
         ];
         let mut expected: String = blocks.iter().map(|block| block.trim_end()).collect();
         expected.push_str(notice);
@@ -511,6 +543,10 @@ mod tests {
         }
     }
 
+    fn past_the_row_limit(learned: &Learned) -> usize {
+        learned.discoveries.recorded - learned.discoveries.rows.len()
+    }
+
     fn entries(learned: &Learned) -> usize {
         learned.instructions.len()
             + learned
@@ -518,7 +554,7 @@ mod tests {
                 .iter()
                 .map(|facts| facts.entries.len())
                 .sum::<usize>()
-            + learned.discoveries.len()
+            + learned.discoveries.rows.len()
     }
 
     /// The ids of the first `shown` entries of each family.
@@ -527,7 +563,7 @@ mod tests {
             .iter()
             .chain(&learned.facts[0].entries[..shown.conventions])
             .chain(&learned.facts[1].entries[..shown.lessons])
-            .chain(&learned.discoveries[..shown.discoveries])
+            .chain(&learned.discoveries.rows[..shown.discoveries])
             .map(|entry| entry.id)
             .collect()
     }
@@ -577,7 +613,7 @@ mod tests {
                     &learned.facts[1].entries
                 )
                 .trim_end(),
-                discovery::render(&learned.discoveries).trim_end(),
+                discovery::render(&learned.discoveries.rows).trim_end(),
             )
         );
         assert!(text.starts_with("\n\n# Standing instructions\n"), "{text}");
@@ -970,12 +1006,12 @@ mod tests {
 
         assert_eq!(
             block.text,
-            discovery::render(&learned.discoveries).trim_end()
+            discovery::render(&learned.discoveries.rows).trim_end()
         );
         assert!(shown.discoveries > 0 && shown.discoveries < 40, "{shown:?}");
         assert!(!block.text.contains("learned entr"), "{}", block.text);
         assert_eq!(block.shown, ids(&learned, shown));
-        for (index, discovery) in learned.discoveries.iter().enumerate() {
+        for (index, discovery) in learned.discoveries.rows.iter().enumerate() {
             assert_eq!(
                 block.shown.contains(&discovery.id),
                 block.text.contains(&discovery.content),
@@ -1004,7 +1040,7 @@ mod tests {
 
         assert_eq!(
             block.text,
-            discovery::render(&learned.discoveries).trim_end()
+            discovery::render(&learned.discoveries.rows).trim_end()
         );
         assert!(
             block.text.contains("discovery-00") && block.text.contains("discovery-02"),
@@ -1021,8 +1057,119 @@ mod tests {
         );
         assert_eq!(
             block.shown,
-            HashSet::from([learned.discoveries[0].id, learned.discoveries[2].id])
+            HashSet::from([
+                learned.discoveries.rows[0].id,
+                learned.discoveries.rows[2].id
+            ])
         );
+    }
+
+    /// A workspace holds more discoveries than the store reads. The ones
+    /// never read are not shown either, and the discoveries block is the one
+    /// that says so: its count is of everything recorded, and this block adds
+    /// no line of its own while its bound has taken nothing.
+    #[test]
+    fn discoveries_past_their_row_limit_are_counted_by_their_own_block() {
+        let mut learned = learned(
+            vec![instruction(0, 80)],
+            Vec::new(),
+            Vec::new(),
+            (0..12)
+                .map(|index| recorded(index, discovery::MAX_ENTRY_BYTES - "Subject 00".len()))
+                .collect(),
+        );
+        learned.discoveries.recorded = 130;
+        let block = render(&learned);
+        let shown = Shown::of(&block.text);
+
+        assert!(shown.discoveries > 0 && shown.discoveries < 12, "{shown:?}");
+        assert_eq!(
+            block.text,
+            format!(
+                "{}{}",
+                knowledge::render_standing_instructions(&learned.instructions).trim_end(),
+                discovery::render_among(&learned.discoveries.rows, 130).trim_end()
+            )
+        );
+        assert!(
+            block.text.ends_with(&format!(
+                "\n\n{} older entries are recorded here but not shown.",
+                130 - shown.discoveries
+            )),
+            "{}",
+            &block.text[block.text.len() - 120..]
+        );
+        assert!(!block.text.contains("learned entr"), "{}", block.text);
+        assert_eq!(block.shown, ids(&learned, shown));
+    }
+
+    /// Past this bound as well, with rows the store never read: the two lines
+    /// count different entries, and together every one that is not shown.
+    #[test]
+    fn with_both_bounds_at_work_every_entry_not_shown_is_counted_once() {
+        const RECORDED: usize = 130;
+        const READ: usize = 40;
+
+        let mut learned = learned(
+            (0..4).map(|index| instruction(index, 600)).collect(),
+            Vec::new(),
+            Vec::new(),
+            (0..READ)
+                .map(|index| recorded(index, discovery::MAX_ENTRY_BYTES - "Subject 00".len()))
+                .collect(),
+        );
+        learned.discoveries.recorded = RECORDED;
+        let block = render(&learned);
+        let shown = Shown::of(&block.text);
+
+        assert!(
+            block.text.len() <= MAX_RENDERED_BYTES,
+            "{} bytes",
+            block.text.len()
+        );
+        assert_eq!(shown.instructions, 4, "{shown:?}");
+        assert!(shown.discoveries > 0, "{shown:?}");
+        assert_eq!(
+            block.text,
+            expected(&learned, shown, &more(READ - shown.discoveries))
+        );
+        assert!(
+            block.text.contains(&format!(
+                "\n\n{} older entries are recorded here but not shown.\n\n{} more learned \
+                 entries are filed in this workspace but not shown here.",
+                RECORDED - READ,
+                READ - shown.discoveries
+            )),
+            "{}",
+            &block.text[block.text.len() - 240..]
+        );
+        assert_eq!(block.shown, ids(&learned, shown));
+    }
+
+    /// With every family down to one entry the largest goes, and here that is
+    /// the only discovery read. Its block goes with it, so the entries past
+    /// the row limit, which that block was counting, are the closing line's.
+    #[test]
+    fn the_closing_line_counts_past_the_row_limit_once_no_discovery_is_shown() {
+        let mut learned = learned(
+            vec![instruction(0, 3_000)],
+            Vec::new(),
+            Vec::new(),
+            vec![recorded(0, 5_200)],
+        );
+        learned.discoveries.recorded = 4;
+        let block = render(&learned);
+
+        assert_eq!(
+            block.text,
+            format!(
+                "{}{}",
+                knowledge::render_standing_instructions(&learned.instructions).trim_end(),
+                more(4)
+            )
+        );
+        assert!(!block.text.contains("recorded here"), "{}", block.text);
+        assert_eq!(block.shown, HashSet::from([learned.instructions[0].id]));
     }
 
     /// The same forty beside enough standing instructions to push the whole
@@ -1050,7 +1197,7 @@ mod tests {
         assert!(shown.discoveries > 0, "{shown:?}");
         assert_eq!(
             Shown::of(&discovery::render(
-                &learned.discoveries[..shown.discoveries]
+                &learned.discoveries.rows[..shown.discoveries]
             ))
             .discoveries,
             shown.discoveries,
@@ -1070,10 +1217,17 @@ mod tests {
         let workspace = Uuid::new_v4();
         let conventions = vec![fact(LearnedCategory::RepositoryConvention, 0, 60)];
 
-        let failed = read(workspace, knowledge::STANDING_INSTRUCTION_CATEGORY, async {
+        let failed: Vec<LearnedEntryRow> =
+            read(workspace, knowledge::STANDING_INSTRUCTION_CATEGORY, async {
+                Err(sqlx::Error::PoolTimedOut)
+            })
+            .await;
+        let unlisted: discovery::Listing = read(workspace, discovery::CATEGORY, async {
             Err(sqlx::Error::PoolTimedOut)
         })
         .await;
+        assert!(unlisted.rows.is_empty(), "{unlisted:?}");
+        assert_eq!(unlisted.recorded, 0);
         let kept = read(
             workspace,
             LearnedCategory::RepositoryConvention.as_str(),
@@ -1108,7 +1262,8 @@ mod tests {
         assert!(loaded.instructions.is_empty());
         assert_eq!(loaded.facts.len(), LearnedCategory::ALL.len());
         assert!(loaded.facts.iter().all(|facts| facts.entries.is_empty()));
-        assert!(loaded.discoveries.is_empty());
+        assert!(loaded.discoveries.rows.is_empty());
+        assert_eq!(loaded.discoveries.recorded, 0);
         assert_eq!(loaded.unread, 0);
         assert_eq!(prompt(&pool, workspace).await, Block::default());
     }
