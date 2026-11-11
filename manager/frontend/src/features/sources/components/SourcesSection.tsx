@@ -1,6 +1,6 @@
 import { Button, EmptyState } from '@zone/ui';
 import { type ReactElement, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { getSourceById, getSourceLabel } from '../config';
 import { useSource, useSources } from '../hooks';
 import type { Source } from '../types';
@@ -11,6 +11,16 @@ import { SourceStatusBadge } from './SourceStatusBadge';
 import './SourcesSection.css';
 
 const SOURCE_PARAMETER = 'source';
+
+interface EditorEntry {
+  listed: boolean;
+}
+
+const LISTED_ENTRY: EditorEntry = { listed: true };
+
+function openedFromList(state: unknown): boolean {
+  return (state as Partial<EditorEntry> | null)?.listed === true;
+}
 
 function stopRowActivation(event: { stopPropagation: () => void }): void {
   event.stopPropagation();
@@ -26,6 +36,8 @@ function formatVerified(at: string): string {
 
 export function SourcesSection(): ReactElement {
   const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
+  const navigate = useNavigate();
   const selectedId = searchParams.get(SOURCE_PARAMETER) || null;
   const {
     sources,
@@ -58,11 +70,15 @@ export function SourcesSection(): ReactElement {
   const openSource = (id: string): void => {
     const next = new URLSearchParams(searchParams);
     next.set(SOURCE_PARAMETER, id);
-    setSearchParams(next);
+    setSearchParams(next, { state: LISTED_ENTRY });
   };
 
   const closeSource = (): void => {
     if (!searchParams.has(SOURCE_PARAMETER)) return;
+    if (openedFromList(location.state)) {
+      navigate(-1);
+      return;
+    }
     const next = new URLSearchParams(searchParams);
     next.delete(SOURCE_PARAMETER);
     setSearchParams(next, { replace: true });

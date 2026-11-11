@@ -943,7 +943,7 @@ describe('SourcesSection', () => {
       expect(mockGetSource).toHaveBeenCalledWith('test-workspace-id', 'src-1');
     });
 
-    it('closes the editor back to the table and drops the query param', async () => {
+    it('closes a deep-linked editor in place, back to the table without the query param', async () => {
       renderSection(`${SECTION_PATH}?source=src-1`);
       await waitFor(() => {
         expect(document.querySelector('.source-details')).not.toBeNull();
@@ -957,8 +957,32 @@ describe('SourcesSection', () => {
         expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
       });
       expect(screen.getByRole('button', { name: 'Add source' })).toBeInTheDocument();
+      expect(window.location.pathname).toBe(SECTION_PATH);
       expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
       expect(window.history.length).toBe(entries);
+    });
+
+    it('closes an editor opened from the list by returning to the list entry', async () => {
+      window.history.pushState({}, '', '/chats');
+      renderSection();
+      await openGitHubEditor();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+      await waitFor(() => {
+        expect(document.querySelector('.source-details')).toBeNull();
+        expect(screen.getByText('GitHub Repository')).toBeInTheDocument();
+      });
+      expect(window.location.pathname).toBe(SECTION_PATH);
+      expect(new URLSearchParams(window.location.search).get('source')).toBeNull();
+
+      act(() => {
+        window.history.back();
+      });
+
+      await waitFor(() => {
+        expect(window.location.pathname).toBe('/chats');
+      });
     });
 
     it('shows the table and Add source when the source id is unknown', async () => {
