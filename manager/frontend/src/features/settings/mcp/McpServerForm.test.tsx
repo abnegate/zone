@@ -3,13 +3,21 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ApiError } from '../../../api/ApiError';
 import { chooseSelect, selectOptionValues } from '../../../test/select';
 import { Source, Status, Transport } from './constants';
+import { VALUE_REQUIRED } from './draft';
 import { SAVED_PLACEHOLDER } from './McpSecretRows';
-import { COMMANDS_OFF_NOTICE, McpServerForm } from './McpServerForm';
+import {
+  ARGUMENTS_HINT,
+  ARGUMENTS_WARNING,
+  COMMANDS_OFF_NOTICE,
+  McpServerForm,
+  ORIGIN_HINT,
+} from './McpServerForm';
 import { type McpServerSubmission, SubmissionKind } from './submission';
 import type { McpServer } from './types';
-import { NAME_LENGTH } from './validation';
+import { LITERAL, NAME_LENGTH } from './validation';
 
 const URL_REFUSED = '`url` must not point at a link-local or cloud metadata address';
+const ORIGIN_REFUSED = "Re-enter the header values when the URL's origin changes";
 
 function server(overrides: Partial<McpServer> = {}): McpServer {
   return {
@@ -136,6 +144,91 @@ describe('McpServerForm', () => {
       kind: SubmissionKind.Update,
       request: { url: 'https://docs.example/v2/mcp' },
     });
+  });
+
+  it('keeps saved headers without a hint when only the path changes', () => {
+    setup({ server: server() });
+    type('URL', 'https://docs.example/v2/mcp');
+    expect(screen.queryByText(ORIGIN_HINT)).toBeNull();
+    expect(screen.getByLabelText('Value for Authorization').getAttribute('placeholder')).toBe(
+      SAVED_PLACEHOLDER
+    );
+  });
+
+  it('asks for saved header values again when the URL moves to a new origin', async () => {
+    const { onSubmit } = setup({ server: server() });
+    type('URL', 'https://wiki.example/mcp');
+
+    const hint = screen.getByText(ORIGIN_HINT);
+    const url = screen.getByLabelText('URL');
+    expect(url.getAttribute('aria-describedby')).toBe(hint.id);
+    const value = screen.getByLabelText('Value for Authorization');
+    expect(value.getAttribute('placeholder')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.getByRole('alert').textContent).toBe(VALUE_REQUIRED);
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    type('Value for Authorization', 'Bearer again');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0]?.[0]).toEqual({
+      kind: SubmissionKind.Update,
+      request: { url: 'https://wiki.example/mcp', headers: { Authorization: 'Bearer again' } },
+    });
+  });
+
+  it('restores the saved headers once the URL returns to its origin', () => {
+    setup({ server: server() });
+    type('URL', 'https://wiki.example/mcp');
+    type('URL', 'https://docs.example/other');
+    expect(screen.queryByText(ORIGIN_HINT)).toBeNull();
+    expect(screen.getByLabelText('Value for Authorization').getAttribute('placeholder')).toBe(
+      SAVED_PLACEHOLDER
+    );
+  });
+
+  it('shows a new origin the server still refuses under the form', async () => {
+    const message = `Failed to save the MCP server: ${ORIGIN_REFUSED}`;
+    const onSubmit = mock((_submission: McpServerSubmission) =>
+      Promise.reject(new ApiError(message, 400))
+    );
+    render(<McpServerForm server={server()} commands onSubmit={onSubmit} onClose={() => {}} />);
+    type('URL', 'https://wiki.example/mcp');
+    type('Value for Authorization', 'Bearer again');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(message);
+    expect(alert.className).toBe('modal-error');
+    expect(screen.getByRole('dialog', { name: 'Edit docs' })).toBeTruthy();
+  });
+
+  it('warns that arguments are visible and audited', () => {
+    setup();
+    chooseSelect('Transport', 'Command (stdio)');
+    const warning = screen.getByText(ARGUMENTS_WARNING);
+    const hint = screen.getByText(ARGUMENTS_HINT);
+    expect(screen.getByLabelText('Arguments').getAttribute('aria-describedby')).toBe(
+      `${hint.id} ${warning.id}`
+    );
+    expect(screen.getByLabelText('Command')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Add variable' })).toBeTruthy();
+  });
+
+  it('keeps the arguments warning beside an arguments error', () => {
+    setup();
+    chooseSelect('Transport', 'Command (stdio)');
+    type('Name', 'files');
+    type('Command', 'npx');
+    type('Arguments', `\${HOME}`);
+    fireEvent.click(screen.getByRole('button', { name: 'Add server' }));
+    const error = screen.getByRole('alert');
+    expect(error.textContent).toBe(LITERAL);
+    const warning = screen.getByText(ARGUMENTS_WARNING);
+    expect(screen.getByLabelText('Arguments').getAttribute('aria-describedby')).toBe(
+      `${error.id} ${warning.id}`
+    );
   });
 
   it('asks for the value again when a saved header is renamed', () => {

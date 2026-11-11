@@ -8,6 +8,7 @@ import {
   draftErrors,
   draftOf,
   emptyDraft,
+  moved,
   RowPart,
   renamedRow,
   rowField,
@@ -156,7 +157,7 @@ describe('updateRequest', () => {
       row.name === 'TOKEN' ? renamedRow(renamedRow(row, 'API_TOKEN'), 'TOKEN') : row
     );
     expect(updateRequest(stored, { ...draft, environment })).toEqual({});
-    expect(draftErrors({ ...draft, environment }, true)).toEqual({});
+    expect(draftErrors({ ...draft, environment }, stored)).toEqual({});
   });
 
   it('never sends the secrets of the other transport', () => {
@@ -184,6 +185,67 @@ describe('updateRequest', () => {
     const stored = server();
     expect(updateRequest(stored, { ...draftOf(stored), name: 'wiki' })).toEqual({ name: 'wiki' });
   });
+
+  it('keeps saved headers when only host case or an explicit default port differs', () => {
+    const stored = server();
+    const draft = { ...draftOf(stored), url: 'https://DOCS.example:443/other' };
+    expect(updateRequest(stored, draft)).toEqual({ url: 'https://DOCS.example:443/other' });
+  });
+
+  it('sends every header value explicitly when the URL moves to a new origin', () => {
+    const stored = server();
+    const draft = draftOf(stored);
+    const headers = draft.headers.map((row) => ({ ...row, value: `${row.name}-again` }));
+    expect(updateRequest(stored, { ...draft, url: 'https://wiki.example/mcp', headers })).toEqual({
+      url: 'https://wiki.example/mcp',
+      headers: { Authorization: 'Authorization-again', 'X-Team': 'X-Team-again' },
+    });
+  });
+
+  it('removes the saved headers left out of a move to a new origin', () => {
+    const stored = server();
+    const [authorization] = draftOf(stored).headers;
+    if (authorization === undefined) {
+      throw new Error('missing stored row');
+    }
+    const headers = [{ ...authorization, value: 'Bearer again' }];
+    expect(
+      updateRequest(stored, { ...draftOf(stored), url: 'http://docs.example/mcp', headers })
+    ).toEqual({ url: 'http://docs.example/mcp', headers: { Authorization: 'Bearer again' } });
+    expect(
+      updateRequest(stored, {
+        ...draftOf(stored),
+        url: 'https://docs.example:8443/mcp',
+        headers: [],
+      })
+    ).toEqual({ url: 'https://docs.example:8443/mcp', headers: {} });
+  });
+
+  it('sends no headers for a move to a new origin when none are stored or typed', () => {
+    const stored = server({ headers: [] });
+    expect(updateRequest(stored, { ...draftOf(stored), url: 'https://wiki.example/mcp' })).toEqual({
+      url: 'https://wiki.example/mcp',
+    });
+  });
+});
+
+describe('moved', () => {
+  it.each([
+    ['https://docs.example/v2/mcp', false],
+    ['https://docs.example:443/mcp', false],
+    ['not a url', false],
+    ['http://docs.example/mcp', true],
+    ['https://docs.example:8443/mcp', true],
+    ['https://wiki.example/mcp', true],
+  ])('treats %s as moved: %p', (url, expected) => {
+    const stored = server();
+    expect(moved(stored, { ...draftOf(stored), url })).toBe(expected);
+  });
+
+  it('never moves a command server', () => {
+    const stored = stdioServer();
+    expect(moved(stored, { ...draftOf(stored), url: 'https://wiki.example/mcp' })).toBe(false);
+  });
 });
 
 describe('draftErrors', () => {
@@ -193,20 +255,36 @@ describe('draftErrors', () => {
     const environment = draft.environment.map((row) =>
       row.name === 'TOKEN' ? renamedRow(row, 'API_TOKEN') : row
     );
-    expect(draftErrors({ ...draft, environment }, true)).toEqual({
+    expect(draftErrors({ ...draft, environment }, stored)).toEqual({
       [rowField(DraftField.Environment, 0, RowPart.Value)]: VALUE_REQUIRED,
     });
   });
 
   it('asks for a value for a stored name that has none', () => {
     const stored = server({ headers: [{ name: 'Authorization', has_value: false }] });
-    expect(draftErrors(draftOf(stored), true)).toEqual({
+    expect(draftErrors(draftOf(stored), stored)).toEqual({
       [rowField(DraftField.Headers, 0, RowPart.Value)]: VALUE_REQUIRED,
     });
   });
 
   it('accepts an untouched saved draft', () => {
-    expect(draftErrors(draftOf(server()), true)).toEqual({});
+    const stored = server();
+    expect(draftErrors(draftOf(stored), stored)).toEqual({});
+  });
+
+  it('accepts saved header values when only the path changes', () => {
+    const stored = server();
+    const draft = { ...draftOf(stored), url: 'https://docs.example/v2/mcp' };
+    expect(draftErrors(draft, stored)).toEqual({});
+  });
+
+  it('asks for every saved header value again when the URL moves to a new origin', () => {
+    const stored = server();
+    const draft = { ...draftOf(stored), url: 'https://wiki.example/mcp' };
+    expect(draftErrors(draft, stored)).toEqual({
+      [rowField(DraftField.Headers, 0, RowPart.Value)]: VALUE_REQUIRED,
+      [rowField(DraftField.Headers, 1, RowPart.Value)]: VALUE_REQUIRED,
+    });
   });
 
   it('refuses a long name, a missing command, references and duplicate names', () => {
@@ -220,7 +298,7 @@ describe('draftErrors', () => {
         { name: '1BAD', value: '', saved: false },
       ],
     };
-    expect(draftErrors(draft, false)).toEqual({
+    expect(draftErrors(draft)).toEqual({
       [DraftField.Name]: NAME_LENGTH,
       [DraftField.Command]: 'Enter a command',
       [DraftField.Arguments]: LITERAL,
@@ -242,7 +320,7 @@ describe('draftErrors', () => {
         { name: 'authorization', value: 'b', saved: false },
       ],
     };
-    expect(draftErrors(draft, false)).toEqual({
+    expect(draftErrors(draft)).toEqual({
       [rowField(DraftField.Headers, 1, RowPart.Name)]: DUPLICATE_NAME,
     });
   });
@@ -259,7 +337,7 @@ describe('draftErrors for headers', () => {
         { name: 'Authorization', value: 'Bearer t', saved: false },
       ],
     };
-    expect(draftErrors(draft, false)).toEqual({
+    expect(draftErrors(draft)).toEqual({
       [rowField(DraftField.Headers, 0, RowPart.Name)]: HEADER_RESERVED,
     });
   });

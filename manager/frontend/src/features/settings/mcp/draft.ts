@@ -129,17 +129,37 @@ function secretListOf(transport: McpTransport): SecretList {
   return usesCommand(transport) ? DraftField.Environment : DraftField.Headers;
 }
 
-function valueError(row: SecretDraft, editing: boolean): string | null {
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+export function moved(server: McpServer, draft: McpServerDraft): boolean {
+  if (usesCommand(server.transport) || server.url === null) {
+    return false;
+  }
+  const origin = originOf(draft.url.trim());
+  return origin !== null && origin !== originOf(server.url);
+}
+
+function keeps(server: McpServer | undefined, draft: McpServerDraft): boolean {
+  return server !== undefined && !moved(server, draft);
+}
+
+function valueError(row: SecretDraft, kept: boolean): string | null {
   if (row.value !== '') {
     return literalError(row.value);
   }
-  return editing && row.saved ? null : VALUE_REQUIRED;
+  return kept && row.saved ? null : VALUE_REQUIRED;
 }
 
 function rowErrors(
   list: SecretList,
   rows: readonly SecretDraft[],
-  editing: boolean,
+  kept: boolean,
   errors: DraftErrors
 ): void {
   const seen = new Set<string>();
@@ -153,14 +173,14 @@ function rowErrors(
     if (name !== null) {
       errors[rowField(list, index, RowPart.Name)] = name;
     }
-    const value = valueError(row, editing);
+    const value = valueError(row, kept);
     if (value !== null) {
       errors[rowField(list, index, RowPart.Value)] = value;
     }
   });
 }
 
-export function draftErrors(draft: McpServerDraft, editing: boolean): DraftErrors {
+export function draftErrors(draft: McpServerDraft, server?: McpServer): DraftErrors {
   const errors: DraftErrors = {};
   const name = nameError(draft.name.trim());
   if (name !== null) {
@@ -184,7 +204,7 @@ export function draftErrors(draft: McpServerDraft, editing: boolean): DraftError
     }
   }
   const list = secretListOf(draft.transport);
-  rowErrors(list, draft[list], editing, errors);
+  rowErrors(list, draft[list], keeps(server, draft), errors);
   return errors;
 }
 
@@ -230,8 +250,14 @@ function sameArguments(left: readonly string[], right: readonly string[]): boole
 
 function updateMap(
   stored: readonly McpSecretField[],
-  rows: readonly SecretDraft[]
+  rows: readonly SecretDraft[],
+  kept: boolean
 ): Record<string, string | null> | undefined {
+  if (!kept) {
+    return stored.length === 0 && rows.length === 0
+      ? undefined
+      : Object.fromEntries(rows.map((row) => [row.name, row.value]));
+  }
   const renamed = !sameNames(
     stored.map((field) => field.name),
     rows.map((row) => row.name)
@@ -270,7 +296,7 @@ export function updateRequest(server: McpServer, draft: McpServerDraft): UpdateM
     }
   }
   const list = secretListOf(server.transport);
-  const secrets = updateMap(server[list], draft[list]);
+  const secrets = updateMap(server[list], draft[list], keeps(server, draft));
   if (secrets) {
     request[list] = secrets;
   }

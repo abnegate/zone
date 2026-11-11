@@ -10,6 +10,7 @@ import {
   draftOf,
   emptyDraft,
   type McpServerDraft,
+  moved,
   updateRequest,
   usesCommand,
 } from './draft';
@@ -23,6 +24,9 @@ import './McpServerForm.css';
 export const COMMANDS_OFF_NOTICE =
   'Command servers are turned off on this instance (ZONE_MCP_COMMANDS)';
 export const ARGUMENTS_HINT = 'One argument per line';
+export const ARGUMENTS_WARNING =
+  'Arguments are visible to members and recorded in the audit log; put secrets in environment variables';
+export const ORIGIN_HINT = 'Header values are not sent to a new address; enter them again';
 export const SAVE_FAILED = 'Failed to save the MCP server';
 
 const NO_ERRORS: DraftErrors = {};
@@ -59,6 +63,7 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
   const argumentsId = `${base}-arguments`;
   const argumentsHintId = `${base}-arguments-hint`;
   const argumentsErrorId = `${base}-arguments-error`;
+  const argumentsWarningId = `${base}-arguments-warning`;
   const [draft, setDraft] = useState<McpServerDraft>(() =>
     server ? draftOf(server) : emptyDraft(Transport.Http)
   );
@@ -68,12 +73,15 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
   const [refusal, setRefusal] = useState<Refusal | null>(null);
 
   const editing = server !== undefined;
-  const errors = attempted ? draftErrors(draft, editing) : NO_ERRORS;
+  const errors = attempted ? draftErrors(draft, server) : NO_ERRORS;
   const blocked = server !== undefined && usesCommand(server.transport) && !commands;
   const unchanged = server !== undefined && !changed(updateRequest(server, draft));
+  const relocated = server !== undefined && moved(server, draft);
+  const kept = editing && !relocated;
   const command = usesCommand(draft.transport);
   const argumentsError = errors[DraftField.Arguments];
   const refused = refusal?.url === draft.url ? refusal.message : undefined;
+  const reentered = relocated && draft.headers.some((row) => row.saved);
 
   const update = <K extends keyof McpServerDraft>(key: K, value: McpServerDraft[K]) =>
     setDraft((current) => ({ ...current, [key]: value }));
@@ -84,7 +92,7 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
       return;
     }
     setAttempted(true);
-    if (Object.keys(draftErrors(draft, editing)).length > 0) {
+    if (Object.keys(draftErrors(draft, server)).length > 0) {
       return;
     }
     const submission: McpServerSubmission = server
@@ -162,7 +170,7 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
                   value={draft.arguments}
                   spellCheck={false}
                   aria-invalid={argumentsError !== undefined}
-                  aria-describedby={argumentsError ? argumentsErrorId : argumentsHintId}
+                  aria-describedby={`${argumentsError ? argumentsErrorId : argumentsHintId} ${argumentsWarningId}`}
                   onChange={(event) => update('arguments', event.target.value)}
                 />
                 {argumentsError ? (
@@ -174,11 +182,15 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
                     {ARGUMENTS_HINT}
                   </p>
                 )}
+                <p id={argumentsWarningId} className="form-hint">
+                  {ARGUMENTS_WARNING}
+                </p>
               </div>
               <McpSecretRows
                 list={DraftField.Environment}
                 rows={draft.environment}
                 errors={errors}
+                kept={kept}
                 onChange={(rows) => update('environment', rows)}
               />
             </>
@@ -194,12 +206,14 @@ export function McpServerForm({ server, commands, onSubmit, onClose }: McpServer
                 spellCheck={false}
                 placeholder="https://example.com/mcp"
                 error={errors[DraftField.Url] ?? refused}
+                helpText={reentered ? ORIGIN_HINT : undefined}
                 onChange={(event) => update('url', event.target.value)}
               />
               <McpSecretRows
                 list={DraftField.Headers}
                 rows={draft.headers}
                 errors={errors}
+                kept={kept}
                 onChange={(rows) => update('headers', rows)}
               />
             </>

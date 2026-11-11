@@ -101,6 +101,10 @@ const reservedHeaders = ['accept', 'content-type', 'host', 'mcp-session-id'];
 const metadataAddress = 'Do not use a link-local or cloud metadata address';
 const metadataRefused = '`url` must not point at a link-local or cloud metadata address';
 const refusedHost = 'refused.example';
+const originHint = 'Header values are not sent to a new address; enter them again';
+const originRefused = "Re-enter the header values when the URL's origin changes";
+const argumentsWarning =
+  'Arguments are visible to members and recorded in the audit log; put secrets in environment variables';
 const directory = process.env.MCP_SCREENSHOTS;
 
 function server(changes: Partial<WireServer> & Pick<WireServer, 'name'>): WireServer {
@@ -215,6 +219,19 @@ function refusal(
   return reserved
     ? `\`headers\` name \`${reserved}\` is set by the connection itself and cannot be configured`
     : null;
+}
+
+function strands(target: WireServer, changes: UpdateMcpServerRequest): boolean {
+  if (changes.url === undefined || target.url === null) {
+    return false;
+  }
+  if (new URL(changes.url).origin === new URL(target.url).origin) {
+    return false;
+  }
+  if (changes.headers === undefined) {
+    return target.headers.some((field) => field.has_value);
+  }
+  return Object.values(changes.headers).some((value) => value === null);
 }
 
 async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
@@ -403,7 +420,8 @@ async function mockApi(page: Page, scenario: Scenario = {}): Promise<Mock> {
           await route.fulfill({ status: 403, json: { error: commandsDisabled } });
           return;
         }
-        const refused = refusal(target.transport, changes);
+        const refused =
+          refusal(target.transport, changes) ?? (strands(target, changes) ? originRefused : null);
         if (refused) {
           await route.fulfill({ status: 400, json: { error: refused } });
           return;
@@ -979,6 +997,54 @@ test.describe('MCP servers', () => {
     expect(content).not.toContain(fixtureSecret);
   });
 
+  test('moving the URL to a new origin asks for every saved header value again', async ({
+    page,
+  }) => {
+    const mock = await openOrganization(page);
+    await chooseAction(page, 'docs', 'Edit');
+    const dialog = page.getByRole('dialog', { name: 'Edit docs' });
+    const url = dialog.getByLabel('URL', { exact: true });
+    const value = dialog.getByLabel('Value for Authorization', { exact: true });
+    await expect(value).toHaveAttribute('placeholder', 'Saved');
+
+    await url.fill('https://docs.example/v2/mcp');
+    await expect(dialog.getByText(originHint)).toHaveCount(0);
+    await expect(value).toHaveAttribute('placeholder', 'Saved');
+
+    await url.fill('https://wiki.example/mcp');
+    await expect(url).toHaveAccessibleDescription(originHint);
+    await expect(value).not.toHaveAttribute('placeholder', 'Saved');
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(value).toHaveAccessibleDescription('Enter a value');
+    expect(writes(mock)).toEqual([]);
+
+    await value.fill('Bearer moved');
+    await dialog.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+
+    expect(writes(mock)).toEqual([
+      {
+        method: 'PUT',
+        path: `${serversPath}/${docsId}`,
+        body: { url: 'https://wiki.example/mcp', headers: { Authorization: 'Bearer moved' } },
+      },
+    ]);
+    expect(mock.secrets.get(`${docsId}:headers:Authorization`)).toBe('Bearer moved');
+    expect(await page.content()).not.toContain('Bearer moved');
+  });
+
+  test('a command server warns that its arguments are visible and audited', async ({ page }) => {
+    await openOrganization(page);
+    await chooseAction(page, 'github', 'Edit');
+    const dialog = page.getByRole('dialog', { name: 'Edit github' });
+    const argumentsField = dialog.getByLabel('Arguments', { exact: true });
+    await expect(argumentsField).toHaveAccessibleDescription(
+      `One argument per line ${argumentsWarning}`
+    );
+    await expect(dialog.getByLabel('Command', { exact: true })).toBeVisible();
+    await expect(dialog.getByLabel('Value for GITHUB_TOKEN', { exact: true })).toBeVisible();
+  });
+
   test('an organization member sees the list but cannot change it', async ({ page }) => {
     await openOrganization(page, { role: 'member' });
 
@@ -1117,6 +1183,16 @@ test.describe('screenshots', () => {
         'Saved'
       );
       await still(page, 'form-edit', theme);
+      await dialog.getByLabel('URL', { exact: true }).fill('https://wiki.example/mcp');
+      await expect(dialog.getByText(originHint)).toBeVisible();
+      await still(page, 'form-edit-origin', theme);
+      await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+
+      await chooseAction(page, 'github', 'Edit');
+      dialog = page.getByRole('dialog', { name: 'Edit github' });
+      await expect(dialog.getByText(argumentsWarning)).toBeVisible();
+      await still(page, 'form-edit-stdio', theme);
       await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
       await expect(dialog).toHaveCount(0);
 

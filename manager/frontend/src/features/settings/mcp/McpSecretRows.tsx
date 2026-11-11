@@ -39,10 +39,11 @@ interface McpSecretRowsProps {
   list: SecretList;
   rows: readonly SecretDraft[];
   errors: DraftErrors;
+  kept: boolean;
   onChange: (rows: SecretDraft[]) => void;
 }
 
-export function McpSecretRows({ list, rows, errors, onChange }: McpSecretRowsProps) {
+export function McpSecretRows({ list, rows, errors, kept, onChange }: McpSecretRowsProps) {
   const base = useId();
   const counter = useRef(rows.length);
   const [keys, setKeys] = useState<number[]>(() => rows.map((_, index) => index));
@@ -87,7 +88,9 @@ export function McpSecretRows({ list, rows, errors, onChange }: McpSecretRowsPro
                   autoComplete="new-password"
                   aria-label={`Value for ${row.name || number}`}
                   value={row.value}
-                  placeholder={row.saved && row.value === '' ? SAVED_PLACEHOLDER : undefined}
+                  placeholder={
+                    kept && row.saved && row.value === '' ? SAVED_PLACEHOLDER : undefined
+                  }
                   error={errors[rowField(list, index, RowPart.Value)]}
                   onChange={(event) => replace(index, { ...row, value: event.target.value })}
                 />
