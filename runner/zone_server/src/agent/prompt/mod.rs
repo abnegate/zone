@@ -65,14 +65,14 @@ const PLAIN: &[Section] = &[
 /// Bounds the prompt of a member's chat over everything production assembles
 /// for one: every optional tool group on, an MCP server attached, the tools
 /// whose schemas are held back listed, a GitHub source, a stated effort and
-/// the server's own zone. It measures 29,661 characters auto-approved in
-/// zone's own loop, and 27,760 offered to a coding agent, which is offered no
+/// the server's own zone. It measures 29,803 characters auto-approved in
+/// zone's own loop, and 27,902 offered to a coding agent, which is offered no
 /// tool that ends zone's turn.
-pub const CHAT_MAX_CHARS: usize = 29_700;
+pub const CHAT_MAX_CHARS: usize = 29_900;
 /// Bounds the prompt of a planner chat, which adds the interview section and
-/// its two tools to the chat prompt: 32,021 characters, and 30,028 offered to
+/// its two tools to the chat prompt: 32,163 characters, and 30,170 offered to
 /// a coding agent.
-pub const PLANNER_MAX_CHARS: usize = 32_100;
+pub const PLANNER_MAX_CHARS: usize = 32_200;
 /// Bounds the prompt of a chat that offers no tools: 4,740 characters.
 pub const PLAIN_MAX_CHARS: usize = 4_800;
 /// Bounds the task prompt over everything production assembles for a run its
