@@ -6,7 +6,9 @@
 //! runs above a 0.6 mean quality, the error category's 0.05 margin over the
 //! runner-up, and the 64 KiB compiled-size limit -- which the regex crate's own
 //! 10 MB default hides, because the bomb the existing tests use is refused
-//! either way.
+//! either way. Beside them sit two properties no constant states: a review
+//! comment is classified on whole words, never on substrings, and a suppression
+//! pattern is held to its length cap in every match mode.
 
 use chrono::NaiveDate;
 use regex::RegexBuilder;
@@ -29,8 +31,6 @@ use zone_server::workers::learning::quality::{
 };
 use zone_server::workers::learning::review::{ReviewCategory, classify};
 use zone_server::workers::learning::strategy::{self, ToolInvocation};
-
-// Claim 1: regex size limits, and no backtracking on user patterns.
 
 fn regex_rule(name: &str, pattern: &str) -> Rule {
     Rule {
@@ -120,11 +120,6 @@ fn the_size_limit_sits_where_the_constant_says_it_does() {
     );
 }
 
-// Claim 2: exponential decay with a two-hour half-life.
-
-// Claim 3: three observations, two distinct runs, 70% agreement, conjunctively, and
-// 0.6 confidence on top.
-
 fn signal(value: &str, run: u128) -> ConventionSignal {
     ConventionSignal {
         kind: ConventionKind::FileNaming,
@@ -143,24 +138,98 @@ fn evidence(winner: usize, competing: usize, runs: usize) -> Vec<ConventionSigna
     signals
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Gate {
+    Observations,
+    DistinctRuns,
+    Agreement,
+    Confidence,
+}
+
+/// The policy with the named gates switched off and every other left standing.
+fn without(policy: ConventionPolicy, gates: &[Gate]) -> ConventionPolicy {
+    gates.iter().fold(policy, |policy, gate| match gate {
+        Gate::Observations => ConventionPolicy {
+            minimum_observations: 0,
+            ..policy
+        },
+        Gate::DistinctRuns => ConventionPolicy {
+            minimum_distinct_runs: 0,
+            ..policy
+        },
+        Gate::Agreement => ConventionPolicy {
+            minimum_agreement: 0.0,
+            ..policy
+        },
+        Gate::Confidence => ConventionPolicy {
+            minimum_confidence: 0.0,
+            ..policy
+        },
+    })
+}
+
+/// Each refused row names every gate that refuses it, and is held to exactly
+/// those: it promotes once they are all switched off, and stays refused while
+/// any one of them stands. Two unanimous observations score 0.55, so nothing
+/// fails the observation count without failing confidence as well.
 #[test]
 fn every_convention_threshold_refuses_independently() {
     let policy = ConventionPolicy::default();
-    let refused = [
-        ("2 of 2 over 2 runs", evidence(2, 0, 2)),
-        ("3 of 3 from 1 run", evidence(3, 0, 1)),
-        ("4 of 4 from 1 run", evidence(4, 0, 1)),
-        ("69 of 100 over 2 runs", evidence(69, 31, 2)),
-        ("9 of 13 (0.692) over 2 runs", evidence(9, 4, 2)),
-        ("11 of 16 (0.6875) over 2 runs", evidence(11, 5, 2)),
-        ("3 of 4 over 2 runs", evidence(3, 1, 2)),
+    let refused: [(&str, Vec<ConventionSignal>, &[Gate]); 7] = [
+        (
+            "2 of 2 over 2 runs",
+            evidence(2, 0, 2),
+            &[Gate::Observations, Gate::Confidence],
+        ),
+        (
+            "3 of 3 from 1 run",
+            evidence(3, 0, 1),
+            &[Gate::DistinctRuns],
+        ),
+        (
+            "4 of 4 from 1 run",
+            evidence(4, 0, 1),
+            &[Gate::DistinctRuns],
+        ),
+        (
+            "69 of 100 over 2 runs",
+            evidence(69, 31, 2),
+            &[Gate::Agreement],
+        ),
+        (
+            "9 of 13 (0.692) over 2 runs",
+            evidence(9, 4, 2),
+            &[Gate::Agreement],
+        ),
+        (
+            "11 of 16 (0.6875) over 2 runs",
+            evidence(11, 5, 2),
+            &[Gate::Agreement],
+        ),
+        ("3 of 4 over 2 runs", evidence(3, 1, 2), &[Gate::Confidence]),
     ];
-    for (label, signals) in refused {
+    for (label, signals, gates) in refused {
         let learned = learn(&signals, &policy);
         assert!(
             learned.is_empty(),
             "{label} must not promote, promoted {learned:?}"
         );
+        assert_eq!(
+            learn(&signals, &without(policy, gates)).len(),
+            1,
+            "{label} is refused by more than {gates:?}"
+        );
+        for standing in gates {
+            let others: Vec<Gate> = gates
+                .iter()
+                .copied()
+                .filter(|gate| gate != standing)
+                .collect();
+            assert!(
+                learn(&signals, &without(policy, &others)).is_empty(),
+                "{label} is not refused by {standing:?} on its own"
+            );
+        }
     }
 
     let promoted = [
@@ -203,13 +272,6 @@ fn every_convention_threshold_refuses_independently() {
         assert!(
             (learned[0].confidence - confidence).abs() < 1e-6,
             "{label}: confidence {} is not {confidence}",
-            learned[0].confidence
-        );
-        println!(
-            "{label}: observations={} runs={} agreement={:.6} confidence={:.6}",
-            learned[0].observations,
-            learned[0].distinct_runs,
-            learned[0].agreement,
             learned[0].confidence
         );
     }
@@ -267,8 +329,6 @@ fn the_convention_gates_are_conjunctive_not_disjunctive() {
     );
 }
 
-// Claim 4: an absolute similarity bar plus a margin over the runner-up.
-
 const DIMENSION: usize = 12;
 
 fn basis(index: usize) -> Vec<f32> {
@@ -312,8 +372,7 @@ fn the_margin_bar_brackets_a_near_tie() {
     let failure = direction(ErrorCategory::TestFailure);
 
     // A blend at 0.5 is an exact tie; the margin grows as the weight moves away from it.
-    // `unbarred` reads the true similarity and margin, `policy` reads the verdict, so
-    // each case is labelled with the numbers that decided it.
+    // `unbarred` reads the true similarity and margin, `policy` reads the verdict.
     let unbarred = CategorizationPolicy {
         minimum_similarity: 0.0,
         minimum_margin: 0.0,
@@ -323,10 +382,6 @@ fn the_margin_bar_brackets_a_near_tie() {
         let embedding = blend(build, failure, weight);
         let measured = categorize(&embedding, &references, &unbarred);
         let assigned = categorize(&embedding, &references, &policy);
-        println!(
-            "weight {weight}: similarity={:.6} margin={:.6} -> {:?}",
-            measured.confidence, measured.margin, assigned.category
-        );
         assert!(
             measured.confidence >= policy.minimum_similarity,
             "weight {weight} has similarity {:.6}, below the absolute bar, so the margin \
@@ -363,8 +418,6 @@ fn the_margin_bar_brackets_a_near_tie() {
     assert!((policy.minimum_similarity - 0.45).abs() < 1e-6);
 }
 
-// Claim 5: whole-word sequences, not substrings.
-
 #[test]
 fn the_named_false_positive_is_gone_and_substring_matching_would_still_have_it() {
     let comment = "Please rebase onto the latest release.";
@@ -388,8 +441,6 @@ fn the_named_false_positive_is_gone_and_substring_matching_would_still_have_it()
         "'latest' contains 'test', which is what substring matching would have found"
     );
 }
-
-// Claim 6: readiness refuses evidence whose arithmetic does not close.
 
 /// Regression: the length cap must apply to every match mode.
 ///
@@ -441,7 +492,6 @@ fn a_full_rule_set_of_literal_patterns_evaluates_promptly() {
     let started = Instant::now();
     let outcome = set.evaluate(&titled(&subject));
     let elapsed = started.elapsed();
-    println!("{MAX_RULES} worst-case literal rules over a bounded subject: {elapsed:?}");
 
     assert!(
         !outcome.suppressed(),
@@ -455,8 +505,6 @@ fn a_full_rule_set_of_literal_patterns_evaluates_promptly() {
         "evaluating one change took {elapsed:?}, which is a denial of service surface"
     );
 }
-
-// Claim 7: a lesson needs two separate runs and a mean quality above 0.6.
 
 fn worked_test_first(run: u128, quality: QualityScore) -> StrategyObservation {
     StrategyObservation {

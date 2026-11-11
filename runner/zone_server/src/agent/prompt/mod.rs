@@ -62,26 +62,22 @@ const PLAIN: &[Section] = &[
     ("session", section::session::render),
 ];
 
-/// Raised by measurement rather than by guess, the way every section that has
-/// widened this has raised it: the chat prompt in a workspace with a GitHub
-/// source, whose bullets send a pull request to zone's own tool, is 24,834
-/// characters, and 24,878 as served to a coding agent, once the catalog holds
-/// `record_discovery` and the workspace section's bullet for recording
-/// unasked renders with it, so the ceiling is the next round number above the
-/// larger and the next section to grow has to measure itself too. Before that
-/// bullet they measured 24,411 and 24,455.
-pub const CHAT_MAX_CHARS: usize = 24_900;
-/// A planner chat adds the interview section to the chat prompt; measured
-/// the same way and rounded up the same way. With the bullet for recording
-/// unasked it is 27,194, and 27,238 as served to a coding agent, and the
-/// ceiling stands above the larger. Before the bullet it measured 26,771.
-pub const PLANNER_MAX_CHARS: usize = 27_300;
+/// Bounds the chat prompt over the worst-case catalog in a workspace with a
+/// GitHub source, whose bullets send a pull request to zone's own tool. It
+/// measures 24,918 characters, and 24,962 as served to a coding agent, which
+/// is told its tools by their qualified names. The ceiling is the next round
+/// hundred above the larger, so a section that grows has to measure itself.
+pub const CHAT_MAX_CHARS: usize = 25_000;
+/// Bounds the prompt of a planner chat, which adds the interview section and
+/// its two tools to the chat prompt: 27,278 characters, and 27,322 as served
+/// to a coding agent.
+pub const PLANNER_MAX_CHARS: usize = 27_400;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
-/// Over the catalog the budget test gives an authorized run, the task prompt
-/// measures 14,383 with the bullet for recording unasked, served to a coding
-/// agent or not: no section a run renders qualifies a tool name. Half of this
-/// is the ceiling on a checkout's instruction block, so that moves with it.
-pub const TASK_MAX_CHARS: usize = 14_400;
+/// Bounds the task prompt over the catalog the budget test gives an authorized
+/// run that requires its plan approved: 14,972 characters, 584 of them added
+/// by the plan paragraph, served to a coding agent or not, since no section a
+/// run renders qualifies a tool name.
+pub const TASK_MAX_CHARS: usize = 15_000;
 
 fn assemble(order: &[Section], context: &Context<'_>) -> String {
     order
@@ -182,6 +178,7 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::agent::discovery::RECORD_DISCOVERY;
+    use crate::agent::plan::SUBMIT_PLAN;
     use crate::agent::question::ASK_USER;
     use crate::agent::{ToolProfile, WorkspaceScope};
     use crate::state::AppState;
@@ -400,14 +397,29 @@ mod tests {
         )
     }
 
-    fn task_tools() -> ChatTools {
+    fn task_catalog() -> Vec<(&'static str, Tier)> {
         let mut catalog = TASK_HOST.to_vec();
         catalog.extend_from_slice(TASK_DOCUMENTS);
-        ChatTools::with_tiers(
-            ToolProfile::Task,
-            &tiered(ToolProfile::Task, &catalog),
-            None,
-        )
+        tiered(ToolProfile::Task, &catalog)
+    }
+
+    fn task_tools() -> ChatTools {
+        ChatTools::with_tiers(ToolProfile::Task, &task_catalog(), None)
+    }
+
+    /// The catalog of a run that requires its plan approved.
+    ///
+    /// `with_plan_approval` rebuilds the names from the registry, and a catalog
+    /// stated by name has none, so calling it on [`task_tools`] leaves
+    /// `submit_plan` as the only tool and every section gated on another goes
+    /// quiet. The tool is added by name instead, at the tier it declares.
+    fn approving_task_tools() -> ChatTools {
+        let mut catalog = task_catalog();
+        catalog.push((
+            SUBMIT_PLAN,
+            ChatTools::empty().with_plan_approval().tier(SUBMIT_PLAN),
+        ));
+        ChatTools::with_tiers(ToolProfile::Task, &catalog, None)
     }
 
     #[test]
@@ -1025,12 +1037,41 @@ mod tests {
             "task prompt is {} chars",
             task_prompt.len()
         );
-        // A run that requires its plan approved carries one more paragraph.
-        let approving_task_prompt = task(&task_tools().with_plan_approval(), &environment());
+        let approving_task_prompt = task(&approving_task_tools(), &environment());
+        assert!(
+            approving_task_prompt.len() > task_prompt.len(),
+            "the plan paragraph adds nothing: {} chars against {}",
+            approving_task_prompt.len(),
+            task_prompt.len()
+        );
         assert!(
             approving_task_prompt.len() <= TASK_MAX_CHARS,
             "plan-approved task prompt is {} chars",
             approving_task_prompt.len()
+        );
+        for &agent in abnegate_agent_cli::AgentKind::ALL {
+            let served = task(&approving_task_tools().served_to(agent), &environment());
+            assert!(
+                served.len() <= TASK_MAX_CHARS,
+                "{agent}'s plan-approved task prompt is {} chars",
+                served.len()
+            );
+        }
+    }
+
+    /// A chat holds both rules that have it write without being asked, so the
+    /// workspace's may not read as the only one.
+    #[test]
+    fn a_chat_told_to_write_memory_unasked_is_told_discovery_is_only_the_workspaces_exception() {
+        let prompt = chat(&chat_tools(), false, &github());
+
+        assert_eq!(occurrences(&prompt, "- Do not wait to be asked: "), 1);
+        assert_eq!(
+            occurrences(
+                &prompt,
+                "- record_discovery is the one workspace write you make unasked: "
+            ),
+            1
         );
     }
 
