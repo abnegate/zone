@@ -116,7 +116,7 @@ impl McpServerResponse {
             transport: transport(server),
             command: server.command.clone(),
             arguments: Vec::new(),
-            url: server.url.as_deref().and_then(origin),
+            url: server.endpoint().and_then(|endpoint| origin(&endpoint.url)),
             tools: (!server.tools.is_empty()).then(|| server.tools.clone()),
             enabled: !server.disabled,
             environment: fields(&server.environment),
@@ -886,6 +886,7 @@ mod tests {
     use chrono::Utc;
     use serde_json::Value;
     use serde_json::json;
+    use zone_core::servers::mask;
 
     use super::*;
     use crate::auth::jwt::Claims;
@@ -900,6 +901,8 @@ mod tests {
     const CREDENTIALED_URL: &str =
         "https://operator:hunter2@mcp.internal:8443/tenants/acme?key=hunter2#hunter2";
     const CREDENTIAL: &str = "hunter2";
+    const REFERRING_URL: &str = "https://${MCP_HOST}:9443/tenants/${MCP_TENANT}?key=${MCP_KEY}";
+    const BOUND_TOKEN: &str = "t0ken-bound-8d1f";
 
     const POLICY: Policy = Policy {
         enabled: true,
@@ -991,15 +994,43 @@ mod tests {
         database.environment = secret("PGPASSWORD", ENVIRONMENT_SECRET);
         let mut remote = McpServer::remote(CREDENTIALED_URL);
         remote.headers = secret("Authorization", HEADER_SECRET);
+        mask(&mut remote);
+        let failed = Connection::failed(status::summary(
+            "referring",
+            &format!("MCP handshake failed for 'referring': JSON-RPC error: -32000: {CREDENTIAL}"),
+        ));
         vec![
             McpServerResponse::instance("database", &database, Connection::connecting()),
             McpServerResponse::instance("remote", &remote, Connection::connecting()),
+            McpServerResponse::instance("referring", &referring(), failed),
         ]
+    }
+
+    /// An instance server as the instance layer holds it once the environment answered every
+    /// reference: the URL and headers as written, the variables bound, and what they resolve
+    /// to masked.
+    fn referring() -> McpServer {
+        let mut server = McpServer::remote(REFERRING_URL)
+            .with_header("Authorization", "Bearer ${MCP_TOKEN}")
+            .with_secret("MCP_HOST", "mcp.internal")
+            .with_secret("MCP_TENANT", "acme")
+            .with_secret("MCP_KEY", CREDENTIAL)
+            .with_secret("MCP_TOKEN", BOUND_TOKEN);
+        mask(&mut server);
+        server
     }
 
     fn sealed(body: &Value) {
         let text = body.to_string();
-        for secret in [CREDENTIAL, ENVIRONMENT_SECRET, "s3cr3t", "tenants/acme"] {
+        for secret in [
+            CREDENTIAL,
+            ENVIRONMENT_SECRET,
+            "s3cr3t",
+            "tenants/acme",
+            BOUND_TOKEN,
+            "MCP_",
+            "${",
+        ] {
             assert!(!text.contains(secret), "{secret} is published: {text}");
         }
     }
@@ -1129,7 +1160,37 @@ mod tests {
                 remote["headers"],
                 json!([{ "name": "Authorization", "has_value": true }])
             );
+            let referring = &body["servers"][2];
+            assert_eq!(referring["url"], "https://mcp.internal:9443");
+            assert_eq!(
+                referring["headers"],
+                json!([{ "name": "Authorization", "has_value": true }])
+            );
+            assert_eq!(referring["environment"], json!([]));
+            assert_eq!(referring["error"], status::REJECTED);
         }
+    }
+
+    #[test]
+    fn an_instance_url_with_a_reference_is_published_as_its_resolved_origin() {
+        let unbound = McpServer::remote(REFERRING_URL);
+        let mut events = referring();
+        events.transport = Some(McpTransport::Sse);
+
+        let published = |server: &McpServer| {
+            McpServerResponse::instance("referring", server, Connection::connecting()).url
+        };
+
+        assert_eq!(
+            published(&referring()).as_deref(),
+            Some("https://mcp.internal:9443")
+        );
+        assert_eq!(
+            published(&events).as_deref(),
+            Some("https://mcp.internal:9443")
+        );
+        assert_eq!(published(&unbound), None);
+        assert_eq!(published(&McpServer::command("magents", ["mcp"])), None);
     }
 
     #[test]
