@@ -3938,6 +3938,12 @@ mod tests {
                 .map(|hub| hub.connected())
         }
 
+        async fn settled(&self) -> Option<usize> {
+            load::organization(&self.state, self.organization)
+                .await
+                .map(|hub| hub.connected())
+        }
+
         async fn remove(self) {
             sqlx::query("DELETE FROM organizations WHERE id = $1")
                 .bind(self.organization)
@@ -4111,7 +4117,7 @@ mod tests {
 
         let overridden = switched.chat().await;
         let hidden = narrowed.chat().await;
-        let connected = (switched.connected(), narrowed.connected());
+        let connected = (switched.settled().await, narrowed.connected());
         switched.remove().await;
         narrowed.remove().await;
 
