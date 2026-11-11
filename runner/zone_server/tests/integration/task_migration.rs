@@ -836,6 +836,13 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
     .fetch_all(&database.pool)
     .await
     .unwrap();
+    let reopened: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks WHERE workspace_id = $1 AND reopened_at IS NOT NULL",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
     let validated: Vec<String> = sqlx::query_scalar(
         "SELECT conname::text FROM pg_constraint \
          WHERE conname = ANY($1) AND convalidated ORDER BY conname",
@@ -865,6 +872,10 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
         shipped,
         vec![(tasks::COMPLETE.to_string(), true)],
         "only a task that is complete and was stamped shipped, when it was completed"
+    );
+    assert_eq!(
+        reopened, 0,
+        "no task is dated as having left completion before that was recorded"
     );
     assert_eq!(
         validated,

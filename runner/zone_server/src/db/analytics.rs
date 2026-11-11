@@ -42,7 +42,8 @@ pub struct ShippedTaskRow {
     pub title: String,
     pub status: String,
     pub shipped_at: NaiveDateTime,
-    pub last_touched_at: NaiveDateTime,
+    /// When the task left `complete` after shipping, if it has.
+    pub reopened_at: Option<NaiveDateTime>,
     pub pull_request_url: Option<String>,
 }
 
@@ -131,7 +132,7 @@ pub async fn shipped_tasks(
             task.title AS title,
             task.status AS status,
             task.shipped_at AS shipped_at,
-            COALESCE(task.updated_at, task.shipped_at) AS last_touched_at,
+            task.reopened_at AS reopened_at,
             task.pr_url AS pull_request_url
         FROM tasks task
         WHERE task.workspace_id = $1

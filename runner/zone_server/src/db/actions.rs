@@ -771,6 +771,7 @@ mod tests {
         );
         assert!(!complete["completed_at"].is_null());
         assert!(!complete["shipped_at"].is_null());
+        assert!(complete["reopened_at"].is_null());
         let update: Update = serde_json::from_value(
             json!({"task_id":task_id,"status":"created","assignee_id":null}),
         )
@@ -782,9 +783,14 @@ mod tests {
             reopened["shipped_at"], complete["shipped_at"],
             "the move back out stays visible as a reopen"
         );
+        assert!(!reopened["reopened_at"].is_null(), "and is dated");
         let raised: Update =
             serde_json::from_value(json!({"task_id":task_id,"priority":1})).unwrap();
         let raised = update_task(&pool, workspace, user, raised).await.unwrap();
+        assert_eq!(
+            raised["reopened_at"], reopened["reopened_at"],
+            "a later write leaves the date of the move alone"
+        );
         assert_eq!(raised["priority"], json!(1));
         assert_eq!(
             raised["status"],

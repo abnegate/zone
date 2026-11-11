@@ -147,15 +147,17 @@ impl Status {
 
 /// The stamps a status write leaves, as `SET` clauses for an `UPDATE` in
 /// which `status` still reads the value being replaced. `shipped_at` is when
-/// the task last reached `complete`. It outlives the move back out and every
-/// run after it, so the move stays visible as a reopen and those runs as what
-/// followed the fix; only reaching `complete` again replaces it.
+/// the task last reached `complete` and `reopened_at` when it then left; both
+/// outlive every later write, and only reaching `complete` again resets them.
 pub(crate) fn completion_stamps(status: &str) -> String {
     format!(
         "completed_at = CASE WHEN {status}::text IS NULL OR {status} = status THEN completed_at \
            WHEN {status} = '{COMPLETE}' THEN COALESCE(completed_at, NOW()) ELSE NULL END, \
          shipped_at = CASE WHEN {status} = '{COMPLETE}' AND status <> '{COMPLETE}' THEN NOW() \
-           ELSE shipped_at END"
+           ELSE shipped_at END, \
+         reopened_at = CASE WHEN {status} = '{COMPLETE}' AND status <> '{COMPLETE}' THEN NULL \
+           WHEN {status} <> '{COMPLETE}' AND status = '{COMPLETE}' THEN NOW() \
+           ELSE reopened_at END"
     )
 }
 
@@ -251,10 +253,10 @@ const ACTIVE_RUN_STATUSES: &str = "('running','waiting')";
 const ORPHANED: &str = "orphaned";
 
 /// The one status a finished run reports as a success.
-const COMPLETED: &str = "completed";
+pub(crate) const COMPLETED: &str = "completed";
 
 /// The status the sweeper writes onto a run whose lease went stale.
-const FAILED: &str = "failed";
+pub(crate) const FAILED: &str = "failed";
 
 /// Identity carried by every side effect of a claimed task run.
 #[derive(Debug, Clone, Copy)]
@@ -1041,37 +1043,9 @@ pub async fn queue_task_as(
     if active.is_none() || active.flatten().is_some() {
         return Ok(None);
     }
-    let row = sqlx::query!(
-        r#"
-        UPDATE tasks
-        SET status = 'queued',
-            queued_at = NOW(),
-            updated_at = NOW()
-        WHERE id = $1
-        RETURNING id, title, description, acceptance_criteria, status, priority,
-                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
-                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending
-        "#,
-        id
-    )
-    .fetch_optional(&mut *transaction)
-    .await?;
-
-    let result = match row {
-        Some(r) => {
-            let mut task = map_task_row!(r);
-            task.project_ids =
-                sqlx::query_scalar("SELECT project_id FROM task_projects WHERE task_id=$1")
-                    .bind(task.id)
-                    .fetch_all(&mut *transaction)
-                    .await?;
-            Ok(Some(task))
-        }
-        None => Ok(None),
-    };
+    let task = queue_task_in(&mut transaction, id).await?;
     transaction.commit().await?;
-    result
+    Ok(task)
 }
 
 /// Membership locks always precede task locks in user-triggered operations.
@@ -1124,6 +1098,7 @@ async fn queue_task_in(connection: &mut PgConnection, id: Uuid) -> DbResult<Opti
         UPDATE tasks
         SET status = 'queued',
             queued_at = NOW(),
+            reopened_at = CASE WHEN status = 'complete' THEN NOW() ELSE reopened_at END,
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, title, description, acceptance_criteria, status, priority,
@@ -1214,11 +1189,17 @@ async fn insert_task_run(
     )
     .fetch_one(&mut *connection)
     .await?;
-    sqlx::query("UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), completed_at = NULL, updated_at = NOW() WHERE id = $1")
-        .bind(task_id)
-        .bind(row.id)
-        .execute(&mut *connection)
-        .await?;
+    sqlx::query(
+        "UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), \
+           completed_at = NULL, \
+           reopened_at = CASE WHEN status = 'complete' THEN NOW() ELSE reopened_at END, \
+           updated_at = NOW() \
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .bind(row.id)
+    .execute(&mut *connection)
+    .await?;
     Ok(TaskRunRow {
         id: row.id,
         task_id: row.task_id,
@@ -1862,7 +1843,7 @@ pub async fn record_run_model(
 pub async fn complete_merged_task(pool: &PgPool, task_id: Uuid, pr_url: &str) -> DbResult<bool> {
     Ok(sqlx::query(
         "UPDATE tasks SET status = 'complete', pr_status = 'merged', completed_at = NOW(), \
-           shipped_at = NOW(), updated_at = NOW() \
+           shipped_at = NOW(), reopened_at = NULL, updated_at = NOW() \
          WHERE id = $1 AND active_run_id IS NULL AND status <> 'complete' AND pr_url = $2",
     )
     .bind(task_id)

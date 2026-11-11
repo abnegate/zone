@@ -96,7 +96,7 @@ pub fn subjects(
                 title: task.title.clone(),
                 status: task.status.clone(),
                 shipped_at: task.shipped_at,
-                last_touched_at: task.last_touched_at,
+                reopened_at: task.reopened_at,
                 addressed: addressed_failure(&history, task.shipped_at),
                 later_runs,
             }
@@ -301,13 +301,13 @@ mod tests {
     use super::super::checker::fixtures::{moment, run};
     use super::*;
 
-    fn task(status: &str, shipped: NaiveDateTime, touched: NaiveDateTime) -> ShippedTaskRow {
+    fn task(status: &str, shipped: NaiveDateTime) -> ShippedTaskRow {
         ShippedTaskRow {
             task_id: Uuid::from_u128(7),
             title: "Stop the importer dropping rows".to_string(),
             status: status.to_string(),
             shipped_at: shipped,
-            last_touched_at: touched,
+            reopened_at: None,
             pull_request_url: None,
         }
     }
@@ -315,7 +315,7 @@ mod tests {
     fn built(runs: Vec<AgentRun>, now: NaiveDateTime) -> Vec<FixSubject> {
         subjects(
             Uuid::from_u128(1),
-            &[task("complete", moment(2, 9, 0), moment(2, 9, 0))],
+            &[task("complete", moment(2, 9, 0))],
             &runs,
             &RegressionPolicy::default(),
             now,
@@ -441,7 +441,7 @@ mod tests {
                 title: "Stop the importer dropping rows".to_string(),
                 status: "complete".to_string(),
                 shipped_at: moment(2, 9, 0),
-                last_touched_at: moment(2, 9, 0),
+                reopened_at: None,
                 addressed: ErrorCategory::Build,
                 later_runs: Vec::new(),
             },

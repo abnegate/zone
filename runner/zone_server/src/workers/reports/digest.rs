@@ -393,7 +393,7 @@ pub(super) mod fixtures {
                 title: title.to_string(),
                 status: "complete".to_string(),
                 shipped_at: moment(3, 8),
-                last_touched_at: moment(3, 8),
+                reopened_at: None,
                 addressed: ErrorCategory::TestFailure,
                 later_runs: Vec::new(),
             },

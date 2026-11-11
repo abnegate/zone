@@ -14,6 +14,9 @@
 //! pulled back into work is [`Verdict::Regressed`]. A completed task moved to
 //! cancelled was dropped, not reopened; one moved to paused is unfinished
 //! work again, so it counts as a reopen.
+//!
+//! The reopen is dated by when the task left `complete`, never by its last
+//! write: runs and edits on a task that was moved back are ordinary work.
 
 use chrono::NaiveDateTime;
 
@@ -53,14 +56,22 @@ impl ReopenChecker {
             );
         }
 
-        let since_shipping = subject.last_touched_at - subject.shipped_at;
+        let Some(reopened_at) = subject.reopened_at else {
+            return RegressionResult::clear(
+                NAME,
+                subject,
+                "No record of when it left completion",
+                now,
+            );
+        };
+
+        let since_shipping = reopened_at - subject.shipped_at;
         if since_shipping < self.policy.reopen_grace {
             return RegressionResult::clear(
                 NAME,
                 subject,
                 format!(
-                    "Moved to {} {} minutes after completion, which is a correction",
-                    subject.status,
+                    "Moved back {} minutes after completion, which is a correction",
                     since_shipping.num_minutes().max(0)
                 ),
                 now,
@@ -72,8 +83,7 @@ impl ReopenChecker {
                 NAME,
                 subject,
                 format!(
-                    "Moved to {} {} days after completion, too late to blame the fix",
-                    subject.status,
+                    "Moved back {} days after completion, too late to blame the fix",
                     since_shipping.num_days()
                 ),
                 now,
@@ -135,13 +145,10 @@ mod tests {
     use crate::workers::learning::attempt::AttemptOutcome;
     use crate::workers::learning::error_category::ErrorCategory;
 
-    const RUN_COMPLETED: &str = "completed";
-    const RUN_FAILED: &str = "failed";
-
-    fn reopened(status: &str, last_touched_at: NaiveDateTime) -> FixSubject {
+    fn reopened(status: &str, reopened_at: NaiveDateTime) -> FixSubject {
         FixSubject {
             status: status.to_string(),
-            last_touched_at,
+            reopened_at: Some(reopened_at),
             ..subject(ErrorCategory::Build, Vec::new())
         }
     }
@@ -212,6 +219,17 @@ mod tests {
             "got {}",
             result.summary()
         );
+    }
+
+    #[test]
+    fn a_task_with_no_record_of_leaving_completion_is_not_dated_from_anything_else() {
+        let result = checked(&FixSubject {
+            status: tasks::IN_PROGRESS.to_string(),
+            ..subject(ErrorCategory::Build, Vec::new())
+        });
+
+        assert_eq!(result.verdict, Verdict::Clear);
+        assert_eq!(result.summary(), "No record of when it left completion");
     }
 
     #[test]
@@ -291,17 +309,23 @@ mod tests {
         .expect("the scan")
     }
 
-    /// Put everything stamped on the task two hours back, as if they had passed.
-    async fn two_hours_pass(project: &Project, task: Uuid) {
+    /// Put everything stamped on the task `elapsed` back, as if it had passed.
+    async fn passes(project: &Project, task: Uuid, elapsed: Duration) {
         sqlx::query(
-            "UPDATE tasks SET completed_at = completed_at - INTERVAL '2 hours', \
-               shipped_at = shipped_at - INTERVAL '2 hours', \
-               updated_at = updated_at - INTERVAL '2 hours' WHERE id = $1",
+            "UPDATE tasks SET completed_at = completed_at - $2 * INTERVAL '1 minute', \
+               shipped_at = shipped_at - $2 * INTERVAL '1 minute', \
+               reopened_at = reopened_at - $2 * INTERVAL '1 minute', \
+               updated_at = updated_at - $2 * INTERVAL '1 minute' WHERE id = $1",
         )
         .bind(task)
+        .bind(elapsed.num_minutes())
         .execute(&project.pool)
         .await
         .expect("the task's stamps move back");
+    }
+
+    async fn two_hours_pass(project: &Project, task: Uuid) {
+        passes(project, task, Duration::hours(2)).await;
     }
 
     #[tokio::test]
@@ -311,7 +335,7 @@ mod tests {
         let run = tasks::create_task_run(&project.pool, task)
             .await
             .expect("a run");
-        tasks::complete_task_run(&project.pool, run.id, "failed", Some("boom"), None)
+        tasks::complete_task_run(&project.pool, run.id, tasks::FAILED, Some("boom"), None)
             .await
             .expect("the run fails");
         let ended = project.status(task).await;
@@ -394,6 +418,21 @@ mod tests {
             .expect("the task's stamp")
     }
 
+    async fn reopened_at(project: &Project, task: Uuid) -> Option<NaiveDateTime> {
+        sqlx::query_scalar("SELECT reopened_at FROM tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&project.pool)
+            .await
+            .expect("the task's stamp")
+    }
+
+    fn reported(results: Vec<RegressionResult>) -> Vec<(Verdict, String)> {
+        results
+            .into_iter()
+            .map(|result| (result.verdict, result.summary()))
+            .collect()
+    }
+
     async fn run_ends(project: &Project, run: Uuid, status: &str) {
         tasks::complete_task_run(&project.pool, run, status, None, None)
             .await
@@ -413,7 +452,7 @@ mod tests {
             .await
             .expect("a run on the shipped task");
         let admitted = shipped_at(&project, task).await;
-        run_ends(&project, run.id, RUN_FAILED).await;
+        run_ends(&project, run.id, tasks::FAILED).await;
         let fixes = watched_fixes(&project).await;
         project.remove().await;
 
@@ -449,17 +488,12 @@ mod tests {
         let tasks::Unattended::Created(run) = admitted else {
             panic!("the driver admits the task a person moved back: {admitted:?}");
         };
-        run_ends(&project, run, RUN_FAILED).await;
+        run_ends(&project, run, tasks::FAILED).await;
         let ended = scanned(&project).await;
         project.remove().await;
 
-        let reported: Vec<(Verdict, String)> = [running, ended]
-            .into_iter()
-            .flatten()
-            .map(|result| (result.verdict, result.summary()))
-            .collect();
         assert_eq!(
-            reported,
+            reported([running, ended].into_iter().flatten().collect()),
             vec![
                 (
                     Verdict::Regressed,
@@ -475,6 +509,214 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_run_long_after_a_completion_that_was_corrected_is_not_a_reopen() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        passes(&project, task, Duration::minutes(2)).await;
+        project.move_to(task, tasks::CREATED).await;
+        passes(&project, task, Duration::minutes(68)).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the task that was moved back");
+        run_ends(&project, run.id, tasks::FAILED).await;
+        let fixes = watched_fixes(&project).await;
+        let results = scanned(&project).await;
+        project.remove().await;
+
+        assert_eq!(
+            reported(results),
+            Vec::new(),
+            "a run seventy minutes after a completion corrected in two is ordinary work"
+        );
+        let [fix] = &fixes[..] else {
+            panic!("one watched fix: {fixes:?}");
+        };
+        assert_eq!(fix.status, tasks::BLOCKED);
+        assert_eq!(
+            fix.reopened_at
+                .map(|reopened_at| (reopened_at - fix.shipped_at).num_minutes()),
+            Some(2),
+            "the task left completion two minutes in, whatever was written since"
+        );
+        assert_eq!(
+            fix.later_runs
+                .iter()
+                .map(|later| later.run_id)
+                .collect::<Vec<_>>(),
+            vec![run.id]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reopen_is_dated_by_the_move_out_however_often_the_task_is_written_after() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        passes(&project, task, Duration::hours(3)).await;
+        project.move_to(task, tasks::CREATED).await;
+        passes(&project, task, Duration::hours(2)).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the reopened task");
+        run_ends(&project, run.id, tasks::FAILED).await;
+        let after_the_run = scanned(&project).await;
+        passes(&project, task, Duration::hours(4)).await;
+        tasks::update_task(
+            &project.pool,
+            task,
+            Some("Renamed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("an edit that leaves the status alone");
+        let after_the_edit = scanned(&project).await;
+        project.remove().await;
+
+        let regressed = (
+            Verdict::Regressed,
+            "Reopened as blocked 3 hours after it was completed".to_string(),
+        );
+        assert_eq!(
+            reported(after_the_run),
+            vec![regressed.clone()],
+            "five hours after completion, the reopen is still the one at three"
+        );
+        assert_eq!(
+            reported(after_the_edit),
+            vec![regressed],
+            "nine hours after completion, the reopen is still the one at three"
+        );
+    }
+
+    #[tokio::test]
+    async fn running_a_completed_task_again_is_a_reopen_while_the_run_is_live() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the completed task");
+        let queued = scanned(&project).await;
+        let started = tasks::start_task_run(&project.pool, run.id)
+            .await
+            .expect("the run starts");
+        let running = scanned(&project).await;
+        project.remove().await;
+
+        assert!(started, "the run that was admitted starts");
+        assert_eq!(
+            reported([queued, running].into_iter().flatten().collect()),
+            vec![
+                (
+                    Verdict::Regressed,
+                    "Reopened as queued 2 hours after it was completed".to_string()
+                ),
+                (
+                    Verdict::Regressed,
+                    "Reopened as in_progress 2 hours after it was completed".to_string()
+                ),
+            ],
+            "the run itself is what took the task out of completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn queueing_a_completed_task_is_a_reopen() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+
+        let queued = tasks::queue_task_authorized(&project.pool, project.actor, task).await;
+        let results = scanned(&project).await;
+        project.remove().await;
+
+        assert!(
+            matches!(queued, Ok(tasks::Mutation::Applied(_))),
+            "the completed task is queued: {queued:?}"
+        );
+        assert_eq!(
+            reported(results),
+            vec![(
+                Verdict::Regressed,
+                "Reopened as queued 2 hours after it was completed".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reopened_task_that_completes_again_starts_over() {
+        const PULL_REQUEST: &str = "https://github.com/acme/shop/pull/7";
+        let project = Project::new(2).await;
+        let (by_hand, by_merge) = (project.tasks[0], project.tasks[1]);
+        for task in [by_hand, by_merge] {
+            project.move_to(task, COMPLETE).await;
+            passes(&project, task, Duration::hours(3)).await;
+            project.move_to(task, tasks::CREATED).await;
+        }
+        let first = (
+            shipped_at(&project, by_hand).await,
+            shipped_at(&project, by_merge).await,
+        );
+        let left = (
+            reopened_at(&project, by_hand).await,
+            reopened_at(&project, by_merge).await,
+        );
+        let reopened = scanned(&project).await;
+
+        project.move_to(by_hand, COMPLETE).await;
+        sqlx::query("UPDATE tasks SET pr_url = $2 WHERE id = $1")
+            .bind(by_merge)
+            .bind(PULL_REQUEST)
+            .execute(&project.pool)
+            .await
+            .expect("the task's pull request");
+        let merged = tasks::complete_merged_task(&project.pool, by_merge, PULL_REQUEST)
+            .await
+            .expect("the merge completes the task");
+        let second = (
+            shipped_at(&project, by_hand).await,
+            shipped_at(&project, by_merge).await,
+        );
+        let cleared = (
+            reopened_at(&project, by_hand).await,
+            reopened_at(&project, by_merge).await,
+        );
+        let completed = scanned(&project).await;
+        project.remove().await;
+
+        assert!(merged);
+        assert!(
+            left.0.is_some() && left.1.is_some(),
+            "leaving completion is stamped: {left:?}"
+        );
+        assert_eq!(reopened.len(), 2, "both reopens are reported: {reopened:?}");
+        assert_eq!(
+            cleared,
+            (None, None),
+            "completing again forgets the earlier move out"
+        );
+        assert!(
+            second.0 > first.0 && second.1 > first.1,
+            "completing again replaces the stamp: {first:?} then {second:?}"
+        );
+        assert_eq!(
+            reported(completed),
+            Vec::new(),
+            "a task complete again is clear"
+        );
+    }
+
+    #[tokio::test]
     async fn a_task_that_completes_again_is_watched_from_its_new_completion() {
         let project = Project::new(1).await;
         let task = project.tasks[0];
@@ -485,7 +727,7 @@ mod tests {
         let run = tasks::create_task_run(&project.pool, task)
             .await
             .expect("a run on the shipped task");
-        run_ends(&project, run.id, RUN_COMPLETED).await;
+        run_ends(&project, run.id, tasks::COMPLETED).await;
         let reviewed = project.status(task).await;
         project.move_to(task, COMPLETE).await;
         let second = shipped_at(&project, task).await;
