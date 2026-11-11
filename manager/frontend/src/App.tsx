@@ -201,6 +201,10 @@ function App({
                           path="sessions"
                           element={<SettingsRedirect from={LegacySettings.Sessions} />}
                         />
+                        <Route
+                          path="sources"
+                          element={<SettingsRedirect from={LegacySettings.Sources} />}
+                        />
                       </Route>
                     </Route>
                     <Route path="*" element={<Unmatched />} />
