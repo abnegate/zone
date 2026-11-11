@@ -307,6 +307,10 @@ pub struct Preparation {
     /// Built once here so a preview and the generation that follows it, and
     /// the retrieval-augmented reassembly in `ws::chat`, all read one clock.
     pub environment: Environment,
+    /// What the workspace has learned, bounded for a chat and read once here
+    /// so the reassembly in `ws::chat` composes the same bytes. Empty for a
+    /// character card with its agent off.
+    pub learned: String,
     /// What this user's memory adds to the system prompt, read once here so
     /// the reassembly in `ws::chat` composes the same bytes rather than a
     /// second read of a table that may have moved between the two.
@@ -454,6 +458,7 @@ pub async fn build(
             ),
         }
     }
+    let learned = learned(state.db(), chat, workspace, agentic).await;
     // Every chat reads what is remembered about the person it is talking to:
     // a profile and a set of preferences describe them and how they want to be
     // worked with, and a chat with its agent off is still a chat with them.
@@ -503,6 +508,7 @@ pub async fn build(
                 agentic,
                 &SearchContext::new(&state.config().web_search).capability(),
                 &environment,
+                &learned,
                 &memory,
                 &skills,
             )),
@@ -611,6 +617,7 @@ pub async fn build(
         budget: settings.budget(),
         timeout: settings.timeout,
         environment,
+        learned,
         memory,
         skills,
         session,
@@ -640,20 +647,52 @@ pub fn policy(settings: &Settings, capacity: &Capacity) -> Policy {
     )
 }
 
+/// Whether a chat is shown what its workspace has learned. A character card
+/// with its agent off is the card and the boundary alone: it is playing a
+/// part, not working in the repository those entries describe.
+fn reads_learned(chat: &ChatRow, agentic: bool) -> bool {
+    agentic || chat.character.is_none()
+}
+
+/// What the workspace has learned, for a chat that reads it. A store that
+/// cannot be read costs the turn the block and nothing else.
+async fn learned(pool: &sqlx::PgPool, chat: &ChatRow, workspace: Uuid, agentic: bool) -> String {
+    if !reads_learned(chat, agentic) {
+        return String::new();
+    }
+    match crate::agent::learned::prompt(pool, workspace).await {
+        Ok(learned) => learned,
+        Err(error) => {
+            tracing::warn!(
+                chat_id = %chat.id,
+                %error,
+                "Failed to load what the workspace has learned; continuing without it"
+            );
+            String::new()
+        }
+    }
+}
+
 /// The whole system entry: a character card if there is one, the built prompt
-/// for this surface, the web-search capability tail, then whatever this user
-/// asked to have remembered, then the workspace's skills index.
+/// for this surface, the web-search capability tail, then what the workspace
+/// has learned, then what is remembered about this user, then the workspace's
+/// skills index. The same order a run reads them in.
 ///
-/// `memory` and `skills` are required rather than optional so the compiler
-/// enumerates every caller: a turn that quietly lost the block would answer a
-/// person the server knows about as if it had never met them, or start work
-/// the workspace has a written procedure for as if it had none.
+/// `learned`, `memory` and `skills` are required rather than optional so the
+/// compiler enumerates every caller: a turn that quietly lost a block would
+/// ask again what the workspace has already answered, answer a person the
+/// server knows about as if it had never met them, or start work the
+/// workspace has a written procedure for as if it had none.
+///
+/// A character card with its agent off reads no learned block whatever it is
+/// handed, so no caller can give it one.
 pub fn system_prompt(
     chat: &ChatRow,
     tools: &ChatTools,
     agentic: bool,
     capability: &str,
     environment: &Environment,
+    learned: &str,
     memory: &str,
     skills: &str,
 ) -> String {
@@ -670,7 +709,12 @@ pub fn system_prompt(
         (None, true) => crate::agent::prompt::chat(tools, chat.auto_approve, environment),
         (None, false) => crate::agent::prompt::plain(environment),
     };
-    format!("{prompt}\n\n{capability}{memory}{skills}")
+    let learned = if reads_learned(chat, agentic) {
+        learned
+    } else {
+        ""
+    };
+    format!("{prompt}\n\n{capability}{learned}{memory}{skills}")
 }
 
 /// A minimal chat row, so prompt tests do not need a database.
@@ -715,6 +759,7 @@ pub(crate) fn composed(at: &str, memory: &str) -> String {
             "Pacific/Auckland",
             PathBuf::from("/srv/zone"),
         ),
+        "",
         memory,
         "",
     )
@@ -856,6 +901,38 @@ mod tests {
             None,
             &[],
         )
+    }
+
+    const INSTRUCTION: &str = "Run cargo nextest from the runner directory.";
+
+    const CONVENTION: &str = "Migrations are timestamped and named in snake_case.";
+
+    const DISCOVERY: &str = "The disposable test database listens on 55471.";
+
+    /// One entry of each learned family, rendered the way a chat turn receives
+    /// them.
+    fn learned_block() -> String {
+        use crate::db::knowledge::{LearnedCategory, LearnedEntryRow};
+
+        fn entry(title: &str, content: &str) -> LearnedEntryRow {
+            LearnedEntryRow {
+                id: Uuid::nil(),
+                workspace_id: Uuid::nil(),
+                title: title.to_string(),
+                content: content.to_string(),
+                tags: Vec::new(),
+                updated_at: None,
+            }
+        }
+
+        crate::agent::learned::render(&crate::agent::learned::Learned {
+            instructions: vec![entry("How do I run the tests", INSTRUCTION)],
+            facts: vec![(
+                LearnedCategory::RepositoryConvention,
+                vec![entry("Migration names", CONVENTION)],
+            )],
+            discoveries: vec![entry("Test database port", DISCOVERY)],
+        })
     }
 
     /// A fixed clock, so every prompt these tests compose is comparable with
@@ -1020,6 +1097,7 @@ mod tests {
             &environment,
             "",
             "",
+            "",
         );
         let agentic = system_prompt(
             &chat_row(None, true, false),
@@ -1027,6 +1105,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             "",
             "",
         );
@@ -1038,6 +1117,7 @@ mod tests {
             &environment,
             "",
             "",
+            "",
         );
         let persona_agentic = system_prompt(
             &chat_row(Some(card), true, false),
@@ -1045,6 +1125,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             "",
             "",
         );
@@ -1075,9 +1156,10 @@ mod tests {
         );
     }
 
-    /// A chat with nothing remembered must read byte for byte as it did before
-    /// memory existed, on every arm: the whole feature is then invisible to a
-    /// user who has never asked for anything to be remembered.
+    /// A chat with nothing learned and nothing remembered must read byte for
+    /// byte as it did before either block existed, on every arm: both features
+    /// are then invisible in a workspace that has learned nothing, to a user
+    /// nothing is remembered about.
     #[test]
     fn an_empty_memory_block_leaves_every_arm_exactly_as_it_was() {
         let environment = environment();
@@ -1124,7 +1206,7 @@ mod tests {
 
         for (chat, agentic, expected) in arms {
             assert_eq!(
-                system_prompt(&chat, &tools, agentic, CAPABILITY, &environment, "", ""),
+                system_prompt(&chat, &tools, agentic, CAPABILITY, &environment, "", "", ""),
                 expected
             );
         }
@@ -1140,8 +1222,17 @@ mod tests {
         let memory = memory();
         assert!(!memory.is_empty());
 
-        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "");
-        let with = system_prompt(&chat, &tools, true, CAPABILITY, &environment, &memory, "");
+        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "", "");
+        let with = system_prompt(
+            &chat,
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            "",
+            &memory,
+            "",
+        );
 
         assert_eq!(with, format!("{without}{memory}"));
         assert!(
@@ -1158,8 +1249,8 @@ mod tests {
         );
     }
 
-    /// The index is the last thing in the entry: after memory, so what the
-    /// person asked to have remembered is read before what the workspace wrote
+    /// The index is the last thing in the entry: after memory, so what is
+    /// remembered about the person is read before what the workspace wrote
     /// about how to work, and carrying its own blank line like memory does.
     #[test]
     fn the_skills_index_follows_the_memory_block() {
@@ -1176,13 +1267,23 @@ mod tests {
             1,
         );
         assert!(skills.starts_with("\n\n# Skills"));
-        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, &memory, "");
+        let without = system_prompt(
+            &chat,
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            "",
+            &memory,
+            "",
+        );
         let with = system_prompt(
             &chat,
             &tools,
             true,
             CAPABILITY,
             &environment,
+            "",
             &memory,
             &skills,
         );
@@ -1193,6 +1294,188 @@ mod tests {
         );
         assert!(!with.contains("\n\n\n"), "{with}");
         assert!(with.ends_with("Use when shipping to production."), "{with}");
+    }
+
+    /// What the workspace has learned is the first block after the tail and
+    /// the remembered block the next, the order a run reads them in: how the
+    /// workspace wants its work done, then who the work is for.
+    #[test]
+    fn the_learned_block_sits_between_the_capability_tail_and_the_memory_block() {
+        let environment = environment();
+        let tools = tools();
+        let chat = chat_row(None, true, false);
+        let learned = learned_block();
+        let memory = memory();
+        assert!(
+            learned.starts_with("\n\n# Standing instructions\n"),
+            "{learned}"
+        );
+
+        let bare = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "", "");
+        let with = system_prompt(
+            &chat,
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            &learned,
+            &memory,
+            "",
+        );
+
+        assert_eq!(with, format!("{bare}{learned}{memory}"));
+        assert!(
+            with.contains(&format!("{CAPABILITY}{learned}{memory}")),
+            "each block carries its own blank line, so nothing separates the three: {with}"
+        );
+        let positions = [
+            CAPABILITY,
+            "# Standing instructions",
+            INSTRUCTION,
+            "# Repository conventions",
+            CONVENTION,
+            "# Recorded while working here",
+            DISCOVERY,
+            "Ada, an electrical engineer",
+        ]
+        .map(|text| {
+            with.find(text)
+                .unwrap_or_else(|| panic!("{text:?} is missing from {with}"))
+        });
+        assert!(positions.is_sorted(), "{positions:?}: {with}");
+        assert!(
+            with.ends_with("Ada, an electrical engineer in Wellington."),
+            "{with}"
+        );
+    }
+
+    #[test]
+    fn a_prompt_carrying_every_block_keeps_them_one_blank_line_apart() {
+        let environment = environment();
+        let tools = tools();
+        let chat = chat_row(None, true, false);
+        let learned = learned_block();
+        let memory = memory();
+        let skills = crate::agent::skills::render(
+            &[crate::db::knowledge::SkillRow {
+                id: Uuid::new_v4(),
+                title: "Deploy checklist".into(),
+                head: "---\ndescription: Use when shipping to production.\n---\n".into(),
+            }],
+            1,
+        );
+
+        let bare = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "", "");
+        let composed = system_prompt(
+            &chat,
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            &learned,
+            &memory,
+            &skills,
+        );
+
+        assert_eq!(composed, format!("{bare}{learned}{memory}{skills}"));
+        for block in [&learned, &memory, &skills] {
+            assert!(block.starts_with("\n\n"), "{block}");
+            assert!(!block.ends_with('\n'), "{block}");
+        }
+        assert!(!composed.contains("\n\n\n"), "{composed}");
+        assert!(
+            composed.ends_with("Use when shipping to production."),
+            "{composed}"
+        );
+    }
+
+    /// The agent being off does not take the block from an assistant chat,
+    /// which answers questions about the same workspace. It does take it from
+    /// a character, which is the card and the boundary and nothing learned:
+    /// whatever the caller hands over, that arm reads none of it.
+    #[test]
+    fn a_character_with_its_agent_off_reads_no_learned_block() {
+        let environment = environment();
+        let tools = tools();
+        let card = crate::services::character::ChatCharacter {
+            name: "Ada".into(),
+            system_prompt: Some(CARD.into()),
+            ..Default::default()
+        };
+        let learned = learned_block();
+        let memory = memory();
+        let boundary = crate::agent::prompt::boundary();
+
+        assert!(!reads_learned(
+            &chat_row(Some(card.clone()), false, false),
+            false
+        ));
+        assert!(reads_learned(
+            &chat_row(Some(card.clone()), true, false),
+            true
+        ));
+        assert!(reads_learned(&chat_row(None, false, false), false));
+        assert!(reads_learned(&chat_row(None, true, false), true));
+
+        let persona = system_prompt(
+            &chat_row(Some(card.clone()), false, false),
+            &tools,
+            false,
+            CAPABILITY,
+            &environment,
+            &learned,
+            &memory,
+            "",
+        );
+        assert_eq!(
+            persona,
+            format!("{CARD}\n\n{boundary}\n\n{CAPABILITY}{memory}")
+        );
+
+        for (chat, agentic) in [
+            (chat_row(None, false, false), false),
+            (chat_row(None, true, false), true),
+            (chat_row(Some(card), true, false), true),
+        ] {
+            let composed = system_prompt(
+                &chat,
+                &tools,
+                agentic,
+                CAPABILITY,
+                &environment,
+                &learned,
+                &memory,
+                "",
+            );
+            assert!(
+                composed.ends_with(&format!("{CAPABILITY}{learned}{memory}")),
+                "{composed}"
+            );
+        }
+    }
+
+    /// A pool that can reach no server stands in for a store that is down: the
+    /// turn goes ahead without the block.
+    #[tokio::test]
+    async fn an_unreadable_store_costs_the_turn_its_learned_block_and_nothing_else() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(250))
+            .connect_lazy("postgres://127.0.0.1:1/zone")
+            .expect("a lazy pool needs no server");
+        let workspace = Uuid::new_v4();
+
+        assert!(
+            crate::agent::learned::prompt(&pool, workspace)
+                .await
+                .is_err(),
+            "the store must be unreachable for this to prove anything"
+        );
+        for (chat, agentic) in [
+            (chat_row(None, true, false), true),
+            (chat_row(None, false, false), false),
+        ] {
+            assert_eq!(learned(&pool, &chat, workspace, agentic).await, "");
+        }
     }
 
     /// The capability is non-empty on both `SearchContext` arms, and it has to
@@ -1209,6 +1492,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             &memory,
             "",
         );

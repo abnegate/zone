@@ -3398,6 +3398,7 @@ async fn prepare_chat(
         agentic,
         &search.capability(),
         &preparation.environment,
+        &preparation.learned,
         &preparation.memory,
         &preparation.skills,
     );
@@ -3631,6 +3632,7 @@ async fn handle_chat_generation(
         mut budget,
         timeout,
         environment: _,
+        learned: _,
         memory: _,
         skills: _,
         session: mut pinned,
@@ -4766,9 +4768,10 @@ mod tests {
     }
 
     /// The capability tail closes each arm here because these four calls pass
-    /// no memory. A user with something remembered reads the block after that
-    /// tail, which `session`'s own tests pin; what this one holds is that the
-    /// persona, the agent contracts and the tail are unchanged by its arrival.
+    /// nothing learned and no memory. A chat with either reads its blocks
+    /// after that tail, which `session`'s own tests pin; what this one holds is
+    /// that the persona, the agent contracts and the tail are unchanged by
+    /// their arrival.
     #[tokio::test]
     async fn system_prompt_preserves_persona_and_agent_contracts() {
         let state = AppState::for_tests();
@@ -4803,6 +4806,7 @@ mod tests {
             &environment,
             "",
             "",
+            "",
         );
         assert!(persona.starts_with("Stay Ari."), "{persona}");
         assert!(persona.ends_with(CAPABILITY), "{persona}");
@@ -4814,6 +4818,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             "",
             "",
         );
@@ -4832,6 +4837,7 @@ mod tests {
             &environment,
             "",
             "",
+            "",
         );
         assert!(combined.starts_with("Stay Ari.\n\n"), "{combined}");
         assert!(
@@ -4845,6 +4851,7 @@ mod tests {
             false,
             CAPABILITY,
             &environment,
+            "",
             "",
             "",
         );
