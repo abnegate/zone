@@ -31,6 +31,7 @@
   width: 100%;
   min-width: 0;
   overflow-x: auto;
+  container-type: inline-size;
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-card);
   background: var(--ui-bg-elevated);
@@ -521,6 +522,27 @@
 .input-mono {
   font-family: var(--ui-font-mono);
   font-size: var(--ui-text-sm);
+}
+
+@media (min-width: 769px) {
+  @container (max-width: 48rem) {
+    .sources-table th:nth-child(4),
+    .sources-table td:nth-child(4),
+    .sources-table th:nth-child(5),
+    .sources-table td:nth-child(5) {
+      display: none;
+    }
+
+    .sources-table td:first-child {
+      width: 100%;
+      max-width: 0;
+    }
+
+    .source-name-cell {
+      min-width: 0;
+      max-width: none;
+    }
+  }
 }
 
 @media (max-width: 768px) {

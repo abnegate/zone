@@ -586,6 +586,21 @@ describe('sources section layout', () => {
     expect(rule(css, '.github-configuration > .ui-btn-link')).toContain('padding-inline: 0');
   });
 
+  it('drops the URL and verified columns when the settings column is too narrow for the actions', () => {
+    expect(rule(css, '.sources-table-wrapper')).toContain('container-type: inline-size');
+    const desktop = media(css, '(min-width: 769px)');
+    expect(desktop).toContain('@container (max-width: 48rem)');
+    expect(
+      rule(
+        desktop,
+        '.sources-table th:nth-child(4),\n.sources-table td:nth-child(4),\n.sources-table th:nth-child(5),\n.sources-table td:nth-child(5)'
+      )
+    ).toContain('display: none');
+    const name = rule(desktop, '.sources-table td:first-child');
+    expect(name).toContain('width: 100%');
+    expect(name).toContain('max-width: 0');
+  });
+
   it('lets the URL column absorb the spare width so the actions fit the settings column', () => {
     const cell = rule(css, '.sources-table .source-url-cell');
     expect(cell).toContain('width: 100%');
