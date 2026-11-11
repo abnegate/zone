@@ -40,9 +40,16 @@ async fn an_active_entry_behind_a_full_candidate_window_of_inactive_ones_is_foun
         )
         .await
         .expect("creating an entry to retire");
-        knowledge::store_knowledge_embedding(&pool, inactive, workspace, &query(), MODEL)
-            .await
-            .expect("embedding the entry to retire");
+        knowledge::store_knowledge_embedding(
+            &pool,
+            inactive,
+            workspace,
+            "An entry that was deleted after it was embedded.",
+            &query(),
+            MODEL,
+        )
+        .await
+        .expect("embedding the entry to retire");
         assert!(
             knowledge::delete_knowledge(&pool, inactive)
                 .await
@@ -63,9 +70,16 @@ async fn an_active_entry_behind_a_full_candidate_window_of_inactive_ones_is_foun
     )
     .await
     .expect("creating the active entry");
-    knowledge::store_knowledge_embedding(&pool, active, workspace, &near_query(16), MODEL)
-        .await
-        .expect("embedding the active entry");
+    knowledge::store_knowledge_embedding(
+        &pool,
+        active,
+        workspace,
+        "The entry the search should return.",
+        &near_query(16),
+        MODEL,
+    )
+    .await
+    .expect("embedding the active entry");
 
     let hits =
         knowledge::search_knowledge_entries(&pool, &query(), workspace, LIMIT, THRESHOLD).await;

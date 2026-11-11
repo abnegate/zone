@@ -275,6 +275,14 @@ pub async fn recover_unindexed(
                     );
                     true
                 }
+                Err(services::knowledge::Unindexed::Changed) => {
+                    tracing::info!(
+                        "Knowledge entry {} changed while it was embedded; a later pass embeds \
+                         what it says now",
+                        entry.id
+                    );
+                    true
+                }
                 Err(error) => {
                     tracing::warn!("Failed to index knowledge entry {}: {error}", entry.id);
                     false
@@ -283,13 +291,13 @@ pub async fn recover_unindexed(
         });
     }
 
-    let mut indexed = 0_i64;
+    let mut embedded = 0_i64;
     let mut attempted = 0_i64;
 
     while let Some(outcome) = indexing.join_next().await {
         attempted += 1;
         match outcome {
-            Ok(true) => indexed += 1,
+            Ok(true) => embedded += 1,
             Ok(false) => {}
             Err(error) => tracing::error!("A knowledge indexing task did not finish: {error}"),
         }
@@ -297,7 +305,7 @@ pub async fn recover_unindexed(
 
     let mut recovery = recovery.lock().await;
 
-    if indexed == 0 {
+    if embedded == 0 {
         recovery.embedded_nothing(attempted);
         tracing::warn!(
             "Knowledge recovery: none of {} entries could be embedded; waiting {} pass(es), \
@@ -309,8 +317,8 @@ pub async fn recover_unindexed(
     } else {
         recovery.answered();
         tracing::info!(
-            "Knowledge recovery: indexed {} of {} entries",
-            indexed,
+            "Knowledge recovery: embedded {} of {} entries",
+            embedded,
             attempted
         );
     }
