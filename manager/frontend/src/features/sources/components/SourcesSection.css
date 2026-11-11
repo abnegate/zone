@@ -154,6 +154,11 @@
   text-overflow: ellipsis;
 }
 
+.sources-table .source-url-cell {
+  width: 100%;
+  max-width: 0;
+}
+
 .source-url {
   display: block;
   max-width: 18rem;

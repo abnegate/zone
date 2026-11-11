@@ -285,7 +285,7 @@ export function SourcesSection() {
                     <td>
                       <SourceStatusBadge source={source} />
                     </td>
-                    <td>
+                    <td className="source-url-cell">
                       <a
                         className="source-url"
                         href={source.url}

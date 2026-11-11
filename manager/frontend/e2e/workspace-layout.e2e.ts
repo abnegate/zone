@@ -159,6 +159,15 @@ for (const viewport of [
           '20px'
         );
         await fitsViewport(page);
+        if (viewport.width > 768) {
+          const table = await page
+            .locator('.sources-table-wrapper')
+            .evaluate((element) => ({
+              scroll: element.scrollWidth,
+              client: element.clientWidth,
+            }));
+          expect(table.scroll).toBeLessThanOrEqual(table.client);
+        }
         await capture(page, `${profile}-sources`, theme);
       });
 

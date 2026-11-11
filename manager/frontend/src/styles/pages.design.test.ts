@@ -558,6 +558,12 @@ describe('sources section layout', () => {
   it('aligns the access token disclosure with the field labels', () => {
     expect(rule(css, '.github-configuration > .ui-btn-link')).toContain('padding-inline: 0');
   });
+
+  it('lets the URL column absorb the spare width so the actions fit the settings column', () => {
+    const cell = rule(css, '.sources-table .source-url-cell');
+    expect(cell).toContain('width: 100%');
+    expect(cell).toContain('max-width: 0');
+  });
 });
 
 describe('settings page layout', () => {
