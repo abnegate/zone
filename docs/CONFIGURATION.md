@@ -2115,7 +2115,7 @@ Inside Docker the manager image does not include magents. Install it on the host
 
 ### `ZONE_MCP_ENABLED`
 - **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
-- **Description**: Master switch for both layers. `1` / `true` / `yes` / `on`, in any case, leaves it on. `0` / `false` / `no` / `off` skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
+- **Description**: Master switch for both layers, which read it the same way: the value is trimmed and read in any case, `0` / `false` / `no` / `off` turns it off, and anything else, an empty or unrecognised value included, leaves it on. Off skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
 
 ### `ZONE_MCP_AUTO_CONNECT`
 - **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
@@ -2170,7 +2170,7 @@ The Helm chart passes each value under `server.env` to zone-server as written, s
 
 ### `ZONE_MCP_COMMANDS`
 - **Default**: `false`. Compose passes `false` unless `.env` says otherwise, and the Helm chart sets `"false"` in `server.env`.
-- **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on` turns it on. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `environment`, never the server's full environment, but it still runs as the server's user, so turn this on only when you trust every organization admin to run commands on the host. Instance-layer servers are not affected.
+- **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on`, trimmed and in any case, turns it on; anything else leaves it off. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `environment`, never the server's full environment, but it still runs as the server's user, so turn this on only when you trust every organization admin to run commands on the host. Instance-layer servers are not affected.
 
 ### Organization-managed servers
 
@@ -2189,29 +2189,37 @@ Each server shows one status:
 
 A status is the result of the last connect, not a live check. Zone tries a failed server again when an admin reconnects it, when an edit changes anything but `tools`, or when Zone restarts; it does not retry one on its own. An `http` server that connected and has since gone away still shows `connected` until it is reconnected.
 
-For a server reached by URL, in either layer, `error` names the kind of failure and, when the server answered with one, the HTTP status. It never repeats the remote server's own words: a response body, a redirect's target and a JSON-RPC error's message all stay out of the API, the console and the audit log. The full text is in the server log, in the "MCP server unavailable" warning logged under `abnegate_agent`. There, everything Zone sends the server is replaced by `[REDACTED]`: each header value, the credential of a two-part value such as `Bearer <token>`, the URL's path and query, each path segment and query value, and a user name or password in an instance URL. Only values of 6 bytes or more are replaced.
+For a server reached by URL, in either layer, `error` is chosen by the kind of failure abnegate-agent records for the connect (`McpFailure`, named in the table below) and, for an HTTP status no other kind names, that status. Both are typed values the client takes from what failed; Zone never reads the failure's text to choose the sentence and never copies any of it in: a response body, a redirect's target and a JSON-RPC error's message all stay out of the API, the console and the audit log. The full text is in the server log, in the "MCP server unavailable" warning logged under `abnegate_agent`. There, everything Zone sends the server is replaced by `[REDACTED]`: each header value, the credential of a two-part value such as `Bearer <token>`, the URL's path and query, each path segment and query value, and a user name or password in an instance URL. Only values of 6 bytes or more are replaced.
 
 | `error` | What happened |
 |---|---|
 | `MCP servers are turned off on this instance (ZONE_MCP_ENABLED)` | `ZONE_MCP_ENABLED` is off. |
 | `Command servers are turned off on this instance (ZONE_MCP_COMMANDS)` | An organization `stdio` server while `ZONE_MCP_COMMANDS` is off. |
-| ``SSE servers are not supported; use streamable HTTP (`http`)`` | The server's `type` is `sse`. |
-| `did not connect; see the server log` | A `stdio` server did not start or did not finish its handshake, or the failure is one Zone has no sentence for. |
-| `The server's definition is not valid` | An instance entry has a `url` and a `type` that does not go with one. |
-| `The URL or a header refers to a variable that is not set` | An instance entry refers to an unset variable with no default. |
-| `The URL is not valid` | The URL does not parse, or is not `http` or `https`. |
-| `The URL points at a link-local or cloud metadata address` | The URL names one of those addresses, or a metadata host. No request was made. |
-| `A header is not valid` | A header's name or value is not one HTTP accepts, the connection sets that header itself, or two headers share a name. |
-| `Zone could not build an HTTP client for the server` | The proxy URL is not valid, or the client could not be set up. |
-| `The server did not answer in time` | The handshake and the tool list took longer than 30 seconds. |
-| `The server answered with a redirect Zone does not follow` | Any redirect but a 307 or 308 to the same origin, or more than 10 of those in a row. |
-| `The server refused the credentials (HTTP 401)` | A 401 with a `WWW-Authenticate` challenge. |
-| `The server refused the credentials (HTTP 403)` | A 403 with a `WWW-Authenticate` challenge. |
-| `The server answered HTTP <status>` | Any other error status, a 401 or 403 with no challenge included. |
-| `The server's answer is not MCP over streamable HTTP` | The server answered, but not with what the protocol expects: a web page, malformed JSON, a protocol version Zone does not speak. |
-| `The server answered the handshake with an error` | A JSON-RPC error in answer to `initialize` or to listing the tools. |
-| `Zone could not reach the server` | The connection was refused, the name did not resolve or resolved only to link-local or metadata addresses, or TLS failed. |
-| `The server did not complete the handshake` | Any other failure during the handshake, an error body too large to read included. |
+| ``SSE servers are not supported; use streamable HTTP (`http`)`` | `Unsupported`: the server's `type` is `sse`. |
+| `did not connect; see the server log` | A `stdio` server did not start or did not finish its handshake. For a server reached by URL: `Other`, a failure abnegate-agent names no kind for, `Status` without a status, or a kind newer than this build of Zone. |
+| `The server's definition is not valid` | `Invalid`: an instance entry has a `url` and a `type` that does not go with one. Also a stored organization `stdio` server whose command, arguments or environment values hold `${`, in a row that reached the database some other way, such as a restore or a hand edit: it is never started. |
+| `The URL or a header refers to a variable that is not set` | `Unresolved`: an instance entry refers to an unset variable with no default. |
+| `The URL is not valid` | `Address`: the URL does not parse, or is not `http` or `https`. |
+| `The URL points at a link-local or cloud metadata address` | `Metadata`: the URL names one of those addresses or a metadata host, or its host name resolved only to such addresses or to none at all. Nothing was sent to it. |
+| `A header is not valid` | `Header`: a header's name or value is not one HTTP accepts, the connection sets that header itself, or two headers share a name. |
+| `Zone could not build an HTTP client for the server` | `Client`: the proxy URL is not valid, or the client could not be set up. |
+| `The server did not answer in time` | `Timeout`: the handshake and the tool list took longer than 30 seconds, or a request to the server timed out. |
+| `The server answered with a redirect Zone does not follow` | `Redirect`: any redirect but a 307 or 308 to the same origin, or more than 10 of those in a row. |
+| `The server refused the credentials (HTTP 401)` | `Unauthorized` with any status but 403: a 401 with a `WWW-Authenticate` challenge the client could read. |
+| `The server refused the credentials (HTTP 403)` | `Unauthorized` with 403: a 403 with a `WWW-Authenticate` challenge the client could read. |
+| `The server answered HTTP <status>` | `Status`: any other status that is not a success, a 401 or 403 with no challenge, or with one that is not valid text, included. |
+| `The server's answer is not MCP over streamable HTTP` | `Protocol`: the server answered, but not with what the protocol expects: a web page, malformed JSON, an answer to another request, a protocol version Zone does not speak. |
+| `The server answered the handshake with an error` | `Rejected`: a JSON-RPC error in answer to `initialize` or to listing the tools. |
+| `Zone could not reach the server` | `Unreachable`: no connection could be made: it was refused, the name did not resolve, or TLS failed. |
+| `The server did not complete the handshake` | `Closed` or `Oversized`: the connection closed before the handshake and the tool list completed, or the server's answer was larger than the client reads. |
+
+The kind is what the client could observe, so a few failures read as another:
+
+- A request is tried a third time only after an HTTP/2 server refused the first two, and the client does not observe the answer to that third attempt. A 401 or 403 there shows as "The server's answer is not MCP over streamable HTTP", with no status.
+- Behind `TOOL_RUNNER_PROXY_URL`, an `https` server is reached through a tunnel, and the proxy's refusal of that tunnel, a 407 included, shows as "Zone could not reach the server".
+- A proxy that answers a plain `http` request in the server's place is reported as the server would be for that answer: a 502 from the proxy shows as "The server answered HTTP 502".
+- An event-stream answer that brings a malformed event, or one that is not JSON-RPC, in place of the message awaited shows as "The server did not complete the handshake", not as an answer that is not MCP.
+- A host name that resolves to no address at all shows as "The URL points at a link-local or cloud metadata address".
 
 Each server process runs its own copy of an organization's servers. It checks that copy against the database whenever it lists them or runs a turn for that organization, and every 60 seconds whether or not anything asks. With several replicas, a server edited, disabled or deleted through one replica changes on another at that replica's next list or turn for the organization, and within about a minute without one. Deleting an organization stops its servers at once on the replica that served the request, and on every other replica within about a minute.
 
