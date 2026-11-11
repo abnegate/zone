@@ -64,19 +64,24 @@ const PLAIN: &[Section] = &[
 
 /// Raised by measurement rather than by guess, the way every section that has
 /// widened this has raised it: the chat prompt in a workspace with a GitHub
-/// source, whose bullets send a pull request to zone's own tool, is 24,411
-/// characters, and 24,455 as served to a coding agent, once the memory section
-/// tells the model to write what a user states about themselves without
-/// waiting to be asked, so the ceiling is the next round number above the
+/// source, whose bullets send a pull request to zone's own tool, is 24,834
+/// characters, and 24,878 as served to a coding agent, once the catalog holds
+/// `record_discovery` and the workspace section's bullet for recording
+/// unasked renders with it, so the ceiling is the next round number above the
 /// larger and the next section to grow has to measure itself too. Before that
-/// rule they measured 24,191 and 24,235.
-pub const CHAT_MAX_CHARS: usize = 24_500;
+/// bullet they measured 24,411 and 24,455.
+pub const CHAT_MAX_CHARS: usize = 24_900;
 /// A planner chat adds the interview section to the chat prompt; measured
-/// the same way and rounded up the same way. The memory section's rule for
-/// writing unasked measured it at 26,771.
-pub const PLANNER_MAX_CHARS: usize = 26_800;
+/// the same way and rounded up the same way. With the bullet for recording
+/// unasked it is 27,194, and 27,238 as served to a coding agent, and the
+/// ceiling stands above the larger. Before the bullet it measured 26,771.
+pub const PLANNER_MAX_CHARS: usize = 27_300;
 pub const PLAIN_MAX_CHARS: usize = 6_000;
-pub const TASK_MAX_CHARS: usize = 14_000;
+/// Over the catalog the budget test gives an authorized run, the task prompt
+/// measures 14,383 with the bullet for recording unasked, served to a coding
+/// agent or not: no section a run renders qualifies a tool name. Half of this
+/// is the ceiling on a checkout's instruction block, so that moves with it.
+pub const TASK_MAX_CHARS: usize = 14_400;
 
 fn assemble(order: &[Section], context: &Context<'_>) -> String {
     order
@@ -176,6 +181,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::discovery::RECORD_DISCOVERY;
     use crate::agent::question::ASK_USER;
     use crate::agent::{ToolProfile, WorkspaceScope};
     use crate::state::AppState;
@@ -246,6 +252,7 @@ mod tests {
         "read_file",
         "read_repository_file",
         "read_review_threads",
+        RECORD_DISCOVERY,
         "run_command",
         "run_shell",
         "search_chat_history",
@@ -283,6 +290,7 @@ mod tests {
         "create_document",
         "list_documents",
         "read_document",
+        RECORD_DISCOVERY,
         "update_document",
     ];
 
@@ -960,18 +968,28 @@ mod tests {
         let mut tiers = tiered(ToolProfile::Chat, CHAT_CATALOG);
         tiers.push((crate::agent::planner::FINALIZE_PROJECT, Tier::Write));
         tiers.push((crate::agent::planner::CREATE_REPOSITORY, Tier::Outward));
-        let tools = ChatTools::with_tiers(
-            ToolProfile::Chat,
-            &tiers,
-            mcp::guidance_for_tools(&[MCP_TOOL], &servers::guidance()),
-        );
-        let prompt = chat(&tools, false, &github());
+        let planner = || {
+            ChatTools::with_tiers(
+                ToolProfile::Chat,
+                &tiers,
+                mcp::guidance_for_tools(&[MCP_TOOL], &servers::guidance()),
+            )
+        };
+        let prompt = chat(&planner(), false, &github());
         assert!(prompt.contains("Planning a project:"), "{prompt}");
         assert!(
             prompt.len() <= PLANNER_MAX_CHARS,
             "planner prompt is {} chars",
             prompt.len()
         );
+        for &agent in abnegate_agent_cli::AgentKind::ALL {
+            let served = chat(&planner().served_to(agent), false, &github());
+            assert!(
+                served.len() <= PLANNER_MAX_CHARS,
+                "{agent}'s planner prompt is {} chars",
+                served.len()
+            );
+        }
     }
 
     #[test]
