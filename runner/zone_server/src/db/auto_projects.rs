@@ -79,6 +79,7 @@ pub async fn set_auto(
         "UPDATE projects SET auto = $2, \
            auto_actor_id = CASE WHEN $2 THEN $3 ELSE auto_actor_id END, \
            auto_paused_reason = CASE WHEN $2 THEN NULL ELSE auto_paused_reason END, \
+           auto_stalled = auto_stalled AND NOT $2, \
            auto_completed_at = CASE WHEN $2 THEN NULL ELSE auto_completed_at END, \
            updated_at = NOW() \
          WHERE id = $1 RETURNING {PROJECT_COLUMNS}"
@@ -149,7 +150,8 @@ pub async fn release(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
 /// Stop driving a project and say why. Nothing already running is touched.
 pub async fn pause(pool: &PgPool, project_id: Uuid, reason: &str) -> DbResult<bool> {
     Ok(sqlx::query(
-        "UPDATE projects SET auto_paused_reason = $2, auto_claimed_at = NULL, updated_at = NOW() \
+        "UPDATE projects SET auto_paused_reason = $2, auto_stalled = FALSE, \
+           auto_claimed_at = NULL, updated_at = NOW() \
          WHERE id = $1 AND auto AND auto_paused_reason IS NULL",
     )
     .bind(project_id)
@@ -178,7 +180,8 @@ pub async fn pause_stalled(pool: &PgPool, project_id: Uuid, reason: &str) -> DbR
     let mut transaction = pool.begin().await?;
     hold(&mut transaction, project_id).await?;
     let paused = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE projects SET auto_paused_reason = $3, auto_claimed_at = NULL, updated_at = NOW() \
+        "UPDATE projects SET auto_paused_reason = $3, auto_stalled = TRUE, \
+           auto_claimed_at = NULL, updated_at = NOW() \
          WHERE id = $1 AND auto AND auto_paused_reason IS NULL \
            AND NOT EXISTS (SELECT 1 {IN_FLIGHT}) AND NOT EXISTS (SELECT 1 {RUNNABLE}) \
            AND EXISTS (SELECT 1 {REMAINING} AND t.status <> $4)"
@@ -198,7 +201,7 @@ pub async fn pause_stalled(pool: &PgPool, project_id: Uuid, reason: &str) -> DbR
 /// Clear a project's pause so the driver picks it up again; false when it does not exist.
 pub async fn resume(pool: &PgPool, project_id: Uuid) -> DbResult<bool> {
     Ok(sqlx::query(
-        "UPDATE projects SET auto_paused_reason = NULL, updated_at = NOW() \
+        "UPDATE projects SET auto_paused_reason = NULL, auto_stalled = FALSE, updated_at = NOW() \
          WHERE id = $1 AND auto_paused_reason IS NOT NULL",
     )
     .bind(project_id)
@@ -275,11 +278,12 @@ pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
     Ok(())
 }
 
-/// Open the auto projects an agentic task belongs to again: one that stopped
+/// Open the auto projects an agentic task belongs to again: one that stalled
 /// or finished while a person withheld the task has work to do once they move
-/// it back. Called after that move has committed, never inside it, so no
-/// project row is locked while a task row is held. The rows are locked in id
-/// order, and read for a stop to undo only once locked, as [`hold`] has it.
+/// it back. A pause no task caused stays until the project is resumed. Called
+/// after that move has committed, never inside it, so no project row is locked
+/// while a task row is held. The rows are locked in id order, and read for a
+/// stop to undo only once locked, as [`hold`] has it.
 pub async fn reopen(pool: &PgPool, task_id: Uuid) -> DbResult<()> {
     let mut transaction = pool.begin().await?;
     let held: Vec<Uuid> = sqlx::query_scalar(
@@ -293,10 +297,10 @@ pub async fn reopen(pool: &PgPool, task_id: Uuid) -> DbResult<()> {
     .await?;
     if !held.is_empty() {
         sqlx::query(
-            "UPDATE projects SET auto_paused_reason = NULL, auto_completed_at = NULL, \
-               updated_at = NOW() \
-             WHERE id = ANY($1) AND auto \
-               AND (auto_paused_reason IS NOT NULL OR auto_completed_at IS NOT NULL)",
+            "UPDATE projects SET \
+               auto_paused_reason = CASE WHEN auto_stalled THEN NULL ELSE auto_paused_reason END, \
+               auto_stalled = FALSE, auto_completed_at = NULL, updated_at = NOW() \
+             WHERE id = ANY($1) AND auto AND (auto_stalled OR auto_completed_at IS NOT NULL)",
         )
         .bind(&held)
         .execute(&mut *transaction)
@@ -2078,6 +2082,53 @@ mod tests {
             (held, finished, stalled),
             (false, false, true),
             "a project waiting on a person, or with nothing left, is not one that stalled"
+        );
+    }
+
+    #[tokio::test]
+    async fn giving_a_task_back_lifts_a_pause_for_stalling_and_no_other() {
+        const STALLED: &str = "nothing can start";
+        const WITHOUT_ACCESS: &str = "no write access";
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.set_status(task, tasks::BLOCKED).await;
+
+        let stalled = pause_stalled(&project.pool, project.id, STALLED)
+            .await
+            .expect("the pause for stalling");
+        reopen(&project.pool, task).await.expect("the reopen");
+        let lifted = automation(&project.pool, project.id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        let refused = pause(&project.pool, project.id, WITHOUT_ACCESS)
+            .await
+            .expect("the pause for access");
+        sqlx::query("UPDATE projects SET auto_completed_at = NOW() WHERE id = $1")
+            .bind(project.id)
+            .execute(&project.pool)
+            .await
+            .expect("the project finishing");
+        reopen(&project.pool, task).await.expect("the reopen");
+        let kept = automation(&project.pool, project.id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        project.remove().await;
+
+        assert!(stalled && refused, "both pauses apply");
+        assert_eq!(
+            lifted.paused_reason, None,
+            "a project that stalled starts again once a task is given back"
+        );
+        assert_eq!(
+            kept.paused_reason.as_deref(),
+            Some(WITHOUT_ACCESS),
+            "a pause no task caused waits for a person to resume the project"
+        );
+        assert_eq!(
+            kept.completed_at, None,
+            "the project is still open again for the task"
         );
     }
 

@@ -859,12 +859,13 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
     .fetch_all(&database.pool)
     .await
     .unwrap();
-    let driven: bool =
-        sqlx::query_scalar("SELECT auto_driven_at IS NOT NULL FROM projects WHERE id = $1")
-            .bind(project)
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
+    let (driven, stalled): (bool, bool) = sqlx::query_as(
+        "SELECT auto_driven_at IS NOT NULL, auto_stalled FROM projects WHERE id = $1",
+    )
+    .bind(project)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
     database.cleanup().await;
 
     assert_eq!(migrated, 12, "every task survives the migration");
@@ -901,6 +902,10 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
         "a row automation paused before the migration is not one a person parked"
     );
     assert!(!driven, "no project has had a pass under the new order");
+    assert!(
+        !stalled,
+        "no project is taken to have stalled before that was recorded"
+    );
 }
 
 /// The tables `sql` holds a lock on until its transaction ends, upper-cased,
