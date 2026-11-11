@@ -103,8 +103,9 @@ pub struct FixSubject {
     /// The task's status now.
     pub status: String,
     pub shipped_at: NaiveDateTime,
-    /// When the task was last changed, which is when it was reopened if it was.
-    pub last_touched_at: NaiveDateTime,
+    /// When the task left `complete` after shipping, if it has. Later writes
+    /// to the task do not move it.
+    pub reopened_at: Option<NaiveDateTime>,
     /// The failure the fix was addressing: the last one classified before it
     /// shipped, or [`ErrorCategory::Unknown`] if it was never diagnosed.
     pub addressed: ErrorCategory,
@@ -319,7 +320,7 @@ pub(super) mod fixtures {
             title: "Stop the importer dropping rows".to_string(),
             status: "complete".to_string(),
             shipped_at: moment(1, 9, 0),
-            last_touched_at: moment(1, 9, 0),
+            reopened_at: None,
             addressed,
             later_runs,
         }

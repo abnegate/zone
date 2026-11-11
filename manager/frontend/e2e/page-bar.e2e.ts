@@ -26,7 +26,7 @@ const screens = [
   { path: '/models', title: 'Models', content: '.model-item', tabs: true },
   { path: '/projects', title: 'Projects', content: '.project-card', tabs: true },
   { path: '/wiki', title: 'Knowledge Base', content: '.knowledge-card', tabs: true },
-  { path: '/tasks', title: 'Tasks', content: '.task-card:not(.skeleton-card)' },
+  { path: '/tasks', title: 'Tasks', content: '.task-card:not(.board-skeleton-card)' },
   { path: '/chats', title: 'Chats', content: '.chat-item', tabs: true },
 ];
 

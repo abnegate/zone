@@ -224,10 +224,7 @@ test('the add source tiles are one 56px row each', async ({ page }) => {
 test('sibling cards in a grid share one height', async ({ page }) => {
   await signIn(page);
 
-  for (const [route, selector] of [
-    ['/wiki', '.knowledge-card'],
-    ['/tasks', '.task-card'],
-  ] as const) {
+  for (const [route, selector] of [['/wiki', '.knowledge-card']] as const) {
     await page.goto(route);
     await page.waitForLoadState('networkidle').catch(() => undefined);
     const heights = await page.locator(selector).evaluateAll((cards) =>

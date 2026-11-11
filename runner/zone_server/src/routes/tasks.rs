@@ -272,6 +272,10 @@ pub struct UpdateTaskRequest {
     model_name: Option<String>,
 }
 
+const TASK_NOT_FOUND: &str = "Task not found";
+
+const BLANK_TITLE: &str = "Title must not be blank";
+
 fn denied(status: StatusCode, message: &str) -> Box<Response> {
     Box::new((status, Json(ErrorResponse::new(message))).into_response())
 }
@@ -338,9 +342,9 @@ async fn authorize_task(
     let task = tasks::get_task(state.db(), task_id)
         .await
         .map_err(database_error)?
-        .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task not found"))?;
+        .ok_or_else(|| denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND))?;
 
-    authorize_workspace(state, auth, task.workspace_id, "Task not found").await
+    authorize_workspace(state, auth, task.workspace_id, TASK_NOT_FOUND).await
 }
 
 /// Authorize a run and read it in the same transaction.
@@ -368,6 +372,13 @@ pub async fn list(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
+    if query
+        .status
+        .as_deref()
+        .is_some_and(|status| tasks::Status::parse(status).is_none())
+    {
+        return *denied(StatusCode::BAD_REQUEST, tasks::UNKNOWN_STATUS);
+    }
     if let Err(response) =
         authorize_workspace(&state, &auth, workspace_id, "Workspace not found").await
     {
@@ -449,19 +460,8 @@ pub async fn get(
     }
     match tasks::get_task(state.db(), id).await {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(None) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Err(error) => *database_error(error),
     }
 }
 
@@ -481,8 +481,13 @@ pub async fn update(
         .as_deref()
         .is_some_and(|title| title.trim().is_empty())
     {
-        return *denied(StatusCode::BAD_REQUEST, "Title must not be blank");
+        return *denied(StatusCode::BAD_REQUEST, BLANK_TITLE);
     }
+    let status = match request.status.as_deref().map(tasks::Status::parse) {
+        Some(None) => return *denied(StatusCode::BAD_REQUEST, tasks::UNKNOWN_STATUS),
+        Some(status) => status,
+        None => None,
+    };
     match tasks::update_task_authorized(
         state.db(),
         user_id,
@@ -491,7 +496,7 @@ pub async fn update(
             title: request.title.as_deref().map(str::trim),
             description: request.description.as_deref(),
             acceptance_criteria: request.acceptance_criteria.as_deref(),
-            status: request.status.as_deref(),
+            status,
             priority: request.priority,
             project_ids: request.project_ids.as_deref(),
             require_plan_approval: request.require_plan_approval,
@@ -502,9 +507,22 @@ pub async fn update(
     )
     .await
     {
-        Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
+        Ok(tasks::Mutation::Applied(task)) => {
+            if status.is_some() {
+                poke_projects(&task);
+            }
+            Json(TaskResponse::from(task)).into_response()
+        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(error) => *mutation_error(error),
+    }
+}
+
+/// A status a person set is one the driver acts on: it parks a task they
+/// withheld and takes up one they gave back, without waiting out its tick.
+fn poke_projects(task: &tasks::TaskRow) {
+    for project in &task.project_ids {
+        crate::workers::auto_project::poke(*project);
     }
 }
 
@@ -520,15 +538,8 @@ pub async fn delete(
     };
     match tasks::delete_task_authorized(state.db(), user_id, id).await {
         Ok(tasks::Mutation::Applied(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Err(error) => *database_error(error),
     }
 }
 
@@ -543,8 +554,11 @@ pub async fn queue(
         Err(response) => return *response,
     };
     match tasks::queue_task_authorized(state.db(), user_id, id).await {
-        Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
+        Ok(tasks::Mutation::Applied(task)) => {
+            poke_projects(&task);
+            Json(TaskResponse::from(task)).into_response()
+        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(error) => *mutation_error(error),
     }
 }
@@ -598,10 +612,11 @@ pub async fn create_run(
             ))),
         )
             .into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
-        Err(e) => {
-            if e.as_database_error()
-                .is_some_and(|error| error.is_unique_violation())
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Err(error) => {
+            if error
+                .as_database_error()
+                .is_some_and(|violation| violation.is_unique_violation())
             {
                 return (
                     StatusCode::CONFLICT,
@@ -610,7 +625,7 @@ pub async fn create_run(
                     .into_response();
             }
 
-            *database_error(e)
+            *database_error(error)
         }
     }
 }
@@ -909,5 +924,63 @@ mod tests {
             "a run that has not started sends the key as null, as a task does"
         );
         assert_eq!(running["run"]["completed_at"], Value::Null);
+    }
+
+    fn member() -> AuthUser {
+        AuthUser(crate::auth::jwt::Claims {
+            sub: Uuid::from_u128(7).to_string(),
+            email: "member@example.com".into(),
+            roles: vec![],
+            permissions: vec![],
+            exp: 0,
+            iat: 0,
+            jti: Uuid::from_u128(8).to_string(),
+            is_admin: false,
+        })
+    }
+
+    async fn refused_as_unknown(response: Response) {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"],
+            tasks::UNKNOWN_STATUS
+        );
+    }
+
+    /// The state's pool is lazy and points at nothing, so a status that got as
+    /// far as the database would fail here as a 500 instead.
+    #[tokio::test]
+    async fn an_unknown_status_is_refused_before_the_database() {
+        let request = serde_json::from_value(serde_json::json!({ "status": "archived" })).unwrap();
+
+        let response = update(
+            State(AppState::for_tests()),
+            member(),
+            Path(Uuid::from_u128(1)),
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        refused_as_unknown(response).await;
+    }
+
+    #[tokio::test]
+    async fn listing_by_an_unknown_status_is_refused_before_the_database() {
+        let query = serde_json::from_value(serde_json::json!({ "status": "archived" })).unwrap();
+
+        let response = list(
+            State(AppState::for_tests()),
+            member(),
+            Path(Uuid::from_u128(1)),
+            Query(query),
+        )
+        .await
+        .into_response();
+
+        refused_as_unknown(response).await;
     }
 }

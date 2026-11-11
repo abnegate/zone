@@ -28,7 +28,7 @@ use crate::services::github_app::Error as GitHubError;
 use crate::workers::conflict::RepairOutcome;
 use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception};
 
-use super::driver::Drive;
+use super::driver::{Admission, Drive};
 use super::notification::{self, MergeReport};
 use super::review::model::{self, Author, Unavailable, Venue};
 use super::review::outage::Outages;
@@ -136,6 +136,9 @@ pub async fn advance(drive: &Drive<'_>, task: &TaskAutomation) -> Result<(), Str
     else {
         return Ok(());
     };
+    if tasks::WITHHELD.contains(&row.status.as_str()) {
+        return drive.park().await;
+    }
     let Some(pr_url) = row.pr_url.clone() else {
         return pause(drive, task, "the task has no pull request to drive").await;
     };
@@ -172,6 +175,24 @@ pub async fn advance(drive: &Drive<'_>, task: &TaskAutomation) -> Result<(), Str
         Stage::Merging => merging(&step).await,
         Stage::PostMerge => post_merge(&step).await,
         _ => Ok(()),
+    }
+}
+
+/// Whether a person paused, cancelled or removed the task since the step
+/// read it; a withheld task is parked. Asked right before an irreversible
+/// call, because the step's own read can be minutes old by then.
+async fn withdrawn(step: &Step<'_>) -> Result<bool, String> {
+    let status = tasks::get_task(step.drive.state.db(), step.task.task_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .map(|row| row.status);
+    match status {
+        None => Ok(true),
+        Some(status) if tasks::WITHHELD.contains(&status.as_str()) => {
+            step.drive.park().await?;
+            Ok(true)
+        }
+        Some(_) => Ok(false),
     }
 }
 
@@ -342,29 +363,23 @@ async fn absent_checks(step: &Step<'_>, pull: &PullRequestDetail) -> Result<(), 
         .map_err(|error| error.to_string())?
     {
         None => {
-            if auto_projects::count_auto_created(pool, project.project_id, Kind::Ci)
-                .await
-                .map_err(|error| error.to_string())?
-                == 0
-            {
-                step.drive
-                    .add_task(
-                        Kind::Ci,
-                        CI_TASK_TITLE,
-                        CI_TASK_DESCRIPTION,
-                        Some(CI_TASK_CRITERIA),
-                        "The repository reports no checks on pull requests, so a task that adds \
-                         continuous integration was put ahead of everything still waiting to start.",
-                    )
-                    .await?;
-            }
+            step.drive
+                .add_task(
+                    Kind::Ci,
+                    CI_TASK_TITLE,
+                    CI_TASK_DESCRIPTION,
+                    Some(CI_TASK_CRITERIA),
+                    "The repository reports no checks on pull requests, so a task that adds \
+                     continuous integration was put ahead of everything still waiting to start.",
+                )
+                .await?;
             step.set(
                 Stage::AwaitingChecks,
                 Some("waiting for continuous integration to be added to the repository"),
             )
             .await
         }
-        Some((_, status)) if status != "complete" => {
+        Some((_, status)) if status != tasks::COMPLETE => {
             step.set(
                 Stage::AwaitingChecks,
                 Some("waiting for the continuous-integration task to merge"),
@@ -1185,10 +1200,11 @@ async fn fixing(step: &Step<'_>) -> Result<(), String> {
             .await;
     }
     let reason = step.task.reason.clone();
-    if !step
+    if step
         .drive
         .admit(step.task.task_id, reason.as_deref())
         .await?
+        == Admission::Active
     {
         step.set(Stage::Running, reason.as_deref()).await?;
     }
@@ -1250,6 +1266,9 @@ async fn merging(step: &Step<'_>) -> Result<(), String> {
         step.row.title,
         reviewer_names(&rows).join(", ")
     );
+    if withdrawn(step).await? {
+        return Ok(());
+    }
     match pr
         .merge(
             &step.reference,
@@ -2609,5 +2628,265 @@ mod tests {
         assert_eq!(after.stage(), Stage::Paused);
         assert_eq!(after.reason.as_deref(), Some(REPOSITORY_TOKEN_MISSING));
         assert_eq!(asked, 0, "the other repository's token is never sent");
+    }
+
+    async fn set_status(merged: &Merged, status: &str) {
+        sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1")
+            .bind(merged.task)
+            .bind(status)
+            .execute(merged.state.db())
+            .await
+            .expect("a person moves the task");
+    }
+
+    async fn status(merged: &Merged) -> String {
+        tasks::get_task(merged.state.db(), merged.task)
+            .await
+            .expect("the task")
+            .expect("a task")
+            .status
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_task_awaiting_checks_is_parked_rather_than_advanced() {
+        let server = wiremock::MockServer::start().await;
+        serve_merged_pull(&server, Some(commit('c').as_str())).await;
+        let merged = Merged::new(&server).await;
+        set_status(&merged, tasks::CANCELLED).await;
+
+        let after = advanced(&merged).await;
+        let status = status(&merged).await;
+        let asked = requests(&server).await;
+        merged.remove().await;
+
+        assert_eq!(after.stage(), Stage::Paused);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some(auto_projects::CANCELLED_BY_PERSON)
+        );
+        assert_eq!(status, tasks::CANCELLED, "the task is not completed");
+        assert_eq!(asked, 0, "nothing is asked of GitHub for a cancelled task");
+    }
+
+    #[tokio::test]
+    async fn a_task_cancelled_after_its_step_was_read_is_parked_not_merged() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_id": "PR_7",
+                "number": 7,
+                "title": "Add a cart",
+                "state": "open",
+                "head": {"ref": "zone/task-1a2b3c4d-add-a-cart", "sha": commit('a').as_str()},
+                "base": {"ref": "main", "sha": commit('b').as_str()},
+                "html_url": "https://github.com/acme/shop/pull/7",
+                "merged": false,
+                "mergeable": true,
+                "mergeable_state": "clean",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "sha": commit('c').as_str(),
+                "merged": true,
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let merged = Merged::new(&server).await;
+        auto_projects::set_stage(
+            merged.state.db(),
+            merged.task,
+            merged.project.project_id,
+            Stage::Merging,
+            None,
+        )
+        .await
+        .expect("the task is merging");
+        auto_projects::set_head(
+            merged.state.db(),
+            merged.task,
+            commit('a').as_str(),
+            None,
+            true,
+        )
+        .await
+        .expect("the head the reviews approved");
+        let drive = merged.drive();
+        let task = merged.automation().await;
+        let row = tasks::get_task(merged.state.db(), merged.task)
+            .await
+            .expect("the task")
+            .expect("a task");
+        let step = Step {
+            drive: &drive,
+            task: &task,
+            row,
+            reference: reference(),
+            token: token(),
+            pr_url: "https://github.com/acme/shop/pull/7".to_string(),
+        };
+        set_status(&merged, tasks::CANCELLED).await;
+
+        let merging = merging(&step).await;
+        let after = merged.automation().await;
+        let status = status(&merged).await;
+        let writes = server
+            .received_requests()
+            .await
+            .expect("the mock records requests")
+            .iter()
+            .filter(|request| request.method != wiremock::http::Method::GET)
+            .count();
+        merged.remove().await;
+
+        merging.expect("a withdrawn merge is not an error");
+        assert_eq!(writes, 0, "the pull request is not merged");
+        assert_eq!(after.stage(), Stage::Paused);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some(auto_projects::CANCELLED_BY_PERSON)
+        );
+        assert_eq!(status, tasks::CANCELLED);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_continuous_integration_task_is_replaced_instead_of_waited_on() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/acme/shop/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "node_id": "PR_7",
+                "number": 7,
+                "title": "Add a cart",
+                "state": "open",
+                "head": {"ref": "zone/task-1a2b3c4d-add-a-cart", "sha": commit('a').as_str()},
+                "base": {"ref": "main", "sha": commit('b').as_str()},
+                "html_url": "https://github.com/acme/shop/pull/7",
+                "merged": false,
+                "mergeable": true,
+                "mergeable_state": "clean",
+            })))
+            .mount(&server)
+            .await;
+        let merged = Merged::new(&server).await;
+        let pool = merged.state.db();
+        let project_id = merged.project.project_id;
+        let cancelled = auto_projects::insert_auto_task(
+            pool,
+            project_id,
+            merged.workspace,
+            merged.actor,
+            Kind::Ci,
+            CI_TASK_TITLE,
+            CI_TASK_DESCRIPTION,
+            Some(CI_TASK_CRITERIA),
+        )
+        .await
+        .expect("the continuous-integration task");
+        sqlx::query("UPDATE tasks SET status = $2 WHERE id = $1")
+            .bind(cancelled)
+            .bind(tasks::CANCELLED)
+            .execute(pool)
+            .await
+            .expect("a person cancels it");
+        auto_projects::set_stage(pool, merged.task, project_id, Stage::AwaitingChecks, None)
+            .await
+            .expect("the task awaits its checks");
+        let drive = merged.drive();
+        let task = merged.automation().await;
+        let row = tasks::get_task(pool, merged.task)
+            .await
+            .expect("the task")
+            .expect("a task");
+        let step = Step {
+            drive: &drive,
+            task: &task,
+            row,
+            reference: reference(),
+            token: token(),
+            pr_url: "https://github.com/acme/shop/pull/7".to_string(),
+        };
+        let pull = step.pull().await.expect("the pull request");
+
+        let waited = absent_checks(&step, &pull).await;
+        let after = merged.automation().await;
+        let replacement = auto_projects::ci_task(pool, project_id)
+            .await
+            .expect("the project's continuous-integration task");
+        merged.remove().await;
+
+        waited.expect("a head no check reports on");
+        assert!(
+            matches!(&replacement, Some((id, status)) if *id != cancelled && status == tasks::CREATED),
+            "the project gets a continuous-integration task it can run: {replacement:?}"
+        );
+        assert_eq!(after.stage(), Stage::AwaitingChecks);
+        assert_eq!(
+            after.reason.as_deref(),
+            Some("waiting for continuous integration to be added to the repository"),
+            "the pull request does not wait on the task a person cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_a_person_un_pauses_goes_back_to_its_checks() {
+        let server = wiremock::MockServer::start().await;
+        let merged = Merged::new(&server).await;
+        let pool = merged.state.db();
+        let project_id = merged.project.project_id;
+        let running = auto_projects::insert_auto_task(
+            pool,
+            project_id,
+            merged.workspace,
+            merged.actor,
+            Kind::Feature,
+            "Keep the project busy",
+            "A run a person started.",
+            None,
+        )
+        .await
+        .expect("a second task");
+        tasks::create_task_run(pool, running)
+            .await
+            .expect("a run keeps the project in flight");
+        auto_projects::set_stage(pool, merged.task, project_id, Stage::AwaitingChecks, None)
+            .await
+            .expect("the task awaits its checks");
+        set_status(&merged, tasks::PAUSED).await;
+        let tick = || {
+            super::super::driver::drive_project(
+                &merged.state,
+                &merged.services,
+                &merged.config,
+                project_id,
+            )
+        };
+
+        let parked = tick().await;
+        let while_paused = merged.automation().await;
+        set_status(&merged, tasks::REVIEW).await;
+        let unparked = tick().await;
+        let after = merged.automation().await;
+        let project = auto_projects::automation(pool, project_id)
+            .await
+            .expect("the project's automation")
+            .expect("an automated project");
+        merged.remove().await;
+
+        parked.expect("the first tick");
+        assert_eq!(while_paused.stage(), Stage::Paused);
+        unparked.expect("the second tick");
+        assert_eq!(after.stage(), Stage::AwaitingChecks);
+        assert_eq!(after.reason, None);
+        assert_eq!(project.paused_reason, None, "the project keeps going");
     }
 }

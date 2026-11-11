@@ -1,10 +1,10 @@
 import { z } from 'zod';
 import { AiProviderSchema } from '../settings/workspace/schemas';
+import { TASK_STATUSES } from '../tasks/status';
 import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
 import {
   ACTION_TARGETS,
   CHAT_TASK_RUN_STATUSES,
-  CHAT_TASK_STATUSES,
   HANDOVER_AGENTS,
   HANDOVER_REASONS,
   PULL_REQUEST_CHECKS,
@@ -541,7 +541,7 @@ export const ChatTaskSchema = z.object({
   id: z.string(),
   title: z.string(),
   title_pending: z.boolean(),
-  status: z.enum(CHAT_TASK_STATUSES),
+  status: z.enum(TASK_STATUSES),
   is_agentic: z.boolean(),
   href: z.string(),
   created_at: z.string().nullable(),

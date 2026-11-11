@@ -1,4 +1,5 @@
 import type { AiProvider } from '../settings/workspace/types';
+import type { TaskStatus } from '../tasks/status';
 import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
 
 export * from './provider';
@@ -608,16 +609,6 @@ export interface PullRequestDiff {
   truncated: boolean;
 }
 
-export const CHAT_TASK_STATUSES = [
-  'created',
-  'queued',
-  'in_progress',
-  'review',
-  'complete',
-  'blocked',
-] as const;
-export type ChatTaskStatus = (typeof CHAT_TASK_STATUSES)[number];
-
 export const CHAT_TASK_RUN_STATUSES = [
   'running',
   'waiting',
@@ -645,7 +636,7 @@ export interface ChatTask {
   id: string;
   title: string;
   title_pending: boolean;
-  status: ChatTaskStatus;
+  status: TaskStatus;
   is_agentic: boolean;
   href: string;
   created_at: string | null;

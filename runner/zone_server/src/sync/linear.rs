@@ -12,12 +12,16 @@ use super::{
     SyncConfig, SyncError, SyncProvider, SyncResult, WebhookEvent, WebhookPayload,
 };
 use crate::db::sync_config::SyncEventType;
-use crate::db::tasks::TaskRow;
+use crate::db::tasks::{self, TaskRow};
 
 const SIGNATURE_HEADER: &str = "Linear-Signature";
 const DELIVERY_HEADER: &str = "Linear-Delivery";
 const ISSUE_TYPE: &str = "Issue";
 const TIMESTAMP_TOLERANCE_MILLISECONDS: u64 = 60_000;
+const COMPLETED_STATE: &str = "completed";
+const STARTED_STATE: &str = "started";
+const CANCELED_STATE: &str = "canceled";
+const BACKLOG_STATE: &str = "backlog";
 
 /// Linear-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,18 +159,18 @@ impl LinearSyncProvider {
     /// Map Zone task status to Linear state
     fn map_task_status_to_linear_state(status: &str) -> &str {
         match status {
-            "complete" => "completed",
-            "in_progress" => "started",
-            "blocked" => "canceled",
-            _ => "backlog",
+            tasks::COMPLETE => COMPLETED_STATE,
+            tasks::IN_PROGRESS => STARTED_STATE,
+            tasks::BLOCKED | tasks::CANCELLED => CANCELED_STATE,
+            _ => BACKLOG_STATE,
         }
     }
 
     /// Map Linear state to IssueState
     fn map_linear_state_to_issue_state(state_type: &str) -> IssueState {
         match state_type {
-            "completed" | "canceled" => IssueState::Closed,
-            "started" => IssueState::InProgress,
+            COMPLETED_STATE | CANCELED_STATE => IssueState::Closed,
+            STARTED_STATE => IssueState::InProgress,
             _ => IssueState::Open,
         }
     }
@@ -683,22 +687,20 @@ mod tests {
 
     #[test]
     fn test_map_task_status_to_linear_state() {
-        assert_eq!(
-            LinearSyncProvider::map_task_status_to_linear_state("complete"),
-            "completed"
-        );
-        assert_eq!(
-            LinearSyncProvider::map_task_status_to_linear_state("in_progress"),
-            "started"
-        );
-        assert_eq!(
-            LinearSyncProvider::map_task_status_to_linear_state("blocked"),
-            "canceled"
-        );
-        assert_eq!(
-            LinearSyncProvider::map_task_status_to_linear_state("created"),
-            "backlog"
-        );
+        for (status, state) in [
+            (tasks::COMPLETE, "completed"),
+            (tasks::IN_PROGRESS, "started"),
+            (tasks::BLOCKED, "canceled"),
+            (tasks::CREATED, "backlog"),
+            (tasks::CANCELLED, "canceled"),
+            (tasks::PAUSED, "backlog"),
+        ] {
+            assert_eq!(
+                LinearSyncProvider::map_task_status_to_linear_state(status),
+                state,
+                "{status}"
+            );
+        }
     }
 
     #[test]

@@ -1,14 +1,8 @@
 import { z } from 'zod';
 import { ActionReceiptSchema, QuestionSchema, WaitingSchema } from '../chats/schemas';
+import { TASK_STATUSES } from './status';
 
-export const TaskStatusSchema = z.enum([
-  'created',
-  'queued',
-  'in_progress',
-  'blocked',
-  'review',
-  'complete',
-]);
+export const TaskStatusSchema = z.enum(TASK_STATUSES);
 
 export const RunStatusSchema = z.enum([
   'pending',

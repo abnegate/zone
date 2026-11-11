@@ -1,7 +1,11 @@
 use sqlx::ConnectOptions;
 use sqlx::migrate::MigrateError;
+use sqlx::migrate::Migrator;
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
+use zone_server::db::auto_projects::Stage;
 use zone_server::db::{ai_settings, memory, migrations, tasks};
 
 use crate::common::Database;
@@ -745,6 +749,297 @@ async fn workspace_theme_defaults_match_the_product() {
         )
     );
     database.cleanup().await;
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct Parking {
+    stage: String,
+    reason: Option<String>,
+    parked_stage: Option<String>,
+    parked_reason: Option<String>,
+}
+
+#[tokio::test]
+async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_it() {
+    const GITHUB_CONNECTIONS: i64 = 3;
+    const STATUS_CHECK: &str = "tasks_status_check";
+    const PARKED_CHECK: &str = "task_automation_parked_check";
+    const STATUSES_BEFORE: [&str; 6] = [
+        tasks::CREATED,
+        tasks::QUEUED,
+        tasks::IN_PROGRESS,
+        tasks::REVIEW,
+        tasks::COMPLETE,
+        tasks::BLOCKED,
+    ];
+    const GAVE_UP: &str = "task \"Backfill\" used its 3 runs";
+    const WAITING_ON_A_PERSON: &str =
+        "nothing can start until a person looks at: Task 1: needs a person";
+    const WAITING_ON_A_TASK: &str = "nothing can start: 1 task(s) remain but none is runnable; \
+        they wait on tasks that are not agentic or did not finish: Task 2";
+    const WITHOUT_ACCESS: &str =
+        "the person who turned automation on no longer has write access to the workspace";
+    let database = Database::new(PREFIX).await;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    Migrator::new(directory.as_path())
+        .await
+        .unwrap()
+        .run_to(GITHUB_CONNECTIONS, &database.pool)
+        .await
+        .unwrap();
+    let (workspace, _) = database.workspace().await;
+    for status in STATUSES_BEFORE {
+        for stamped in [true, false] {
+            sqlx::query(
+                "INSERT INTO tasks(workspace_id, title, description, status, completed_at) \
+                 VALUES ($1, 'Backfill', 'Regression', $2, \
+                   CASE WHEN $3 THEN TIMESTAMP '2026-01-02 03:04:05' END)",
+            )
+            .bind(workspace)
+            .bind(status)
+            .bind(stamped)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        }
+    }
+    let project: Uuid = sqlx::query_scalar(
+        "INSERT INTO projects(workspace_id, name, auto) VALUES ($1, 'Backfill', TRUE) RETURNING id",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO projects(workspace_id, name, auto, auto_paused_reason) \
+         VALUES ($1, 'Stalled on a person', TRUE, $2), ($1, 'Stalled on a task', TRUE, $3), \
+                ($1, 'Without access', TRUE, $4)",
+    )
+    .bind(workspace)
+    .bind(WAITING_ON_A_PERSON)
+    .bind(WAITING_ON_A_TASK)
+    .bind(WITHOUT_ACCESS)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_automation(task_id, project_id, stage, reason) \
+         SELECT id, $2, CASE WHEN status = $3 THEN $6 ELSE $7 END, \
+                CASE WHEN status = $3 THEN $4 END \
+         FROM tasks WHERE workspace_id = $1 AND status = ANY($5) AND completed_at IS NULL",
+    )
+    .bind(workspace)
+    .bind(project)
+    .bind(tasks::BLOCKED)
+    .bind(GAVE_UP)
+    .bind([tasks::BLOCKED, tasks::IN_PROGRESS].as_slice())
+    .bind(Stage::Paused.as_str())
+    .bind(Stage::Running.as_str())
+    .execute(&database.pool)
+    .await
+    .unwrap();
+
+    migrations::run(&database.pool).await.unwrap();
+
+    let migrated: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE workspace_id = $1")
+        .bind(workspace)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    let shipped: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT status, shipped_at IS NOT DISTINCT FROM completed_at FROM tasks \
+         WHERE workspace_id = $1 AND shipped_at IS NOT NULL",
+    )
+    .bind(workspace)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let reopened: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks WHERE workspace_id = $1 AND reopened_at IS NOT NULL",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    let validated: Vec<String> = sqlx::query_scalar(
+        "SELECT conname::text FROM pg_constraint \
+         WHERE conname = ANY($1) AND convalidated ORDER BY conname",
+    )
+    .bind([STATUS_CHECK, PARKED_CHECK].as_slice())
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let automation: Vec<Parking> = sqlx::query_as(
+        "SELECT stage, reason, parked_stage, parked_reason FROM task_automation \
+         WHERE project_id = $1 ORDER BY stage",
+    )
+    .bind(project)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let driven: bool =
+        sqlx::query_scalar("SELECT auto_driven_at IS NOT NULL FROM projects WHERE id = $1")
+            .bind(project)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    let stalled: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM projects WHERE workspace_id = $1 AND auto_stalled ORDER BY name",
+    )
+    .bind(workspace)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    database.cleanup().await;
+
+    assert_eq!(migrated, 12, "every task survives the migration");
+    assert_eq!(
+        shipped,
+        vec![(tasks::COMPLETE.to_string(), true)],
+        "only a task that is complete and was stamped shipped, when it was completed"
+    );
+    assert_eq!(
+        reopened, 0,
+        "no task is dated as having left completion before that was recorded"
+    );
+    assert_eq!(
+        validated,
+        vec![PARKED_CHECK, STATUS_CHECK],
+        "both constraints hold for the rows that were already there"
+    );
+    assert_eq!(
+        automation,
+        vec![
+            Parking {
+                stage: Stage::Paused.as_str().to_string(),
+                reason: Some(GAVE_UP.to_string()),
+                parked_stage: None,
+                parked_reason: None,
+            },
+            Parking {
+                stage: Stage::Running.as_str().to_string(),
+                reason: None,
+                parked_stage: None,
+                parked_reason: None,
+            },
+        ],
+        "a row automation paused before the migration is not one a person parked"
+    );
+    assert!(!driven, "no project has had a pass under the new order");
+    assert_eq!(
+        stalled,
+        vec!["Stalled on a person", "Stalled on a task"],
+        "only a project paused for stalling is one a task given back starts again"
+    );
+}
+
+/// The tables `sql` holds a lock on until its transaction ends, upper-cased,
+/// read from each kind of statement a migration changes a live table with.
+fn locked_tables(sql: &str) -> BTreeSet<String> {
+    const QUALIFIERS: [&str; 6] = ["TABLE", "IF", "NOT", "EXISTS", "ONLY", "CONCURRENTLY"];
+    const SCHEMA: &str = "PUBLIC.";
+    let code = sql
+        .lines()
+        .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_uppercase();
+    let mut tables = BTreeSet::new();
+    for statement in code.split(';') {
+        let words: Vec<&str> = statement.split_whitespace().collect();
+        for at in 0..words.len() {
+            let named = match &words[at..] {
+                ["ALTER" | "DROP" | "LOCK", "TABLE", named @ ..] => named,
+                ["CREATE", "INDEX", index @ ..] | ["CREATE", "UNIQUE", "INDEX", index @ ..] => {
+                    index
+                        .iter()
+                        .position(|word| *word == "ON")
+                        .map_or(&[][..], |on| &index[on + 1..])
+                }
+                ["LOCK" | "UPDATE", named @ ..] if at == 0 => named,
+                _ => continue,
+            };
+            for word in named.iter().skip_while(|word| QUALIFIERS.contains(*word)) {
+                let name = word.split('(').next().unwrap_or(word);
+                let name = name.trim_end_matches(',').trim_matches('"');
+                tables.insert(name.strip_prefix(SCHEMA).unwrap_or(name).to_string());
+                if !word.ends_with(',') {
+                    break;
+                }
+            }
+        }
+    }
+    tables
+}
+
+#[test]
+fn every_kind_of_statement_that_locks_a_table_counts_it() {
+    const TASKS: &str = "TASKS";
+    const PROJECTS: &str = "PROJECTS";
+    const ONE_TABLE: &str = "SET LOCAL lock_timeout = '5s';\n\
+        ALTER TABLE tasks ADD COLUMN reopened_at timestamp; -- ALTER TABLE projects\n\
+        UPDATE tasks SET shipped_at = completed_at WHERE status = 'complete';\n\
+        INSERT INTO tasks (id) SELECT id FROM tasks ON CONFLICT (id) DO UPDATE SET title = '';\n\
+        CREATE INDEX tasks_shipped ON tasks (shipped_at);";
+    const SECOND_TABLE: [&str; 9] = [
+        "ALTER TABLE IF EXISTS ONLY public.projects ADD COLUMN driven boolean",
+        "DO $$ BEGIN ALTER TABLE projects ADD COLUMN driven boolean; END $$",
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS projects_driven\n    ON public.projects USING btree (driven)",
+        "CREATE INDEX projects_driven ON projects(driven)",
+        "DROP TABLE IF EXISTS projects CASCADE",
+        "DROP TABLE tasks, projects",
+        "LOCK TABLE projects IN SHARE MODE",
+        "LOCK ONLY \"projects\"",
+        "update projects set driven = false",
+    ];
+
+    assert_eq!(
+        locked_tables(ONE_TABLE),
+        BTreeSet::from([TASKS.to_string()])
+    );
+    for statement in SECOND_TABLE {
+        assert_eq!(
+            locked_tables(&format!("{ONE_TABLE}\n{statement};")),
+            BTreeSet::from([PROJECTS.to_string(), TASKS.to_string()]),
+            "`{statement}` locks a second table"
+        );
+    }
+}
+
+/// A migration that locks two tables can deadlock with the server, which
+/// takes the same pairs in both orders. 0003 predates this and has run everywhere.
+#[test]
+fn each_migration_after_github_connections_alters_one_table() {
+    const FIRST: i64 = 4;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
+        let path = entry.expect("migration entry is readable").path();
+        if !path.extension().is_some_and(|extension| extension == "sql") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .expect("migration path has a file name")
+            .to_string_lossy()
+            .into_owned();
+        let version: i64 = name
+            .split('_')
+            .next()
+            .expect("a migration name opens with its version")
+            .parse()
+            .expect("a migration name opens with its version");
+        if version < FIRST {
+            continue;
+        }
+        let sql = std::fs::read_to_string(&path).expect("migration is readable");
+        let locked = locked_tables(&sql);
+        assert!(
+            locked.len() <= 1,
+            "{name} locks {locked:?} in one transaction, so its boot can deadlock with a \
+             statement that locks the same tables in the other order; change each in a migration \
+             of its own"
+        );
+    }
 }
 
 /// Every lock a later migration takes on a live table is one ordinary traffic

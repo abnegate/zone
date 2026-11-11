@@ -3,6 +3,7 @@ import type { Locator } from '@playwright/test';
 import {
   api,
   ask,
+  chooseTaskAction,
   enabled,
   expect,
   logLines,
@@ -101,10 +102,7 @@ test.describe('mcp', () => {
     ).find((t) => t.title === title);
     expect(task).toBeTruthy();
     const mark = logMark();
-    await page
-      .locator('.task-card', { hasText: title })
-      .getByRole('button', { name: 'Execute' })
-      .click();
+    await chooseTaskAction(page, title, 'Run');
     await page.getByRole('button', { name: /start execution/i }).click();
     await expect
       .poll(

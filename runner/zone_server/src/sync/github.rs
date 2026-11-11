@@ -33,7 +33,7 @@ use super::SyncResult;
 use super::WebhookEvent;
 use super::WebhookPayload;
 use crate::db::sync_config::SyncEventType;
-use crate::db::tasks::TaskRow;
+use crate::db::tasks::{self, TaskRow};
 use crate::secret::Unseal;
 
 const TOKEN_UNOPENABLE: &str =
@@ -45,7 +45,7 @@ const GITHUB_REFUSED: &str =
 const ISSUE_NUMBER_INVALID: &str = "the linked GitHub issue ID is not an issue number";
 const INVALID_SIGNATURE: &str = "Invalid signature";
 const CRITERIA_HEADING: &str = "\n\n## Acceptance Criteria\n\n";
-const CLOSING_STATUSES: [&str; 2] = ["complete", "blocked"];
+const CLOSING_STATUSES: [&str; 3] = [tasks::COMPLETE, tasks::BLOCKED, tasks::CANCELLED];
 const EVENT_HEADER: &str = "X-GitHub-Event";
 const DELIVERY_HEADER: &str = "X-GitHub-Delivery";
 const ISSUES_EVENT: &str = "issues";
@@ -881,22 +881,20 @@ mod tests {
 
     #[test]
     fn test_map_task_status_to_github_state() {
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("complete"),
-            GitHubState::Closed
-        );
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("blocked"),
-            GitHubState::Closed
-        );
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("created"),
-            GitHubState::Open
-        );
-        assert_eq!(
-            GitHubSyncProvider::map_task_status_to_github_state("in_progress"),
-            GitHubState::Open
-        );
+        for (status, state) in [
+            (tasks::COMPLETE, GitHubState::Closed),
+            (tasks::BLOCKED, GitHubState::Closed),
+            (tasks::CREATED, GitHubState::Open),
+            (tasks::IN_PROGRESS, GitHubState::Open),
+            (tasks::CANCELLED, GitHubState::Closed),
+            (tasks::PAUSED, GitHubState::Open),
+        ] {
+            assert_eq!(
+                GitHubSyncProvider::map_task_status_to_github_state(status),
+                state,
+                "{status}"
+            );
+        }
     }
 
     #[test]

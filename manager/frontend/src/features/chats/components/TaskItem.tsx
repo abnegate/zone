@@ -1,13 +1,8 @@
 import { Badge } from '@zone/ui';
 import { Link } from 'react-router-dom';
+import { statusLabel, statusTint } from '../../tasks/status';
 import type { ChatTask } from '../types';
-import {
-  publicationName,
-  runProgress,
-  runReading,
-  taskStatusLabel,
-  taskStatusTint,
-} from '../utils/tasks';
+import { publicationName, runProgress, runReading } from '../utils/tasks';
 
 export interface TaskItemProps {
   task: ChatTask;
@@ -24,8 +19,8 @@ export function TaskItem({ task }: TaskItemProps) {
         <Link className="chat-task-title" to={task.href} title={task.title}>
           {task.title}
         </Link>
-        <Badge className="chat-task-status" variant={taskStatusTint(task.status)}>
-          {taskStatusLabel(task.status)}
+        <Badge className="chat-task-status" variant={statusTint(task.status)}>
+          {statusLabel(task.status)}
         </Badge>
       </div>
       {(reading || publication) && (

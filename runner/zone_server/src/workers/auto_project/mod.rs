@@ -38,7 +38,7 @@ static WAKE: Notify = Notify::const_new();
 const CLAIM_LEASE: Duration = Duration::from_secs(15 * 60);
 
 /// Projects one tick will claim.
-const PROJECTS_PER_TICK: i64 = 10;
+pub const PROJECTS_PER_TICK: i64 = 10;
 
 /// Ask the driver to look again before its next tick.
 pub fn poke(project_id: Uuid) {

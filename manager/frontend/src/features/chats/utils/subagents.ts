@@ -1,5 +1,5 @@
+import type { StatusTint } from '../../tasks/status';
 import type { ChatSubagent, StepStatus, SubagentStatus, SubagentStep } from '../subagentTypes';
-import type { TaskTint } from './tasks';
 
 const SECOND = 1_000;
 const MINUTE = 60 * SECOND;
@@ -16,7 +16,7 @@ const STATUS_LABELS: Record<SubagentStatus, string> = {
   stopped: 'Stopped',
 };
 
-const STATUS_TINTS: Record<SubagentStatus, TaskTint> = {
+const STATUS_TINTS: Record<SubagentStatus, StatusTint> = {
   running: 'info',
   completed: 'success',
   failed: 'destructive',
@@ -153,7 +153,7 @@ export function subagentStatusLabel(status: SubagentStatus): string {
   return STATUS_LABELS[status];
 }
 
-export function subagentStatusTint(status: SubagentStatus): TaskTint {
+export function subagentStatusTint(status: SubagentStatus): StatusTint {
   return STATUS_TINTS[status];
 }
 
