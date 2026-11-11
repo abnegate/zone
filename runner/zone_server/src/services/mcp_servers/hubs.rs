@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 
 use abnegate_agent::mcp::McpConfig;
 use abnegate_agent::mcp::McpHub;
+use abnegate_agent::mcp::McpOutcome;
+use abnegate_agent::mcp::McpServer;
 use abnegate_agent::tool::Proxy;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
@@ -18,6 +20,7 @@ use super::sessions::advertised;
 use super::status::Connection;
 use super::status::Policy;
 use super::status::UNCONNECTED;
+use super::status::summary;
 
 pub struct Hubs {
     proxy: Proxy,
@@ -160,14 +163,18 @@ impl Hubs {
             .count()
     }
 
-    pub fn instance_connection(&self, name: &str) -> Connection {
+    pub fn instance_connection(&self, name: &str, server: &McpServer) -> Connection {
         let Some(hub) = self.existing_instance() else {
             return Connection::connecting();
         };
-        if !hub.server_names().iter().any(|server| server == name) {
-            return Connection::failed(UNCONNECTED);
+        match hub.outcome(name) {
+            Some(McpOutcome::Connected { .. }) => Connection::connected(advertised(name, &hub)),
+            Some(McpOutcome::Failed { error, .. }) if server.url.is_some() => {
+                Connection::failed(summary(name, &error))
+            }
+            Some(McpOutcome::Disabled) => Connection::disabled(),
+            _ => Connection::failed(UNCONNECTED),
         }
-        Connection::connected(advertised(name, &hub))
     }
 
     fn entry(&self, organization: Uuid) -> Option<Arc<Entry>> {
@@ -235,20 +242,37 @@ mod tests {
     use crate::services::mcp_servers::definition::Definition;
     use crate::services::mcp_servers::organization::Registered;
     use crate::services::mcp_servers::status::COMMANDS_DISABLED;
-    use crate::services::mcp_servers::status::HTTP_PENDING;
     use crate::services::mcp_servers::status::MCP_DISABLED;
     use crate::services::mcp_servers::status::SSE_UNSUPPORTED;
     use crate::services::mcp_servers::status::Status;
+    use crate::services::mcp_servers::status::UNREACHABLE;
+    use crate::services::mcp_servers::status::UNRESOLVED;
+    use crate::services::mcp_servers::stub::Stub;
     use crate::services::mcp_servers::testing;
 
     const LIMIT: Duration = Duration::from_secs(30);
     const ENABLED: &str = "ZONE_MCP_ENABLED";
     const UNREADABLE: &str = "the database is away";
+    const REMOTE: &str = "remote";
+    const TOKEN: &str = "stub-token-51c2d9";
+    const TOKEN_VARIABLE: &str = "ZONE_TEST_MCP_TOKEN";
 
     const POLICY: Policy = Policy {
         enabled: true,
         commands: true,
     };
+
+    fn referring(url: &str) -> String {
+        serde_json::json!({
+            "mcpServers": {
+                REMOTE: {
+                    "url": url,
+                    "headers": { "Authorization": format!("Bearer ${{{TOKEN_VARIABLE}}}") },
+                },
+            },
+        })
+        .to_string()
+    }
 
     type Loaded = Result<Option<Snapshot>, &'static str>;
 
@@ -872,23 +896,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_definitions_report_why_they_are_not_connected() {
+    async fn remote_definitions_report_why_they_did_not_connect() {
         let hubs = hubs();
         let organization = Uuid::new_v4();
         let sse = Definition::of(
             "events",
             McpServer::remote("http://127.0.0.1:1/sse").with_transport(McpTransport::Sse),
         );
-        let http = Definition::of("remote", McpServer::remote("http://127.0.0.1:1/mcp"));
+        let http = Definition::of("remote", McpServer::remote(testing::REMOTE_URL));
+        let rows = Rows::default();
+        let hub = built(&hubs, organization, &rows).await;
 
-        let hub = built(&hubs, organization, &Rows::storing(vec![sse, http])).await;
+        rows.store(vec![sse, http]);
+        synced(&hubs, organization, &rows).await;
+        let connecting = hub.connection("remote");
 
         assert_eq!(
             hub.connection("events"),
             Connection::failed(SSE_UNSUPPORTED)
         );
-        assert_eq!(hub.connection("remote"), Connection::failed(HTTP_PENDING));
+        assert_eq!(connecting, Connection::connecting());
+        assert_eq!(
+            settled(&hub, "remote").await,
+            Connection::failed(UNREACHABLE)
+        );
         assert_eq!(hub.connected(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_instance_http_server_connects_with_its_reference_bound() {
+        let stub = Stub::start(&["--token", TOKEN]).await;
+        let mut variables = testing::isolated();
+        variables.set(TOKEN_VARIABLE, TOKEN);
+        variables.set(testing::SERVERS, referring(&stub.url()));
+        let hubs = hubs();
+
+        let configuration = hubs.configured().await;
+        drop(variables);
+        let before = hubs.instance_connection(REMOTE, &configuration.servers[REMOTE]);
+        hubs.instance().await;
+
+        assert_eq!(before, Connection::connecting());
+        assert_eq!(
+            hubs.instance_connection(REMOTE, &configuration.servers[REMOTE]),
+            delegate()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_instance_http_server_with_an_unset_reference_fails() {
+        let mut variables = testing::isolated();
+        variables.remove(TOKEN_VARIABLE);
+        variables.set(testing::SERVERS, referring(testing::REMOTE_URL));
+        let hubs = hubs();
+
+        let configuration = hubs.configured().await;
+        drop(variables);
+        hubs.instance().await;
+
+        assert_eq!(
+            hubs.instance_connection(REMOTE, &configuration.servers[REMOTE]),
+            Connection::failed(UNRESOLVED)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_instance_sse_server_fails_as_an_organizations_does() {
+        let mut variables = testing::isolated();
+        variables.set(
+            testing::SERVERS,
+            r#"{"mcpServers":{"events":{"type":"sse","url":"http://127.0.0.1:1/sse"}}}"#,
+        );
+        let hubs = hubs();
+
+        let configuration = hubs.configured().await;
+        drop(variables);
+        hubs.instance().await;
+
+        assert_eq!(
+            hubs.instance_connection("events", &configuration.servers["events"]),
+            Connection::failed(SSE_UNSUPPORTED)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_instance_command_server_that_fails_keeps_the_generic_reason() {
+        let missing = McpServer::command("/nonexistent/zone-mcp-stub", Vec::<String>::new());
+        let mut disabled = McpServer::remote(testing::REMOTE_URL);
+        disabled.disabled = true;
+        let configuration = McpConfig::default()
+            .with_server("missing", missing.clone())
+            .with_server("off", disabled.clone());
+        let hubs = hubs();
+        hubs.install_instance(McpHub::connect_through(&configuration, &Proxy::default()).await);
+
+        assert_eq!(
+            hubs.instance_connection("missing", &missing),
+            Connection::failed(UNCONNECTED)
+        );
+        assert_eq!(
+            hubs.instance_connection("off", &disabled),
+            Connection::disabled()
+        );
     }
 
     #[tokio::test]
@@ -935,12 +1044,16 @@ mod tests {
     #[tokio::test]
     async fn the_instance_layer_is_connecting_until_its_hub_exists() {
         let hubs = hubs();
-        assert_eq!(hubs.instance_connection("docs"), Connection::connecting());
+        let docs = McpServer::remote(testing::REMOTE_URL);
+        assert_eq!(
+            hubs.instance_connection("docs", &docs),
+            Connection::connecting()
+        );
 
         hubs.install_instance(McpHub::new());
 
         assert_eq!(
-            hubs.instance_connection("docs"),
+            hubs.instance_connection("docs", &docs),
             Connection::failed(UNCONNECTED)
         );
         assert_eq!(hubs.instance().await.server_count(), 0);
@@ -951,7 +1064,7 @@ mod tests {
         let hubs = hubs();
         let definition = Definition::stub("stub");
         let stub = McpHub::connect_through(
-            &McpConfig::default().with_server("stub", definition.server),
+            &McpConfig::default().with_server("stub", definition.server.clone()),
             &Proxy::default(),
         )
         .await;
@@ -960,9 +1073,12 @@ mod tests {
         hubs.install_instance(stub);
         hubs.install_instance(McpHub::new());
 
-        assert_eq!(hubs.instance_connection("stub"), delegate());
         assert_eq!(
-            hubs.instance_connection("other"),
+            hubs.instance_connection("stub", &definition.server),
+            delegate()
+        );
+        assert_eq!(
+            hubs.instance_connection("other", &definition.server),
             Connection::failed(UNCONNECTED)
         );
     }

@@ -5,6 +5,8 @@ pub mod organization;
 mod sessions;
 pub mod source;
 pub mod status;
+#[cfg(any(test, feature = "testing"))]
+pub mod stub;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod transport;

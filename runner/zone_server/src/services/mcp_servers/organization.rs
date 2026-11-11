@@ -23,6 +23,7 @@ use super::status::Connection;
 use super::status::Policy;
 use super::status::UNCONNECTED;
 use super::status::static_status;
+use super::status::summary;
 
 struct Slot {
     definition: Definition,
@@ -101,6 +102,11 @@ impl OrganizationHub {
         }
         if inner.sessions.connected(server) {
             return Connection::connected(inner.sessions.tools(server, name));
+        }
+        if slot.definition.server.url.is_some()
+            && let Some(error) = inner.sessions.failure(server, name)
+        {
+            return Connection::failed(summary(name, &error));
         }
         Connection::failed(UNCONNECTED)
     }
@@ -297,6 +303,12 @@ impl OrganizationHub {
         inner.sessions.get(server)
     }
 
+    pub(crate) fn failure(&self, name: &str) -> Option<String> {
+        let inner = self.read();
+        let (server, _) = inner.named(name)?;
+        inner.sessions.failure(server, name)
+    }
+
     pub(crate) fn generation(&self, name: &str) -> Option<u64> {
         self.read().named(name).map(|(_, slot)| slot.generation)
     }
@@ -315,15 +327,111 @@ impl OrganizationHub {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use abnegate_agent::mcp::McpTransport;
+    use abnegate_secret::REDACTED;
+    use serde_json::Value;
+    use serde_json::json;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::Request;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::any;
+    use zone_core::servers::mask;
 
     use super::*;
+    use crate::services::mcp_servers::status::ANSWERED;
+    use crate::services::mcp_servers::status::FORBIDDEN;
+    use crate::services::mcp_servers::status::INCOMPLETE;
+    use crate::services::mcp_servers::status::METADATA_ADDRESS;
+    use crate::services::mcp_servers::status::NOT_MCP;
+    use crate::services::mcp_servers::status::REDIRECTED;
+    use crate::services::mcp_servers::status::REJECTED;
+    use crate::services::mcp_servers::status::SSE_UNSUPPORTED;
     use crate::services::mcp_servers::status::Status;
+    use crate::services::mcp_servers::status::UNAUTHORIZED;
+    use crate::services::mcp_servers::status::UNREACHABLE;
+    use crate::services::mcp_servers::stub::Stub;
 
     const POLICY: Policy = Policy {
         enabled: true,
         commands: true,
     };
+    const PROMPT: Duration = Duration::from_secs(5);
+    const REMOTE: &str = "remote";
+    const AUTHORIZATION: &str = "Authorization";
+    const TOKEN: &str = "stub-token-51c2d9";
+    const KEY_HEADER: &str = "X-Key";
+    const KEY: &str = "key-9f3a7b-sent";
+    const SPOKEN: &str = "remote-said-7f3e9a";
+    const CHALLENGE_HEADER: &str = "WWW-Authenticate";
+    const CHALLENGE: &str = r#"Bearer error="insufficient_scope", scope="remote-said-7f3e9a""#;
+    const LOCATION: &str = "Location";
+    const OVERSIZED: usize = 4096;
+    const INITIALIZE: &str = "initialize";
+    const LIST: &str = "tools/list";
+
+    fn remote(url: String) -> Definition {
+        Definition::of(REMOTE, McpServer::remote(url))
+    }
+
+    async fn answering(
+        respond: impl Fn(&Request) -> ResponseTemplate + Send + Sync + 'static,
+    ) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(respond)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn listing(answer: fn(&Request) -> ResponseTemplate) -> MockServer {
+        answering(move |request| match method(request).as_deref() {
+            Some(INITIALIZE) => ResponseTemplate::new(200).set_body_json(initialized(request)),
+            Some(LIST) => answer(request),
+            _ => ResponseTemplate::new(202),
+        })
+        .await
+    }
+
+    fn spoken(status: u16) -> ResponseTemplate {
+        ResponseTemplate::new(status).set_body_string(SPOKEN)
+    }
+
+    fn typed(body: String, kind: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_raw(body, kind)
+    }
+
+    fn message(request: &Request) -> Value {
+        request.body_json().unwrap_or(Value::Null)
+    }
+
+    fn method(request: &Request) -> Option<String> {
+        message(request)["method"].as_str().map(str::to_string)
+    }
+
+    fn refusal(request: &Request) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": message(request)["id"],
+            "error": { "code": -32000, "message": SPOKEN, "data": SPOKEN },
+        })
+    }
+
+    fn initialized(request: &Request) -> Value {
+        let message = message(request);
+        json!({
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "result": {
+                "protocolVersion": message["params"]["protocolVersion"],
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": "stub", "version": "0.0.1" },
+            },
+        })
+    }
 
     async fn settled(definitions: Vec<Definition>) -> Arc<OrganizationHub> {
         let hub = Arc::new(OrganizationHub::new(Proxy::default(), POLICY));
@@ -441,8 +549,222 @@ mod tests {
 
         assert_eq!(hub.connection("off").status, Status::Disabled);
         assert!(hub.session("off").is_none());
-        assert!(hub.session("remote").is_none());
+        assert_eq!(hub.connection("remote"), Connection::failed(UNREACHABLE));
+        assert_eq!(
+            hub.session("remote").map(|session| session.server_count()),
+            Some(0),
+            "the hub of a connect that failed is kept, for the reason it holds"
+        );
+        assert_eq!(
+            hub.connection("events"),
+            Connection::failed(SSE_UNSUPPORTED)
+        );
         assert!(hub.session("events").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_http_server_connects_and_lists_its_tools() {
+        let stub = Stub::start(&[]).await;
+        let hub = connected(vec![remote(stub.url())]).await;
+        let mut registry = ToolRegistry::new();
+
+        let registered = hub.register(&mut registry, &|_| true);
+
+        assert_eq!(
+            hub.connection(REMOTE),
+            Connection::connected(vec!["delegate".to_string()])
+        );
+        assert_eq!(registered, one());
+        assert_eq!(registry.names(), ["remote__delegate"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_http_server_fails_with_its_kind_and_status() {
+        let stub = Stub::start(&["--token", TOKEN]).await;
+        let admitted = Definition::of(
+            "admitted",
+            McpServer::remote(stub.url()).with_header(AUTHORIZATION, format!("Bearer {TOKEN}")),
+        );
+        let refused = Definition::of(
+            "refused",
+            McpServer::remote(stub.url()).with_header(AUTHORIZATION, "Bearer another-token"),
+        );
+
+        let hub = connected(vec![admitted, refused]).await;
+
+        assert_eq!(
+            hub.connection("admitted"),
+            Connection::connected(vec!["delegate".to_string()])
+        );
+        assert_eq!(hub.connection("refused"), Connection::failed(UNAUTHORIZED));
+    }
+
+    #[tokio::test]
+    async fn each_failure_reaches_a_tenant_as_its_kind() {
+        let closed = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+            format!("http://{}/mcp", listener.local_addr().expect("its address"))
+        };
+        let servers = [
+            (
+                "unchallenged",
+                answering(|_| spoken(401)).await,
+                format!("{ANSWERED} 401"),
+            ),
+            (
+                "challenged",
+                answering(|_| spoken(401).insert_header(CHALLENGE_HEADER, "Bearer")).await,
+                UNAUTHORIZED.to_string(),
+            ),
+            (
+                "forbidden",
+                answering(|_| spoken(403).insert_header(CHALLENGE_HEADER, CHALLENGE)).await,
+                FORBIDDEN.to_string(),
+            ),
+            (
+                "echoing",
+                answering(|request| {
+                    let sent = request
+                        .headers
+                        .get(KEY_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default();
+                    ResponseTemplate::new(400)
+                        .set_body_string(format!("{SPOKEN}: unknown key {sent}"))
+                })
+                .await,
+                format!("{ANSWERED} 400"),
+            ),
+            (
+                "rejecting",
+                answering(|request| ResponseTemplate::new(400).set_body_json(refusal(request)))
+                    .await,
+                REJECTED.to_string(),
+            ),
+            (
+                "broken",
+                answering(|_| spoken(500)).await,
+                format!("{ANSWERED} 500"),
+            ),
+            (
+                "limiting",
+                answering(|_| spoken(429)).await,
+                format!("{ANSWERED} 429"),
+            ),
+            (
+                "oversized",
+                answering(|_| ResponseTemplate::new(400).set_body_string(SPOKEN.repeat(OVERSIZED)))
+                    .await,
+                INCOMPLETE.to_string(),
+            ),
+            (
+                "page",
+                answering(|_| typed(format!("<p>{SPOKEN}</p>"), "text/html")).await,
+                NOT_MCP.to_string(),
+            ),
+            (
+                "garbled",
+                answering(|_| typed(format!("{{{SPOKEN}"), "application/json")).await,
+                NOT_MCP.to_string(),
+            ),
+            (
+                "uninitialized",
+                answering(|request| ResponseTemplate::new(200).set_body_json(refusal(request)))
+                    .await,
+                REJECTED.to_string(),
+            ),
+            (
+                "uncorrelated",
+                answering(|_| {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "jsonrpc": "2.0",
+                        "id": SPOKEN,
+                        "error": { "code": -32000, "message": SPOKEN },
+                    }))
+                })
+                .await,
+                NOT_MCP.to_string(),
+            ),
+            (
+                "elsewhere",
+                answering(|_| {
+                    ResponseTemplate::new(307)
+                        .insert_header(LOCATION, format!("http://127.0.0.1:1/{SPOKEN}"))
+                })
+                .await,
+                REDIRECTED.to_string(),
+            ),
+            (
+                "moved",
+                answering(|_| {
+                    ResponseTemplate::new(302).insert_header(LOCATION, format!("/{SPOKEN}"))
+                })
+                .await,
+                REDIRECTED.to_string(),
+            ),
+            (
+                "looping",
+                answering(|request| {
+                    ResponseTemplate::new(307).insert_header(LOCATION, request.url.path())
+                })
+                .await,
+                REDIRECTED.to_string(),
+            ),
+            (
+                "unlisted",
+                listing(|request| ResponseTemplate::new(200).set_body_json(refusal(request))).await,
+                REJECTED.to_string(),
+            ),
+            (
+                "unlistable",
+                listing(|_| spoken(500)).await,
+                format!("{ANSWERED} 500"),
+            ),
+            (
+                "mislisted",
+                listing(|request| ResponseTemplate::new(200).set_body_json(initialized(request)))
+                    .await,
+                NOT_MCP.to_string(),
+            ),
+        ];
+        let cases: Vec<(&str, String, String)> = servers
+            .iter()
+            .map(|(name, server, expected)| (*name, server.uri(), expected.clone()))
+            .chain([("closed", closed, UNREACHABLE.to_string())])
+            .collect();
+        let definitions = cases
+            .iter()
+            .map(|(name, url, _)| {
+                let mut server = McpServer::remote(url.clone()).with_header(KEY_HEADER, KEY);
+                mask(&mut server);
+                Definition::of(name, server)
+            })
+            .collect();
+
+        let hub = settled(definitions).await;
+
+        for (name, _, expected) in cases {
+            let text = hub.failure(name).expect("the connect failed");
+            assert_eq!(hub.connection(name), Connection::failed(expected), "{name}");
+            assert!(!text.contains(KEY), "{name} kept the header it sent");
+        }
+        assert!(
+            hub.failure("echoing")
+                .is_some_and(|text| text.contains(REDACTED)),
+            "the header the server echoed was never in its answer"
+        );
+        assert_eq!(hub.connected(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_metadata_address_is_refused_before_any_request() {
+        let metadata = Definition::of(REMOTE, McpServer::remote("http://169.254.169.254/mcp"));
+
+        let hub = tokio::time::timeout(PROMPT, settled(vec![metadata]))
+            .await
+            .expect("no request is made, so nothing is waited for");
+
+        assert_eq!(hub.connection(REMOTE), Connection::failed(METADATA_ADDRESS));
     }
 
     #[tokio::test]

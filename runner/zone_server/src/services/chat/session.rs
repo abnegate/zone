@@ -1566,8 +1566,6 @@ mod tests {
         };
         tenant.store(&state, off).await;
         let disabled = preview(&state).await;
-        tenant.store(&state, remote("remote")).await;
-        let unconnectable = preview(&state).await;
         let on = tenant.store(&state, stub("on")).await;
         let commands_off = preview(&remote_only).await;
         let unconnected = preview(&state).await;
@@ -1575,21 +1573,22 @@ mod tests {
         let overridden = preview(&state).await;
         tenant.overriding(on.id, true).await;
         let restored = preview(&state).await;
-        let unbuilt = state
-            .mcp()
-            .existing_organization(tenant.organization)
-            .is_none();
+        tenant.overriding(on.id, false).await;
+        tenant.store(&state, remote("remote")).await;
+        let awaited = [preview(&state).await, preview(&remote_only).await];
+        tenant.overriding(on.id, true).await;
+        let unbuilt = [&state, &remote_only].map(|state| {
+            state
+                .mcp()
+                .existing_organization(tenant.organization)
+                .is_none()
+        });
         load::organization(&state, tenant.organization).await;
         let connected = preview(&state).await;
         tenant.remove().await;
 
         assert_eq!(bare, (false, false), "no server is stored");
         assert_eq!(disabled, (false, false), "the only server is disabled");
-        assert_eq!(
-            unconnectable,
-            (false, false),
-            "an http server is not connected by this build"
-        );
         assert_eq!(
             commands_off,
             (false, false),
@@ -1602,8 +1601,21 @@ mod tests {
             "the workspace switched the only connectable server off"
         );
         assert_eq!(restored, (true, true), "the workspace switched it back on");
-        assert!(unbuilt, "a preview built the organization's hub");
-        assert_eq!(connected, (false, false), "the organization's hub is built");
+        assert_eq!(
+            awaited,
+            [(true, true), (true, true)],
+            "an http server awaits a turn, with commands on or off"
+        );
+        assert_eq!(
+            unbuilt,
+            [true, true],
+            "a preview built the organization's hub"
+        );
+        assert_eq!(
+            connected,
+            (false, false),
+            "the organization's hub is built, and its http server has settled as failed"
+        );
     }
 
     #[tokio::test]

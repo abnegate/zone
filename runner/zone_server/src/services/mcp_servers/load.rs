@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use abnegate_agent::mcp::McpServer;
 use uuid::Uuid;
+use zone_core::servers::mask;
 
 use crate::db::mcp_servers;
 use crate::db::mcp_servers::McpServerError;
@@ -104,6 +105,7 @@ fn server(record: &McpServerRecord) -> McpServer {
             let mut server = McpServer::remote(record.url.clone().unwrap_or_default())
                 .with_transport(transport.into());
             server.headers = record.secrets.headers.clone();
+            mask(&mut server);
             server
         }
     }
@@ -188,8 +190,8 @@ mod tests {
     #[test]
     fn an_http_record_sends_its_headers() {
         let mut record = record(Transport::Http);
-        record.url = Some("http://10.0.0.5:8080/mcp".to_string());
-        record.secrets.headers = secrets(&[("Authorization", "Bearer token")]);
+        record.url = Some("http://10.0.0.5:8080/mcp/tenant-7c1d?key=query-4b2e".to_string());
+        record.secrets.headers = secrets(&[("Authorization", "Bearer token-9f3a7b")]);
         record.secrets.environment = secrets(&[("IGNORED", "value")]);
 
         let definition = definition(&record);
@@ -198,14 +200,72 @@ mod tests {
         assert!(definition.tools.is_none());
         let server = definition.server;
         assert_eq!(server.transport, Some(McpTransport::Http));
-        assert_eq!(server.url.as_deref(), Some("http://10.0.0.5:8080/mcp"));
+        assert_eq!(
+            server.url.as_deref(),
+            Some("http://10.0.0.5:8080/mcp/tenant-7c1d?key=query-4b2e")
+        );
         assert_eq!(
             server.headers,
-            secrets(&[("Authorization", "Bearer token")])
+            secrets(&[("Authorization", "Bearer token-9f3a7b")])
         );
         assert!(server.environment.is_empty());
         assert!(server.command.is_none());
         assert!(server.tools.is_empty());
+        assert_eq!(
+            server.secrets,
+            secrets(&[
+                ("header credential Authorization", "token-9f3a7b"),
+                ("header value Authorization", "Bearer token-9f3a7b"),
+                ("path segment 0", "mcp"),
+                ("path segment 1", "tenant-7c1d"),
+                ("query value 0", "query-4b2e"),
+                ("url path", "/mcp/tenant-7c1d"),
+                ("url query", "key=query-4b2e"),
+            ])
+        );
+        let endpoint = server
+            .endpoint()
+            .expect("a stored server holds no reference");
+        assert_eq!(
+            endpoint.url,
+            "http://10.0.0.5:8080/mcp/tenant-7c1d?key=query-4b2e"
+        );
+        assert_eq!(
+            endpoint.headers,
+            secrets(&[("Authorization", "Bearer token-9f3a7b")])
+        );
+    }
+
+    #[test]
+    fn a_changed_record_binds_nothing_it_sent_before() {
+        let mut record = record(Transport::Http);
+        record.url = Some("http://10.0.0.5:8080/mcp/tenant-7c1d?key=query-4b2e".to_string());
+        record.secrets.headers = secrets(&[("Authorization", "Bearer token-9f3a7b")]);
+        let before = definition(&record).server;
+
+        record.url = Some("http://10.0.0.5:8080/mcp".to_string());
+        record.secrets.headers = secrets(&[("X-Key", "key-51c2d9")]);
+        let after = definition(&record).server;
+
+        assert_eq!(before.secrets.len(), 7);
+        assert_eq!(
+            after.secrets,
+            secrets(&[
+                ("header value X-Key", "key-51c2d9"),
+                ("path segment 0", "mcp"),
+                ("url path", "/mcp"),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_stdio_record_binds_nothing() {
+        let mut stdio = record(Transport::Stdio);
+        stdio.command = Some("uvx".to_string());
+        stdio.arguments = vec!["--token=token-9f3a7b".to_string()];
+        stdio.secrets.environment = secrets(&[("TOKEN", "sealed-9f3a7b")]);
+
+        assert!(definition(&stdio).server.secrets.is_empty());
     }
 
     #[test]

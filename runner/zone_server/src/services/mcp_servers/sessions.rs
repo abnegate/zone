@@ -5,6 +5,7 @@ use std::sync::Arc;
 use abnegate_agent::Tool;
 use abnegate_agent::mcp::McpConfig;
 use abnegate_agent::mcp::McpHub;
+use abnegate_agent::mcp::McpOutcome;
 use abnegate_agent::mcp::McpServer;
 use abnegate_agent::mcp::SEPARATOR;
 use abnegate_agent::tool::Proxy;
@@ -53,6 +54,13 @@ impl Sessions {
             .get(&server)
             .map(|hub| advertised(name, hub))
             .unwrap_or_default()
+    }
+
+    pub(super) fn failure(&self, server: Uuid, name: &str) -> Option<String> {
+        match self.hubs.get(&server)?.outcome(name)? {
+            McpOutcome::Failed { error, .. } => Some(error),
+            _ => None,
+        }
     }
 
     pub(super) fn tools_avoiding(

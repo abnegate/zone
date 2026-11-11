@@ -584,7 +584,8 @@ async fn instance_servers(state: &AppState) -> Vec<McpServerResponse> {
         .servers
         .iter()
         .map(|(name, server)| {
-            McpServerResponse::instance(name, server, state.mcp().instance_connection(name))
+            let connection = state.mcp().instance_connection(name, server);
+            McpServerResponse::instance(name, server, connection)
         })
         .collect()
 }
@@ -1012,7 +1013,11 @@ mod tests {
             headers: secret("Authorization", HEADER_SECRET),
         };
 
-        let response = row(None, POLICY, &record);
+        let response = McpServerResponse::organization(
+            &record,
+            stored_transport(&record),
+            Connection::failed(status::UNREACHABLE),
+        );
 
         let body = serde_json::to_string(&response).unwrap();
         assert!(
@@ -1034,7 +1039,7 @@ mod tests {
                 "environment": [{ "name": "TOKEN", "has_value": true }],
                 "headers": [{ "name": "Authorization", "has_value": true }],
                 "status": "failed",
-                "error": status::HTTP_PENDING,
+                "error": "Zone could not reach the server",
                 "available_tools": [],
                 "created_at": record.created_at.to_rfc3339(),
                 "updated_at": record.updated_at.to_rfc3339(),
@@ -1169,13 +1174,26 @@ mod tests {
             Connection::disabled()
         );
 
+        let http = record(Transport::Http);
+        for policy in [POLICY, REMOTE] {
+            assert_eq!(
+                connection(None, &load::definition(&http), policy),
+                Connection::connecting()
+            );
+            assert_eq!(
+                connection(None, &load::definition(&record(Transport::Sse)), policy),
+                Connection::failed(status::SSE_UNSUPPORTED)
+            );
+        }
         assert_eq!(
-            connection(None, &load::definition(&record(Transport::Http)), POLICY),
-            Connection::failed(status::HTTP_PENDING)
+            connection(None, &load::definition(&http), OFF),
+            Connection::failed(status::MCP_DISABLED)
         );
+        let mut disabled = http;
+        disabled.enabled = false;
         assert_eq!(
-            connection(None, &load::definition(&record(Transport::Sse)), POLICY),
-            Connection::failed(status::SSE_UNSUPPORTED)
+            connection(None, &load::definition(&disabled), POLICY),
+            Connection::disabled()
         );
     }
 
@@ -1733,22 +1751,21 @@ mod tests {
     async fn a_reconnect_answers_with_the_servers_own_connection() {
         let tenant = Tenant::new().await;
         let state = tenant.replica().await;
+        let mut body = stub_body("off");
+        body["enabled"] = json!(false);
+        let off = creating(&state, &tenant, body).await;
+
+        let unbuilt = reconnecting(&state, &tenant, &off).await;
+        let hubs = state.mcp().organizations();
         let remote = creating(
             &state,
             &tenant,
             json!({ "name": "remote", "transport": "http", "url": REMOTE_URL }),
         )
         .await;
-        let mut body = stub_body("off");
-        body["enabled"] = json!(false);
-        let off = creating(&state, &tenant, body).await;
-
-        let unbuilt = [
-            reconnecting(&state, &tenant, &remote).await,
-            reconnecting(&state, &tenant, &off).await,
-        ];
-        let hubs = state.mcp().organizations();
+        let first = reconnecting(&state, &tenant, &remote).await;
         load::organization(&state, tenant.organization).await;
+        let refused = reading(&state, &tenant, &remote).await;
         let built = [
             reconnecting(&state, &tenant, &remote).await,
             reconnecting(&state, &tenant, &off).await,
@@ -1762,15 +1779,20 @@ mod tests {
 
         assert_eq!(
             hubs, 0,
-            "a reconnect of servers that cannot connect built a hub"
+            "a reconnect of a server that cannot connect built a hub"
         );
-        for responses in [unbuilt, built] {
-            let [remote, off] = responses;
-            assert_eq!(remote.status, Status::Failed);
-            assert_eq!(remote.error.as_deref(), Some(status::HTTP_PENDING));
+        let [again, disabled] = built;
+        for off in [unbuilt, disabled] {
             assert_eq!(off.status, Status::Disabled);
             assert_eq!(off.error, None);
         }
+        for connecting in [remote, first, again] {
+            assert_eq!(connecting.status, Status::Connecting);
+            assert_eq!(connecting.error, None);
+            assert_eq!(connecting.available_tools, Vec::<String>::new());
+        }
+        assert_eq!(refused.status, Status::Failed);
+        assert_eq!(refused.error.as_deref(), Some(status::UNREACHABLE));
         assert_eq!(settled.status, Status::Connected);
         assert_eq!(requested.status, Status::Connecting);
         assert_eq!(requested.available_tools, Vec::<String>::new());
