@@ -22,7 +22,6 @@ use super::sessions::Sessions;
 use super::status::Connection;
 use super::status::Policy;
 use super::status::UNCONNECTED;
-use super::status::static_status;
 use super::status::summary;
 
 struct Slot {
@@ -96,7 +95,7 @@ impl OrganizationHub {
             return Connection::failed(UNCONNECTED);
         };
         let name = &slot.definition.name;
-        if let Some(connection) = static_status(&slot.definition, self.policy) {
+        if let Some(connection) = slot.definition.known(self.policy) {
             return connection;
         }
         if slot.connecting {
@@ -209,7 +208,7 @@ impl OrganizationHub {
                     }
                 }
                 let generation = inner.next();
-                let connecting = static_status(&definition, self.policy).is_none();
+                let connecting = definition.known(self.policy).is_none();
                 stale.extend(inner.sessions.remove(server));
                 if connecting {
                     openings.push(Opening {

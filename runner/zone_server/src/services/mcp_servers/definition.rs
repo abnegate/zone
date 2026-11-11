@@ -1,13 +1,18 @@
 use std::collections::BTreeMap;
 
 use abnegate_agent::mcp::McpServer;
-#[cfg(test)]
 use abnegate_secret::SecretValue;
 use chrono::DateTime;
 #[cfg(test)]
 use chrono::Duration;
 use chrono::Utc;
 use uuid::Uuid;
+
+use super::status::Connection;
+use super::status::INVALID;
+use super::status::Policy;
+use super::status::static_status;
+use super::validation::PLACEHOLDER;
 
 #[cfg(test)]
 const MARKER: &str = "ZONE_STUB_MARKER";
@@ -22,6 +27,28 @@ pub struct Definition {
     pub server: McpServer,
     pub enabled: bool,
     pub tools: Option<Vec<String>>,
+}
+
+impl Definition {
+    /// The connection the server has without being connected, when it has one. A command that
+    /// still holds a `${` reference in its command, arguments or environment is invalid: the
+    /// crate would fill it in from Zone's own environment.
+    pub fn known(&self, policy: Policy) -> Option<Connection> {
+        static_status(self, policy)
+            .or_else(|| self.referring().then(|| Connection::failed(INVALID)))
+    }
+
+    fn referring(&self) -> bool {
+        let server = &self.server;
+        server.command.is_some()
+            && server
+                .command
+                .iter()
+                .chain(&server.arguments)
+                .map(String::as_str)
+                .chain(server.environment.values().map(SecretValue::expose))
+                .any(|value| value.contains(PLACEHOLDER))
+    }
 }
 
 /// One reading of what an organization stores: the revision of every row, and a definition for

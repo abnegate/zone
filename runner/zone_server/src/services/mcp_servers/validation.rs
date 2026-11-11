@@ -44,7 +44,7 @@ const RESERVED: [&str; 24] = [
     "x-google-metadata-request",
 ];
 const RESERVED_PREFIX: &str = "mcp-param-";
-const PLACEHOLDER: &str = "${";
+pub(crate) const PLACEHOLDER: &str = "${";
 const SCHEMES: [&str; 2] = ["http", "https"];
 const PROBE: &str = "probe";
 const NAME: &str = "name";

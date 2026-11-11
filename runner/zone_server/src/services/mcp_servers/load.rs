@@ -123,7 +123,9 @@ mod tests {
 
     use super::*;
     use crate::db::mcp_servers::McpServerChanges;
+    use crate::db::mcp_servers::NewMcpServer;
     use crate::db::mcp_servers::Secrets;
+    use crate::services::mcp_servers::status;
     use crate::services::mcp_servers::status::Connection;
     use crate::services::mcp_servers::status::UNCONNECTED;
     use crate::services::mcp_servers::testing;
@@ -443,6 +445,58 @@ mod tests {
             Some(1),
             "a changed server was not read again"
         );
+    }
+
+    fn touching(name: &str, marker: &std::path::Path) -> NewMcpServer {
+        NewMcpServer {
+            command: Some("sh".to_string()),
+            arguments: vec![
+                "-c".to_string(),
+                "touch \"$1\"".to_string(),
+                "sh".to_string(),
+                marker.to_string_lossy().into_owned(),
+            ],
+            ..stub(name)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stored_command_holding_a_reference_is_invalid_and_never_spawned() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica().await;
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let marker = directory.path().join("spawned");
+        let plain = touching("plain", &marker);
+        let command = NewMcpServer {
+            command: Some("${ZONE_TEST_UNSET:-sh}".to_string()),
+            ..touching("command", &marker)
+        };
+        let mut arguments = touching("arguments", &marker);
+        arguments.arguments.push("${HOME}".to_string());
+        let environment = NewMcpServer {
+            environment: secrets(&[("TOKEN", "${HOME}")]),
+            ..touching("environment", &marker)
+        };
+        for new in [command, arguments, environment] {
+            tenant.store(&state, new).await;
+        }
+
+        let hub = organization(&state, tenant.organization)
+            .await
+            .expect("the hub");
+        let refused: Vec<Connection> = ["command", "arguments", "environment"]
+            .into_iter()
+            .map(|name| hub.named(name))
+            .collect();
+        let spawned = marker.exists();
+        tenant.store(&state, plain).await;
+        organization(&state, tenant.organization).await;
+        let reached = marker.exists();
+        tenant.remove().await;
+
+        assert_eq!(refused, vec![Connection::failed(status::INVALID); 3]);
+        assert!(!spawned, "a command holding a reference was spawned");
+        assert!(reached, "the command without a reference never ran");
     }
 
     #[tokio::test]

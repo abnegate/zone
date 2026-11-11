@@ -512,7 +512,9 @@ fn connection(
 ) -> Connection {
     match hub {
         Some(hub) => hub.connection(definition.id),
-        None => status::static_status(definition, policy).unwrap_or_else(Connection::connecting),
+        None => definition
+            .known(policy)
+            .unwrap_or_else(Connection::connecting),
     }
 }
 

@@ -35,7 +35,6 @@ use crate::services::chat::handover::Handover;
 use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
 use crate::services::mcp_servers::load;
-use crate::services::mcp_servers::status;
 use crate::services::mcp_servers::status::Status;
 use crate::services::project_directory::{self, Start};
 use crate::state::AppState;
@@ -649,7 +648,7 @@ async fn mcp_pending(state: &AppState, workspace: Uuid) -> bool {
     match mcp_servers::offered(state.db(), organization, workspace).await {
         Ok(records) => records.iter().any(|record| match &hub {
             Some(hub) => hub.connection(record.id).status == Status::Connecting,
-            None => status::static_status(&load::definition(record), policy).is_none(),
+            None => load::definition(record).known(policy).is_none(),
         }),
         Err(error) => {
             tracing::debug!(
