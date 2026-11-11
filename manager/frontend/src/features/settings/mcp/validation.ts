@@ -19,6 +19,28 @@ export const LITERAL = `Replace ${REFERENCE}…} references with the value`;
 export const ENVIRONMENT_NAME =
   'Use letters, digits and underscores, starting with a letter or underscore';
 export const HEADER_NAME = "Use a valid header name: letters, digits and !#$%&'*+-.^_`|~";
+export const HEADER_RESERVED = 'The connection sets this header itself';
+
+export const RESERVED_HEADERS: readonly string[] = [
+  'accept',
+  'connection',
+  'content-length',
+  'content-type',
+  'host',
+  'keep-alive',
+  'last-event-id',
+  'mcp-method',
+  'mcp-name',
+  'mcp-protocol-version',
+  'mcp-session-id',
+  'proxy-authorization',
+  'proxy-connection',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+];
+export const RESERVED_HEADER_PREFIX = 'mcp-param-';
 
 const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 const ENVIRONMENT_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -78,6 +100,14 @@ export function environmentNameError(name: string): string | null {
   return ENVIRONMENT_PATTERN.test(name) ? null : ENVIRONMENT_NAME;
 }
 
+function reservedHeader(name: string): boolean {
+  const header = name.toLowerCase();
+  return RESERVED_HEADERS.includes(header) || header.startsWith(RESERVED_HEADER_PREFIX);
+}
+
 export function headerNameError(name: string): string | null {
-  return HEADER_PATTERN.test(name) ? null : HEADER_NAME;
+  if (!HEADER_PATTERN.test(name)) {
+    return HEADER_NAME;
+  }
+  return reservedHeader(name) ? HEADER_RESERVED : null;
 }

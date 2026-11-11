@@ -269,13 +269,10 @@ export function updateRequest(server: McpServer, draft: McpServerDraft): UpdateM
       request.url = url;
     }
   }
-  const environment = updateMap(server.environment, draft.environment);
-  if (environment) {
-    request.environment = environment;
-  }
-  const headers = updateMap(server.headers, draft.headers);
-  if (headers) {
-    request.headers = headers;
+  const list = secretListOf(server.transport);
+  const secrets = updateMap(server[list], draft[list]);
+  if (secrets) {
+    request[list] = secrets;
   }
   return request;
 }

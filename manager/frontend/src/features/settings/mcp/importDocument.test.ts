@@ -166,6 +166,41 @@ describe('parseMcpDocument', () => {
     });
   });
 
+  it('skips a server whose header the connection sets itself', () => {
+    const json = JSON.stringify({
+      typed: {
+        url: 'https://x.example/mcp',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer x' },
+      },
+      scoped: { url: 'https://x.example/mcp', headers: { 'Mcp-Param-Region': 'eu' } },
+    });
+    expect(parseMcpDocument(json, true)).toEqual({
+      requests: [],
+      errors: [
+        'typed: the connection sets this header itself (Content-Type)',
+        'scoped: the connection sets this header itself (Mcp-Param-Region)',
+      ],
+    });
+  });
+
+  it('keeps only the fields the transport of each server uses', () => {
+    const json = JSON.stringify({
+      local: {
+        command: 'npx',
+        url: 'https://x.example/mcp',
+        headers: { Authorization: 'Bearer x' },
+      },
+      remote: { url: 'https://x.example/mcp', args: ['-y'], env: { TOKEN: 't' } },
+    });
+    expect(parseMcpDocument(json, true)).toEqual({
+      requests: [
+        { name: 'local', transport: Transport.Stdio, command: 'npx', arguments: [] },
+        { name: 'remote', transport: Transport.Http, url: 'https://x.example/mcp' },
+      ],
+      errors: [],
+    });
+  });
+
   it('trims the command', () => {
     const json = JSON.stringify({ local: { command: '  zone-mcp  ' } });
     expect(parseMcpDocument(json, true)).toEqual({

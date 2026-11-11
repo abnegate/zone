@@ -15,7 +15,7 @@ import {
   VALUE_REQUIRED,
 } from './draft';
 import type { McpServer } from './types';
-import { LITERAL, NAME_LENGTH } from './validation';
+import { HEADER_RESERVED, LITERAL, NAME_LENGTH } from './validation';
 
 function server(overrides: Partial<McpServer> = {}): McpServer {
   return {
@@ -159,6 +159,27 @@ describe('updateRequest', () => {
     expect(draftErrors({ ...draft, environment }, true)).toEqual({});
   });
 
+  it('never sends the secrets of the other transport', () => {
+    const stray = [{ name: 'X-Stray', value: 'v', saved: false }];
+    const command = stdioServer();
+    expect(updateRequest(command, { ...draftOf(command), headers: stray })).toEqual({});
+    const remote = server();
+    expect(
+      updateRequest(remote, { ...draftOf(remote), environment: [{ ...stray[0], name: 'STRAY' }] })
+    ).toEqual({});
+  });
+
+  it('never names the transport, which the server refuses to change', () => {
+    const stored = stdioServer();
+    const request = updateRequest(stored, {
+      ...draftOf(stored),
+      transport: Transport.Http,
+      name: 'renamed',
+      command: 'bunx',
+    });
+    expect(request).toEqual({ name: 'renamed', command: 'bunx' });
+  });
+
   it('sends a new name', () => {
     const stored = server();
     expect(updateRequest(stored, { ...draftOf(stored), name: 'wiki' })).toEqual({ name: 'wiki' });
@@ -227,6 +248,23 @@ describe('draftErrors', () => {
   });
 });
 
+describe('draftErrors for headers', () => {
+  it('refuses a header the connection sets itself before anything is sent', () => {
+    const draft = {
+      ...emptyDraft(Transport.Http),
+      name: 'docs',
+      url: 'https://docs.example/mcp',
+      headers: [
+        { name: 'Content-Type', value: 'application/json', saved: false },
+        { name: 'Authorization', value: 'Bearer t', saved: false },
+      ],
+    };
+    expect(draftErrors(draft, false)).toEqual({
+      [rowField(DraftField.Headers, 0, RowPart.Name)]: HEADER_RESERVED,
+    });
+  });
+});
+
 describe('createRequest', () => {
   it('builds a stdio request from the draft', () => {
     const draft = {
@@ -242,6 +280,37 @@ describe('createRequest', () => {
       command: 'npx',
       arguments: ['-y', 'pkg'],
       environment: { TOKEN: 't' },
+    });
+  });
+
+  it('ignores headers and a URL on a stdio server', () => {
+    const draft = {
+      ...emptyDraft(Transport.Stdio),
+      name: 'pkg',
+      command: ' npx ',
+      url: 'https://docs.example/mcp',
+      headers: [{ name: 'Authorization', value: 'Bearer t', saved: false }],
+    };
+    expect(createRequest(draft)).toEqual({
+      name: 'pkg',
+      transport: Transport.Stdio,
+      command: 'npx',
+      arguments: [],
+    });
+  });
+
+  it('ignores a command and arguments on an http server', () => {
+    const draft = {
+      ...emptyDraft(Transport.Http),
+      name: 'docs',
+      url: 'https://docs.example/mcp',
+      command: 'npx',
+      arguments: '-y\npkg',
+    };
+    expect(createRequest(draft)).toEqual({
+      name: 'docs',
+      transport: Transport.Http,
+      url: 'https://docs.example/mcp',
     });
   });
 

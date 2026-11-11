@@ -3,6 +3,7 @@ import {
   ENVIRONMENT_NAME,
   environmentNameError,
   HEADER_NAME,
+  HEADER_RESERVED,
   headerNameError,
   LITERAL,
   literalError,
@@ -93,4 +94,22 @@ describe('headerNameError', () => {
     expect(headerNameError('X:Api')).toBe(HEADER_NAME);
     expect(headerNameError('')).toBe(HEADER_NAME);
   });
+
+  it.each([
+    ['Content-Type'],
+    ['accept'],
+    ['HOST'],
+    ['Mcp-Session-Id'],
+    ['Mcp-Param-Region'],
+    ['mcp-param-'],
+  ])('refuses %p, which the connection sets itself', (name) => {
+    expect(headerNameError(name)).toBe(HEADER_RESERVED);
+  });
+
+  it.each([['Authorization'], ['X-Content-Type'], ['Accept-Language'], ['Mcp-Parameter']])(
+    'accepts %p, which only resembles a reserved name',
+    (name) => {
+      expect(headerNameError(name)).toBeNull();
+    }
+  );
 });
