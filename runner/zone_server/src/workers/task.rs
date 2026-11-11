@@ -1630,17 +1630,12 @@ impl Guidance<'_> {
 
 /// Appends one guidance block, which owns the blank line that opens it.
 ///
-/// Trimming what is already there rather than adding a separator is what keeps
-/// adjacent blocks exactly one blank line apart: the knowledge renderers close
-/// with a newline and the next block opens with two, which would otherwise run
-/// the appended guidance past the blank line the prompt is assembled with.
+/// The join is the knowledge store's own, the one a chat's learned block is
+/// assembled with: what is already there gives up its closing newline rather
+/// than gaining a separator, which keeps adjacent blocks exactly one blank
+/// line apart and a run and a chat reading the same bytes.
 fn push_block(guidance: &mut String, block: &str) {
-    let block = block.trim_end();
-    if block.is_empty() {
-        return;
-    }
-    guidance.truncate(guidance.trim_end().len());
-    guidance.push_str(block);
+    *guidance = crate::db::knowledge::join_blocks(&[guidance.as_str(), block.trim_end()]);
 }
 
 /// The remembered block follows `actor`, whoever started this run, rather than

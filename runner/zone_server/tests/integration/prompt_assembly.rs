@@ -720,9 +720,35 @@ struct Prepared {
     agent: bool,
     agentic: bool,
     system: String,
-    learned: String,
+    findings: learned::Block,
     memory: String,
     skills: String,
+}
+
+/// A workspace of its own in a new organization, which is what a test deletes
+/// to take everything it filed with it.
+async fn workspace(pool: &PgPool) -> (Uuid, Uuid) {
+    let organization: Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING id")
+            .bind("Learned")
+            .bind(Uuid::new_v4().to_string())
+            .fetch_one(pool)
+            .await
+            .expect("an organization");
+    let workspace: Uuid = sqlx::query_scalar(
+        "INSERT INTO workspaces (organization_id, name, slug) VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(organization)
+    .bind("Learned")
+    .bind(Uuid::new_v4().to_string())
+    .fetch_one(pool)
+    .await
+    .expect("a workspace");
+    (organization, workspace)
+}
+
+fn confirmed() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 11, 11).expect("a real date")
 }
 
 /// The one claim only the real builder can make: a chat's system entry carries
@@ -737,23 +763,8 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
     let pool = PgPool::connect(&common::context_database_url())
         .await
         .expect("a migrated disposable database");
-    let confirmed = NaiveDate::from_ymd_opt(2026, 11, 11).expect("a real date");
-    let organization: Uuid =
-        sqlx::query_scalar("INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING id")
-            .bind("Learned")
-            .bind(Uuid::new_v4().to_string())
-            .fetch_one(&pool)
-            .await
-            .expect("an organization");
-    let workspace: Uuid = sqlx::query_scalar(
-        "INSERT INTO workspaces (organization_id, name, slug) VALUES ($1, $2, $3) RETURNING id",
-    )
-    .bind(organization)
-    .bind("Learned")
-    .bind(Uuid::new_v4().to_string())
-    .fetch_one(&pool)
-    .await
-    .expect("a workspace");
+    let confirmed = confirmed();
+    let (organization, workspace) = workspace(&pool).await;
 
     knowledge::upsert_standing_instruction(
         &pool,
@@ -856,7 +867,7 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
                     .content
                     .clone()
                     .unwrap_or_default(),
-                learned: preparation.learned,
+                findings: preparation.findings,
                 memory: preparation.memory,
                 skills: preparation.skills,
             }
@@ -876,9 +887,8 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
         .await
         .expect("the author goes");
 
-    let rendered = rendered.expect("the learned block");
     assert_eq!(
-        rendered,
+        rendered.text,
         format!(
             "{}{}",
             instructions.expect("what a run reads").trim_end(),
@@ -886,14 +896,20 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
         ),
         "under the bound a chat reads the bytes a run reads"
     );
-    assert!(rendered.len() <= learned::MAX_RENDERED_BYTES);
+    assert!(rendered.text.len() <= learned::MAX_RENDERED_BYTES);
+    assert_eq!(
+        rendered.shown.len(),
+        3,
+        "one entry of each family is shown: {:?}",
+        rendered.shown
+    );
 
     for preparation in prepared {
         let Prepared {
             agent,
             agentic,
             system,
-            learned,
+            findings,
             memory,
             skills,
         } = preparation.unwrap_or_else(|error| panic!("the turn is prepared: {error}"));
@@ -903,10 +919,10 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
             agent,
             "{system}"
         );
-        assert_eq!(learned, rendered);
+        assert_eq!(findings, rendered);
         assert_eq!((memory.as_str(), skills.as_str()), ("", ""));
         assert!(
-            system.ends_with(&learned),
+            system.ends_with(&findings.text),
             "with nothing remembered and no skill filed the block closes the entry: {system}"
         );
 
@@ -931,4 +947,62 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
         );
         assert!(!system.contains("\n\n\n"), "{system}");
     }
+}
+
+/// The standing instructions are read to a row limit. A workspace that has
+/// filed more than that gets a block well under the byte bound that is still
+/// not the whole list, and the closing line has to count the rows nothing
+/// read: the ones a run in the same workspace is not shown either.
+#[tokio::test]
+async fn a_chat_is_told_how_many_entries_a_row_limit_kept_from_it() {
+    const FILED: usize = 43;
+
+    let pool = PgPool::connect(&common::context_database_url())
+        .await
+        .expect("a migrated disposable database");
+    let (organization, workspace) = workspace(&pool).await;
+    for index in 0..FILED {
+        knowledge::upsert_standing_instruction(
+            &pool,
+            &StandingInstruction {
+                workspace_id: workspace,
+                title: format!("Repeated answer {index:02}"),
+                content: format!("Answer {index:02}."),
+                provenance: PromotionProvenance {
+                    fingerprint: format!("promoted-{index:02}"),
+                    occurrences: 4,
+                    distinct_chats: 3,
+                    last_confirmed: confirmed(),
+                },
+            },
+        )
+        .await
+        .expect("a standing instruction");
+    }
+
+    let loaded = learned::load(&pool, workspace).await;
+    let block = learned::render(&loaded);
+    let run = knowledge::standing_instructions_prompt(&pool, workspace).await;
+    sqlx::query("DELETE FROM organizations WHERE id = $1")
+        .bind(organization)
+        .execute(&pool)
+        .await
+        .expect("the workspace and everything in it go");
+
+    let read = loaded.instructions.len();
+    assert!(
+        read > 0 && read < FILED,
+        "the store reads to a row limit: {read} of {FILED}"
+    );
+    assert_eq!(loaded.unread, FILED - read);
+    assert_eq!(
+        block.text,
+        format!(
+            "{}\n\n{} more learned entries are filed in this workspace but not shown here.",
+            run.expect("what a run reads").trim_end(),
+            FILED - read
+        )
+    );
+    assert!(block.text.len() <= learned::MAX_RENDERED_BYTES);
+    assert_eq!(block.shown.len(), read);
 }

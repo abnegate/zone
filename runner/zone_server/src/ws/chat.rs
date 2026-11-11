@@ -40,6 +40,7 @@ use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
 
+use crate::agent::learned;
 use crate::agent::wait::{self, Outcome, WaitSettled, Waited, Waiting};
 use crate::agent::{
     self, ActionReceipt, AgentEvent, AgentRun, ChatTools, Citation, Question, Refusal, Spend,
@@ -3403,7 +3404,7 @@ async fn prepare_chat(
         agentic,
         &search.capability(),
         &preparation.environment,
-        &preparation.learned,
+        &preparation.findings.text,
         &preparation.memory,
         &preparation.skills,
     );
@@ -3429,41 +3430,19 @@ async fn prepare_chat(
         };
 
         let attached = chat_attached_sources::scope(state.db(), Some(chat_id)).await;
-        let mut knowledge_hits = Vec::new();
-        if let (Some(embedding), None) = (query_embedding.as_deref(), attached.as_ref()) {
-            match knowledge::search_knowledge_entries(
-                state.db(),
-                embedding,
-                workspace_id,
-                MAX_CONTEXT_IN_PROMPT as i64,
-                0.5,
-            )
-            .await
-            {
-                Ok(hits) => knowledge_hits = hits,
-                Err(error) => tracing::warn!(%error, "Knowledge semantic search failed"),
+        let knowledge_hits = match &attached {
+            Some(_) => Vec::new(),
+            None => {
+                retrieve_knowledge(
+                    state.db(),
+                    query_embedding.as_deref(),
+                    content,
+                    workspace_id,
+                    &preparation.findings,
+                )
+                .await
             }
-        }
-        if attached.is_none() {
-            match knowledge::search_knowledge_keyword(
-                state.db(),
-                content,
-                workspace_id,
-                MAX_CONTEXT_IN_PROMPT as i64,
-            )
-            .await
-            {
-                Ok(hits) => {
-                    knowledge_hits = knowledge::fuse_knowledge_hits(
-                        knowledge_hits,
-                        hits,
-                        content,
-                        MAX_CONTEXT_IN_PROMPT,
-                    );
-                }
-                Err(error) => tracing::warn!(%error, "Knowledge keyword search failed"),
-            }
-        }
+        };
 
         let mut source_lines = Vec::new();
         if let Some(context_service) = state.context_service() {
@@ -3533,6 +3512,55 @@ async fn prepare_chat(
     )
     .await;
     Ok(preparation)
+}
+
+/// `hits` less the entries `findings` already shows the chat.
+fn unshown(
+    hits: Vec<knowledge::KnowledgeSearchHit>,
+    findings: &learned::Block,
+) -> Vec<knowledge::KnowledgeSearchHit> {
+    hits.into_iter()
+        .filter(|hit| !findings.shown.contains(&hit.entry_id))
+        .collect()
+}
+
+/// The workspace's knowledge entries that answer `content`, best first: what its embedding is
+/// near, when it has one, fused with what its words match.
+///
+/// What a workspace learned is filed in the same store, and the chat already reads it in
+/// `findings`, so an entry shown there is left out here rather than said twice. Each search asks
+/// for that many more than the prompt holds, which is the most it could lose, so a learned entry
+/// never costs a document its place. One a bound kept out of `findings` is still found here.
+async fn retrieve_knowledge(
+    pool: &PgPool,
+    embedding: Option<&[f32]>,
+    content: &str,
+    workspace_id: Uuid,
+    findings: &learned::Block,
+) -> Vec<knowledge::KnowledgeSearchHit> {
+    let limit = i64::try_from(MAX_CONTEXT_IN_PROMPT + findings.shown.len()).unwrap_or(i64::MAX);
+    let mut hits = Vec::new();
+    if let Some(embedding) = embedding {
+        match knowledge::search_knowledge_entries(pool, embedding, workspace_id, limit, 0.5).await {
+            Ok(semantic) => hits = unshown(semantic, findings),
+            Err(error) => tracing::warn!(%error, "Knowledge semantic search failed"),
+        }
+    }
+    match knowledge::search_knowledge_keyword(pool, content, workspace_id, limit).await {
+        Ok(keyword) => {
+            hits = knowledge::fuse_knowledge_hits(
+                hits,
+                unshown(keyword, findings),
+                content,
+                MAX_CONTEXT_IN_PROMPT,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Knowledge keyword search failed");
+            hits.truncate(MAX_CONTEXT_IN_PROMPT);
+        }
+    }
+    hits
 }
 
 /// Settles the coding agent session `preparation` runs in, when it runs in one: a session the
@@ -3637,7 +3665,7 @@ async fn handle_chat_generation(
         mut budget,
         timeout,
         environment: _,
-        learned: _,
+        findings: _,
         memory: _,
         skills: _,
         session: mut pinned,
@@ -4770,6 +4798,130 @@ mod tests {
         );
         assert!(interleave_context_lines(vec!["k".into()], vec!["s".into()], 0).is_empty());
         assert!(interleave_context_lines(Vec::new(), Vec::new(), 5).is_empty());
+    }
+
+    #[test]
+    fn a_hit_the_learned_block_shows_is_dropped_and_the_rest_keep_their_order() {
+        fn hit(entry_id: Uuid) -> knowledge::KnowledgeSearchHit {
+            knowledge::KnowledgeSearchHit {
+                entry_id,
+                similarity: 0.9,
+                title: "Runbook".to_string(),
+                content: "Rotate the deploy key.".to_string(),
+                category: None,
+                tags: Vec::new(),
+            }
+        }
+        let [first, shown, second] = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        let findings = learned::Block {
+            text: String::new(),
+            shown: std::collections::HashSet::from([shown]),
+        };
+
+        let kept = unshown(vec![hit(first), hit(shown), hit(second)], &findings);
+
+        assert_eq!(
+            kept.iter().map(|hit| hit.entry_id).collect::<Vec<_>>(),
+            [first, second]
+        );
+        assert_eq!(
+            unshown(vec![hit(first), hit(shown)], &learned::Block::default()).len(),
+            2,
+            "a chat with no learned block retrieves as it always did"
+        );
+    }
+
+    /// A recurring question is promoted to a standing instruction titled with
+    /// the question itself, so the next time it is asked that entry is what a
+    /// keyword search ranks first. The chat already reads it in its learned
+    /// block: retrieved again it would say the same thing twice and push one
+    /// of the workspace's documents out. An entry the block does not show is
+    /// still there to be found.
+    #[tokio::test]
+    async fn retrieval_leaves_out_what_the_learned_block_already_shows() {
+        const QUESTION: &str = "How do I rotate the deploy key?";
+
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .expect("the test database");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let organization = db::organizations::create_organization(&pool, "Learned", &suffix, None)
+            .await
+            .expect("an organization");
+        let workspace =
+            workspaces::create_workspace(&pool, organization.id, "Learned", &suffix, None)
+                .await
+                .expect("a workspace")
+                .id;
+        let (instruction, _) = knowledge::upsert_standing_instruction(
+            &pool,
+            &knowledge::StandingInstruction {
+                workspace_id: workspace,
+                title: "Repeated answer: how do I rotate the deploy key".to_string(),
+                content: "Rotate the deploy key from the vault console. To rotate the deploy \
+                          key you need the operator role."
+                    .to_string(),
+                provenance: knowledge::PromotionProvenance {
+                    fingerprint: "promoted-deploy-key".to_string(),
+                    occurrences: 4,
+                    distinct_chats: 3,
+                    last_confirmed: chrono::NaiveDate::from_ymd_opt(2026, 11, 11)
+                        .expect("a real date"),
+                },
+            },
+        )
+        .await
+        .expect("a standing instruction");
+        let mut documents = std::collections::HashSet::new();
+        for index in 0..MAX_CONTEXT_IN_PROMPT {
+            let document: Uuid = sqlx::query_scalar(
+                "INSERT INTO knowledge_entries (workspace_id, title, content) \
+                 VALUES ($1, $2, $3) RETURNING id",
+            )
+            .bind(workspace)
+            .bind(format!("Runbook {index}"))
+            .bind(format!(
+                "Section {index} of the operations handbook says when to rotate a key, and \
+                 further down which deploy it belongs to."
+            ))
+            .fetch_one(&pool)
+            .await
+            .expect("a document");
+            documents.insert(document);
+        }
+
+        let findings = learned::prompt(&pool, workspace).await;
+        let retrieved = retrieve_knowledge(&pool, None, QUESTION, workspace, &findings).await;
+        let unshown =
+            retrieve_knowledge(&pool, None, QUESTION, workspace, &learned::Block::default()).await;
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .expect("the workspace and everything in it go");
+
+        assert_eq!(
+            findings.shown,
+            std::collections::HashSet::from([instruction]),
+            "the block shows the instruction: {}",
+            findings.text
+        );
+        assert_eq!(
+            retrieved
+                .iter()
+                .map(|hit| hit.entry_id)
+                .collect::<std::collections::HashSet<_>>(),
+            documents,
+            "every slot goes to a document the chat has not already read"
+        );
+        assert_eq!(retrieved.len(), MAX_CONTEXT_IN_PROMPT);
+        assert_eq!(unshown.len(), MAX_CONTEXT_IN_PROMPT);
+        assert!(
+            unshown.iter().any(|hit| hit.entry_id == instruction),
+            "an entry the block does not show is still retrieved: {unshown:?}"
+        );
     }
 
     /// The capability tail closes each arm here because these four calls pass
