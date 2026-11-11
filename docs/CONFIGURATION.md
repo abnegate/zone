@@ -2114,19 +2114,19 @@ Every member of every organization sees the instance servers in Settings: each s
 Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
 
 ### `ZONE_MCP_ENABLED`
-- **Default**: `true`
-- **Description**: Master switch for both layers. `false` / `0` / `off` skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
+- **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
+- **Description**: Master switch for both layers. `1` / `true` / `yes` / `on`, in any case, leaves it on. `0` / `false` / `no` / `off` skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
 
 ### `ZONE_MCP_AUTO_CONNECT`
-- **Default**: `true`
+- **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
 - **Description**: When no enabled server is configured and `magents` is on `PATH`, attach `magents mcp` automatically. Disabled servers do not count as configured. Every other server does, whatever its transport and whether or not it connects, so a document whose only enabled server has a `url`, an `sse` one included, keeps the fallback off. A server with a `command` is launched over stdio even when it also names a `url` or a `type`. A document in which any server's `command` is blank is ignored whole, so only this fallback can attach. A server keyed `magents` that the document disables keeps the fallback off, even in a document that is otherwise ignored; a disabled server under another key that runs `magents` does not.
 
 ### `ZONE_MCP_AUTO_MAGENTS`
-- **Default**: `true`
+- **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
 - **Description**: The older name for `ZONE_MCP_AUTO_CONNECT`, still honoured. It can only turn the `magents mcp` fallback off: when either variable is off, the fallback is not attached, and neither turns it back on while `ZONE_MCP_ENABLED` is off.
 
 ### `ZONE_MCP_CONFIG`
-- **Default**: *empty* (falls back to `~/.zone/mcp.json` if that file exists)
+- **Default**: *empty* (falls back to `~/.zone/mcp.json` if that file exists). Compose passes it from `.env`, empty unless set there, and the Helm chart sets `""` in `server.env`.
 - **Description**: Path to a JSON file of MCP servers.
 - **Example**:
 
@@ -2142,8 +2142,8 @@ Inside Docker the manager image does not include magents. Install it on the host
 ```
 
 ### `ZONE_MCP_SERVERS`
-- **Default**: *empty*
-- **Description**: Inline JSON of the same shape as `ZONE_MCP_CONFIG`. Useful in Compose. Takes precedence over the config file.
+- **Default**: *empty*. Compose passes it from `.env`, empty unless set there, and the Helm chart sets `""` in `server.env`.
+- **Description**: Inline JSON of the same shape as `ZONE_MCP_CONFIG`. Useful in Compose and Helm. Takes precedence over the config file.
 
 In Compose, who fills a `${VAR}` reference depends on how the value is written. Compose hands `ZONE_MCP_SERVERS` to the `manager` service from the shell or from `.env`:
 
@@ -2166,15 +2166,17 @@ services:
 
 `docker compose config` shows what the container will receive: a reference left for Zone prints as `$${DOCS_MCP_TOKEN}`. This is how Docker Compose v5.7.0 behaves.
 
+The Helm chart passes each value under `server.env` to zone-server as written, so a `${VAR}` reference in `server.env.ZONE_MCP_SERVERS` reaches Zone intact, and Zone fills it from the pod's environment. Set the variable it names under `server.env` too; its value then sits in the Deployment in plain text.
+
 ### `ZONE_MCP_COMMANDS`
-- **Default**: `false`
+- **Default**: `false`. Compose passes `false` unless `.env` says otherwise, and the Helm chart sets `"false"` in `server.env`.
 - **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on` turns it on. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `environment`, never the server's full environment, but it still runs as the server's user, so turn this on only when you trust every organization admin to run commands on the host. Instance-layer servers are not affected.
 
 ### Organization-managed servers
 
-Organization admins and owners add, edit, reconnect and delete servers in **Settings → Organization → MCP servers**; members see the list read-only. A server is `stdio`, a `command` with `arguments` that needs `ZONE_MCP_COMMANDS`, or `http`, streamable HTTP at a `url`, which needs no flag. `sse` is refused; use streamable HTTP. A name is at most 32 letters, digits, `-` and `_`, with no `__` and no trailing `_`. It must be unique in the organization and must not match an instance server: a clash returns 409. `tools` limits which of the server's tools are offered; `null` offers them all.
+Organization admins and owners add, edit, reconnect and delete servers in **Settings → Organization → MCP servers**; members see the list read-only. A server is `stdio`, a `command` with `arguments` that needs `ZONE_MCP_COMMANDS`, or `http`, streamable HTTP at a `url`, which needs no flag. `sse` is refused; use streamable HTTP. A name is at most 32 letters, digits, `-` and `_`, with no `__` and no trailing `_`. 32 is the half of a 64-character tool name that abnegate-agent keeps for the server in `server__tool`: it cuts a longer server name, so two servers sharing their first 32 characters would offer their tools under one prefix. It must be unique in the organization and must not match an instance server: a clash returns 409. `tools` limits which of the server's tools are offered; `null` offers them all.
 
-The API's field names are its own, not the `mcpServers` ones: a server's variables are `environment` and its arguments are `arguments`, where an instance document says `env` and `args`. The API ignores a key it does not know, so `env` or `args` in a request is dropped without an error.
+The API's field names are its own, not the `mcpServers` ones: a server's variables are `environment` and its arguments are `arguments`, where an instance document says `env` and `args`. A create, update or workspace body that names a key the route does not read, `env` and `args` included, is refused with 400 and nothing is stored; `error` is axum's account of the body, which names the key: ``Failed to deserialize the JSON body into the target type: unknown field `env`, …``. Any other body the route cannot read, malformed JSON or a value of the wrong type, is a 400 the same way.
 
 In **Settings → Workspace → MCP servers**, a workspace admin or owner sets each organization server to Inherit, On or Off. A workspace can only turn a server off: On does not enable a server the organization has turned off. `effective` is the outcome: the server is enabled and the workspace has not turned it off. Instance servers can't be overridden per workspace.
 
@@ -2211,7 +2213,7 @@ For a server reached by URL, in either layer, `error` names the kind of failure 
 | `Zone could not reach the server` | The connection was refused, the name did not resolve or resolved only to link-local or metadata addresses, or TLS failed. |
 | `The server did not complete the handshake` | Any other failure during the handshake, an error body too large to read included. |
 
-Each server process runs its own copy of an organization's servers and checks it against the database whenever it lists them or runs a turn for that organization. With several replicas, a change made through one reaches the others the next time they do either. Deleting an organization stops its servers on the replica that served the request; another replica keeps them running until it restarts.
+Each server process runs its own copy of an organization's servers. It checks that copy against the database whenever it lists them or runs a turn for that organization, and every 60 seconds whether or not anything asks. With several replicas, a server edited, disabled or deleted through one replica changes on another at that replica's next list or turn for the organization, and within about a minute without one. Deleting an organization stops its servers at once on the replica that served the request, and on every other replica within about a minute.
 
 A turn that starts while one of its organization's servers is still connecting, after a create, an edit or a reconnect, waits for it rather than running without its tools. Each connect is given at most 30 seconds.
 
@@ -2225,7 +2227,7 @@ Rules for every organization server:
 - A `command` has no whitespace before or after it.
 - A `stdio` server takes `environment` and refuses `url` and `headers`. An `http` server takes `headers` and refuses `command`, `arguments` and `environment`.
 - Header names are unique whatever their case, and a header value holds no line break or other control character. The headers the connection sets itself are refused: `Accept`, `Content-Type`, `Content-Length`, `Host`, `Connection`, `Keep-Alive`, `Proxy-Authorization`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Last-Event-Id`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and any `Mcp-Param-` header. So are the headers a cloud metadata service requires before it answers, so that no request Zone sends can pass for one wherever it ends up: `Metadata`, `Metadata-Flavor`, `X-Google-Metadata-Request`, `X-aws-ec2-metadata-token`, `X-aws-ec2-metadata-token-ttl-seconds`, `X-aliyun-ecs-metadata-token` and `X-aliyun-ecs-metadata-token-ttl-seconds`.
-- `${` is refused in every field, because Zone would expand it from its own environment. A NUL character is refused too.
+- `${` is refused in every field, because Zone would expand it from its own environment. A NUL character is refused too. A stored `stdio` server whose command, arguments or environment values hold `${` all the same, in a row that reached the database some other way, such as a restore or a hand edit, shows `failed` with "The server's definition is not valid" and is never started.
 - `environment` and `headers` values are sealed under `ENCRYPTION_KEY`. They are never returned, logged or audited: the API lists each name with `has_value` only. If a server's stored values do not open under the key, listing the servers fails and the server log names that server's id: delete it by id and add it again. Until then chats and tasks run with the organization's other servers.
 
 | Method | Path | Who |
@@ -2239,9 +2241,13 @@ Rules for every organization server:
 | GET | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace member |
 | PUT | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace admin/owner |
 
+Every route checks that the caller belongs to the organization before it looks up the server or workspace in its path, so a caller outside the organization gets 404 "Organization not found" whether or not either exists.
+
 PUT is sparse and can't change `transport`. A field that already holds the value sent is not written, and a PUT that changes nothing leaves `updated_at` as it was. A change to `tools` alone leaves a running server as it is; any other change stops it and, while it is enabled, starts it again. In `environment` and `headers` on PUT, a `null` value keeps the stored value and an omitted name is removed. On the workspace PUT, `null` clears the override.
 
-POST `/connection` answers 202 with the server as it is then: `connecting` when Zone can start it, which covers every enabled `http` server while `ZONE_MCP_ENABLED` is on, `disabled` when it is turned off, and `failed` with the reason otherwise.
+An update is audited as `mcp_server.updated`, with the server as the API showed it just before the write in `old_values` and as it shows it after in `new_values`: `environment` and `headers` by name and `has_value`, never a value.
+
+POST `/connection` answers 202 with the server as it is then: `connecting` when Zone can start it, which covers every enabled `http` server while `ZONE_MCP_ENABLED` is on, `disabled` when it is turned off, and `failed` with the reason otherwise. While a connect of the server is still under way and the server has not changed since it began, a reconnect starts no other: it answers 202 `connecting` and leaves that connect to finish.
 
 ### Upgrading with `url` entries in the instance configuration
 
@@ -2249,7 +2255,7 @@ Zone used to skip an instance entry that had a `url` and no `command`. It now co
 
 - Zone contacts the URL, with every `${VAR}` in it and in its headers filled from the server's environment, and offers the tools it advertises to every organization on the instance.
 - The entry counts as configured, so `magents mcp` is no longer attached beside it automatically. To keep magents, add it to the document as its own entry.
-- The entry holds its name. Creating an organization server under that name, or renaming one to it, returns 409. An organization server that already has the name stays listed beside the instance entry and stays editable, and both connect, but a tool the two both advertise is then named twice. While the organization server's `tools` is `null`, both are offered, the instance's as `<name>__<tool>` and the organization's as `<name>__<tool>_2`. Once `tools` lists the tool, only the instance's is offered: the list names `<tool>`, which no longer matches the renamed one. Rename one of the two servers.
+- The entry holds its name. Creating an organization server under that name, or renaming one to it, returns 409. An organization server that already has the name stays listed beside the instance entry and stays editable, and both connect, but a tool the two both advertise is then named twice: the instance's is offered as `<name>__<tool>` and the organization's as `<name>__<tool>_2`, on every provider. The organization server's `tools` names a tool as that server does, `<tool>`, never by its suffixed name: a tool it lists is offered as `<name>__<tool>_2`, and a tool it leaves out is not offered and takes no name. The suffix is easy to miss, so rename one of the two servers.
 - To keep an entry off, add `"disabled": true` to it.
 
 ---

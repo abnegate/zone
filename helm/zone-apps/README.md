@@ -307,7 +307,7 @@ The chart is configured for high availability by default:
 
 Organizations on the Claude Code or Codex provider need a single server replica instead; see [Coding Agent Sign-ins](#coding-agent-sign-ins).
 
-Each server replica runs its own copy of an organization's MCP servers. A change made through one replica reaches the others the next time they list that organization's servers or run a turn for it.
+Each server replica runs its own copy of an organization's MCP servers. A change made through one replica reaches the others the next time they list that organization's servers or run a turn for it, and within about a minute without either. Deleting an organization stops its servers on every replica within the same minute.
 
 ## Coding Agent Sign-ins
 
