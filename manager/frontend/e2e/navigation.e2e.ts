@@ -1,8 +1,6 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker, routeApi } from './test-utils';
-
-const SOURCES_PATH = '/settings/workspace/sources';
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 const tasksRoutePattern = /\/api\/workspaces\/[^/]+\/tasks/;
 const tasksListPattern = /\/api\/workspaces\/[^/]+\/tasks\/?$/;
 const sourcesRoutePattern = /\/api\/workspaces\/[^/]+\/sources/;

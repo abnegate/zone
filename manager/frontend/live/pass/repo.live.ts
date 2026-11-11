@@ -12,6 +12,7 @@ import {
   record,
   shot,
   signIn,
+  SOURCES_PATH,
   sql,
   stamp,
   state,
@@ -29,7 +30,6 @@ const REPO =
 const TOKEN = process.env.ZONE_LIVE_REPO_TOKEN ?? '';
 const [OWNER, NAME] = REPO.replace(/^https:\/\/github\.com\//, '').split('/');
 const SOURCE = 'Scratch repo';
-const SOURCES_PATH = '/settings/workspace/sources';
 const REPO_PROJECT = 'Real pass repository';
 const SCRATCH_PROJECT = 'Real pass scratch';
 const BROKEN_PROJECT = 'Real pass broken';

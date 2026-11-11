@@ -1,6 +1,6 @@
 import { test, expect } from './fixtures';
 import type { Page } from '@playwright/test';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 import { mockTasks, setupAdminAuth, setupCommonRoutes, tasksNow } from './layout-fixtures';
 
 const runScreenshots = process.env.RUN_SCREENSHOTS === 'true';
@@ -10,7 +10,6 @@ const PNG_BASE64 =
 const TASK_CARD = '.task-card:not(.board-skeleton-card)';
 const SKELETON_CARD = '.skeleton-card, .board-skeleton-card';
 const PHONE = { width: 375, height: 812 };
-const SOURCES_PATH = '/settings/workspace/sources';
 
 const CardAction = {
   rename: 'Rename',
@@ -235,7 +234,7 @@ describeScreenshots('Screenshots - Empty States', () => {
     });
   });
 
-  test('Sources page (empty)', async ({ page }) => {
+  test('Sources section (empty)', async ({ page }) => {
     await setupCommonRoutes(page, false);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
@@ -638,7 +637,7 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   }
 
-  test('Sources page (populated)', async ({ page }) => {
+  test('Sources section (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
@@ -823,7 +822,7 @@ describeScreenshots('Screenshots - Dark Mode', () => {
     });
   });
 
-  test('Sources page (dark)', async ({ page }) => {
+  test('Sources section (dark)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());

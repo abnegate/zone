@@ -1,4 +1,4 @@
-import { api, expect, signIn, state, test, tokenFor } from './harness';
+import { api, expect, signIn, SOURCES_PATH, state, test, tokenFor } from './harness';
 
 /**
  * The layout contract every page is held to, measured live at the smallest
@@ -9,7 +9,6 @@ import { api, expect, signIn, state, test, tokenFor } from './harness';
 
 const VIEWPORT = { width: 1280, height: 720 };
 const BAR_HEIGHT = 48;
-const SOURCES_PATH = '/settings/workspace/sources';
 const ROUTES = [
   '/chats',
   '/projects',

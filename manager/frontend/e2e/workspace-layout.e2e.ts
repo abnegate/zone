@@ -5,9 +5,9 @@ import {
   setupAdminAuth,
   setupCommonRoutes,
 } from './layout-fixtures';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 
-const SOURCES_PATH = 'settings/workspace/sources';
+const SOURCES_SCREEN = SOURCES_PATH.slice(1);
 
 const screens = [
   {
@@ -142,7 +142,7 @@ for (const viewport of [
       test('the sources section keeps its table inside the viewport', async ({
         page,
       }) => {
-        await ready(page, SOURCES_PATH, theme);
+        await ready(page, SOURCES_SCREEN, theme);
         await expect(
           page
             .getByRole('region', { name: 'Sources', exact: true })
@@ -181,7 +181,7 @@ for (const viewport of [
         { name: 'tasks', path: 'tasks', button: 'New task', title: 'New Task' },
         {
           name: 'sources',
-          path: SOURCES_PATH,
+          path: SOURCES_SCREEN,
           button: 'Add source',
           title: 'Add Source',
         },

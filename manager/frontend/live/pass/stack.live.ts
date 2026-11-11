@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import type { Page } from '@playwright/test';
-import { expect, record, shot, test } from './rig';
+import { expect, record, shot, SOURCES_PATH, test } from './rig';
 import { setChecked } from '../stub';
 
 /**
@@ -162,7 +162,7 @@ test.describe('compose stack', () => {
       '/chats',
       '/projects',
       '/tasks',
-      '/settings/workspace/sources',
+      SOURCES_PATH,
       '/search',
       '/models',
       '/wiki',

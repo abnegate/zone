@@ -1,4 +1,4 @@
-import { expect, signIn, state, test } from './harness';
+import { expect, signIn, SOURCES_PATH, state, test } from './harness';
 
 test.describe('the console against a real server', () => {
   test('signs in with a real account and renders the shell', async ({ page, consoleErrors }) => {
@@ -35,7 +35,7 @@ test.describe('the console against a real server', () => {
       '/models',
       '/tasks',
       '/projects',
-      '/settings/workspace/sources',
+      SOURCES_PATH,
       '/settings/workspace/general',
     ]) {
       await page.goto(path);
