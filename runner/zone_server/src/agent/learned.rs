@@ -35,7 +35,9 @@
 //! The block opens with the blank line every block in a system prompt owns and
 //! ends without a newline, so whatever follows it sits one blank line below.
 //! It also names the entries it shows, so a turn that retrieves from the same
-//! store can leave those out and still find the ones a bound withheld.
+//! store can leave those out and still find the ones a bound withheld. Which
+//! discoveries those are is their own block's answer, since it may pass over
+//! one in the middle of what it was handed.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -57,8 +59,6 @@ use crate::db::knowledge::{self, LearnedCategory, LearnedEntryRow, discovery};
 pub const MAX_RENDERED_BYTES: usize = skills::MAX_RENDERED_BYTES;
 
 const HEADING: &str = "Learned in this workspace";
-
-const BULLET: &str = "\n- ";
 
 /// One kind of learned fact and what is filed under it, most recent first.
 #[derive(Debug, Clone)]
@@ -106,18 +106,21 @@ impl Family {
     }
 
     /// Whether `entry` can be shown at all: alone under its family's heading
-    /// it is within the bound.
+    /// it is within the bound. A discovery always answers that it can, because
+    /// its block leaves out one too large for it and counts it there.
     fn fits(self, entry: &LearnedEntryRow) -> bool {
         self.render(std::slice::from_ref(entry)).trim_end().len() <= MAX_RENDERED_BYTES
     }
 
-    /// How many of the `handed` entries `block` shows, from the front. Every
-    /// family shows all it is handed except the discoveries, whose block keeps
-    /// to a bound of its own and gives each entry it shows one bullet.
-    fn shows(self, block: &str, handed: usize) -> usize {
+    /// Which of `entries` the family's block for them shows. Every family
+    /// shows all it is handed except the discoveries, whose block keeps to a
+    /// bound of its own and says which rows that bound let through.
+    fn shown(self, entries: &[LearnedEntryRow]) -> Vec<Uuid> {
         match self {
-            Family::Instructions | Family::Facts(_) => handed,
-            Family::Discoveries => block.matches(BULLET).count().min(handed),
+            Family::Instructions | Family::Facts(_) => {
+                entries.iter().map(|entry| entry.id).collect()
+            }
+            Family::Discoveries => discovery::block(entries, entries.len()).shown,
         }
     }
 }
@@ -164,9 +167,8 @@ impl<'a> Section<'a> {
         self.block = self.family.render(&self.entries[..self.handed]);
     }
 
-    fn shown(&self) -> impl Iterator<Item = Uuid> + '_ {
-        let shown = self.family.shows(&self.block, self.handed);
-        self.entries[..shown].iter().map(|entry| entry.id)
+    fn shown(&self) -> Vec<Uuid> {
+        self.family.shown(&self.entries[..self.handed])
     }
 }
 
@@ -980,6 +982,47 @@ mod tests {
                 "discovery {index} is named as shown exactly when its text is"
             );
         }
+    }
+
+    /// The discoveries block passes over a row too large for it and shows the
+    /// rows behind it, so what it shows is not the front of what it was
+    /// handed. The row passed over is not named as shown, or a turn's
+    /// retrieval would drop the one entry the chat has not read.
+    #[test]
+    fn a_discovery_its_block_passed_over_is_not_named_as_shown() {
+        let learned = learned(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                recorded(0, 60),
+                recorded(1, discovery::MAX_RENDERED_BYTES),
+                recorded(2, 60),
+            ],
+        );
+        let block = render(&learned);
+
+        assert_eq!(
+            block.text,
+            discovery::render(&learned.discoveries).trim_end()
+        );
+        assert!(
+            block.text.contains("discovery-00") && block.text.contains("discovery-02"),
+            "{}",
+            block.text
+        );
+        assert!(!block.text.contains("discovery-01"), "{}", block.text);
+        assert!(
+            block
+                .text
+                .ends_with("\n\n1 older entry is recorded here but not shown."),
+            "{}",
+            block.text
+        );
+        assert_eq!(
+            block.shown,
+            HashSet::from([learned.discoveries[0].id, learned.discoveries[2].id])
+        );
     }
 
     /// The same forty beside enough standing instructions to push the whole

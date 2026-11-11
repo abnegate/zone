@@ -364,12 +364,27 @@ fn omitted(count: usize) -> String {
     format!("\n{count} {entries} recorded here but not shown.\n")
 }
 
+/// A rendered block, and which of the rows it was rendered from it shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Block {
+    /// A system-prompt section. Empty when there were no rows.
+    pub text: String,
+    /// The entries `text` shows, in the order it shows them. One the bound
+    /// left out or passed over is not among them.
+    pub shown: Vec<Uuid>,
+}
+
 /// Render discoveries as a system-prompt section. Empty when there are none.
 ///
 /// The rows are taken to be all there is, in the order [`listing`] gives.
 /// [`render_among`] is the same block for rows read under the row limit.
 pub fn render(discoveries: &[LearnedEntryRow]) -> String {
     render_among(discoveries, discoveries.len())
+}
+
+/// The text of [`block`], for a caller with no use for which rows it shows.
+pub fn render_among(discoveries: &[LearnedEntryRow], recorded: usize) -> String {
+    block(discoveries, recorded).text
 }
 
 /// The block for `discoveries`, out of `recorded` entries in all, so that
@@ -381,25 +396,28 @@ pub fn render(discoveries: &[LearnedEntryRow]) -> String {
 /// many, because a list that reads as complete and is not would have the
 /// reader take a missing note for no note. A row no block could hold is
 /// passed over and counted, so it does not take the rows behind it too.
-pub fn render_among(discoveries: &[LearnedEntryRow], recorded: usize) -> String {
+pub fn block(discoveries: &[LearnedEntryRow], recorded: usize) -> Block {
     if discoveries.is_empty() {
-        return String::new();
+        return Block::default();
     }
 
-    let mut rendered = format!("\n\n# {HEADING}\n{PREAMBLE} {READ_FILTER}\n");
+    let mut text = format!("\n\n# {HEADING}\n{PREAMBLE} {READ_FILTER}\n");
     let lines: Vec<String> = discoveries.iter().map(line).collect();
     let recorded = recorded.max(lines.len());
 
-    let whole = rendered.len() + lines.iter().map(String::len).sum::<usize>();
+    let whole = text.len() + lines.iter().map(String::len).sum::<usize>();
     if recorded == lines.len() && whole <= MAX_RENDERED_BYTES {
-        rendered.push_str(&lines.concat());
-        return rendered;
+        text.push_str(&lines.concat());
+        return Block {
+            text,
+            shown: discoveries.iter().map(|discovery| discovery.id).collect(),
+        };
     }
 
-    let room = MAX_RENDERED_BYTES.saturating_sub(rendered.len() + omitted(recorded).len());
+    let room = MAX_RENDERED_BYTES.saturating_sub(text.len() + omitted(recorded).len());
     let mut used = 0;
-    let mut shown = 0;
-    for line in &lines {
+    let mut shown = Vec::new();
+    for (discovery, line) in discoveries.iter().zip(&lines) {
         if line.len() > room {
             continue;
         }
@@ -407,11 +425,11 @@ pub fn render_among(discoveries: &[LearnedEntryRow], recorded: usize) -> String 
             break;
         }
         used += line.len();
-        shown += 1;
-        rendered.push_str(line);
+        shown.push(discovery.id);
+        text.push_str(line);
     }
-    rendered.push_str(&omitted(recorded - shown));
-    rendered
+    text.push_str(&omitted(recorded - shown.len()));
+    Block { text, shown }
 }
 
 #[cfg(test)]
@@ -827,5 +845,39 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("Everything"), "{rendered}");
+    }
+
+    /// A caller that leaves out of a search what the block already shows asks
+    /// which rows those are, and a row passed over or cut off is not one.
+    #[test]
+    fn a_block_names_the_rows_it_shows_and_no_others() {
+        let mut rows = vec![
+            recorded("Migration names", "Timestamped, snake_case."),
+            recorded("Everything", &"s".repeat(MAX_RENDERED_BYTES)),
+            recorded("Lint command", "cargo clippy with warnings denied."),
+        ];
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.id = Uuid::from_u128(index as u128 + 1);
+        }
+
+        let passed = block(&rows, rows.len());
+        assert_eq!(passed.text, render(&rows));
+        assert_eq!(passed.shown, [rows[0].id, rows[2].id]);
+
+        let whole = block(&rows[..1], 1);
+        assert_eq!(whole.shown, [rows[0].id]);
+        assert!(!whole.text.contains("not shown"), "{}", whole.text);
+
+        let mut full: Vec<LearnedEntryRow> = (0..8).map(maximal).collect();
+        for (index, row) in full.iter_mut().enumerate() {
+            row.id = Uuid::from_u128(index as u128 + 1);
+        }
+        let cut = block(&full, 130);
+        assert_eq!(
+            cut.shown,
+            full[..5].iter().map(|row| row.id).collect::<Vec<_>>()
+        );
+        assert_eq!(cut.text, render_among(&full, 130));
+        assert_eq!(block(&[], 4), Block::default());
     }
 }
