@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
 
 const generateMockSource = (
   id: string,
@@ -50,10 +50,10 @@ const sourcesListPattern = /\/api\/workspaces\/[^/]+\/sources\/?$/;
 const sourceDetailPattern = /\/api\/workspaces\/[^/]+\/sources\/src-1$/;
 const sourceVerifyPattern = /\/api\/workspaces\/[^/]+\/sources\/src-1\/verify$/;
 
+const SHORT_VIEWPORT = { width: 1280, height: 600 };
+
 const isSourcesListRequest = (requestUrl: string) =>
   sourcesListPattern.test(new URL(requestUrl).pathname);
-
-const SOURCES_PATH = '/settings/workspace/sources';
 
 const addSourceButton = (page: Page) =>
   page.locator('.sources-section .section-row-actions').getByRole('button', { name: 'Add source' });
@@ -61,7 +61,7 @@ const addSourceButton = (page: Page) =>
 const openAccessTokenFields = (page: Page) =>
   page.getByRole('button', { name: 'Use an access token instead' }).click();
 
-test.describe('Sources Page', () => {
+test.describe('Sources Section', () => {
   test.beforeEach(async ({ context, page }) => {
     await blockServiceWorker(context);
 
@@ -146,7 +146,7 @@ test.describe('Sources Page', () => {
     await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
   });
 
-  test.describe('Page Header', () => {
+  test.describe('Section Header', () => {
     test('displays section title and description', async ({ page }) => {
       await expect(
         page
@@ -174,7 +174,7 @@ test.describe('Sources Page', () => {
         )
       ).toBeVisible();
       await expect(
-        page.locator('.sources-empty').getByRole('button', { name: 'Add source' })
+        page.locator('.sources-section .ui-empty').getByRole('button', { name: 'Add source' })
       ).toBeVisible();
     });
   });
@@ -643,6 +643,41 @@ test.describe('Sources Page', () => {
       await deleteBtn.click();
 
       await expect(page.locator('.source-card')).toHaveCount(2);
+    });
+  });
+
+  test.describe('Source Editor', () => {
+    test('keeps Save in view when a tall editor first opens, before any scroll', async ({
+      page,
+    }) => {
+      await routeApi(page, sourceDetailPattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ source: mockSources[0] }),
+          });
+        } else {
+          route.continue();
+        }
+      });
+      await page.setViewportSize(SHORT_VIEWPORT);
+
+      await page.goto(`${SOURCES_PATH}?source=src-1`);
+
+      const editor = page.locator('.source-details');
+      const save = editor.getByRole('button', { name: 'Save' });
+      await expect(save).toBeVisible();
+      expect(await page.locator('.page-body').evaluate((body) => body.scrollTop)).toBe(0);
+      const editorBox = await editor.boundingBox();
+      const footerBox = await editor.locator('.source-details-actions').boundingBox();
+      const saveBox = await save.boundingBox();
+      expect(editorBox).not.toBeNull();
+      expect(footerBox).not.toBeNull();
+      expect(saveBox).not.toBeNull();
+      expect(editorBox!.y + editorBox!.height).toBeGreaterThan(SHORT_VIEWPORT.height);
+      expect(saveBox!.y + saveBox!.height).toBeLessThanOrEqual(SHORT_VIEWPORT.height);
+      expect(footerBox!.y + footerBox!.height).toBeCloseTo(SHORT_VIEWPORT.height, 0);
     });
   });
 

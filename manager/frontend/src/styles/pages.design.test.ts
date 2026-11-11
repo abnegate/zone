@@ -555,6 +555,37 @@ describe('sources section layout', () => {
     expect(rule(css, '.source-details-actions')).toContain('height: var(--ui-header-height)');
   });
 
+  it('sticks the editor footer to the settings scroller instead of scrolling a body of its own', () => {
+    const footer = rule(css, '.source-details-actions');
+    expect(footer).toContain('position: sticky');
+    expect(footer).toContain('bottom: 0;');
+    expect(footer).toContain('background: var(--ui-bg-elevated)');
+    expect(footer).toContain('border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card)');
+    expect(rule(css, '.settings-page .page-body:has(.source-details-actions)')).toContain(
+      'padding-bottom: 0'
+    );
+    expect(rule(css, '.source-details')).not.toContain('flex: 1');
+    expect(rule(css, '.source-details')).not.toContain('min-height');
+    expect(rule(css, '.source-details-body')).not.toContain('overflow');
+    expect(rule(css, '.source-details-body')).not.toContain('flex: 1');
+  });
+
+  it('shows source form hints in full over the two-line settings clamp', () => {
+    const settings = read(join(features, 'settings', 'pages', 'SettingsPage.css'));
+    expect(rule(settings, '.settings-page .form-hint')).toContain('display: -webkit-box');
+    const hint = rule(css, '.source-details .form-hint');
+    expect(hint).toContain('display: block');
+    expect(hint).toContain('overflow: visible');
+    const cascade = read(join(import.meta.dir, 'cascade.ts'));
+    expect(cascade.indexOf('/sources/components/SourcesSection.css')).toBeGreaterThan(
+      cascade.indexOf('/settings/pages/SettingsPage.css')
+    );
+  });
+
+  it('leaves the empty state to sit in the section flow like its sibling sections', () => {
+    expect(css).not.toContain('.sources-empty');
+  });
+
   it('aligns the access token disclosure with the field labels', () => {
     expect(rule(css, '.github-configuration > .ui-btn-link')).toContain('padding-inline: 0');
   });
