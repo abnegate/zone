@@ -4,6 +4,8 @@ use std::time::Duration;
 use abnegate_secret::MasterKey;
 use abnegate_secret::SecretValue;
 use sqlx::PgPool;
+use sqlx::Postgres;
+use sqlx::Transaction;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
@@ -16,8 +18,8 @@ const TOKEN: &str = "ghp_mcp_server_token";
 const AUTHORIZATION: &str = "Bearer mcp-header-secret";
 const POLL: Duration = Duration::from_millis(20);
 const PATIENCE: Duration = Duration::from_secs(20);
-const WAITING: &str =
-    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock')";
+const BLOCKED: &str = "SELECT $2 = ANY(pg_blocking_pids($1))";
+const BACKEND: &str = "SELECT pg_backend_pid()";
 
 fn database() -> String {
     std::env::var("TEST_DATABASE_URL").expect("isolated test database")
@@ -35,26 +37,35 @@ async fn session() -> (PgPool, i32) {
         .connect(&database())
         .await
         .expect("the test database accepts connections");
-    let backend = sqlx::query_scalar("SELECT pg_backend_pid()")
+    let backend = sqlx::query_scalar(BACKEND)
         .fetch_one(&pool)
         .await
         .expect("the session's backend");
     (pool, backend)
 }
 
-async fn waits(pool: &PgPool, backend: i32) {
+async fn holder(transaction: &mut Transaction<'_, Postgres>) -> i32 {
+    sqlx::query_scalar(BACKEND)
+        .fetch_one(&mut **transaction)
+        .await
+        .expect("the transaction's backend")
+}
+
+/// Returns once `backend` waits on a lock that `blocker` holds, or is queued for ahead of it.
+async fn waits(pool: &PgPool, backend: i32, blocker: i32) {
     tokio::time::timeout(PATIENCE, async {
-        while !sqlx::query_scalar::<_, bool>(WAITING)
+        while !sqlx::query_scalar::<_, bool>(BLOCKED)
             .bind(backend)
+            .bind(blocker)
             .fetch_one(pool)
             .await
-            .expect("the session's activity")
+            .expect("the sessions blocking the backend")
         {
             tokio::time::sleep(POLL).await;
         }
     })
     .await
-    .expect("the session waits on a lock");
+    .expect("the session waits on the blocker's lock");
 }
 
 struct Fixture {
@@ -906,6 +917,7 @@ async fn two_updates_of_one_server_keep_both_secrets() {
         .execute(&mut *holding)
         .await
         .expect("the server is held");
+    let held = holder(&mut holding).await;
 
     let environment = update_authorized(
         &one,
@@ -923,7 +935,7 @@ async fn two_updates_of_one_server_keep_both_secrets() {
         },
     );
     let headers = async {
-        waits(&fixture.pool, first).await;
+        waits(&fixture.pool, first, held).await;
         update_authorized(
             &two,
             &fixture.key,
@@ -942,7 +954,7 @@ async fn two_updates_of_one_server_keep_both_secrets() {
         .await
     };
     let release = async {
-        waits(&fixture.pool, second).await;
+        waits(&fixture.pool, second, first).await;
         holding.commit().await.expect("the server is released");
     };
     let (environment, headers, ()) = tokio::join!(environment, headers, release);
@@ -1546,13 +1558,14 @@ async fn an_override_of_a_server_deleted_meanwhile_is_invalid() {
         .execute(&mut *deleting)
         .await
         .expect("the server is deleted, not yet committed");
+    let uncommitted = holder(&mut deleting).await;
 
     let overriding = fixture.overrides(
         &session,
         BTreeMap::from([(kept.id, Some(false)), (deleted.id, Some(false))]),
     );
     let commit = async {
-        waits(&fixture.pool, backend).await;
+        waits(&fixture.pool, backend, uncommitted).await;
         deleting.commit().await.expect("the delete commits");
     };
     let (result, ()) = tokio::join!(overriding, commit);
@@ -1595,16 +1608,17 @@ async fn opposite_overrides_of_one_workspace_take_turns() {
     .execute(&mut *holding)
     .await
     .expect("the lower override is held");
+    let held = holder(&mut holding).await;
 
     let earlier = fixture.overrides(&one, BTreeMap::from([(low, Some(true)), (high, None)]));
     let later = async {
-        waits(&fixture.pool, first).await;
+        waits(&fixture.pool, first, held).await;
         fixture
             .overrides(&two, BTreeMap::from([(low, None), (high, Some(true))]))
             .await
     };
     let release = async {
-        waits(&fixture.pool, second).await;
+        waits(&fixture.pool, second, first).await;
         holding.commit().await.expect("the override is released");
     };
     let (earlier, later, ()) = tokio::join!(earlier, later, release);
