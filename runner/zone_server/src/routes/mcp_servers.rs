@@ -170,6 +170,13 @@ fn effective(enabled: bool, workspace_enabled: Option<bool>) -> bool {
     enabled && workspace_enabled.unwrap_or(true)
 }
 
+/// What a workspace's audit row holds when its overrides were stored and the servers they apply
+/// to could not be read back.
+#[derive(Debug, Serialize)]
+struct StoredOverrides<'a> {
+    overrides: &'a BTreeMap<Uuid, bool>,
+}
+
 #[derive(Debug, Serialize)]
 struct RemovedMcpServer<'a> {
     name: &'a str,
@@ -827,7 +834,7 @@ pub async fn update_workspace(
 ) -> Result<Json<WorkspaceMcpServerListResponse>, Refusal> {
     let user = caller(&auth)?;
     let changes = request.overrides()?;
-    mcp_servers::set_workspace_overrides_authorized(
+    let stored = mcp_servers::set_workspace_overrides_authorized(
         state.db(),
         path.org_id,
         path.ws_id,
@@ -835,15 +842,24 @@ pub async fn update_workspace(
         changes,
     )
     .await?;
-    let (records, overrides) = mcp_servers::workspace_list_authorized(
+    let read = mcp_servers::workspace_list_authorized(
         state.db(),
         state.master_key(),
         path.org_id,
         path.ws_id,
         user,
     )
-    .await?;
-    let response = workspace_servers(&state, path.org_id, &records, &overrides).await;
+    .await;
+    let response = match read {
+        Ok((records, overrides)) => {
+            Ok(workspace_servers(&state, path.org_id, &records, &overrides).await)
+        }
+        Err(error) => Err(error),
+    };
+    let new_values = match &response {
+        Ok(response) => serde_json::to_value(response).ok(),
+        Err(_) => serde_json::to_value(StoredOverrides { overrides: &stored }).ok(),
+    };
     audit(
         state.db(),
         AuditEvent {
@@ -855,11 +871,11 @@ pub async fn update_workspace(
             resource_type: resources::WORKSPACE_MCP_SERVERS,
             resource_id: Some(path.ws_id),
             old_values: None,
-            new_values: serde_json::to_value(&response).ok(),
+            new_values,
         },
     )
     .await;
-    Ok(Json(response))
+    Ok(Json(response?))
 }
 
 #[cfg(test)]

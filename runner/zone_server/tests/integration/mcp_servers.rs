@@ -7,6 +7,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use abnegate_secret::MasterKey;
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use axum::http::StatusCode;
 use serde_json::Value;
 use serde_json::json;
@@ -1658,6 +1661,63 @@ async fn every_write_is_audited() {
     assert_eq!(
         actions,
         [CREATED, UPDATED, RECONNECTED, WORKSPACE_UPDATED, DELETED]
+    );
+
+    tenant.discard(&client, &[]).await;
+}
+
+#[tokio::test]
+async fn an_override_is_audited_even_when_the_servers_cannot_be_read_back() {
+    let _environment = isolated();
+    let client = client(false).await;
+    let tenant = Tenant::new(&client).await;
+    let token = tenant.owner.token.as_str();
+    let server = id(&tenant.create(&client, &remote("remote")).await);
+    let mut sealed = remote("sealed");
+    sealed["headers"] = json!({ HEADER: format!("Bearer {HEADER_SECRET}") });
+    let sealed = id(&tenant.create(&client, &sealed).await);
+    let other = MasterKey::generate().expect("a key");
+    let foreign = encrypt_value(&SecretValue::from("{}"), &other).expect("an envelope");
+    sqlx::query("UPDATE mcp_servers SET secrets = $2 WHERE id::text = $1")
+        .bind(&sealed)
+        .bind(&foreign)
+        .execute(client.state().db())
+        .await
+        .expect("the stored secrets are replaced");
+
+    let response = client
+        .put_json_auth(
+            &tenant.workspace_servers(),
+            &json!({ "servers": { server.as_str(): false } }),
+            token,
+        )
+        .await;
+
+    response.assert_status(StatusCode::INTERNAL_SERVER_ERROR);
+    let stored: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT server_id::text, enabled FROM workspace_mcp_servers WHERE workspace_id = $1",
+    )
+    .bind(tenant.workspace)
+    .fetch_all(client.state().db())
+    .await
+    .expect("the overrides are readable");
+    assert_eq!(stored, [(server.clone(), false)]);
+    let audited: Vec<String> = sqlx::query_scalar(
+        "SELECT new_values::text FROM audit_logs WHERE organization_id = $1 AND action = $2",
+    )
+    .bind(tenant.organization)
+    .bind(WORKSPACE_UPDATED)
+    .fetch_all(client.state().db())
+    .await
+    .expect("the audit log is readable");
+    let audited: Vec<Value> = audited
+        .iter()
+        .map(|values| serde_json::from_str(values).expect("the audited values are JSON"))
+        .collect();
+    assert_eq!(
+        audited,
+        [json!({ "overrides": { server.as_str(): false } })],
+        "the stored override was not audited as stored"
     );
 
     tenant.discard(&client, &[]).await;
