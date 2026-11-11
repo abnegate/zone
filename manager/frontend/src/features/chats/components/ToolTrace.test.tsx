@@ -309,7 +309,7 @@ describe('ToolTrace', () => {
             arguments:
               '{"kind":"lesson","subject":"Frontend tests need isolation","statement":"Run the suite with --isolate."}',
             detail:
-              '{"id":"5d0c7e1a","title":"Frontend tests need isolation","kind":"lesson","outcome":"recorded"}',
+              '{"id":"5d0c7e1a-6b2f-4c3d-9e8a-1f2b3c4d5e6f","kind":"lesson","outcome":"Recorded as a new entry.","subject":"Frontend tests need isolation"}',
           }),
         ]}
       />
@@ -325,19 +325,25 @@ describe('ToolTrace', () => {
   });
 
   it('labels a discovery by the state its call is in and keeps the server words for a refusal', () => {
-    const discovery = {
-      name: 'record_discovery',
-      arguments: '{"kind":"convention","subject":"Deploy token","statement":"Kept in the vault."}',
-    };
+    const refusal = `${TOOL_ERROR_PREFIX}Not recorded: that looks like a credential, a connection string carrying a password, or a long run of letters and digits such as a full commit hash. Name the variable rather than its value, or shorten the value.`;
     render(
       <ToolTrace
         calls={[
-          call({ ...discovery, id: 'running', pending: true, detail: 'Running…', duration_ms: 0 }),
           call({
-            ...discovery,
+            id: 'running',
+            name: 'record_discovery',
+            arguments:
+              '{"kind":"convention","subject":"Deploy token","statement":"Kept in the vault."}',
+            pending: true,
+            detail: 'Running…',
+            duration_ms: 0,
+          }),
+          call({
             id: 'refused',
+            name: 'record_discovery',
+            arguments: '{"kind":"convention"}',
             success: false,
-            detail: 'Error: Not recorded: the entry reads like a credential.',
+            detail: refusal,
           }),
         ]}
       />
@@ -350,7 +356,7 @@ describe('ToolTrace', () => {
     ]);
     expect(rows.map((row) => row.querySelector('.tool-call-detail')?.textContent)).toEqual([
       'Running…',
-      'Error: Not recorded: the entry reads like a credential.',
+      refusal,
     ]);
   });
 
