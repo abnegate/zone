@@ -867,18 +867,27 @@ describe('Client', () => {
       expect(result).toHaveLength(1);
     });
 
-    it('getTasks with filters', async () => {
+    it('getTasks filters by project and by nothing else', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ tasks: [] }),
       });
 
-      await client.getTasks(testWorkspaceId, 'project-1', 'pending');
+      await client.getTasks(testWorkspaceId, 'project 1');
 
       const url = mockFetch.mock.calls[0][0];
-      expect(url).toContain(`/api/workspaces/${testWorkspaceId}/tasks`);
-      expect(url).toContain('project_id=project-1');
-      expect(url).toContain('status=pending');
+      expect(url).toEndWith(`/api/workspaces/${testWorkspaceId}/tasks?project_id=project+1`);
+    });
+
+    it('getTasks asks for every task without a query when no project is given', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ tasks: [] }),
+      });
+
+      await client.getTasks(testWorkspaceId);
+
+      expect(mockFetch.mock.calls[0][0]).toEndWith(`/api/workspaces/${testWorkspaceId}/tasks`);
     });
 
     it('createTask creates task', async () => {

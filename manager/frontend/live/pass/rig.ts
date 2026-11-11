@@ -11,6 +11,8 @@ import type { Page } from '@playwright/test';
 import {
   api,
   chooseOption,
+  chooseTaskAction,
+  deleteTask,
   expect,
   signIn,
   state,
@@ -166,6 +168,8 @@ export {
   api,
   approveIfAsked,
   chooseOption,
+  chooseTaskAction,
+  deleteTask,
   expect,
   newChat,
   send,

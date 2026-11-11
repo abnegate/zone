@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE tasks\n        SET status = 'queued',\n            queued_at = NOW(),\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending\n        ",
+  "query": "\n        UPDATE tasks\n        SET status = 'queued',\n            queued_at = NOW(),\n            reopened_at = CASE WHEN status = 'complete' THEN NOW() ELSE reopened_at END,\n            updated_at = NOW()\n        WHERE id = $1\n        RETURNING id, title, description, acceptance_criteria, status, priority,\n                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,\n                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,\n                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending\n        ",
   "describe": {
     "columns": [
       {
@@ -324,5 +324,5 @@
       false
     ]
   },
-  "hash": "50f7ea503d94c77a3af6a920695c9408161a1ca308a7b50d2ffe78e6bc8fba32"
+  "hash": "89280e558b21af6600a730d8cba9e9ba6a241bbd5c68ec8ac393b908ff9e643d"
 }

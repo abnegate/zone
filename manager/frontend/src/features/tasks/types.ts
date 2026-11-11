@@ -1,9 +1,10 @@
 import type { z } from 'zod';
 import type { ActionReceipt, Question, Waiting } from '../chats/types';
 import type { TaskProgressMessageSchema } from './schemas';
+import type { StageId, TaskStatus } from './status';
+import type { TitleDraft } from './TitleDraft';
 
-// Task Types
-export type TaskStatus = 'created' | 'queued' | 'in_progress' | 'blocked' | 'review' | 'complete';
+export type { TaskStatus } from './status';
 export type RunStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 export type LogLevel = 'debug' | 'info' | 'warning' | 'error';
 export type PrStatus = 'pending' | 'open' | 'merged' | 'closed';
@@ -107,6 +108,27 @@ export interface CreateTaskRequest {
   source_ids?: string[];
 }
 
+export interface Stage {
+  id: StageId;
+  label: string;
+  target: TaskStatus;
+}
+
+export interface Renaming {
+  id: string;
+  draft: TitleDraft;
+}
+
+export interface BoardActions {
+  open: (task: Task) => void;
+  run: (task: Task) => void;
+  rename: (task: Task) => void;
+  retitle: (task: Task, title: string) => Promise<void>;
+  finish: (task: Task) => void;
+  remove: (task: Task) => void;
+  move: (task: Task, status: TaskStatus) => Promise<boolean>;
+}
+
 export interface UpdateTaskRequest {
   title?: string;
   description?: string;
@@ -128,10 +150,8 @@ export interface UpdateTaskRequest {
   source_ids?: string[];
 }
 
-// Task execution progress (WebSocket messages)
 export type TaskProgressMessage = z.infer<typeof TaskProgressMessageSchema>;
 
-// API Response wrappers
 export interface TasksResponse {
   success?: boolean;
   error?: string;

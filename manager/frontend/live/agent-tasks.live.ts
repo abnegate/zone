@@ -1,5 +1,5 @@
 import { type Locator, type Page } from '@playwright/test';
-import { api, expect, signIn, state, test, tokenFor } from './harness';
+import { api, chooseTaskAction, expect, signIn, state, test, tokenFor } from './harness';
 import { latest, roundsFor, script, settledRounds, stamp } from './stub';
 
 /**
@@ -160,7 +160,7 @@ async function createTask(
 }
 
 async function startRun(page: Page, title: string): Promise<void> {
-  await page.locator('.task-card', { hasText: title }).getByRole('button', { name: 'Execute' }).click();
+  await chooseTaskAction(page, title, 'Run');
   await page.getByRole('button', { name: /start execution/i }).click();
   await expect(page.locator('.execution-logs')).toContainText('Execution Logs');
 }

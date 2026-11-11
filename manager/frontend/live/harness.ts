@@ -164,6 +164,24 @@ export async function chooseOption(trigger: Locator, value: string): Promise<voi
   await expect(listbox).toHaveCount(0);
 }
 
+export type TaskAction = 'Run' | 'Rename' | 'Delete';
+
+export async function chooseTaskAction(
+  page: Page,
+  title: string,
+  action: TaskAction
+): Promise<void> {
+  await page.getByRole('button', { name: `Actions for ${title}`, exact: true }).click();
+  await page.getByRole('menuitem', { name: action, exact: true }).click();
+}
+
+export async function deleteTask(page: Page, title: string): Promise<void> {
+  await chooseTaskAction(page, title, 'Delete');
+  const dialog = page.getByRole('dialog', { name: `Delete "${title}"?`, exact: true });
+  await dialog.getByRole('button', { name: 'Delete task', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+}
+
 /** Every test asserts a clean console, so a broken render cannot pass as a pass. */
 export const test = base.extend<{ consoleErrors: string[] }>({
   consoleErrors: async ({ page }, use) => {

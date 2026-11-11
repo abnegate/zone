@@ -330,48 +330,141 @@ const legacyScales = /var\(--(gray|blue|green|red|yellow|purple)-\d+\)/;
 
 describe('tasks page layout', () => {
   const css = read(join(features, 'tasks', 'pages', 'TasksPage.css'));
+  const boardStyles = join(features, 'tasks', 'components', 'board');
+  const board = read(join(boardStyles, 'Board.css'));
+  const columns = read(join(boardStyles, 'Column.css'));
+  const cards = read(join(boardStyles, 'Card.css'));
 
-  it('lays tasks out as a 56px-row table with a 32px header', () => {
-    expect(rule(css, '.tasks-table-wrapper')).toContain('border: 1px solid var(--ui-border)');
-    expect(rule(css, '.tasks-table th')).toContain('height: var(--ui-control-height)');
-    expect(rule(css, '.tasks-table td')).toContain('height: var(--ui-list-row-2)');
-    expect(rule(css, '.tasks-table td')).toContain('box-shadow: inset 0 -1px var(--ui-border)');
-    expect(rule(css, '.task-card-title')).toContain('height: var(--ui-space-5)');
-    expect(rule(css, '.task-project')).toContain('height: var(--ui-space-4)');
-    expect(rule(css, '.task-card .task-description')).toContain('height: var(--ui-space-4)');
+  it('scrolls the board sideways in its own row of fixed-width columns', () => {
+    expect(rule(board, '.board')).toContain('overflow-x: auto');
+    const column = rule(columns, '.board-column');
+    expect(column).toContain('flex-shrink: 0');
+    expect(column).toContain('width: 280px');
   });
 
-  it('guarantees the title 60% of its row and keeps the badges from pushing it out', () => {
-    expect(rule(css, '.task-card-title h3')).toContain('min-width: 60%');
-    expect(rule(css, '.task-badges')).toContain('overflow: hidden');
-    expect(rule(css, '.task-badges')).not.toContain('flex-shrink: 0');
+  it('keeps every column rule in the column stylesheet', () => {
+    expect(board).not.toMatch(/(^|[\s,}])\.board-column\s*[{,]/);
   });
 
-  it('keeps badges and pull request rows on the palette', () => {
-    expect(css).not.toMatch(legacyScales);
-    expect(css).not.toContain('.task-agentic-badge');
-    expect(css).not.toContain('.task-pr-info');
-    expect(rule(css, '.task-branch')).toContain('height: var(--ui-badge-height)');
+  it('gives the drag grip a 24px hit area, and 44px on a touch screen, without growing the grip', () => {
+    const handle = rule(cards, '.task-card-handle');
+    expect(handle).toContain('width: var(--ui-space-3)');
+    expect(handle).toContain('height: var(--ui-space-5)');
+    expect(handle).toContain('--task-card-handle-target: var(--ui-space-6)');
+    const grip = rule(cards, '.task-card-handle svg');
+    expect(grip).toContain('width: 0.5rem');
+    expect(grip).toContain('height: var(--ui-space-3)');
+
+    const target = rule(cards, '.task-card-handle::after');
+    expect(target).toContain('position: absolute');
+    expect(target).toContain('width: var(--task-card-handle-target)');
+    expect(target).toContain('height: var(--task-card-handle-target)');
+    expect(target).toContain("content: ''");
+
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-handle')).toContain('--task-card-handle-target: 2.75rem');
+    expect(rule(touch, '.task-card-handle::after')).toContain('transform: none');
   });
 
-  it('keeps the pull request on one row and truncates the model and source', () => {
-    expect(rule(css, '.task-pr')).toContain('display: flex');
-    expect(css).not.toContain('.task-meta > * + *::before');
-    const giveWay = rule(css, '.task-model,\n.task-source');
-    expect(giveWay).toContain('min-width: 0');
-    expect(giveWay).toContain('text-overflow: ellipsis');
+  it('ends the grip hit area at the grip, clear of the title beside it', () => {
+    const target = rule(cards, '.task-card-handle::after');
+    expect(target).toContain('right: 0');
+    expect(target).toContain('transform: translateY(-50%)');
+    expect(target).not.toContain('left:');
   });
 
-  it('sets the branch tag next to the pull request', () => {
-    expect(rule(css, '.task-actions')).toContain('align-items: center');
-    const slot = rule(css, '.task-branch-slot');
-    expect(slot).toContain('min-width: 0');
-    expect(slot).toContain('height: var(--ui-badge-height)');
-    const branch = rule(css, '.task-branch');
-    expect(branch).toContain('display: block');
-    expect(branch).toContain('text-overflow: ellipsis');
-    expect(branch).not.toContain('max-width: 50%');
-    expect(branch).not.toContain('flex:');
+  it('shows the grip and the menu wherever any pointer is coarse, not only without hover', () => {
+    expect(cards).not.toContain('(hover: none)');
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-handle,\n  .task-card-menu')).toContain('opacity: 1');
+  });
+
+  it('keeps the drag placeholder muted and dashed in the dark theme and under the pointer', () => {
+    const placeholder = rule(
+      cards,
+      ".task-card-dragging,\n.task-card-dragging:hover,\n:root[data-theme='dark'] .task-card-dragging,\n:root[data-theme='dark'] .task-card-dragging:hover"
+    );
+    expect(placeholder).toContain('background: var(--ui-bg-muted)');
+    expect(placeholder).toContain('border-style: dashed');
+    expect(placeholder).toContain('border-color: var(--ui-border-strong)');
+  });
+
+  it('gives the card title one rule, shared by the card and the copy that is dragged', () => {
+    const title = rule(cards, '.task-card-title');
+    expect(title).toContain('font-size: var(--ui-text-sm)');
+    expect(title).toContain('line-clamp: 2');
+    expect(rule(cards, '.task-card-open')).not.toContain('font-size');
+    expect(cards).not.toContain('.task-card-overlay .task-card-heading');
+  });
+
+  it('makes room above a focused card for its ring without moving the card', () => {
+    expect(rule(columns, '.board-column')).toContain('--board-column-ring: 3px');
+    expect(rule(columns, '.board-column-body')).toContain(
+      'padding: 0 var(--ui-space-2) var(--ui-space-2)'
+    );
+    const focused = rule(columns, '.board-column-body:has(.task-card-open:focus-visible)');
+    expect(focused).toContain('margin-top: calc(-1 * var(--board-column-ring))');
+    expect(focused).toContain('padding-top: var(--board-column-ring)');
+    expect(rule(cards, '.task-card-open:focus-visible::after')).toContain(
+      '0 0 0 var(--board-column-ring) var(--ui-border-focus)'
+    );
+    expect(rule(columns, '.board-column:focus-visible')).toContain('outline-offset: -2px');
+  });
+
+  it('contains only vertical overscroll in a column, so a sideways swipe reaches the board', () => {
+    const body = rule(columns, '.board-column-body');
+    expect(body).toContain('overscroll-behavior-y: contain');
+    expect(body).not.toContain('overscroll-behavior: contain');
+  });
+
+  it('names the board skeleton apart from every other skeleton', () => {
+    expect(board).not.toMatch(/\.skeleton\b/);
+    expect(board).not.toMatch(/[\s.]skeleton-(title|text|badge|card|meta|tag|count)/);
+    expect(rule(board, '.board-skeleton-title')).toContain('max-width: 75%');
+    expect(rule(board, '.task-card.board-skeleton-card')).toContain('pointer-events: none');
+  });
+
+  it('stops the drop highlight fading in when motion is reduced', () => {
+    expect(rule(columns, '.board-column-body')).toContain('transition:');
+    const reduced = media(columns, '(prefers-reduced-motion: reduce)');
+    expect(rule(reduced, '.board-column-body')).toContain('transition: none');
+  });
+
+  it('snaps one column at a time on a phone', () => {
+    const phone = media(board, '(max-width: 768px)');
+    expect(rule(phone, '.board')).toContain('scroll-snap-type: x mandatory');
+    expect(rule(phone, '.board[data-dragging]')).toContain('scroll-snap-type: none');
+    const column = rule(media(columns, '(max-width: 768px)'), '.board-column');
+    expect(column).toContain('scroll-snap-align: start');
+    expect(column).toContain('width: min(85vw, 300px)');
+  });
+
+  it('leaves no table or table skeleton rules behind', () => {
+    for (const selector of [
+      '.tasks-table',
+      '.task-card-agentic td',
+      '.task-actions',
+      '.task-delete',
+      '.task-badges',
+      '.task-project',
+      '.task-priority',
+      '.task-model',
+      '.task-source',
+      '.task-pr',
+      '.task-branch',
+      '.task-rename',
+      '.task-card-title',
+      '.task-card .task-description',
+      '.tasks-page .skeleton',
+    ]) {
+      expect(css).not.toContain(selector);
+    }
+  });
+
+  it('keeps the task styles on the palette', () => {
+    for (const styles of [css, board, columns, cards]) {
+      expect(styles).not.toMatch(legacyScales);
+    }
   });
 
   it('wraps the task filters instead of shrinking them off the page bar', () => {
@@ -391,8 +484,7 @@ describe('tasks page layout', () => {
     expect(rule(css, '.log-entry')).toContain('min-height: var(--ui-control-height-sm)');
   });
 
-  it('opens the editor from a pointer row and sizes the editor chrome to the header', () => {
-    expect(rule(css, '.tasks-table tbody .task-card')).toContain('cursor: pointer');
+  it('sizes the editor chrome to the header', () => {
     expect(rule(css, '.task-details-header')).toContain('height: var(--ui-header-height)');
     expect(rule(css, '.task-details-actions')).toContain('height: var(--ui-header-height)');
   });

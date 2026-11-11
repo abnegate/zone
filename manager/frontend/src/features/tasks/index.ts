@@ -1,10 +1,5 @@
-// Types
-
-// Hooks
 export { useTask, useTaskRuns, useTasks } from './hooks';
-// Pages
 export { TasksPage } from './pages';
-// Schemas
 export {
   CreateTaskRequestSchema,
   LogLevelSchema,

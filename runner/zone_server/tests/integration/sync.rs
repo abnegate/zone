@@ -1185,6 +1185,57 @@ async fn a_github_close_completes_the_task_and_a_reopen_brings_it_back() {
 }
 
 #[tokio::test]
+async fn a_github_close_leaves_a_cancelled_task_cancelled_and_a_reopen_brings_it_back() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    synced.set_task("Original", tasks::CANCELLED).await;
+
+    let closed = github_issue_at("closed", "Renamed", "closed", "2026-01-01T00:00:10Z");
+    let (status, response) = synced.send_github(&closed, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let task = synced.task().await;
+    assert_eq!(
+        task.status,
+        tasks::CANCELLED,
+        "the tracker closing the issue does not complete it"
+    );
+    assert_eq!(
+        task.title, "Renamed",
+        "the rest of the delivery still applies"
+    );
+    assert_eq!(
+        synced.stored_state().await,
+        Some(json!("closed")),
+        "the close is stored as followed"
+    );
+    assert_eq!(
+        synced.item_event_types().await,
+        vec![SyncEventType::Update],
+        "a close the task did not follow is logged as an update"
+    );
+
+    let reopened = github_issue_at("reopened", "Renamed", "open", "2026-01-01T00:00:20Z");
+    assert_eq!(synced.post_github(&reopened).await, StatusCode::OK);
+    assert_eq!(synced.task().await.status, tasks::CREATED);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_linear_cancel_leaves_a_cancelled_task_cancelled() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    let started = linear_issue_at("Original", "started", "2026-01-01T00:00:01.000Z");
+    assert_eq!(synced.post_linear(&started).await, StatusCode::OK);
+    synced.set_task("Original", tasks::CANCELLED).await;
+
+    let canceled = linear_issue_at("Original", "canceled", "2026-01-01T00:00:02.000Z");
+    let (status, response) = synced.send_linear(&canceled, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(synced.task().await.status, tasks::CANCELLED);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
 async fn an_edit_delivered_after_a_later_close_neither_reopens_nor_renames_the_task() {
     let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
     let closed = github_issue_at("closed", "Closed title", "closed", "2026-01-01T00:00:10Z");

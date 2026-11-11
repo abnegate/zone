@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import PencilIcon from '../../../shared/components/PencilIcon/PencilIcon';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
+import { STATUS_OPTIONS } from '../status';
 import { awaitsTitle } from '../title';
 import type { Task, TaskStatus, UpdateTaskRequest } from '../types';
 import { TaskTitleInput } from './TaskTitleInput';
@@ -28,14 +29,7 @@ type TaskDetailProps = {
   onSave: (request: UpdateTaskRequest) => Promise<void>;
 };
 
-const STATUSES: { value: TaskStatus; label: string }[] = [
-  { value: 'created', label: 'Created' },
-  { value: 'queued', label: 'Queued' },
-  { value: 'in_progress', label: 'In Progress' },
-  { value: 'blocked', label: 'Blocked' },
-  { value: 'review', label: 'Review' },
-  { value: 'complete', label: 'Complete' },
-];
+const SAVE_FAILED = 'Failed to save task';
 
 const PRIORITIES: { value: number; label: string }[] = [
   { value: 1, label: 'Lowest' },
@@ -47,9 +41,8 @@ const PRIORITIES: { value: number; label: string }[] = [
 
 function sameIds(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;
-  const a = [...left].sort();
-  const b = [...right].sort();
-  return a.every((id, index) => id === b[index]);
+  const sorted = [...right].sort();
+  return [...left].sort().every((id, index) => id === sorted[index]);
 }
 
 function hydrate(task: Task): Draft {
@@ -152,8 +145,8 @@ export function TaskDetail({
     setError(null);
     try {
       await onSave(request);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save task');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : SAVE_FAILED);
     } finally {
       setSaving(false);
     }
@@ -232,7 +225,7 @@ export function TaskDetail({
               setDraft((current) => ({ ...current, status: next as TaskStatus }))
             }
             wrapperClassName="form-group"
-            options={STATUSES}
+            options={[...STATUS_OPTIONS]}
           />
 
           <div className="form-group">

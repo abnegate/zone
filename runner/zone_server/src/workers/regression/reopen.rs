@@ -11,9 +11,18 @@
 //! [`RegressionPolicy::monitoring`] is a new problem on an old task rather than
 //! this fix unravelling. Between the two, a task pulled back into review is
 //! [`Verdict::Suspected`] — more eyes is not the same as broken — and a task
-//! pulled back into work is [`Verdict::Regressed`].
+//! pulled back into work is [`Verdict::Regressed`]. A completed task moved to
+//! cancelled was dropped, not reopened; one moved to paused is unfinished
+//! work again, so it counts as a reopen.
+//!
+//! The reopen is dated by when the task left `complete`, never by its last
+//! write: runs and edits on a task that was moved back are ordinary work.
 
 use chrono::NaiveDateTime;
+
+use crate::db::tasks::CANCELLED;
+use crate::db::tasks::COMPLETE;
+use crate::db::tasks::REVIEW;
 
 use super::checker::{
     Evidence, FixSubject, RegressionChecker, RegressionError, RegressionPolicy, RegressionResult,
@@ -21,8 +30,6 @@ use super::checker::{
 };
 
 const NAME: &str = "reopen";
-const COMPLETE: &str = "complete";
-const REVIEW: &str = "review";
 
 /// Watches for a completed task being moved back out of completion.
 #[derive(Debug, Clone, Copy, Default)]
@@ -40,15 +47,31 @@ impl ReopenChecker {
         if subject.status == COMPLETE {
             return RegressionResult::clear(NAME, subject, "The task is still complete", now);
         }
+        if subject.status == CANCELLED {
+            return RegressionResult::clear(
+                NAME,
+                subject,
+                "Cancelled after completion, which is not a reopen",
+                now,
+            );
+        }
 
-        let since_shipping = subject.last_touched_at - subject.shipped_at;
+        let Some(reopened_at) = subject.reopened_at else {
+            return RegressionResult::clear(
+                NAME,
+                subject,
+                "No record of when it left completion",
+                now,
+            );
+        };
+
+        let since_shipping = reopened_at - subject.shipped_at;
         if since_shipping < self.policy.reopen_grace {
             return RegressionResult::clear(
                 NAME,
                 subject,
                 format!(
-                    "Moved to {} {} minutes after completion, which is a correction",
-                    subject.status,
+                    "Moved back {} minutes after completion, which is a correction",
                     since_shipping.num_minutes().max(0)
                 ),
                 now,
@@ -60,8 +83,7 @@ impl ReopenChecker {
                 NAME,
                 subject,
                 format!(
-                    "Moved to {} {} days after completion, too late to blame the fix",
-                    subject.status,
+                    "Moved back {} days after completion, too late to blame the fix",
                     since_shipping.num_days()
                 ),
                 now,
@@ -109,14 +131,24 @@ impl RegressionChecker for ReopenChecker {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use chrono::Duration;
+    use uuid::Uuid;
+
     use super::super::checker::fixtures::{moment, subject};
+    use super::super::worker::{RegressionSettings, checkers, scan_workspace, watched};
     use super::*;
+    use crate::db::analytics;
+    use crate::db::auto_projects::testing::Project;
+    use crate::db::tasks;
+    use crate::workers::learning::attempt::AttemptOutcome;
     use crate::workers::learning::error_category::ErrorCategory;
 
-    fn reopened(status: &str, last_touched_at: NaiveDateTime) -> FixSubject {
+    fn reopened(status: &str, reopened_at: NaiveDateTime) -> FixSubject {
         FixSubject {
             status: status.to_string(),
-            last_touched_at,
+            reopened_at: Some(reopened_at),
             ..subject(ErrorCategory::Build, Vec::new())
         }
     }
@@ -127,7 +159,7 @@ mod tests {
 
     #[test]
     fn a_task_moved_back_into_work_the_next_day_is_a_regression() {
-        let result = checked(&reopened("in_progress", moment(2, 9, 0)));
+        let result = checked(&reopened(tasks::IN_PROGRESS, moment(2, 9, 0)));
 
         assert_eq!(result.verdict, Verdict::Regressed);
         assert_eq!(result.confidence, 1.0);
@@ -143,14 +175,35 @@ mod tests {
     #[test]
     fn a_blocked_task_is_a_regression_too() {
         assert_eq!(
-            checked(&reopened("blocked", moment(2, 9, 0))).verdict,
+            checked(&reopened(tasks::BLOCKED, moment(2, 9, 0))).verdict,
             Verdict::Regressed
         );
     }
 
     #[test]
+    fn a_completed_task_cancelled_inside_the_monitoring_window_is_not_a_reopen() {
+        let result = checked(&reopened(CANCELLED, moment(2, 9, 0)));
+
+        assert_eq!(result.verdict, Verdict::Clear);
+        assert!(!result.is_reportable());
+        assert_eq!(
+            result.summary(),
+            "Cancelled after completion, which is not a reopen"
+        );
+    }
+
+    #[test]
+    fn a_completed_task_paused_inside_the_monitoring_window_is_still_a_regression() {
+        assert_eq!(
+            checked(&reopened(tasks::PAUSED, moment(2, 9, 0))).verdict,
+            Verdict::Regressed,
+            "paused work is unfinished work"
+        );
+    }
+
+    #[test]
     fn a_task_still_complete_says_nothing() {
-        let result = checked(&reopened("complete", moment(3, 9, 0)));
+        let result = checked(&reopened(COMPLETE, moment(3, 9, 0)));
 
         assert_eq!(result.verdict, Verdict::Clear);
         assert!(!result.is_reportable());
@@ -158,7 +211,7 @@ mod tests {
 
     #[test]
     fn a_status_corrected_within_the_hour_is_not_a_regression() {
-        let result = checked(&reopened("in_progress", moment(1, 9, 30)));
+        let result = checked(&reopened(tasks::IN_PROGRESS, moment(1, 9, 30)));
 
         assert_eq!(result.verdict, Verdict::Clear);
         assert!(
@@ -169,8 +222,19 @@ mod tests {
     }
 
     #[test]
+    fn a_task_with_no_record_of_leaving_completion_is_not_dated_from_anything_else() {
+        let result = checked(&FixSubject {
+            status: tasks::IN_PROGRESS.to_string(),
+            ..subject(ErrorCategory::Build, Vec::new())
+        });
+
+        assert_eq!(result.verdict, Verdict::Clear);
+        assert_eq!(result.summary(), "No record of when it left completion");
+    }
+
+    #[test]
     fn a_reopen_long_after_the_fix_is_a_new_problem() {
-        let result = checked(&reopened("in_progress", moment(25, 9, 0)));
+        let result = checked(&reopened(tasks::IN_PROGRESS, moment(25, 9, 0)));
 
         assert_eq!(result.verdict, Verdict::Clear);
         assert!(
@@ -182,7 +246,7 @@ mod tests {
 
     #[test]
     fn a_task_pulled_back_into_review_is_only_suspected() {
-        let result = checked(&reopened("review", moment(2, 9, 0)));
+        let result = checked(&reopened(REVIEW, moment(2, 9, 0)));
 
         assert_eq!(
             result.verdict,
@@ -194,7 +258,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_trait_returns_what_the_pure_decision_returns() {
-        let subject = reopened("in_progress", moment(2, 9, 0));
+        let subject = reopened(tasks::IN_PROGRESS, moment(2, 9, 0));
         let checker = ReopenChecker::default();
 
         assert_eq!(
@@ -205,5 +269,494 @@ mod tests {
             checker.decide(&subject, moment(4, 9, 0))
         );
         assert_eq!(checker.name(), "reopen");
+    }
+
+    /// The database's own clock, in the zoneless form a task is stamped in, so
+    /// a window lines up with the stamps whatever zone the server keeps.
+    async fn database_now(project: &Project) -> NaiveDateTime {
+        sqlx::query_scalar("SELECT LOCALTIMESTAMP")
+            .fetch_one(&project.pool)
+            .await
+            .expect("the database's clock")
+    }
+
+    async fn shipped(project: &Project) -> Vec<Uuid> {
+        let now = database_now(project).await;
+        analytics::shipped_tasks(
+            &project.pool,
+            project.workspace,
+            now - RegressionPolicy::default().monitoring,
+            now + Duration::seconds(1),
+            100,
+        )
+        .await
+        .expect("the shipped tasks")
+        .into_iter()
+        .map(|task| task.task_id)
+        .collect()
+    }
+
+    async fn scanned(project: &Project) -> Vec<RegressionResult> {
+        let checkers: Vec<Arc<dyn RegressionChecker>> = vec![Arc::new(ReopenChecker::default())];
+        scan_workspace(
+            &project.pool,
+            project.workspace,
+            &checkers,
+            &RegressionSettings::default(),
+            database_now(project).await + Duration::seconds(1),
+        )
+        .await
+        .expect("the scan")
+    }
+
+    /// Put everything stamped on the task `elapsed` back, as if it had passed.
+    async fn passes(project: &Project, task: Uuid, elapsed: Duration) {
+        sqlx::query(
+            "UPDATE tasks SET completed_at = completed_at - $2 * INTERVAL '1 minute', \
+               shipped_at = shipped_at - $2 * INTERVAL '1 minute', \
+               reopened_at = reopened_at - $2 * INTERVAL '1 minute', \
+               updated_at = updated_at - $2 * INTERVAL '1 minute' WHERE id = $1",
+        )
+        .bind(task)
+        .bind(elapsed.num_minutes())
+        .execute(&project.pool)
+        .await
+        .expect("the task's stamps move back");
+    }
+
+    async fn two_hours_pass(project: &Project, task: Uuid) {
+        passes(project, task, Duration::hours(2)).await;
+    }
+
+    #[tokio::test]
+    async fn a_task_that_never_completed_is_no_shipped_fix_wherever_it_is_moved() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run");
+        tasks::complete_task_run(&project.pool, run.id, tasks::FAILED, Some("boom"), None)
+            .await
+            .expect("the run fails");
+        let ended = project.status(task).await;
+        two_hours_pass(&project, task).await;
+
+        tasks::update_task(
+            &project.pool,
+            task,
+            Some("Renamed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("an edit that leaves the status alone");
+        let after_edit = (shipped(&project).await, scanned(&project).await);
+        project.move_to(task, tasks::PAUSED).await;
+        let after_pause = (shipped(&project).await, scanned(&project).await);
+        project.remove().await;
+
+        assert_eq!(ended, tasks::BLOCKED);
+        assert_eq!(
+            after_edit,
+            (Vec::new(), Vec::new()),
+            "a run that ended is not a fix that shipped"
+        );
+        assert_eq!(
+            after_pause,
+            (Vec::new(), Vec::new()),
+            "pausing a task that was never complete reopens nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_a_person_completed_is_watched_and_moving_it_back_out_is_a_reopen() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+
+        project.move_to(task, COMPLETE).await;
+        let completed = (shipped(&project).await, scanned(&project).await);
+        two_hours_pass(&project, task).await;
+        project.move_to(task, tasks::PAUSED).await;
+        let reopened = (shipped(&project).await, scanned(&project).await);
+        project.remove().await;
+
+        assert_eq!(
+            completed,
+            (vec![task], Vec::new()),
+            "a task moved to complete by hand is a fix to watch, and still complete"
+        );
+        assert_eq!(reopened.0, vec![task]);
+        let [result] = &reopened.1[..] else {
+            panic!("one reopened fix: {:?}", reopened.1);
+        };
+        assert_eq!(result.verdict, Verdict::Regressed);
+        assert_eq!(
+            result.summary(),
+            "Reopened as paused 2 hours after it was completed"
+        );
+    }
+
+    async fn watched_fixes(project: &Project) -> Vec<FixSubject> {
+        watched(
+            &project.pool,
+            project.workspace,
+            &RegressionSettings::default(),
+            database_now(project).await + Duration::seconds(1),
+        )
+        .await
+        .expect("the watched fixes")
+    }
+
+    async fn shipped_at(project: &Project, task: Uuid) -> Option<NaiveDateTime> {
+        sqlx::query_scalar("SELECT shipped_at FROM tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&project.pool)
+            .await
+            .expect("the task's stamp")
+    }
+
+    async fn reopened_at(project: &Project, task: Uuid) -> Option<NaiveDateTime> {
+        sqlx::query_scalar("SELECT reopened_at FROM tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(&project.pool)
+            .await
+            .expect("the task's stamp")
+    }
+
+    fn reported(results: Vec<RegressionResult>) -> Vec<(Verdict, String)> {
+        results
+            .into_iter()
+            .map(|result| (result.verdict, result.summary()))
+            .collect()
+    }
+
+    async fn run_ends(project: &Project, run: Uuid, status: &str) {
+        tasks::complete_task_run(&project.pool, run, status, None, None)
+            .await
+            .expect("the run ends")
+            .expect("a run that was live");
+    }
+
+    #[tokio::test]
+    async fn a_run_that_fails_after_the_fix_shipped_is_one_that_followed_it() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+        let shipped = shipped_at(&project, task).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the shipped task");
+        let admitted = shipped_at(&project, task).await;
+        run_ends(&project, run.id, tasks::FAILED).await;
+        let fixes = watched_fixes(&project).await;
+        project.remove().await;
+
+        assert!(shipped.is_some(), "completing the task stamps it");
+        assert_eq!(admitted, shipped, "a new run leaves the stamp alone");
+        let [fix] = &fixes[..] else {
+            panic!("one watched fix: {fixes:?}");
+        };
+        assert_eq!(fix.status, tasks::BLOCKED);
+        assert_eq!(Some(fix.shipped_at), shipped);
+        assert_eq!(
+            fix.later_runs
+                .iter()
+                .map(|later| (later.run_id, later.outcome))
+                .collect::<Vec<_>>(),
+            vec![(run.id, AttemptOutcome::Failed)],
+            "the recurrence checker is shown the run that failed after the fix"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shipped_task_moved_back_out_and_run_again_is_still_a_reopen() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+
+        project.move_to(task, tasks::CREATED).await;
+        let admitted = tasks::create_unattended_task_run(&project.pool, task, project.actor)
+            .await
+            .expect("the admission");
+        let running = scanned(&project).await;
+        let tasks::Unattended::Created(run) = admitted else {
+            panic!("the driver admits the task a person moved back: {admitted:?}");
+        };
+        run_ends(&project, run, tasks::FAILED).await;
+        let ended = scanned(&project).await;
+        project.remove().await;
+
+        assert_eq!(
+            reported([running, ended].into_iter().flatten().collect()),
+            vec![
+                (
+                    Verdict::Regressed,
+                    "Reopened as queued 2 hours after it was completed".to_string()
+                ),
+                (
+                    Verdict::Regressed,
+                    "Reopened as blocked 2 hours after it was completed".to_string()
+                ),
+            ],
+            "the run the reopen led to does not hide the reopen"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_long_after_a_completion_that_was_corrected_is_not_a_reopen() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        passes(&project, task, Duration::minutes(2)).await;
+        project.move_to(task, tasks::CREATED).await;
+        passes(&project, task, Duration::minutes(68)).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the task that was moved back");
+        run_ends(&project, run.id, tasks::FAILED).await;
+        let fixes = watched_fixes(&project).await;
+        let results = scanned(&project).await;
+        project.remove().await;
+
+        assert_eq!(
+            reported(results),
+            Vec::new(),
+            "a run seventy minutes after a completion corrected in two is ordinary work"
+        );
+        let [fix] = &fixes[..] else {
+            panic!("one watched fix: {fixes:?}");
+        };
+        assert_eq!(fix.status, tasks::BLOCKED);
+        assert_eq!(
+            fix.reopened_at
+                .map(|reopened_at| (reopened_at - fix.shipped_at).num_minutes()),
+            Some(2),
+            "the task left completion two minutes in, whatever was written since"
+        );
+        assert_eq!(
+            fix.later_runs
+                .iter()
+                .map(|later| later.run_id)
+                .collect::<Vec<_>>(),
+            vec![run.id]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reopen_is_dated_by_the_move_out_however_often_the_task_is_written_after() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        passes(&project, task, Duration::hours(3)).await;
+        project.move_to(task, tasks::CREATED).await;
+        passes(&project, task, Duration::hours(2)).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the reopened task");
+        run_ends(&project, run.id, tasks::FAILED).await;
+        let after_the_run = scanned(&project).await;
+        passes(&project, task, Duration::hours(4)).await;
+        tasks::update_task(
+            &project.pool,
+            task,
+            Some("Renamed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("an edit that leaves the status alone");
+        let after_the_edit = scanned(&project).await;
+        project.remove().await;
+
+        let regressed = (
+            Verdict::Regressed,
+            "Reopened as blocked 3 hours after it was completed".to_string(),
+        );
+        assert_eq!(
+            reported(after_the_run),
+            vec![regressed.clone()],
+            "five hours after completion, the reopen is still the one at three"
+        );
+        assert_eq!(
+            reported(after_the_edit),
+            vec![regressed],
+            "nine hours after completion, the reopen is still the one at three"
+        );
+    }
+
+    #[tokio::test]
+    async fn running_a_completed_task_again_is_a_reopen_while_the_run_is_live() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the completed task");
+        let queued = scanned(&project).await;
+        let started = tasks::start_task_run(&project.pool, run.id)
+            .await
+            .expect("the run starts");
+        let running = scanned(&project).await;
+        project.remove().await;
+
+        assert!(started, "the run that was admitted starts");
+        assert_eq!(
+            reported([queued, running].into_iter().flatten().collect()),
+            vec![
+                (
+                    Verdict::Regressed,
+                    "Reopened as queued 2 hours after it was completed".to_string()
+                ),
+                (
+                    Verdict::Regressed,
+                    "Reopened as in_progress 2 hours after it was completed".to_string()
+                ),
+            ],
+            "the run itself is what took the task out of completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn queueing_a_completed_task_is_a_reopen() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+
+        let queued = tasks::queue_task_authorized(&project.pool, project.actor, task).await;
+        let results = scanned(&project).await;
+        project.remove().await;
+
+        assert!(
+            matches!(queued, Ok(tasks::Mutation::Applied(_))),
+            "the completed task is queued: {queued:?}"
+        );
+        assert_eq!(
+            reported(results),
+            vec![(
+                Verdict::Regressed,
+                "Reopened as queued 2 hours after it was completed".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reopened_task_that_completes_again_starts_over() {
+        const PULL_REQUEST: &str = "https://github.com/acme/shop/pull/7";
+        let project = Project::new(2).await;
+        let (by_hand, by_merge) = (project.tasks[0], project.tasks[1]);
+        for task in [by_hand, by_merge] {
+            project.move_to(task, COMPLETE).await;
+            passes(&project, task, Duration::hours(3)).await;
+            project.move_to(task, tasks::CREATED).await;
+        }
+        let first = (
+            shipped_at(&project, by_hand).await,
+            shipped_at(&project, by_merge).await,
+        );
+        let left = (
+            reopened_at(&project, by_hand).await,
+            reopened_at(&project, by_merge).await,
+        );
+        let reopened = scanned(&project).await;
+
+        project.move_to(by_hand, COMPLETE).await;
+        sqlx::query("UPDATE tasks SET pr_url = $2 WHERE id = $1")
+            .bind(by_merge)
+            .bind(PULL_REQUEST)
+            .execute(&project.pool)
+            .await
+            .expect("the task's pull request");
+        let merged = tasks::complete_merged_task(&project.pool, by_merge, PULL_REQUEST)
+            .await
+            .expect("the merge completes the task");
+        let second = (
+            shipped_at(&project, by_hand).await,
+            shipped_at(&project, by_merge).await,
+        );
+        let cleared = (
+            reopened_at(&project, by_hand).await,
+            reopened_at(&project, by_merge).await,
+        );
+        let completed = scanned(&project).await;
+        project.remove().await;
+
+        assert!(merged);
+        assert!(
+            left.0.is_some() && left.1.is_some(),
+            "leaving completion is stamped: {left:?}"
+        );
+        assert_eq!(reopened.len(), 2, "both reopens are reported: {reopened:?}");
+        assert_eq!(
+            cleared,
+            (None, None),
+            "completing again forgets the earlier move out"
+        );
+        assert!(
+            second.0 > first.0 && second.1 > first.1,
+            "completing again replaces the stamp: {first:?} then {second:?}"
+        );
+        assert_eq!(
+            reported(completed),
+            Vec::new(),
+            "a task complete again is clear"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_that_completes_again_is_watched_from_its_new_completion() {
+        let project = Project::new(1).await;
+        let task = project.tasks[0];
+        project.move_to(task, COMPLETE).await;
+        two_hours_pass(&project, task).await;
+        let first = shipped_at(&project, task).await;
+
+        let run = tasks::create_task_run(&project.pool, task)
+            .await
+            .expect("a run on the shipped task");
+        run_ends(&project, run.id, tasks::COMPLETED).await;
+        let reviewed = project.status(task).await;
+        project.move_to(task, COMPLETE).await;
+        let second = shipped_at(&project, task).await;
+        let fixes = watched_fixes(&project).await;
+        let results = scan_workspace(
+            &project.pool,
+            project.workspace,
+            &checkers(&RegressionSettings::default()),
+            &RegressionSettings::default(),
+            database_now(&project).await + Duration::seconds(1),
+        )
+        .await
+        .expect("the scan");
+        project.remove().await;
+
+        assert_eq!(reviewed, REVIEW);
+        assert!(
+            first.is_some() && second > first,
+            "completing again replaces the stamp: {first:?} then {second:?}"
+        );
+        let [fix] = &fixes[..] else {
+            panic!("one watched fix: {fixes:?}");
+        };
+        assert_eq!(Some(fix.shipped_at), second);
+        assert!(
+            fix.later_runs.is_empty(),
+            "the run that led to the new completion did not follow it: {:?}",
+            fix.later_runs
+        );
+        assert_eq!(results, Vec::new(), "a task complete again is clear");
     }
 }
