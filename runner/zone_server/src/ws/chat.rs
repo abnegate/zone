@@ -8818,10 +8818,16 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
-    fn a_discovery_the_tool_will_take_is_traced_as_it_was_written() {
+    fn a_discovery_the_tool_will_take_is_traced_as_the_entry_it_stores() {
         use crate::agent::discovery::RECORD_DISCOVERY;
         use serde_json::json;
         let arguments = json!({
+            "kind": " lesson ",
+            "subject": "Frontend tests  need isolation",
+            "statement": "Run bun test\nwith --isolate.",
+        })
+        .to_string();
+        let stored = json!({
             "kind": "lesson",
             "subject": "Frontend tests need isolation",
             "statement": "Run bun test with --isolate.",
@@ -8838,14 +8844,50 @@ cat 'DIR/reply.jsonl'
         );
 
         assert_eq!(
-            record.arguments, arguments,
-            "an entry the workspace reads anyway"
+            record.arguments, stored,
+            "the entry the workspace reads anyway"
         );
         assert_eq!(record.reason, None);
         assert_eq!(
             serde_json::to_value(&frame).expect("a frame serialises")["arguments"],
-            arguments
+            stored
         );
+    }
+
+    /// The tool reads a field written twice by its last copy, so a call whose
+    /// earlier copy carries a credential is taken, and that copy must not
+    /// reach the trace the workspace reads.
+    #[test]
+    fn a_discovery_with_a_field_written_twice_leaves_the_unread_copy_out_of_the_trace() {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use serde_json::json;
+        const SECRET: &str = "ghp_abcdefgh1234";
+        let arguments = format!(
+            r#"{{"kind":"lesson","subject":"The deploy token","statement":"It is {SECRET}","statement":"Kept in the vault."}}"#
+        );
+
+        let (record, frame) = trace_started(
+            Uuid::new_v4(),
+            "call_1".to_string(),
+            RECORD_DISCOVERY.to_string(),
+            &arguments,
+            0,
+            None,
+        );
+
+        assert_eq!(
+            record.arguments,
+            json!({
+                "kind": "lesson",
+                "subject": "The deploy token",
+                "statement": "Kept in the vault.",
+            })
+            .to_string()
+        );
+        let record = serde_json::to_string(&record).expect("a record serialises");
+        let frame = serde_json::to_string(&frame).expect("a frame serialises");
+        assert!(!record.contains(SECRET), "{record}");
+        assert!(!frame.contains(SECRET), "{frame}");
     }
 
     fn call(name: &str, success: bool) -> ToolCallRecord {

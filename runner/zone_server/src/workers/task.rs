@@ -3941,6 +3941,58 @@ mod tests {
             .unwrap();
     }
 
+    /// The tool reads a field written twice by its last copy, so a discovery
+    /// whose earlier copy carries a credential is taken. Its tool-call record
+    /// and the logged copy of the model's message keep the entry it stores,
+    /// and not the copy no screen read.
+    #[tokio::test]
+    async fn a_discovery_with_a_field_written_twice_leaves_the_unread_copy_out_of_what_a_run_keeps()
+    {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use serde_json::json;
+        const SECRET: &str = "ghp_abcdefgh1234";
+        let arguments = format!(
+            r#"{{"kind":"lesson","subject":"The deploy token","statement":"It is {SECRET}","statement":"Kept in the vault."}}"#
+        );
+        let stored = json!({
+            "kind": "lesson",
+            "subject": "The deploy token",
+            "statement": "Kept in the vault.",
+        });
+        let pool =
+            PgPool::connect_lazy("postgres://zone@127.0.0.1:1/unreachable").expect("a lazy pool");
+        let callback = DatabaseTaskCallback::new(pool, Uuid::new_v4());
+
+        callback.on_tool_call("call_1", RECORD_DISCOVERY, &arguments);
+        let (_, recorded) = callback.close_call("call_1");
+        let message: ReplayMessage = serde_json::from_value(json!({
+            "version": 1,
+            "role": "assistant",
+            "content": null,
+            "name": null,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": RECORD_DISCOVERY, "arguments": arguments},
+            }],
+            "tool_call_id": null,
+            "images": [],
+            "generated_images": [],
+        }))
+        .expect("an assistant message that made one call");
+        let conversed = logged(&message);
+
+        assert_eq!(recorded, stored);
+        let conversed = conversed
+            .tool_calls
+            .expect("the logged copy keeps its calls")
+            .remove(0)
+            .function
+            .arguments;
+        assert_eq!(conversed, stored.to_string());
+        assert!(!conversed.contains(SECRET), "{conversed}");
+    }
+
     #[tokio::test]
     async fn full_worker_scopes_actions_uses_checkout_and_cleans_up() {
         let _execution = EXECUTION.lock().await;

@@ -34,6 +34,12 @@ const UNASKED: &str = "- Do not wait to be asked: when the user tells you someth
      write it, then say in a line that you did. Unasked, what the rules below keep out you \
      leave unwritten, without saying so.";
 
+/// A request to forget leaves what it was about in the conversation, where
+/// `UNASKED` would find it again; the server cannot tell that write from one
+/// the user asked for, so the limit is stated here.
+const FORGOTTEN: &str = "- Never write again what the user asked you to forget, whether in this conversation or \
+     as an entry you deleted, unless they ask for it again.";
+
 const HORIZON: &str = "- Write what will still be true and worth reading in a month. A passing mention is not \
      one; a durable phrasing beats a precise figure.";
 
@@ -78,6 +84,7 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
     let rules = [
         TRIGGER,
         UNASKED,
+        FORGOTTEN,
         HORIZON,
         STATED,
         SHAPE,
@@ -137,7 +144,7 @@ mod tests {
 
             assert_eq!(lines.next(), Some(HEADING), "{rendered}");
             let rules: Vec<&str> = lines.collect();
-            assert_eq!(rules.len(), 11, "{rendered}");
+            assert_eq!(rules.len(), 12, "{rendered}");
             for rule in rules {
                 assert!(rule.starts_with("- "), "{rule}");
             }
@@ -177,10 +184,34 @@ mod tests {
                 position(TRIGGER) + TRIGGER.len() + 1,
                 "{rendered}"
             );
-            for limit in [HORIZON, STATED, NEVER, SUPPRESSION] {
+            for limit in [FORGOTTEN, HORIZON, STATED, NEVER, SUPPRESSION] {
                 assert!(position(UNASKED) < position(limit), "{limit}");
             }
         }
+    }
+
+    /// Asking to forget something leaves it in the conversation, so the rule
+    /// that has the model write unasked would find it there again.
+    #[test]
+    fn what_the_user_asked_to_forget_is_not_written_again_unasked() {
+        for rendered in [chat(), task()] {
+            let position = |rule: &str| {
+                rendered
+                    .find(rule)
+                    .unwrap_or_else(|| panic!("{rule} missing from {rendered}"))
+            };
+
+            assert_eq!(
+                position(FORGOTTEN),
+                position(UNASKED) + UNASKED.len() + 1,
+                "{rendered}"
+            );
+        }
+        assert_eq!(
+            FORGOTTEN,
+            "- Never write again what the user asked you to forget, whether in this conversation \
+             or as an entry you deleted, unless they ask for it again."
+        );
     }
 
     /// `NEVER` ends on a refusal written for a request. Read beside a rule to

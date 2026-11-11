@@ -479,7 +479,9 @@ made unasked, but it is that person's entry and not the workspace's.
 - Kept out of the trace when refused. A call the tool is about to refuse for
   its shape, its size or what the screen found leaves only its kind in the
   chat's tool trace, in a run's tool-call record and in the run log, and no
-  receipt for the tool carries a stated reason.
+  receipt for the tool carries a stated reason. A call it takes leaves the
+  entry it stores there, not the text the model wrote, so the copy of a field
+  written twice that no screen read is left out too.
 - Bounded in bytes. A subject and its statement are stored with their white
   space collapsed to the one line a prompt renders, and that line holds
   `MAX_ENTRY_BYTES`, 1,000 bytes, for the two together. The rendered block

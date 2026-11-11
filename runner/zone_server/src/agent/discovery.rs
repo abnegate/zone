@@ -23,8 +23,9 @@
 //! The same holds for the trace, which is written as a call starts and before
 //! the tool has refused anything. Everything a call can be refused for
 //! without the store is decided by one pure function, so [`trace_arguments`]
-//! asks it first and a call the tool will refuse leaves its kind and nothing
-//! else where the workspace reads it.
+//! asks it first: a call the tool will refuse leaves its kind and nothing
+//! else where the workspace reads it, and a call it will take leaves the
+//! entry it stores.
 //!
 //! Recording needs member standing, read again on every call. A viewer's chat
 //! is still offered the tool, because assembling a catalog reads no database,
@@ -204,8 +205,10 @@ struct Withheld {
 /// The arguments the trace shows for a call, if they are not to be shown as
 /// they are.
 ///
-/// `None` means show them: the call is another tool's, or it is one this tool
-/// will take as far as the store, whose entry the workspace reads anyway. A
+/// `None` means show them: the call is another tool's. A call this tool will
+/// take as far as the store is shown as the entry it stores, whose text the
+/// workspace reads anyway, and not as written: a field written twice is read
+/// by its last copy, and an earlier copy is text the screen never read. A
 /// call [`entry`] refuses is refused for its shape, its size or what the
 /// screen found in it, and the last of those may be a credential, so all of
 /// them leave the kind alone. A reason volunteered beside the three fields
@@ -215,8 +218,8 @@ pub fn trace_arguments(name: &str, arguments: &str) -> Option<String> {
         return None;
     }
     let parameters = serde_json::from_str::<Value>(arguments).unwrap_or(Value::Null);
-    if entry(parameters.clone()).is_ok() {
-        return None;
+    if let Ok(taken) = entry(parameters.clone()) {
+        return Some(json!(taken).to_string());
     }
     let withheld: Withheld = serde_json::from_value(parameters).unwrap_or_default();
     Some(json!(withheld).to_string())
@@ -234,7 +237,7 @@ pub fn trace_reason(name: &str, reason: Option<String>) -> Option<String> {
 
 /// A call's arguments once everything that needs no database has been
 /// decided about them.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 struct Entry {
     kind: Kind,
     subject: String,
@@ -797,10 +800,45 @@ mod tests {
     }
 
     #[test]
-    fn a_call_the_tool_will_take_and_every_other_tool_s_are_traced_as_written() {
-        let taken = call("lesson", SUBJECT, STATEMENT).to_string();
+    fn a_call_the_tool_will_take_is_traced_as_the_entry_it_stores() {
+        let taken = call(" lesson ", "  Running the integration\ntests ", STATEMENT).to_string();
 
-        assert_eq!(trace_arguments(RECORD_DISCOVERY, &taken), None);
+        assert_eq!(
+            trace_arguments(RECORD_DISCOVERY, &taken),
+            Some(json!({"kind": "lesson", "subject": SUBJECT, "statement": STATEMENT}).to_string())
+        );
+    }
+
+    /// A field written twice is read once, by its last copy. The copy before
+    /// it is text no screen read, and it may be the credential.
+    #[test]
+    fn a_field_written_twice_is_traced_as_the_copy_the_tool_stores() {
+        let duplicated = format!(
+            r#"{{"kind":"lesson","subject":"{SUBJECT}","statement":"The deploy token is ghp_abcdefgh1234","statement":"{STATEMENT}"}}"#
+        );
+        let parameters: Value =
+            serde_json::from_str(&duplicated).expect("a repeated field still parses");
+
+        assert_eq!(
+            entry(parameters),
+            Ok(Entry {
+                kind: Kind::Lesson,
+                subject: SUBJECT.to_string(),
+                statement: STATEMENT.to_string(),
+            }),
+            "the tool takes the call by its last copy"
+        );
+        let traced = trace_arguments(RECORD_DISCOVERY, &duplicated)
+            .expect("a taken call is traced as what it stores");
+        assert_eq!(
+            traced,
+            json!({"kind": "lesson", "subject": SUBJECT, "statement": STATEMENT}).to_string()
+        );
+        assert!(!traced.contains("ghp_"), "{traced}");
+    }
+
+    #[test]
+    fn every_other_tool_s_call_is_traced_as_written() {
         assert_eq!(
             trace_arguments("read_file", r#"{"path":"ghp_abcdefgh1234"}"#),
             None,
