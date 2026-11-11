@@ -10,7 +10,7 @@ import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
 import { CreateTaskWizard, DeleteTaskDialog, TaskDetail } from '../components';
 import { Board, Skeleton, View } from '../components/board';
-import { TASKS_KEY, useTask, useTasks } from '../hooks';
+import { TASKS_KEY, useTask, useTasks, useWorkspaceTasks } from '../hooks';
 import { TitleDraft } from '../TitleDraft';
 import type { BoardActions, Renaming, Task, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
@@ -48,6 +48,8 @@ export default function TasksPage() {
     moveTask,
     deleteTask,
   } = useTasks(filterProject || undefined);
+  const filtered = filterProject !== ALL_PROJECTS;
+  const known = useWorkspaceTasks(filtered) ?? tasks;
 
   const { projects, loading: projectsLoading } = useProjects('all');
   const { data: sources = [] } = useQuery({
@@ -103,6 +105,15 @@ export default function TasksPage() {
     [searchParams, setSearchParams]
   );
 
+  const open = useCallback(
+    (task: Task, host?: Task) => {
+      if (host) view.trail.push(host.id);
+      view.trail.push(task.id);
+      openEditor(task.id);
+    },
+    [view, openEditor]
+  );
+
   const closeEditor = () => {
     setExecutionTask(null);
     const next = new URLSearchParams(searchParams);
@@ -132,10 +143,7 @@ export default function TasksPage() {
 
   const actions = useMemo<BoardActions>(
     () => ({
-      open: (task) => {
-        view.opened = task.id;
-        openEditor(task.id);
-      },
+      open,
       run: setExecutionTask,
       rename: (task) => setRenaming({ id: task.id, draft: new TitleDraft(task.title) }),
       retitle: async (task, title) => {
@@ -155,12 +163,11 @@ export default function TasksPage() {
         }
       },
     }),
-    [openEditor, updateListedTask, moveTask, view]
+    [open, updateListedTask, moveTask]
   );
 
   const loading = tasksLoading || projectsLoading;
   const displayError = tasksError || (editorFailed ? editorError : null);
-  const filtered = filterProject !== ALL_PROJECTS;
 
   return (
     <div className="page page--workspace tasks-page">
@@ -205,8 +212,10 @@ export default function TasksPage() {
         ) : editorReady && editorTask ? (
           <TaskDetail
             task={editorTask}
+            tasks={known}
             projects={projects}
             sources={sources}
+            onOpen={open}
             onClose={closeEditor}
             onExecute={() => setExecutionTask(editorTask)}
             onSave={handleSave}
@@ -216,6 +225,7 @@ export default function TasksPage() {
         ) : tasks.length > 0 ? (
           <Board
             tasks={tasks}
+            known={known}
             projects={projectNames}
             renaming={renaming}
             removed={removed}

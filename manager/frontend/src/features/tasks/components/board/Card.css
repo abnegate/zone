@@ -180,6 +180,10 @@
   color: var(--ui-text-muted);
 }
 
+.task-card-meta:empty {
+  display: none;
+}
+
 .task-card-project {
   flex: 0 1 auto;
   min-width: 0;
@@ -201,27 +205,6 @@
   color: var(--ui-text-secondary);
   border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-md);
-}
-
-.task-card-pr {
-  position: relative;
-  z-index: 1;
-  flex-shrink: 0;
-  font-weight: 600;
-  color: var(--ui-accent);
-  text-decoration: none;
-  border-radius: var(--ui-radius-sm);
-}
-
-.task-card-pr:hover {
-  color: var(--ui-accent-hover);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.task-card-pr:focus-visible {
-  outline: 2px solid var(--ui-border-focus);
-  outline-offset: 1px;
 }
 
 .task-card-time {

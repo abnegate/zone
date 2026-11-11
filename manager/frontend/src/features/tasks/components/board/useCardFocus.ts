@@ -7,11 +7,12 @@ type Groups = ReadonlyMap<StageId, readonly Task[]>;
 interface Held {
   id: string;
   control: string;
+  related?: string;
 }
 
 export interface CardFocus {
   release: () => void;
-  title: (id: string) => void;
+  title: (id: string) => boolean;
 }
 
 const CARD = 'li[data-task-id]';
@@ -22,7 +23,7 @@ const TITLE = '.task-card-open';
 
 const MENU = '.task-card-menu button';
 
-const CONTROLS = ['.task-card-handle', TITLE, '.task-card-pr', MENU];
+const CONTROLS = ['.task-card-handle', TITLE, '.task-pull-request', '.task-relation-open', MENU];
 
 const POPUP = '[role="menu"]';
 
@@ -39,8 +40,9 @@ function cardIn(board: HTMLElement | null, id: string): HTMLElement | undefined 
   );
 }
 
-function controlIn(board: HTMLElement | null, { id, control }: Held): HTMLElement | null {
-  return cardIn(board, id)?.querySelector<HTMLElement>(control) ?? null;
+function controlIn(board: HTMLElement | null, { id, control, related }: Held): HTMLElement | null {
+  const controls = cardIn(board, id)?.querySelectorAll<HTMLElement>(control) ?? [];
+  return Array.from(controls).find((found) => found.dataset.related === related) ?? null;
 }
 
 function columnIn(board: HTMLElement | null, stage: StageId): HTMLElement | undefined {
@@ -113,7 +115,7 @@ export function useCardFocus(
         source && id && board.current?.contains(source)
           ? CONTROLS.find((selector) => source.matches(selector))
           : undefined;
-      held.current = id && control ? { id, control } : null;
+      held.current = id && control ? { id, control, related: source?.dataset.related } : null;
     };
     const release = () => {
       held.current = null;
@@ -131,7 +133,11 @@ export function useCardFocus(
       release: () => {
         held.current = null;
       },
-      title: (id: string) => controlIn(board.current, { id, control: TITLE })?.focus(),
+      title: (id: string) => {
+        const title = controlIn(board.current, { id, control: TITLE });
+        title?.focus();
+        return title !== null;
+      },
     }),
     [board]
   );

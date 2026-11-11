@@ -120,7 +120,7 @@ export interface Renaming {
 }
 
 export interface BoardActions {
-  open: (task: Task) => void;
+  open: (task: Task, host?: Task) => void;
   run: (task: Task) => void;
   rename: (task: Task) => void;
   retitle: (task: Task, title: string) => Promise<void>;
