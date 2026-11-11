@@ -1,7 +1,11 @@
 use sqlx::ConnectOptions;
 use sqlx::migrate::MigrateError;
+use sqlx::migrate::Migrator;
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
+use zone_server::db::auto_projects::Stage;
 use zone_server::db::{ai_settings, memory, migrations, tasks};
 
 use crate::common::Database;
@@ -745,6 +749,207 @@ async fn workspace_theme_defaults_match_the_product() {
         )
     );
     database.cleanup().await;
+}
+
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct Parking {
+    stage: String,
+    reason: Option<String>,
+    parked_stage: Option<String>,
+    parked_reason: Option<String>,
+}
+
+#[tokio::test]
+async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_it() {
+    const GITHUB_CONNECTIONS: i64 = 3;
+    const STATUS_CHECK: &str = "tasks_status_check";
+    const PARKED_CHECK: &str = "task_automation_parked_check";
+    const STATUSES_BEFORE: [&str; 6] = [
+        tasks::CREATED,
+        tasks::QUEUED,
+        tasks::IN_PROGRESS,
+        tasks::REVIEW,
+        tasks::COMPLETE,
+        tasks::BLOCKED,
+    ];
+    const GAVE_UP: &str = "task \"Backfill\" used its 3 runs";
+    let database = Database::new(PREFIX).await;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    Migrator::new(directory.as_path())
+        .await
+        .unwrap()
+        .run_to(GITHUB_CONNECTIONS, &database.pool)
+        .await
+        .unwrap();
+    let (workspace, _) = database.workspace().await;
+    for status in STATUSES_BEFORE {
+        for stamped in [true, false] {
+            sqlx::query(
+                "INSERT INTO tasks(workspace_id, title, description, status, completed_at) \
+                 VALUES ($1, 'Backfill', 'Regression', $2, \
+                   CASE WHEN $3 THEN TIMESTAMP '2026-01-02 03:04:05' END)",
+            )
+            .bind(workspace)
+            .bind(status)
+            .bind(stamped)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        }
+    }
+    let project: Uuid = sqlx::query_scalar(
+        "INSERT INTO projects(workspace_id, name, auto) VALUES ($1, 'Backfill', TRUE) RETURNING id",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_automation(task_id, project_id, stage, reason) \
+         SELECT id, $2, CASE WHEN status = $3 THEN $6 ELSE $7 END, \
+                CASE WHEN status = $3 THEN $4 END \
+         FROM tasks WHERE workspace_id = $1 AND status = ANY($5) AND completed_at IS NULL",
+    )
+    .bind(workspace)
+    .bind(project)
+    .bind(tasks::BLOCKED)
+    .bind(GAVE_UP)
+    .bind([tasks::BLOCKED, tasks::IN_PROGRESS].as_slice())
+    .bind(Stage::Paused.as_str())
+    .bind(Stage::Running.as_str())
+    .execute(&database.pool)
+    .await
+    .unwrap();
+
+    migrations::run(&database.pool).await.unwrap();
+
+    let migrated: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE workspace_id = $1")
+        .bind(workspace)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    let shipped: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT status, shipped_at IS NOT DISTINCT FROM completed_at FROM tasks \
+         WHERE workspace_id = $1 AND shipped_at IS NOT NULL",
+    )
+    .bind(workspace)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let validated: Vec<String> = sqlx::query_scalar(
+        "SELECT conname::text FROM pg_constraint \
+         WHERE conname = ANY($1) AND convalidated ORDER BY conname",
+    )
+    .bind([STATUS_CHECK, PARKED_CHECK].as_slice())
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let automation: Vec<Parking> = sqlx::query_as(
+        "SELECT stage, reason, parked_stage, parked_reason FROM task_automation \
+         WHERE project_id = $1 ORDER BY stage",
+    )
+    .bind(project)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let driven: bool =
+        sqlx::query_scalar("SELECT auto_driven_at IS NOT NULL FROM projects WHERE id = $1")
+            .bind(project)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    database.cleanup().await;
+
+    assert_eq!(migrated, 12, "every task survives the migration");
+    assert_eq!(
+        shipped,
+        vec![(tasks::COMPLETE.to_string(), true)],
+        "only a task that is complete and was stamped shipped, when it was completed"
+    );
+    assert_eq!(
+        validated,
+        vec![PARKED_CHECK, STATUS_CHECK],
+        "both constraints hold for the rows that were already there"
+    );
+    assert_eq!(
+        automation,
+        vec![
+            Parking {
+                stage: Stage::Paused.as_str().to_string(),
+                reason: Some(GAVE_UP.to_string()),
+                parked_stage: None,
+                parked_reason: None,
+            },
+            Parking {
+                stage: Stage::Running.as_str().to_string(),
+                reason: None,
+                parked_stage: None,
+                parked_reason: None,
+            },
+        ],
+        "a row automation paused before the migration is not one a person parked"
+    );
+    assert!(!driven, "no project has had a pass under the new order");
+}
+
+/// `ALTER TABLE` holds its table's exclusive lock until the migration's
+/// transaction ends, so a migration altering two tables queues for the second
+/// while it holds the first. The server takes the same pairs in both orders:
+/// `park` locks `task_automation` and then `tasks` where `resume_paused_tasks`
+/// locks `tasks` first, and an insert into `task_automation` reaches
+/// `projects` through its foreign key where `finalize` writes `projects`
+/// first. Whichever order the migration picks, one of them deadlocks with the
+/// boot of a rolling deploy, so each table gets a migration, and a
+/// transaction, of its own. 0003 predates this and has run everywhere.
+#[test]
+fn each_migration_after_github_connections_alters_one_table() {
+    const FIRST: i64 = 4;
+    const QUALIFIERS: [&str; 3] = ["IF", "EXISTS", "ONLY"];
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
+        let path = entry.expect("migration entry is readable").path();
+        if !path.extension().is_some_and(|extension| extension == "sql") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .expect("migration path has a file name")
+            .to_string_lossy()
+            .into_owned();
+        let version: i64 = name
+            .split('_')
+            .next()
+            .expect("a migration name opens with its version")
+            .parse()
+            .expect("a migration name opens with its version");
+        if version < FIRST {
+            continue;
+        }
+        let sql = std::fs::read_to_string(&path).expect("migration is readable");
+        let words: Vec<String> = sql
+            .lines()
+            .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+            .flat_map(str::split_whitespace)
+            .map(str::to_ascii_uppercase)
+            .collect();
+        let altered: BTreeSet<&str> = words
+            .windows(2)
+            .enumerate()
+            .filter(|(_, pair)| pair[0] == "ALTER" && pair[1] == "TABLE")
+            .filter_map(|(at, _)| {
+                words[at + 2..]
+                    .iter()
+                    .find(|word| !QUALIFIERS.contains(&word.as_str()))
+            })
+            .map(|table| table.trim_start_matches("PUBLIC.").trim_end_matches(';'))
+            .collect();
+        assert!(
+            altered.len() <= 1,
+            "{name} alters {altered:?} in one transaction, so its boot can deadlock with a \
+             statement that locks the same tables in the other order; alter each in a migration \
+             of its own"
+        );
+    }
 }
 
 /// Every lock a later migration takes on a live table is one ordinary traffic
