@@ -1,9 +1,10 @@
 import { Select, type WizardStep } from '@zone/ui';
-import { useCallback, useMemo, useState } from 'react';
+import { type ReactElement, useCallback, useMemo, useState } from 'react';
 import { Wizard } from '../../../components';
 import type { Source } from '../../../types';
 import { getErrors } from '../../../validation';
 import type { Project } from '../../projects/types';
+import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 import { CreateTaskRequestSchema } from '../schemas';
 import type { CreateTaskRequest, Task } from '../types';
 
@@ -41,7 +42,7 @@ export function CreateTaskWizard({
   createTask,
   projects,
   sources,
-}: CreateTaskWizardProps) {
+}: CreateTaskWizardProps): ReactElement {
   const [currentStep, setCurrentStep] = useState(0);
   const [projectId, setProjectId] = useState(projects[0]?.id || '');
   const [title, setTitle] = useState('');
@@ -363,7 +364,7 @@ export function CreateTaskWizard({
                 )}
                 {!projectSource && activeSources.length === 0 && (
                   <span className="form-hint form-hint-warning">
-                    No sources configured. Add one in Settings › Workspace › Sources.
+                    No sources configured. Add one in {SOURCES_LOCATION}.
                   </span>
                 )}
               </div>

@@ -275,6 +275,15 @@ describe('SettingsPage', () => {
       expect(linkLabels('Workspace')).toEqual(['General', 'AI', 'Folders', 'Members']);
     });
 
+    it('keeps a user who can read sources deep-linking to a source exactly where they asked', () => {
+      signInAs('owner', 'admin', [PERMISSIONS.MODELS.READ, PERMISSIONS.SOURCES.READ]);
+
+      renderAt('/settings/workspace/sources?source=abc#details');
+
+      expect(location()).toBe('/settings/workspace/sources?source=abc#details');
+      expect(screen.getByTestId('settings-content').textContent).toBe('workspace/sources');
+    });
+
     it('hides Sources outside a workspace even from a user who can read sources', () => {
       signInAs('admin', null, [PERMISSIONS.MODELS.READ, PERMISSIONS.SOURCES.READ]);
 

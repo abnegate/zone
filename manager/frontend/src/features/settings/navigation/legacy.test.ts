@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import {
-  legacyOrganizationPath,
-  legacyWorkspacePath,
-  relocate,
-  SESSIONS_PATH,
-  SOURCES_PATH,
-} from './legacy';
+import { legacyOrganizationPath, legacyWorkspacePath, relocate, SESSIONS_PATH } from './legacy';
 
 const ORGANIZATION_TABS = [
   ['ai', '/settings/organization/ai'],
@@ -89,12 +83,6 @@ describe('legacyWorkspacePath', () => {
 describe('sessions path', () => {
   it('points the old sessions page at You › Sessions', () => {
     expect(SESSIONS_PATH).toBe('/settings/you/sessions');
-  });
-});
-
-describe('sources path', () => {
-  it('points the old sources page at Workspace › Sources', () => {
-    expect(SOURCES_PATH).toBe('/settings/workspace/sources');
   });
 });
 

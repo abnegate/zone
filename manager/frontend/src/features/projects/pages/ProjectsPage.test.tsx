@@ -7,6 +7,7 @@ import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-rou
 import { clientModule } from '../../../test/client';
 import { chooseSelect } from '../../../test/select';
 import type { Source } from '../../../types';
+import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 import type { Project, ProjectAutomation } from '../types';
 
 let ProjectsPage: typeof import('./ProjectsPage').default;
@@ -686,7 +687,7 @@ describe('ProjectsPage', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Link Source' }));
     expect(
-      await screen.findByText('No sources configured. Add one in Settings › Workspace › Sources.')
+      await screen.findByText(`No sources configured. Add one in ${SOURCES_LOCATION}.`)
     ).toBeInTheDocument();
   });
 

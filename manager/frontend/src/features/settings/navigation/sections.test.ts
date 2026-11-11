@@ -5,9 +5,11 @@ import {
   GROUP_LABELS,
   SECTIONS,
   SETTINGS_ROOT,
+  SETTINGS_TITLE,
   type SettingsAccess,
   SettingsGroup,
   SettingsSection,
+  SOURCES_LOCATION,
   settingsPath,
   visibleSections,
 } from './sections';
@@ -285,16 +287,19 @@ describe('visibleSections', () => {
   });
 
   it('shows Sources in a workspace to whoever can read sources', () => {
-    expect(
-      paths({
-        organization: true,
-        organizationRole: 'member',
-        workspace: true,
-        workspaceRole: 'member',
-        installsModels: false,
-        readsSources: true,
-      })
-    ).toContain(SOURCES);
+    for (const workspaceRole of ['viewer', 'member'] as const) {
+      expect(
+        paths({
+          organization: true,
+          organizationRole: 'member',
+          workspace: true,
+          workspaceRole,
+          installsModels: false,
+          readsSources: true,
+        }),
+        workspaceRole
+      ).toContain(SOURCES);
+    }
   });
 
   it('hides Sources in a workspace from whoever cannot read sources', () => {
@@ -326,24 +331,19 @@ describe('visibleSections', () => {
     ).not.toContain(SOURCES);
   });
 
-  it('shows Sources to a workspace viewer who can read sources', () => {
-    expect(
-      paths({
-        organization: true,
-        organizationRole: 'member',
-        workspace: true,
-        workspaceRole: 'viewer',
-        installsModels: false,
-        readsSources: true,
-      })
-    ).toContain(SOURCES);
-  });
-
   it('finds the Sources section in the workspace group', () => {
-    expect(findSection('workspace', 'sources')).toMatchObject({
+    expect(findSection(SettingsGroup.Workspace, SettingsSection.Sources)).toMatchObject({
       group: SettingsGroup.Workspace,
       section: SettingsSection.Sources,
       label: 'Sources',
     });
+  });
+
+  it('names the Sources location from the settings title, group and section labels', () => {
+    const section = findSection(SettingsGroup.Workspace, SettingsSection.Sources);
+    expect(SOURCES_LOCATION).toBe(
+      `${SETTINGS_TITLE} → ${GROUP_LABELS[SettingsGroup.Workspace]} → ${section?.label}`
+    );
+    expect(SOURCES_LOCATION).toBe('Settings → Workspace → Sources');
   });
 });

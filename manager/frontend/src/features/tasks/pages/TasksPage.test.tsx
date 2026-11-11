@@ -9,6 +9,7 @@ import { chooseMenuItem, openMenu } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
+import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 import { STAGE_IDS, TASK_STATUSES } from '../status';
 import type { CreateTaskRequest, Task, TaskRun, TaskRunLog, TaskStatus } from '../types';
 import TasksPage from './TasksPage';
@@ -1315,7 +1316,7 @@ describe('TasksPage', () => {
     fireEvent.click(checkbox);
 
     expect(
-      screen.getByText('No sources configured. Add one in Settings › Workspace › Sources.')
+      screen.getByText(`No sources configured. Add one in ${SOURCES_LOCATION}.`)
     ).toBeInTheDocument();
   });
 

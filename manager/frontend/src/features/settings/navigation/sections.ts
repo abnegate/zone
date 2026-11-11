@@ -3,6 +3,8 @@ import { allowsOrganization, ORGANIZATION_ADMIN_ROLE } from './access';
 
 export const SETTINGS_ROOT = '/settings';
 
+export const SETTINGS_TITLE = 'Settings';
+
 export const COMPACT_QUERY = '(max-width: 768px)';
 
 export const SettingsGroup = {
@@ -54,6 +56,14 @@ export const GROUP_LABELS: Record<SettingsGroup, string> = {
   you: 'You',
 };
 
+const SOURCES_LABEL = 'Sources';
+
+const LOCATION_SEPARATOR = ' → ';
+
+export const SOURCES_LOCATION = [SETTINGS_TITLE, GROUP_LABELS.workspace, SOURCES_LABEL].join(
+  LOCATION_SEPARATOR
+);
+
 const inWorkspace = (access: SettingsAccess): boolean => access.workspace;
 
 const inOrganization = (access: SettingsAccess): boolean => access.organization;
@@ -66,7 +76,7 @@ export const administersOrganization = (
 const installsModels = (access: SettingsAccess): boolean => access.installsModels;
 
 const readsWorkspaceSources = (access: SettingsAccess): boolean =>
-  access.workspace && access.readsSources;
+  inWorkspace(access) && access.readsSources;
 
 const always = (): boolean => true;
 
@@ -92,7 +102,7 @@ export const SECTIONS: readonly SectionDefinition[] = [
   {
     group: SettingsGroup.Workspace,
     section: SettingsSection.Sources,
-    label: 'Sources',
+    label: SOURCES_LABEL,
     visible: readsWorkspaceSources,
   },
   {

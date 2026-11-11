@@ -6,6 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { clientModule } from '../../../test/client';
 import type { Source } from '../../../types';
 import type { WorkspaceRole } from '../../auth/types';
+import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 import type { CreateProjectRequest, Project } from '../types';
 
 const existing: Source = {
@@ -185,7 +186,7 @@ describe('CreateProjectWizard new source', () => {
     expect(await within(projectDialog()).findByText('No sources available.')).toBeTruthy();
     expect(
       within(projectDialog()).getByText(
-        'You can add sources in Settings › Workspace › Sources and link them later.'
+        `You can add sources in ${SOURCES_LOCATION} and link them later.`
       )
     ).toBeTruthy();
     expect(within(projectDialog()).queryByRole('button', { name: /New source/ })).toBeNull();
