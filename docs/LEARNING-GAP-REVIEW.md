@@ -428,15 +428,22 @@ conventions, the strategy lessons and the recorded discoveries described
 below. `agent::learned` loads each family, renders it with the renderer that
 already sat beside its store, and holds the whole block to
 `MAX_RENDERED_BYTES`, 8,000 bytes, the figure the skills index is held to.
-Past the bound, whichever family currently renders largest gives up its oldest
-entry, whole, until the block fits, and the block closes by saying how many
-entries were left out. Every block keeps its `READ_FILTER`.
+Past the bound an entry too large to be shown even alone under its family's
+heading goes first; then whichever family currently renders largest gives up
+the entry at the end of its list, whole, until the block fits. A family down
+to its last entry gives nothing while another still has a second. The block
+closes by saying how many entries were left out, the ones past a store's row
+limit included, and the discoveries block keeps its own count, so no entry is
+counted twice. Every block keeps its `READ_FILTER`.
 
 Two things differ from the sketch under G5. The block sits before the memory
 block, not after it, which is the order a task run reads them in. And a
-character card with its agent off reads none of it. A store that cannot be
-read costs the turn the block and a warning, not the reply. Task runs are
-unchanged: they read the same families, each held only by its own limit.
+character card with its agent off reads none of it. Each family is read on its
+own, so a store that cannot be read costs the turn that family and a warning,
+not the block and not the reply. A chat with its agent off also searches the
+knowledge store before it answers, and that search now leaves out the entries
+the block already shows. Task runs are unchanged: they read the same families,
+each held only by its own limit.
 
 ### Inline recording: `record_discovery`
 
@@ -446,7 +453,8 @@ run calls, unasked, when it has verified something durable about the
 repository that the next run would otherwise rediscover. It writes a
 `knowledge_entries` row in a fourth reserved category, `agent-discovery`, with
 its kind (`convention` or `lesson`), the run or chat it came from and the date
-it was recorded in tags. The prompt calls it the one workspace write made
+it was recorded in tags, and with the member that run or chat was acting for
+as its author. The prompt calls it the one workspace write made
 unasked. A chat's memory write of what a person says about themselves is also
 made unasked, but it is that person's entry and not the workspace's.
 
@@ -456,25 +464,40 @@ made unasked, but it is that person's entry and not the workspace's.
   instructions. It does not render under a pass-derived family's preamble or
   compete with pass-derived facts for their row limit.
 - Screened, by a rulebook of its own. `rules::refused_discovery` keeps the
-  credential detector whole, narrows identifiers to a person's email address
-  and an international telephone number, and narrows suppression to the verbs
-  that are about what a reader is told. The memory rulebook, `rules::refused`,
-  is unchanged and still screens the memory tools and the promotion pass; it
-  would refuse what a repository note exists to say. A control character or
-  one that does not show is refused as well, so a person reviewing the entry
-  sees the text the model reads.
-- Bounded in bytes. A subject and its statement hold `MAX_ENTRY_BYTES`, 1,000
-  bytes, together, and the rendered block holds `MAX_RENDERED_BYTES`, 6,000
-  bytes, dropping whole entries oldest first and saying how many. A source's
-  share of the block is bounded as well, so one chat or one run cannot fill
-  it.
+  credential detector but shows it a long run that reads as a name (a
+  repository path, a branch, a route, a `SCREAMING_SNAKE` constant) with its
+  digits respelt, so the entropy rule does not take a name for a generated
+  value. It narrows identifiers to a person's email address and an
+  international telephone number, and narrows suppression to an instruction:
+  one that opens a clause, or one that says whom something is kept from. What
+  the docs do not mention and what a log never tells you are statements, and
+  are recorded. The memory rulebook, `rules::refused`, is unchanged and still
+  screens the memory tools and the promotion pass; it would refuse what a
+  repository note exists to say. A control character or one that does not
+  show is refused as well, so a person reviewing the entry sees the text the
+  model reads, and so is a call carrying any field beside the three.
+- Kept out of the trace when refused. A call the tool is about to refuse for
+  its shape, its size or what the screen found leaves only its kind in the
+  chat's tool trace, in a run's tool-call record and in the run log, and no
+  receipt for the tool carries a stated reason.
+- Bounded in bytes. A subject and its statement are stored with their white
+  space collapsed to the one line a prompt renders, and that line holds
+  `MAX_ENTRY_BYTES`, 1,000 bytes, for the two together. The rendered block
+  holds `MAX_RENDERED_BYTES`, 6,000 bytes, and is read from at most
+  `MAX_LISTED`, 117, rows. They are dealt a source at a time, each run's or
+  chat's most recent first, so one chat or one run cannot fill the block; the
+  share is settled at the read, and nothing limits how many a source writes.
+  Entries that do not fit are left out whole and the block says how many,
+  counted against everything recorded.
 - One entry per subject. Recording a subject again replaces its entry, which
-  is how a stale note is corrected.
-- Deletion is final. A subject whose entry was deleted through
-  `DELETE /api/knowledge/{id}` is refused when recorded again, and so is its
-  statement under a respelled subject: the entry keeps a fingerprint of each.
-  The two pass-derived families still revive a deleted row when a pass
-  re-derives it from fresh evidence.
+  is how a stale note is corrected, and the call is answered with the
+  statement it wrote over.
+- Deletion is final, as far as a fingerprint can tell. A subject whose entry
+  was deleted through `DELETE /api/knowledge/{id}` is refused when recorded
+  again, and so is its statement under another subject: the entry keeps a
+  fingerprint of each, taken past casing and spacing and nothing else, so a
+  reworded note is recorded as a new one. The two pass-derived families still
+  revive a deleted row when a pass re-derives it from fresh evidence.
 - Unconfirmed. The tool is in the write tier, so nobody approves the call in a
   chat or in a run; a plan hold still refuses it. Recording needs member
   standing, read on every call, and a run with no authorized initiator does
