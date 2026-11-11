@@ -909,6 +909,7 @@ mod tests {
     use std::future::ready;
     use std::sync::Arc;
 
+    use abnegate_agent::mcp::McpFailure;
     use abnegate_agent::tool::Proxy;
     use chrono::Utc;
     use serde_json::Value;
@@ -1023,11 +1024,7 @@ mod tests {
         let mut remote = McpServer::remote(CREDENTIALED_URL);
         remote.headers = secret("Authorization", HEADER_SECRET);
         mask(&mut remote);
-        let failed = Connection::failed(status::summary(
-            "referring",
-            &referring(),
-            &format!("MCP handshake failed for 'referring': JSON-RPC error: -32000: {CREDENTIAL}"),
-        ));
+        let failed = Connection::failed(status::summary(McpFailure::Rejected, None));
         vec![
             McpServerResponse::instance("database", &database, Connection::connecting()),
             McpServerResponse::instance("remote", &remote, Connection::connecting()),

@@ -166,9 +166,9 @@ impl Hubs {
         };
         match hub.outcome(name) {
             Some(McpOutcome::Connected { .. }) => Connection::connected(advertised(name, &hub)),
-            Some(McpOutcome::Failed { error, .. }) if server.url.is_some() => {
-                Connection::failed(summary(name, server, &error))
-            }
+            Some(McpOutcome::Failed {
+                failure, status, ..
+            }) if server.url.is_some() => Connection::failed(summary(failure, status)),
             Some(McpOutcome::Disabled) => Connection::disabled(),
             _ => Connection::failed(UNCONNECTED),
         }

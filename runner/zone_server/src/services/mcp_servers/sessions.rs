@@ -56,11 +56,8 @@ impl Sessions {
             .unwrap_or_default()
     }
 
-    pub(super) fn failure(&self, server: Uuid, name: &str) -> Option<String> {
-        match self.hubs.get(&server)?.outcome(name)? {
-            McpOutcome::Failed { error, .. } => Some(error),
-            _ => None,
-        }
+    pub(super) fn outcome(&self, server: Uuid, name: &str) -> Option<McpOutcome> {
+        self.hubs.get(&server)?.outcome(name)
     }
 
     /// The tools of `server` that `allowed` keeps, each named clear of `used`.

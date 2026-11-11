@@ -8,6 +8,7 @@ use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
 
 use abnegate_agent::ToolRegistry;
+use abnegate_agent::mcp::McpOutcome;
 use abnegate_agent::mcp::McpServer;
 use abnegate_agent::mcp::qualified_tool_name;
 use abnegate_agent::tool::Proxy;
@@ -107,9 +108,11 @@ impl OrganizationHub {
             return Connection::connected(inner.sessions.tools(server, name));
         }
         if slot.definition.server.url.is_some()
-            && let Some(error) = inner.sessions.failure(server, name)
+            && let Some(McpOutcome::Failed {
+                failure, status, ..
+            }) = inner.sessions.outcome(server, name)
         {
-            return Connection::failed(summary(name, &slot.definition.server, &error));
+            return Connection::failed(summary(failure, status));
         }
         Connection::failed(UNCONNECTED)
     }
@@ -330,7 +333,10 @@ impl OrganizationHub {
     pub(crate) fn failure(&self, name: &str) -> Option<String> {
         let inner = self.read();
         let (server, _) = inner.named(name)?;
-        inner.sessions.failure(server, name)
+        match inner.sessions.outcome(server, name)? {
+            McpOutcome::Failed { error, .. } => Some(error),
+            _ => None,
+        }
     }
 
     pub(crate) fn connects(&self) -> usize {
