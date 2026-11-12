@@ -579,7 +579,7 @@ pub async fn deliver_next(pool: &PgPool, sweep: Sweep) -> DbResult<Delivered> {
 
 /// The key the claim serialises on. Arbitrary and constant; it only has to be
 /// the same number in every process.
-const CLAIM_LOCK: i64 = 0x7A6F_6E65_5455_524E;
+pub(crate) const CLAIM_LOCK: i64 = 0x7A6F_6E65_5455_524E;
 
 /// How many times one firing's turn is offered before it is given up on.
 ///
@@ -686,15 +686,36 @@ pub async fn claim_turn(
 /// Fenced on the claim's `attempts`: once the lease lapsed and another worker
 /// took the firing over, the original claim is gone, and renewing would only
 /// extend the newer one's lease from a worker that is not running it.
-pub async fn renew_turn(pool: &PgPool, turn_id: Uuid, attempts: i32) -> DbResult<bool> {
+///
+/// Bounded by `lease` as well: a claim that lapsed is one `claim_turn` already
+/// treats as gone, and may have let a later firing of the same schedule start
+/// on the strength of it. Reviving it would put two of that schedule's
+/// firings in flight at once.
+pub async fn renew_turn(
+    pool: &PgPool,
+    turn_id: Uuid,
+    attempts: i32,
+    lease: Duration,
+) -> DbResult<bool> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(CLAIM_LOCK)
+        .execute(&mut *transaction)
+        .await?;
+    // Timed from the statement, not the transaction: `NOW()` is when this
+    // transaction began, before it waited on the lock, and a claim that ran in
+    // that wait may have judged this one lapsed at a later moment than that.
     let renewed = sqlx::query(
-        "UPDATE reminder_turns SET claimed_at = NOW() \
-         WHERE id = $1 AND attempts = $2 AND claimed_at IS NOT NULL",
+        "UPDATE reminder_turns SET claimed_at = statement_timestamp() \
+         WHERE id = $1 AND attempts = $2 \
+         AND claimed_at > statement_timestamp() - make_interval(secs => $3)",
     )
     .bind(turn_id)
     .bind(attempts)
-    .execute(pool)
+    .bind(lease.as_secs_f64())
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(renewed.rows_affected() > 0)
 }
 

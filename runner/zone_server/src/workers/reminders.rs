@@ -189,7 +189,9 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
                                 turn.reminder_id,
                                 move || {
                                     let pool = pool.clone();
-                                    async move { reminders::renew_turn(&pool, id, attempts).await }
+                                    async move {
+                                        reminders::renew_turn(&pool, id, attempts, LEASE).await
+                                    }
                                 },
                                 crate::ws::chat::run_turn(
                                     &state,

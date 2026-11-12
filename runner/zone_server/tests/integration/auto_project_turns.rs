@@ -22,6 +22,10 @@ use crate::common::{self, Database};
 const PREFIX: &str = "auto_project_turns";
 const DRIVES_SETTLE_WITHIN: Duration = Duration::from_secs(30);
 
+/// A lease short enough for a test to outlast, and a renewal well inside it.
+const SHORT_LEASE: Duration = Duration::from_secs(1);
+const SHORT_RENEWAL: Duration = Duration::from_millis(100);
+
 struct Fixture {
     database: Database,
     state: AppState,
@@ -125,6 +129,22 @@ impl Fixture {
             .unwrap()
     }
 
+    /// The project holding `task`.
+    async fn project_of(&self, task: Uuid) -> Uuid {
+        sqlx::query_scalar("SELECT project_id FROM task_projects WHERE task_id = $1")
+            .bind(task)
+            .fetch_one(&self.database.pool)
+            .await
+            .unwrap()
+    }
+
+    /// Another instance's claim on whatever is due under `lease`.
+    async fn claim(&self, lease: Duration) -> Vec<auto_projects::Claim> {
+        auto_projects::claim_due(&self.database.pool, lease, PROJECTS_PER_TICK)
+            .await
+            .unwrap()
+    }
+
     async fn stopped(&self) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM projects \
@@ -196,4 +216,73 @@ async fn projects_held_by_a_person_do_not_keep_another_from_its_turn() {
     assert_eq!(stopped, 0, "a project waiting on a person stays open");
     assert_eq!(undriven, 0, "every project had a pass");
     assert_eq!(claimed, 0, "every pass gave its claim back");
+}
+
+#[tokio::test]
+async fn a_drive_longer_than_its_lease_keeps_its_claim() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project_of(fixture.project("Long").await).await;
+    let [claim] = fixture.claim(SHORT_LEASE).await[..] else {
+        panic!("the one open project is claimed");
+    };
+
+    let taken =
+        auto_project::lease::holding(fixture.database.pool.clone(), claim, SHORT_RENEWAL, async {
+            tokio::time::sleep(SHORT_LEASE * 3).await;
+            fixture.claim(SHORT_LEASE).await
+        })
+        .await;
+    let released = auto_projects::release(&fixture.database.pool, claim)
+        .await
+        .unwrap();
+    fixture.database.cleanup().await;
+
+    assert_eq!(claim.project_id, project);
+    assert!(
+        taken.is_empty(),
+        "a drive running past its lease renews its claim, so no other instance takes it: {taken:?}"
+    );
+    assert!(released, "the drive still held its claim when it ended");
+}
+
+#[tokio::test]
+async fn a_stale_drivers_release_leaves_the_claim_that_took_over() {
+    let fixture = Fixture::new().await;
+    fixture.project("Contested").await;
+    let [stale] = fixture.claim(SHORT_LEASE).await[..] else {
+        panic!("the one open project is claimed");
+    };
+    tokio::time::sleep(SHORT_LEASE * 2).await;
+    let [current] = fixture.claim(SHORT_LEASE).await[..] else {
+        panic!("a lapsed claim is offered again");
+    };
+
+    let pool = &fixture.database.pool;
+    let stale_renewed = auto_projects::renew(pool, stale).await.unwrap();
+    let stale_released = auto_projects::release(pool, stale).await.unwrap();
+    let retaken = fixture.claim(Duration::from_secs(60 * 60)).await;
+    let current_released = auto_projects::release(pool, current).await.unwrap();
+    let claimed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE auto_claimed_at IS NOT NULL")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    fixture.database.cleanup().await;
+
+    assert_eq!(stale.project_id, current.project_id);
+    assert_ne!(
+        stale.owner, current.owner,
+        "every claim has an owner of its own"
+    );
+    assert!(!stale_renewed, "a claim that was taken over is not renewed");
+    assert!(
+        !stale_released,
+        "a claim that was taken over is not released"
+    );
+    assert!(
+        retaken.is_empty(),
+        "the stale driver's release left the current claim in place: {retaken:?}"
+    );
+    assert!(current_released, "the current owner releases its own claim");
+    assert_eq!(claimed, 0);
 }

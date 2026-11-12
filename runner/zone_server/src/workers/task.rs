@@ -996,12 +996,13 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         },
         Ending::Finished => {}
     }
+    crate::mcp::settle(run_id).await;
+    reap(run_id).await;
     if let Some(checkout) = checkout.take() {
         checkout.finish().await;
     }
     usage.settle(state).await;
     crate::workers::auto_project::poke_task(state, task_id);
-    reap(run_id).await;
 }
 
 /// Fail a run whose heartbeat lapsed, and say why it lapsed: a stop taken on
@@ -1091,7 +1092,8 @@ impl<'a> Usage<'a> {
 /// One point rather than one per exit: every path that executed anything
 /// passes through the select above, the cancelled one included. A backgrounded
 /// job outlives the tool call that started it and nothing drops its child, so
-/// killing what the run left running is the run's own last act.
+/// what the run left running is killed once no call of the run can start
+/// another, and before the checkout it works in is removed under it.
 async fn reap(run_id: Uuid) {
     let session = Session::Task(run_id);
     let killed = Jobs::kill_session(session).await;
@@ -2512,10 +2514,159 @@ async fn attempt_run<'a>(
     };
 
     let outcome = turns.await;
-    if let Some(mut finished) = metered.take() {
+    record_usage(&mut metered).await;
+    outcome
+}
+
+/// Records what the attempt metered, and lets the meter go only once that returns: a stop that
+/// lands while it records leaves the meter for [`Usage::settle`] to record and settle.
+async fn record_usage(metered: &mut Option<Metered<'_>>) {
+    if let Some(finished) = metered.as_mut() {
         finished.meter.record().await;
     }
-    outcome
+    *metered = None;
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use abnegate_agent_cli::AgentKind;
+    use abnegate_llm::Window;
+    use zone_core::llm::window;
+
+    use super::*;
+    use crate::db::agent_logins::{self, Insert};
+
+    const STOPPED_WITHIN: Duration = Duration::from_millis(200);
+
+    struct Fixture {
+        pool: PgPool,
+        organization: Uuid,
+        login: Uuid,
+        state: AppState,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .expect("the test database");
+            let organization = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Usage', $1::text)",
+            )
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+            let login = agent_logins::insert(
+                &pool,
+                &Insert {
+                    organization_id: organization,
+                    agent: AgentKind::Claude.as_str(),
+                    account: Some("usage"),
+                    credential: None,
+                    label: Some("usage"),
+                    expires_at: None,
+                },
+            )
+            .await
+            .expect("a login")
+            .id;
+            let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+            Self {
+                pool,
+                organization,
+                login,
+                state,
+            }
+        }
+
+        async fn recorded(&self) -> Option<Vec<Window>> {
+            agent_logins::get(&self.pool, self.login)
+                .await
+                .expect("the login to be readable")
+                .expect("the login")
+                .snapshot()
+                .map(|snapshot| snapshot.windows)
+        }
+
+        async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .expect("the organization to be removed");
+        }
+    }
+
+    fn measured(name: &str, used_percent: f64) -> Window {
+        Window::new(name).with_used_percent(used_percent)
+    }
+
+    #[tokio::test]
+    async fn an_attempt_stopped_while_it_records_its_usage_still_settles_it() {
+        let fixture = Fixture::new().await;
+        let usage = Usage::default();
+        let mut metered = usage.begin(&fixture.state, Some(fixture.login)).await;
+        metered
+            .as_mut()
+            .expect("a meter for the login")
+            .meter
+            .observe(measured(window::FIVE_HOURS, 40.0));
+
+        let mut locking = fixture.pool.begin().await.expect("a transaction");
+        sqlx::query("SELECT 1 FROM agent_logins WHERE id = $1 FOR UPDATE")
+            .bind(fixture.login)
+            .execute(&mut *locking)
+            .await
+            .expect("the login's row held");
+        let stopped = tokio::time::timeout(STOPPED_WITHIN, record_usage(&mut metered)).await;
+        locking.rollback().await.expect("the row released");
+        drop(metered);
+        usage.settle(&fixture.state).await;
+        let recorded = fixture.recorded().await;
+        let left = usage.0.lock().await.is_some();
+        drop(usage);
+        fixture.remove().await;
+
+        assert!(
+            stopped.is_err(),
+            "the record waits on the held row until the stop drops it"
+        );
+        assert_eq!(
+            recorded,
+            Some(vec![measured(window::FIVE_HOURS, 40.0)]),
+            "settling records what the stopped record left"
+        );
+        assert!(!left, "settling lets the meter go");
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_recorded_its_usage_leaves_nothing_to_settle() {
+        let fixture = Fixture::new().await;
+        let usage = Usage::default();
+        let mut metered = usage.begin(&fixture.state, Some(fixture.login)).await;
+        metered
+            .as_mut()
+            .expect("a meter for the login")
+            .meter
+            .observe(measured(window::FIVE_HOURS, 40.0));
+
+        record_usage(&mut metered).await;
+        let left = metered.is_some();
+        drop(metered);
+        drop(usage);
+        let recorded = fixture.recorded().await;
+        fixture.remove().await;
+
+        assert_eq!(recorded, Some(vec![measured(window::FIVE_HOURS, 40.0)]));
+        assert!(
+            !left,
+            "a finished record lets the meter go, so settling cannot record it again"
+        );
+    }
 }
 
 /// Build the tool set one turn will consume.
@@ -9466,6 +9617,72 @@ mod cli_tests {
             std::thread::current().id(),
             "the stopped run released its checkout on the runtime's own thread"
         );
+    }
+
+    /// A background job the run started keeps its own process group, so the
+    /// stop that kills the agent leaves it running. It dies before the
+    /// checkout it works in is removed, never with that checkout vanishing
+    /// under it: the job watches the file the run wrote and records, outside
+    /// the checkout, the moment it disappears.
+    #[tokio::test]
+    async fn a_stopped_run_kills_its_background_jobs_before_removing_its_checkout() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = start_mid_attempt(&state, &fixture, &agent).await;
+        let checkout = checkout_of(fixture.run);
+        let witness = TempDir::new().expect("a directory outside the checkout");
+        let started = witness.path().join("started");
+        let outlived = witness.path().join("outlived");
+        let context = abnegate_agent::ToolContext::default()
+            .within(&checkout)
+            .with_session(Session::Task(fixture.run))
+            .with_application(zone_core::application::application())
+            .with_environment(abnegate_agent::tool::EnvironmentPolicy::empty())
+            .with_proxy(abnegate_agent::tool::Proxy::default());
+        let job = Jobs::spawn(
+            &abnegate_agent::tool::job::JobCommand::new(
+                "/bin/sh",
+                vec![
+                    "-c".to_string(),
+                    format!(
+                        ": > '{}'; while [ -e '{SERVED}' ]; do :; done; : > '{}'",
+                        started.display(),
+                        outlived.display()
+                    ),
+                ],
+            ),
+            &context,
+        )
+        .await
+        .expect("the job starts");
+        tokio::time::timeout(SPAWN_TIMEOUT, async {
+            while !started.exists() {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the job is watching the checkout");
+
+        stop_running(&fixture, running).await;
+
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &job.pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill to run")
+            .success();
+        let removed = !checkout.exists();
+        fixture.remove().await;
+        assert!(
+            !outlived.exists(),
+            "the job saw {} removed while it was still running",
+            checkout.display()
+        );
+        assert!(!alive, "job {} outlived the stopped run", job.pid);
+        assert!(removed, "the stopped run removed {}", checkout.display());
     }
 
     /// The checkout the run `run` works in.

@@ -782,14 +782,25 @@ mod tests {
             .set_delay(Duration::from_millis(500))
     }
 
+    /// How long, in real time, [`advancing`] waits for a request before the test fails rather
+    /// than hangs on a review that ended early.
+    const REQUESTS_WITHIN: Duration = Duration::from_secs(30);
+
     /// Once `server` has been sent `count` requests, moves the clock on by `duration`.
     async fn advancing(server: &wiremock::MockServer, count: usize, duration: Duration) {
-        while server
-            .received_requests()
-            .await
-            .map_or(0, |requests| requests.len())
-            < count
-        {
+        let started = std::time::Instant::now();
+        loop {
+            let received = server
+                .received_requests()
+                .await
+                .map_or(0, |requests| requests.len());
+            if received >= count {
+                break;
+            }
+            assert!(
+                started.elapsed() < REQUESTS_WITHIN,
+                "expected {count} requests within {REQUESTS_WITHIN:?}, received {received}"
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         tokio::time::pause();

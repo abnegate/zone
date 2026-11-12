@@ -1699,13 +1699,138 @@ mod tests {
     /// Ages a claim past any lease a test uses, the way a worker that went
     /// quiet would.
     async fn backdate(pool: &PgPool, turn: Uuid) {
+        age(pool, turn, LEASE * 2).await;
+    }
+
+    async fn age(pool: &PgPool, turn: Uuid, by: std::time::Duration) {
         sqlx::query(
-            "UPDATE reminder_turns SET claimed_at = NOW() - INTERVAL '2 hours' WHERE id = $1",
+            "UPDATE reminder_turns SET claimed_at = NOW() - make_interval(secs => $2) \
+             WHERE id = $1",
         )
         .bind(turn)
+        .bind(by.as_secs_f64())
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    async fn claimed_at(pool: &PgPool, turn: Uuid) -> chrono::DateTime<Utc> {
+        sqlx::query_scalar("SELECT claimed_at FROM reminder_turns WHERE id = $1")
+            .bind(turn)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A second firing of `reminder`, owed behind the first.
+    async fn sibling_turn(pool: &PgPool, reminder: Uuid) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, prompt) \
+             SELECT reminder_id, workspace_id, chat_id, created_by, prompt FROM reminder_turns \
+             WHERE reminder_id = $1 RETURNING id",
+        )
+        .bind(reminder)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A claim whose lease lapsed is one `claim_turn` treats as gone, and the
+    /// schedule's next firing may already have started on the strength of it.
+    /// Renewing the lapsed claim then would put two of one schedule's firings
+    /// in flight, which is what running them one at a time rules out.
+    #[tokio::test]
+    async fn a_lapsed_claim_is_not_revived_once_a_sibling_firing_is_running() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        let sibling = sibling_turn(&pool, reminder).await;
+        backdate(&pool, first.id).await;
+
+        let mut renewal_in_flight = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM reminder_turns WHERE id = $1 FOR UPDATE")
+            .bind(first.id)
+            .execute(&mut *renewal_in_flight)
+            .await
+            .unwrap();
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("a lapsed claim does not hold its sibling back");
+        assert_eq!(second.id, sibling, "the sibling firing is the one taken");
+        renewal_in_flight.rollback().await.unwrap();
+        let before = claimed_at(&pool, first.id).await;
+
+        assert!(
+            !reminders::renew_turn(&pool, first.id, first.attempts, LEASE)
+                .await
+                .unwrap(),
+            "a lapsed claim is not the worker's to renew"
+        );
+        assert_eq!(
+            claimed_at(&pool, first.id).await,
+            before,
+            "the lapsed claim stays lapsed while its sibling runs"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A renewal that waits behind a claim judges its lease when it runs, not
+    /// when it started waiting: the claim may have found it lapsed in between
+    /// and started the schedule's next firing.
+    #[tokio::test]
+    async fn a_renewal_waiting_on_a_claim_judges_its_lease_after_the_claim() {
+        const SHORT: std::time::Duration = std::time::Duration::from_secs(1);
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        let sibling = sibling_turn(&pool, reminder).await;
+
+        let mut claiming = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(reminders::CLAIM_LOCK)
+            .execute(&mut *claiming)
+            .await
+            .unwrap();
+        let renewal = tokio::spawn({
+            let pool = pool.clone();
+            async move { reminders::renew_turn(&pool, first.id, first.attempts, SHORT).await }
+        });
+        tokio::time::sleep(SHORT * 2).await;
+        sqlx::query(
+            "UPDATE reminder_turns SET attempts = 1, claimed_at = clock_timestamp() WHERE id = $1",
+        )
+        .bind(sibling)
+        .execute(&mut *claiming)
+        .await
+        .unwrap();
+        claiming.commit().await.unwrap();
+
+        assert!(
+            !renewal.await.unwrap().unwrap(),
+            "a claim that lapsed while its renewal waited is not revived"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
     }
 
     /// A turn has no length limit, so the lease is a heartbeat rather than a
@@ -1723,12 +1848,16 @@ mod tests {
             .expect("the owed firing is claimable");
         assert_eq!(turn.attempts, 1, "the claim names which attempt it is");
 
-        backdate(&pool, turn.id).await;
+        age(&pool, turn.id, LEASE - std::time::Duration::from_secs(60)).await;
         assert!(
-            reminders::renew_turn(&pool, turn.id, turn.attempts)
+            reminders::renew_turn(&pool, turn.id, turn.attempts, LEASE)
                 .await
                 .unwrap(),
             "the worker holding the claim renews it"
+        );
+        assert!(
+            claimed_at(&pool, turn.id).await > Utc::now() - Duration::minutes(1),
+            "a renewal starts the lease over"
         );
         assert!(
             reminders::claim_turn(&pool, sweep, LEASE)
@@ -1773,25 +1902,16 @@ mod tests {
             .expect("the lapsed claim is taken over");
         assert_eq!(second.id, first.id);
         backdate(&pool, second.id).await;
-        let claimed_at = |pool: PgPool, id: Uuid| async move {
-            sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
-                "SELECT claimed_at FROM reminder_turns WHERE id = $1",
-            )
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-        };
-        let before = claimed_at(pool.clone(), first.id).await;
+        let before = claimed_at(&pool, first.id).await;
 
         assert!(
-            !reminders::renew_turn(&pool, first.id, first.attempts)
+            !reminders::renew_turn(&pool, first.id, first.attempts, LEASE)
                 .await
                 .unwrap(),
             "the first worker's claim is gone, so its renewal says so"
         );
         assert_eq!(
-            claimed_at(pool.clone(), first.id).await,
+            claimed_at(&pool, first.id).await,
             before,
             "a stale renewal leaves the newer claim's lease alone"
         );

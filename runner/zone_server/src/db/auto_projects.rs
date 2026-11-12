@@ -105,16 +105,26 @@ pub async fn set_brief(
     Ok(())
 }
 
+/// One instance's hold on a project for one drive. `owner` is minted afresh
+/// by each claim, so a driver whose lease lapsed and was taken over can no
+/// longer renew or release the claim that replaced its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
+pub struct Claim {
+    pub project_id: Uuid,
+    pub owner: Uuid,
+}
+
 /// Claim the projects due for a drive, across every server instance.
 ///
 /// `FOR UPDATE SKIP LOCKED` keeps two instances from taking the same project in
 /// the same instant; the lease keeps an instance that died mid-drive from
-/// holding it for ever. A claim past its lease is offered again.
+/// holding it for ever. A claim past its lease is offered again, so a drive
+/// that runs longer than the lease keeps its claim with [`renew`].
 ///
 /// The projects longest undriven go first, and [`release`] stamps each pass,
 /// so every open project gets its turn however many of them a pass has
 /// nothing to do for.
-pub async fn claim_due(pool: &PgPool, lease: Duration, limit: i64) -> DbResult<Vec<Uuid>> {
+pub async fn claim_due(pool: &PgPool, lease: Duration, limit: i64) -> DbResult<Vec<Claim>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
     let due: Vec<Uuid> = sqlx::query_scalar(
@@ -127,24 +137,51 @@ pub async fn claim_due(pool: &PgPool, lease: Duration, limit: i64) -> DbResult<V
     .bind(limit)
     .fetch_all(&mut *transaction)
     .await?;
-    if !due.is_empty() {
-        sqlx::query("UPDATE projects SET auto_claimed_at = NOW() WHERE id = ANY($1)")
+    let claims =
+        match due.is_empty() {
+            true => Vec::new(),
+            false => sqlx::query_as::<_, Claim>(
+                "UPDATE projects SET auto_claimed_at = NOW(), auto_claim_id = gen_random_uuid() \
+                 WHERE id = ANY($1) RETURNING id AS project_id, auto_claim_id AS owner",
+            )
             .bind(&due)
-            .execute(&mut *transaction)
-            .await?;
-    }
+            .fetch_all(&mut *transaction)
+            .await?,
+        };
     transaction.commit().await?;
-    Ok(due)
+    Ok(claims)
+}
+
+/// Restart a claim's lease while its drive runs, and say whether `claim`
+/// still holds the project.
+pub async fn renew(pool: &PgPool, claim: Claim) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE projects SET auto_claimed_at = statement_timestamp() \
+         WHERE id = $1 AND auto_claim_id = $2",
+    )
+    .bind(claim.project_id)
+    .bind(claim.owner)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Give up the driver's lease on a project once its pass is over, and send
 /// the project to the back of the order [`claim_due`] takes projects in.
-pub async fn release(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
-    sqlx::query("UPDATE projects SET auto_claimed_at = NULL, auto_driven_at = NOW() WHERE id = $1")
-        .bind(project_id)
-        .execute(pool)
-        .await?;
-    Ok(())
+/// A claim another instance took over is left to that instance, and says
+/// false.
+pub async fn release(pool: &PgPool, claim: Claim) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE projects SET auto_claimed_at = NULL, auto_claim_id = NULL, auto_driven_at = NOW() \
+         WHERE id = $1 AND auto_claim_id = $2",
+    )
+    .bind(claim.project_id)
+    .bind(claim.owner)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Stop driving a project and say why. Nothing already running is touched.
