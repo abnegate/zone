@@ -18,6 +18,7 @@ const mockGetTasks = mock(() => Promise.resolve([] as Task[]));
 const mockGetTask = mock(() => Promise.resolve({} as Task));
 const mockCreateTask = mock(() => Promise.resolve({} as Task));
 const mockUpdateTask = mock(() => Promise.resolve({} as Task));
+const mockUpdateTasks = mock(() => Promise.resolve([] as Task[]));
 const mockDeleteTask = mock(() => Promise.resolve());
 const running: TaskRun = {
   id: 'run-1',
@@ -36,6 +37,7 @@ const mockGetTaskRunLogs = mock(() => Promise.resolve([] as TaskRunLog[]));
 const mockGetProjects = mock(() => Promise.resolve([] as Project[]));
 const mockGetSources = mock(() => Promise.resolve([] as Source[]));
 const mockToastError = mock();
+const mockToastSuccess = mock();
 
 const mockWorkspace = {
   id: 'workspace-1',
@@ -63,6 +65,7 @@ mock.module('../../../api/tasks', () => ({
     getTask: mockGetTask,
     createTask: mockCreateTask,
     updateTask: mockUpdateTask,
+    updateTasks: mockUpdateTasks,
     deleteTask: mockDeleteTask,
     runTask: mockRunTask,
     getTaskRuns: mockGetTaskRuns,
@@ -85,7 +88,7 @@ mock.module('../../../api/client', () =>
 
 mock.module('sonner', () => ({
   toast: {
-    success: mock(),
+    success: mockToastSuccess,
     error: mockToastError,
   },
 }));
@@ -271,6 +274,7 @@ describe('TasksPage', () => {
     mockGetTask.mockReset();
     mockCreateTask.mockReset();
     mockUpdateTask.mockReset();
+    mockUpdateTasks.mockReset();
     mockDeleteTask.mockReset();
     mockRunTask.mockReset();
     mockRunTask.mockImplementation(() => Promise.resolve(running));
@@ -283,6 +287,7 @@ describe('TasksPage', () => {
     mockGetProjects.mockReset();
     mockGetSources.mockReset();
     mockToastError.mockReset();
+    mockToastSuccess.mockReset();
     mockGetTasks.mockImplementation(() => Promise.resolve(mockTasks));
     mockGetTask.mockImplementation((id: string) => {
       const found = mockTasks.find((task) => task.id === id);
@@ -1976,6 +1981,225 @@ describe('TasksPage', () => {
     expect(receipt).toHaveTextContent('Document created');
     expect(screen.getByTestId('action-receipt-link')).toHaveAttribute('href', '/wiki?id=doc-1');
     expect(screen.queryByText('Workspace action receipt')).not.toBeInTheDocument();
+  });
+
+  describe('selecting', () => {
+    const refusal = 'Task has an active run or is no longer available';
+
+    const planned: Task[] = ['Draft the spec', 'Write the plan', 'Review the plan'].map(
+      (title, index) => ({ ...mockTasks[0], id: `planned-${index + 1}`, title })
+    );
+
+    function checkbox(title: string): HTMLElement {
+      return screen.getByRole('checkbox', { name: `Select ${title}` });
+    }
+
+    function selectionBar(): HTMLElement | null {
+      return screen.queryByRole('toolbar', { name: 'Selected tasks' });
+    }
+
+    async function check(...titles: string[]): Promise<void> {
+      for (const title of titles) {
+        fireEvent.click(await screen.findByRole('checkbox', { name: `Select ${title}` }));
+      }
+    }
+
+    async function editSelection(name: string): Promise<HTMLElement> {
+      const bar = await screen.findByRole('toolbar', { name: 'Selected tasks' });
+      fireEvent.click(within(bar).getByRole('button', { name: 'Edit' }));
+      const dialog = await screen.findByRole('dialog', { name });
+      chooseSelect('Status', 'Paused');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }));
+      return dialog;
+    }
+
+    it('counts the cards checked on the board', async () => {
+      renderTasksPage();
+      expect(selectionBar()).toBeNull();
+
+      await check('Implement login', 'Fix button styling');
+
+      expect(await screen.findByRole('toolbar', { name: 'Selected tasks' })).toHaveTextContent(
+        '2 selected'
+      );
+      expect(checkbox('Implement login')).toBeChecked();
+      expect(checkbox('Fix button styling')).toBeChecked();
+      expect(document.querySelector('.tasks-body[data-selecting]')).not.toBeNull();
+    });
+
+    for (const modifier of ['metaKey', 'ctrlKey'] as const) {
+      it(`toggles a card from its title with ${modifier} without opening it`, async () => {
+        renderTasksPage();
+        const title = await openTitle('Implement login');
+
+        fireEvent.click(title, { [modifier]: true });
+
+        expect(await screen.findByText('1 selected')).toBeInTheDocument();
+        expect(checkbox('Implement login')).toBeChecked();
+
+        fireEvent.click(title, { [modifier]: true });
+
+        await waitFor(() => expect(selectionBar()).toBeNull());
+        expect(checkbox('Implement login')).not.toBeChecked();
+        expect(document.querySelector('section.task-details')).toBeNull();
+        expect(new URLSearchParams(window.location.search).get('task')).toBeNull();
+      });
+    }
+
+    it('selects every card between the last checked and a shift-clicked one in a column', async () => {
+      mockGetTasks.mockImplementation(() => Promise.resolve([...planned, mockTasks[1]]));
+      renderTasksPage();
+
+      await check('Draft the spec');
+      fireEvent.click(checkbox('Review the plan'), { shiftKey: true });
+
+      expect(await screen.findByText('3 selected')).toBeInTheDocument();
+      expect(checkbox('Write the plan')).toBeChecked();
+      expect(checkbox('Fix button styling')).not.toBeChecked();
+    });
+
+    it('clears the selection with Escape', async () => {
+      renderTasksPage();
+      await check('Implement login', 'Fix button styling');
+      await screen.findByText('2 selected');
+
+      fireEvent.keyDown(document.body, { key: 'Escape' });
+
+      await waitFor(() => expect(selectionBar()).toBeNull());
+      expect(checkbox('Implement login')).not.toBeChecked();
+      expect(document.querySelector('.tasks-body[data-selecting]')).toBeNull();
+    });
+
+    it('keeps the selection when Escape cancels a board rename', async () => {
+      renderTasksPage();
+      await check('Fix button styling');
+      await screen.findByText('1 selected');
+
+      await chooseMenuItem('Actions for Implement login', 'Rename');
+      fireEvent.keyDown(screen.getByRole('textbox', { name: 'Task title' }), { key: 'Escape' });
+
+      await waitFor(() => {
+        expect(screen.queryByRole('textbox', { name: 'Task title' })).not.toBeInTheDocument();
+      });
+      expect(screen.getByText('1 selected')).toBeInTheDocument();
+    });
+
+    it('keeps the selection when Escape puts back a card picked up by keyboard', async () => {
+      const restore = layOutBoard();
+      try {
+        renderTasksPage();
+        await check('Fix button styling');
+        await screen.findByText('1 selected');
+
+        const handle = await screen.findByRole('button', { name: 'Move Implement login' });
+        handle.focus();
+        await pressKey(handle, 'Space');
+        expect(document.querySelector('.board[data-dragging]')).not.toBeNull();
+
+        await pressKey(handle, 'Escape');
+
+        expect(document.querySelector('.board[data-dragging]')).toBeNull();
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(checkbox('Fix button styling')).toBeChecked();
+        expect(mockUpdateTask).not.toHaveBeenCalled();
+      } finally {
+        restore();
+      }
+    });
+
+    it('clears the selection when the project filter changes', async () => {
+      renderTasksPage();
+      await check('Implement login');
+      await screen.findByText('1 selected');
+
+      chooseSelect('Filter by project', 'Project Alpha');
+
+      await waitFor(() => expect(mockGetTasks).toHaveBeenCalledWith('workspace-1', 'proj-1'));
+      expect(
+        await screen.findByRole('checkbox', { name: 'Select Implement login' })
+      ).not.toBeChecked();
+      expect(selectionBar()).toBeNull();
+    });
+
+    it('clears the selection when the workspace changes', async () => {
+      const { again } = renderTasksPage();
+      await check('Implement login');
+      await screen.findByText('1 selected');
+
+      currentWorkspace = { ...mockWorkspace, id: 'workspace-2', name: 'Other Workspace' };
+      again();
+
+      await waitFor(() => expect(mockGetTasks).toHaveBeenCalledWith('workspace-2', undefined));
+      expect(
+        await screen.findByRole('checkbox', { name: 'Select Implement login' })
+      ).not.toBeChecked();
+      expect(selectionBar()).toBeNull();
+    });
+
+    it('drops a task that leaves the listing from the selection', async () => {
+      let listed = mockTasks;
+      mockGetTasks.mockImplementation(() => Promise.resolve(listed));
+      renderTasksPage();
+      await check('Implement login', 'Fix button styling');
+      await screen.findByText('2 selected');
+
+      listed = [mockTasks[0]];
+      const loads = mockGetTasks.mock.calls.length;
+      await act(async () => {
+        window.dispatchEvent(new Event('visibilitychange'));
+        await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(loads + 1));
+      });
+
+      await waitFor(() => expect(screen.queryByText('Fix button styling')).toBeNull());
+      expect(screen.getByText('1 selected')).toBeInTheDocument();
+    });
+
+    it('edits the selected tasks together, then clears the selection', async () => {
+      mockUpdateTasks.mockImplementation(
+        (_workspace: string, ids: readonly string[], changes: Partial<Task>) =>
+          Promise.resolve(
+            mockTasks
+              .filter((task) => ids.includes(task.id))
+              .map((task) => ({ ...task, ...changes }))
+          )
+      );
+      renderTasksPage();
+      await check('Implement login', 'Fix button styling');
+
+      await editSelection('Edit 2 tasks');
+
+      await waitFor(() => {
+        expect(mockUpdateTasks).toHaveBeenCalledWith('workspace-1', ['task-1', 'task-2'], {
+          status: 'paused',
+        });
+      });
+      await waitFor(() => expect(mockToastSuccess).toHaveBeenCalledWith('Updated 2 tasks'));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(selectionBar()).toBeNull();
+      expect(checkbox('Implement login')).not.toBeChecked();
+      expect(mockUpdateTasks).toHaveBeenCalledTimes(1);
+      expect(mockToastError).not.toHaveBeenCalled();
+    });
+
+    it('keeps the dialog and the selection open when the edit is refused', async () => {
+      mockUpdateTasks.mockImplementation(() => Promise.reject(new Error(refusal)));
+      renderTasksPage();
+      await check('Implement login');
+
+      const dialog = await editSelection('Edit 1 task');
+
+      await waitFor(() => {
+        expect(mockToastError).toHaveBeenCalledWith("Couldn't update 1 task", {
+          description: refusal,
+        });
+      });
+      await waitFor(() => {
+        expect(within(dialog).getByRole('button', { name: 'Save changes' })).toBeEnabled();
+      });
+      expect(screen.getByRole('dialog', { name: 'Edit 1 task' })).toBeInTheDocument();
+      expect(screen.getByText('1 selected')).toBeInTheDocument();
+      expect(mockToastSuccess).not.toHaveBeenCalled();
+    });
   });
 
   describe('dragging', () => {
