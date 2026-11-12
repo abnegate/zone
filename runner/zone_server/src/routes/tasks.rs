@@ -667,6 +667,7 @@ pub struct AnswersResponse {
 const WAITING: &str = "waiting";
 const NOT_WAITING: &str = "Task run is not waiting on a question";
 const NOT_FOUND: &str = "Task run not found";
+const NOT_ACTIVE: &str = "Task run is not active";
 const NOTHING_CHOSEN: &str = "Choose an option for at least one question";
 
 /// POST /api/tasks/runs/:run_id/answers
@@ -719,6 +720,30 @@ pub async fn answer_run(
         Json(AnswersResponse { run_id, answered }),
     )
         .into_response()
+}
+
+/// POST /api/tasks/runs/:run_id/stop
+pub async fn stop_run(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(run_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let actor = match user_id(&auth) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match tasks::stop_task_run_authorized(state.db(), actor, run_id).await {
+        Ok(tasks::Mutation::Applied(tasks::Stop::Stopped(run))) => {
+            crate::workers::task::stop::request(run.id);
+            crate::workers::auto_project::poke_task(&state, run.task_id);
+            Json(TaskRunResponse::from(*run)).into_response()
+        }
+        Ok(tasks::Mutation::Applied(tasks::Stop::Finished)) => {
+            *denied(StatusCode::CONFLICT, NOT_ACTIVE)
+        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, NOT_FOUND),
+        Err(error) => *database_error(error),
+    }
 }
 
 /// GET /api/tasks/runs/:run_id/logs

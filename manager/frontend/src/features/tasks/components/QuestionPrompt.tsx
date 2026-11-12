@@ -8,8 +8,7 @@ import './QuestionPrompt.css';
 const TITLE = 'The run needs an answer';
 const OPTIONAL_NOTICE =
   'Leave an optional question alone and the run carries on with the recommended option after about thirty seconds.';
-const REQUIRED_NOTICE =
-  'A required question holds the run until someone answers it, and the run times out after an hour. A timed-out run is not retried — start a new run to try again.';
+const REQUIRED_NOTICE = 'A required question holds the run until someone answers it.';
 const FAILURE_TITLE = 'Could not send this answer';
 const FAILURE_FALLBACK = 'The answer was not accepted.';
 

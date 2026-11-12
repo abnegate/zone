@@ -1129,7 +1129,9 @@ mod tests {
 
         // And once a firing is done, the one behind it is offered — to the same
         // schedule, so the next comparison is against what the first recorded.
-        reminders::finish_turn(&pool, first.id).await.unwrap();
+        reminders::finish_turn(&pool, first.id, first.attempts)
+            .await
+            .unwrap();
         let next = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
@@ -1587,7 +1589,9 @@ mod tests {
         assert_eq!(fired, 1);
         assert_eq!(message_id, None);
 
-        reminders::finish_turn(&pool, turn.id).await.unwrap();
+        reminders::finish_turn(&pool, turn.id, turn.attempts)
+            .await
+            .unwrap();
         assert!(
             reminders::claim_turn(&pool, sweep, LEASE)
                 .await
@@ -1658,6 +1662,195 @@ mod tests {
             owed, 0,
             "the queue does not silt up with firings nothing will run"
         );
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// One owed firing of a one-shot prompt reminder, written down the way a
+    /// claim writes it.
+    async fn owed_turn(pool: &PgPool, workspace: Uuid, user: Uuid, chat_id: Uuid) -> Uuid {
+        let created = reminders::create(
+            pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Long investigation".into(),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
+                rrule: None,
+                prompt: Some("Work out why the nightly build is slow.".into()),
+                timing_mode: None,
+                time_zone: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        reminders::deliver_next(pool, Sweep::Workspace(workspace))
+            .await
+            .unwrap();
+        id
+    }
+
+    /// Ages a claim past any lease a test uses, the way a worker that went
+    /// quiet would.
+    async fn backdate(pool: &PgPool, turn: Uuid) {
+        sqlx::query(
+            "UPDATE reminder_turns SET claimed_at = NOW() - INTERVAL '2 hours' WHERE id = $1",
+        )
+        .bind(turn)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A turn has no length limit, so the lease is a heartbeat rather than a
+    /// guess at how long a turn takes: a claim that keeps being renewed is
+    /// never offered to a second worker however old it is, and one that stops
+    /// being renewed is offered again once its lease runs out.
+    #[tokio::test]
+    async fn a_renewed_claim_is_not_offered_again_after_its_lease() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let turn = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        assert_eq!(turn.attempts, 1, "the claim names which attempt it is");
+
+        backdate(&pool, turn.id).await;
+        assert!(
+            reminders::renew_turn(&pool, turn.id, turn.attempts)
+                .await
+                .unwrap(),
+            "the worker holding the claim renews it"
+        );
+        assert!(
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
+            "a turn still running and renewing its claim is not handed to a second worker"
+        );
+
+        backdate(&pool, turn.id).await;
+        let again = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("a claim nobody renewed lapses and the firing is offered again");
+        assert_eq!(again.id, turn.id);
+        assert_eq!(again.attempts, 2, "the new claim is the next attempt");
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A worker whose claim lapsed and was taken over must not keep the new
+    /// claim alive: it is not the one running the turn, and if the worker that
+    /// is dies, its renewals would hold the firing for ever.
+    #[tokio::test]
+    async fn a_superseded_claim_is_not_renewed() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        backdate(&pool, first.id).await;
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the lapsed claim is taken over");
+        assert_eq!(second.id, first.id);
+        backdate(&pool, second.id).await;
+        let claimed_at = |pool: PgPool, id: Uuid| async move {
+            sqlx::query_scalar::<_, chrono::DateTime<Utc>>(
+                "SELECT claimed_at FROM reminder_turns WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        let before = claimed_at(pool.clone(), first.id).await;
+
+        assert!(
+            !reminders::renew_turn(&pool, first.id, first.attempts)
+                .await
+                .unwrap(),
+            "the first worker's claim is gone, so its renewal says so"
+        );
+        assert_eq!(
+            claimed_at(pool.clone(), first.id).await,
+            before,
+            "a stale renewal leaves the newer claim's lease alone"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A worker whose claim lapsed and was taken over finishes only its own
+    /// claim: the newer one stays for the worker running it to finish.
+    #[tokio::test]
+    async fn a_superseded_claim_does_not_finish_the_newer_one() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        backdate(&pool, first.id).await;
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the lapsed claim is taken over");
+        let remaining = |pool: PgPool, id: Uuid| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reminder_turns WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        reminders::finish_turn(&pool, first.id, first.attempts)
+            .await
+            .unwrap();
+        assert_eq!(
+            remaining(pool.clone(), second.id).await,
+            1,
+            "a superseded worker finished the claim another worker is running"
+        );
+
+        reminders::finish_turn(&pool, second.id, second.attempts)
+            .await
+            .unwrap();
+        assert_eq!(
+            remaining(pool.clone(), second.id).await,
+            0,
+            "the worker holding the claim finishes it"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
         cleanup(&pool, organization, user).await;
     }
 

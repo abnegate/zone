@@ -147,10 +147,8 @@ pub async fn repair(
         }),
     };
 
-    match tokio::time::timeout(agent::REPAIR_TIMEOUT, repairer.repair(&task)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return RepairOutcome::Failed(error),
-        Err(_) => return RepairOutcome::Failed("the repair ran out of time".to_string()),
+    if let Err(error) = repairer.repair(&task).await {
+        return RepairOutcome::Failed(error);
     }
 
     if let Err(error) = conflict.verify(service).await {
@@ -248,6 +246,19 @@ mod tests {
             Writer(MERGED).repair(task).await?;
             std::fs::write(task.conflict.path().join("README.md"), "rewritten")
                 .map_err(|error| error.to_string())
+        }
+    }
+
+    /// Resolves properly once its duration has passed on a paused clock.
+    struct Slow(std::time::Duration);
+
+    #[async_trait]
+    impl RepairAgent for Slow {
+        async fn repair(&self, task: &RepairTask<'_>) -> Result<(), String> {
+            tokio::time::pause();
+            tokio::time::sleep(self.0).await;
+            tokio::time::resume();
+            Writer(MERGED).repair(task).await
         }
     }
 
@@ -385,6 +396,26 @@ mod tests {
         let published = feature_value(origin.path());
         assert!(published.contains("let feature = 2;"));
         assert!(published.contains("let mainline = 1;"));
+    }
+
+    /// A repair is bounded by its turns, not by the clock: one that takes an hour still lands.
+    #[tokio::test]
+    async fn a_repair_that_takes_an_hour_is_still_published() {
+        let origin = origin(true);
+        let before = feature_head(origin.path());
+
+        let outcome = repair(
+            &service(),
+            &Slow(std::time::Duration::from_secs(60 * 60)),
+            &request(origin.path()),
+        )
+        .await;
+
+        assert!(
+            outcome.repaired(),
+            "a slow repair must still land, got {outcome:?}"
+        );
+        assert_ne!(feature_head(origin.path()), before);
     }
 
     #[tokio::test]

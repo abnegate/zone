@@ -1,20 +1,84 @@
 //! Persistent reminder dispatch. Database locks coordinate all server instances.
+use crate::db::DbResult;
 use crate::db::reminders;
 use crate::db::reminders::Delivered;
 use crate::db::reminders::Sweep;
 use crate::state::AppState;
 use serde_json::json;
 use std::time::Duration;
+use tokio::task::AbortHandle;
+use tokio::time::Instant;
+use tokio::time::MissedTickBehavior;
+use uuid::Uuid;
 
-/// How long a claimed turn is left alone before it is taken to have died with
-/// whatever was running it.
+/// How long a claimed turn is left alone without a renewal before it is taken
+/// to have died with whatever was running it and is offered again.
 ///
-/// The generation timeout bounds a turn once it starts; this adds the time one
-/// can spend queued behind the chat's own semaphore, waiting out whatever the
-/// person is saying there. A turn still running when the lease expires is
-/// dispatched a second time, which is a repeated question — the failure this
-/// whole path exists to avoid is the other one, a firing nobody ever receives.
-const QUEUED: Duration = Duration::from_secs(30 * 60);
+/// A turn runs for as long as it needs, so the lease does not measure the turn:
+/// the worker running it renews the claim every `RENEWAL`, and the lease only
+/// has to outlast a missed renewal or two before a dead worker's firing is
+/// handed to a live one.
+const LEASE: Duration = Duration::from_secs(5 * 60);
+
+/// How often a running turn renews its claim. Ten renewals fit in one lease,
+/// so a slow or failed round trip to the database does not cost the claim.
+const RENEWAL: Duration = Duration::from_secs(30);
+
+/// Stops a turn's renewals when the turn is over, however it ended -- a turn
+/// that panicked must not leave its claim renewed for ever, or its firing is
+/// never offered again.
+struct Renewal(AbortHandle);
+
+impl Drop for Renewal {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Runs `turn` to completion while renewing its claim alongside it.
+///
+/// The renewals run as a task of their own rather than racing the turn,
+/// because the turn is never cancelled: it holds the chat's queue until its
+/// generation is done, and dropping it part way through could leave that queue
+/// held.
+async fn renewing<Turn, Renew, Attempt>(reminder_id: Uuid, renew: Renew, turn: Turn) -> Turn::Output
+where
+    Turn: Future,
+    Renew: FnMut() -> Attempt + Send + 'static,
+    Attempt: Future<Output = DbResult<bool>> + Send + 'static,
+{
+    let _renewal = Renewal(tokio::spawn(heartbeat(reminder_id, renew)).abort_handle());
+    turn.await
+}
+
+async fn heartbeat<Renew, Attempt>(reminder_id: Uuid, mut renew: Renew)
+where
+    Renew: FnMut() -> Attempt,
+    Attempt: Future<Output = DbResult<bool>>,
+{
+    let mut interval = tokio::time::interval_at(Instant::now() + RENEWAL, RENEWAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        match renew().await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    %reminder_id,
+                    "A running reminder turn lost its claim; no longer renewing it"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    %reminder_id,
+                    "Could not renew a running reminder turn's claim; trying again"
+                );
+            }
+        }
+    }
+}
 
 /// Wraps a watch's prompt in the thing that makes it a watch.
 ///
@@ -62,8 +126,7 @@ fn watching(prompt: &str, baseline: Option<&str>) -> String {
 pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let lease = state.config().chat.timeout.saturating_add(QUEUED);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
             // Every reminder whose time has come is claimed first. A claim
@@ -82,7 +145,7 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
             // Then whatever the claims left owing, which is also where a turn
             // abandoned by a restart is picked back up.
             loop {
-                match reminders::claim_turn(state.db(), sweep, lease).await {
+                match reminders::claim_turn(state.db(), sweep, LEASE).await {
                     Ok(None) => break,
                     Ok(Some(turn)) => {
                         // Spawned rather than awaited: a generation takes as
@@ -120,19 +183,28 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
                                 Some(last) => watching(&turn.prompt, last.as_deref()),
                                 None => turn.prompt.clone(),
                             };
-                            let message_id = crate::ws::chat::run_turn(
-                                &state,
-                                turn.chat_id,
-                                turn.workspace_id,
-                                turn.user_id,
-                                &content,
-                                // Marked, so a reader can tell a turn the
-                                // schedule opened from one the person typed.
-                                Some(json!({
-                                    "source": "reminder",
-                                    "reminder_id": turn.reminder_id,
-                                    "actor_id": turn.user_id,
-                                })),
+                            let pool = state.db().clone();
+                            let (id, attempts) = (turn.id, turn.attempts);
+                            let message_id = renewing(
+                                turn.reminder_id,
+                                move || {
+                                    let pool = pool.clone();
+                                    async move { reminders::renew_turn(&pool, id, attempts).await }
+                                },
+                                crate::ws::chat::run_turn(
+                                    &state,
+                                    turn.chat_id,
+                                    turn.workspace_id,
+                                    turn.user_id,
+                                    &content,
+                                    // Marked, so a reader can tell a turn the
+                                    // schedule opened from one the person typed.
+                                    Some(json!({
+                                        "source": "reminder",
+                                        "reminder_id": turn.reminder_id,
+                                        "actor_id": turn.user_id,
+                                    })),
+                                ),
                             )
                             .await;
                             // What this firing found becomes what the next one
@@ -167,7 +239,9 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
                             // Last, and only after the turn has finished: this
                             // is what stops it being offered again, so it is
                             // not owed until there is nothing left to run.
-                            if let Err(error) = reminders::finish_turn(state.db(), turn.id).await {
+                            if let Err(error) =
+                                reminders::finish_turn(state.db(), turn.id, turn.attempts).await
+                            {
                                 tracing::warn!(
                                     %error,
                                     reminder_id = %turn.reminder_id,
@@ -189,7 +263,108 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::LEASE;
+    use super::RENEWAL;
+    use super::renewing;
     use super::watching;
+    use crate::db::DbResult;
+    use std::future::Ready;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering;
+    use uuid::Uuid;
+
+    fn counting(
+        outcome: fn(u32) -> DbResult<bool>,
+    ) -> (
+        Arc<AtomicU32>,
+        impl FnMut() -> Ready<DbResult<bool>> + Send + 'static,
+    ) {
+        let renewals = Arc::new(AtomicU32::new(0));
+        let counter = renewals.clone();
+        let renew = move || {
+            let renewal = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            std::future::ready(outcome(renewal))
+        };
+        (renewals, renew)
+    }
+
+    /// A turn has no length limit, so its claim is kept alive for as long as
+    /// it runs -- through a failed renewal too, because one bad round trip is
+    /// not a dead worker -- and is left to lapse the moment it is over, so a
+    /// finished or crashed turn does not hold its firing for ever.
+    #[tokio::test(start_paused = true)]
+    async fn a_running_turn_renews_its_claim_until_it_finishes() {
+        let (renewals, renew) = counting(|renewal| {
+            if renewal == 1 {
+                Err(sqlx::Error::PoolTimedOut)
+            } else {
+                Ok(true)
+            }
+        });
+        let runs = LEASE + RENEWAL / 2;
+        let answer = renewing(Uuid::new_v4(), renew, async {
+            tokio::time::sleep(runs).await;
+            "answered"
+        })
+        .await;
+        assert_eq!(answer, "answered", "the turn runs to its own end");
+        let expected = (LEASE.as_secs() / RENEWAL.as_secs()) as u32;
+        assert_eq!(
+            renewals.load(Ordering::SeqCst),
+            expected,
+            "one renewal every interval for as long as the turn ran, a failed one included"
+        );
+
+        tokio::time::sleep(LEASE * 2).await;
+        assert_eq!(
+            renewals.load(Ordering::SeqCst),
+            expected,
+            "nothing renews a claim whose turn is over"
+        );
+    }
+
+    /// A turn that panics stops its renewals as it unwinds, so its claim
+    /// lapses and the firing is offered again rather than held for ever.
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_that_panics_stops_renewing_its_claim() {
+        let (renewals, renew) = counting(|_| Ok(true));
+        let turn = tokio::spawn(renewing(Uuid::new_v4(), renew, async {
+            tokio::time::sleep(RENEWAL + RENEWAL / 2).await;
+            panic!("the turn crashed");
+        }));
+
+        let crashed = turn.await.expect_err("the turn panicked");
+        assert!(crashed.is_panic(), "{crashed:?}");
+        let renewed = renewals.load(Ordering::SeqCst);
+        assert_eq!(renewed, 1, "the claim was renewed while the turn ran");
+
+        tokio::time::sleep(LEASE * 2).await;
+        assert_eq!(
+            renewals.load(Ordering::SeqCst),
+            renewed,
+            "a crashed turn kept renewing its claim"
+        );
+    }
+
+    /// A claim another worker took over belongs to that worker. The turn here
+    /// still runs to its end -- it is never cancelled -- but it stops renewing
+    /// a lease that is no longer its own.
+    #[tokio::test(start_paused = true)]
+    async fn a_turn_whose_claim_was_taken_over_stops_renewing_but_still_finishes() {
+        let (renewals, renew) = counting(|_| Ok(false));
+        let answer = renewing(Uuid::new_v4(), renew, async {
+            tokio::time::sleep(LEASE * 2).await;
+            "answered"
+        })
+        .await;
+        assert_eq!(answer, "answered", "a superseded turn is not cut short");
+        assert_eq!(
+            renewals.load(Ordering::SeqCst),
+            1,
+            "the first renewal that finds the claim gone is the last"
+        );
+    }
 
     /// The first firing has nothing to report a change against and must not
     /// report one; every later firing is handed the reading rather than told to

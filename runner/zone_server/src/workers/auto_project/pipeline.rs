@@ -1749,16 +1749,6 @@ mod tests {
     }
 
     #[test]
-    fn a_review_that_timed_out_is_a_failed_round() {
-        let recovery = recover(&ReviewError::TimedOut, "qwen3:32b", 0, &unwatched());
-
-        let missed = recovery.missed.expect("a timed-out round is recorded");
-        assert_eq!(missed.verdict, Recorded::Failed);
-        assert_eq!(missed.summary, ReviewError::TimedOut.to_string());
-        assert!(matches!(recovery.next, Next::Retry(_)));
-    }
-
-    #[test]
     fn an_unreadable_reply_is_recorded_as_unparseable_and_asked_again() {
         let error = ReviewError::Unparseable("the reply carries no <zone-review> marker".into());
 

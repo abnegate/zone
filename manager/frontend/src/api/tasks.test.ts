@@ -153,6 +153,37 @@ describe('task runner contract', () => {
     await expect(tasksApi.answerRun('run-1', [])).rejects.toThrow('Answer a required question');
   });
 
+  it('stops a run at the registered route and reads the stopped run back', async () => {
+    const stopped = { ...run, status: 'cancelled', error_message: 'Task run was stopped' };
+    const controller = new AbortController();
+    fetch.mockResolvedValueOnce(Response.json({ run: stopped }));
+
+    expect(await tasksApi.stopRun('run/1', controller.signal)).toEqual(stopped);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/tasks/runs/run%2F1/stop'),
+      expect.objectContaining({
+        method: 'POST',
+        signal: controller.signal,
+        headers: expect.objectContaining({ Authorization: 'Bearer test-token' }),
+      })
+    );
+    expect(fetch.mock.calls[0][1]?.body).toBeUndefined();
+  });
+
+  it('surfaces the server refusal to stop a run that is no longer active', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json({ error: 'Task run is not active' }, { status: 409 })
+    );
+
+    await expect(tasksApi.stopRun('run-1')).rejects.toThrow('Task run is not active');
+  });
+
+  it('reports a bare status when a stop is refused without a message', async () => {
+    fetch.mockResolvedValueOnce(new Response('', { status: 502 }));
+
+    await expect(tasksApi.stopRun('run-1')).rejects.toThrow('Failed to stop task run: 502');
+  });
+
   it('preserves runner rejection messages', async () => {
     fetch.mockResolvedValueOnce(
       Response.json({ error: 'Task already has an active run' }, { status: 409 })
@@ -194,6 +225,8 @@ describe('task runner contract', () => {
       },
       { type: 'completed', status: 'completed' },
       { type: 'failed', error: 'Model unavailable' },
+      { type: 'cancelled', error: 'Task run was stopped' },
+      { type: 'cancelled', message: 'Task run was stopped' },
       { type: 'error', message: 'Authentication failed' },
     ];
     for (const message of messages)

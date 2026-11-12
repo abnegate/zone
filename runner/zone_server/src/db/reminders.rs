@@ -390,6 +390,9 @@ pub struct PendingTurn {
     pub chat_id: Uuid,
     pub user_id: Uuid,
     pub prompt: String,
+    /// Which claim this is, so a renewal from a worker whose claim has since
+    /// been taken over cannot keep the newer one alive on its behalf.
+    pub attempts: i32,
 }
 
 /// Where a fired automation goes next, or `None` when its rule is spent and
@@ -588,12 +591,11 @@ const MAX_TURN_ATTEMPTS: i32 = 3;
 
 /// Takes the oldest firing that still owes a turn, or `None` when none does.
 ///
-/// `lease` is how long a claim is honoured: past it the firing is taken to have
-/// died with whatever was running it, and is offered again. The caller sets it
-/// because only the caller knows how long a turn can take — the generation
-/// timeout, plus however long one may sit queued behind the chat's own
-/// semaphore. Too short costs a duplicate turn and too long costs a late one,
-/// and of the two only the duplicate is something a person has to read.
+/// `lease` is how long a claim is honoured without being renewed: past it the
+/// firing is taken to have died with whatever was running it, and is offered
+/// again. A turn has no length limit, so the lease does not measure the turn —
+/// the worker running it renews the claim with `renew_turn` for as long as it
+/// is alive, and the lease only has to outlast a missed renewal or two.
 pub async fn claim_turn(
     pool: &PgPool,
     sweep: Sweep,
@@ -666,7 +668,8 @@ pub async fn claim_turn(
            AND ahead.claimed_at IS NOT NULL \
            AND ahead.claimed_at > NOW() - make_interval(secs => $2)) \
          ORDER BY owed.created_at, owed.id LIMIT 1 FOR UPDATE SKIP LOCKED) \
-         RETURNING id, reminder_id, workspace_id, chat_id, created_by AS user_id, prompt",
+         RETURNING id, reminder_id, workspace_id, chat_id, created_by AS user_id, prompt, \
+         attempts",
     )
     .bind(MAX_TURN_ATTEMPTS)
     .bind(seconds)
@@ -677,15 +680,37 @@ pub async fn claim_turn(
     Ok(claimed)
 }
 
+/// Keeps a claim live while its turn is still running, and says whether it
+/// still held.
+///
+/// Fenced on the claim's `attempts`: once the lease lapsed and another worker
+/// took the firing over, the original claim is gone, and renewing would only
+/// extend the newer one's lease from a worker that is not running it.
+pub async fn renew_turn(pool: &PgPool, turn_id: Uuid, attempts: i32) -> DbResult<bool> {
+    let renewed = sqlx::query(
+        "UPDATE reminder_turns SET claimed_at = NOW() \
+         WHERE id = $1 AND attempts = $2 AND claimed_at IS NOT NULL",
+    )
+    .bind(turn_id)
+    .bind(attempts)
+    .execute(pool)
+    .await?;
+    Ok(renewed.rows_affected() > 0)
+}
+
 /// Marks one firing's turn as run, whatever the turn made of it.
 ///
 /// A turn that reached the chat and failed there has already said so in the
 /// chat, and offering it again would repeat the failure rather than recover
 /// from it. The retry in `claim_turn` exists for the one case this cannot
 /// reach: a process that did not live to call this.
-pub async fn finish_turn(pool: &PgPool, turn_id: Uuid) -> DbResult<()> {
-    sqlx::query("DELETE FROM reminder_turns WHERE id = $1")
+///
+/// Fenced on the claim's `attempts` like `renew_turn`: a worker whose claim
+/// lapsed and was taken over leaves the newer claim to the worker running it.
+pub async fn finish_turn(pool: &PgPool, turn_id: Uuid, attempts: i32) -> DbResult<()> {
+    sqlx::query("DELETE FROM reminder_turns WHERE id = $1 AND attempts = $2")
         .bind(turn_id)
+        .bind(attempts)
         .execute(pool)
         .await?;
     Ok(())

@@ -11,6 +11,7 @@ use crate::services::checkout::{self, Checkout};
 
 const GIT: &str = ".git";
 const STAGING: &str = "staging";
+const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// A repository a project's chat starts in that nobody has cloned yet.
 ///
@@ -23,7 +24,6 @@ pub struct Missing {
     url: RepositoryUrl,
     token: Option<SecretValue>,
     destination: PathBuf,
-    timeout: Duration,
 }
 
 impl Missing {
@@ -32,7 +32,6 @@ impl Missing {
         workspace: Uuid,
         url: RepositoryUrl,
         token: Option<SecretValue>,
-        timeout: Duration,
     ) -> Self {
         let destination = root
             .join(workspace.as_hyphenated().to_string())
@@ -43,7 +42,6 @@ impl Missing {
             url,
             token,
             destination,
-            timeout,
         }
     }
 
@@ -105,7 +103,7 @@ impl Missing {
         })
         .await?;
         checkout::git()
-            .with_timeout(self.timeout)
+            .with_timeout(TIMEOUT)
             .clone_repository(&self.url, &staging, self.token.as_ref())
             .await
             .map_err(|error| error.to_string())?;

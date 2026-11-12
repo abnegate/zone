@@ -569,7 +569,6 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
     use zone_core::application::application;
-    use zone_core::llm::cli::TURN_TIMEOUT;
 
     #[tokio::test]
     async fn what_the_agent_wrote_is_yielded_before_a_call_that_arrived_with_it() {
@@ -680,19 +679,19 @@ mod tests {
         );
     }
 
-    /// A task attempt runs for an hour and a chat for as long as the operator
-    /// sets, so a token that expired on its own clock would cut the agent off
-    /// from zone's tools partway through. The lease is the only thing that
-    /// ends it.
+    /// An agent runs until it is done, so a token that expired on its own
+    /// clock would cut it off from zone's tools partway through. The token
+    /// ends only with its lease.
     #[tokio::test(start_paused = true)]
     async fn a_token_answers_for_as_long_as_its_lease_is_held() {
+        const DAY: Duration = Duration::from_secs(24 * 60 * 60);
         let opened = open(ApprovalPolicy::auto()).await;
 
-        tokio::time::advance(TURN_TIMEOUT * 4).await;
+        tokio::time::advance(DAY).await;
 
         assert!(
             Turn::find(&opened.token).is_some(),
-            "a turn that outlasts the agent's default timeout lost its tools"
+            "a turn that runs for a day lost its tools"
         );
         drop(opened.lease);
         assert!(Turn::find(&opened.token).is_none());

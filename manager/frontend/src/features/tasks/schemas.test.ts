@@ -125,3 +125,26 @@ describe('a run that parked on a wait', () => {
     expect(parsed).toMatchObject({ id: 'run-1', status: 'waiting', progress_percent: 40 });
   });
 });
+
+describe('a task run stopped over the run socket', () => {
+  const STOPPED_MESSAGE = 'Task run was stopped';
+
+  for (const field of ['error', 'message']) {
+    it(`ends the stream as cancelled with the reason sent as ${field}`, () => {
+      const frame = TaskProgressMessageSchema.parse({
+        type: 'cancelled',
+        [field]: STOPPED_MESSAGE,
+      });
+
+      expect(frame).toEqual({ type: 'cancelled', status: 'cancelled', reason: STOPPED_MESSAGE });
+    });
+  }
+
+  it('ends the stream as cancelled when no reason was sent', () => {
+    expect(TaskProgressMessageSchema.parse({ type: 'cancelled' })).toEqual({
+      type: 'cancelled',
+      status: 'cancelled',
+      reason: null,
+    });
+  });
+});

@@ -199,6 +199,20 @@ class TasksApi {
     return receipt.success ? receipt.data : undefined;
   }
 
+  async stopRun(runId: string, signal?: AbortSignal): Promise<TaskRun> {
+    const response = await fetch(`${API_BASE}/api/tasks/runs/${encodeURIComponent(runId)}/stop`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      signal,
+    });
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to stop task run: ${response.status}`);
+    }
+    const data = parse(TaskRunResponseSchema, await response.json());
+    return data.run;
+  }
+
   async getTaskRunLogs(
     _taskId: string,
     runId: string,

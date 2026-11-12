@@ -52,6 +52,14 @@ pub enum RunMutation {
     Active(TaskRunRow),
 }
 
+/// Result of stopping a task run by hand: the run it stopped, or `Finished`
+/// when the run had already ended before the stop reached it.
+#[derive(Debug)]
+pub enum Stop {
+    Stopped(Box<TaskRunRow>),
+    Finished,
+}
+
 const PLACEHOLDER_CHARACTERS: usize = 60;
 
 const UNTITLED: &str = "Untitled task";
@@ -251,6 +259,10 @@ const ACTIVE_RUN_STATUSES: &str = "('running','waiting')";
 /// Why the sweeper failed a run, both in the row it writes and in the frame it
 /// publishes to whoever was waiting on that run.
 const ORPHANED: &str = "orphaned";
+
+/// Why a run a user stopped ended, both in the row and in the frame published
+/// to whoever was waiting on that run.
+pub const STOPPED: &str = "Task run was stopped";
 
 /// The one status a finished run reports as a success.
 pub(crate) const COMPLETED: &str = "completed";
@@ -1454,6 +1466,43 @@ pub async fn sweep_task_runs(pool: &PgPool) -> DbResult<u64> {
         task_progress::publish_terminal(*run, FAILED, Some(ORPHANED));
     }
     Ok(failed.len() as u64)
+}
+
+/// Cancel a live run on a workspace member's behalf and pause its task.
+///
+/// Unfenced on owner and heartbeat: a stuck run is exactly the one whose
+/// lease cannot be trusted. Locks the task before the run, like
+/// [`complete_owned_task_run`], so it never deadlocks against a finishing run.
+pub async fn stop_task_run_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    run_id: Uuid,
+) -> DbResult<Mutation<Stop>> {
+    let mut transaction = pool.begin().await?;
+    let task_id: Option<Uuid> = sqlx::query_scalar("SELECT task_id FROM task_runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let Some(task_id) = task_id else {
+        return Ok(Mutation::NotFound);
+    };
+    if lock_task_writer(&mut transaction, task_id, user_id)
+        .await?
+        .is_none()
+    {
+        return Ok(Mutation::NotFound);
+    }
+    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $2, completed_at = NOW(), error_message = $3, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL WHERE id = $1 AND status IN {ACTIVE_RUN_STATUSES} RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
+        .bind(run_id).bind(CANCELLED).bind(STOPPED).fetch_optional(&mut *transaction).await?;
+    let Some(run) = row else {
+        transaction.commit().await?;
+        return Ok(Mutation::Applied(Stop::Finished));
+    };
+    sqlx::query("UPDATE tasks SET status = $3, updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2")
+        .bind(run.task_id).bind(run.id).bind(PAUSED).execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
+    Ok(Mutation::Applied(Stop::Stopped(Box::new(run))))
 }
 
 /// Update task run progress

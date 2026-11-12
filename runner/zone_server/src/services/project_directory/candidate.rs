@@ -124,8 +124,7 @@ impl Candidate {
                          clones only GitHub repositories. Add a folder that holds one."
                     ));
                 };
-                let missing =
-                    Missing::new(&config.clones, workspace, url, token, config.chat.timeout);
+                let missing = Missing::new(&config.clones, workspace, url, token);
                 match missing.present() {
                     true => usable(config, missing.destination().to_path_buf()),
                     false => Start::Missing(missing),
