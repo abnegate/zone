@@ -1,0 +1,310 @@
+import { describe, expect, it, mock } from 'bun:test';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { chooseSelect, openSelect } from '../../../test/select';
+import type { Project } from '../../projects/types';
+import type { Task, TaskChanges } from '../types';
+import { EditTasksDialog } from './EditTasksDialog';
+
+const task: Task = {
+  id: 'task-1',
+  workspace_id: 'workspace-1',
+  project_ids: [],
+  title: 'Ship the board',
+  description: 'Replace the table',
+  acceptance_criteria: null,
+  status: 'created',
+  priority: null,
+  model_name: null,
+  dependencies: [],
+  created_at: null,
+  updated_at: null,
+  started_at: null,
+  completed_at: null,
+  is_agentic: false,
+  require_plan_approval: false,
+  github_repo_url: null,
+  source_id: null,
+  source_ids: [],
+  queued_at: null,
+  worker_id: null,
+  pr_url: null,
+  branch_name: null,
+  pr_status: null,
+  pr_created_at: null,
+};
+
+function project(id: string, name: string): Project {
+  return {
+    id,
+    name,
+    description: null,
+    status: 'active',
+    github_repo_url: null,
+    source_id: null,
+    auto: false,
+    position: 0,
+    created_at: '2026-11-01T00:00:00Z',
+    updated_at: '2026-11-01T00:00:00Z',
+  };
+}
+
+const PROJECTS = [
+  project('project-1', 'Console'),
+  project('project-2', 'Runner'),
+  project('project-3', 'Docs'),
+];
+
+const TASKS: Task[] = [
+  { ...task, id: 'task-1', project_ids: ['project-1', 'project-2'] },
+  { ...task, id: 'task-2', title: 'Write the docs', project_ids: ['project-1'] },
+];
+
+const TITLE = 'Edit 2 tasks';
+
+function deferred() {
+  let resolve: () => void = () => {};
+  let reject: (reason: unknown) => void = () => {};
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function renderDialog(
+  onSave: (changes: TaskChanges) => Promise<void> = () => Promise.resolve(),
+  tasks: readonly Task[] = TASKS
+) {
+  const save = mock(onSave);
+  const onClose = mock(() => {});
+  render(<EditTasksDialog tasks={tasks} projects={PROJECTS} onSave={save} onClose={onClose} />);
+  return { onSave: save, onClose };
+}
+
+function saveButton(): HTMLButtonElement {
+  return screen.getByRole('button', { name: 'Save changes' }) as HTMLButtonElement;
+}
+
+function cancelButton(): HTMLButtonElement {
+  return screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement;
+}
+
+function projectBox(name: string): HTMLInputElement {
+  return screen.getByRole('checkbox', { name }) as HTMLInputElement;
+}
+
+function optionNames(label: string): string[] {
+  const trigger = openSelect(label);
+  const names = screen.getAllByRole('option').map((option) => option.textContent ?? '');
+  fireEvent.keyDown(trigger, { key: 'Escape' });
+  return names;
+}
+
+describe('EditTasksDialog', () => {
+  it('counts the tasks in the title', () => {
+    renderDialog();
+    expect(screen.getByRole('dialog', { name: TITLE })).toBeTruthy();
+  });
+
+  it('names a single task in the singular', () => {
+    renderDialog(undefined, [TASKS[0]]);
+    expect(screen.getByRole('dialog', { name: 'Edit 1 task' })).toBeTruthy();
+  });
+
+  it('starts every field unchanged with Save disabled', () => {
+    renderDialog();
+
+    for (const label of ['Status', 'Priority', 'Agentic', 'Require plan approval']) {
+      expect(screen.getByRole('combobox', { name: label }).textContent).toBe('Unchanged');
+    }
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it('offers Unchanged before each status', () => {
+    renderDialog();
+    expect(optionNames('Status')).toEqual([
+      'Unchanged',
+      'Created',
+      'Queued',
+      'In progress',
+      'Blocked',
+      'Paused',
+      'In review',
+      'Completed',
+      'Cancelled',
+    ]);
+  });
+
+  it('numbers the priorities beside their names', () => {
+    renderDialog();
+    expect(optionNames('Priority')).toEqual([
+      'Unchanged',
+      '1 · Lowest',
+      '2 · Low',
+      '3 · Medium',
+      '4 · High',
+      '5 · Highest',
+    ]);
+  });
+
+  it('offers On and Off for the switches', () => {
+    renderDialog();
+    expect(optionNames('Agentic')).toEqual(['Unchanged', 'On', 'Off']);
+    expect(optionNames('Require plan approval')).toEqual(['Unchanged', 'On', 'Off']);
+  });
+
+  it('saves only the status when only the status changes', async () => {
+    const { onSave } = renderDialog();
+
+    chooseSelect('Status', 'Paused');
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toEqual({ status: 'paused' });
+  });
+
+  it('saves priority and both switches together', async () => {
+    const { onSave } = renderDialog();
+
+    chooseSelect('Priority', '5 · Highest');
+    chooseSelect('Agentic', 'Off');
+    chooseSelect('Require plan approval', 'On');
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toEqual({
+      priority: 5,
+      is_agentic: false,
+      require_plan_approval: true,
+    });
+  });
+
+  it('drops a field chosen back to Unchanged', async () => {
+    const { onSave } = renderDialog();
+
+    chooseSelect('Status', 'Blocked');
+    chooseSelect('Status', 'Unchanged');
+    expect(saveButton().disabled).toBe(true);
+
+    chooseSelect('Agentic', 'On');
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toEqual({ is_agentic: true });
+  });
+
+  it('marks projects by how many of the tasks share them', () => {
+    renderDialog();
+    const projects = screen.getByRole('group', { name: 'Projects' });
+
+    expect(within(projects).getAllByRole('checkbox')).toHaveLength(3);
+    expect(projectBox('Console').checked).toBe(true);
+    expect(projectBox('Console').indeterminate).toBe(false);
+    expect(projectBox('Runner').indeterminate).toBe(true);
+    expect(projectBox('Docs').checked).toBe(false);
+    expect(projectBox('Docs').indeterminate).toBe(false);
+  });
+
+  it('leaves projects out until one is toggled', async () => {
+    const { onSave } = renderDialog();
+
+    chooseSelect('Priority', '2 · Low');
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toEqual({ priority: 2 });
+  });
+
+  it('sends the full project list once a project is toggled', async () => {
+    const { onSave } = renderDialog();
+
+    fireEvent.click(projectBox('Docs'));
+
+    expect(projectBox('Docs').checked).toBe(true);
+    expect(projectBox('Runner').indeterminate).toBe(false);
+    expect(projectBox('Runner').checked).toBe(false);
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toEqual({ project_ids: ['project-1', 'project-3'] });
+  });
+
+  it('adds a partly shared project to every task when it is checked', async () => {
+    const { onSave } = renderDialog();
+
+    fireEvent.click(projectBox('Runner'));
+
+    expect(projectBox('Runner').checked).toBe(true);
+    expect(projectBox('Runner').indeterminate).toBe(false);
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toEqual({ project_ids: ['project-1', 'project-2'] });
+  });
+
+  it('clears every project when the shared one is unchecked', async () => {
+    const { onSave } = renderDialog(undefined, [TASKS[1]]);
+
+    fireEvent.click(projectBox('Console'));
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toEqual({ project_ids: [] });
+  });
+
+  it('shows loading and locks the dialog while saving', async () => {
+    const pending = deferred();
+    const { onClose } = renderDialog(() => pending.promise);
+
+    chooseSelect('Status', 'Paused');
+    fireEvent.click(saveButton());
+
+    await waitFor(() => {
+      expect(saveButton().disabled).toBe(true);
+      expect(saveButton().querySelector('.ui-btn-spinner')).not.toBeNull();
+    });
+    expect(cancelButton().disabled).toBe(true);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: TITLE })).toBeTruthy();
+    pending.resolve();
+  });
+
+  it('stays open and can retry after a failed save', async () => {
+    const { onSave, onClose } = renderDialog(() =>
+      Promise.reject(new Error('Task has an active run or is no longer available'))
+    );
+
+    chooseSelect('Status', 'Paused');
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    expect(saveButton().querySelector('.ui-btn-spinner')).toBeNull();
+    expect(cancelButton().disabled).toBe(false);
+    expect(screen.getByRole('dialog', { name: TITLE })).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(2));
+    expect(onSave.mock.calls[1][0]).toEqual({ status: 'paused' });
+  });
+
+  it('closes from Cancel without saving', () => {
+    const { onSave, onClose } = renderDialog();
+
+    fireEvent.click(cancelButton());
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('closes on Escape when idle', () => {
+    const { onClose } = renderDialog();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});
