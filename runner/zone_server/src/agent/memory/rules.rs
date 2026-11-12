@@ -36,34 +36,20 @@
 //! caught at every read by `READ_FILTER`, while a false refusal loses the
 //! note an unattended run was told to write.
 //!
-//! Sparing names has a cost, and nothing at a read stands behind it. A
+//! Sparing names has a cost, and nothing at a read stands behind it: a
 //! generated value that its own separators cut into parts which each pass for
-//! a name is recorded. Measured against the detector, over 200,000 values of
-//! each shape and beyond what it misses by itself: about one URL-safe base64
-//! value of 32 characters in seventeen hundred, and one 24-character secret in
-//! seven hundred, or in one hundred and eighty when it is URL-safe base64,
-//! when it ends a path whose other segments are names. Those are read as
-//! generated once their mixed-case parts hold three letters that stand alone
-//! between changes of case or words with no vowel. A code written in four or
-//! more groups of one length between one separator is read as generated when
-//! three different groups mix letters with digits or change case, when two do
-//! in a code of five groups or more that holds lower case, and when one does
-//! in capitals between dashes or slashes. That leaves at most one in two
-//! thousand in capitals, one in three hundred in lower case and one in sixty
-//! thousand in mixed case, though as many as one in two in lower case of four
-//! short groups that end a path. Capitals between underscores are how a
-//! constant is written, and of a code written so one in fifty is recorded, or
-//! one in eight in base32. So is a passphrase of plain words and numbers that
-//! only its length gave away, and so is any unlabelled code under 32
-//! characters, which the detector never read. The cost the other way is a
-//! name that changes case beside a number in a long path,
-//! `features/chats/ChatPanelV2.tsx`, which is what a base62 secret looks
-//! like, a name whose parts mix letters with digits as a code's do,
-//! `crates/codecs/utf16_utf32_base64`, and a name that strings initials
-//! together, `Plugins/ABI/SystemZ/ABISysV_s390x.cpp`: all are refused as
-//! secrets. Over 1.2 million paths, branches and constants from two dozen
-//! repositories, the last is the only name these readings refuse that was
-//! recorded before them.
+//! a name is recorded. A run is still read as generated when its mixed-case
+//! parts are scrambled, or when it is written in four or more groups of one
+//! length that bear enough different marks of a code. What gets through is
+//! about one URL-safe base64 value of 32 characters in eight hundred, one
+//! 24-character value that ends a path in sixty to a hundred and twenty, by
+//! the path, one code in lower case of three-character groups in fourteen and
+//! as many as one in two codes of four short groups that end a path, along
+//! with a code in capitals between underscores, as a constant is written, a
+//! passphrase, and any unlabelled code under 32 characters, which the
+//! detector never read. The cost the other way is a name that reads as such a
+//! value, `features/chats/ChatPanelV2.tsx` or
+//! `crates/codecs/utf16_utf32_base64`, which is refused as a secret.
 
 use std::sync::LazyLock;
 
@@ -336,8 +322,9 @@ static GENERATED: LazyLock<Regex> = LazyLock::new(|| {
     .expect("generated pattern is a valid regex")
 });
 
-/// What a long run is cut into parts by.
-const SEPARATORS: [char; 4] = ['/', '_', '+', '-'];
+/// What a long run is cut into parts by. A plus sign cuts one too, but
+/// [`GENERATED`] has read any run that holds one before a part is cut.
+const SEPARATORS: [char; 3] = ['/', '_', '-'];
 
 /// The fewest groups of one length in a row, between one separator, that
 /// make a code. Fewer is how a date and a target triple are written.
@@ -347,25 +334,30 @@ const FEWEST_GROUPS: usize = 4;
 /// versions are listed: `v1-v2-v3-v4`.
 const SHORTEST_GROUP: usize = 3;
 
-/// How many different groups must mix letters with digits or change case
-/// before groups that hold lower case, or capitals between underscores, are a
-/// code: a list of platforms marks two, `linux-arm64-amd64`, and a register
-/// name repeats one, `HSI0_PPMU_HSI0_BUS0`.
+/// How many different [marks](Mark) groups that hold lower case, or capitals
+/// between underscores, must bear to be a code: a list of platforms bears
+/// two, `linux-arm64-amd64`, and a register name repeats one,
+/// `HSI0_PPMU_HSI0_BUS0`.
 const MARKED_GROUPS: usize = 3;
 
-/// The fewest groups of a long code, in which two marked groups are enough
-/// when it holds lower case. A list of platforms is shorter:
+/// The fewest groups of a long code, in which [`LONG_CODE_MARKED_GROUPS`]
+/// marks are enough when it holds lower case. A list of platforms is shorter:
 /// `build-linux-arm64-amd64`.
 const LONG_CODE_GROUPS: usize = 5;
 
-/// How many different marked groups give away a long code that holds lower
-/// case.
+/// How many different marks give away a long code that holds lower case.
 const LONG_CODE_MARKED_GROUPS: usize = 2;
 
 /// The separators between which one group that mixes letters with digits
 /// makes capitals a code. No name is written in capitals between them, while
 /// a constant is written in capitals between underscores.
 const CAPITAL_SEPARATORS: [char; 2] = ['-', '/'];
+
+/// How a list writes an item: a letter or two in lower case, a number, and at
+/// most one letter after it, as `v10`, `rc1`, `k8s` and `e2e` are written.
+static NUMBERED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^[a-z]{1,2}[0-9]+[a-z]?$").expect("numbered pattern is a valid regex")
+});
 
 /// Whether a group holds letters and digits both, as most groups of a
 /// generated code do and few words of a name.
@@ -374,97 +366,125 @@ fn mixes(group: &str) -> bool {
         && group.bytes().any(|byte| byte.is_ascii_alphabetic())
 }
 
-/// Whether a group holds a capital after its first letter beside lower case,
-/// as a generated group in mixed case does and a word of a name does not.
+fn holds_lower_case(text: &str) -> bool {
+    text.bytes().any(|byte| byte.is_ascii_lowercase())
+}
+
+/// Whether a group holds a capital straight after lower case, as a generated
+/// group in mixed case does. Capitals that lower case follows, `OAuth`, are
+/// how an initialism meets a word.
 fn changes_case(group: &str) -> bool {
-    group.bytes().any(|byte| byte.is_ascii_lowercase())
-        && group.bytes().skip(1).any(|byte| byte.is_ascii_uppercase())
+    group
+        .as_bytes()
+        .windows(2)
+        .any(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+}
+
+/// Whether two groups hold their capitals, lower case and digits in the same
+/// places, as `iPad` and `iMac` do.
+fn written_alike(left: &str, right: &str) -> bool {
+    left.len() == right.len()
+        && left.bytes().zip(right.bytes()).all(|(left, right)| {
+            left.is_ascii_digit() == right.is_ascii_digit()
+                && left.is_ascii_uppercase() == right.is_ascii_uppercase()
+        })
+}
+
+/// What marks a group as a code's. A list writes its items alike and a code
+/// writes each group its own way, so groups that bear a mark alike count once
+/// between them: `v10-v11-v12-v13` bears one mark, as `iPad/iPod/iMac` does.
+enum Mark<'group> {
+    /// A [numbered](NUMBERED) group, wherever its digits fall.
+    Numbered,
+    /// A group that [changes case](changes_case), by where its capitals fall.
+    Cased(&'group str),
+    /// Any other group that [mixes](mixes) letters with digits, by its
+    /// spelling.
+    Mixed(&'group str),
+}
+
+impl<'group> Mark<'group> {
+    fn of(group: &'group str) -> Option<Self> {
+        if changes_case(group) {
+            Some(Self::Cased(group))
+        } else if NUMBERED.is_match(group) {
+            Some(Self::Numbered)
+        } else if mixes(group) {
+            Some(Self::Mixed(group))
+        } else {
+            None
+        }
+    }
+
+    fn alike(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Numbered, Self::Numbered) => true,
+            (Self::Cased(left), Self::Cased(right)) => written_alike(left, right),
+            (Self::Mixed(left), Self::Mixed(right)) => left == right,
+            _ => false,
+        }
+    }
 }
 
 /// Groups of one length in a row, cut from a long run by one separator.
-struct Code<'run> {
+struct Groups<'run> {
     separator: char,
-    groups: Vec<&'run str>,
+    groups: &'run [&'run str],
 }
 
-impl Code<'_> {
+impl Groups<'_> {
     /// Whether these groups are a code, as a recovery code and a licence key
     /// are written: enough of them, long enough, and marked as generated
-    /// groups are.
-    fn generated(&self) -> bool {
-        self.groups.len() >= FEWEST_GROUPS
-            && self
+    /// groups are. Fewer marks give away a long code that holds lower case,
+    /// which no list of platforms and no constant is.
+    fn is_code(&self) -> bool {
+        if self.groups.len() < FEWEST_GROUPS
+            || self
                 .groups
                 .first()
-                .is_some_and(|group| group.len() >= SHORTEST_GROUP)
-            && (self.marked() >= self.marks_needed() || self.capitals_with_a_digit())
-    }
-
-    /// How many marked groups give these away: fewer in a long code that
-    /// holds lower case, which no list of platforms and no constant is.
-    fn marks_needed(&self) -> usize {
-        if self.groups.len() >= LONG_CODE_GROUPS && self.holds_lower_case() {
+                .is_none_or(|group| group.len() < SHORTEST_GROUP)
+        {
+            return false;
+        }
+        let lower_case = self.groups.iter().any(|group| holds_lower_case(group));
+        if !lower_case && CAPITAL_SEPARATORS.contains(&self.separator) {
+            return self.groups.iter().any(|group| mixes(group));
+        }
+        let needed = if lower_case && self.groups.len() >= LONG_CODE_GROUPS {
             LONG_CODE_MARKED_GROUPS
         } else {
             MARKED_GROUPS
+        };
+        self.marks() >= needed
+    }
+
+    /// How many different marks these groups bear.
+    fn marks(&self) -> usize {
+        let mut marks: Vec<Mark<'_>> = Vec::new();
+        for mark in self.groups.iter().filter_map(|group| Mark::of(group)) {
+            if !marks.iter().any(|seen| seen.alike(&mark)) {
+                marks.push(mark);
+            }
         }
-    }
-
-    fn holds_lower_case(&self) -> bool {
-        self.groups
-            .iter()
-            .any(|group| group.bytes().any(|byte| byte.is_ascii_lowercase()))
-    }
-
-    /// How many different groups mix letters with digits or change case.
-    fn marked(&self) -> usize {
-        let mut marked: Vec<&str> = self
-            .groups
-            .iter()
-            .copied()
-            .filter(|group| mixes(group) || changes_case(group))
-            .collect();
-        marked.sort_unstable();
-        marked.dedup();
-        marked.len()
-    }
-
-    /// Whether these are capitals between dashes or slashes, one group of
-    /// which mixes letters with digits.
-    fn capitals_with_a_digit(&self) -> bool {
-        CAPITAL_SEPARATORS.contains(&self.separator)
-            && !self.holds_lower_case()
-            && self.groups.iter().any(|group| mixes(group))
+        marks.len()
     }
 }
 
-/// Every code a long run could hold: for each separator, the groups of one
-/// length in a row that it cuts each stretch between the others into.
-fn codes(run: &str) -> Vec<Code<'_>> {
-    let mut codes = Vec::new();
-    for separator in SEPARATORS {
-        let stretches =
-            run.split(|character: char| character != separator && SEPARATORS.contains(&character));
-        for stretch in stretches {
-            let groups: Vec<&str> = stretch.split(separator).collect();
-            codes.extend(
+/// Whether a long run holds a code written in groups of one length: for each
+/// separator, in each stretch between the others, groups of one length in a
+/// row that it cuts. [`GENERATED`] reads no such code, because each group
+/// passes for a word beside a number.
+fn grouped(run: &str) -> bool {
+    SEPARATORS.iter().any(|&separator| {
+        run.split(|character: char| character != separator && SEPARATORS.contains(&character))
+            .filter(|stretch| stretch.matches(separator).count() >= FEWEST_GROUPS - 1)
+            .any(|stretch| {
+                let groups: Vec<&str> = stretch.split(separator).collect();
                 groups
                     .chunk_by(|left, right| left.len() == right.len())
-                    .map(|groups| Code {
-                        separator,
-                        groups: groups.to_vec(),
-                    }),
-            );
-        }
-    }
-    codes
-}
-
-/// Whether a long run holds a code written in groups of one length.
-/// [`GENERATED`] reads no such code, because each group passes for a word
-/// beside a number.
-fn grouped(run: &str) -> bool {
-    codes(run).iter().any(Code::generated)
+                    .any(|groups| Groups { separator, groups }.is_code())
+            })
+    })
 }
 
 /// The fewest characters of a part that [`coded`] reads as mixing letters
@@ -494,33 +514,48 @@ fn coded(run: &str) -> bool {
     mixed >= MIXED_PARTS && mixed * 2 >= parts.len()
 }
 
-/// How many letters standing alone and words with no vowel a run's mixed-case
+/// How many letters standing alone and unspoken words a run's mixed-case
 /// parts must hold between them before it reads as scrambled. A name seldom
-/// holds more than two, as `ABISysV` holds `Sys` and `V`, though beside
-/// `SystemZ` it reaches three.
+/// holds more than two, as `CodeElementUIntUInt` holds two `U`s.
 const SCRAMBLED_WORDS: usize = 3;
 
 /// The fewest letters of a word that [`unspoken`] reads.
 const SHORTEST_UNSPOKEN_WORD: usize = 3;
 
-/// What a word that can be spoken holds one of.
-const VOWELS: &[u8] = b"aeiouAEIOU";
+/// What a word that can be spoken holds one of, `y` among them: `Sync`,
+/// `Try`.
+const VOWELS: &[u8] = b"aeiouyAEIOUY";
+
+/// The abbreviations with no vowel that names write in mixed case, as
+/// `HttpJwtSmtpService` does, which [`unspoken`] does not read in any case.
+const ABBREVIATIONS: [&str; 56] = [
+    "cdn", "cfg", "cmd", "cmp", "cms", "cpp", "crm", "css", "csv", "ctx", "dbg", "dhcp", "dns",
+    "ftp", "grpc", "html", "http", "https", "jdbc", "jpg", "jwt", "llm", "mcp", "mgr", "msg",
+    "mvc", "npm", "pdf", "pkg", "png", "psr", "ptr", "rgb", "rpc", "scss", "sdk", "sms", "smtp",
+    "snmp", "sql", "src", "ssh", "ssl", "std", "stmt", "str", "svg", "tcp", "tls", "tmp", "txt",
+    "vcs", "xhr", "xml", "xsd", "xss",
+];
 
 /// The words a part is written in: a new one opens at a capital after lower
 /// case, at a change between letters and digits, and at the last capital of a
-/// run that lower case follows, so `XMLHttp2` is `XML`, `Http` and `2`.
+/// run that lower case follows, so `XMLHttp2` is `XML`, `Http` and `2`. A
+/// lone `s` after capitals is their plural and stays with them: `getUserIDs`
+/// is `get`, `User` and `IDs`.
 fn words(part: &str) -> Vec<&str> {
-    let bytes = part.as_bytes();
+    let characters: Vec<(usize, char)> = part.char_indices().collect();
     let mut words = Vec::new();
     let mut start = 0;
-    for index in 1..bytes.len() {
-        let previous = bytes[index - 1];
-        let byte = bytes[index];
-        let opens = (previous.is_ascii_lowercase() && byte.is_ascii_uppercase())
-            || previous.is_ascii_digit() != byte.is_ascii_digit()
+    for (position, &(index, character)) in characters.iter().enumerate().skip(1) {
+        let previous = characters[position - 1].1;
+        let next = characters.get(position + 1).map(|&(_, next)| next);
+        let after = characters.get(position + 2).map(|&(_, after)| after);
+        let plural = next == Some('s') && !after.is_some_and(|after| after.is_ascii_lowercase());
+        let opens = (previous.is_ascii_lowercase() && character.is_ascii_uppercase())
+            || previous.is_ascii_digit() != character.is_ascii_digit()
             || (previous.is_ascii_uppercase()
-                && byte.is_ascii_uppercase()
-                && bytes.get(index + 1).is_some_and(u8::is_ascii_lowercase));
+                && character.is_ascii_uppercase()
+                && next.is_some_and(|next| next.is_ascii_lowercase())
+                && !plural);
         if opens {
             words.push(&part[start..index]);
             start = index;
@@ -534,23 +569,42 @@ fn is_number(word: &str) -> bool {
     word.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// Whether the word at `index` is one letter between two changes of case, as
-/// the `B` of `sBSw` is. The capital that opens `OAuth` and the `V` of `V2`
-/// are how names are written, so neither counts.
+/// Whether the word at `index` is one letter between two words that are not
+/// numbers, as the `B` of `sBSw` is. A capital that opens a part, `OAuth`, or
+/// ends one, `getX` and `AuthN`, and a letter beside a number, `V2`, are how
+/// names are written, so none counts.
 fn stands_alone(words: &[&str], index: usize) -> bool {
     index > 0
+        && index + 1 < words.len()
         && words[index].len() == 1
         && !is_number(words[index])
         && !is_number(words[index - 1])
-        && !words.get(index + 1).is_some_and(|next| is_number(next))
+        && !is_number(words[index + 1])
+}
+
+/// The most capitals an initialism is written in. Five capitals with no
+/// vowel, `VRSMQ`, are scrambled.
+const LONGEST_INITIALISM: usize = 4;
+
+/// Whether a word is an initialism, a few capitals with their plural `s` or
+/// without it: `PHP`, `PRs`, `HTML`.
+fn initialism(word: &str) -> bool {
+    let capitals = word.strip_suffix('s').unwrap_or(word);
+    (1..=LONGEST_INITIALISM).contains(&capitals.len())
+        && capitals.bytes().all(|byte| byte.is_ascii_uppercase())
 }
 
 /// Whether a word of letters is too long to be an initial and holds no vowel,
-/// as `Hbq` does.
+/// as `Hbq` does, and is neither an [initialism](initialism) nor one of the
+/// [`ABBREVIATIONS`].
 fn unspoken(word: &str) -> bool {
     word.len() >= SHORTEST_UNSPOKEN_WORD
         && word.bytes().all(|byte| byte.is_ascii_alphabetic())
         && !word.bytes().any(|byte| VOWELS.contains(&byte))
+        && !initialism(word)
+        && !ABBREVIATIONS
+            .iter()
+            .any(|abbreviation| abbreviation.eq_ignore_ascii_case(word))
 }
 
 /// Whether a long run's parts that mix cases are scrambled rather than
@@ -562,10 +616,7 @@ fn unspoken(word: &str) -> bool {
 fn scrambled(run: &str) -> bool {
     let mut parts: Vec<&str> = run
         .split(SEPARATORS)
-        .filter(|part| {
-            part.bytes().any(|byte| byte.is_ascii_lowercase())
-                && part.bytes().any(|byte| byte.is_ascii_uppercase())
-        })
+        .filter(|part| holds_lower_case(part) && part.bytes().any(|byte| byte.is_ascii_uppercase()))
         .collect();
     parts.sort_unstable();
     parts.dedup();
@@ -644,7 +695,7 @@ pub(crate) mod test_support {
     use super::Refusal;
 
     /// What a repository note says every day.
-    pub(crate) const RECORDED: [&str; 39] = [
+    pub(crate) const RECORDED: [&str; 57] = [
         "runner/zone_server/migrations/0002_search_knowledge_active_candidates.sql",
         "target/x86_64-unknown-linux-gnu/release/zone_server",
         "/api/v1/workspaces/knowledge/refresh-all-entries",
@@ -684,12 +735,30 @@ pub(crate) mod test_support {
         "OAUTH2_SERVER_PUBLIC_ACCESS_TOKEN_EXPIRY",
         "A_MAC_PORT_RX_LINKA_DFE_H10_AND_H11",
         "CLK_GOUT_HSI0_PPMU_HSI0_BUS0_ACLK",
+        "contrib/llvm-project/lldb/source/Plugins/ABI/SystemZ/ABISysV_s390x.cpp",
+        "app/Http/Controllers/Api/V2/HtmlToPdfController",
+        "app/Http/Controllers/Admin/Cms/V2/CmsPageController",
+        "app/Http/Controllers/Api/V1/Sms/SmsWebhookController",
+        "tests/PHPUnit/Http2/TLSConfigTest/fixtures",
+        "Sources/PDFKit/CSSParser/HTMLRenderer/Version2",
+        "lib/Parsers/Html5/XmlDocument/CssSelector",
+        "src/main/kotlin/com/example/v2/HttpJwtSmtpService",
+        "src/Sync/SyncHttpClient/TryParse/v2",
+        "src/utils/v2/getX/getY/getZ/geometry",
+        "docs/upgrade-guides/v10-v11-v12-v13-migration",
+        "release/2026/rc1/rc2/rc3/rc4/notes",
+        "chore/bump-node-n18-n20-n22-n24-images",
+        "ci/matrix/go1-py3-js5-rb3-integration-tests",
+        "infra/k8s/e2e/dev/stg/prd/values",
+        "deploy/k8s/e2e/gke/eks/aks/values2",
+        "Assets/Icons/iPad/iPod/iMac/icon_2x",
+        "feat/AuthN-AuthZ-OAuth-SAML2-support-for-sso",
     ];
 
     /// What no note should carry, with the reason each is turned away for.
     /// An issued prefix is spelt apart from its body so that no scanner reads
     /// a fixture as a leak.
-    pub(crate) const NOT_RECORDED: [(&str, Refusal); 48] = [
+    pub(crate) const NOT_RECORDED: [(&str, Refusal); 49] = [
         (
             concat!(
                 "The deploy token is ghp_",
@@ -890,6 +959,10 @@ pub(crate) mod test_support {
         ),
         (
             "Alerts post to api/v1/webhooks/CMgqqp_s7WGgs-gGiIaVRSMQ",
+            Refusal::Secret,
+        ),
+        (
+            "The signing key is kcvLZ_WKA8Mbbee_XeArKCkBHaKYSwfi",
             Refusal::Secret,
         ),
     ];
@@ -1380,48 +1453,11 @@ mod tests {
     }
 
     #[test]
-    fn a_code_is_not_a_name_whichever_separator_cuts_it() {
-        for text in [
-            "gbre_e4ck_zdqe_e26j_xufh_xahb_0rxn",
-            "D8d_06b_puv_HE1_7Yy_ooJ_j3X_19W_2ka",
-            "GBRE/E4CK/ZDQE/E26J/XUFH/XAHB/0RXN",
-            "blm/hsw/l43/ady/i7y/jvs/10u/rzw/nw9",
-            "rVAq-bxWp-IqNU-UJxJ-clER-D6ix-nAXN",
-            "BLM-HSW-L43-ADY-I7Y-JVS-10U-RZW-NW9",
-        ] {
-            assert!(
-                contains_credential(text),
-                "the detector reads {text} as generated by itself"
-            );
-            assert_eq!(refused_discovery(text), Some(Refusal::Secret), "{text}");
-        }
-    }
-
-    #[test]
-    fn a_value_scrambled_between_cases_is_not_a_name() {
-        for text in [
-            "xmff34J-sBSwncLFvmzIZCgqN_qTHgZv",
-            "kcvLZ_WKA8Mbbee_XeArKCkBHaKYSwfi",
-            "api/v1/webhooks/CMgqqp_s7WGgs-gGiIaVRSMQ",
-        ] {
-            assert!(
-                contains_credential(text),
-                "the detector reads {text} as generated by itself"
-            );
-            assert_eq!(refused_discovery(text), Some(Refusal::Secret), "{text}");
-        }
-    }
-
-    #[test]
-    fn a_name_that_repeats_a_marked_group_or_opens_a_word_with_a_capital_is_recorded() {
-        for text in [
-            "src/Appwrite/Platform/Modules/OAuth2/Http/OAuth2/Projects/XList.php",
-            "contrib/llvm-project/lldb/source/Plugins/ABI/AArch64/ABISysV_arm64.cpp",
-            "libarchive/test/test_read_format_7zip_bcj2_copy_lzma.7z.uu",
-            "OAUTH2_SERVER_PUBLIC_ACCESS_TOKEN_EXPIRY",
-            "A_MAC_PORT_RX_LINKA_DFE_H10_AND_H11",
-            "CLK_GOUT_HSI0_PPMU_HSI0_BUS0_ACLK",
-        ] {
+    fn every_name_recorded_is_one_the_detector_alone_takes_for_a_credential() {
+        for text in test_support::RECORDED
+            .into_iter()
+            .filter(|text| !text.contains(char::is_whitespace))
+        {
             assert!(
                 contains_credential(text),
                 "the detector reads {text} as a name by itself"
@@ -1431,14 +1467,16 @@ mod tests {
     }
 
     #[test]
-    fn a_name_that_strings_initials_together_reads_as_scrambled() {
-        let text = "contrib/llvm-project/lldb/source/Plugins/ABI/SystemZ/ABISysV_s390x.cpp";
-
-        assert!(
-            contains_credential(text),
-            "the detector reads {text} as generated by itself"
-        );
-        assert_eq!(refused_discovery(text), Some(Refusal::Secret));
+    fn a_name_is_cut_into_the_words_it_is_written_in() {
+        for (part, written) in [
+            ("XMLHttp2", &["XML", "Http", "2"][..]),
+            ("getUserIDs", &["get", "User", "IDs"]),
+            ("listPRs", &["list", "PRs"]),
+            ("HTTPsClient", &["HTTPs", "Client"]),
+            ("sBSwnc", &["s", "B", "Swnc"]),
+        ] {
+            assert_eq!(words(part), written, "{part}");
+        }
     }
 
     const URL_SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -1451,34 +1489,20 @@ mod tests {
 
     /// A generated value cut by separators: `groups` groups of `length`
     /// characters of `alphabet`, joined by `separator` after `prefix`, of
-    /// which at most one in `rarest` that the detector reads may be recorded.
+    /// which at most one in `allowed_one_in` that the detector reads may be
+    /// recorded. Each bound lies four standard deviations or more above what
+    /// [`SAMPLES`] values are expected to record at the rate measured over a
+    /// million, so that whichever seed draws them the test holds.
     struct Shape {
         alphabet: &'static [u8],
         length: usize,
         groups: usize,
         separator: &'static str,
         prefix: &'static str,
-        rarest: usize,
+        allowed_one_in: usize,
     }
 
     impl Shape {
-        fn code(
-            alphabet: &'static [u8],
-            length: usize,
-            groups: usize,
-            separator: &'static str,
-            rarest: usize,
-        ) -> Self {
-            Self {
-                alphabet,
-                length,
-                groups,
-                separator,
-                prefix: "",
-                rarest,
-            }
-        }
-
         fn draw(&self, random: &mut StdRng) -> String {
             let groups: Vec<String> = (0..self.groups)
                 .map(|_| {
@@ -1495,20 +1519,65 @@ mod tests {
 
     fn shapes() -> Vec<Shape> {
         let mut shapes = vec![
-            Shape::code(URL_SAFE, 32, 1, "", 1000),
             Shape {
-                prefix: "api/v1/webhooks/",
-                ..Shape::code(URL_SAFE, 24, 1, "", 75)
+                alphabet: URL_SAFE,
+                length: 32,
+                groups: 1,
+                separator: "",
+                prefix: "",
+                allowed_one_in: 250,
             },
-            Shape::code(CAPITALS, 4, 7, "/", 1000),
-            Shape::code(CAPITALS, 3, 9, "/", 1000),
-            Shape::code(CAPITALS, 3, 9, "-", 1000),
+            Shape {
+                alphabet: URL_SAFE,
+                length: 24,
+                groups: 1,
+                separator: "",
+                prefix: "api/v1/webhooks/",
+                allowed_one_in: 40,
+            },
+            Shape {
+                alphabet: MIXED_CASE,
+                length: 4,
+                groups: 4,
+                separator: "/",
+                prefix: "deploy/keys/staging/",
+                allowed_one_in: 12,
+            },
+            Shape {
+                alphabet: CAPITALS,
+                length: 4,
+                groups: 7,
+                separator: "/",
+                prefix: "",
+                allowed_one_in: 1500,
+            },
         ];
+        for separator in ["/", "-"] {
+            shapes.push(Shape {
+                alphabet: CAPITALS,
+                length: 3,
+                groups: 9,
+                separator,
+                prefix: "",
+                allowed_one_in: 900,
+            });
+        }
         for separator in ["_", "/", "-"] {
-            shapes.push(Shape::code(MIXED_CASE, 4, 7, separator, 1000));
-            shapes.push(Shape::code(MIXED_CASE, 3, 9, separator, 1000));
-            shapes.push(Shape::code(LOWER_CASE, 4, 7, separator, 200));
-            shapes.push(Shape::code(LOWER_CASE, 3, 9, separator, 100));
+            for (alphabet, length, groups, allowed_one_in) in [
+                (MIXED_CASE, 4, 7, 1500),
+                (MIXED_CASE, 3, 9, 600),
+                (LOWER_CASE, 4, 7, 100),
+                (LOWER_CASE, 3, 9, 10),
+            ] {
+                shapes.push(Shape {
+                    alphabet,
+                    length,
+                    groups,
+                    separator,
+                    prefix: "",
+                    allowed_one_in,
+                });
+            }
         }
         shapes
     }
@@ -1531,10 +1600,10 @@ mod tests {
                 }
             }
             assert!(
-                recorded.len() * shape.rarest <= read,
+                recorded.len() * shape.allowed_one_in <= read,
                 "{} of {read} recorded, more than one in {}: {recorded:?}",
                 recorded.len(),
-                shape.rarest
+                shape.allowed_one_in
             );
         }
     }
