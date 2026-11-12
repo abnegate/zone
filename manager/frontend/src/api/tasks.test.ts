@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import created from '../../../../runner/zone_server/tests/fixtures/task-created.json';
+import { ActiveRunError } from '../features/tasks/ActiveRunError';
 import { TaskProgressMessageSchema } from '../features/tasks/schemas';
 import { tasksApi } from './tasks';
 
@@ -250,14 +251,67 @@ describe('editing many tasks at once', () => {
     ]);
   });
 
-  it('surfaces the server refusal rather than a bare status', async () => {
+  it('sends the projects to add and remove, never a replacement list', async () => {
+    fetch.mockResolvedValueOnce(Response.json({ tasks: [first, second] }));
+
+    await tasksApi.updateTasks('workspace-1', ids, {
+      add_project_ids: ['project-3'],
+      remove_project_ids: ['project-1'],
+    });
+
+    const [, init] = fetch.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({
+      ids,
+      add_project_ids: ['project-3'],
+      remove_project_ids: ['project-1'],
+    });
+  });
+
+  it('names the tasks a live run holds when the server refuses for them', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json(
+        { error: 'Task has an active run or is no longer available', ids: ['task-2'] },
+        { status: 409 }
+      )
+    );
+
+    const failure = await tasksApi
+      .updateTasks('workspace-1', ids, { status: 'paused' })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ActiveRunError);
+    expect((failure as ActiveRunError).name).toBe('ActiveRunError');
+    expect((failure as ActiveRunError).message).toBe(
+      'Task has an active run or is no longer available'
+    );
+    expect((failure as ActiveRunError).ids).toEqual(['task-2']);
+  });
+
+  it('surfaces a refusal without ids as a plain error', async () => {
     fetch.mockResolvedValueOnce(
       Response.json({ error: 'Task has an active run or is no longer available' }, { status: 409 })
     );
 
-    await expect(tasksApi.updateTasks('workspace-1', ids, { status: 'paused' })).rejects.toThrow(
-      'Task has an active run or is no longer available'
+    const failure = await tasksApi
+      .updateTasks('workspace-1', ids, { status: 'paused' })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(ActiveRunError);
+    expect((failure as Error).message).toBe('Task has an active run or is no longer available');
+  });
+
+  it('surfaces any other refusal with its message', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json({ error: 'A project cannot be both added and removed' }, { status: 400 })
     );
+
+    const failure = await tasksApi
+      .updateTasks('workspace-1', ids, { add_project_ids: ['project-1'] })
+      .catch((error: unknown) => error);
+
+    expect(failure).not.toBeInstanceOf(ActiveRunError);
+    expect((failure as Error).message).toBe('A project cannot be both added and removed');
   });
 
   it('names the status when the refusal has no message', async () => {

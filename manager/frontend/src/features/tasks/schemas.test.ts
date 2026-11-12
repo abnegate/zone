@@ -48,14 +48,16 @@ describe('an edit of many tasks', () => {
   it.each([
     { status: 'paused' },
     { priority: 5 },
-    { project_ids: [] },
-    { project_ids: ['project-1'] },
+    { add_project_ids: ['project-1'] },
+    { remove_project_ids: ['project-2'] },
+    { add_project_ids: ['project-1'], remove_project_ids: ['project-2'] },
     { is_agentic: false },
     { require_plan_approval: true },
     {
       status: 'blocked',
       priority: 1,
-      project_ids: ['project-1'],
+      add_project_ids: ['project-1'],
+      remove_project_ids: ['project-2'],
       is_agentic: true,
       require_plan_approval: false,
     },
@@ -65,6 +67,14 @@ describe('an edit of many tasks', () => {
 
   it('rejects a status the server never writes', () => {
     expect(UpdateTasksRequestSchema.safeParse({ ids, status: 'archived' }).success).toBe(false);
+  });
+
+  it.each([0, 6, 2.5])('rejects priority %p outside the one to five scale', (priority) => {
+    expect(UpdateTasksRequestSchema.safeParse({ ids, priority }).success).toBe(false);
+  });
+
+  it('never replaces the project list of every task', () => {
+    expect(Object.keys(UpdateTasksRequestSchema.shape)).not.toContain('project_ids');
   });
 
   it('requires only the ids, so every change may be left out', () => {

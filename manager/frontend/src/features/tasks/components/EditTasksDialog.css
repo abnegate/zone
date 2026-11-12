@@ -19,27 +19,29 @@
   overflow-y: auto;
 }
 
-.edit-tasks-projects .edit-tasks-project-list label {
+.edit-tasks-project-list .ui-checkbox-wrapper {
+  align-items: center;
+}
+
+.edit-tasks-project-list .ui-checkbox {
+  margin: 0;
+}
+
+.edit-tasks-project-list .ui-checkbox-copy {
+  flex: 1;
+}
+
+.edit-tasks-project-list .ui-checkbox-copy .ui-label {
   display: flex;
   align-items: center;
-  gap: var(--ui-space-2);
   min-height: var(--ui-control-height-sm);
-  margin: 0;
-  font-size: var(--ui-text-sm);
   font-weight: 400;
   color: var(--ui-text-primary);
   overflow-wrap: anywhere;
-  cursor: pointer;
-}
-
-.edit-tasks-project-list input {
-  flex-shrink: 0;
-  margin: 0;
-  accent-color: var(--ui-accent);
 }
 
 @media (any-pointer: coarse) {
-  .edit-tasks-projects .edit-tasks-project-list label {
+  .edit-tasks-project-list .ui-checkbox-copy .ui-label {
     min-height: var(--ui-control-height);
   }
 }

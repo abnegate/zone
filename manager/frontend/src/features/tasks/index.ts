@@ -1,3 +1,4 @@
+export { ActiveRunError } from './ActiveRunError';
 export { useTask, useTaskRuns, useTasks } from './hooks';
 export { TasksPage } from './pages';
 export {
@@ -34,6 +35,7 @@ export type {
   TaskRunLogsResponse,
   TaskRunResponse,
   TaskRunsResponse,
+  TaskSettings,
   TaskStatus,
   TasksResponse,
   UpdateTaskRequest,

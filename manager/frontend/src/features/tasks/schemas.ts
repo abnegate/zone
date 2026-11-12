@@ -143,10 +143,16 @@ export const UpdateTaskRequestSchema = z.object({
 export const UpdateTasksRequestSchema = z.object({
   ids: z.array(z.string()).min(1),
   status: TaskStatusSchema.optional(),
-  priority: z.number().optional(),
-  project_ids: z.array(z.string()).optional(),
+  priority: z.number().int().min(1).max(5).optional(),
+  add_project_ids: z.array(z.string()).optional(),
+  remove_project_ids: z.array(z.string()).optional(),
   is_agentic: z.boolean().optional(),
   require_plan_approval: z.boolean().optional(),
+});
+
+export const ActiveRunRefusalSchema = z.object({
+  error: z.string(),
+  ids: z.array(z.string()),
 });
 
 export const TasksResponseSchema = z.object({

@@ -1,15 +1,18 @@
-import { Button, Modal, Select } from '@zone/ui';
-import { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Button, Checkbox, Modal, Select } from '@zone/ui';
+import { useMemo, useState } from 'react';
 import type { Project } from '../../projects/types';
-import { Edits } from '../Edits';
+import { Edits, ProjectEdit } from '../Edits';
 import { PRIORITIES } from '../priority';
 import { STATUS_OPTIONS } from '../status';
-import type { Task, TaskChanges, TaskStatus } from '../types';
+import type { Task, TaskChanges, TaskSettings, TaskStatus } from '../types';
 import './EditTasksDialog.css';
 
 const UNCHANGED = '';
 const ON = 'on';
 const OFF = 'off';
+const INDETERMINATE = 'indeterminate';
+
+type CheckState = boolean | typeof INDETERMINATE;
 
 const UNCHANGED_OPTION = { value: UNCHANGED, label: 'Unchanged' };
 
@@ -25,19 +28,19 @@ const PRIORITY_CHOICES = [
 
 const SWITCH_CHOICES = [UNCHANGED_OPTION, { value: ON, label: 'On' }, { value: OFF, label: 'Off' }];
 
+const PARTLY_SHARED_CYCLE: readonly ProjectEdit[] = [
+  ProjectEdit.UNCHANGED,
+  ProjectEdit.ADD,
+  ProjectEdit.REMOVE,
+];
+const SHARED_CYCLE: readonly ProjectEdit[] = [ProjectEdit.UNCHANGED, ProjectEdit.REMOVE];
+const UNUSED_CYCLE: readonly ProjectEdit[] = [ProjectEdit.UNCHANGED, ProjectEdit.ADD];
+
 interface EditTasksDialogProps {
   tasks: readonly Task[];
   projects: readonly Project[];
   onSave: (changes: TaskChanges) => Promise<void>;
   onClose: () => void;
-}
-
-interface ProjectOptionProps {
-  project: Project;
-  checked: boolean;
-  indeterminate: boolean;
-  disabled: boolean;
-  onToggle: () => void;
 }
 
 function titleOf(count: number): string {
@@ -53,67 +56,46 @@ function switchOf(choice: string): boolean | undefined {
   return choice === UNCHANGED ? undefined : choice === ON;
 }
 
-function sharedProjects(tasks: readonly Task[]): string[] {
-  const [first, ...rest] = tasks;
-  if (!first) return [];
-  return first.project_ids.filter((id) => rest.every((task) => task.project_ids.includes(id)));
-}
-
-function partlySharedProjects(tasks: readonly Task[], shared: readonly string[]): Set<string> {
-  const partly = new Set(tasks.flatMap((task) => task.project_ids));
-  for (const id of shared) partly.delete(id);
-  return partly;
-}
-
-function ProjectOption({
-  project,
-  checked,
-  indeterminate,
-  disabled,
-  onToggle,
-}: ProjectOptionProps) {
-  const input = useRef<HTMLInputElement>(null);
-
-  useLayoutEffect(() => {
-    if (input.current) input.current.indeterminate = indeterminate;
-  }, [indeterminate]);
-
-  return (
-    <label>
-      <input
-        ref={input}
-        type="checkbox"
-        checked={checked}
-        disabled={disabled}
-        onChange={onToggle}
-      />
-      {project.name}
-    </label>
+function membershipOf(tasks: readonly Task[]): ReadonlyMap<string, CheckState> {
+  const counts = new Map<string, number>();
+  for (const task of tasks) {
+    for (const id of new Set(task.project_ids)) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return new Map(
+    [...counts].map(([id, count]) => [id, count === tasks.length ? true : INDETERMINATE])
   );
+}
+
+function cycleOf(original: CheckState): readonly ProjectEdit[] {
+  if (original === INDETERMINATE) return PARTLY_SHARED_CYCLE;
+  return original ? SHARED_CYCLE : UNUSED_CYCLE;
+}
+
+function nextEdit(original: CheckState, edit: ProjectEdit): ProjectEdit {
+  const cycle = cycleOf(original);
+  return cycle[(cycle.indexOf(edit) + 1) % cycle.length];
+}
+
+function stateOf(original: CheckState, edit: ProjectEdit): CheckState {
+  if (edit === ProjectEdit.ADD) return true;
+  if (edit === ProjectEdit.REMOVE) return false;
+  return original;
 }
 
 export function EditTasksDialog({ tasks, projects, onSave, onClose }: EditTasksDialogProps) {
   const [edits, setEdits] = useState(Edits.NONE);
   const [saving, setSaving] = useState(false);
-  const shared = useMemo(() => sharedProjects(tasks), [tasks]);
-  const partly = useMemo(() => partlySharedProjects(tasks, shared), [tasks, shared]);
+  const membership = useMemo(() => membershipOf(tasks), [tasks]);
   const changes = edits.request();
-  const chosen = changes.project_ids;
 
-  const change = <K extends keyof TaskChanges>(key: K, value: TaskChanges[K] | undefined) => {
+  const originalOf = (id: string): CheckState => membership.get(id) ?? false;
+
+  const change = <K extends keyof TaskSettings>(key: K, value: TaskSettings[K] | undefined) => {
     setEdits((current) => current.with(key, value));
   };
 
-  const toggleProject = (id: string) => {
-    setEdits((current) => {
-      const projectIds = current.request().project_ids ?? shared;
-      return current.with(
-        'project_ids',
-        projectIds.includes(id)
-          ? projectIds.filter((projectId) => projectId !== id)
-          : [...projectIds, id]
-      );
-    });
+  const cycleProject = (id: string) => {
+    setEdits((current) => current.project(id, nextEdit(originalOf(id), current.projectEdit(id))));
   };
 
   const save = async () => {
@@ -182,13 +164,13 @@ export function EditTasksDialog({ tasks, projects, onSave, onClose }: EditTasksD
             <legend className="form-label">Projects</legend>
             <div className="edit-tasks-project-list">
               {projects.map((project) => (
-                <ProjectOption
+                <Checkbox
                   key={project.id}
-                  project={project}
-                  checked={(chosen ?? shared).includes(project.id)}
-                  indeterminate={!chosen && partly.has(project.id)}
+                  id={`edit-tasks-project-${project.id}`}
+                  label={project.name}
+                  checked={stateOf(originalOf(project.id), edits.projectEdit(project.id))}
                   disabled={saving}
-                  onToggle={() => toggleProject(project.id)}
+                  onCheckedChange={() => cycleProject(project.id)}
                 />
               ))}
             </div>

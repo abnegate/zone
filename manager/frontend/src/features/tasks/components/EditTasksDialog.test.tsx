@@ -89,8 +89,16 @@ function cancelButton(): HTMLButtonElement {
   return screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement;
 }
 
-function projectBox(name: string): HTMLInputElement {
-  return screen.getByRole('checkbox', { name }) as HTMLInputElement;
+const CHECKED = 'true';
+const UNCHECKED = 'false';
+const MIXED = 'mixed';
+
+function projectBox(name: string): HTMLElement {
+  return screen.getByRole('checkbox', { name });
+}
+
+function stateOf(name: string): string | null {
+  return projectBox(name).getAttribute('aria-checked');
 }
 
 function optionNames(label: string): string[] {
@@ -199,14 +207,12 @@ describe('EditTasksDialog', () => {
     const projects = screen.getByRole('group', { name: 'Projects' });
 
     expect(within(projects).getAllByRole('checkbox')).toHaveLength(3);
-    expect(projectBox('Console').checked).toBe(true);
-    expect(projectBox('Console').indeterminate).toBe(false);
-    expect(projectBox('Runner').indeterminate).toBe(true);
-    expect(projectBox('Docs').checked).toBe(false);
-    expect(projectBox('Docs').indeterminate).toBe(false);
+    expect(stateOf('Console')).toBe(CHECKED);
+    expect(stateOf('Runner')).toBe(MIXED);
+    expect(stateOf('Docs')).toBe(UNCHECKED);
   });
 
-  it('leaves projects out until one is toggled', async () => {
+  it('leaves projects out until one is clicked', async () => {
     const { onSave } = renderDialog();
 
     chooseSelect('Priority', '2 · Low');
@@ -216,42 +222,109 @@ describe('EditTasksDialog', () => {
     expect(onSave.mock.calls[0][0]).toEqual({ priority: 2 });
   });
 
-  it('sends the full project list once a project is toggled', async () => {
+  it('adds a new project without touching the projects only some tasks have', async () => {
     const { onSave } = renderDialog();
 
     fireEvent.click(projectBox('Docs'));
 
-    expect(projectBox('Docs').checked).toBe(true);
-    expect(projectBox('Runner').indeterminate).toBe(false);
-    expect(projectBox('Runner').checked).toBe(false);
-    expect(saveButton().disabled).toBe(false);
+    expect(stateOf('Docs')).toBe(CHECKED);
+    expect(stateOf('Runner')).toBe(MIXED);
+    expect(stateOf('Console')).toBe(CHECKED);
     fireEvent.click(saveButton());
 
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
-    expect(onSave.mock.calls[0][0]).toEqual({ project_ids: ['project-1', 'project-3'] });
+    const changes = onSave.mock.calls[0][0];
+    expect(changes).toEqual({ add_project_ids: ['project-3'] });
+    expect(JSON.stringify(changes)).not.toContain('project-2');
   });
 
-  it('adds a partly shared project to every task when it is checked', async () => {
+  it('removes a shared project from every task with one click', async () => {
+    const { onSave } = renderDialog();
+
+    fireEvent.click(projectBox('Console'));
+
+    expect(stateOf('Console')).toBe(UNCHECKED);
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toEqual({ remove_project_ids: ['project-1'] });
+  });
+
+  it('cycles a partly shared project through add, remove and back to unchanged', async () => {
     const { onSave } = renderDialog();
 
     fireEvent.click(projectBox('Runner'));
+    expect(stateOf('Runner')).toBe(CHECKED);
+    expect(saveButton().disabled).toBe(false);
 
-    expect(projectBox('Runner').checked).toBe(true);
-    expect(projectBox('Runner').indeterminate).toBe(false);
+    fireEvent.click(projectBox('Runner'));
+    expect(stateOf('Runner')).toBe(UNCHECKED);
+    expect(saveButton().disabled).toBe(false);
+
+    fireEvent.click(projectBox('Runner'));
+    expect(stateOf('Runner')).toBe(MIXED);
+    expect(saveButton().disabled).toBe(true);
+
+    fireEvent.click(projectBox('Runner'));
     fireEvent.click(saveButton());
-
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
-    expect(onSave.mock.calls[0][0]).toEqual({ project_ids: ['project-1', 'project-2'] });
+    expect(onSave.mock.calls[0][0]).toEqual({ add_project_ids: ['project-2'] });
   });
 
-  it('clears every project when the shared one is unchecked', async () => {
-    const { onSave } = renderDialog(undefined, [TASKS[1]]);
+  it('removes a partly shared project from the tasks that have it', async () => {
+    const { onSave } = renderDialog();
 
-    fireEvent.click(projectBox('Console'));
+    fireEvent.click(projectBox('Runner'));
+    fireEvent.click(projectBox('Runner'));
     fireEvent.click(saveButton());
 
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
-    expect(onSave.mock.calls[0][0]).toEqual({ project_ids: [] });
+    expect(onSave.mock.calls[0][0]).toEqual({ remove_project_ids: ['project-2'] });
+  });
+
+  it('returns a project checked then unchecked to untouched', () => {
+    renderDialog();
+
+    fireEvent.click(projectBox('Docs'));
+    expect(saveButton().disabled).toBe(false);
+    fireEvent.click(projectBox('Docs'));
+
+    expect(stateOf('Docs')).toBe(UNCHECKED);
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it('returns a shared project unchecked then checked to untouched', () => {
+    renderDialog();
+
+    fireEvent.click(projectBox('Console'));
+    fireEvent.click(projectBox('Console'));
+
+    expect(stateOf('Console')).toBe(CHECKED);
+    expect(saveButton().disabled).toBe(true);
+  });
+
+  it('toggles a project from its name', () => {
+    renderDialog();
+
+    fireEvent.click(screen.getByText('Docs'));
+
+    expect(stateOf('Docs')).toBe(CHECKED);
+  });
+
+  it('sends project edits beside the other changes', async () => {
+    const { onSave } = renderDialog();
+
+    chooseSelect('Status', 'Blocked');
+    fireEvent.click(projectBox('Console'));
+    fireEvent.click(projectBox('Docs'));
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toEqual({
+      status: 'blocked',
+      add_project_ids: ['project-3'],
+      remove_project_ids: ['project-1'],
+    });
   });
 
   it('shows loading and locks the dialog while saving', async () => {
@@ -266,6 +339,7 @@ describe('EditTasksDialog', () => {
       expect(saveButton().querySelector('.ui-btn-spinner')).not.toBeNull();
     });
     expect(cancelButton().disabled).toBe(true);
+    expect(projectBox('Docs').hasAttribute('disabled')).toBe(true);
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog', { name: TITLE })).toBeTruthy();

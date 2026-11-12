@@ -153,10 +153,15 @@ export interface UpdateTaskRequest {
   source_ids?: string[];
 }
 
-export type TaskChanges = Pick<
+export type TaskSettings = Pick<
   UpdateTaskRequest,
-  'status' | 'priority' | 'project_ids' | 'is_agentic' | 'require_plan_approval'
+  'status' | 'priority' | 'is_agentic' | 'require_plan_approval'
 >;
+
+export type TaskChanges = TaskSettings & {
+  add_project_ids?: string[];
+  remove_project_ids?: string[];
+};
 
 export interface UpdateTasksRequest extends TaskChanges {
   ids: string[];
