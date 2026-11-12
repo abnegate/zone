@@ -336,7 +336,7 @@ async fn a_member_of_two_workspaces_cannot_edit_one_workspaces_task_through_the_
         .edit(
             first_owner.workspace,
             &member.token,
-            &json!({ "ids": [second_workspace_task], "priority": 9 }),
+            &json!({ "ids": [second_workspace_task], "priority": 3 }),
         )
         .await;
     refused(&crossing, StatusCode::NOT_FOUND, TASK_NOT_FOUND);
@@ -345,7 +345,7 @@ async fn a_member_of_two_workspaces_cannot_edit_one_workspaces_task_through_the_
         .edit(
             first_owner.workspace,
             &member.token,
-            &json!({ "ids": [first_workspace_task, second_workspace_task], "priority": 9 }),
+            &json!({ "ids": [first_workspace_task, second_workspace_task], "priority": 3 }),
         )
         .await;
     refused(&mixed, StatusCode::NOT_FOUND, TASK_NOT_FOUND);
@@ -365,10 +365,10 @@ async fn a_member_of_two_workspaces_cannot_edit_one_workspaces_task_through_the_
         .edit(
             first_owner.workspace,
             &member.token,
-            &json!({ "ids": [first_workspace_task], "priority": 9 }),
+            &json!({ "ids": [first_workspace_task], "priority": 3 }),
         )
         .await;
-    assert_eq!(edited(&own)[0]["priority"], 9);
+    assert_eq!(edited(&own)[0]["priority"], 3);
 
     board.cleanup().await;
 }
@@ -413,7 +413,7 @@ async fn strangers_and_viewers_cannot_edit_many_tasks() {
             .edit(
                 owner.workspace,
                 &outsider.token,
-                &json!({ "ids": [first, second], "status": "cancelled", "priority": 7 }),
+                &json!({ "ids": [first, second], "status": "cancelled", "priority": 4 }),
             )
             .await;
         refused(&response, StatusCode::NOT_FOUND, TASK_NOT_FOUND);
@@ -441,7 +441,7 @@ async fn a_status_change_on_a_running_task_conflicts_and_changes_nothing() {
         .edit(
             owner.workspace,
             &owner.token,
-            &json!({ "ids": [idle, running], "status": "paused", "priority": 8 }),
+            &json!({ "ids": [idle, running], "status": "paused", "priority": 5 }),
         )
         .await;
 
@@ -452,7 +452,7 @@ async fn a_status_change_on_a_running_task_conflicts_and_changes_nothing() {
         .edit(
             owner.workspace,
             &owner.token,
-            &json!({ "ids": [idle, running], "priority": 8 }),
+            &json!({ "ids": [idle, running], "priority": 5 }),
         )
         .await;
     let tasks = edited(&response);
@@ -461,7 +461,7 @@ async fn a_status_change_on_a_running_task_conflicts_and_changes_nothing() {
     let after = board.snapshot(&owner, &[idle, running]).await;
     assert_eq!(after[0]["status"], "created");
     assert_eq!(after[1]["status"], "queued");
-    assert!(after.iter().all(|task| task["priority"] == 8));
+    assert!(after.iter().all(|task| task["priority"] == 5));
 
     board.cleanup().await;
 }
@@ -482,7 +482,7 @@ async fn a_project_from_another_workspace_is_refused_and_changes_nothing() {
             .edit(
                 owner.workspace,
                 &owner.token,
-                &json!({ "ids": [first, second], "priority": 6, "project_ids": project_ids }),
+                &json!({ "ids": [first, second], "priority": 3, "project_ids": project_ids }),
             )
             .await;
         refused(&response, StatusCode::BAD_REQUEST, PROJECT_UNAVAILABLE);

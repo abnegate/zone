@@ -373,10 +373,12 @@ describe('tasks page layout', () => {
     expect(target).not.toContain('left:');
   });
 
-  it('shows the grip and the menu wherever any pointer is coarse, not only without hover', () => {
+  it('shows the grip, the selector and the menu wherever any pointer is coarse, not only without hover', () => {
     expect(cards).not.toContain('(hover: none)');
     const touch = media(cards, '(any-pointer: coarse)');
-    expect(rule(touch, '.task-card-handle,\n  .task-card-menu')).toContain('opacity: 1');
+    expect(rule(touch, '.task-card-handle, .task-card-selector, .task-card-menu')).toContain(
+      'opacity: 1'
+    );
   });
 
   it('keeps the drag placeholder muted and dashed in the dark theme and under the pointer', () => {
