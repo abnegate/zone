@@ -352,8 +352,9 @@ const LONG_CODE_GROUPS: usize = 5;
 const LONG_CODE_MARKED_GROUPS: usize = 2;
 
 /// The separators between which one group that mixes letters with digits
-/// makes capitals a code. No name is written in capitals between them, while
-/// a constant is written in capitals between underscores.
+/// makes capitals a code, unless every such group is written alike, as a list
+/// of versions is: `V10-V11-V12-V13`. No other name is written in capitals
+/// between them, while a constant is written in capitals between underscores.
 const CAPITAL_SEPARATORS: [char; 2] = ['-', '/'];
 
 /// The separator a recovery code and a licence key are written with.
@@ -464,7 +465,8 @@ impl Groups<'_> {
         }
         let lower_case = self.groups.iter().any(|group| holds_lower_case(group));
         if !lower_case && CAPITAL_SEPARATORS.contains(&self.separator) {
-            return self.groups.iter().any(|group| mixes(group));
+            let mixed = self.groups.iter().filter(|group| mixes(group)).count();
+            return mixed == 1 || (mixed > 1 && self.marks() > 1);
         }
         if self.separator == DASH
             && length >= SHORTEST_DASHED_GROUP
@@ -1389,6 +1391,8 @@ mod tests {
             "images/build-linux-arm64-amd64-for-the-release-runners",
             "fixtures/2026-1110-1200-0001-0002-seed-data-for-the-suite.sql",
             "releases/v1-v2-v3-v4-v5-compatibility-matrix-for-clients",
+            "releases/V10-V11-V12-V13-V14-compatibility-matrix-for-clients",
+            "releases/RC1/RC2/RC3/RC4/notes-for-the-release-candidates",
             "docs/HTTP-POST-JSON-BODY-examples-for-the-v2-api",
             "runner/zone_server/tests/fixtures/ISO-8859-1-SHIFT-JIS-UTF-16LE.txt",
             "docs/notes/make-some-test-data-work-well-here-v2.md",
