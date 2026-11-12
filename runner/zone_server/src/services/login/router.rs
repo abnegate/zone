@@ -38,7 +38,9 @@ const REST: TimeDelta = TimeDelta::minutes(5);
 /// every login but those in `exclude` is resolved, its usage brought up to date, and ranked:
 /// `preferred`'s logins before every other agent's, and within an agent the most headroom first,
 /// then those whose usage is unknown, then the least recently used, then by label. A login that
-/// is exhausted or cannot be resolved is never picked.
+/// is exhausted or cannot be resolved is never picked. A login's usage is judged by the windows
+/// that limit `model`: one scoped to another model, such as `7d Fable` for a session on Opus,
+/// neither exhausts the login nor takes from its headroom.
 ///
 /// A login that refused `model`, the one the session runs on `preferred`, for want of usage
 /// credits within [`unfunded::COOL_DOWN`] cannot run the session: it ranks after every other
@@ -73,7 +75,7 @@ pub async fn pick(
     if let Some(login) = sticky.and_then(|sticky| logins.iter().find(|login| login.id == sticky))
         && AgentKind::named(&login.agent) == Some(preferred)
         && !cooling.contains(&login.id)
-        && Standing::of(login, login.snapshot().as_ref(), now).usable()
+        && Standing::of(login, login.snapshot().as_ref(), model, now).usable()
     {
         match credential::resolve(state, login).await {
             Ok(resolved) => {
@@ -126,7 +128,7 @@ pub async fn pick(
     usage::refresh(state, &mut candidates).await;
     let mut ranked = Vec::with_capacity(candidates.len());
     for chosen in candidates {
-        match Standing::of(&chosen.login, chosen.snapshot.as_ref(), now) {
+        match Standing::of(&chosen.login, chosen.snapshot.as_ref(), model, now) {
             Standing::Exhausted { until } => spent.push(until),
             standing => ranked.push((standing, chosen)),
         }
@@ -480,6 +482,13 @@ mod tests {
                 .expect("the login's usage to be stored");
         }
 
+        /// Stores a reading of `login`'s usage made of `windows`, read now.
+        async fn windows(&self, login: Uuid, windows: Vec<Window>) {
+            agent_logins::observe(&self.pool, login, &Snapshot::new(windows, Utc::now()))
+                .await
+                .expect("the login's usage to be stored");
+        }
+
         async fn exhaust(&self, login: Uuid, until: DateTime<Utc>) {
             sqlx::query("UPDATE agent_logins SET exhausted_until = $2 WHERE id = $1")
                 .bind(login)
@@ -596,6 +605,88 @@ mod tests {
             Some(70.0)
         );
         assert!(matches!(chosen.resolved, Login::Claude { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_limit_on_another_model_never_spends_a_login_for_the_sessions_model() {
+        let scene = Scene::new().await;
+        let five_hours = Utc::now() + TimeDelta::hours(3);
+        let soon = Utc::now() + TimeDelta::hours(14);
+        let later = Utc::now() + TimeDelta::days(2);
+        let latest = Utc::now() + TimeDelta::days(3);
+        let session = scene.login(AgentKind::Claude, "session", None).await;
+        let weekly = scene.login(AgentKind::Claude, "weekly", None).await;
+        let roomy = scene.login(AgentKind::Claude, "roomy", None).await;
+        let tight = scene.login(AgentKind::Claude, "tight", None).await;
+        scene
+            .windows(
+                session,
+                vec![
+                    window(FIVE_HOURS, 100.0, Some(five_hours)),
+                    window(SEVEN_DAYS, 15.0, Some(latest)),
+                    window("7d Fable", 3.0, Some(latest)),
+                ],
+            )
+            .await;
+        scene
+            .windows(
+                weekly,
+                vec![
+                    window(SEVEN_DAYS, 100.0, Some(soon)),
+                    window("7d Fable", 0.0, Some(soon)),
+                ],
+            )
+            .await;
+        scene
+            .windows(
+                roomy,
+                vec![
+                    window(SEVEN_DAYS, 71.0, Some(later)),
+                    window("7d Fable", 100.0, Some(later)),
+                ],
+            )
+            .await;
+        scene
+            .windows(
+                tight,
+                vec![
+                    window(SEVEN_DAYS, 86.0, Some(latest)),
+                    window("7d Fable", 100.0, Some(latest)),
+                ],
+            )
+            .await;
+
+        let on_opus = scene.running(MODEL, AgentKind::Claude, &[], None).await;
+        let after_roomy = scene
+            .running(MODEL, AgentKind::Claude, &[roomy], None)
+            .await;
+        let on_fable = pick(
+            &scene.state,
+            scene.organization,
+            AgentKind::Claude,
+            &[],
+            None,
+            Some("fable"),
+            false,
+        )
+        .await;
+        scene.remove().await;
+
+        assert_eq!(
+            on_opus, roomy,
+            "the most headroom on opus is the login's own"
+        );
+        assert_eq!(after_roomy, tight);
+        match on_fable {
+            Err(Error::Exhausted {
+                resets_at: Some(at),
+            }) => assert_eq!(
+                at.timestamp_micros(),
+                five_hours.timestamp_micros(),
+                "a fable session is spent on every login until the earliest reset"
+            ),
+            other => panic!("expected every login to be spent on fable, got {other:?}"),
+        }
     }
 
     #[tokio::test]

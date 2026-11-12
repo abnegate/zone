@@ -244,7 +244,7 @@ pub async fn opening(
     let unfunded = model.is_some_and(|model| router::unfunded::cooling(model, now).contains(&left));
     let (reason, resets_at) = match from.agent != configured && to.agent == configured {
         true => (Reason::Configured, None),
-        false => standing(&row, unfunded, now),
+        false => standing(&row, model, unfunded, now),
     };
     let carried = previous.agent == to.agent
         && from.agent == to.agent
@@ -415,18 +415,19 @@ fn identity(row: &AgentLoginRow) -> Option<LoginIdentity> {
     })
 }
 
-/// Why the router passed over `row`, which it keeps a chat on while it can run: a limit it
-/// reached, and when that resets, else the chat's model it refused lately for want of usage
-/// credits, when it is `unfunded`, else a sign-in that can no longer be used.
+/// Why the router passed over `row`, which it keeps a chat on `model` on while it can run: a limit
+/// on `model` it reached, and when that resets, else the chat's model it refused lately for want
+/// of usage credits, when it is `unfunded`, else a sign-in that can no longer be used.
 fn standing(
     row: &AgentLoginRow,
+    model: Option<&str>,
     unfunded: bool,
     now: chrono::DateTime<Utc>,
 ) -> (Reason, Option<chrono::DateTime<Utc>>) {
     if let Some(until) = row.exhausted_until.filter(|until| *until > now) {
         return (Reason::Limit, Some(until));
     }
-    match row.snapshot() {
+    match row.snapshot().map(|snapshot| snapshot.on(model)) {
         Some(snapshot) if snapshot.headroom.is_some_and(|headroom| headroom <= 0.0) => {
             let resets_at = match snapshot.availability() {
                 Availability::At(until) if until > now => Some(until),
