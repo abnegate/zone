@@ -40,24 +40,30 @@
 //! generated value that its own separators cut into parts which each pass for
 //! a name is recorded. Measured against the detector, over 200,000 values of
 //! each shape and beyond what it misses by itself: about one URL-safe base64
-//! value of 32 characters in five hundred, and one 24-character secret in
-//! seventy, or in forty when it is URL-safe base64, when it ends a path whose
-//! other segments are names. A code written in four or more dashed groups of
-//! one length is read as generated, which leaves at most one in nine hundred
-//! in capitals, one in eighty in lower case and one in eighteen in mixed
-//! case. A code cut by any separator is read as generated too when at least
-//! half its parts, and three at the fewest, mix letters with digits over four
-//! characters or more, which leaves of a code in groups of four or five
-//! between underscores or slashes at most one in six in capitals, one in
-//! forty-five in lower case and one in eleven in mixed case. A code grouped
-//! in threes is written the way a list of regions is, and between two fifths
-//! and three quarters of those are recorded. So is a passphrase of plain
-//! words and numbers that only its length gave away, and so is any unlabelled
-//! code under 32 characters, which the detector never read. The cost the
-//! other way is a name that changes case beside a number in a long path,
+//! value of 32 characters in seventeen hundred, and one 24-character secret in
+//! seven hundred, or in one hundred and eighty when it is URL-safe base64,
+//! when it ends a path whose other segments are names. Those are read as
+//! generated once their mixed-case parts hold three letters that stand alone
+//! between changes of case or words with no vowel. A code written in four or
+//! more groups of one length between one separator is read as generated when
+//! three different groups mix letters with digits or change case, when two do
+//! in a code of five groups or more that holds lower case, and when one does
+//! in capitals between dashes or slashes. That leaves at most one in two
+//! thousand in capitals, one in three hundred in lower case and one in sixty
+//! thousand in mixed case, though as many as one in two in lower case of four
+//! short groups that end a path. Capitals between underscores are how a
+//! constant is written, and of a code written so one in fifty is recorded, or
+//! one in eight in base32. So is a passphrase of plain words and numbers that
+//! only its length gave away, and so is any unlabelled code under 32
+//! characters, which the detector never read. The cost the other way is a
+//! name that changes case beside a number in a long path,
 //! `features/chats/ChatPanelV2.tsx`, which is what a base62 secret looks
-//! like, and a name whose parts mix letters with digits as a code's do,
-//! `crates/codecs/utf16_utf32_base64`: both are refused as secrets.
+//! like, a name whose parts mix letters with digits as a code's do,
+//! `crates/codecs/utf16_utf32_base64`, and a name that strings initials
+//! together, `Plugins/ABI/SystemZ/ABISysV_s390x.cpp`: all are refused as
+//! secrets. Over 1.2 million paths, branches and constants from two dozen
+//! repositories, the last is the only name these readings refuse that was
+//! recorded before them.
 
 use std::sync::LazyLock;
 
@@ -330,19 +336,36 @@ static GENERATED: LazyLock<Regex> = LazyLock::new(|| {
     .expect("generated pattern is a valid regex")
 });
 
-/// The fewest dashed groups in a row that make a grouped code. Fewer is how a
-/// date and a target triple are written.
+/// What a long run is cut into parts by.
+const SEPARATORS: [char; 4] = ['/', '_', '+', '-'];
+
+/// The fewest groups of one length in a row, between one separator, that
+/// make a code. Fewer is how a date and a target triple are written.
 const FEWEST_GROUPS: usize = 4;
 
-/// The fewest characters in each group of a grouped code. Shorter groups are
-/// how versions and regions are listed.
-const SHORTEST_GROUP: usize = 4;
+/// The fewest characters in each group of a code. Shorter groups are how
+/// versions are listed: `v1-v2-v3-v4`.
+const SHORTEST_GROUP: usize = 3;
 
-/// How many groups must mix letters with digits before groups that hold
-/// lower case are a code, since a list of platforms mixes two:
-/// `linux-arm64-amd64`. One is enough in capitals, which no name is written
-/// in between dashes.
-const MIXED_GROUPS: usize = 3;
+/// How many different groups must mix letters with digits or change case
+/// before groups that hold lower case, or capitals between underscores, are a
+/// code: a list of platforms marks two, `linux-arm64-amd64`, and a register
+/// name repeats one, `HSI0_PPMU_HSI0_BUS0`.
+const MARKED_GROUPS: usize = 3;
+
+/// The fewest groups of a long code, in which two marked groups are enough
+/// when it holds lower case. A list of platforms is shorter:
+/// `build-linux-arm64-amd64`.
+const LONG_CODE_GROUPS: usize = 5;
+
+/// How many different marked groups give away a long code that holds lower
+/// case.
+const LONG_CODE_MARKED_GROUPS: usize = 2;
+
+/// The separators between which one group that mixes letters with digits
+/// makes capitals a code. No name is written in capitals between them, while
+/// a constant is written in capitals between underscores.
+const CAPITAL_SEPARATORS: [char; 2] = ['-', '/'];
 
 /// Whether a group holds letters and digits both, as most groups of a
 /// generated code do and few words of a name.
@@ -351,27 +374,102 @@ fn mixes(group: &str) -> bool {
         && group.bytes().any(|byte| byte.is_ascii_alphabetic())
 }
 
-/// Whether a long run holds a code written in dashed groups of one length, as
-/// a recovery code and a licence key are. [`GENERATED`] reads no such code,
-/// because each group passes for a word beside a number.
-fn grouped(run: &str) -> bool {
-    run.split(['/', '_', '+']).any(|part| {
-        let groups: Vec<&str> = part.split('-').collect();
-        groups
-            .chunk_by(|left, right| left.len() == right.len())
-            .any(|code| {
-                let capitals = !code
-                    .iter()
-                    .any(|group| group.bytes().any(|byte| byte.is_ascii_lowercase()));
-                let mixed = code.iter().filter(|group| mixes(group)).count();
-                code.len() >= FEWEST_GROUPS
-                    && code
-                        .first()
-                        .is_some_and(|group| group.len() >= SHORTEST_GROUP)
-                    && (mixed >= MIXED_GROUPS || (capitals && mixed > 0))
-            })
-    })
+/// Whether a group holds a capital after its first letter beside lower case,
+/// as a generated group in mixed case does and a word of a name does not.
+fn changes_case(group: &str) -> bool {
+    group.bytes().any(|byte| byte.is_ascii_lowercase())
+        && group.bytes().skip(1).any(|byte| byte.is_ascii_uppercase())
 }
+
+/// Groups of one length in a row, cut from a long run by one separator.
+struct Code<'run> {
+    separator: char,
+    groups: Vec<&'run str>,
+}
+
+impl Code<'_> {
+    /// Whether these groups are a code, as a recovery code and a licence key
+    /// are written: enough of them, long enough, and marked as generated
+    /// groups are.
+    fn generated(&self) -> bool {
+        self.groups.len() >= FEWEST_GROUPS
+            && self
+                .groups
+                .first()
+                .is_some_and(|group| group.len() >= SHORTEST_GROUP)
+            && (self.marked() >= self.marks_needed() || self.capitals_with_a_digit())
+    }
+
+    /// How many marked groups give these away: fewer in a long code that
+    /// holds lower case, which no list of platforms and no constant is.
+    fn marks_needed(&self) -> usize {
+        if self.groups.len() >= LONG_CODE_GROUPS && self.holds_lower_case() {
+            LONG_CODE_MARKED_GROUPS
+        } else {
+            MARKED_GROUPS
+        }
+    }
+
+    fn holds_lower_case(&self) -> bool {
+        self.groups
+            .iter()
+            .any(|group| group.bytes().any(|byte| byte.is_ascii_lowercase()))
+    }
+
+    /// How many different groups mix letters with digits or change case.
+    fn marked(&self) -> usize {
+        let mut marked: Vec<&str> = self
+            .groups
+            .iter()
+            .copied()
+            .filter(|group| mixes(group) || changes_case(group))
+            .collect();
+        marked.sort_unstable();
+        marked.dedup();
+        marked.len()
+    }
+
+    /// Whether these are capitals between dashes or slashes, one group of
+    /// which mixes letters with digits.
+    fn capitals_with_a_digit(&self) -> bool {
+        CAPITAL_SEPARATORS.contains(&self.separator)
+            && !self.holds_lower_case()
+            && self.groups.iter().any(|group| mixes(group))
+    }
+}
+
+/// Every code a long run could hold: for each separator, the groups of one
+/// length in a row that it cuts each stretch between the others into.
+fn codes(run: &str) -> Vec<Code<'_>> {
+    let mut codes = Vec::new();
+    for separator in SEPARATORS {
+        let stretches =
+            run.split(|character: char| character != separator && SEPARATORS.contains(&character));
+        for stretch in stretches {
+            let groups: Vec<&str> = stretch.split(separator).collect();
+            codes.extend(
+                groups
+                    .chunk_by(|left, right| left.len() == right.len())
+                    .map(|groups| Code {
+                        separator,
+                        groups: groups.to_vec(),
+                    }),
+            );
+        }
+    }
+    codes
+}
+
+/// Whether a long run holds a code written in groups of one length.
+/// [`GENERATED`] reads no such code, because each group passes for a word
+/// beside a number.
+fn grouped(run: &str) -> bool {
+    codes(run).iter().any(Code::generated)
+}
+
+/// The fewest characters of a part that [`coded`] reads as mixing letters
+/// with digits.
+const SHORTEST_PART: usize = 4;
 
 /// The fewest parts of a run, cut at any of its separators, that must mix
 /// letters with digits before the run is read as a code. Two is how a name
@@ -381,19 +479,106 @@ const MIXED_PARTS: usize = 3;
 /// Whether a long run reads as a code cut into parts of any length and by
 /// any separator, as `abcd1_efgh2_ijkl3_mnop4_qrst5` is: at least half its
 /// parts, and [`MIXED_PARTS`] at the fewest, mix letters with digits over
-/// [`SHORTEST_GROUP`] characters or more. [`grouped`] reads a code only in
-/// dashed groups of one length, and a name's parts seldom do this: a version
-/// or a region is too short, and a word holds no digit.
+/// [`SHORTEST_PART`] characters or more. [`grouped`] reads a code only in
+/// groups of one length, and a name's parts seldom do this: a version or a
+/// region is too short, and a word holds no digit.
 fn coded(run: &str) -> bool {
     let parts: Vec<&str> = run
-        .split(['/', '_', '+', '-'])
+        .split(SEPARATORS)
         .filter(|part| !part.is_empty())
         .collect();
     let mixed = parts
         .iter()
-        .filter(|part| part.len() >= SHORTEST_GROUP && mixes(part))
+        .filter(|part| part.len() >= SHORTEST_PART && mixes(part))
         .count();
     mixed >= MIXED_PARTS && mixed * 2 >= parts.len()
+}
+
+/// How many letters standing alone and words with no vowel a run's mixed-case
+/// parts must hold between them before it reads as scrambled. A name seldom
+/// holds more than two, as `ABISysV` holds `Sys` and `V`, though beside
+/// `SystemZ` it reaches three.
+const SCRAMBLED_WORDS: usize = 3;
+
+/// The fewest letters of a word that [`unspoken`] reads.
+const SHORTEST_UNSPOKEN_WORD: usize = 3;
+
+/// What a word that can be spoken holds one of.
+const VOWELS: &[u8] = b"aeiouAEIOU";
+
+/// The words a part is written in: a new one opens at a capital after lower
+/// case, at a change between letters and digits, and at the last capital of a
+/// run that lower case follows, so `XMLHttp2` is `XML`, `Http` and `2`.
+fn words(part: &str) -> Vec<&str> {
+    let bytes = part.as_bytes();
+    let mut words = Vec::new();
+    let mut start = 0;
+    for index in 1..bytes.len() {
+        let previous = bytes[index - 1];
+        let byte = bytes[index];
+        let opens = (previous.is_ascii_lowercase() && byte.is_ascii_uppercase())
+            || previous.is_ascii_digit() != byte.is_ascii_digit()
+            || (previous.is_ascii_uppercase()
+                && byte.is_ascii_uppercase()
+                && bytes.get(index + 1).is_some_and(u8::is_ascii_lowercase));
+        if opens {
+            words.push(&part[start..index]);
+            start = index;
+        }
+    }
+    words.push(&part[start..]);
+    words
+}
+
+fn is_number(word: &str) -> bool {
+    word.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Whether the word at `index` is one letter between two changes of case, as
+/// the `B` of `sBSw` is. The capital that opens `OAuth` and the `V` of `V2`
+/// are how names are written, so neither counts.
+fn stands_alone(words: &[&str], index: usize) -> bool {
+    index > 0
+        && words[index].len() == 1
+        && !is_number(words[index])
+        && !is_number(words[index - 1])
+        && !words.get(index + 1).is_some_and(|next| is_number(next))
+}
+
+/// Whether a word of letters is too long to be an initial and holds no vowel,
+/// as `Hbq` does.
+fn unspoken(word: &str) -> bool {
+    word.len() >= SHORTEST_UNSPOKEN_WORD
+        && word.bytes().all(|byte| byte.is_ascii_alphabetic())
+        && !word.bytes().any(|byte| VOWELS.contains(&byte))
+}
+
+/// Whether a long run's parts that mix cases are scrambled rather than
+/// written in words: between them, each part counted once however often a
+/// name repeats it, they hold [`SCRAMBLED_WORDS`] letters that
+/// [stand alone](stands_alone) or words that are [`unspoken`]. A generated
+/// value in mixed case that its separators cut into parts too short for
+/// [`GENERATED`] is read here.
+fn scrambled(run: &str) -> bool {
+    let mut parts: Vec<&str> = run
+        .split(SEPARATORS)
+        .filter(|part| {
+            part.bytes().any(|byte| byte.is_ascii_lowercase())
+                && part.bytes().any(|byte| byte.is_ascii_uppercase())
+        })
+        .collect();
+    parts.sort_unstable();
+    parts.dedup();
+    let scrambled: usize = parts
+        .iter()
+        .map(|part| {
+            let words = words(part);
+            (0..words.len())
+                .filter(|&index| stands_alone(&words, index) || unspoken(words[index]))
+                .count()
+        })
+        .sum();
+    scrambled >= SCRAMBLED_WORDS
 }
 
 /// What a name's digits are respelt as: a letter no credential prefix and no
@@ -404,7 +589,7 @@ const RESPELT: &str = "q";
 /// and with its digits respelt when it reads as a name.
 fn respelt(captures: &Captures<'_>) -> String {
     let run = &captures[0];
-    if GENERATED.is_match(run) || grouped(run) || coded(run) {
+    if GENERATED.is_match(run) || grouped(run) || coded(run) || scrambled(run) {
         run.to_string()
     } else {
         run.replace(|character: char| character.is_ascii_digit(), RESPELT)
@@ -459,7 +644,7 @@ pub(crate) mod test_support {
     use super::Refusal;
 
     /// What a repository note says every day.
-    pub(crate) const RECORDED: [&str; 31] = [
+    pub(crate) const RECORDED: [&str; 39] = [
         "runner/zone_server/migrations/0002_search_knowledge_active_candidates.sql",
         "target/x86_64-unknown-linux-gnu/release/zone_server",
         "/api/v1/workspaces/knowledge/refresh-all-entries",
@@ -491,12 +676,20 @@ pub(crate) mod test_support {
         "Never, under any circumstances, run migrations against production from a laptop",
         "Docs should never mention internal hostnames",
         "The README should never mention internal hostnames",
+        "src/Appwrite/Platform/Modules/OAuth2/Http/OAuth2/Projects/XList.php",
+        "contrib/llvm-project/lldb/source/Plugins/ABI/AArch64/ABISysV_arm64.cpp",
+        "tests/e2e/Services/Databases/TablesDB/TablesDBColumnsTest.php",
+        "libarchive/test/test_read_format_7zip_bcj2_copy_lzma.7z.uu",
+        "CLO-4107-fix-for-nextjs-non-standalone-build-nft-prune",
+        "OAUTH2_SERVER_PUBLIC_ACCESS_TOKEN_EXPIRY",
+        "A_MAC_PORT_RX_LINKA_DFE_H10_AND_H11",
+        "CLK_GOUT_HSI0_PPMU_HSI0_BUS0_ACLK",
     ];
 
     /// What no note should carry, with the reason each is turned away for.
     /// An issued prefix is spelt apart from its body so that no scanner reads
     /// a fixture as a leak.
-    pub(crate) const NOT_RECORDED: [(&str, Refusal); 40] = [
+    pub(crate) const NOT_RECORDED: [(&str, Refusal); 48] = [
         (
             concat!(
                 "The deploy token is ghp_",
@@ -667,11 +860,47 @@ pub(crate) mod test_support {
             "The signing key is ab1cd-efgh23-ijk4lmn-op5qrs-tuv6wx",
             Refusal::Secret,
         ),
+        (
+            "The recovery code is gbre_e4ck_zdqe_e26j_xufh_xahb_0rxn",
+            Refusal::Secret,
+        ),
+        (
+            "The recovery code is D8d_06b_puv_HE1_7Yy_ooJ_j3X_19W_2ka",
+            Refusal::Secret,
+        ),
+        (
+            "The recovery code is GBRE/E4CK/ZDQE/E26J/XUFH/XAHB/0RXN",
+            Refusal::Secret,
+        ),
+        (
+            "The recovery code is blm/hsw/l43/ady/i7y/jvs/10u/rzw/nw9",
+            Refusal::Secret,
+        ),
+        (
+            "The recovery code is rVAq-bxWp-IqNU-UJxJ-clER-D6ix-nAXN",
+            Refusal::Secret,
+        ),
+        (
+            "The recovery code is BLM-HSW-L43-ADY-I7Y-JVS-10U-RZW-NW9",
+            Refusal::Secret,
+        ),
+        (
+            "The signing key is xmff34J-sBSwncLFvmzIZCgqN_qTHgZv",
+            Refusal::Secret,
+        ),
+        (
+            "Alerts post to api/v1/webhooks/CMgqqp_s7WGgs-gGiIaVRSMQ",
+            Refusal::Secret,
+        ),
     ];
 }
 
 #[cfg(test)]
 mod tests {
+    use rand::RngExt;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+
     use super::*;
 
     const ISSUED_CREDENTIAL: &str = "Remember my token is ghp_abcdefgh1234";
@@ -1146,6 +1375,166 @@ mod tests {
                 refused_discovery(text),
                 Some(Refusal::Suppression),
                 "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_code_is_not_a_name_whichever_separator_cuts_it() {
+        for text in [
+            "gbre_e4ck_zdqe_e26j_xufh_xahb_0rxn",
+            "D8d_06b_puv_HE1_7Yy_ooJ_j3X_19W_2ka",
+            "GBRE/E4CK/ZDQE/E26J/XUFH/XAHB/0RXN",
+            "blm/hsw/l43/ady/i7y/jvs/10u/rzw/nw9",
+            "rVAq-bxWp-IqNU-UJxJ-clER-D6ix-nAXN",
+            "BLM-HSW-L43-ADY-I7Y-JVS-10U-RZW-NW9",
+        ] {
+            assert!(
+                contains_credential(text),
+                "the detector reads {text} as generated by itself"
+            );
+            assert_eq!(refused_discovery(text), Some(Refusal::Secret), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_value_scrambled_between_cases_is_not_a_name() {
+        for text in [
+            "xmff34J-sBSwncLFvmzIZCgqN_qTHgZv",
+            "kcvLZ_WKA8Mbbee_XeArKCkBHaKYSwfi",
+            "api/v1/webhooks/CMgqqp_s7WGgs-gGiIaVRSMQ",
+        ] {
+            assert!(
+                contains_credential(text),
+                "the detector reads {text} as generated by itself"
+            );
+            assert_eq!(refused_discovery(text), Some(Refusal::Secret), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_repeats_a_marked_group_or_opens_a_word_with_a_capital_is_recorded() {
+        for text in [
+            "src/Appwrite/Platform/Modules/OAuth2/Http/OAuth2/Projects/XList.php",
+            "contrib/llvm-project/lldb/source/Plugins/ABI/AArch64/ABISysV_arm64.cpp",
+            "libarchive/test/test_read_format_7zip_bcj2_copy_lzma.7z.uu",
+            "OAUTH2_SERVER_PUBLIC_ACCESS_TOKEN_EXPIRY",
+            "A_MAC_PORT_RX_LINKA_DFE_H10_AND_H11",
+            "CLK_GOUT_HSI0_PPMU_HSI0_BUS0_ACLK",
+        ] {
+            assert!(
+                contains_credential(text),
+                "the detector reads {text} as a name by itself"
+            );
+            assert_eq!(refused_discovery(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_name_that_strings_initials_together_reads_as_scrambled() {
+        let text = "contrib/llvm-project/lldb/source/Plugins/ABI/SystemZ/ABISysV_s390x.cpp";
+
+        assert!(
+            contains_credential(text),
+            "the detector reads {text} as generated by itself"
+        );
+        assert_eq!(refused_discovery(text), Some(Refusal::Secret));
+    }
+
+    const URL_SAFE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const MIXED_CASE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const LOWER_CASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    const CAPITALS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    const SAMPLES: usize = 5000;
+    const SEED: u64 = 231;
+
+    /// A generated value cut by separators: `groups` groups of `length`
+    /// characters of `alphabet`, joined by `separator` after `prefix`, of
+    /// which at most one in `rarest` that the detector reads may be recorded.
+    struct Shape {
+        alphabet: &'static [u8],
+        length: usize,
+        groups: usize,
+        separator: &'static str,
+        prefix: &'static str,
+        rarest: usize,
+    }
+
+    impl Shape {
+        fn code(
+            alphabet: &'static [u8],
+            length: usize,
+            groups: usize,
+            separator: &'static str,
+            rarest: usize,
+        ) -> Self {
+            Self {
+                alphabet,
+                length,
+                groups,
+                separator,
+                prefix: "",
+                rarest,
+            }
+        }
+
+        fn draw(&self, random: &mut StdRng) -> String {
+            let groups: Vec<String> = (0..self.groups)
+                .map(|_| {
+                    (0..self.length)
+                        .map(|_| {
+                            char::from(self.alphabet[random.random_range(0..self.alphabet.len())])
+                        })
+                        .collect()
+                })
+                .collect();
+            format!("{}{}", self.prefix, groups.join(self.separator))
+        }
+    }
+
+    fn shapes() -> Vec<Shape> {
+        let mut shapes = vec![
+            Shape::code(URL_SAFE, 32, 1, "", 1000),
+            Shape {
+                prefix: "api/v1/webhooks/",
+                ..Shape::code(URL_SAFE, 24, 1, "", 75)
+            },
+            Shape::code(CAPITALS, 4, 7, "/", 1000),
+            Shape::code(CAPITALS, 3, 9, "/", 1000),
+            Shape::code(CAPITALS, 3, 9, "-", 1000),
+        ];
+        for separator in ["_", "/", "-"] {
+            shapes.push(Shape::code(MIXED_CASE, 4, 7, separator, 1000));
+            shapes.push(Shape::code(MIXED_CASE, 3, 9, separator, 1000));
+            shapes.push(Shape::code(LOWER_CASE, 4, 7, separator, 200));
+            shapes.push(Shape::code(LOWER_CASE, 3, 9, separator, 100));
+        }
+        shapes
+    }
+
+    #[test]
+    fn few_generated_values_that_separators_cut_into_names_are_recorded() {
+        for shape in shapes() {
+            let mut random = StdRng::seed_from_u64(SEED);
+            let mut read = 0;
+            let mut recorded = Vec::new();
+            for _ in 0..SAMPLES {
+                let value = shape.draw(&mut random);
+                let text = format!("The value is {value}");
+                if !contains_credential(&text) {
+                    continue;
+                }
+                read += 1;
+                if refused_discovery(&text) != Some(Refusal::Secret) {
+                    recorded.push(value);
+                }
+            }
+            assert!(
+                recorded.len() * shape.rarest <= read,
+                "{} of {read} recorded, more than one in {}: {recorded:?}",
+                recorded.len(),
+                shape.rarest
             );
         }
     }
