@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
-import { media, read, rule } from '../test/css';
+import { media, read, rule, token } from '../test/css';
 
 const features = join(import.meta.dir, '..', 'features');
 
@@ -603,6 +603,47 @@ describe('tasks page layout', () => {
   it('sizes the editor chrome to the header', () => {
     expect(rule(css, '.task-details-header')).toContain('height: var(--ui-header-height)');
     expect(rule(css, '.task-details-actions')).toContain('height: var(--ui-header-height)');
+  });
+});
+
+describe('bulk edit dialog', () => {
+  const kit = join(import.meta.dir, '..', '..', '..', '..', 'packages', 'ui', 'src', 'styles');
+  const globals = read(join(kit, 'globals.css'));
+  const variables = read(join(kit, 'variables.css'));
+  const dialog = read(join(features, 'tasks', 'components', 'EditTasksDialog.css'));
+  const ROOT_FONT_SIZE = 16;
+
+  function pixels(length: string): number {
+    const value = Number.parseFloat(length);
+    return length.endsWith('rem') ? value * ROOT_FONT_SIZE : value;
+  }
+
+  function declaration(block: string, property: string): string {
+    const match = block.match(new RegExp(`(?:^|; )${property}: ([^;]+)`));
+    if (!match) throw new Error(`${property} is not declared`);
+    return match[1].trim();
+  }
+
+  const focus = rule(globals, '.ui-checkbox:focus-visible');
+  const ring =
+    pixels(declaration(focus, 'outline').split(' ')[0]) +
+    pixels(declaration(focus, 'outline-offset'));
+
+  it('pads the scrolling project list sideways so a focused checkbox shows its whole ring', () => {
+    const list = rule(dialog, '.edit-tasks-project-list');
+    expect(list).toContain('overflow-y: auto');
+    expect(declaration(list, 'padding-inline')).toBe('var(--ui-space-1)');
+    expect(declaration(list, 'margin-inline')).toBe('calc(var(--ui-space-1) * -1)');
+    expect(pixels(token(variables, 'ui-space-1'))).toBeGreaterThanOrEqual(ring);
+  });
+
+  it('leaves room above and below a centred checkbox for its ring', () => {
+    expect(rule(dialog, '.edit-tasks-project-list .ui-checkbox-wrapper')).toContain(
+      'align-items: center'
+    );
+    const row = pixels(token(variables, 'ui-control-height-sm'));
+    const box = pixels(declaration(rule(globals, '.ui-checkbox'), 'height'));
+    expect((row - box) / 2).toBeGreaterThanOrEqual(ring);
   });
 });
 

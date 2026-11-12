@@ -16,6 +16,8 @@
   flex-direction: column;
   gap: var(--ui-space-1);
   max-height: calc(var(--ui-control-height-sm) * 8);
+  margin-inline: calc(var(--ui-space-1) * -1);
+  padding-inline: var(--ui-space-1);
   overflow-y: auto;
 }
 
