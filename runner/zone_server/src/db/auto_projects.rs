@@ -278,21 +278,21 @@ pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
     Ok(())
 }
 
-/// Open the auto projects an agentic task belongs to again: one that stalled
-/// or finished while a person withheld the task has work to do once they move
+/// Open the auto projects the agentic tasks belong to again: one that stalled
+/// or finished while a person withheld a task has work to do once they move
 /// it back. A pause no task caused stays until the project is resumed. Called
 /// after that move has committed, never inside it, so no project row is locked
 /// while a task row is held. The rows are locked in id order, and read for a
 /// stop to undo only once locked, as [`hold`] has it.
-pub async fn reopen(pool: &PgPool, task_id: Uuid) -> DbResult<()> {
+pub async fn reopen(pool: &PgPool, task_ids: &[Uuid]) -> DbResult<()> {
     let mut transaction = pool.begin().await?;
     let held: Vec<Uuid> = sqlx::query_scalar(
         "SELECT p.id FROM projects p JOIN task_projects tp ON tp.project_id = p.id \
            JOIN tasks t ON t.id = tp.task_id \
-         WHERE tp.task_id = $1 AND p.auto AND t.is_agentic \
+         WHERE tp.task_id = ANY($1) AND p.auto AND t.is_agentic \
          ORDER BY p.id FOR NO KEY UPDATE OF p",
     )
-    .bind(task_id)
+    .bind(task_ids)
     .fetch_all(&mut *transaction)
     .await?;
     if !held.is_empty() {
@@ -336,7 +336,7 @@ pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u6
            SELECT t.id FROM tasks t JOIN task_automation a ON a.task_id = t.id \
            WHERE a.project_id = $1 AND a.stage = 'paused' AND t.pr_url IS NULL \
              AND t.status <> 'complete' AND t.status <> ALL($2) AND t.active_run_id IS NULL \
-           FOR UPDATE OF t), \
+           ORDER BY t.id FOR UPDATE OF t), \
          restarted AS ( \
            UPDATE task_automation a SET stage = 'idle', reason = NULL, runs = 0, \
              parked_stage = NULL, parked_reason = NULL, updated_at = NOW() \
@@ -723,10 +723,10 @@ pub async fn enrollable(pool: &PgPool, project_id: Uuid) -> DbResult<Vec<Settled
 /// The next task a project can start: created, agentic, and with every task it
 /// depends on complete or cancelled. A person cancelling a task takes it out
 /// of the plan, so nothing waits on it; a paused one is still to be done.
-/// Priority first, then age.
+/// The most urgent first, then the oldest.
 pub async fn next_runnable(pool: &PgPool, project_id: Uuid) -> DbResult<Option<Uuid>> {
     sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT t.id {RUNNABLE} ORDER BY t.priority NULLS LAST, t.created_at, t.id LIMIT 1"
+        "SELECT t.id {RUNNABLE} ORDER BY {MOST_URGENT_FIRST} LIMIT 1"
     )))
     .bind(project_id)
     .bind(tasks::CLOSED.as_slice())
@@ -744,6 +744,9 @@ const RUNNABLE: &str = "FROM tasks t JOIN task_projects tp ON tp.task_id = t.id 
          SELECT 1 FROM jsonb_array_elements_text( \
            CASE WHEN jsonb_typeof(t.dependencies) = 'array' THEN t.dependencies ELSE '[]'::jsonb END \
          ) AS d(id) JOIN tasks p ON p.id::text = d.id WHERE p.status <> ALL($2))";
+
+/// A larger priority is more urgent, as everywhere else that reads one.
+const MOST_URGENT_FIRST: &str = "t.priority DESC NULLS LAST, t.created_at, t.id";
 
 /// Tasks occupying one of the project's slots: running, or between a run and a merge.
 pub async fn in_flight(pool: &PgPool, project_id: Uuid) -> DbResult<i64> {
@@ -836,7 +839,7 @@ pub struct ProjectTask {
 
 /// Every task of a project with its automation state, for the report.
 pub async fn project_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<Vec<ProjectTask>> {
-    sqlx::query_as::<_, ProjectTask>(
+    sqlx::query_as::<_, ProjectTask>(sqlx::AssertSqlSafe(format!(
         "SELECT t.id AS task_id, t.title, t.status, t.is_agentic, t.priority, t.pr_url, t.dependencies, \
                 a.kind, a.stage, a.reason, a.runs, a.review_rounds, a.head, a.checks, a.merge_sha, \
                 a.auto_created, \
@@ -845,8 +848,8 @@ pub async fn project_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<Vec<Proj
          FROM tasks t JOIN task_projects tp ON tp.task_id = t.id \
          LEFT JOIN task_automation a ON a.task_id = t.id \
          WHERE tp.project_id = $1 \
-         ORDER BY t.priority NULLS LAST, t.created_at, t.id",
-    )
+         ORDER BY {MOST_URGENT_FIRST}"
+    )))
     .bind(project_id)
     .bind(Verdict::verdictless())
     .fetch_all(pool)
@@ -1305,7 +1308,7 @@ pub async fn insert_auto_task(
             title: Some(title),
             description,
             acceptance_criteria,
-            priority: Some(1),
+            priority: Some(*tasks::PRIORITIES.end()),
             is_agentic: true,
             require_plan_approval: false,
             source_id: None,
@@ -2096,7 +2099,7 @@ mod tests {
         let stalled = pause_stalled(&project.pool, project.id, STALLED)
             .await
             .expect("the pause for stalling");
-        reopen(&project.pool, task).await.expect("the reopen");
+        reopen(&project.pool, &[task]).await.expect("the reopen");
         let lifted = automation(&project.pool, project.id)
             .await
             .expect("the project's automation")
@@ -2109,7 +2112,7 @@ mod tests {
             .execute(&project.pool)
             .await
             .expect("the project finishing");
-        reopen(&project.pool, task).await.expect("the reopen");
+        reopen(&project.pool, &[task]).await.expect("the reopen");
         let kept = automation(&project.pool, project.id)
             .await
             .expect("the project's automation")
@@ -2133,6 +2136,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn giving_tasks_back_together_reopens_every_project_they_stalled() {
+        const STALLED: &str = "nothing can start";
+        let first = Project::new(1).await;
+        let second = Project::new(1).await;
+        for project in [&first, &second] {
+            project.set_status(project.tasks[0], tasks::BLOCKED).await;
+            pause_stalled(&project.pool, project.id, STALLED)
+                .await
+                .expect("the pause for stalling");
+        }
+
+        reopen(&first.pool, &[first.tasks[0], second.tasks[0]])
+            .await
+            .expect("the reopen");
+        let mut lifted = Vec::new();
+        for project in [&first, &second] {
+            let automation = automation(&project.pool, project.id)
+                .await
+                .expect("the project's automation")
+                .expect("an automated project");
+            lifted.push(automation.paused_reason);
+        }
+        first.remove().await;
+        second.remove().await;
+
+        assert_eq!(
+            lifted,
+            [None, None],
+            "one reopen starts every project its tasks stalled"
+        );
+    }
+
+    #[tokio::test]
     async fn giving_a_task_back_undoes_a_stop_the_driver_is_still_writing() {
         let project = Project::new(1).await;
         let task = project.tasks[0];
@@ -2145,9 +2181,10 @@ mod tests {
             .expect("the driver's stop, written and not yet committed");
         project.set_status(task, tasks::CREATED).await;
 
+        let given = [task];
         let (reopened, ()) = {
             let project = &project;
-            tokio::join!(reopen(&project.pool, task), async move {
+            tokio::join!(reopen(&project.pool, &given), async move {
                 project.queued_behind(&stop).await;
                 stop.release().await;
             })
@@ -2513,5 +2550,76 @@ mod tests {
             vec![true, true, false],
             "a paused task starts once it is un-paused, so it waits too"
         );
+    }
+
+    async fn rank(project: &Project, task: Uuid, priority: i32) {
+        sqlx::query("UPDATE tasks SET priority = $2 WHERE id = $1")
+            .bind(task)
+            .bind(priority)
+            .execute(&project.pool)
+            .await
+            .expect("the task's priority is set");
+    }
+
+    async fn admission_order(project: &Project) -> Vec<Uuid> {
+        let mut admitted = Vec::new();
+        while let Some(task) = next_runnable(&project.pool, project.id)
+            .await
+            .expect("the next runnable task")
+        {
+            project.set_status(task, tasks::IN_PROGRESS).await;
+            admitted.push(task);
+        }
+        admitted
+    }
+
+    #[tokio::test]
+    async fn the_most_urgent_task_is_admitted_first_and_an_unranked_one_last() {
+        let project = Project::new(3).await;
+        let [unranked, lowest, highest] = project.tasks[..] else {
+            panic!("three tasks");
+        };
+        rank(&project, lowest, *tasks::PRIORITIES.start()).await;
+        rank(&project, highest, *tasks::PRIORITIES.end()).await;
+
+        let reported: Vec<Uuid> = project_tasks(&project.pool, project.id)
+            .await
+            .expect("the project's tasks")
+            .into_iter()
+            .map(|task| task.task_id)
+            .collect();
+        let admitted = admission_order(&project).await;
+        project.remove().await;
+
+        assert_eq!(
+            admitted,
+            vec![highest, lowest, unranked],
+            "priority 5 is the most urgent, as the console labels it"
+        );
+        assert_eq!(reported, admitted, "the report lists tasks in run order");
+    }
+
+    #[tokio::test]
+    async fn a_task_the_driver_adds_goes_ahead_of_every_planned_one() {
+        let project = Project::new(1).await;
+        let planned = project.tasks[0];
+        rank(&project, planned, *tasks::PRIORITIES.end() - 1).await;
+        let added = insert_auto_task(
+            &project.pool,
+            project.id,
+            project.workspace,
+            project.actor,
+            Kind::Fix,
+            "Fix the failed deployment",
+            "The deployment job failed after the merge.",
+            None,
+        )
+        .await
+        .expect("the added task");
+
+        let admitted = admission_order(&project).await;
+        project.remove().await;
+
+        assert_eq!(admitted, vec![added, planned]);
     }
 }

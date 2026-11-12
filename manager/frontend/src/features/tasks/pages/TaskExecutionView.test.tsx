@@ -584,3 +584,49 @@ describe('stopping a task run', () => {
     expect(screen.queryByText(INACTIVE_MESSAGE)).not.toBeInTheDocument();
   });
 });
+
+describe('a run read by a viewer', () => {
+  beforeEach(() => {
+    mockRunTask.mockReset();
+    mockGetTaskRuns.mockReset();
+    mockGetTaskRun.mockReset();
+    mockGetTaskRunLogs.mockReset();
+    mockAnswerRun.mockReset();
+    mockGetTaskRunLogs.mockImplementation(() => Promise.resolve([]));
+  });
+
+  it('offers no way to start a run', async () => {
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([]));
+    render(<TaskExecutionView task={task} writable={false} onClose={() => {}} />);
+
+    expect(await screen.findByText('This task has not run yet.')).toBeInTheDocument();
+    expect(screen.getByText('Not run')).toBeInTheDocument();
+    expect(screen.queryByText('Ready to run')).not.toBeInTheDocument();
+    expect(
+      screen.getByText('You have view access, so you can read tasks but not change them')
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start Execution' })).not.toBeInTheDocument();
+  });
+
+  it('shows a parked question without a way to answer it', async () => {
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([waiting]));
+    mockGetTaskRun.mockImplementation(() => Promise.resolve(waiting));
+    render(<TaskExecutionView task={task} writable={false} onClose={() => {}} />);
+
+    expect(
+      await screen.findByText('This run is waiting for a member to answer its question.')
+    ).toBeInTheDocument();
+    expect(screen.getByText('Waiting')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for you')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('question-card')).not.toBeInTheDocument();
+  });
+
+  it('offers no way to stop a running run', async () => {
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([running]));
+    mockGetTaskRun.mockImplementation(() => Promise.resolve(running));
+    render(<TaskExecutionView task={task} writable={false} onClose={() => {}} />);
+
+    expect(await screen.findByText('Running')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+  });
+});

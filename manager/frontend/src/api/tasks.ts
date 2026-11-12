@@ -1,5 +1,7 @@
 import type { Answer } from '../features/chats/types';
+import { ActiveRunError } from '../features/tasks/ActiveRunError';
 import {
+  ActiveRunRefusalSchema,
   AnswersResponseSchema,
   TaskResponseSchema,
   TaskRunLogsResponseSchema,
@@ -11,30 +13,39 @@ import type {
   AnswersResponse,
   CreateTaskRequest,
   Task,
+  TaskChanges,
   TaskRun,
   TaskRunLog,
   UpdateTaskRequest,
+  UpdateTasksRequest,
 } from '../features/tasks/types';
 import { parse } from '../validation';
 import { API_BASE } from './client';
 import { deviceHeaders } from './device';
 import { session } from './session';
 
-// Helper to parse error responses
+const CONFLICT = 409;
+
 async function parseErrorResponse(response: Response): Promise<{ message?: string }> {
   try {
-    const data = await response.json();
-    return { message: data.message || data.error || data.detail };
+    return { message: messageOf(await response.json()) };
   } catch {
     return {};
   }
 }
 
+function messageOf(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) return undefined;
+  const { message, error, detail } = data as Record<string, unknown>;
+  const text = message || error || detail;
+  return typeof text === 'string' ? text : undefined;
+}
+
 class TasksApi {
   private getAccessToken: () => string | null = () => session.getAccessToken();
 
-  setGetAccessToken(fn: () => string | null): void {
-    this.getAccessToken = fn;
+  setGetAccessToken(provider: () => string | null): void {
+    this.getAccessToken = provider;
   }
 
   private getHeaders(): HeadersInit {
@@ -107,6 +118,32 @@ class TasksApi {
     }
     const data = parse(TaskResponseSchema, await response.json());
     return data.task;
+  }
+
+  async updateTasks(
+    workspaceId: string,
+    ids: readonly string[],
+    changes: TaskChanges
+  ): Promise<Task[]> {
+    const request: UpdateTasksRequest = { ids: [...ids], ...changes };
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/tasks`,
+      {
+        method: 'PATCH',
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+      }
+    );
+    if (!response.ok) {
+      const body: unknown = await response.json().catch(() => undefined);
+      const refusal = ActiveRunRefusalSchema.safeParse(body);
+      if (response.status === CONFLICT && refusal.success) {
+        throw new ActiveRunError(refusal.data.error, refusal.data.ids);
+      }
+      throw new Error(messageOf(body) || `Failed to update tasks: ${response.status}`);
+    }
+    const data = parse(TasksResponseSchema, await response.json());
+    return data.tasks;
   }
 
   async deleteTask(id: string): Promise<void> {

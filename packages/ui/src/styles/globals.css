@@ -542,9 +542,9 @@
     height: 1rem;
     width: 1rem;
     flex-shrink: 0;
-    border-radius: var(--ui-radius-sm);
-    border: 1px solid var(--ui-border-strong);
-    background-color: var(--ui-bg-base);
+    border-radius: var(--ui-radius-xs);
+    border: 1px solid var(--ui-border-control);
+    background-color: transparent;
     cursor: pointer;
     transition:
       background-color var(--ui-duration-fast) var(--ui-ease-out),
@@ -563,8 +563,8 @@
   }
 
   .ui-checkbox:focus-visible {
-    outline: none;
-    box-shadow: 0 0 0 2px var(--ui-border-focus);
+    outline: 2px solid var(--ui-border-focus);
+    outline-offset: 2px;
   }
 
   .ui-checkbox:disabled {
@@ -572,7 +572,8 @@
     opacity: 0.5;
   }
 
-  .ui-checkbox[data-state='checked'] {
+  .ui-checkbox[data-state='checked'],
+  .ui-checkbox[data-state='indeterminate'] {
     background-color: var(--ui-accent);
     border-color: var(--ui-accent);
   }

@@ -167,9 +167,9 @@ pub async fn update_task(
     }
     if input
         .priority
-        .is_some_and(|priority| !(1..=5).contains(&priority))
+        .is_some_and(|priority| !tasks::PRIORITIES.contains(&priority))
     {
-        return Err(invalid("priority must be between 1 and 5"));
+        return Err(invalid(tasks::PRIORITY_OUT_OF_RANGE));
     }
     let mut transaction = pool.begin().await?;
     authorize(&mut transaction, workspace_id, user_id, true).await?;
@@ -342,9 +342,9 @@ pub async fn start_task(
     }
     if input
         .priority
-        .is_some_and(|priority| !(1..=5).contains(&priority))
+        .is_some_and(|priority| !tasks::PRIORITIES.contains(&priority))
     {
-        return Err(invalid("priority must be between 1 and 5"));
+        return Err(invalid(tasks::PRIORITY_OUT_OF_RANGE));
     }
     let (task, run) = match super::tasks::start_task_authorized(
         pool,

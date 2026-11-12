@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock, setSystemTime } from 'bun:test';
 import { DndContext, useSensor, useSensors } from '@dnd-kit/core';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { chooseMenuItem, openMenu, settleMenu } from '../../../../test/menu';
 import { type Relations, UNRELATED } from '../../relations';
@@ -13,6 +13,7 @@ import { Unfolded } from './Unfolded';
 const NOW = new Date('2026-11-10T12:00:00Z');
 const PROJECTS = 'Website, Mobile';
 const MENU = 'Actions for Implement login';
+const SENSOR_DETACH = 60;
 
 const base: Task = {
   id: 'task-1',
@@ -51,6 +52,7 @@ function makeActions(): BoardActions {
     finish: mock(),
     remove: mock(),
     move: mock(() => Promise.resolve(true)),
+    select: mock(),
   };
 }
 
@@ -65,6 +67,8 @@ function Board({ children, onDragStart }: { children: ReactNode; onDragStart?: (
 
 interface CardOptions {
   renaming?: boolean;
+  selected?: boolean;
+  writable?: boolean;
   projects?: string;
   relations?: Relations;
   onDragStart?: () => void;
@@ -76,7 +80,14 @@ function other(id: string, title: string, status: TaskStatus = 'created'): Task 
 
 function renderCard(
   overrides: Partial<Task> = {},
-  { renaming = false, projects = PROJECTS, relations = UNRELATED, onDragStart }: CardOptions = {}
+  {
+    renaming = false,
+    selected = false,
+    writable = true,
+    projects = PROJECTS,
+    relations = UNRELATED,
+    onDragStart,
+  }: CardOptions = {}
 ) {
   const task = { ...base, ...overrides };
   const actions = makeActions();
@@ -88,6 +99,8 @@ function renderCard(
         relations={relations}
         now={NOW.getTime()}
         renaming={renaming ? new TitleDraft(task.title) : null}
+        selected={selected}
+        writable={writable}
         actions={actions}
       />
     </Board>
@@ -109,7 +122,10 @@ function description(control: HTMLElement): string | null | undefined {
   return document.getElementById(control.getAttribute('aria-describedby') ?? '')?.textContent;
 }
 
+let dragged = false;
+
 function drag(target: HTMLElement, pointerType = 'mouse') {
+  dragged = true;
   fireEvent.pointerDown(target, {
     isPrimary: true,
     button: 0,
@@ -125,8 +141,12 @@ describe('Card', () => {
     setSystemTime(NOW);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     setSystemTime();
+    if (!dragged) return;
+    dragged = false;
+    fireEvent.pointerUp(document, { isPrimary: true });
+    await act(() => new Promise((resolve) => setTimeout(resolve, SENSOR_DETACH)));
   });
 
   it('opens the task from its title button', () => {
@@ -406,6 +426,7 @@ describe('Card', () => {
               relations={relations}
               now={NOW.getTime()}
               renaming={null}
+              selected={false}
               actions={makeActions()}
             />
           </Board>
@@ -548,6 +569,7 @@ describe('Card', () => {
       controls.map((control) => control.getAttribute('aria-label') ?? control.textContent)
     ).toEqual([
       'Move Implement login',
+      'Select Implement login',
       'Implement login',
       'Pull request #7',
       'Open Write the spec',
@@ -633,12 +655,31 @@ describe('Card', () => {
     });
   }
 
-  it('lists Run, Rename and a destructive Delete in the menu', async () => {
+  it('lists Run, Rename, Select and a destructive Delete in the menu', async () => {
     renderCard();
     await openMenu(MENU);
     const items = screen.getAllByRole('menuitem');
-    expect(items.map((item) => item.textContent)).toEqual(['Run', 'Rename', 'Delete']);
-    expect(items[2]).toHaveClass('ui-action-menu-item-destructive');
+    expect(items.map((item) => item.textContent)).toEqual(['Run', 'Rename', 'Select', 'Delete']);
+    expect(items[3]).toHaveClass('ui-action-menu-item-destructive');
+  });
+
+  it("toggles the task into the selection from the menu's Select item without opening it", async () => {
+    const { task, actions } = renderCard();
+    await chooseMenuItem(MENU, 'Select');
+    expect(actions.select).toHaveBeenCalledTimes(1);
+    expect(actions.select).toHaveBeenCalledWith(task, 'toggle');
+    expect(actions.open).not.toHaveBeenCalled();
+  });
+
+  it("offers to deselect a selected task from the menu's Deselect item", async () => {
+    const { task, actions } = renderCard({}, { selected: true });
+    await openMenu(MENU);
+    const items = screen.getAllByRole('menuitem');
+    expect(items.map((item) => item.textContent)).toEqual(['Run', 'Rename', 'Deselect', 'Delete']);
+    fireEvent.click(items[2]);
+    await settleMenu();
+    expect(actions.select).toHaveBeenCalledTimes(1);
+    expect(actions.select).toHaveBeenCalledWith(task, 'toggle');
   });
 
   it('swaps the title for an input while renaming and saves the new title', async () => {
@@ -759,5 +800,153 @@ describe('Card', () => {
     drag(screen.getByRole('textbox', { name: 'Task title' }));
     await settleMenu();
     expect(onDragStart).not.toHaveBeenCalled();
+  });
+
+  describe('selection', () => {
+    const SELECT = 'Select Implement login';
+
+    function checkbox(): HTMLElement {
+      return screen.getByRole('checkbox', { name: SELECT });
+    }
+
+    function title(): HTMLElement {
+      return screen.getByRole('button', { name: 'Implement login' });
+    }
+
+    it('puts the selection checkbox right after the grip handle', () => {
+      renderCard();
+      const handle = screen.getByRole('button', { name: 'Move Implement login' });
+      expect(checkbox()).toHaveClass('task-card-select');
+      expect(handle.compareDocumentPosition(checkbox()) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING
+      );
+      expect(checkbox().compareDocumentPosition(title()) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING
+      );
+    });
+
+    it('leaves an unselected card unmarked and its checkbox clear', () => {
+      renderCard();
+      expect(card()).not.toHaveAttribute('data-selected');
+      expect(checkbox()).toHaveAttribute('aria-checked', 'false');
+    });
+
+    it('marks a selected card and checks its checkbox', () => {
+      renderCard({}, { selected: true });
+      expect(card()).toHaveAttribute('data-selected');
+      expect(checkbox()).toHaveAttribute('aria-checked', 'true');
+    });
+
+    it('toggles the task from its checkbox without opening it', () => {
+      const { task, actions } = renderCard();
+      fireEvent.click(checkbox());
+      expect(actions.select).toHaveBeenCalledTimes(1);
+      expect(actions.select).toHaveBeenCalledWith(task, 'toggle');
+      expect(actions.open).not.toHaveBeenCalled();
+    });
+
+    it('selects a range from a shift-click on the checkbox', () => {
+      const { task, actions } = renderCard();
+      fireEvent.click(checkbox(), { shiftKey: true });
+      expect(actions.select).toHaveBeenCalledWith(task, 'range');
+    });
+
+    it('leaves the checkbox to the board instead of checking itself', () => {
+      renderCard();
+      fireEvent.click(checkbox());
+      expect(checkbox()).toHaveAttribute('aria-checked', 'false');
+    });
+
+    it('does not start a drag from the checkbox', async () => {
+      const onDragStart = mock();
+      renderCard({}, { onDragStart });
+      drag(checkbox());
+      await settleMenu();
+      expect(onDragStart).not.toHaveBeenCalled();
+      expect(card()).not.toHaveClass('task-card-dragging');
+    });
+
+    for (const modifier of ['metaKey', 'ctrlKey'] as const) {
+      it(`toggles the task with ${modifier} on its title instead of opening it`, () => {
+        const { task, actions } = renderCard();
+        const clicked = fireEvent.click(title(), { [modifier]: true });
+        expect(clicked).toBe(false);
+        expect(actions.select).toHaveBeenCalledWith(task, 'toggle');
+        expect(actions.open).not.toHaveBeenCalled();
+      });
+    }
+
+    it('selects a range from a shift-click on its title instead of opening it', () => {
+      const { task, actions } = renderCard();
+      const clicked = fireEvent.click(title(), { shiftKey: true });
+      expect(clicked).toBe(false);
+      expect(actions.select).toHaveBeenCalledWith(task, 'range');
+      expect(actions.open).not.toHaveBeenCalled();
+    });
+
+    it('opens the task from a plain click on its title without selecting it', () => {
+      const { task, actions } = renderCard({}, { selected: true });
+      fireEvent.click(title());
+      expect(actions.open).toHaveBeenCalledWith(task);
+      expect(actions.select).not.toHaveBeenCalled();
+    });
+
+    it('keeps a shift-click on the checkbox or title from selecting text', () => {
+      renderCard();
+      expect(fireEvent.mouseDown(checkbox(), { shiftKey: true })).toBe(false);
+      expect(fireEvent.mouseDown(title(), { shiftKey: true })).toBe(false);
+      expect(fireEvent.mouseDown(title())).toBe(true);
+    });
+
+    it('still starts a pointer drag from the body of a selected card', async () => {
+      const onDragStart = mock();
+      renderCard({}, { selected: true, onDragStart });
+      drag(title());
+      await waitFor(() => expect(onDragStart).toHaveBeenCalled());
+    });
+  });
+
+  describe('read by a viewer', () => {
+    it('has no grip and no selection checkbox', () => {
+      renderCard({}, { writable: false });
+      expect(
+        screen.queryByRole('button', { name: 'Move Implement login' })
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('checkbox', { name: 'Select Implement login' })
+      ).not.toBeInTheDocument();
+    });
+
+    it('offers only the runs from its menu', async () => {
+      const { task, actions } = renderCard({}, { writable: false });
+      await openMenu(MENU);
+      const items = screen.getAllByRole('menuitem');
+      expect(items.map((item) => item.textContent)).toEqual(['Runs']);
+      fireEvent.click(items[0]);
+      await settleMenu();
+      expect(actions.run).toHaveBeenCalledWith(task);
+    });
+
+    it('opens the task from a modified click on the title instead of selecting it', () => {
+      const { task, actions } = renderCard({}, { writable: false });
+      fireEvent.click(screen.getByRole('button', { name: 'Implement login' }), { metaKey: true });
+      expect(actions.select).not.toHaveBeenCalled();
+      expect(actions.open).toHaveBeenCalledWith(task);
+    });
+
+    it('cannot be dragged to another column', async () => {
+      const onDragStart = mock();
+      renderCard({}, { writable: false, onDragStart });
+      drag(card());
+      await settleMenu();
+      expect(onDragStart).not.toHaveBeenCalled();
+    });
+
+    it('can be dragged by a writer from the same spot', async () => {
+      const onDragStart = mock();
+      renderCard({}, { onDragStart });
+      drag(card());
+      await waitFor(() => expect(onDragStart).toHaveBeenCalled());
+    });
   });
 });

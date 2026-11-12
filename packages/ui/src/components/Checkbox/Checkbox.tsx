@@ -1,7 +1,10 @@
-import React, { forwardRef, useCallback } from 'react';
 import * as CheckboxPrimitive from '@radix-ui/react-checkbox';
+import type React from 'react';
+import { forwardRef, useCallback } from 'react';
 import { cn } from '../../lib/utils';
 import { Label } from '../Label';
+
+export type CheckedState = boolean | 'indeterminate';
 
 export interface CheckboxProps
   extends Omit<
@@ -10,7 +13,7 @@ export interface CheckboxProps
   > {
   label?: string;
   helpText?: string;
-  checked?: boolean;
+  checked?: CheckedState;
   defaultChecked?: boolean;
   onChange?: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onCheckedChange?: (checked: boolean) => void;
@@ -35,10 +38,16 @@ const Checkbox = forwardRef<React.ElementRef<typeof CheckboxPrimitive.Root>, Che
     ref
   ) => {
     const checkboxId =
-      id || (label ? label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') : undefined);
+      id ||
+      (label
+        ? label
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-|-$/g, '')
+        : undefined);
 
     const handleCheckedChange = useCallback(
-      (nextChecked: boolean | 'indeterminate') => {
+      (nextChecked: CheckedState) => {
         const resolvedChecked = nextChecked === true;
         onCheckedChange?.(resolvedChecked);
         if (onChange) {
@@ -76,8 +85,13 @@ const Checkbox = forwardRef<React.ElementRef<typeof CheckboxPrimitive.Root>, Che
               strokeLinecap="round"
               strokeLinejoin="round"
               className="ui-checkbox-icon"
+              aria-hidden="true"
             >
-              <polyline points="20 6 9 17 4 12" />
+              {checked === 'indeterminate' ? (
+                <line x1="6" y1="12" x2="18" y2="12" />
+              ) : (
+                <polyline points="20 6 9 17 4 12" />
+              )}
             </svg>
           </CheckboxPrimitive.Indicator>
         </CheckboxPrimitive.Root>
@@ -85,7 +99,10 @@ const Checkbox = forwardRef<React.ElementRef<typeof CheckboxPrimitive.Root>, Che
           <div className="ui-checkbox-copy">
             {label && <Label htmlFor={checkboxId}>{label}</Label>}
             {helpText && (
-              <p id={checkboxId ? `${checkboxId}-help` : undefined} className="ui-checkbox-help-text">
+              <p
+                id={checkboxId ? `${checkboxId}-help` : undefined}
+                className="ui-checkbox-help-text"
+              >
                 {helpText}
               </p>
             )}

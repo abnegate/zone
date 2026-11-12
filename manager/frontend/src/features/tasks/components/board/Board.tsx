@@ -34,8 +34,12 @@ export interface BoardProps {
   renaming: Renaming | null;
   removed: string | null;
   view: View;
+  selected?: ReadonlySet<string>;
+  writable?: boolean;
   actions: BoardActions;
 }
+
+const NONE: ReadonlySet<string> = new Set();
 
 const POINTER = { activationConstraint: { distance: 5 } };
 
@@ -73,6 +77,8 @@ export function Board({
   renaming,
   removed,
   view,
+  selected = NONE,
+  writable = true,
   actions,
 }: BoardProps) {
   const groups = useMemo(() => groupByStage(tasks), [tasks]);
@@ -159,6 +165,7 @@ export function Board({
       className="board"
       aria-label="Tasks"
       data-dragging={active !== null || undefined}
+      data-selecting={selected.size > 0 || undefined}
     >
       <DndContext
         id={instructions}
@@ -182,6 +189,8 @@ export function Board({
                   relations={relations.get(task.id) ?? UNRELATED}
                   now={now}
                   renaming={renaming?.id === task.id ? renaming.draft : null}
+                  selected={selected.has(task.id)}
+                  writable={writable}
                   actions={actions}
                 />
               ))}

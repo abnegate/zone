@@ -298,7 +298,9 @@ pub fn create_router(state: AppState) -> Router {
         // Tasks (workspace-scoped)
         .route(
             "/api/workspaces/{workspace_id}/tasks",
-            get(tasks::list).post(tasks::create),
+            get(tasks::list)
+                .post(tasks::create)
+                .patch(tasks::update_many),
         )
         .route(
             "/api/tasks/{id}",

@@ -111,6 +111,7 @@ mod skills_store;
 mod subscriptions;
 mod sync;
 mod task_authorization;
+mod task_bulk_edit;
 mod task_creation;
 mod task_execution;
 mod task_lifecycle;

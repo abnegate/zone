@@ -114,9 +114,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-exec"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afdef19b064937b532c5073a1a18146a6e330fb3207abe0913d662f637ff5610"
+checksum = "302a87773426b90887ddc9565209a5fd76d7c0ef3361fb85fb8b591932db1524"
 dependencies = [
  "abnegate-secret",
  "base64 0.23.1",

@@ -1,4 +1,5 @@
 import { memo, useLayoutEffect, useRef } from 'react';
+import { gestureOf, keepText } from '../../gesture';
 import type { Relations } from '../../relations';
 import type { TitleDraft } from '../../TitleDraft';
 import { awaitsTitle } from '../../title';
@@ -14,6 +15,8 @@ export interface CardContentProps {
   relations: Relations;
   now: number;
   renaming: TitleDraft | null;
+  selected: boolean;
+  writable: boolean;
   actions: BoardActions;
 }
 
@@ -23,6 +26,8 @@ export const CardContent = memo(function CardContent({
   relations,
   now,
   renaming,
+  selected,
+  writable,
   actions,
 }: CardContentProps) {
   const open = useRef<HTMLButtonElement>(null);
@@ -35,29 +40,39 @@ export const CardContent = memo(function CardContent({
     wasRenaming.current = renaming !== null;
   }, [renaming]);
 
-  const title = renaming ? (
-    <TaskTitleInput
-      title={task.title}
-      draft={renaming}
-      onSave={(value) => actions.retitle(task, value)}
-      onDone={() => actions.finish(task)}
-    />
-  ) : (
-    <button
-      ref={open}
-      type="button"
-      className={
-        pending
-          ? 'task-card-title task-card-open task-card-title-pending'
-          : 'task-card-title task-card-open'
-      }
-      title={task.title}
-      aria-busy={pending || undefined}
-      onClick={() => actions.open(task)}
-    >
-      {task.title}
-    </button>
-  );
+  const title =
+    renaming && writable ? (
+      <TaskTitleInput
+        title={task.title}
+        draft={renaming}
+        onSave={(value) => actions.retitle(task, value)}
+        onDone={() => actions.finish(task)}
+      />
+    ) : (
+      <button
+        ref={open}
+        type="button"
+        className={
+          pending
+            ? 'task-card-title task-card-open task-card-title-pending'
+            : 'task-card-title task-card-open'
+        }
+        title={task.title}
+        aria-busy={pending || undefined}
+        onMouseDown={keepText}
+        onClick={(event) => {
+          const gesture = writable ? gestureOf(event) : null;
+          if (gesture === null) {
+            actions.open(task);
+            return;
+          }
+          event.preventDefault();
+          actions.select(task, gesture);
+        }}
+      >
+        {task.title}
+      </button>
+    );
 
   return (
     <>
@@ -70,7 +85,7 @@ export const CardContent = memo(function CardContent({
         onOpen={(related) => actions.open(related, task)}
       />
       <div className="task-card-menu" onPointerDown={CardSensor.shield}>
-        <CardMenu task={task} actions={actions} />
+        <CardMenu task={task} selected={selected} writable={writable} actions={actions} />
       </div>
     </>
   );
