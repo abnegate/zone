@@ -1,8 +1,8 @@
-import { memo, useLayoutEffect, useRef } from 'react';
+import { type MouseEvent, memo, useLayoutEffect, useRef } from 'react';
 import type { Relations } from '../../relations';
 import type { TitleDraft } from '../../TitleDraft';
 import { awaitsTitle } from '../../title';
-import type { BoardActions, Task } from '../../types';
+import type { BoardActions, Gesture, Task } from '../../types';
 import { TaskTitleInput } from '../TaskTitleInput';
 import { CardBody } from './CardBody';
 import { CardMenu } from './CardMenu';
@@ -15,6 +15,20 @@ export interface CardContentProps {
   now: number;
   renaming: TitleDraft | null;
   actions: BoardActions;
+}
+
+const TOGGLE: Gesture = 'toggle';
+
+const RANGE: Gesture = 'range';
+
+function gestureOf(event: MouseEvent): Gesture | null {
+  if (event.shiftKey) return RANGE;
+  if (event.metaKey || event.ctrlKey) return TOGGLE;
+  return null;
+}
+
+function keepText(event: MouseEvent): void {
+  if (event.shiftKey) event.preventDefault();
 }
 
 export const CardContent = memo(function CardContent({
@@ -53,7 +67,16 @@ export const CardContent = memo(function CardContent({
       }
       title={task.title}
       aria-busy={pending || undefined}
-      onClick={() => actions.open(task)}
+      onMouseDown={keepText}
+      onClick={(event) => {
+        const gesture = gestureOf(event);
+        if (gesture === null) {
+          actions.open(task);
+          return;
+        }
+        event.preventDefault();
+        actions.select(task, gesture);
+      }}
     >
       {task.title}
     </button>

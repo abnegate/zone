@@ -119,6 +119,8 @@ export interface Renaming {
   draft: TitleDraft;
 }
 
+export type Gesture = 'toggle' | 'range';
+
 export interface BoardActions {
   open: (task: Task, host?: Task) => void;
   run: (task: Task) => void;
@@ -127,6 +129,7 @@ export interface BoardActions {
   finish: (task: Task) => void;
   remove: (task: Task) => void;
   move: (task: Task, status: TaskStatus) => Promise<boolean>;
+  select: (task: Task, gesture: Gesture) => void;
 }
 
 export interface UpdateTaskRequest {
