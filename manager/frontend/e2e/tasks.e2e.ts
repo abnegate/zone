@@ -2002,6 +2002,70 @@ test.describe('Tasks Page', () => {
     });
   });
 
+  test.describe('View-only access', () => {
+    const READ_ONLY = 'You have view access, so you can read tasks but not change them';
+
+    test.beforeEach(async ({ page }) => {
+      const viewer = {
+        workspaces: [
+          {
+            id: workspaceId,
+            organization_id: '00000000-0000-0000-0000-000000000001',
+            name: 'Default Workspace',
+            slug: 'default',
+            description: null,
+            is_active: true,
+            role: 'viewer',
+            created_at: UPDATED,
+            updated_at: UPDATED,
+          },
+        ],
+      };
+      await page.unroute('**/api/organizations/*/workspaces?*');
+      await page.unroute('**/api/organizations/*/workspaces');
+      await routeApi(page, '**/api/organizations/*/workspaces?*', (route) =>
+        fulfillJson(route, viewer)
+      );
+      await routeApi(page, '**/api/organizations/*/workspaces', (route) =>
+        fulfillJson(route, viewer)
+      );
+    });
+
+    test('offers a viewer no write the server would refuse', async ({ context, page }) => {
+      const server = await serveTasks(context, page);
+      const login = card(page, 'Implement login page');
+
+      await expect(page.getByText(READ_ONLY)).toBeVisible();
+      await expect(page.getByRole('button', { name: /New task/ })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /^Move / })).toHaveCount(0);
+      await expect(page.getByRole('checkbox', { name: /^Select / })).toHaveCount(0);
+
+      await openMenu(page, 'Implement login page');
+      await expect(page.getByRole('menuitem')).toHaveText(['Runs']);
+      await page.keyboard.press('Escape');
+
+      const from = await center(login.locator('.task-card-meta'));
+      const to = await center(column(page, 'Completed'));
+      await page.mouse.move(from.x, from.y);
+      await page.mouse.down();
+      await page.mouse.move(to.x, to.y, { steps: 12 });
+      await page.mouse.up();
+      await expect(page.locator('.task-card-overlay')).toHaveCount(0);
+      await expect(card(column(page, 'Planned'), 'Implement login page')).toBeVisible();
+
+      await page.getByRole('button', { name: 'Implement login page', exact: true }).click({
+        modifiers: ['ControlOrMeta'],
+      });
+      await expect(page.locator('section.task-details')).toBeVisible();
+      await expect(selection(page)).toHaveCount(0);
+      await expect(page.getByLabel('Description')).toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Save' })).toBeDisabled();
+      await expect(page.locator('.task-details-access')).toHaveText(READ_ONLY);
+
+      expect(server.mutations).toEqual([]);
+    });
+  });
+
   test.describe('Disabled State', () => {
     test('new task button is disabled when no projects exist', async ({ context, page }) => {
       await context.unroute('**/api/projects*');

@@ -16,6 +16,7 @@ export interface CardContentProps {
   now: number;
   renaming: TitleDraft | null;
   selected: boolean;
+  writable: boolean;
   actions: BoardActions;
 }
 
@@ -26,6 +27,7 @@ export const CardContent = memo(function CardContent({
   now,
   renaming,
   selected,
+  writable,
   actions,
 }: CardContentProps) {
   const open = useRef<HTMLButtonElement>(null);
@@ -58,7 +60,7 @@ export const CardContent = memo(function CardContent({
       aria-busy={pending || undefined}
       onMouseDown={keepText}
       onClick={(event) => {
-        const gesture = gestureOf(event);
+        const gesture = writable ? gestureOf(event) : null;
         if (gesture === null) {
           actions.open(task);
           return;
@@ -82,7 +84,7 @@ export const CardContent = memo(function CardContent({
         onOpen={(related) => actions.open(related, task)}
       />
       <div className="task-card-menu" onPointerDown={CardSensor.shield}>
-        <CardMenu task={task} selected={selected} actions={actions} />
+        <CardMenu task={task} selected={selected} writable={writable} actions={actions} />
       </div>
     </>
   );

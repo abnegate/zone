@@ -1140,6 +1140,17 @@ describe('Client', () => {
       );
     });
 
+    it("getWorkspaces keeps the caller's role in each workspace", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ workspaces: [{ ...mockWorkspace, role: 'viewer' }] }),
+      });
+
+      const [workspace] = await client.getWorkspaces('org-1');
+
+      expect(workspace.role).toBe('viewer');
+    });
+
     it('createWorkspace creates workspace', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,

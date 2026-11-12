@@ -78,6 +78,55 @@ function description(control: HTMLElement): string | null | undefined {
 }
 
 describe('TaskDetail', () => {
+  describe('read by a viewer', () => {
+    const READ_ONLY = 'You have view access, so you can read tasks but not change them';
+
+    function renderReadOnly() {
+      const onSave = mock((_request: UpdateTaskRequest) => Promise.resolve());
+      render(
+        <TaskDetail
+          task={task}
+          tasks={[task]}
+          projects={[]}
+          sources={[]}
+          onOpen={() => {}}
+          onClose={() => {}}
+          onExecute={() => {}}
+          onSave={onSave}
+          writable={false}
+        />
+      );
+      return { onSave };
+    }
+
+    it('disables Save and says why', () => {
+      renderReadOnly();
+
+      const save = screen.getByRole('button', { name: 'Save' });
+      expect(save).toBeDisabled();
+      expect(description(save)).toBe(READ_ONLY);
+    });
+
+    it('locks every field and the title', () => {
+      renderReadOnly();
+
+      for (const field of ['Description', /Acceptance Criteria/, 'Model']) {
+        expect(screen.getByLabelText(field).closest('fieldset')).toBeDisabled();
+      }
+      expect(
+        screen.queryByRole('button', { name: `Rename ${task.title}` })
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: task.title })).toBeInTheDocument();
+    });
+
+    it('offers the runs instead of executing', () => {
+      renderReadOnly();
+
+      expect(screen.getByRole('button', { name: 'Runs' })).toBeEnabled();
+      expect(screen.queryByRole('button', { name: 'Execute' })).not.toBeInTheDocument();
+    });
+  });
+
   it('lists every status in order with the shared labels', async () => {
     renderDetail(() => Promise.resolve());
 

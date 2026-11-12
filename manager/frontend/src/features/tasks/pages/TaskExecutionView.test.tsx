@@ -342,3 +342,38 @@ describe('a task run that parked on a wait', () => {
     expect(screen.queryByTestId('wait-countdown')).not.toBeInTheDocument();
   });
 });
+
+describe('a run read by a viewer', () => {
+  beforeEach(() => {
+    mockRunTask.mockReset();
+    mockGetTaskRuns.mockReset();
+    mockGetTaskRun.mockReset();
+    mockGetTaskRunLogs.mockReset();
+    mockAnswerRun.mockReset();
+    mockGetTaskRunLogs.mockImplementation(() => Promise.resolve([]));
+  });
+
+  it('offers no way to start a run', async () => {
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([]));
+    render(<TaskExecutionView task={task} writable={false} onClose={() => {}} />);
+
+    expect(await screen.findByText('This task has not run yet.')).toBeInTheDocument();
+    expect(
+      screen.getByText('You have view access, so you can read tasks but not change them')
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start Execution' })).not.toBeInTheDocument();
+  });
+
+  it('shows a parked question without a way to answer it', async () => {
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([waiting]));
+    mockGetTaskRun.mockImplementation(() => Promise.resolve(waiting));
+    render(<TaskExecutionView task={task} writable={false} onClose={() => {}} />);
+
+    expect(
+      await screen.findByText('This run is waiting for a member to answer its question.')
+    ).toBeInTheDocument();
+    expect(screen.getByText('Waiting')).toBeInTheDocument();
+    expect(screen.queryByText('Waiting for you')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('question-card')).not.toBeInTheDocument();
+  });
+});

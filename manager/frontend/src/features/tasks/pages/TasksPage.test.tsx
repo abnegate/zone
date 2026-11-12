@@ -52,10 +52,12 @@ const mockWorkspace = {
 };
 
 let currentWorkspace = mockWorkspace;
+let writable = true;
 
 mock.module('../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: mock(() => ({
     currentWorkspace,
+    writable,
     loading: false,
   })),
 }));
@@ -101,6 +103,7 @@ afterAll(() => {
 afterEach(() => {
   window.history.pushState({}, '', '/');
   currentWorkspace = mockWorkspace;
+  writable = true;
 });
 
 const createQueryClient = () =>
@@ -2599,5 +2602,78 @@ describe('TasksPage', () => {
       expect(screen.getByLabelText('Description')).toHaveValue('Also on iOS');
       expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
     }, 15_000);
+  });
+
+  describe('read by a viewer', () => {
+    const READ_ONLY = 'You have view access, so you can read tasks but not change them';
+
+    beforeEach(() => {
+      writable = false;
+    });
+
+    it('offers no new task and says why', async () => {
+      renderTasksPage();
+      await screen.findByText('Implement login');
+
+      expect(screen.queryByRole('button', { name: 'New task' })).not.toBeInTheDocument();
+      expect(screen.getByText(READ_ONLY)).toBeInTheDocument();
+    });
+
+    it('offers no task to create from the empty board', async () => {
+      mockGetTasks.mockImplementation(() => Promise.resolve([]));
+      renderTasksPage();
+
+      expect(await screen.findByText('No tasks yet')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Create Task' })).not.toBeInTheDocument();
+      expect(screen.getAllByText(READ_ONLY).length).toBeGreaterThan(0);
+    });
+
+    it('shows cards with nothing to move, select, rename or delete', async () => {
+      renderTasksPage();
+      await screen.findByText('Implement login');
+
+      expect(
+        screen.queryByRole('button', { name: 'Move Implement login' })
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('checkbox', { name: 'Select Implement login' })
+      ).not.toBeInTheDocument();
+      await openMenu('Actions for Implement login');
+      expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Runs']);
+    });
+
+    it('opens a task from a modified click instead of selecting it', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'), { metaKey: true });
+
+      await waitFor(() => {
+        expect(document.querySelector('section.task-details')).not.toBeNull();
+      });
+      expect(screen.queryByRole('group', { name: 'Selected tasks' })).toBeNull();
+    });
+
+    it('opens the editor with Save disabled', async () => {
+      renderTasksPage();
+      fireEvent.click(await openTitle('Implement login'));
+
+      const save = await screen.findByRole('button', { name: 'Save' });
+      expect(save).toBeDisabled();
+      expect(screen.getByLabelText('Description').closest('fieldset')).toBeDisabled();
+    });
+
+    it('drops a selection made before the role became view-only', async () => {
+      writable = true;
+      const { again } = renderTasksPage();
+      fireEvent.click(await screen.findByRole('checkbox', { name: 'Select Implement login' }));
+      await screen.findByText('1 selected');
+
+      writable = false;
+      again();
+
+      await waitFor(() =>
+        expect(screen.queryByRole('group', { name: 'Selected tasks' })).toBeNull()
+      );
+      expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
+    });
   });
 });

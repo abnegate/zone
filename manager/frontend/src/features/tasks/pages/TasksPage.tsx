@@ -9,6 +9,7 @@ import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
 import { ActiveRunError } from '../ActiveRunError';
+import { READ_ONLY } from '../access';
 import {
   CreateTaskWizard,
   DeleteTaskDialog,
@@ -104,7 +105,7 @@ function keepsSelection(event: KeyboardEvent): boolean {
 export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
-  const { currentWorkspace } = useWorkspace();
+  const { currentWorkspace, writable } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
   const [scope, setScope] = useState(workspaceId);
   const [filterProject, setFilterProject] = useState(ALL_PROJECTS);
@@ -143,7 +144,10 @@ export default function TasksPage() {
   } = useTasks(filterProject || undefined);
   const latest = useRef(tasks);
   const listed = useMemo(() => idsOf(tasks), [tasks]);
-  const visible = useMemo(() => selection.retain(listed), [selection, listed]);
+  const visible = useMemo(
+    () => (writable ? selection.retain(listed) : Selection.EMPTY),
+    [writable, selection, listed]
+  );
   const chosen = useMemo(() => tasks.filter((task) => visible.has(task.id)), [tasks, visible]);
 
   if (visible !== selection) {
@@ -355,13 +359,17 @@ export default function TasksPage() {
                 ]}
               />
             </div>
-            <Button
-              onClick={() => setShowCreateModal(true)}
-              disabled={loading || projects.length === 0}
-            >
-              <PlusIcon />
-              New task
-            </Button>
+            {writable ? (
+              <Button
+                onClick={() => setShowCreateModal(true)}
+                disabled={loading || projects.length === 0}
+              >
+                <PlusIcon />
+                New task
+              </Button>
+            ) : (
+              <p className="tasks-access">{READ_ONLY}</p>
+            )}
           </>
         ) : null}
       </PageBar>
@@ -388,6 +396,7 @@ export default function TasksPage() {
             onClose={closeEditor}
             onExecute={() => setExecutionTask(editorTask)}
             onSave={handleSave}
+            writable={writable}
           />
         ) : loading ? (
           <Skeleton />
@@ -401,6 +410,7 @@ export default function TasksPage() {
               removed={removed}
               view={view}
               selected={visible.ids}
+              writable={writable}
               actions={actions}
             />
           </Unfolded>
@@ -417,25 +427,27 @@ export default function TasksPage() {
             description={
               filtered
                 ? 'No tasks belong to this project yet'
-                : 'Create your first task to automate your workflow'
+                : writable
+                  ? 'Create your first task to automate your workflow'
+                  : READ_ONLY
             }
             action={
               filtered ? (
                 <Button variant="secondary" onClick={() => filter(ALL_PROJECTS)}>
                   Show all tasks
                 </Button>
-              ) : (
+              ) : writable ? (
                 <Button onClick={() => setShowCreateModal(true)} disabled={projects.length === 0}>
                   Create Task
                 </Button>
-              )
+              ) : undefined
             }
           />
         )}
       </div>
 
       <CreateTaskWizard
-        isOpen={showCreateModal && projects.length > 0}
+        isOpen={writable && showCreateModal && projects.length > 0}
         onClose={() => setShowCreateModal(false)}
         onCreated={() => {}}
         createTask={createTask}
@@ -444,7 +456,12 @@ export default function TasksPage() {
       />
 
       {executionTask && (
-        <TaskExecutionView key={executionTask.id} task={executionTask} onClose={closeExecution} />
+        <TaskExecutionView
+          key={executionTask.id}
+          task={executionTask}
+          writable={writable}
+          onClose={closeExecution}
+        />
       )}
 
       {selecting && (
@@ -455,7 +472,7 @@ export default function TasksPage() {
         />
       )}
 
-      {editing && (
+      {editing && writable && (
         <EditTasksDialog
           tasks={chosen}
           projects={projects}

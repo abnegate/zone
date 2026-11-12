@@ -88,6 +88,7 @@ function TestComponent() {
       <span data-testid="resolving-role">{ctx.resolvingRole ? 'resolving' : 'settled'}</span>
       <span data-testid="ws-count">{ctx.workspaces.length}</span>
       <span data-testid="current-ws">{ctx.currentWorkspace?.name || 'none'}</span>
+      <span data-testid="writable">{ctx.writable ? 'writable' : 'read-only'}</span>
       <button onClick={() => ctx.setCurrentOrganization(mockOrganizations[1])}>Switch Org</button>
       <button onClick={() => ctx.setCurrentWorkspace(mockWorkspaces[1])}>Switch Workspace</button>
       <button onClick={() => ctx.refreshOrganizations()}>Refresh Orgs</button>
@@ -380,6 +381,56 @@ describe('WorkspaceContext', () => {
       });
       expect(screen.getByTestId('current-role')).toHaveTextContent('unknown');
       expect(mockClient.getOrgMembers).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('workspace role', () => {
+    async function writableAs(role: Workspace['role']): Promise<string | null> {
+      mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
+      mockClient.getWorkspaces.mockResolvedValueOnce([{ ...mockWorkspaces[0], role }]);
+
+      render(
+        <WorkspaceProvider useAuthHook={useAuthHook}>
+          <TestComponent />
+        </WorkspaceProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('current-ws')).toHaveTextContent('Workspace 1');
+      });
+      return screen.getByTestId('writable').textContent;
+    }
+
+    it('reads a viewer as read-only', async () => {
+      expect(await writableAs('viewer')).toBe('read-only');
+    });
+
+    it.each(['member', 'admin', 'owner'] as const)('lets a %s write', async (role) => {
+      expect(await writableAs(role)).toBe('writable');
+    });
+
+    it('leaves writes to the server when the workspace carries no role', async () => {
+      expect(await writableAs(undefined)).toBe('writable');
+    });
+
+    it('reads the role of the workspace picked, not the first listed', async () => {
+      localStorage.setItem('manager_current_workspace', 'ws-2');
+      mockClient.getOrganizations.mockResolvedValueOnce(mockOrganizations);
+      mockClient.getWorkspaces.mockResolvedValueOnce([
+        { ...mockWorkspaces[0], role: 'member' },
+        { ...mockWorkspaces[1], role: 'viewer' },
+      ]);
+
+      render(
+        <WorkspaceProvider useAuthHook={useAuthHook}>
+          <TestComponent />
+        </WorkspaceProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByTestId('current-ws')).toHaveTextContent('Workspace 2');
+      });
+      expect(screen.getByTestId('writable')).toHaveTextContent('read-only');
     });
   });
 

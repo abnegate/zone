@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
 import { ActionReceipts } from '../../chats/components';
 import type { Waiting } from '../../chats/types';
+import { READ_ONLY } from '../access';
 import { QuestionPrompt } from '../components';
 import type { RunStatus, Task, TaskRun, TaskRunLog } from '../types';
 
@@ -11,6 +12,7 @@ const WAITING_LABEL = 'Waiting for';
 const ANSWER_ACTIVITY = 'Waiting for an answer';
 const WAITING_STATUS = 'Waiting';
 const WAITING_FOR_YOU_STATUS = 'Waiting for you';
+const UNANSWERABLE = 'This run is waiting for a member to answer its question.';
 const DEADLINE_PASSED_LABEL = 'Deadline passed';
 
 const KIND_JOB = 'job';
@@ -70,8 +72,9 @@ function waitSubject(waiting: Waiting): string {
   }
 }
 
-function statusLabel(run: TaskRun): string {
-  return wait(run) ? WAITING_STATUS : STATUSES[run.status];
+function statusLabel(run: TaskRun, writable: boolean): string {
+  if (wait(run) || (!writable && run.status === 'waiting')) return WAITING_STATUS;
+  return STATUSES[run.status];
 }
 
 /// The phase, read with what the run carries: a parked run reads as a question
@@ -130,7 +133,15 @@ function Countdown({ deadline }: { deadline: string }) {
   );
 }
 
-export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () => void }) {
+export function TaskExecutionView({
+  task,
+  writable = true,
+  onClose,
+}: {
+  task: Task;
+  writable?: boolean;
+  onClose: () => void;
+}) {
   const [run, setRun] = useState<TaskRun | null>(null);
   const [logs, setLogs] = useState<TaskRunLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -252,7 +263,7 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
     : loading
       ? 'Loading run'
       : run
-        ? statusLabel(run)
+        ? statusLabel(run, writable)
         : 'Ready to run';
   return (
     <Modal
@@ -290,7 +301,9 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
       </div>
       {!run && !loading && !starting && !error && (
         <p className="execution-hint">
-          Start this task to see its activity and execution logs here.
+          {writable
+            ? 'Start this task to see its activity and execution logs here.'
+            : 'This task has not run yet.'}
         </p>
       )}
       {error && (
@@ -318,9 +331,13 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
       {run?.status === 'completed' && (
         <p className="execution-hint">Task completed successfully.</p>
       )}
-      {run?.status === 'waiting' && run.pending_question && (
-        <QuestionPrompt run={run} onAnswered={() => setRevision((value) => value + 1)} />
-      )}
+      {run?.status === 'waiting' &&
+        run.pending_question &&
+        (writable ? (
+          <QuestionPrompt run={run} onAnswered={() => setRevision((value) => value + 1)} />
+        ) : (
+          <p className="execution-hint">{UNANSWERABLE}</p>
+        ))}
       {run && (
         <section className="execution-logs" aria-label="Execution logs">
           <h3>Execution Logs</h3>
@@ -368,9 +385,11 @@ export function TaskExecutionView({ task, onClose }: { task: Task; onClose: () =
         <p className="execution-hint">
           {running || starting
             ? 'You can close this window. The task continues in the background.'
-            : 'Runs use this task’s configured model and sources.'}
+            : writable
+              ? 'Runs use this task’s configured model and sources.'
+              : READ_ONLY}
         </p>
-        {!running && (
+        {writable && !running && (
           <Button onClick={() => void start()} disabled={loading || starting || !!monitoring}>
             {starting ? 'Starting…' : error ? 'Try Again' : run ? 'Run Again' : 'Start Execution'}
           </Button>

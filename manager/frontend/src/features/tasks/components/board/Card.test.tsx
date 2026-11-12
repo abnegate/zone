@@ -68,6 +68,7 @@ function Board({ children, onDragStart }: { children: ReactNode; onDragStart?: (
 interface CardOptions {
   renaming?: boolean;
   selected?: boolean;
+  writable?: boolean;
   projects?: string;
   relations?: Relations;
   onDragStart?: () => void;
@@ -82,6 +83,7 @@ function renderCard(
   {
     renaming = false,
     selected = false,
+    writable = true,
     projects = PROJECTS,
     relations = UNRELATED,
     onDragStart,
@@ -98,6 +100,7 @@ function renderCard(
         now={NOW.getTime()}
         renaming={renaming ? new TitleDraft(task.title) : null}
         selected={selected}
+        writable={writable}
         actions={actions}
       />
     </Board>
@@ -899,6 +902,50 @@ describe('Card', () => {
       const onDragStart = mock();
       renderCard({}, { selected: true, onDragStart });
       drag(title());
+      await waitFor(() => expect(onDragStart).toHaveBeenCalled());
+    });
+  });
+
+  describe('read by a viewer', () => {
+    it('has no grip and no selection checkbox', () => {
+      renderCard({}, { writable: false });
+      expect(
+        screen.queryByRole('button', { name: 'Move Implement login' })
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('checkbox', { name: 'Select Implement login' })
+      ).not.toBeInTheDocument();
+    });
+
+    it('offers only the runs from its menu', async () => {
+      const { task, actions } = renderCard({}, { writable: false });
+      await openMenu(MENU);
+      const items = screen.getAllByRole('menuitem');
+      expect(items.map((item) => item.textContent)).toEqual(['Runs']);
+      fireEvent.click(items[0]);
+      await settleMenu();
+      expect(actions.run).toHaveBeenCalledWith(task);
+    });
+
+    it('opens the task from a modified click on the title instead of selecting it', () => {
+      const { task, actions } = renderCard({}, { writable: false });
+      fireEvent.click(screen.getByRole('button', { name: 'Implement login' }), { metaKey: true });
+      expect(actions.select).not.toHaveBeenCalled();
+      expect(actions.open).toHaveBeenCalledWith(task);
+    });
+
+    it('cannot be dragged to another column', async () => {
+      const onDragStart = mock();
+      renderCard({}, { writable: false, onDragStart });
+      drag(card());
+      await settleMenu();
+      expect(onDragStart).not.toHaveBeenCalled();
+    });
+
+    it('can be dragged by a writer from the same spot', async () => {
+      const onDragStart = mock();
+      renderCard({}, { onDragStart });
+      drag(card());
       await waitFor(() => expect(onDragStart).toHaveBeenCalled());
     });
   });
