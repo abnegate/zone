@@ -1,5 +1,7 @@
 //! Task database queries
 
+use std::collections::HashMap;
+
 use chrono::NaiveDateTime;
 use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
@@ -216,40 +218,40 @@ pub struct Patch<'a> {
     pub model_name: Option<&'a str>,
 }
 
-/// Sparse values applied alike to every task of one bulk update.
+/// Sparse values applied alike to every task of one bulk update. Projects
+/// are linked and unlinked one by one, so links outside both lists stay.
 pub struct Changes<'a> {
     pub status: Option<Status>,
     pub priority: Option<i32>,
-    pub project_ids: Option<&'a [Uuid]>,
+    pub add_projects: &'a [Uuid],
+    pub remove_projects: &'a [Uuid],
     pub is_agentic: Option<bool>,
     pub require_plan_approval: Option<bool>,
 }
 
-impl<'a> Changes<'a> {
-    fn patch(&self, id: Uuid) -> Patch<'a> {
-        Patch {
-            id,
-            title: None,
-            description: None,
-            acceptance_criteria: None,
-            status: self.status,
-            priority: self.priority,
-            project_ids: self.project_ids,
-            require_plan_approval: self.require_plan_approval,
-            is_agentic: self.is_agentic,
-            source_id: None,
-            model_name: None,
-        }
-    }
+/// Result of a bulk update, which applies to every listed task or to none.
+#[derive(Debug)]
+pub enum Edit {
+    Applied(Vec<TaskRow>),
+    NotFound,
+    /// The listed tasks whose status a live run owns and the update would change.
+    Running(Vec<Uuid>),
 }
 
+/// The columns a [`TaskRow`] reads, without the projects it is linked to.
+const TASK_COLUMNS: &str = "id, title, description, acceptance_criteria, status, priority, \
+    model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, \
+    source_ids, workspace_id, worker_id, queued_at, started_at, completed_at, created_at, \
+    updated_at, pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending";
+
 /// Task row from database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TaskRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub created_by: Option<Uuid>,
-    pub project_ids: Vec<Uuid>, // Associated projects via task_projects join table
+    #[sqlx(skip)]
+    pub project_ids: Vec<Uuid>,
     pub title: String,
     pub title_pending: bool,
     pub description: String,
@@ -868,64 +870,146 @@ pub async fn update_tasks_authorized(
     workspace_id: Uuid,
     ids: &[Uuid],
     changes: Changes<'_>,
-) -> Result<Mutation<Vec<TaskRow>>, MutationError> {
+) -> Result<Edit, MutationError> {
     let mut ids = ids.to_vec();
     ids.sort_unstable();
     ids.dedup();
 
     let mut transaction = pool.begin().await?;
-    if !lock_writer(&mut transaction, workspace_id, user_id).await?
-        || !lock_tasks(&mut transaction, workspace_id, &ids).await?
-    {
-        return Ok(Mutation::NotFound);
+    if !lock_writer(&mut transaction, workspace_id, user_id).await? {
+        return Ok(Edit::NotFound);
     }
-    if let Some(project_ids) = changes.project_ids {
-        lock_projects(&mut transaction, workspace_id, project_ids).await?;
-    }
+    let Some(locked) = lock_tasks(&mut transaction, workspace_id, &ids).await? else {
+        return Ok(Edit::NotFound);
+    };
+    lock_projects(&mut transaction, workspace_id, changes.add_projects).await?;
 
-    let mut updated = Vec::with_capacity(ids.len());
-    let mut released = Vec::new();
-    for id in ids {
-        let Some(held) = hold(&mut transaction, id).await? else {
-            return Err(MutationError::ActiveRun);
-        };
-        if held.refuses(changes.status) {
-            return Err(MutationError::ActiveRun);
-        }
-        let Some(task) = apply_update(&mut transaction, &changes.patch(id), &held).await? else {
-            return Ok(Mutation::NotFound);
-        };
-        if held.releases(changes.status) {
-            released.push(id);
-        }
-        updated.push(task);
+    let running: Vec<Uuid> = locked
+        .iter()
+        .filter(|(_, held)| held.refuses(changes.status))
+        .map(|(id, _)| *id)
+        .collect();
+    if !running.is_empty() {
+        return Ok(Edit::Running(running));
     }
+    let released: Vec<Uuid> = locked
+        .iter()
+        .filter(|(_, held)| held.releases(changes.status))
+        .map(|(id, _)| *id)
+        .collect();
+
+    let updated = apply_changes(&mut transaction, &ids, &changes).await?;
     transaction.commit().await?;
 
     for id in released {
         release(pool, id).await;
     }
-    Ok(Mutation::Applied(updated))
+    Ok(Edit::Applied(updated))
 }
 
-/// Lock every task in `ids`, which must be sorted and distinct, in id order;
-/// `false` when any is missing or belongs to another workspace.
+/// Lock every task in `ids`, which must be sorted and distinct, in id order,
+/// and read what each lock found; `None` when any is missing or belongs to
+/// another workspace. A row of another workspace is never locked, so a
+/// stranger's id cannot make this wait on that workspace's writers.
 async fn lock_tasks(
     connection: &mut PgConnection,
     workspace_id: Uuid,
     ids: &[Uuid],
-) -> DbResult<bool> {
-    let workspaces: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT workspace_id FROM tasks WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+) -> DbResult<Option<Vec<(Uuid, Held)>>> {
+    let rows: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, status, active_run_id FROM tasks \
+         WHERE id = ANY($1) AND workspace_id = $2 ORDER BY id FOR UPDATE",
+    )
+    .bind(ids)
+    .bind(workspace_id)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    Ok((rows.len() == ids.len()).then(|| {
+        rows.into_iter()
+            .map(|(id, status, run)| {
+                (
+                    id,
+                    Held {
+                        status,
+                        running: run.is_some(),
+                    },
+                )
+            })
+            .collect()
+    }))
+}
+
+/// Apply `changes` to every task in `ids` with one statement per kind of
+/// change, whatever the number of tasks. The caller holds every row lock and
+/// has found no live run that owns a status `changes` would change.
+async fn apply_changes(
+    connection: &mut PgConnection,
+    ids: &[Uuid],
+    changes: &Changes<'_>,
+) -> DbResult<Vec<TaskRow>> {
+    let status = changes.status.map(Status::as_str);
+    if let Some(status) = status {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE tasks SET {} WHERE id = ANY($1) AND status <> $2",
+            completion_stamps("$2")
+        )))
+        .bind(ids)
+        .bind(status)
+        .execute(&mut *connection)
+        .await?;
+    }
+    let mut tasks: Vec<TaskRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "UPDATE tasks SET status = COALESCE($2, status), priority = COALESCE($3, priority), \
+           is_agentic = COALESCE($4, is_agentic), \
+           require_plan_approval = COALESCE($5, require_plan_approval), updated_at = NOW() \
+         WHERE id = ANY($1) RETURNING {TASK_COLUMNS}"
+    )))
+    .bind(ids)
+    .bind(status)
+    .bind(changes.priority)
+    .bind(changes.is_agentic)
+    .bind(changes.require_plan_approval)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    if !changes.remove_projects.is_empty() {
+        sqlx::query("DELETE FROM task_projects WHERE task_id = ANY($1) AND project_id = ANY($2)")
+            .bind(ids)
+            .bind(changes.remove_projects)
+            .execute(&mut *connection)
+            .await?;
+    }
+    if !changes.add_projects.is_empty() {
+        sqlx::query(
+            "INSERT INTO task_projects (task_id, project_id) \
+             SELECT task.id, project.id \
+             FROM unnest($1::uuid[]) AS task(id), unnest($2::uuid[]) AS project(id) \
+             ON CONFLICT (task_id, project_id) DO NOTHING",
+        )
+        .bind(ids)
+        .bind(changes.add_projects)
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    let links: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT task_id, project_id FROM task_projects \
+         WHERE task_id = ANY($1) ORDER BY task_id, project_id",
     )
     .bind(ids)
     .fetch_all(&mut *connection)
     .await?;
+    let mut projects: HashMap<Uuid, Vec<Uuid>> = HashMap::with_capacity(ids.len());
+    for (task, project) in links {
+        projects.entry(task).or_default().push(project);
+    }
 
-    Ok(workspaces.len() == ids.len()
-        && workspaces
-            .iter()
-            .all(|workspace| *workspace == workspace_id))
+    tasks.sort_unstable_by_key(|task| task.id);
+    for task in &mut tasks {
+        task.project_ids = projects.remove(&task.id).unwrap_or_default();
+    }
+    Ok(tasks)
 }
 
 /// Tell automation a person took a task back out of [`WITHHELD`]. The move

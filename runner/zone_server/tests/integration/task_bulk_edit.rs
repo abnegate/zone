@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -12,6 +15,7 @@ const PROJECT_UNAVAILABLE: &str = "Project is not available in this workspace";
 const ACTIVE_RUN: &str = "Task has an active run or is no longer available";
 const NO_TASKS: &str = "Choose at least one task";
 const NO_CHANGES: &str = "Choose something to change";
+const ADDED_AND_REMOVED: &str = "A project cannot be both added and removed";
 const UNKNOWN_STATUS: &str = "Unknown task status";
 
 struct Tenant {
@@ -101,12 +105,16 @@ impl Board {
     }
 
     async fn task(&self, owner: &Tenant, project: Uuid) -> Uuid {
+        self.task_in(owner, &[project]).await
+    }
+
+    async fn task_in(&self, owner: &Tenant, projects: &[Uuid]) -> Uuid {
         let response = self
             .client
             .post_json_auth(
                 &format!("/api/workspaces/{}/tasks", owner.workspace),
                 &json!({
-                    "project_ids": [project],
+                    "project_ids": projects,
                     "title": "Bulk edited task",
                     "description": "Edited alongside others",
                     "priority": 1,
@@ -180,6 +188,13 @@ fn listed(tasks: &[Value]) -> Vec<Uuid> {
     tasks.iter().map(|task| uuid(&task["id"])).collect()
 }
 
+fn projects(tasks: &[Value]) -> BTreeMap<Uuid, Value> {
+    tasks
+        .iter()
+        .map(|task| (uuid(&task["id"]), task["project_ids"].clone()))
+        .collect()
+}
+
 fn refused(response: &TestResponse, status: StatusCode, message: &str) {
     response.assert_status(status);
     assert_eq!(response.json_value(), json!({ "error": message }));
@@ -204,7 +219,7 @@ async fn every_change_lands_on_every_listed_task_and_nowhere_else() {
                 "ids": [second, first],
                 "status": "blocked",
                 "priority": 5,
-                "project_ids": [second_project],
+                "add_project_ids": [second_project],
                 "is_agentic": true,
                 "require_plan_approval": true,
             }),
@@ -219,7 +234,10 @@ async fn every_change_lands_on_every_listed_task_and_nowhere_else() {
     {
         assert_eq!(task["status"], "blocked");
         assert_eq!(task["priority"], 5);
-        assert_eq!(task["project_ids"], json!([second_project]));
+        assert_eq!(
+            task["project_ids"],
+            json!(ascending(&[first_project, second_project]))
+        );
         assert_eq!(task["is_agentic"], true);
         assert_eq!(task["require_plan_approval"], true);
         assert_eq!(task["title"], "Bulk edited task");
@@ -230,31 +248,97 @@ async fn every_change_lands_on_every_listed_task_and_nowhere_else() {
 }
 
 #[tokio::test]
-async fn an_empty_project_list_clears_every_listed_task() {
+async fn an_added_project_joins_the_projects_each_task_already_has() {
     let board = Board::new().await;
     let owner = board.tenant().await;
-    let project = board.project(&owner).await;
-    let first = board.task(&owner, project).await;
-    let second = board.task(&owner, project).await;
+    let shared = board.project(&owner).await;
+    let other = board.project(&owner).await;
+    let added = board.project(&owner).await;
+    let first = board.task_in(&owner, &[shared, other]).await;
+    let second = board.task_in(&owner, &[shared]).await;
+    let expected = BTreeMap::from([
+        (first, json!(ascending(&[shared, other, added]))),
+        (second, json!(ascending(&[shared, added]))),
+    ]);
 
     let response = board
         .edit(
             owner.workspace,
             &owner.token,
-            &json!({ "ids": [first, second], "project_ids": [] }),
+            &json!({ "ids": [first, second], "add_project_ids": [added] }),
         )
         .await;
     let tasks = edited(&response);
 
     assert_eq!(listed(&tasks), ascending(&[first, second]));
-    for task in tasks
-        .iter()
-        .chain(&board.snapshot(&owner, &[first, second]).await)
-    {
-        assert_eq!(task["project_ids"], json!([]));
-        assert_eq!(task["status"], "created");
-        assert_eq!(task["priority"], 1);
-    }
+    assert_eq!(projects(&tasks), expected);
+    assert_eq!(
+        projects(&board.snapshot(&owner, &[first, second]).await),
+        expected
+    );
+
+    board.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_removed_project_leaves_the_other_projects_of_each_task() {
+    let board = Board::new().await;
+    let owner = board.tenant().await;
+    let foreign = board.tenant().await;
+    let shared = board.project(&owner).await;
+    let other = board.project(&owner).await;
+    let foreign_project = board.project(&foreign).await;
+    let first = board.task_in(&owner, &[shared, other]).await;
+    let second = board.task_in(&owner, &[shared]).await;
+    let theirs = board.task(&foreign, foreign_project).await;
+    let other_workspace = board.snapshot(&foreign, &[theirs]).await;
+    let expected = BTreeMap::from([(first, json!([other])), (second, json!([]))]);
+
+    let response = board
+        .edit(
+            owner.workspace,
+            &owner.token,
+            &json!({
+                "ids": [first, second],
+                "remove_project_ids": [shared, foreign_project, Uuid::new_v4()],
+            }),
+        )
+        .await;
+    let tasks = edited(&response);
+
+    assert_eq!(projects(&tasks), expected);
+    assert_eq!(
+        projects(&board.snapshot(&owner, &[first, second]).await),
+        expected
+    );
+    assert_eq!(board.snapshot(&foreign, &[theirs]).await, other_workspace);
+
+    board.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_project_both_added_and_removed_is_refused_and_changes_nothing() {
+    let board = Board::new().await;
+    let owner = board.tenant().await;
+    let project = board.project(&owner).await;
+    let other = board.project(&owner).await;
+    let task = board.task(&owner, project).await;
+    let before = board.snapshot(&owner, &[task]).await;
+
+    let response = board
+        .edit(
+            owner.workspace,
+            &owner.token,
+            &json!({
+                "ids": [task],
+                "add_project_ids": [other, project],
+                "remove_project_ids": [project],
+            }),
+        )
+        .await;
+
+    refused(&response, StatusCode::BAD_REQUEST, ADDED_AND_REMOVED);
+    assert_eq!(board.snapshot(&owner, &[task]).await, before);
 
     board.cleanup().await;
 }
@@ -425,43 +509,84 @@ async fn strangers_and_viewers_cannot_edit_many_tasks() {
 }
 
 #[tokio::test]
-async fn a_status_change_on_a_running_task_conflicts_and_changes_nothing() {
+async fn a_status_change_on_running_tasks_conflicts_names_them_and_changes_nothing() {
     let board = Board::new().await;
     let owner = board.tenant().await;
     let project = board.project(&owner).await;
     let idle = board.task(&owner, project).await;
     let running = board.task(&owner, project).await;
-    tasks::create_task_run(&board.database.pool, running)
-        .await
-        .expect("the task gets a run");
-    let before = board.snapshot(&owner, &[idle, running]).await;
+    let also_running = board.task(&owner, project).await;
+    for task in [running, also_running] {
+        tasks::create_task_run(&board.database.pool, task)
+            .await
+            .expect("the task gets a run");
+    }
+    let selection = [idle, running, also_running];
+    let before = board.snapshot(&owner, &selection).await;
     assert_eq!(before[1]["status"], "queued");
 
     let response = board
         .edit(
             owner.workspace,
             &owner.token,
-            &json!({ "ids": [idle, running], "status": "paused", "priority": 5 }),
+            &json!({ "ids": selection, "status": "paused", "priority": 5 }),
         )
         .await;
 
-    refused(&response, StatusCode::CONFLICT, ACTIVE_RUN);
-    assert_eq!(board.snapshot(&owner, &[idle, running]).await, before);
+    response.assert_status(StatusCode::CONFLICT);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": ACTIVE_RUN, "ids": ascending(&[running, also_running]) })
+    );
+    assert_eq!(board.snapshot(&owner, &selection).await, before);
 
     let response = board
         .edit(
             owner.workspace,
             &owner.token,
-            &json!({ "ids": [idle, running], "priority": 5 }),
+            &json!({ "ids": selection, "priority": 5 }),
         )
         .await;
     let tasks = edited(&response);
 
-    assert_eq!(listed(&tasks), ascending(&[idle, running]));
-    let after = board.snapshot(&owner, &[idle, running]).await;
+    assert_eq!(listed(&tasks), ascending(&selection));
+    let after = board.snapshot(&owner, &selection).await;
     assert_eq!(after[0]["status"], "created");
     assert_eq!(after[1]["status"], "queued");
+    assert_eq!(after[2]["status"], "queued");
     assert!(after.iter().all(|task| task["priority"] == 5));
+
+    board.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_task_another_workspace_has_locked_is_not_waited_on() {
+    let board = Board::new().await;
+    let owner = board.tenant().await;
+    let foreign = board.tenant().await;
+    let own = board.task(&owner, board.project(&owner).await).await;
+    let theirs = board.task(&foreign, board.project(&foreign).await).await;
+
+    let mut holder = board.database.pool.begin().await.unwrap();
+    sqlx::query("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
+        .bind(theirs)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        board.edit(
+            owner.workspace,
+            &owner.token,
+            &json!({ "ids": [own, theirs], "priority": 4 }),
+        ),
+    )
+    .await;
+    holder.rollback().await.unwrap();
+    let response = response.expect("another workspace's row lock does not hold the edit up");
+
+    refused(&response, StatusCode::NOT_FOUND, TASK_NOT_FOUND);
 
     board.cleanup().await;
 }
@@ -477,12 +602,12 @@ async fn a_project_from_another_workspace_is_refused_and_changes_nothing() {
     let second = board.task(&owner, project).await;
     let before = board.snapshot(&owner, &[first, second]).await;
 
-    for project_ids in [json!([foreign_project]), json!([project, Uuid::new_v4()])] {
+    for added in [json!([foreign_project]), json!([project, Uuid::new_v4()])] {
         let response = board
             .edit(
                 owner.workspace,
                 &owner.token,
-                &json!({ "ids": [first, second], "priority": 3, "project_ids": project_ids }),
+                &json!({ "ids": [first, second], "priority": 3, "add_project_ids": added }),
             )
             .await;
         refused(&response, StatusCode::BAD_REQUEST, PROJECT_UNAVAILABLE);
@@ -507,6 +632,10 @@ async fn a_malformed_edit_is_refused_and_changes_nothing() {
             UNKNOWN_STATUS,
         ),
         (json!({ "ids": [task] }), NO_CHANGES),
+        (
+            json!({ "ids": [task], "add_project_ids": [], "remove_project_ids": [] }),
+            NO_CHANGES,
+        ),
     ] {
         let response = board.edit(owner.workspace, &owner.token, &body).await;
         refused(&response, StatusCode::BAD_REQUEST, message);
@@ -517,6 +646,14 @@ async fn a_malformed_edit_is_refused_and_changes_nothing() {
             owner.workspace,
             &owner.token,
             &json!({ "ids": [task], "title": "Not editable together" }),
+        )
+        .await
+        .assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    board
+        .edit(
+            owner.workspace,
+            &owner.token,
+            &json!({ "ids": [task], "project_ids": [] }),
         )
         .await
         .assert_status(StatusCode::UNPROCESSABLE_ENTITY);

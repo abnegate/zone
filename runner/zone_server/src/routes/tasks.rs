@@ -272,26 +272,47 @@ pub struct UpdateTaskRequest {
     model_name: Option<String>,
 }
 
-/// Update tasks request: the same sparse changes for every listed task
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateTasksRequest {
     ids: Vec<Uuid>,
     status: Option<String>,
     priority: Option<i32>,
-    project_ids: Option<Vec<Uuid>>,
+    add_project_ids: Option<Vec<Uuid>>,
+    remove_project_ids: Option<Vec<Uuid>>,
     is_agentic: Option<bool>,
     require_plan_approval: Option<bool>,
 }
 
 impl UpdateTasksRequest {
+    fn added(&self) -> &[Uuid] {
+        self.add_project_ids.as_deref().unwrap_or_default()
+    }
+
+    fn removed(&self) -> &[Uuid] {
+        self.remove_project_ids.as_deref().unwrap_or_default()
+    }
+
     fn changes_nothing(&self) -> bool {
         self.status.is_none()
             && self.priority.is_none()
-            && self.project_ids.is_none()
+            && self.added().is_empty()
+            && self.removed().is_empty()
             && self.is_agentic.is_none()
             && self.require_plan_approval.is_none()
     }
+
+    fn adds_a_removed_project(&self) -> bool {
+        let removed = self.removed();
+        self.added().iter().any(|project| removed.contains(project))
+    }
+}
+
+/// A bulk edit refused because live runs own the status of these tasks.
+#[derive(Debug, Serialize)]
+struct RunningResponse {
+    error: &'static str,
+    ids: Vec<Uuid>,
 }
 
 const TASK_NOT_FOUND: &str = "Task not found";
@@ -299,6 +320,10 @@ const TASK_NOT_FOUND: &str = "Task not found";
 const NO_TASKS: &str = "Choose at least one task";
 
 const NO_CHANGES: &str = "Choose something to change";
+
+const ADDED_AND_REMOVED: &str = "A project cannot be both added and removed";
+
+const ACTIVE_RUN_CONFLICT: &str = "Task has an active run or is no longer available";
 
 const BLANK_TITLE: &str = "Title must not be blank";
 
@@ -345,10 +370,7 @@ fn mutation_error(error: tasks::MutationError) -> Box<Response> {
             StatusCode::BAD_REQUEST,
             "Source is not available in this workspace",
         ),
-        tasks::MutationError::ActiveRun => denied(
-            StatusCode::CONFLICT,
-            "Task has an active run or is no longer available",
-        ),
+        tasks::MutationError::ActiveRun => denied(StatusCode::CONFLICT, ACTIVE_RUN_CONFLICT),
         tasks::MutationError::Database(error) => database_error(error),
     }
 }
@@ -585,6 +607,9 @@ pub async fn update_many(
     if request.changes_nothing() {
         return *denied(StatusCode::BAD_REQUEST, NO_CHANGES);
     }
+    if request.adds_a_removed_project() {
+        return *denied(StatusCode::BAD_REQUEST, ADDED_AND_REMOVED);
+    }
     let status = match parse_status(request.status.as_deref()) {
         Ok(status) => status,
         Err(response) => return *response,
@@ -600,14 +625,15 @@ pub async fn update_many(
         tasks::Changes {
             status,
             priority: request.priority,
-            project_ids: request.project_ids.as_deref(),
+            add_projects: request.added(),
+            remove_projects: request.removed(),
             is_agentic: request.is_agentic,
             require_plan_approval: request.require_plan_approval,
         },
     )
     .await
     {
-        Ok(tasks::Mutation::Applied(updated)) => {
+        Ok(tasks::Edit::Applied(updated)) => {
             if status.is_some() {
                 updated.iter().for_each(poke_projects);
             }
@@ -616,7 +642,15 @@ pub async fn update_many(
             })
             .into_response()
         }
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Ok(tasks::Edit::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Ok(tasks::Edit::Running(ids)) => (
+            StatusCode::CONFLICT,
+            Json(RunningResponse {
+                error: ACTIVE_RUN_CONFLICT,
+                ids,
+            }),
+        )
+            .into_response(),
         Err(error) => *mutation_error(error),
     }
 }
@@ -1105,6 +1139,30 @@ mod tests {
         let response = update_many_with(serde_json::json!({ "ids": [Uuid::from_u128(1)] })).await;
 
         refused_with(response, NO_CHANGES).await;
+    }
+
+    #[tokio::test]
+    async fn empty_project_lists_are_no_change_to_many_tasks() {
+        let response = update_many_with(serde_json::json!({
+            "ids": [Uuid::from_u128(1)],
+            "add_project_ids": [],
+            "remove_project_ids": [],
+        }))
+        .await;
+
+        refused_with(response, NO_CHANGES).await;
+    }
+
+    #[tokio::test]
+    async fn a_project_both_added_and_removed_is_refused_before_the_database() {
+        let response = update_many_with(serde_json::json!({
+            "ids": [Uuid::from_u128(1)],
+            "add_project_ids": [Uuid::from_u128(3), Uuid::from_u128(4)],
+            "remove_project_ids": [Uuid::from_u128(4)],
+        }))
+        .await;
+
+        refused_with(response, ADDED_AND_REMOVED).await;
     }
 
     #[tokio::test]
