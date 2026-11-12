@@ -1152,7 +1152,10 @@ An account is exhausted once a turn on it hits a usage limit: until the
 limit's own reset, else until its spent window resets by its last reading,
 else until its spent window resets by a read made there and then (a codex
 limit names no reset of its own), else for five minutes. One whose last
-reading has no headroom left is exhausted until that window resets. A turn
+reading has no headroom left is exhausted until that window resets. A window
+scoped to one model, such as `7d Fable`, counts only for chats and task runs
+on that model: a spent `7d Fable` leaves the account to Opus and Sonnet
+sessions, ranked by the headroom of its other windows. A turn
 refused for want of usage credits does not exhaust its account: the refusal
 says nothing about the subscription and refuses only the model the turn ran,
 so chats and task runs on other models still start there. For an hour after

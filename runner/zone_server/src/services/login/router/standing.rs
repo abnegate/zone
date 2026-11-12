@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use crate::db::agent_logins::AgentLoginRow;
 use crate::services::login::usage::{Availability, Snapshot};
 
-/// How usable a login is for a new session, judged by its usage.
+/// How usable a login is for a new session, judged by the usage that limits the session's model.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Standing {
     /// Its most used window has `headroom` percent left.
@@ -20,12 +20,13 @@ impl Standing {
     pub(super) fn of(
         login: &AgentLoginRow,
         snapshot: Option<&Snapshot>,
+        model: Option<&str>,
         now: DateTime<Utc>,
     ) -> Self {
         if let Some(until) = marked(login, now) {
             return Self::Exhausted { until: Some(until) };
         }
-        let Some(snapshot) = snapshot else {
+        let Some(snapshot) = snapshot.map(|snapshot| snapshot.on(model)) else {
             return Self::Unknown;
         };
         match snapshot.headroom {
