@@ -16,14 +16,24 @@ export interface CardProps {
   now: number;
   renaming: TitleDraft | null;
   selected: boolean;
+  writable: boolean;
   actions: BoardActions;
 }
 
-export function Card({ task, projects, relations, now, renaming, selected, actions }: CardProps) {
+export function Card({
+  task,
+  projects,
+  relations,
+  now,
+  renaming,
+  selected,
+  writable,
+  actions,
+}: CardProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, isDragging } = useDraggable({
     id: task.id,
     data: { task },
-    disabled: renaming !== null,
+    disabled: !writable || renaming !== null,
   });
   const className = isDragging ? 'task-card task-card-dragging' : 'task-card';
 
@@ -33,26 +43,30 @@ export function Card({ task, projects, relations, now, renaming, selected, actio
       className={className}
       data-task-id={task.id}
       data-selected={selected || undefined}
-      {...listeners}
+      {...(writable ? listeners : undefined)}
     >
-      <button
-        type="button"
-        ref={setActivatorNodeRef}
-        className="task-card-handle"
-        {...attributes}
-        aria-label={`Move ${task.title}`}
-      >
-        <GripIcon />
-      </button>
-      <div className="task-card-selector" onPointerDown={CardSensor.shield}>
-        <Checkbox
-          className="task-card-select"
-          aria-label={`Select ${task.title}`}
-          checked={selected}
-          onMouseDown={keepText}
-          onClick={(event) => actions.select(task, gestureOf(event) ?? TOGGLE)}
-        />
-      </div>
+      {writable && (
+        <>
+          <button
+            type="button"
+            ref={setActivatorNodeRef}
+            className="task-card-handle"
+            {...attributes}
+            aria-label={`Move ${task.title}`}
+          >
+            <GripIcon />
+          </button>
+          <div className="task-card-selector" onPointerDown={CardSensor.shield}>
+            <Checkbox
+              className="task-card-select"
+              aria-label={`Select ${task.title}`}
+              checked={selected}
+              onMouseDown={keepText}
+              onClick={(event) => actions.select(task, gestureOf(event) ?? TOGGLE)}
+            />
+          </div>
+        </>
+      )}
       <CardContent
         task={task}
         projects={projects}
@@ -60,6 +74,7 @@ export function Card({ task, projects, relations, now, renaming, selected, actio
         now={now}
         renaming={renaming}
         selected={selected}
+        writable={writable}
         actions={actions}
       />
     </li>

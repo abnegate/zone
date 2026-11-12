@@ -35,6 +35,7 @@ export interface BoardProps {
   removed: string | null;
   view: View;
   selected?: ReadonlySet<string>;
+  writable?: boolean;
   actions: BoardActions;
 }
 
@@ -77,6 +78,7 @@ export function Board({
   removed,
   view,
   selected = NONE,
+  writable = true,
   actions,
 }: BoardProps) {
   const groups = useMemo(() => groupByStage(tasks), [tasks]);
@@ -188,6 +190,7 @@ export function Board({
                   now={now}
                   renaming={renaming?.id === task.id ? renaming.draft : null}
                   selected={selected.has(task.id)}
+                  writable={writable}
                   actions={actions}
                 />
               ))}
