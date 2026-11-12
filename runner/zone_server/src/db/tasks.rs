@@ -93,6 +93,12 @@ pub const ACTIVE_RUN: &str = "Task has an active run";
 
 pub const UNKNOWN_STATUS: &str = "Unknown task status";
 
+/// Every value `tasks_priority_check` admits, so a caller can refuse another
+/// before the constraint turns it into a server error.
+pub const PRIORITIES: std::ops::RangeInclusive<i32> = 1..=5;
+
+pub const PRIORITY_OUT_OF_RANGE: &str = "Priority must be between 1 and 5";
+
 pub const CREATED: &str = "created";
 pub const QUEUED: &str = "queued";
 pub const IN_PROGRESS: &str = "in_progress";
@@ -208,6 +214,33 @@ pub struct Patch<'a> {
     pub is_agentic: Option<bool>,
     pub source_id: Option<Uuid>,
     pub model_name: Option<&'a str>,
+}
+
+/// Sparse values applied alike to every task of one bulk update.
+pub struct Changes<'a> {
+    pub status: Option<Status>,
+    pub priority: Option<i32>,
+    pub project_ids: Option<&'a [Uuid]>,
+    pub is_agentic: Option<bool>,
+    pub require_plan_approval: Option<bool>,
+}
+
+impl<'a> Changes<'a> {
+    fn patch(&self, id: Uuid) -> Patch<'a> {
+        Patch {
+            id,
+            title: None,
+            description: None,
+            acceptance_criteria: None,
+            status: self.status,
+            priority: self.priority,
+            project_ids: self.project_ids,
+            require_plan_approval: self.require_plan_approval,
+            is_agentic: self.is_agentic,
+            source_id: None,
+            model_name: None,
+        }
+    }
 }
 
 /// Task row from database
@@ -825,6 +858,74 @@ pub async fn update_task_authorized(
         release(pool, task.id).await;
     }
     Ok(Mutation::Applied(task))
+}
+
+/// Apply `changes` to every task in `ids` in one transaction, or to none.
+/// Duplicate ids collapse and the rows come back in ascending id order.
+pub async fn update_tasks_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    ids: &[Uuid],
+    changes: Changes<'_>,
+) -> Result<Mutation<Vec<TaskRow>>, MutationError> {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+
+    let mut transaction = pool.begin().await?;
+    if !lock_writer(&mut transaction, workspace_id, user_id).await?
+        || !lock_tasks(&mut transaction, workspace_id, &ids).await?
+    {
+        return Ok(Mutation::NotFound);
+    }
+    if let Some(project_ids) = changes.project_ids {
+        lock_projects(&mut transaction, workspace_id, project_ids).await?;
+    }
+
+    let mut updated = Vec::with_capacity(ids.len());
+    let mut released = Vec::new();
+    for id in ids {
+        let Some(held) = hold(&mut transaction, id).await? else {
+            return Err(MutationError::ActiveRun);
+        };
+        if held.refuses(changes.status) {
+            return Err(MutationError::ActiveRun);
+        }
+        let Some(task) = apply_update(&mut transaction, &changes.patch(id), &held).await? else {
+            return Ok(Mutation::NotFound);
+        };
+        if held.releases(changes.status) {
+            released.push(id);
+        }
+        updated.push(task);
+    }
+    transaction.commit().await?;
+
+    for id in released {
+        release(pool, id).await;
+    }
+    Ok(Mutation::Applied(updated))
+}
+
+/// Lock every task in `ids`, which must be sorted and distinct, in id order;
+/// `false` when any is missing or belongs to another workspace.
+async fn lock_tasks(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    ids: &[Uuid],
+) -> DbResult<bool> {
+    let workspaces: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT workspace_id FROM tasks WHERE id = ANY($1) ORDER BY id FOR UPDATE",
+    )
+    .bind(ids)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    Ok(workspaces.len() == ids.len()
+        && workspaces
+            .iter()
+            .all(|workspace| *workspace == workspace_id))
 }
 
 /// Tell automation a person took a task back out of [`WITHHELD`]. The move
