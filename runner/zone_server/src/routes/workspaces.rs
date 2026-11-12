@@ -30,6 +30,8 @@ pub struct WorkspaceResponse {
     slug: String,
     description: Option<String>,
     is_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -43,8 +45,22 @@ impl From<workspaces::WorkspaceRow> for WorkspaceResponse {
             slug: row.slug,
             description: row.description,
             is_active: row.is_active.unwrap_or(true),
+            role: None,
             timestamps: Timestamps::from_naive(row.created_at, row.updated_at),
         }
+    }
+}
+
+impl From<workspace_members::UserWorkspace> for WorkspaceResponse {
+    fn from(membership: workspace_members::UserWorkspace) -> Self {
+        Self::from(membership.workspace).with_role(membership.role)
+    }
+}
+
+impl WorkspaceResponse {
+    fn with_role(mut self, role: workspace_members::WorkspaceRole) -> Self {
+        self.role = Some(role.as_str());
+        self
     }
 }
 
@@ -96,7 +112,7 @@ pub async fn get_workspace(
 ) -> impl IntoResponse {
     match workspaces::get_workspace(state.db(), member.workspace_id).await {
         Ok(Some(ws)) => Json(SingleWorkspaceResponse {
-            workspace: WorkspaceResponse::from(ws),
+            workspace: WorkspaceResponse::from(ws).with_role(member.role),
         })
         .into_response(),
         Ok(None) => (

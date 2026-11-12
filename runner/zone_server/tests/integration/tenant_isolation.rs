@@ -396,8 +396,8 @@ async fn test_organization_admin_can_see_all_workspaces() {
         .expect("Failed to list workspaces");
 
     assert_eq!(workspaces.len(), 2);
-    assert!(workspaces.iter().any(|w| w.id == ws1.id));
-    assert!(workspaces.iter().any(|w| w.id == ws2.id));
+    assert!(workspaces.iter().any(|w| w.workspace.id == ws1.id));
+    assert!(workspaces.iter().any(|w| w.workspace.id == ws2.id));
 }
 
 #[tokio::test]
@@ -495,7 +495,7 @@ async fn test_organization_member_only_sees_assigned_workspaces() {
         .expect("Failed to list workspaces");
 
     assert_eq!(workspaces.len(), 2);
-    assert!(workspaces.iter().any(|w| w.id == ws1.id));
-    assert!(workspaces.iter().any(|w| w.id == ws2.id));
-    assert!(!workspaces.iter().any(|w| w.id == ws3.id));
+    assert!(workspaces.iter().any(|w| w.workspace.id == ws1.id));
+    assert!(workspaces.iter().any(|w| w.workspace.id == ws2.id));
+    assert!(!workspaces.iter().any(|w| w.workspace.id == ws3.id));
 }
