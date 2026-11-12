@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { titlePoll } from '../title';
-import type { CreateTaskRequest, Task, TaskStatus, UpdateTaskRequest } from '../types';
+import type { CreateTaskRequest, Task, TaskChanges, TaskStatus, UpdateTaskRequest } from '../types';
 
 export const TASKS_KEY = ['tasks'] as const;
 
@@ -25,6 +25,11 @@ interface Move {
 }
 
 type Moves = ReadonlyMap<string, Move>;
+
+interface Edit {
+  ids: readonly string[];
+  changes: TaskChanges;
+}
 
 function without(moves: Moves, move: Move): Moves {
   if (moves.get(move.id) !== move) return moves;
@@ -74,6 +79,23 @@ export function useTasks(projectId?: string) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: TASKS_KEY }),
   });
 
+  const updateTasksMutation = useMutation({
+    mutationFn: ({ ids, changes }: Edit) => {
+      if (!workspaceId) throw new Error(NO_WORKSPACE);
+      return tasksApi.updateTasks(workspaceId, ids, changes);
+    },
+    onSuccess: async (updated) => {
+      await queryClient.cancelQueries({ queryKey: TASKS_KEY });
+      const replacements = new Map(updated.map((task) => [task.id, task]));
+      queryClient.setQueriesData<Task[]>({ queryKey: TASKS_KEY }, (current) =>
+        current?.map((task) => replacements.get(task.id) ?? task)
+      );
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: TASKS_KEY });
+    },
+  });
+
   const moveTaskMutation = useMutation({
     mutationFn: ({ id, status }: Move) => tasksApi.updateTask(id, { status }),
     onSuccess: async (moved) => {
@@ -99,11 +121,17 @@ export function useTasks(projectId?: string) {
   });
 
   const { mutateAsync: update } = updateTaskMutation;
+  const { mutateAsync: updateMany } = updateTasksMutation;
   const { mutateAsync: move } = moveTaskMutation;
 
   const updateTask = useCallback(
     (id: string, request: UpdateTaskRequest) => update({ id, request }),
     [update]
+  );
+
+  const updateTasks = useCallback(
+    (ids: readonly string[], changes: TaskChanges) => updateMany({ ids, changes }),
+    [updateMany]
   );
 
   const moveTask = useCallback(
@@ -133,6 +161,7 @@ export function useTasks(projectId?: string) {
     error: error instanceof Error ? error.message : error ? LOAD_FAILED : null,
     createTask: createTaskMutation.mutateAsync,
     updateTask,
+    updateTasks,
     moveTask,
     deleteTask: deleteTaskMutation.mutateAsync,
     refetch,

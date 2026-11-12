@@ -8,6 +8,7 @@ import type { Task, TaskStatus } from '../types';
 const mockGetTasks = mock();
 const mockCreateTask = mock();
 const mockUpdateTask = mock();
+const mockUpdateTasks = mock();
 const mockDeleteTask = mock();
 
 mock.module('../../../api/tasks', () => ({
@@ -15,6 +16,7 @@ mock.module('../../../api/tasks', () => ({
     getTasks: mockGetTasks,
     createTask: mockCreateTask,
     updateTask: mockUpdateTask,
+    updateTasks: mockUpdateTasks,
     deleteTask: mockDeleteTask,
   },
 }));
@@ -671,5 +673,156 @@ describe('useTasks quick moves', () => {
     expect(statusOf(queryClient, 'task-2', PROJECT_KEY)).toBe(BLOCKED);
     expect(statusOf(queryClient, 'task-2')).toBe(BLOCKED);
     expect(shown(result)).toEqual([BLOCKED]);
+  });
+});
+
+describe('useTasks updateTasks', () => {
+  const other: Task = { ...mockTask, id: 'task-2', title: 'Other Task' };
+  const untouched: Task = { ...mockTask, id: 'task-3', title: 'Untouched Task' };
+  const IDS = ['task-1', 'task-2'];
+  const CHANGES = { priority: 5 };
+  const PROJECT = 'proj-1';
+  const PROJECT_KEY = ['tasks', 'workspace-1', PROJECT];
+  const edited = [
+    { ...mockTask, priority: 5 },
+    { ...other, priority: 5 },
+  ];
+  const EDITED = [
+    ['task-1', 5],
+    ['task-2', 5],
+    ['task-3', 1],
+  ];
+
+  const keepingClient = () =>
+    new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, gcTime: Number.POSITIVE_INFINITY },
+        mutations: { retry: false, gcTime: 0 },
+      },
+    });
+
+  function priorities(tasks: readonly Task[] | undefined) {
+    return tasks?.map((task) => [task.id, task.priority]);
+  }
+
+  async function renderLoaded(queryClient: QueryClient) {
+    const rendered = renderHook(({ projectId }: { projectId?: string }) => useTasks(projectId), {
+      initialProps: { projectId: undefined as string | undefined },
+      wrapper: createWrapper(queryClient),
+    });
+    await waitFor(() => {
+      expect(rendered.result.current.tasks).toEqual([mockTask, other, untouched]);
+    });
+    return rendered;
+  }
+
+  function holdReloads() {
+    mockGetTasks.mockReset();
+    mockGetTasks.mockReturnValue(new Promise(() => {}));
+  }
+
+  beforeEach(() => {
+    mockGetTasks.mockReset();
+    mockUpdateTasks.mockReset();
+    mockGetTasks.mockImplementation((_workspace: string, projectId?: string) =>
+      Promise.resolve(projectId === PROJECT ? [other] : [mockTask, other, untouched])
+    );
+  });
+
+  it('sends the ids and the changes for the current workspace', async () => {
+    mockUpdateTasks.mockResolvedValueOnce(edited);
+    const { result } = await renderLoaded(keepingClient());
+
+    await act(async () => {
+      await expect(result.current.updateTasks(IDS, CHANGES)).resolves.toEqual(edited);
+    });
+
+    expect(mockUpdateTasks.mock.calls).toEqual([['workspace-1', IDS, CHANGES]]);
+  });
+
+  it('shows the edited tasks in every list that holds them, without waiting on a reload', async () => {
+    const queryClient = keepingClient();
+    const { result, rerender } = await renderLoaded(queryClient);
+    rerender({ projectId: PROJECT });
+    await waitFor(() => expect(result.current.tasks).toEqual([other]));
+    holdReloads();
+    mockUpdateTasks.mockResolvedValueOnce(edited);
+
+    await act(async () => {
+      await result.current.updateTasks(IDS, CHANGES);
+    });
+
+    expect(priorities(queryClient.getQueryData<Task[]>(QUERY_KEY))).toEqual(EDITED);
+    expect(priorities(queryClient.getQueryData<Task[]>(PROJECT_KEY))).toEqual([['task-2', 5]]);
+    await waitFor(() => expect(priorities(result.current.tasks)).toEqual([['task-2', 5]]));
+  });
+
+  it('keeps the edited tasks when a reload that began before the edit comes back', async () => {
+    const queryClient = keepingClient();
+    const { result } = await renderLoaded(queryClient);
+    const stale = deferred<Task[]>();
+    mockGetTasks.mockReturnValueOnce(stale.promise);
+    act(() => {
+      void result.current.refetch();
+    });
+    await waitFor(() => expect(mockGetTasks).toHaveBeenCalledTimes(2));
+    holdReloads();
+    mockUpdateTasks.mockResolvedValueOnce(edited);
+
+    await act(async () => {
+      await result.current.updateTasks(IDS, CHANGES);
+    });
+    await waitFor(() => expect(priorities(result.current.tasks)).toEqual(EDITED));
+    await act(async () => {
+      stale.resolve([mockTask, other, untouched]);
+      await stale.promise;
+    });
+
+    expect(priorities(queryClient.getQueryData<Task[]>(QUERY_KEY))).toEqual(EDITED);
+    expect(priorities(result.current.tasks)).toEqual(EDITED);
+  });
+
+  it('rethrows a refused edit and leaves every list as it was', async () => {
+    const queryClient = keepingClient();
+    const { result } = await renderLoaded(queryClient);
+    holdReloads();
+    const refusal = new Error('Task has an active run or is no longer available');
+    mockUpdateTasks.mockRejectedValueOnce(refusal);
+
+    await act(async () => {
+      await expect(result.current.updateTasks(IDS, { status: 'paused' })).rejects.toBe(refusal);
+    });
+
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([mockTask, other, untouched]);
+    expect(result.current.tasks).toEqual([mockTask, other, untouched]);
+  });
+
+  it('invalidates the task lists once the edit settles, accepted or refused', async () => {
+    const queryClient = keepingClient();
+    const invalidate = spyOn(queryClient, 'invalidateQueries');
+    const { result } = await renderLoaded(queryClient);
+
+    mockUpdateTasks.mockResolvedValueOnce(edited);
+    await act(async () => {
+      await result.current.updateTasks(IDS, CHANGES);
+    });
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['tasks'] });
+
+    mockUpdateTasks.mockRejectedValueOnce(new Error('refused'));
+    await act(async () => {
+      await expect(result.current.updateTasks(IDS, CHANGES)).rejects.toThrow('refused');
+    });
+    expect(invalidate).toHaveBeenCalledTimes(2);
+    expect(invalidate).toHaveBeenLastCalledWith({ queryKey: ['tasks'] });
+  });
+
+  it('keeps its callback across renders', async () => {
+    const { result, rerender } = await renderLoaded(keepingClient());
+    const { updateTasks } = result.current;
+
+    rerender({ projectId: undefined });
+
+    expect(result.current.updateTasks).toBe(updateTasks);
   });
 });

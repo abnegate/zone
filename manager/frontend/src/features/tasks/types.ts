@@ -150,6 +150,15 @@ export interface UpdateTaskRequest {
   source_ids?: string[];
 }
 
+export type TaskChanges = Pick<
+  UpdateTaskRequest,
+  'status' | 'priority' | 'project_ids' | 'is_agentic' | 'require_plan_approval'
+>;
+
+export interface UpdateTasksRequest extends TaskChanges {
+  ids: string[];
+}
+
 export type TaskProgressMessage = z.infer<typeof TaskProgressMessageSchema>;
 
 export interface TasksResponse {

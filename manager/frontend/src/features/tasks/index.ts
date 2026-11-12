@@ -17,6 +17,7 @@ export {
   TaskStatusSchema,
   TasksResponseSchema,
   UpdateTaskRequestSchema,
+  UpdateTasksRequestSchema,
 } from './schemas';
 export type {
   CreateTaskRequest,
@@ -25,6 +26,7 @@ export type {
   PrStatus,
   RunStatus,
   Task,
+  TaskChanges,
   TaskProgressMessage,
   TaskResponse,
   TaskRun,
@@ -35,4 +37,5 @@ export type {
   TaskStatus,
   TasksResponse,
   UpdateTaskRequest,
+  UpdateTasksRequest,
 } from './types';

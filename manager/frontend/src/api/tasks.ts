@@ -11,6 +11,7 @@ import type {
   AnswersResponse,
   CreateTaskRequest,
   Task,
+  TaskChanges,
   TaskRun,
   TaskRunLog,
   UpdateTaskRequest,
@@ -107,6 +108,27 @@ class TasksApi {
     }
     const data = parse(TaskResponseSchema, await response.json());
     return data.task;
+  }
+
+  async updateTasks(
+    workspaceId: string,
+    ids: readonly string[],
+    changes: TaskChanges
+  ): Promise<Task[]> {
+    const response = await fetch(
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/tasks`,
+      {
+        method: 'PATCH',
+        headers: this.getHeaders(),
+        body: JSON.stringify({ ids, ...changes }),
+      }
+    );
+    if (!response.ok) {
+      const errorData = await parseErrorResponse(response);
+      throw new Error(errorData.message || `Failed to update tasks: ${response.status}`);
+    }
+    const data = parse(TasksResponseSchema, await response.json());
+    return data.tasks;
   }
 
   async deleteTask(id: string): Promise<void> {

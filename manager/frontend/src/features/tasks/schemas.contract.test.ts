@@ -20,6 +20,7 @@ import {
   PendingQuestionSchema,
   TaskRunResponseSchema,
   TaskRunSchema,
+  UpdateTasksRequestSchema,
 } from './schemas';
 
 const TASK_WORKER_RS = join(
@@ -188,5 +189,13 @@ describe('the run the console reads is the one the route sends', () => {
       completed_at: '2026-09-13T09:44:30+00:00',
     });
     expect(TaskRunSchema.parse({ ...running, started_at: null }).started_at).toBeNull();
+  });
+});
+
+describe('the bulk edit the console sends is the one the route accepts', () => {
+  test('the request carries exactly the fields the route declares, since it refuses any other', () => {
+    expect(serialisedNames(readFileSync(TASKS_ROUTE_RS, 'utf8'), 'UpdateTasksRequest')).toEqual(
+      Object.keys(UpdateTasksRequestSchema.shape).sort()
+    );
   });
 });
