@@ -857,7 +857,7 @@ pub async fn update_task_authorized(
     };
     transaction.commit().await?;
     if held.releases(input.status) {
-        release(pool, task.id).await;
+        release(pool, &[task.id]).await;
     }
     Ok(Mutation::Applied(task))
 }
@@ -901,9 +901,7 @@ pub async fn update_tasks_authorized(
     let updated = apply_changes(&mut transaction, &ids, &changes).await?;
     transaction.commit().await?;
 
-    for id in released {
-        release(pool, id).await;
-    }
+    release(pool, &released).await;
     Ok(Edit::Applied(updated))
 }
 
@@ -1012,12 +1010,15 @@ async fn apply_changes(
     Ok(tasks)
 }
 
-/// Tell automation a person took a task back out of [`WITHHELD`]. The move
+/// Tell automation a person took tasks back out of [`WITHHELD`]. The move
 /// has committed by now, so a failure here is logged and the move still
-/// reported: the caller has a run to start or a task to answer with.
-async fn release(pool: &PgPool, task_id: Uuid) {
-    if let Err(error) = super::auto_projects::reopen(pool, task_id).await {
-        tracing::warn!(%task_id, %error, "Could not reopen the auto projects of a task a person gave back");
+/// reported: the caller has a run to start or tasks to answer with.
+async fn release(pool: &PgPool, task_ids: &[Uuid]) {
+    if task_ids.is_empty() {
+        return;
+    }
+    if let Err(error) = super::auto_projects::reopen(pool, task_ids).await {
+        tracing::warn!(?task_ids, %error, "Could not reopen the auto projects of tasks a person gave back");
     }
 }
 
@@ -1272,7 +1273,7 @@ pub async fn queue_task_authorized(
     };
     transaction.commit().await?;
     if held.withheld() {
-        release(pool, id).await;
+        release(pool, &[id]).await;
     }
     Ok(Mutation::Applied(task))
 }
@@ -1351,7 +1352,7 @@ pub async fn create_task_run_authorized(
     let run = insert_task_run(&mut transaction, task_id, Some(user_id)).await?;
     transaction.commit().await?;
     if released {
-        release(pool, task_id).await;
+        release(pool, &[task_id]).await;
     }
     Ok(Mutation::Applied(RunMutation::Created(run)))
 }

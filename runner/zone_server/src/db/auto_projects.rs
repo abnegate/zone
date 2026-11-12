@@ -278,21 +278,21 @@ pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
     Ok(())
 }
 
-/// Open the auto projects an agentic task belongs to again: one that stalled
-/// or finished while a person withheld the task has work to do once they move
+/// Open the auto projects the agentic tasks belong to again: one that stalled
+/// or finished while a person withheld a task has work to do once they move
 /// it back. A pause no task caused stays until the project is resumed. Called
 /// after that move has committed, never inside it, so no project row is locked
 /// while a task row is held. The rows are locked in id order, and read for a
 /// stop to undo only once locked, as [`hold`] has it.
-pub async fn reopen(pool: &PgPool, task_id: Uuid) -> DbResult<()> {
+pub async fn reopen(pool: &PgPool, task_ids: &[Uuid]) -> DbResult<()> {
     let mut transaction = pool.begin().await?;
     let held: Vec<Uuid> = sqlx::query_scalar(
         "SELECT p.id FROM projects p JOIN task_projects tp ON tp.project_id = p.id \
            JOIN tasks t ON t.id = tp.task_id \
-         WHERE tp.task_id = $1 AND p.auto AND t.is_agentic \
+         WHERE tp.task_id = ANY($1) AND p.auto AND t.is_agentic \
          ORDER BY p.id FOR NO KEY UPDATE OF p",
     )
-    .bind(task_id)
+    .bind(task_ids)
     .fetch_all(&mut *transaction)
     .await?;
     if !held.is_empty() {
@@ -2099,7 +2099,7 @@ mod tests {
         let stalled = pause_stalled(&project.pool, project.id, STALLED)
             .await
             .expect("the pause for stalling");
-        reopen(&project.pool, task).await.expect("the reopen");
+        reopen(&project.pool, &[task]).await.expect("the reopen");
         let lifted = automation(&project.pool, project.id)
             .await
             .expect("the project's automation")
@@ -2112,7 +2112,7 @@ mod tests {
             .execute(&project.pool)
             .await
             .expect("the project finishing");
-        reopen(&project.pool, task).await.expect("the reopen");
+        reopen(&project.pool, &[task]).await.expect("the reopen");
         let kept = automation(&project.pool, project.id)
             .await
             .expect("the project's automation")
@@ -2136,6 +2136,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn giving_tasks_back_together_reopens_every_project_they_stalled() {
+        const STALLED: &str = "nothing can start";
+        let first = Project::new(1).await;
+        let second = Project::new(1).await;
+        for project in [&first, &second] {
+            project.set_status(project.tasks[0], tasks::BLOCKED).await;
+            pause_stalled(&project.pool, project.id, STALLED)
+                .await
+                .expect("the pause for stalling");
+        }
+
+        reopen(&first.pool, &[first.tasks[0], second.tasks[0]])
+            .await
+            .expect("the reopen");
+        let mut lifted = Vec::new();
+        for project in [&first, &second] {
+            let automation = automation(&project.pool, project.id)
+                .await
+                .expect("the project's automation")
+                .expect("an automated project");
+            lifted.push(automation.paused_reason);
+        }
+        first.remove().await;
+        second.remove().await;
+
+        assert_eq!(
+            lifted,
+            [None, None],
+            "one reopen starts every project its tasks stalled"
+        );
+    }
+
+    #[tokio::test]
     async fn giving_a_task_back_undoes_a_stop_the_driver_is_still_writing() {
         let project = Project::new(1).await;
         let task = project.tasks[0];
@@ -2148,9 +2181,10 @@ mod tests {
             .expect("the driver's stop, written and not yet committed");
         project.set_status(task, tasks::CREATED).await;
 
+        let given = [task];
         let (reopened, ()) = {
             let project = &project;
-            tokio::join!(reopen(&project.pool, task), async move {
+            tokio::join!(reopen(&project.pool, &given), async move {
                 project.queued_behind(&stop).await;
                 stop.release().await;
             })

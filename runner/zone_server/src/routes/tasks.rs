@@ -1,5 +1,7 @@
 //! Task endpoints
 
+use std::collections::HashSet;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -303,7 +305,7 @@ impl UpdateTasksRequest {
     }
 
     fn adds_a_removed_project(&self) -> bool {
-        let removed = self.removed();
+        let removed: HashSet<&Uuid> = self.removed().iter().collect();
         self.added().iter().any(|project| removed.contains(project))
     }
 }
