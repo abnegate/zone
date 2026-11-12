@@ -322,6 +322,13 @@ Desktop app (builds the manager frontend first):
 make desktop
 ```
 
+To build an installable `Zone.app`, sync the manager frontend into the client first so the binary embeds it; the app unpacks it into its data directory on launch:
+
+```bash
+make sync-tauri-ui
+cd runner/zone_desktop && bunx --bun @tauri-apps/cli@2 build --bundles app
+```
+
 Android and iOS use the same Tauri client. Prerequisites: Android Studio / Android SDK, Xcode, and CocoaPods. Then:
 
 ```bash

@@ -9,7 +9,7 @@ pub const PROXY_TARGET_ENV: &str = "ZONE_PROXY_TARGET";
 pub const CONFIG_PATH_ENV: &str = "ZONE_CONFIG_PATH";
 
 const DEFAULT_BIND: &str = "0.0.0.0:8000";
-const DEBIAN_MANAGER_DIR: &str = "/usr/share/zone/manager";
+pub const DEBIAN_MANAGER_DIR: &str = "/usr/share/zone/manager";
 const DEFAULT_PROXY_TARGET: &str = "http://manager.localhost";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
