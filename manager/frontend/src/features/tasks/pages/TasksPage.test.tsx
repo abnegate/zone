@@ -616,7 +616,7 @@ describe('TasksPage', () => {
       renderTasksPage();
       await screen.findByText('Implement login');
       await openMenu('Actions for Implement login');
-      expect(screen.getAllByRole('menuitem')).toHaveLength(3);
+      expect(screen.getAllByRole('menuitem')).toHaveLength(4);
 
       await reloadWith('in_progress');
 

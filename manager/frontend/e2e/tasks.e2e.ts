@@ -159,16 +159,33 @@ interface TaskServer {
   hold: Promise<void> | null;
 }
 
-type TaskEdit = Partial<MockTask> & { ids: string[] };
+type TaskEdit = Partial<Omit<MockTask, 'project_ids'>> & {
+  ids: string[];
+  add_project_ids?: string[];
+  remove_project_ids?: string[];
+};
 
 function fulfillJson(route: Route, body: unknown, status = 200): Promise<void> {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 }
 
+function relink(
+  projects: readonly string[],
+  add: readonly string[],
+  remove: readonly string[]
+): string[] {
+  const removed = new Set(remove);
+  return [...new Set([...projects, ...add])].filter((id) => !removed.has(id)).sort();
+}
+
 function applyEdit(server: TaskServer, edit: TaskEdit): MockTask[] {
-  const { ids, ...changes } = edit;
+  const { ids, add_project_ids: add = [], remove_project_ids: remove = [], ...changes } = edit;
   const edited = new Set(ids);
-  server.tasks = server.tasks.map((task) => (edited.has(task.id) ? { ...task, ...changes } : task));
+  server.tasks = server.tasks.map((task) =>
+    edited.has(task.id)
+      ? { ...task, ...changes, project_ids: relink(task.project_ids, add, remove) }
+      : task
+  );
   return server.tasks
     .filter((task) => edited.has(task.id))
     .sort((first, second) => first.id.localeCompare(second.id));
