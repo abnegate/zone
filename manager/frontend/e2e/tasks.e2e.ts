@@ -159,8 +159,19 @@ interface TaskServer {
   hold: Promise<void> | null;
 }
 
+type TaskEdit = Partial<MockTask> & { ids: string[] };
+
 function fulfillJson(route: Route, body: unknown, status = 200): Promise<void> {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+}
+
+function applyEdit(server: TaskServer, edit: TaskEdit): MockTask[] {
+  const { ids, ...changes } = edit;
+  const edited = new Set(ids);
+  server.tasks = server.tasks.map((task) => (edited.has(task.id) ? { ...task, ...changes } : task));
+  return server.tasks
+    .filter((task) => edited.has(task.id))
+    .sort((first, second) => first.id.localeCompare(second.id));
 }
 
 async function serveTasks(
@@ -179,8 +190,14 @@ async function serveTasks(
   await context.unroute(tasksRoutePattern);
   await page.unroute(tasksRoutePattern);
   await routeApiContext(context, tasksRoutePattern, (route) => {
-    if (route.request().method() !== 'GET') return route.continue();
-    const url = new URL(route.request().url());
+    const request = route.request();
+    if (request.method() === 'PATCH') {
+      const edit: TaskEdit = request.postDataJSON();
+      server.mutations.push({ method: 'PATCH', id: '', body: edit });
+      return fulfillJson(route, { tasks: applyEdit(server, edit) });
+    }
+    if (request.method() !== 'GET') return route.continue();
+    const url = new URL(request.url());
     server.listed.push(url);
     const project = url.searchParams.get('project_id');
     const tasks = project
@@ -238,6 +255,26 @@ function card(scope: Page | Locator, title: string): Locator {
 
 function moves(server: TaskServer): Mutation[] {
   return server.mutations.filter((mutation) => mutation.method === 'PUT');
+}
+
+function edits(server: TaskServer): Mutation[] {
+  return server.mutations
+    .filter((mutation) => mutation.method === 'PATCH')
+    .map((mutation) => {
+      const { ids, ...changes } = mutation.body as TaskEdit;
+      return { ...mutation, body: { ids: [...ids].sort(), ...changes } };
+    });
+}
+
+function selection(page: Page): Locator {
+  return page.getByRole('toolbar', { name: 'Selected tasks', exact: true });
+}
+
+async function select(page: Page, titles: readonly string[]): Promise<void> {
+  for (const title of titles) {
+    await page.getByRole('checkbox', { name: `Select ${title}`, exact: true }).click();
+  }
+  await expect(selection(page)).toContainText(`${titles.length} selected`);
 }
 
 async function openMenu(page: Page, title: string): Promise<void> {
@@ -813,8 +850,13 @@ test.describe('Tasks Page', () => {
         });
       expect(await measure()).toEqual({ underHeader: 0, clear: 0 });
 
+      const tab = browserName === 'webkit' ? 'Alt+Tab' : 'Tab';
       await page.getByRole('button', { name: 'Move Implement login page', exact: true }).focus();
-      await page.keyboard.press(browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
+      await page.keyboard.press(tab);
+      await expect(
+        page.getByRole('checkbox', { name: 'Select Implement login page', exact: true })
+      ).toBeFocused();
+      await page.keyboard.press(tab);
       await expect(
         page.getByRole('button', { name: 'Implement login page', exact: true })
       ).toBeFocused();
@@ -1256,10 +1298,58 @@ test.describe('Tasks Page', () => {
       await expect(column(page, 'Cancelled')).toBeFocused();
     });
 
+    test('two selected cards move to another column with one edit', async ({ context, page }) => {
+      const server = await serveTasks(context, page);
+
+      await select(page, ['Implement login page', 'Fix navigation bug']);
+      await selection(page).getByRole('button', { name: 'Edit', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Edit 2 tasks', exact: true });
+      const status = dialog.getByRole('combobox', { name: 'Status', exact: true });
+      await expect(status).toHaveText('Unchanged');
+      await chooseSelect(status, 'Blocked');
+      await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
+
+      await expect.poll(() => edits(server)).toEqual([
+        { method: 'PATCH', id: '', body: { ids: ['task-1', 'task-3'], status: 'blocked' } },
+      ]);
+      await expect(dialog).toHaveCount(0);
+      const blocked = column(page, 'Blocked');
+      await expect(card(blocked, 'Implement login page')).toBeVisible();
+      await expect(card(blocked, 'Fix navigation bug')).toBeVisible();
+      await expect(blocked.locator('.board-column-count')).toHaveText('3');
+      await expect(column(page, 'In progress').locator('p.board-column-empty')).toHaveText(
+        'No tasks'
+      );
+      await expect(selection(page)).toHaveCount(0);
+      expect(server.mutations).toHaveLength(1);
+      await expect(page).toHaveURL('/tasks');
+    });
+
+    test('dragging a selected card by its grip moves only that card', async ({
+      context,
+      page,
+    }) => {
+      const server = await serveTasks(context, page);
+
+      await select(page, ['Implement login page', 'Fix navigation bug']);
+      await pointerDrag(page, 'Fix navigation bug', column(page, 'Blocked'));
+
+      await expect.poll(() => server.mutations).toEqual([
+        { method: 'PUT', id: 'task-3', body: { status: 'blocked' } },
+      ]);
+      await expect(card(column(page, 'Blocked'), 'Fix navigation bug')).toBeVisible();
+      await expect(card(column(page, 'Planned'), 'Implement login page')).toBeVisible();
+      await expect(column(page, 'Blocked').locator('.board-column-count')).toHaveText('2');
+      expect(edits(server)).toEqual([]);
+    });
+
     test.describe('on a touch screen', () => {
       test.use({ hasTouch: true });
 
-      test('a grip can be hit anywhere in a 44px square around it', async ({ context, page }) => {
+      test('a grip can be hit anywhere in a 44px tall target that ends where its checkbox begins', async ({
+        context,
+        page,
+      }) => {
         await serveTasks(context, page);
         await shrinkToPhone(page);
         const grip = page.getByRole('button', { name: 'Move Implement login page', exact: true });
@@ -1278,6 +1368,7 @@ test.describe('Tasks Page', () => {
             [left + 1, top + height - 1],
             [left + width - 1, top + height - 1],
           ];
+          const beyond = document.elementFromPoint(left + width + 1, box.top + box.height / 2);
           return {
             touch: matchMedia('(any-pointer: coarse)').matches,
             grip: [box.width, box.height],
@@ -1286,15 +1377,17 @@ test.describe('Tasks Page', () => {
             hits: corners.map(
               ([x, y]) => document.elementFromPoint(x, y)?.closest('.task-card-handle') === handle
             ),
+            checkbox: beyond?.closest('.task-card-select')?.getAttribute('aria-label') ?? null,
           };
         });
 
         expect(target).toEqual({
           touch: true,
           grip: [12, 20],
-          width: 44,
+          width: 28,
           height: 44,
           hits: [true, true, true, true],
+          checkbox: 'Select Implement login page',
         });
       });
 
