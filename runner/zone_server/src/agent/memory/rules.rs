@@ -48,8 +48,11 @@
 //! with a code in capitals between underscores, as a constant is written, a
 //! passphrase, and any unlabelled code under 32 characters, which the
 //! detector never read. The cost the other way is a name that reads as such a
-//! value, `features/chats/ChatPanelV2.tsx` or
-//! `crates/codecs/utf16_utf32_base64`, which is refused as a secret.
+//! value, `features/chats/ChatPanelV2.tsx`,
+//! `crates/codecs/utf16_utf32_base64`, or one of five groups or more that
+//! bear two marks, `feat/add-2fa-for-iOS-and-web-users` and
+//! `src/crypto/digest/test_from_utf8_into_sha1_hash`, which is refused as a
+//! secret.
 
 use std::sync::LazyLock;
 
@@ -353,6 +356,16 @@ const LONG_CODE_MARKED_GROUPS: usize = 2;
 /// a constant is written in capitals between underscores.
 const CAPITAL_SEPARATORS: [char; 2] = ['-', '/'];
 
+/// The separator a recovery code and a licence key are written with.
+const DASH: char = '-';
+
+/// How long dashed groups must be for [`MARKED_GROUPS`] of them that mix
+/// letters with digits to make a code however alike their marks. Shorter
+/// groups are how a version list is dashed, `v10-v11-v12-v13`, while at four
+/// characters a letter or two beside a number is drawn as often as written:
+/// `ce29` and `vq5c` bear one mark in `y6al-ogrg-ce29-vq5c`.
+const SHORTEST_DASHED_GROUP: usize = 4;
+
 /// How a list writes an item: a letter or two in lower case, a number, and at
 /// most one letter after it, as `v10`, `rc1`, `k8s` and `e2e` are written.
 static NUMBERED: LazyLock<Regex> = LazyLock::new(|| {
@@ -390,6 +403,10 @@ fn written_alike(left: &str, right: &str) -> bool {
         })
 }
 
+fn letters(group: &str) -> impl Iterator<Item = char> + '_ {
+    group.chars().filter(char::is_ascii_alphabetic)
+}
+
 /// What marks a group as a code's. A list writes its items alike and a code
 /// writes each group its own way, so groups that bear a mark alike count once
 /// between them: `v10-v11-v12-v13` bears one mark, as `iPad/iPod/iMac` does.
@@ -399,7 +416,7 @@ enum Mark<'group> {
     /// A group that [changes case](changes_case), by where its capitals fall.
     Cased(&'group str),
     /// Any other group that [mixes](mixes) letters with digits, by its
-    /// spelling.
+    /// letters: `2xx` and `5xx` are one class of status.
     Mixed(&'group str),
 }
 
@@ -420,7 +437,7 @@ impl<'group> Mark<'group> {
         match (self, other) {
             (Self::Numbered, Self::Numbered) => true,
             (Self::Cased(left), Self::Cased(right)) => written_alike(left, right),
-            (Self::Mixed(left), Self::Mixed(right)) => left == right,
+            (Self::Mixed(left), Self::Mixed(right)) => letters(left).eq(letters(right)),
             _ => false,
         }
     }
@@ -436,19 +453,24 @@ impl Groups<'_> {
     /// Whether these groups are a code, as a recovery code and a licence key
     /// are written: enough of them, long enough, and marked as generated
     /// groups are. Fewer marks give away a long code that holds lower case,
-    /// which no list of platforms and no constant is.
+    /// which no list of platforms and no constant is, and long enough dashed
+    /// groups need only mix letters with digits.
     fn is_code(&self) -> bool {
-        if self.groups.len() < FEWEST_GROUPS
-            || self
-                .groups
-                .first()
-                .is_none_or(|group| group.len() < SHORTEST_GROUP)
-        {
+        let Some(length) = self.groups.first().map(|group| group.len()) else {
+            return false;
+        };
+        if self.groups.len() < FEWEST_GROUPS || length < SHORTEST_GROUP {
             return false;
         }
         let lower_case = self.groups.iter().any(|group| holds_lower_case(group));
         if !lower_case && CAPITAL_SEPARATORS.contains(&self.separator) {
             return self.groups.iter().any(|group| mixes(group));
+        }
+        if self.separator == DASH
+            && length >= SHORTEST_DASHED_GROUP
+            && self.groups.iter().filter(|group| mixes(group)).count() >= MARKED_GROUPS
+        {
+            return true;
         }
         let needed = if lower_case && self.groups.len() >= LONG_CODE_GROUPS {
             LONG_CODE_MARKED_GROUPS
@@ -528,12 +550,13 @@ const VOWELS: &[u8] = b"aeiouyAEIOUY";
 
 /// The abbreviations with no vowel that names write in mixed case, as
 /// `HttpJwtSmtpService` does, which [`unspoken`] does not read in any case.
-const ABBREVIATIONS: [&str; 56] = [
-    "cdn", "cfg", "cmd", "cmp", "cms", "cpp", "crm", "css", "csv", "ctx", "dbg", "dhcp", "dns",
-    "ftp", "grpc", "html", "http", "https", "jdbc", "jpg", "jwt", "llm", "mcp", "mgr", "msg",
-    "mvc", "npm", "pdf", "pkg", "png", "psr", "ptr", "rgb", "rpc", "scss", "sdk", "sms", "smtp",
-    "snmp", "sql", "src", "ssh", "ssl", "std", "stmt", "str", "svg", "tcp", "tls", "tmp", "txt",
-    "vcs", "xhr", "xml", "xsd", "xss",
+const ABBREVIATIONS: [&str; 65] = [
+    "btn", "cdn", "cfg", "cmd", "cmp", "cms", "cpp", "crm", "css", "csv", "ctrl", "ctx", "dbg",
+    "dhcp", "dns", "ftp", "grpc", "html", "http", "https", "jdbc", "jpg", "jwt", "kms", "llm",
+    "mcp", "mgmt", "mgr", "msg", "mvc", "npm", "pdf", "pkg", "png", "psr", "ptr", "pwd", "rgb",
+    "rpc", "rtc", "scss", "sdk", "sms", "smtp", "snmp", "sns", "sql", "sqs", "src", "ssh", "ssl",
+    "std", "stmt", "str", "svg", "tcp", "tls", "tmp", "txn", "txt", "vcs", "xhr", "xml", "xsd",
+    "xss",
 ];
 
 /// The words a part is written in: a new one opens at a capital after lower
@@ -610,9 +633,11 @@ fn unspoken(word: &str) -> bool {
 /// Whether a long run's parts that mix cases are scrambled rather than
 /// written in words: between them, each part counted once however often a
 /// name repeats it, they hold [`SCRAMBLED_WORDS`] letters that
-/// [stand alone](stands_alone) or words that are [`unspoken`]. A generated
-/// value in mixed case that its separators cut into parts too short for
-/// [`GENERATED`] is read here.
+/// [stand alone](stands_alone) or different words that are [`unspoken`]. A
+/// name repeats its abbreviations, `SqsQueue/SqsJob/SqsConnector`, where a
+/// generated value seldom draws one twice. A generated value in mixed case
+/// that its separators cut into parts too short for [`GENERATED`] is read
+/// here.
 fn scrambled(run: &str) -> bool {
     let mut parts: Vec<&str> = run
         .split(SEPARATORS)
@@ -620,16 +645,23 @@ fn scrambled(run: &str) -> bool {
         .collect();
     parts.sort_unstable();
     parts.dedup();
-    let scrambled: usize = parts
-        .iter()
-        .map(|part| {
-            let words = words(part);
-            (0..words.len())
-                .filter(|&index| stands_alone(&words, index) || unspoken(words[index]))
-                .count()
-        })
-        .sum();
-    scrambled >= SCRAMBLED_WORDS
+    let mut alone = 0;
+    let mut unspoken_words: Vec<&str> = Vec::new();
+    for part in parts {
+        let words = words(part);
+        for (index, &word) in words.iter().enumerate() {
+            if stands_alone(&words, index) {
+                alone += 1;
+            } else if unspoken(word)
+                && !unspoken_words
+                    .iter()
+                    .any(|seen| seen.eq_ignore_ascii_case(word))
+            {
+                unspoken_words.push(word);
+            }
+        }
+    }
+    alone + unspoken_words.len() >= SCRAMBLED_WORDS
 }
 
 /// What a name's digits are respelt as: a letter no credential prefix and no
@@ -695,7 +727,7 @@ pub(crate) mod test_support {
     use super::Refusal;
 
     /// What a repository note says every day.
-    pub(crate) const RECORDED: [&str; 57] = [
+    pub(crate) const RECORDED: [&str; 72] = [
         "runner/zone_server/migrations/0002_search_knowledge_active_candidates.sql",
         "target/x86_64-unknown-linux-gnu/release/zone_server",
         "/api/v1/workspaces/knowledge/refresh-all-entries",
@@ -753,12 +785,27 @@ pub(crate) mod test_support {
         "deploy/k8s/e2e/gke/eks/aks/values2",
         "Assets/Icons/iPad/iPod/iMac/icon_2x",
         "feat/AuthN-AuthZ-OAuth-SAML2-support-for-sso",
+        "src/components/ui/v2/BtnGroup/BtnPrimary/BtnSecondary",
+        "src/components/Forms/V2/PwdInput/PwdStrength/PwdReset",
+        "packages/ui/src/components/V2/TxnList/TxnRow/TxnDetail",
+        "app/Services/Aws/V2/SqsService/SqsWorker/SqsDispatcher",
+        "app/Jobs/V2/SyncSqsJob/ProcessSqsJob/RetrySqsJob",
+        "app/Queue/V2/SqsQueue/SqsJob/SqsConnector",
+        "src/Api/V2/Mgmt/MgmtController/MgmtService",
+        "lib/WebRTC/V2/RtcPeerConnection/RtcDataChannel/RtcStats",
+        "src/Infrastructure/Messaging/V2/SqsPublisher/SnsPublisher/KmsKeyResolver",
+        "app/Http/Controllers/Api/V2/Mgmt/CtrlPanelBtnController",
+        "feat/count-2xx-3xx-4xx-5xx-responses",
+        "http_requests_2xx_3xx_4xx_5xx_total",
+        "RESPONSE_CLASS_2XX_3XX_4XX_5XX_COUNT",
+        "fix/map-4xx-and-5xx-for-api-errors",
+        "fix/retry-on-4xx-5xx-and-2fa-timeouts",
     ];
 
     /// What no note should carry, with the reason each is turned away for.
     /// An issued prefix is spelt apart from its body so that no scanner reads
     /// a fixture as a leak.
-    pub(crate) const NOT_RECORDED: [(&str, Refusal); 49] = [
+    pub(crate) const NOT_RECORDED: [(&str, Refusal); 51] = [
         (
             concat!(
                 "The deploy token is ghp_",
@@ -963,6 +1010,14 @@ pub(crate) mod test_support {
         ),
         (
             "The signing key is kcvLZ_WKA8Mbbee_XeArKCkBHaKYSwfi",
+            Refusal::Secret,
+        ),
+        (
+            "The recovery code is deploy/keys/staging/y6al-ogrg-ce29-vq5c",
+            Refusal::Secret,
+        ),
+        (
+            "The recovery code is docs/recovery/codes/mn9z-kr02-5227-ytz8",
             Refusal::Secret,
         ),
     ];
@@ -1542,6 +1597,14 @@ mod tests {
                 separator: "/",
                 prefix: "deploy/keys/staging/",
                 allowed_one_in: 12,
+            },
+            Shape {
+                alphabet: LOWER_CASE,
+                length: 4,
+                groups: 4,
+                separator: "-",
+                prefix: "deploy/keys/staging/",
+                allowed_one_in: 4,
             },
             Shape {
                 alphabet: CAPITALS,
