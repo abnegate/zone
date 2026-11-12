@@ -203,6 +203,7 @@ async fn main() {
     } else {
         AppState::new_with_mail(config.clone(), db, Some(cache), mail)
     };
+    state.mcp().configured().await;
 
     // Start background workers
     zone_server::workers::housekeeping::spawn(state.clone());

@@ -33,6 +33,7 @@ use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
 use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
+use crate::db::mcp_servers;
 use crate::db::tasks::Origin;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::backend;
@@ -40,6 +41,8 @@ use crate::services::chat::driver::Driver;
 use crate::services::chat::handover::Handover;
 use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
+use crate::services::mcp_servers::load;
+use crate::services::mcp_servers::status::Status;
 use crate::services::project_directory::{self, Start};
 use crate::state::AppState;
 
@@ -48,6 +51,8 @@ pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
 pub const INSTRUCTIONS: &str = "instructions";
 const TEMPERATURE: f32 = 0.7;
 const SEARCH: &str = "supplement:search";
+const MCP_PENDING: &str =
+    "Configured MCP tool definitions will be counted when their servers connect.";
 pub const WITHHELD_IMAGE: &str = "[An image is omitted here because this model can't view images.]";
 
 fn parse_timeout(seconds: u64) -> Result<Duration, String> {
@@ -507,15 +512,9 @@ pub async fn build(
                 Some("Requested search results will be counted when retrieval completes.".into());
         }
     }
-    if matches!(mode, Mode::Preview)
-        && agentic
-        && state.existing_mcp().is_none()
-        && !zone_core::servers::config().is_empty()
-    {
+    if matches!(mode, Mode::Preview) && agentic && mcp_pending(state, workspace).await {
         incomplete = true;
-        reason = Some(
-            "Configured MCP tool definitions will be counted when their servers connect.".into(),
-        );
+        reason = Some(MCP_PENDING.into());
     }
     if matches!(mode, Mode::Preview) && !agentic && chat.character.is_none() {
         let knowledge: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM knowledge_entries WHERE workspace_id=$1 AND is_active=TRUE ", not_memory!(), ")"))
@@ -611,6 +610,47 @@ pub async fn build(
         effort: chat.reasoning_effort,
         driver,
     })
+}
+
+/// Whether an MCP server the chat's turns are offered has yet to connect: the
+/// instance's, or one its organization has switched on, its workspace has not
+/// switched off and this instance can connect. A preview starts neither, so it
+/// cannot count their tools.
+async fn mcp_pending(state: &AppState, workspace: Uuid) -> bool {
+    if state.mcp().existing_instance().is_none() && !state.mcp().configured().await.is_empty() {
+        return true;
+    }
+    let organization = match mcp_servers::organization_for_workspace(state.db(), workspace).await {
+        Ok(Some(organization)) => organization,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::debug!(
+                %workspace,
+                %error,
+                "Could not read the workspace's organization; counting no MCP servers of its own"
+            );
+            return false;
+        }
+    };
+    let hub = state.mcp().existing_organization(organization);
+    if hub.as_ref().is_some_and(|hub| !hub.connecting()) {
+        return false;
+    }
+    let policy = state.mcp().policy();
+    match mcp_servers::offered(state.db(), organization, workspace).await {
+        Ok(records) => records.iter().any(|record| match &hub {
+            Some(hub) => hub.connection(record.id).status == Status::Connecting,
+            None => load::definition(record).known(policy).is_none(),
+        }),
+        Err(error) => {
+            tracing::debug!(
+                %organization,
+                %error,
+                "Could not read the organization's MCP servers; counting none"
+            );
+            false
+        }
+    }
 }
 
 /// What a chat's optional blocks are rendered from, read together. A store
@@ -2207,6 +2247,151 @@ mod tests {
             body["reasoning_effort"],
             json!("high"),
             "an endpoint is sent the chat's effort at the highest level it takes: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preview_is_incomplete_until_the_organizations_mcp_servers_connect() {
+        use crate::db::chats;
+        use crate::db::mcp_servers::NewMcpServer;
+        use crate::services::mcp_servers::testing::Tenant;
+        use crate::services::mcp_servers::testing::remote;
+        use crate::services::mcp_servers::testing::stub;
+
+        const UNREACHABLE: &str = "http://127.0.0.1:1";
+        let tenant = Tenant::new().await;
+        let chat = chats::create_chat(
+            &tenant.pool,
+            Some(tenant.workspace),
+            "Servers",
+            "test",
+            true,
+            false,
+        )
+        .await
+        .expect("an agent chat");
+        let configured = |commands: bool| {
+            let mut config = crate::state::test_config();
+            config.litellm_host = UNREACHABLE.into();
+            config.ollama_host = UNREACHABLE.into();
+            config.mcp_commands = commands;
+            tenant.configured(config)
+        };
+        let state = configured(true).await;
+        let remote_only = configured(false).await;
+        let endpoint = crate::services::route::Route::for_workspace(&state, tenant.workspace)
+            .await
+            .into_endpoint()
+            .expect("a usable route");
+        let preview = |state: &AppState| {
+            let state = state.clone();
+            let chat = chat.clone();
+            let endpoint = endpoint.clone();
+            async move {
+                let preparation = build(
+                    &state,
+                    &chat,
+                    Uuid::new_v4(),
+                    None,
+                    Mode::Preview,
+                    endpoint,
+                    None,
+                )
+                .await
+                .expect("a preview");
+                let pending = preparation.context.reason.as_deref() == Some(MCP_PENDING);
+                (preparation.context.incomplete, pending)
+            }
+        };
+
+        let bare = preview(&state).await;
+        let off = NewMcpServer {
+            enabled: false,
+            ..stub("off")
+        };
+        tenant.store(&state, off).await;
+        let disabled = preview(&state).await;
+        let on = tenant.store(&state, stub("on")).await;
+        let commands_off = preview(&remote_only).await;
+        let unconnected = preview(&state).await;
+        tenant.overriding(on.id, false).await;
+        let overridden = preview(&state).await;
+        tenant.overriding(on.id, true).await;
+        let restored = preview(&state).await;
+        tenant.overriding(on.id, false).await;
+        tenant.store(&state, remote("remote")).await;
+        let awaited = [preview(&state).await, preview(&remote_only).await];
+        tenant.overriding(on.id, true).await;
+        let unbuilt = [&state, &remote_only].map(|state| {
+            state
+                .mcp()
+                .existing_organization(tenant.organization)
+                .is_none()
+        });
+        load::organization(&state, tenant.organization).await;
+        let connected = preview(&state).await;
+        tenant.remove().await;
+
+        assert_eq!(bare, (false, false), "no server is stored");
+        assert_eq!(disabled, (false, false), "the only server is disabled");
+        assert_eq!(
+            commands_off,
+            (false, false),
+            "a command server never connects while commands are off"
+        );
+        assert_eq!(unconnected, (true, true), "an enabled server awaits a turn");
+        assert_eq!(
+            overridden,
+            (false, false),
+            "the workspace switched the only connectable server off"
+        );
+        assert_eq!(restored, (true, true), "the workspace switched it back on");
+        assert_eq!(
+            awaited,
+            [(true, true), (true, true)],
+            "an http server awaits a turn, with commands on or off"
+        );
+        assert_eq!(
+            unbuilt,
+            [true, true],
+            "a preview built the organization's hub"
+        );
+        assert_eq!(
+            connected,
+            (false, false),
+            "the organization's hub is built, and its http server has settled as failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preview_is_incomplete_while_a_built_hub_is_still_connecting() {
+        use crate::db::mcp_servers::NewMcpServer;
+        use crate::services::mcp_servers::testing::Tenant;
+        use crate::services::mcp_servers::testing::stub;
+
+        let tenant = Tenant::new().await;
+        let state = tenant.replica().await;
+        load::organization(&state, tenant.organization).await;
+        let settled = mcp_pending(&state, tenant.workspace).await;
+        let silent = NewMcpServer {
+            command: Some("sleep".to_string()),
+            arguments: vec!["30".to_string()],
+            ..stub("silent")
+        };
+        let stored = tenant.store(&state, silent).await;
+
+        load::sync(&state, tenant.organization).await;
+        let connecting = mcp_pending(&state, tenant.workspace).await;
+        tenant.overriding(stored.id, false).await;
+        let overridden = mcp_pending(&state, tenant.workspace).await;
+        state.mcp().forget(tenant.organization);
+        tenant.remove().await;
+
+        assert!(!settled, "an empty hub has nothing left to connect");
+        assert!(connecting, "the server has not answered yet");
+        assert!(
+            !overridden,
+            "the workspace switched the connecting server off"
         );
     }
 }

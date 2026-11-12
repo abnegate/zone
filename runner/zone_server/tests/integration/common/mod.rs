@@ -9,7 +9,9 @@ pub mod comfy;
 pub mod context;
 pub mod database;
 pub mod github_app;
+pub mod logs;
 pub mod mail;
+pub mod mcp;
 pub mod stand_in;
 pub mod transcript;
 
@@ -107,6 +109,8 @@ pub fn test_config() -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
+        mcp_commands: false,
     }
 }
 
@@ -191,6 +195,16 @@ impl TestClient {
     /// Create a test client on `pool`, for a test that needs a database of its own.
     pub fn with_pool(pool: PgPool) -> Self {
         let state = create_test_state(test_config(), pool);
+        let router = create_test_router(state.clone());
+        Self {
+            router,
+            state: Some(state),
+        }
+    }
+
+    /// Create a test client over `state` as it is, for a test whose instance MCP servers really
+    /// connect: every other constructor installs an empty instance hub first.
+    pub fn with_state(state: AppState) -> Self {
         let router = create_test_router(state.clone());
         Self {
             router,
@@ -561,6 +575,8 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
+        mcp_commands: false,
     }
 }
 

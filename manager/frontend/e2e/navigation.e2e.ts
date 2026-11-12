@@ -218,6 +218,7 @@ test.describe('Navigation', () => {
       'Folders',
       'Sources',
       'Members',
+      'MCP servers',
     ]);
     await workspace.getByRole('link', { name: 'Sources', exact: true }).click();
     await expect(page).toHaveURL(SOURCES_PATH);

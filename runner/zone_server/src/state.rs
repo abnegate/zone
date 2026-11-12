@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zone_context::adapters::{
     AdapterRegistry, FilesystemAdapter, GitHubAdapter, GitLabAdapter, TextAdapter, WebAdapter,
@@ -15,7 +15,6 @@ use zone_context::adapters::{
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
 use zone_core::llm::{LlmBackend, cli};
-use zone_core::servers;
 
 use crate::cache::Cache;
 #[cfg(test)]
@@ -25,6 +24,8 @@ use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
 use crate::services::github_app::Provider;
 use crate::services::mail::AccountMail;
+use crate::services::mcp_servers::hubs::Hubs;
+use crate::services::mcp_servers::status::Policy;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
 use crate::train_jobs::TrainRegistry;
@@ -111,8 +112,9 @@ struct AppStateInner {
     /// Clip extracts queue here instead of 429ing, so a dump of hundreds of
     /// videos can run a few ffmpeg jobs at a time.
     pub frame_semaphore: Arc<Semaphore>,
-    /// Process-wide MCP hub. Connected once, shared across chat turns.
-    pub mcp: OnceCell<McpHub>,
+    /// The process's MCP hubs: the instance layer, connected once, and one
+    /// per organization, each shared across chat turns.
+    pub mcp: Hubs,
     pub github: OnceLock<Provider>,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
@@ -212,6 +214,14 @@ impl AppState {
             }
         });
 
+        let mcp = Hubs::new(
+            zone_routing::proxy(),
+            Policy {
+                enabled: config.mcp_enabled,
+                commands: config.mcp_commands,
+            },
+        );
+
         Self {
             inner: Arc::new(AppStateInner {
                 config,
@@ -229,7 +239,7 @@ impl AppState {
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
-                mcp: OnceCell::new(),
+                mcp,
                 github: OnceLock::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
@@ -318,14 +328,9 @@ impl AppState {
         &self.inner.train_jobs
     }
 
-    /// MCP servers for this process. Connected once on first chat or task use.
-    pub async fn mcp_hub(&self) -> &McpHub {
-        self.inner
-            .mcp
-            .get_or_init(|| async {
-                McpHub::connect_through(&servers::config(), &zone_routing::proxy()).await
-            })
-            .await
+    /// MCP servers for this process, by layer. Each connects on first use.
+    pub fn mcp(&self) -> &Hubs {
+        &self.inner.mcp
     }
 
     /// Terminal frames for task runs. A waiter subscribes here; the writers
@@ -377,10 +382,6 @@ impl AppState {
         self.hold_device(device_id)
     }
 
-    pub fn existing_mcp(&self) -> Option<&McpHub> {
-        self.inner.mcp.get()
-    }
-
     /// Install an empty hub so tests never spawn MCP children.
     pub fn disable_mcp(&self) {
         self.install_mcp(McpHub::new());
@@ -390,7 +391,7 @@ impl AppState {
     /// server instead of whatever the process environment names. A hub that
     /// is already installed stays.
     pub fn install_mcp(&self, hub: McpHub) {
-        let _ = self.inner.mcp.set(hub);
+        self.inner.mcp.install_instance(hub);
     }
 
     pub fn github(&self) -> &Provider {
@@ -429,12 +430,42 @@ impl AppState {
     ///
     /// The pool is lazy, so nothing connects unless a test actually queries.
     pub fn for_tests() -> Self {
-        let db =
-            PgPool::connect_lazy("postgres://localhost/test").expect("a lazy pool needs no server");
-        let state = Self::new(test_config(), db, None);
+        let state = Self::new(test_config(), lazy_pool(), None);
         state.disable_mcp();
         state
     }
+}
+
+#[cfg(test)]
+const LAZY_DATABASE: &str = "postgres://localhost/test";
+
+#[cfg(test)]
+const UNREACHABLE_DATABASE: &str = "postgres://127.0.0.1:1/unreachable";
+
+#[cfg(test)]
+const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// A pool that dials nothing until a test queries it, and gives up on a server
+/// that is not there within [`ACQUIRE_TIMEOUT`]: sqlx retries a refused
+/// connection until the acquire timeout, which is thirty seconds by default.
+#[cfg(test)]
+pub(crate) fn lazy_pool() -> PgPool {
+    lazy(LAZY_DATABASE)
+}
+
+/// A [`lazy_pool`] for a test that has to fail every query: nothing listens
+/// on its port, whatever database the machine or its `PG*` variables offer.
+#[cfg(test)]
+pub(crate) fn unreachable_pool() -> PgPool {
+    lazy(UNREACHABLE_DATABASE)
+}
+
+#[cfg(test)]
+fn lazy(database: &str) -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(ACQUIRE_TIMEOUT)
+        .connect_lazy(database)
+        .expect("a lazy pool needs no server")
 }
 
 /// A loopback port nothing listens on, where a test's agent logins read usage unless the test
@@ -456,7 +487,7 @@ pub(crate) fn test_config() -> Config {
     Config {
         host: "localhost".to_string(),
         port: 8000,
-        database_url: "postgres://localhost/test".to_string(),
+        database_url: LAZY_DATABASE.to_string(),
         redis_url: "redis://localhost:6379".to_string(),
         jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
         jwt_access_lifetime: 900,
@@ -487,6 +518,8 @@ pub(crate) fn test_config() -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
+        mcp_commands: false,
     }
 }
 
@@ -520,6 +553,20 @@ mod tests {
             .await
             .expect("REDIS_URL must point to a reachable cache");
         Some(cache)
+    }
+
+    #[tokio::test]
+    async fn a_test_pool_gives_up_quickly_on_a_server_that_is_not_there() {
+        for pool in [
+            lazy_pool(),
+            unreachable_pool(),
+            AppState::for_tests().db().clone(),
+        ] {
+            assert_eq!(
+                pool.options().get_acquire_timeout(),
+                Duration::from_millis(250)
+            );
+        }
     }
 
     #[tokio::test]
@@ -649,6 +696,8 @@ mod tests {
             host_mounts: Default::default(),
             clones: std::env::temp_dir().join("zone-clones"),
             connect_urls: Vec::new(),
+            mcp_enabled: true,
+            mcp_commands: false,
         }
     }
 
@@ -809,12 +858,12 @@ mod tests {
         let _ = state.sync_registry();
         let _ = state.pull_registry();
         assert!(state.train_jobs().current().is_none());
-        assert!(state.existing_mcp().is_none());
+        assert!(state.mcp().existing_instance().is_none());
         state.disable_mcp();
-        assert!(state.existing_mcp().is_some());
-        assert!(std::ptr::eq(
-            state.mcp_hub().await,
-            state.existing_mcp().unwrap()
+        assert!(state.mcp().existing_instance().is_some());
+        assert!(Arc::ptr_eq(
+            &state.mcp().instance().await,
+            &state.mcp().existing_instance().unwrap()
         ));
 
         let mail = Arc::new(AccountMail::new(Arc::new(MockMailer::new())));
@@ -843,11 +892,26 @@ mod tests {
             .expect("a lazy pool needs no server");
         let state = AppState::new(test_config(), pool, None);
 
-        let connected = state.mcp_hub().await.server_count();
+        let connected = state.mcp().instance().await.server_count();
         drop(environment);
 
         assert_eq!(connected, 0, "the recorder exits without answering");
         recording::assert_routed(&recorded);
+    }
+
+    #[tokio::test]
+    async fn the_mcp_policy_is_the_configurations() {
+        for (enabled, commands) in [(true, false), (false, true)] {
+            let config = Config {
+                mcp_enabled: enabled,
+                mcp_commands: commands,
+                ..test_config()
+            };
+
+            let state = AppState::new(config, lazy_pool(), None);
+
+            assert_eq!(state.mcp().policy(), Policy { enabled, commands });
+        }
     }
 
     #[tokio::test]

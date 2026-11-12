@@ -55,9 +55,16 @@ describe('edit roles', () => {
       theme: 'member',
       ai: 'admin',
       folders: 'member',
+      mcp: 'admin',
       sources: 'member',
     });
-    expect(Object.keys(WORKSPACE_EDIT_ROLE).sort()).toEqual(['ai', 'folders', 'sources', 'theme']);
+    expect(Object.keys(WORKSPACE_EDIT_ROLE).sort()).toEqual([
+      'ai',
+      'folders',
+      'mcp',
+      'sources',
+      'theme',
+    ]);
   });
 
   it('edits sources with the same role the sources feature writes them with', () => {

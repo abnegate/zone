@@ -1,6 +1,4 @@
 use std::collections::BTreeMap;
-use std::io;
-use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
@@ -8,9 +6,6 @@ use chrono::DateTime;
 use reqwest::Url;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tracing::subscriber::DefaultGuard;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 use wiremock::{MockServer, ResponseTemplate};
 use zone_server::db::github_apps::{self, AppRow, OwnerType};
@@ -24,7 +19,8 @@ use zone_server::services::github_app::manifest::{MANIFEST_CALLBACK_PATH, SETUP_
 use crate::common::github_app::{
     self, GITHUB_WEB_URL, Installed, ListedBranch, ListedRepository, Registration, TEST_PRIVATE_KEY,
 };
-use crate::common::{self, TestClient, TestResponse, test_email, test_password};
+use crate::common::logs::capturing;
+use crate::common::{TestClient, TestResponse, test_email, test_password};
 
 const SETTINGS_PATH: &str = "/settings/organization/github";
 const OUTCOME_PARAMETER: &str = "github";
@@ -864,7 +860,7 @@ async fn callback_manifest_duplicate_owner_fails() {
 /// the subscriber set as this thread's default.
 #[tokio::test(flavor = "current_thread")]
 async fn callback_manifest_orphaned_app_is_logged_for_deletion() {
-    let (captured, _capturing) = capturing();
+    let (captured, _capturing) = capturing(CAPTURED_TARGETS);
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;
     let existing = harness.seed_app(&tenant).await;
@@ -1484,52 +1480,6 @@ async fn security_location_never_carries_secrets() {
     );
 }
 
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl Captured {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("the capture is readable")).into_owned()
-    }
-}
-
-impl io::Write for Captured {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the capture is writable")
-            .extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> MakeWriter<'writer> for Captured {
-    type Writer = Captured;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-/// Every log line the server writes on this thread while the guard lives. A
-/// global subscriber is installed first because, beside a lone scoped one,
-/// tracing caches each callsite's interest from whichever thread first reaches
-/// it, so a callsite a parallel test reached first would never log here.
-fn capturing() -> (Captured, DefaultGuard) {
-    common::init_tracing();
-    let captured = Captured::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(CAPTURED_TARGETS))
-        .with_writer(captured.clone())
-        .with_ansi(false)
-        .finish();
-    (captured, tracing::subscriber::set_default(subscriber))
-}
-
 /// Every JWT Zone signed and sent to `github`.
 async fn sent_jwts(github: &MockServer) -> Vec<String> {
     github
@@ -1549,7 +1499,7 @@ async fn sent_jwts(github: &MockServer) -> Vec<String> {
 /// the subscriber set as this thread's default.
 #[tokio::test(flavor = "current_thread")]
 async fn security_logs_never_carry_secrets() {
-    let (captured, _capturing) = capturing();
+    let (captured, _capturing) = capturing(CAPTURED_TARGETS);
 
     let harness = Harness::new().await;
     let tenant = harness.tenant().await;

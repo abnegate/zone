@@ -727,12 +727,25 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
     use zone_server::services::chat::session::{self, Mode};
     use zone_server::services::route::Route;
     use zone_server::state::AppState;
-    let (pool, _, chat, _) = fixture().await;
+    let (pool, _, chat, workspace) = fixture().await;
+    let organization = zone_server::db::mcp_servers::organization_for_workspace(&pool, workspace)
+        .await
+        .unwrap()
+        .expect("the workspace's organization");
+    sqlx::query(
+        "INSERT INTO mcp_servers (organization_id, name, transport, command) \
+         VALUES ($1, 'stub', 'stdio', 'python3')",
+    )
+    .bind(organization)
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut config = common::test_config();
     config.litellm_host = "http://127.0.0.1:1".into();
     config.ollama_host = "http://127.0.0.1:1".into();
     let state = AppState::new(config, pool.clone(), None);
-    assert!(state.existing_mcp().is_none());
+    assert!(state.mcp().existing_instance().is_none());
+    assert!(state.mcp().existing_organization(organization).is_none());
     for enabled in [false, true] {
         let row = chats::update_chat(
             &pool,
@@ -764,12 +777,21 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
         .await
         .unwrap();
         assert!(
-            state.existing_mcp().is_none(),
+            state.mcp().existing_instance().is_none(),
             "Preview initialized MCP children"
+        );
+        assert!(
+            state.mcp().existing_organization(organization).is_none(),
+            "Preview built the organization's MCP hub"
         );
     }
     sqlx::query("DELETE FROM chats WHERE id=$1")
         .bind(chat)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM mcp_servers WHERE organization_id=$1")
+        .bind(organization)
         .execute(&pool)
         .await
         .unwrap();

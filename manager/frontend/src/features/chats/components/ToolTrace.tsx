@@ -135,6 +135,16 @@ function humanise(name: string): string {
   );
 }
 
+const SERVER_SEPARATOR = '__';
+
+function toolName(name: string): string {
+  const index = name.indexOf(SERVER_SEPARATOR);
+  const server = index === -1 ? '' : name.slice(0, index);
+  const tool = index === -1 ? '' : name.slice(index + SERVER_SEPARATOR.length);
+  if (!server || !tool) return humanise(name);
+  return `${humanise(tool)} (${server})`;
+}
+
 type ToolState =
   | 'approval'
   | 'pending'
@@ -177,7 +187,7 @@ function toolState(call: ToolCallRecord): ToolState {
 
 function toolLabel(name: string, state: ToolState): string {
   const known = TOOL_ACTIONS[name];
-  if (!known) return humanise(name);
+  if (!known) return toolName(name);
   const {
     verb: { base, gerund, past },
     object,
@@ -307,7 +317,7 @@ type Derive = (args: Arguments, detail: string, titles: Titles) => string | null
 /// reader gets those.
 const DETAIL_FROM_ARGUMENTS: Partial<Record<string, Derive>> = {
   load_tools: (args) =>
-    Array.isArray(args.names) ? args.names.filter(isString).map(humanise).join(', ') || null : null,
+    Array.isArray(args.names) ? args.names.filter(isString).map(toolName).join(', ') || null : null,
   fetch_url: (args) => text(args.url),
   web_search: (args) => (isString(args.query) ? `“${args.query}”` : null),
   list_sources: (_, detail) => sourceNames(detail),

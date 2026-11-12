@@ -128,7 +128,7 @@ fn stream(status: u16, deltas: Vec<Value>) -> ResponseTemplate {
 
 /// Bounds the wait on a database nothing answers on, so a call that reaches it
 /// costs a test milliseconds rather than the default acquire timeout.
-const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Where a chat tool set in this binary has its session checkout, and so where
 /// a job started through one writes its log.

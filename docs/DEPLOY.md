@@ -973,7 +973,7 @@ Every run, dry or not, counts first and refuses to go on when no sealed-looking 
 
 What each column takes:
 
-- `sources.credentials_encrypted`, `agent_logins.credential` and `sync_configs.webhook_secret_encrypted`: values sealed before envelopes existed are resealed; plaintext is reported, not sealed, because some or all of their readers refuse it.
+- `sources.credentials_encrypted`, `agent_logins.credential`, `mcp_servers.secrets` and `sync_configs.webhook_secret_encrypted`: values sealed before envelopes existed are resealed; plaintext is reported, not sealed, because some or all of their readers refuse it.
 - `projects.github_access_token` and the GitHub sync `token`: plaintext and earlier sealed values are both sealed.
 - The GitHub App private key, the Linear API key and the AI settings keys: counted in the report, never written.
 - In every column, envelopes are skipped, and values that look sealed but do not open under the key are reported.

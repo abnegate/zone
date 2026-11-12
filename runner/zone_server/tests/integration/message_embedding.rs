@@ -21,10 +21,6 @@ use zone_server::routes::create_router;
 use zone_server::state::AppState;
 use zone_server::workers::embeddings::spawn_message_embedding_task;
 
-// =============================================================================
-// Test Setup Helpers
-// =============================================================================
-
 /// Create test configuration
 fn test_config() -> Config {
     Config {
@@ -64,6 +60,8 @@ fn test_config() -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
+        mcp_commands: false,
     }
 }
 
@@ -191,10 +189,6 @@ async fn create_test_message(
     Uuid::parse_str(body["message"]["id"].as_str().unwrap()).unwrap()
 }
 
-// =============================================================================
-// Background Worker Tests
-// =============================================================================
-
 #[tokio::test]
 async fn test_spawn_message_embedding_task_creates_embedding() {
     // Given: A database with a chat and message
@@ -305,10 +299,6 @@ async fn test_spawn_embedding_respects_semaphore_limit() {
     // Then: All tasks should complete without overwhelming the system
     // (The semaphore should limit concurrency to MAX_CONCURRENT_EMBEDDINGS)
 }
-
-// =============================================================================
-// Search Endpoint Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_search_messages_endpoint_returns_results() {
@@ -583,10 +573,6 @@ async fn test_search_requires_authentication() {
     );
 }
 
-// =============================================================================
-// Alternative Search Route Tests (chat-specific)
-// =============================================================================
-
 #[tokio::test]
 async fn test_chat_specific_search_endpoint() {
     // Given: A chat with messages
@@ -623,10 +609,6 @@ async fn test_chat_specific_search_endpoint() {
         );
     }
 }
-
-// =============================================================================
-// Error Handling Tests
-// =============================================================================
 
 #[tokio::test]
 async fn test_embedding_worker_handles_invalid_message_id() {

@@ -72,6 +72,7 @@ mod tests {
     use crate::agent::question::ASK_USER;
     use crate::agent::wait::WAIT_FOR;
     use crate::agent::{ToolProfile, WorkspaceScope};
+    use crate::state::AppState;
     use abnegate_agent::tool::WaitFor;
     use abnegate_agent_cli::{AgentKind, CliSettings};
     use uuid::Uuid;
@@ -163,7 +164,7 @@ mod tests {
 
     async fn chat() -> ChatTools {
         ChatTools::build(WorkspaceScope {
-            state: testing::state(),
+            state: AppState::for_tests(),
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
@@ -175,7 +176,7 @@ mod tests {
 
     async fn task() -> ChatTools {
         ChatTools::for_task(
-            &testing::state(),
+            &AppState::for_tests(),
             std::env::temp_dir(),
             Uuid::new_v4(),
             None,

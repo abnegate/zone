@@ -225,10 +225,11 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{open, scope, state, tools, wait_for_card, write};
+    use super::super::testing::{open, scope, tools, wait_for_card, write};
     use super::*;
     use crate::agent::wait::WAIT_FOR;
     use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy};
+    use crate::state::AppState;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use http_body_util::BodyExt;
@@ -245,7 +246,7 @@ mod tests {
         if let Some(token) = token {
             request = request.header(header::AUTHORIZATION, format!("{BEARER}{token}"));
         }
-        let response = crate::routes::create_router(state())
+        let response = crate::routes::create_router(AppState::for_tests())
             .oneshot(request.body(Body::from(body.to_string())).unwrap())
             .await
             .expect("the router answers");

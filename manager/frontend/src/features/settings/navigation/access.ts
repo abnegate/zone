@@ -6,6 +6,7 @@ export const WORKSPACE_EDIT_ROLE = {
   theme: 'member',
   ai: 'admin',
   folders: 'member',
+  mcp: 'admin',
   sources: SOURCES_WRITE_ROLE,
 } as const satisfies Record<string, WorkspaceRole>;
 

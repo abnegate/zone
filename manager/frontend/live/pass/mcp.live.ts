@@ -1,17 +1,25 @@
-import { execFileSync } from 'node:child_process';
-import type { Locator } from '@playwright/test';
+import { execFileSync, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { once } from 'node:events';
+import { createInterface } from 'node:readline';
+import { setTimeout as after } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+import type { Locator, Page } from '@playwright/test';
 import {
   api,
   ask,
+  chooseOption,
   chooseTaskAction,
   enabled,
   expect,
   logLines,
   logMark,
+  logSince,
   model,
   newChat,
   ownerToken,
   record,
+  renderedToolCalls,
   shot,
   signIn,
   sql,
@@ -23,11 +31,31 @@ import {
 /**
  * Row 32: with magents on PATH and ZONE_MCP_ENABLED=true on the server, a task
  * that must hand work to another coding agent reaches the magents_* tools and
- * the console shows their calls. The rig hardcodes MCP off, so this lane
- * expects the server to have been restarted with it on (restart-server.sh).
+ * the console shows their calls. Row 32c adds a streamable-HTTP server through
+ * Settings and calls its one tool from a chat. The rig keeps MCP off unless it
+ * is brought up with ZONE_LIVE_MCP_ENABLED=true, which this lane expects.
  */
 
 const SCRATCH_PROJECT = 'Real pass scratch';
+
+const SETTINGS = '/settings/organization/mcp';
+const SERVER = 'stub_http';
+const DELEGATE = 'delegate';
+const TOOL = `${SERVER}__${DELEGATE}`;
+const TOOL_LABEL = `Delegate (${SERVER})`;
+const SERVER_LOG = new RegExp(`mcp|${SERVER}`, 'i');
+const TRANSPORT = 'http';
+const TRANSPORT_LABEL = 'Streamable HTTP';
+const CONNECTED = 'Connected';
+const OFF = /=(0|false|no|off)$/i;
+const PORT_LINE = /^PORT=(\d+)$/;
+const STUB_DEADLINE = 30_000;
+const STUB = fileURLToPath(
+  new URL(
+    '../../../../runner/zone_server/tests/fixtures/stub_mcp_http_server.py',
+    import.meta.url,
+  ),
+);
 
 // Which agent magents should start, and where: a headless claude on a host
 // whose Claude Code runs on the desktop app's sign-in answers "Not logged
@@ -51,6 +79,95 @@ async function toggle(
   await expect(box).toBeChecked({ checked: wanted });
 }
 
+function serverSwitch(): string {
+  return execFileSync(
+    'sh',
+    [
+      '-c',
+      `ps -Eww -o command= -p $(lsof -nP -iTCP:${process.env.ZONE_LIVE_API_PORT ?? '8010'} -sTCP:LISTEN -t) | tr ' ' '\\n' | grep '^ZONE_MCP_ENABLED=' || echo ZONE_MCP_ENABLED=unset`,
+    ],
+    { encoding: 'utf8' },
+  ).trim();
+}
+
+function toolCalls(chatId: string): string[] {
+  return sql(
+    `select coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'assistant' order by created_at`,
+  ).flatMap((line) =>
+    (
+      JSON.parse(line) as { function: { name: string; arguments: string } }[]
+    ).map((c) => `${c.function.name} ${c.function.arguments.slice(0, 120)}`),
+  );
+}
+
+function toolResults(chatId: string): string[] {
+  return sql(
+    `select replace(message->>'content', E'\\n', ' ') from chat_entries where chat_id = '${chatId}' and message->>'role' = 'tool' order by created_at`,
+  );
+}
+
+interface Stub {
+  port: number;
+  stop(): void;
+}
+
+async function startStub(token: string): Promise<Stub> {
+  const child = spawn('python3', ['-I', STUB, '--token', token], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  const lines = createInterface({ input: child.stdout });
+  const stop = () => {
+    lines.close();
+    child.kill();
+  };
+  const first = await Promise.race([
+    once(lines, 'line').then(([line]) => String(line)),
+    once(lines, 'close').then(() => 'its output closed'),
+    once(child, 'error').then(([failure]) => String(failure)),
+    after(STUB_DEADLINE, 'it printed nothing in time', { ref: false }),
+  ]);
+  const port = PORT_LINE.exec(first)?.[1];
+  if (!port) {
+    stop();
+    throw new Error(`the MCP stub gave no port: ${first}`);
+  }
+  return { port: Number(port), stop };
+}
+
+function row(page: Page): Locator {
+  return page
+    .getByRole('list', { name: 'MCP servers' })
+    .getByRole('listitem', { name: SERVER, exact: true });
+}
+
+async function remove(page: Page): Promise<void> {
+  await page
+    .getByRole('button', { name: `Actions for ${SERVER}`, exact: true })
+    .click();
+  await page.getByRole('menuitem', { name: 'Remove', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: `Remove ${SERVER}?` });
+  await dialog
+    .getByRole('button', { name: 'Remove server', exact: true })
+    .click();
+  await expect(dialog).toHaveCount(0);
+}
+
+/**
+ * Open the organization's MCP servers with the stub's row gone. "Add server"
+ * renders only once the list has loaded, so the row count after it is real.
+ */
+async function clear(page: Page): Promise<void> {
+  await page.goto(SETTINGS);
+  await expect(
+    page.getByRole('heading', { name: 'MCP servers', level: 2 }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Add server', exact: true }),
+  ).toBeVisible();
+  if (await row(page).count()) await remove(page);
+  await expect(row(page)).toHaveCount(0);
+}
+
 test.describe('mcp', () => {
   test.skip(!enabled, 'set ZONE_LIVE_REAL_PASS=1 against the real rig');
   test.describe.configure({ timeout: 2_400_000 });
@@ -61,14 +178,7 @@ test.describe('mcp', () => {
     const magents = execFileSync('sh', ['-c', 'command -v magents || true'], {
       encoding: 'utf8',
     }).trim();
-    const serverEnv = execFileSync(
-      'sh',
-      [
-        '-c',
-        `ps -Eww -o command= -p $(lsof -nP -iTCP:${process.env.ZONE_LIVE_API_PORT ?? '8010'} -sTCP:LISTEN -t) | tr ' ' '\\n' | grep '^ZONE_MCP_ENABLED=' || echo ZONE_MCP_ENABLED=unset`,
-      ],
-      { encoding: 'utf8' },
-    ).trim();
+    const serverEnv = serverSwitch();
     const attached = logLines(0, /Attached MCP tools/).slice(-2);
     await signIn(page);
     const s = stamp();
@@ -164,16 +274,8 @@ test.describe('mcp', () => {
       { replies: 1, timeout: 1_800_000 },
     );
     await shot(page, '32-magents-from-chat');
-    const calls = sql(
-      `select coalesce(nullif(message->'tool_calls', 'null'::jsonb), '[]'::jsonb) from chat_entries where chat_id = '${chatId}' and message->>'role' = 'assistant' order by created_at`,
-    ).flatMap((line) =>
-      (
-        JSON.parse(line) as { function: { name: string; arguments: string } }[]
-      ).map((c) => `${c.function.name} ${c.function.arguments.slice(0, 120)}`),
-    );
-    const results = sql(
-      `select replace(message->>'content', E'\\n', ' ') from chat_entries where chat_id = '${chatId}' and message->>'role' = 'tool' order by created_at`,
-    );
+    const calls = toolCalls(chatId);
+    const results = toolResults(chatId);
     // The spawned session's title repeats the instruction, so what it
     // printed is read from the transcript's assistant turn, not from any
     // mention of the words.
@@ -206,5 +308,152 @@ test.describe('mcp', () => {
       screenshots: ['32-magents-from-chat.png'],
     });
     expect(magents.length, calls.join(' | ')).toBeGreaterThan(0);
+  });
+
+  test("32c: an HTTP server added in Settings reaches a chat's tool trace", async ({
+    page,
+  }) => {
+    const serverEnv = serverSwitch();
+    const token = randomBytes(24).toString('hex');
+    const stub = await startStub(token);
+    const scrub = (text: string) => text.split(token).join('<token>');
+    const instruction = `delegated-${stamp()}`;
+    const mark = logMark();
+    const serverLog = () => ({
+      server_log: logLines(mark, SERVER_LOG)
+        .slice(0, 12)
+        .map((line) => scrub(line).slice(0, 200)),
+      token_in_server_log: logSince(mark).includes(token),
+    });
+    let submitted = false;
+    try {
+      await signIn(page);
+      await clear(page);
+      await page
+        .getByRole('button', { name: 'Add server', exact: true })
+        .click();
+      const dialog = page.getByRole('dialog', { name: 'Add MCP server' });
+      await expect(dialog).toBeVisible();
+      const transport = dialog.getByRole('combobox', { name: 'Transport' });
+      await chooseOption(transport, TRANSPORT);
+      await expect(transport).toHaveText(TRANSPORT_LABEL);
+      await dialog.getByLabel('Name', { exact: true }).fill(SERVER);
+      await dialog
+        .getByLabel('URL', { exact: true })
+        .fill(`http://127.0.0.1:${stub.port}/mcp`);
+      await dialog
+        .getByRole('button', { name: 'Add header', exact: true })
+        .click();
+      await dialog
+        .getByLabel('Header name 1', { exact: true })
+        .fill('Authorization');
+      await dialog
+        .getByLabel('Value for Authorization', { exact: true })
+        .fill(`Bearer ${token}`);
+      submitted = true;
+      await dialog
+        .getByRole('button', { name: 'Add server', exact: true })
+        .click();
+      await expect(dialog).toHaveCount(0);
+
+      const item = row(page);
+      const status = item.getByRole('status');
+      const connected = await expect(status)
+        .toHaveText(CONNECTED, { timeout: 60_000 })
+        .then(
+          () => true,
+          () => false,
+        );
+      const badge = (await status.allInnerTexts()).join(' ').trim();
+      const refusal = scrub(
+        (await item.locator('.mcp-server-error').allInnerTexts()).join(' '),
+      );
+      if (connected) {
+        await item
+          .getByRole('button', { name: `Tools for ${SERVER}`, exact: true })
+          .click();
+        await expect(
+          item.getByRole('checkbox', { name: DELEGATE, exact: true }),
+        ).toBeChecked();
+      }
+      await shot(page, '32c-http-server-in-settings');
+      const settings = {
+        server_env: serverEnv,
+        server_status: badge,
+        server_error: refusal,
+      };
+      if (!connected) {
+        record(32.7, {
+          result: 'FAILS',
+          cause: OFF.test(serverEnv)
+            ? `environment: the server runs with ${serverEnv}`
+            : `product: ${SERVER} is ${badge || 'missing from the list'}${refusal ? `: ${refusal}` : ''}`,
+          ...settings,
+          ...serverLog(),
+          screenshots: ['32c-http-server-in-settings.png'],
+        });
+      }
+      expect(connected, `${SERVER} is ${badge}: ${refusal}`).toBe(true);
+
+      const chatId = await newChat(page, {
+        model,
+        agent: true,
+        autoApprove: true,
+      });
+      const reply = await ask(
+        page,
+        `You have an MCP tool named ${TOOL}. Call it once with the instruction "${instruction}", then tell me word for word what it returned.`,
+        { replies: 1 },
+      );
+      await shot(page, '32c-http-tool-from-chat');
+      const calls = toolCalls(chatId);
+      const results = toolResults(chatId);
+      const called = calls.filter((c) => c.startsWith(TOOL));
+      const echoed = results.filter((result) =>
+        result.includes(`delegated:${instruction}`),
+      );
+      const rendered = (await renderedToolCalls(page)).map((call) =>
+        call.replace(/\s+/g, ' '),
+      );
+      const traced = rendered.filter((call) => call.includes(TOOL_LABEL));
+      record(32.7, {
+        result:
+          called.length > 0 && echoed.length > 0 && traced.length > 0
+            ? 'WORKS'
+            : 'FAILS',
+        cause:
+          called.length === 0
+            ? `model: no ${TOOL} call from the chat (calls: ${[...new Set(calls.map((c) => c.split(' ')[0]))].join(', ')})`
+            : echoed.length === 0
+              ? `product: ${TOOL} was called but no tool result carries delegated:${instruction}`
+              : traced.length === 0
+                ? `product: the tool trace shows no "${TOOL_LABEL}"`
+                : undefined,
+        ...settings,
+        chat_id: chatId,
+        reply: reply.slice(0, 300),
+        calls,
+        tool_results: results
+          .slice(0, 12)
+          .map((result) => result.slice(0, 300)),
+        rendered_tool_calls: rendered,
+        mcp_attach_lines_since_mark: logLines(mark, /Attached MCP tools/)
+          .length,
+        ...serverLog(),
+        screenshots: [
+          '32c-http-server-in-settings.png',
+          '32c-http-tool-from-chat.png',
+        ],
+      });
+      expect(called.length, calls.join(' | ')).toBeGreaterThan(0);
+      expect(echoed.length, results.join(' | ')).toBeGreaterThan(0);
+      expect(traced.length, rendered.join(' | ')).toBeGreaterThan(0);
+    } finally {
+      try {
+        if (submitted) await clear(page);
+      } finally {
+        stub.stop();
+      }
+    }
   });
 });

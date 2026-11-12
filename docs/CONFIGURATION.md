@@ -1557,9 +1557,10 @@ The processes that run as that user are:
   without an approval card. `write_file` and `apply_patch` do the same once
   approved or with Auto-approve on, and `run_shell` and `run_command` then
   reach everything above;
-- configured stdio MCP servers, which also inherit the server's full
-  environment, and `COMFYUI_TRAIN_COMMAND`, which gets the allowlist described
-  under it.
+- instance-layer stdio MCP servers (`ZONE_MCP_SERVERS`, `ZONE_MCP_CONFIG`),
+  which also inherit the server's full environment, organization stdio MCP
+  servers, which get the allowlist, and `COMFYUI_TRAIN_COMMAND`, which gets
+  the allowlist described under it.
 
 What stands in the way:
 
@@ -1569,8 +1570,15 @@ What stands in the way:
   process only: any process of the same user can read a child's environment
   while the child runs. The CLIs, Zone's shell tools, `COMFYUI_TRAIN_COMMAND`,
   and the `rg`, `git`, `ffmpeg` and `ffprobe` it runs start from an
-  allowlisted environment, without those secrets. Configured stdio MCP servers
-  start from the server's full environment, so they carry them.
+  allowlisted environment, without those secrets, and so do organization
+  stdio MCP servers, plus their own `environment`. Instance-layer stdio MCP
+  servers start from the server's full environment, so they carry them. With
+  `ZONE_MCP_COMMANDS` on, an organization admin's stdio server is a process of
+  that user too, so it can read those secrets from a running instance stdio
+  server, and every other organization's stdio server `environment`. An
+  instance-layer URL server is not a process and inherits nothing, but its
+  `url` and `headers` may refer to any variable of the server's environment,
+  and what a reference resolves to is sent to that server.
 - Zone's file tools, `read_file`, `list_files`, `search_code`, `write_file`
   and `apply_patch`, refuse any path under the agent state directory and any
   process's `/proc/<pid>` entry, `/proc/self` included, whatever the chat's
@@ -2010,7 +2018,7 @@ that still sets an old name gets the default instead:
 
 ### `TOOL_RUNNER_PROXY_URL`
 - **Default**: empty (existing subprocess environment)
-- **Description**: Optional HTTP proxy for proxy-aware command tools, MCP subprocesses, evaluation tool runs and `zone-runner` jobs. Loopback and the stack's own services stay direct. A routed process also receives `ABNEGATE_EXEC_PROXY_URL` and `ABNEGATE_EXEC_PROXY_BYPASS`, so what it starts is routed the same way.
+- **Description**: Optional HTTP proxy for proxy-aware command tools, MCP subprocesses, evaluation tool runs and `zone-runner` jobs. Loopback and the stack's own services stay direct. A routed process also receives `ABNEGATE_EXEC_PROXY_URL` and `ABNEGATE_EXEC_PROXY_BYPASS`, so what it starts is routed the same way. HTTP MCP servers, instance and organization alike, are not subprocesses: Zone connects to them from its own process, through this proxy, with loopback and the stack's own services still direct. It never reaches one through `HTTP_PROXY`, `HTTPS_PROXY` or the system's proxy settings, and with no proxy configured it connects directly. Behind the proxy the proxy resolves host names, so Zone refuses only a cloud metadata or link-local address, or a metadata host name, written in the URL itself; see [Organization-managed servers](#organization-managed-servers).
 - **VPN value**: `http://gluetun:8888` in `.env` (Traefik). Manager's VPN overlay uses `http://127.0.0.1:8888` for the same shared-namespace reason.
 
 ### `ABNEGATE_EXEC_PROXY_URL` and `ABNEGATE_EXEC_PROXY_BYPASS`
@@ -2078,22 +2086,50 @@ Zone's agent loop can attach [Model Context Protocol](https://modelcontextprotoc
 
 Config uses the same JSON shape as Cursor (`mcpServers`). Tool names are `server__tool`: the server name, two underscores, then the tool's own name, so magents' `spawn_session` becomes `magents__spawn_session`. A name is at most 64 characters.
 
-Stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat configured servers as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
+Servers come from two layers:
+
+- The **instance layer** is what the variables below configure: `ZONE_MCP_SERVERS`, else `ZONE_MCP_CONFIG`, else `~/.zone/mcp.json`, plus the magents fallback. Settings lists it read-only, and it can't be overridden per workspace.
+- The **organization layer** is managed by organization admins in Settings, as described under [Organization-managed servers](#organization-managed-servers).
+
+Chats and tasks attach both layers, whichever provider runs them, because Zone serves every MCP tool itself. A task attaches them only while the member who started it can still write to the workspace. `zone run` attaches only the instance layer.
+
+Instance stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat them as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
+
+An instance entry with a `url` and no `command` is reached over streamable HTTP, with its `headers` sent on every request:
+
+```json
+{
+  "mcpServers": {
+    "docs": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+`${VAR}` and `${VAR:-default}` in a `url` and in `headers` values are filled from the server's environment when the configuration is read. The default stands in only for a variable that is unset, not for one that is set and empty. An entry that refers to an unset variable with no default stays listed and shows `failed` with "The URL or a header refers to a variable that is not set". An entry whose `type` is `sse` shows `failed` with "SSE servers are not supported; use streamable HTTP (`http`)". An instance URL server connects, fails and is reported the way an organization's `http` server is, as described under [Organization-managed servers](#organization-managed-servers); the rules there for what the API accepts are the API's alone and are not applied to an instance entry. Its tools reach every organization on the instance. An entry with `"disabled": true` is neither contacted nor listed.
+
+Zone reads the instance configuration once per process, the first time Settings or a turn needs it, and connects its servers once. After changing `ZONE_MCP_SERVERS`, `ZONE_MCP_CONFIG` or `~/.zone/mcp.json`, restart the server: until then neither Settings nor a turn sees the change. An instance server that failed to connect stays `failed` until that restart too.
+
+Every member of every organization sees the instance servers in Settings: each server's name, its `command`, and the names of its `env` variables and headers. The arguments and header values are never shown. A URL is shown as the origin, scheme, host and port, of what it resolves to, and not at all when it does not resolve. Pass credentials through `env` or `headers` all the same, not in `args` or a URL.
+
+Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
 
 ### `ZONE_MCP_ENABLED`
-- **Default**: `true`
-- **Description**: Master switch. `false` / `0` / `off` skips every MCP server.
+- **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
+- **Description**: Master switch for both layers, which read it the same way: the value is trimmed and read in any case, `0` / `false` / `no` / `off` turns it off, and anything else, an empty or unrecognised value included, leaves it on. Off skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
 
 ### `ZONE_MCP_AUTO_CONNECT`
-- **Default**: `true`
-- **Description**: When no enabled stdio server is configured and `magents` is on `PATH`, attach `magents mcp` automatically. Disabled servers and servers with only a `url` do not count as configured. A server with a `command` is launched over stdio even when it also names a `url` or a `type`. A document in which any server's `command` is blank is ignored whole, so only this fallback can attach. A server keyed `magents` that the document disables keeps the fallback off, even in a document that is otherwise ignored; a disabled server under another key that runs `magents` does not.
+- **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
+- **Description**: When no enabled server is configured and `magents` is on `PATH`, attach `magents mcp` automatically. Disabled servers do not count as configured. Every other server does, whatever its transport and whether or not it connects, so a document whose only enabled server has a `url`, an `sse` one included, keeps the fallback off. A server with a `command` is launched over stdio even when it also names a `url` or a `type`. A document in which any server's `command` is blank is ignored whole, so only this fallback can attach. A server keyed `magents` that the document disables keeps the fallback off, even in a document that is otherwise ignored; a disabled server under another key that runs `magents` does not.
 
 ### `ZONE_MCP_AUTO_MAGENTS`
-- **Default**: `true`
+- **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
 - **Description**: The older name for `ZONE_MCP_AUTO_CONNECT`, still honoured. It can only turn the `magents mcp` fallback off: when either variable is off, the fallback is not attached, and neither turns it back on while `ZONE_MCP_ENABLED` is off.
 
 ### `ZONE_MCP_CONFIG`
-- **Default**: *empty* (falls back to `~/.zone/mcp.json` if that file exists)
+- **Default**: *empty* (falls back to `~/.zone/mcp.json` if that file exists). Compose passes it from `.env`, empty unless set there, and the Helm chart sets `""` in `server.env`.
 - **Description**: Path to a JSON file of MCP servers.
 - **Example**:
 
@@ -2109,12 +2145,130 @@ Stdio servers inherit the Zone process environment, then overlay any `env` map o
 ```
 
 ### `ZONE_MCP_SERVERS`
-- **Default**: *empty*
-- **Description**: Inline JSON of the same shape as `ZONE_MCP_CONFIG`. Useful in Compose. Takes precedence over the config file.
+- **Default**: *empty*. Compose passes it from `.env`, empty unless set there, and the Helm chart sets `""` in `server.env`.
+- **Description**: Inline JSON of the same shape as `ZONE_MCP_CONFIG`. Useful in Compose and Helm. Takes precedence over the config file.
 
-A server entry with only a `url` (HTTP transport) is skipped — Zone speaks stdio today.
+In Compose, who fills a `${VAR}` reference depends on how the value is written. Compose hands `ZONE_MCP_SERVERS` to the `manager` service from the shell or from `.env`:
 
-Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
+- A value exported from the shell, or wrapped in single quotes in `.env`, reaches Zone with its references intact, and Zone fills them from the container's environment. `docker-compose.yml` passes the container only the variables it lists, so add each variable a reference names to `manager`'s `environment:` in `docker-compose.override.yml`, which `make up` and `./scripts/compose.sh` include when it exists.
+- An unquoted or double-quoted `.env` value has its references filled by Compose itself, from `.env` and the shell, before Zone starts. Zone then receives the value as literal text. A variable Compose does not find becomes an empty string, with only the warning `The "DOCS_MCP_TOKEN" variable is not set. Defaulting to a blank string.`, so the server is sent an empty credential instead of showing "The URL or a header refers to a variable that is not set".
+
+```bash
+# .env: single quotes leave ${DOCS_MCP_TOKEN} for Zone to fill
+ZONE_MCP_SERVERS='{"mcpServers":{"docs":{"url":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer ${DOCS_MCP_TOKEN}"}}}}'
+DOCS_MCP_TOKEN=change-me
+```
+
+```yaml
+# docker-compose.override.yml
+services:
+  manager:
+    environment:
+      - DOCS_MCP_TOKEN=${DOCS_MCP_TOKEN:-}
+```
+
+`docker compose config` shows what the container will receive: a reference left for Zone prints as `$${DOCS_MCP_TOKEN}`. This is how Docker Compose v5.7.0 behaves.
+
+The Helm chart passes each value under `server.env` to zone-server as written, so a `${VAR}` reference in `server.env.ZONE_MCP_SERVERS` reaches Zone intact, and Zone fills it from the pod's environment. Set the variable it names under `server.env` too; its value then sits in the Deployment in plain text.
+
+### `ZONE_MCP_COMMANDS`
+- **Default**: `false`. Compose passes `false` unless `.env` says otherwise, and the Helm chart sets `"false"` in `server.env`.
+- **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on`, trimmed and in any case, turns it on; anything else leaves it off. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `environment`, never the server's full environment, but that does not isolate it: it runs as the server's user, and any process of that user can read the environment of every other process of that user while it runs, from `/proc/<pid>/environ` (see [Security: every organization is the same OS user](#security-every-organization-is-the-same-os-user)). A command as plain as `sh -c 'cat /proc/*/environ'` is enough. **Turning this on gives every organization admin every other organization's MCP secrets, the `environment` of each of their running stdio servers, and the instance's own keys, the database URL, the JWT and encryption keys and the LiteLLM key, whenever an instance stdio server that inherits the server's environment is running**: any `command` entry in `ZONE_MCP_SERVERS` or `ZONE_MCP_CONFIG`, and the `magents mcp` fallback that `ZONE_MCP_AUTO_CONNECT` attaches. Turn it on for single-tenant installs only. While it is on and such an instance server is configured, Zone logs a warning at startup that begins "ZONE_MCP_COMMANDS is on while an instance stdio MCP server inherits the server's environment". Instance-layer servers are not affected.
+
+### Organization-managed servers
+
+Organization admins and owners add, edit, reconnect and delete servers in **Settings → Organization → MCP servers**; members see the list read-only. A server is `stdio`, a `command` with `arguments` that needs `ZONE_MCP_COMMANDS`, or `http`, streamable HTTP at a `url`, which needs no flag. `sse` is refused; use streamable HTTP. A name is at most 32 letters, digits, `-` and `_`, with no `__` and no trailing `_`. 32 is the half of a 64-character tool name that abnegate-agent keeps for the server in `server__tool`: it cuts a longer server name, so two servers sharing their first 32 characters would offer their tools under one prefix. It must be unique in the organization and must not match an instance server: a clash returns 409. `tools` limits which of the server's tools are offered; `null` offers them all.
+
+The API's field names are its own, not the `mcpServers` ones: a server's variables are `environment` and its arguments are `arguments`, where an instance document says `env` and `args`. A create, update or workspace body that names a key the route does not read, `env` and `args` included, is refused with 400 and nothing is stored; `error` is axum's account of the body, which names the key: ``Failed to deserialize the JSON body into the target type: unknown field `env`, …``. Any other body the route cannot read, malformed JSON or a value of the wrong type, is a 400 the same way.
+
+In **Settings → Workspace → MCP servers**, a workspace admin or owner sets each organization server to Inherit, On or Off. A workspace can only turn a server off: On does not enable a server the organization has turned off. `effective` is the outcome: the server is enabled and the workspace has not turned it off. Instance servers can't be overridden per workspace.
+
+Each server shows one status:
+
+- `connected`: `available_tools` lists the tools it advertised.
+- `connecting`: Zone is starting it, after a create, a change that needs a reconnect, or a reconnect request.
+- `failed`: `error` says why, in one of the sentences listed below.
+- `disabled`: the server is turned off.
+
+A status is the result of the last connect, not a live check. Zone tries a failed server again when an admin reconnects it, when an edit changes anything but `tools`, or when Zone restarts; it does not retry one on its own. An `http` server that connected and has since gone away still shows `connected` until it is reconnected.
+
+For a server reached by URL, in either layer, `error` is chosen by the kind of failure abnegate-agent records for the connect (`McpFailure`, named in the table below) and, for an HTTP status no other kind names, that status. Both are typed values the client takes from what failed; Zone never reads the failure's text to choose the sentence and never copies any of it in: a response body, a redirect's target and a JSON-RPC error's message all stay out of the API, the console and the audit log. The full text is in the server log, in the "MCP server unavailable" warning logged under `abnegate_agent`. There, everything Zone sends the server is replaced by `[REDACTED]`: each header value, the credential of a two-part value such as `Bearer <token>`, the URL's path and query, each path segment and query value, and a user name or password in an instance URL. Only values of 6 bytes or more are replaced.
+
+| `error` | What happened |
+|---|---|
+| `MCP servers are turned off on this instance (ZONE_MCP_ENABLED)` | `ZONE_MCP_ENABLED` is off. |
+| `Command servers are turned off on this instance (ZONE_MCP_COMMANDS)` | An organization `stdio` server while `ZONE_MCP_COMMANDS` is off. |
+| ``SSE servers are not supported; use streamable HTTP (`http`)`` | `Unsupported`: the server's `type` is `sse`. |
+| `did not connect; see the server log` | A `stdio` server did not start or did not finish its handshake. For a server reached by URL: `Other`, a failure abnegate-agent names no kind for, `Status` without a status, or a kind newer than this build of Zone. |
+| `The server's definition is not valid` | `Invalid`: an instance entry has a `url` and a `type` that does not go with one. Also a stored organization `stdio` server whose command, arguments or environment values hold `${`, in a row that reached the database some other way, such as a restore or a hand edit: it is never started. |
+| `The URL or a header refers to a variable that is not set` | `Unresolved`: an instance entry refers to an unset variable with no default. |
+| `The URL is not valid` | `Address`: the URL does not parse, or is not `http` or `https`. |
+| `The URL points at a link-local or cloud metadata address` | `Metadata`: the URL names one of those addresses or a metadata host, or its host name resolved only to such addresses or to none at all. Nothing was sent to it. |
+| `A header is not valid` | `Header`: a header's name or value is not one HTTP accepts, the connection sets that header itself, or two headers share a name. |
+| `Zone could not build an HTTP client for the server` | `Client`: the proxy URL is not valid, or the client could not be set up. |
+| `The server did not answer in time` | `Timeout`: the handshake and the tool list took longer than 30 seconds, or a request to the server timed out. |
+| `The server answered with a redirect Zone does not follow` | `Redirect`: any redirect but a 307 or 308 to the same origin, or more than 10 of those in a row. |
+| `The server refused the credentials (HTTP 401)` | `Unauthorized` with any status but 403: a 401 with a `WWW-Authenticate` challenge the client could read. |
+| `The server refused the credentials (HTTP 403)` | `Unauthorized` with 403: a 403 with a `WWW-Authenticate` challenge the client could read. |
+| `The server answered HTTP <status>` | `Status`: any other status that is not a success, a 401 or 403 with no challenge, or with one that is not valid text, included. |
+| `The server's answer is not MCP over streamable HTTP` | `Protocol`: the server answered, but not with what the protocol expects: a web page, malformed JSON, an answer to another request, a protocol version Zone does not speak. |
+| `The server answered the handshake with an error` | `Rejected`: a JSON-RPC error in answer to `initialize` or to listing the tools. |
+| `Zone could not reach the server` | `Unreachable`: no connection could be made: it was refused, the name did not resolve, or TLS failed. |
+| `The server did not complete the handshake` | `Closed` or `Oversized`: the connection closed before the handshake and the tool list completed, or the server's answer was larger than the client reads. |
+
+The kind is what the client could observe, so a few failures read as another:
+
+- A request is tried a third time only after an HTTP/2 server refused the first two, and the client does not observe the answer to that third attempt. A 401 or 403 there shows as "The server's answer is not MCP over streamable HTTP", with no status.
+- Behind `TOOL_RUNNER_PROXY_URL`, an `https` server is reached through a tunnel, and the proxy's refusal of that tunnel, a 407 included, shows as "Zone could not reach the server".
+- A proxy that answers a plain `http` request in the server's place is reported as the server would be for that answer: a 502 from the proxy shows as "The server answered HTTP 502".
+- An event-stream answer that brings a malformed event, or one that is not JSON-RPC, in place of the message awaited shows as "The server did not complete the handshake", not as an answer that is not MCP.
+- A host name that resolves to no address at all shows as "The URL points at a link-local or cloud metadata address".
+
+Each server process runs its own copy of an organization's servers. It checks that copy against the database whenever it lists them or runs a turn for that organization, and every 60 seconds whether or not anything asks. With several replicas, a server edited, disabled or deleted through one replica changes on another at that replica's next list or turn for the organization, and within about a minute without one. Deleting an organization stops its servers at once on the replica that served the request, and on every other replica within about a minute.
+
+A turn that starts while one of its organization's servers is still connecting, after a create, an edit or a reconnect, waits for it rather than running without its tools. Each connect is given at most 30 seconds.
+
+Rules for every organization server:
+
+- Authentication is static headers only, a bearer token in `Authorization` included. OAuth is not supported.
+- Put credentials in headers, never in the URL: query strings are stored, returned and audited as entered.
+- Put a `stdio` server's secrets in `environment`, never in `arguments`: arguments are stored, returned to every organization member and audited as entered.
+- A URL is `http` or `https` with a host. Private and loopback addresses are allowed, so a server on the host or the LAN works. Cloud metadata and link-local addresses, credentials embedded in the URL, fragments and other schemes are refused. The URL is stored as the parser normalises it.
+- A cloud metadata or link-local address is refused again at every connect, and so is every such address a host name resolves to: a name that resolves to nothing else is not reached. Behind `TOOL_RUNNER_PROXY_URL` the proxy resolves host names, so there only an address or metadata host written in the URL is refused.
+- Only a 307 or 308 redirect to the same origin is followed, at most 10 in a row. Any other redirect fails the connect.
+- A `command` has no whitespace before or after it.
+- A `stdio` server takes `environment` and refuses `url` and `headers`. An `http` server takes `headers` and refuses `command`, `arguments` and `environment`.
+- Header names are unique whatever their case, and a header value holds no line break or other control character. The headers the connection sets itself are refused: `Accept`, `Content-Type`, `Content-Length`, `Host`, `Connection`, `Keep-Alive`, `Proxy-Authorization`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Last-Event-Id`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and any `Mcp-Param-` header. So are the headers a cloud metadata service requires before it answers, so that no request Zone sends can pass for one wherever it ends up: `Metadata`, `Metadata-Flavor`, `X-Google-Metadata-Request`, `X-aws-ec2-metadata-token`, `X-aws-ec2-metadata-token-ttl-seconds`, `X-aliyun-ecs-metadata-token` and `X-aliyun-ecs-metadata-token-ttl-seconds`.
+- `${` is refused in every field, because Zone would expand it from its own environment. A NUL character is refused too. A stored `stdio` server whose command, arguments or environment values hold `${` all the same, in a row that reached the database some other way, such as a restore or a hand edit, shows `failed` with "The server's definition is not valid" and is never started.
+- `environment` and `headers` values are sealed under `ENCRYPTION_KEY`. They are never returned, logged or audited: the API lists each name with `has_value` only. If a server's stored values do not open under the key, listing the servers fails and the server log names that server's id: delete it by id and add it again. Until then chats and tasks run with the organization's other servers.
+
+| Method | Path | Who |
+|---|---|---|
+| GET | `/api/organizations/{org_id}/mcp-servers` | org member |
+| POST | `/api/organizations/{org_id}/mcp-servers` | org admin/owner |
+| GET | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org member |
+| PUT | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org admin/owner |
+| DELETE | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org admin/owner |
+| POST | `/api/organizations/{org_id}/mcp-servers/{server_id}/connection` | org admin/owner |
+| GET | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace member |
+| PUT | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace admin/owner |
+
+Every route checks that the caller belongs to the organization before it looks up the server or workspace in its path, so a caller outside the organization gets 404 "Organization not found" whether or not either exists.
+
+PUT is sparse and can't change `transport`. A field that already holds the value sent is not written, and a PUT that changes nothing leaves `updated_at` as it was. A change to `tools` alone leaves a running server as it is; any other change stops it and, while it is enabled, starts it again. In `environment` and `headers` on PUT, a `null` value keeps the stored value and an omitted name is removed. A PUT that moves `url` to another origin, a different scheme, host or port, must send every stored header again with its value, or leave it out to remove it: a `null` header value, or no `headers` at all while the server stores any, answers 400 `{"error": "Re-enter the header values when the URL's origin changes"}` and stores nothing, so a saved credential is never sent to a host it was not entered for. A new path on the same origin keeps the stored headers. On the workspace PUT, `null` clears the override.
+
+An update is audited as `mcp_server.updated`, with the server as the API showed it just before the write in `old_values` and as it shows it after in `new_values`: `environment` and `headers` by name and `has_value`, never a value.
+
+POST `/connection` answers 202 with the server as it is then: `connecting` when Zone can start it, which covers every enabled `http` server while `ZONE_MCP_ENABLED` is on, `disabled` when it is turned off, and `failed` with the reason otherwise. While a connect of the server is still under way and the server has not changed since it began, a reconnect starts no other: it answers 202 `connecting` and leaves that connect to finish.
+
+### Upgrading with `url` entries in the instance configuration
+
+Zone used to skip an instance entry that had a `url` and no `command`. It now connects to each one, in the server and in `zone run` alike. Before upgrading an install whose `ZONE_MCP_SERVERS`, `ZONE_MCP_CONFIG` file or `~/.zone/mcp.json` holds such an entry, check each:
+
+- Zone contacts the URL, with every `${VAR}` in it and in its headers filled from the server's environment, and offers the tools it advertises to every organization on the instance.
+- The entry counts as configured, so `magents mcp` is no longer attached beside it automatically. To keep magents, add it to the document as its own entry.
+- The entry holds its name. Creating an organization server under that name, or renaming one to it, returns 409. An organization server that already has the name stays listed beside the instance entry and stays editable, and both connect, but a tool the two both advertise is then named twice: the instance's is offered as `<name>__<tool>` and the organization's as `<name>__<tool>_2`, on every provider. The organization server's `tools` names a tool as that server does, `<tool>`, never by its suffixed name: a tool it lists is offered as `<name>__<tool>_2`, and a tool it leaves out is not offered and takes no name. The suffix is easy to miss, so rename one of the two servers.
+- To keep an entry off, add `"disabled": true` to it.
 
 ---
 
@@ -2443,7 +2597,7 @@ Need to find a specific config? Quick lookup:
   COMFYUI_COMMIT
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
-- **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_CONNECT, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS
+- **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_CONNECT, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS, ZONE_MCP_COMMANDS
 - **Auto projects**: ZONE_AUTO_ENABLED, ZONE_AUTO_PARALLEL_TASKS, ZONE_AUTO_REVIEW_MODELS, ZONE_AUTO_REVIEW_BOTS, ZONE_AUTO_ADMIN_MERGE, ZONE_AUTO_*
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY

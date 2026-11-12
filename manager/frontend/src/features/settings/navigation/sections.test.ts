@@ -21,12 +21,14 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Workspace, section: SettingsSection.Folders, label: 'Folders' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Sources, label: 'Sources' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Members, label: 'Members' },
+  { group: SettingsGroup.Workspace, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Organization, section: SettingsSection.Ai, label: 'AI defaults' },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
   { group: SettingsGroup.Organization, section: SettingsSection.Billing, label: 'Billing' },
   { group: SettingsGroup.Organization, section: SettingsSection.Audit, label: 'Audit log' },
   { group: SettingsGroup.Organization, section: SettingsSection.GitHub, label: 'GitHub' },
+  { group: SettingsGroup.Organization, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Server, section: SettingsSection.Features, label: 'Features' },
   { group: SettingsGroup.Server, section: SettingsSection.Connect, label: 'Connect a device' },
   { group: SettingsGroup.You, section: SettingsSection.Sessions, label: 'Sessions' },
@@ -42,6 +44,7 @@ const pathsOf = (...groups: SettingsGroup[]): string[] =>
 
 const ORGANIZATION_MEMBERS = settingsPath(SettingsGroup.Organization, SettingsSection.Members);
 const ORGANIZATION_GITHUB = settingsPath(SettingsGroup.Organization, SettingsSection.GitHub);
+const ORGANIZATION_MCP = settingsPath(SettingsGroup.Organization, SettingsSection.Mcp);
 const FEATURES = settingsPath(SettingsGroup.Server, SettingsSection.Features);
 const CONNECT = settingsPath(SettingsGroup.Server, SettingsSection.Connect);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
@@ -70,6 +73,7 @@ describe('settings constants', () => {
       Billing: 'billing',
       Audit: 'audit',
       GitHub: 'github',
+      Mcp: 'mcp',
       Features: 'features',
       Connect: 'connect',
       Sessions: 'sessions',
@@ -116,6 +120,11 @@ describe('findSection', () => {
       section: SettingsSection.Ai,
       label: 'AI',
     });
+    expect(findSection('workspace', 'mcp')).toMatchObject({
+      group: SettingsGroup.Workspace,
+      section: SettingsSection.Mcp,
+      label: 'MCP servers',
+    });
     expect(findSection('organization', 'ai')).toMatchObject({
       group: SettingsGroup.Organization,
       section: SettingsSection.Ai,
@@ -125,6 +134,11 @@ describe('findSection', () => {
       group: SettingsGroup.Organization,
       section: SettingsSection.GitHub,
       label: 'GitHub',
+    });
+    expect(findSection('organization', 'mcp')).toMatchObject({
+      group: SettingsGroup.Organization,
+      section: SettingsSection.Mcp,
+      label: 'MCP servers',
     });
     expect(findSection('you', 'sessions')).toMatchObject({
       group: SettingsGroup.You,
@@ -150,7 +164,7 @@ describe('findSection', () => {
 });
 
 describe('visibleSections', () => {
-  it('shows an organization member in a workspace as a viewer only the organization members list and GitHub', () => {
+  it('shows an organization member in a workspace as a viewer only the organization members list, GitHub and MCP servers', () => {
     expect(
       paths({
         organization: true,
@@ -164,6 +178,7 @@ describe('visibleSections', () => {
       ...pathsOf(SettingsGroup.Workspace),
       ORGANIZATION_MEMBERS,
       ORGANIZATION_GITHUB,
+      ORGANIZATION_MCP,
       CONNECT,
       SESSIONS,
     ]);
@@ -182,7 +197,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all fourteen sections to an organization owner who administers the workspace', () => {
+  it('shows all sixteen sections to an organization owner who administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -192,7 +207,7 @@ describe('visibleSections', () => {
       readsSources: true,
     });
 
-    expect(visible).toHaveLength(14);
+    expect(visible).toHaveLength(16);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 

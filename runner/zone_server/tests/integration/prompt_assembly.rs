@@ -10,6 +10,7 @@ use crate::common;
 use chrono::DateTime;
 use sqlx::postgres::PgPoolOptions;
 use std::path::PathBuf;
+use std::time::Duration;
 use uuid::Uuid;
 use zone_server::agent::prompt;
 use zone_server::agent::wait::WAIT_FOR;
@@ -46,11 +47,14 @@ fn environment() -> Environment {
     )
 }
 
-/// A pool nothing dials, because building a catalog only reads its own registry.
+/// A pool nothing answers on. A chat's catalog asks it for the workspace's
+/// organization, and is assembled without that organization's servers once the
+/// wait for a connection runs out.
 fn state() -> zone_server::state::AppState {
     common::create_test_state(
         common::test_config(),
         PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(250))
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap(),
     )

@@ -15,6 +15,7 @@ use abnegate_agent_cli::{AgentKind, CodexSandbox};
 use abnegate_vcs::pull_request::PullRequestResult;
 use abnegate_vcs::{PullRequestError, PullRequestService};
 use uuid::Uuid;
+use zone_core::servers;
 
 use crate::services::hosts::Hosts;
 use crate::services::login::claude::ROOT_PATH;
@@ -133,6 +134,10 @@ pub struct Config {
     pub host_mounts: crate::host_mounts::HostMounts,
     /// Origins a phone can type into the Zone app (`ZONE_CONNECT_URL`).
     pub connect_urls: Vec<String>,
+    /// Whether any MCP server is connected (`ZONE_MCP_ENABLED`).
+    pub mcp_enabled: bool,
+    /// Whether the API may create stdio MCP servers (`ZONE_MCP_COMMANDS`).
+    pub mcp_commands: bool,
 }
 
 /// The instance-wide default backend.
@@ -248,6 +253,12 @@ const CONSOLE_ORIGINS: &str = "ZONE_CONSOLE_ORIGINS";
 
 /// Origins a phone should type into the Zone app.
 const CONNECT_URLS: &str = "ZONE_CONNECT_URL";
+
+/// The master switch for MCP servers, the instance's and every organization's.
+const MCP_ENABLED: &str = "ZONE_MCP_ENABLED";
+
+/// Whether the API may create MCP servers that run a host command.
+const MCP_COMMANDS: &str = "ZONE_MCP_COMMANDS";
 
 const DEFAULT_CALLBACK_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -1336,6 +1347,8 @@ impl Config {
             endpoint_hosts: Hosts::from_env(),
             host_mounts: crate::host_mounts::HostMounts::from_env(),
             connect_urls: connect_urls(env::var(CONNECT_URLS).ok())?,
+            mcp_enabled: servers::flag(MCP_ENABLED, true),
+            mcp_commands: servers::flag(MCP_COMMANDS, false),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1385,6 +1398,8 @@ impl std::fmt::Debug for Config {
             .field("host_mounts", &self.host_mounts)
             .field("clones", &self.clones)
             .field("connect_urls", &self.connect_urls)
+            .field("mcp_enabled", &self.mcp_enabled)
+            .field("mcp_commands", &self.mcp_commands)
             .finish()
     }
 }
@@ -1414,6 +1429,58 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::matchers::path;
     use zone_core::variables::Variables;
+
+    const ENVIRONMENT: &[&str] = &[
+        "APP_BASE_URL",
+        "GITHUB_API_URL",
+        "GITHUB_WEB_URL",
+        "CORS_ALLOW_CREDENTIALS",
+        "CORS_ORIGINS",
+        CONNECT_URLS,
+        MCP_ENABLED,
+        MCP_COMMANDS,
+        "DATABASE_URL",
+        "ENCRYPTION_KEY",
+        "GPT4ALL_MODELS_URL",
+        "HOST",
+        "HUGGINGFACE_MODELS_URL",
+        "JWT_ACCESS_LIFETIME",
+        "JWT_REFRESH_LIFETIME",
+        "JWT_SECRET",
+        "LITELLM_HOST",
+        "LITELLM_KEY",
+        "MODEL_SEARCH_PROXY_URL",
+        "MONITORING_ENABLED",
+        "MONITORING_GRAFANA_ADMIN_PASSWORD",
+        "MONITORING_GRAFANA_ADMIN_USER",
+        "MONITORING_GRAFANA_TOKEN",
+        "MONITORING_GRAFANA_URL",
+        "MONITORING_PROMETHEUS_URL",
+        "OLLAMA_HOST",
+        "PORT",
+        "PROMETHEUS_URL",
+        "REDIS_URL",
+        "SEARCH_TIMEOUT_SECONDS",
+        "SEARCH_TIMEOUT_SECS",
+        "SOURCE_RESYNC_ENABLED",
+        "SOURCE_RESYNC_INTERVAL_SECS",
+        "SOURCE_RESYNC_POLL_SECS",
+        "TRAIN_UPLOAD_LIMIT_MB",
+        MODEL_BACKEND,
+        MODEL_BACKEND_EXECUTABLE,
+        AGENT_STATE,
+        AGENT_HOST_LOGIN,
+        CLAUDE_TOKEN_URL,
+        USAGE_TTL,
+        CLAUDE_API_URL,
+        CODEX_API_URL,
+        CODEX_SANDBOX,
+    ];
+    const INSTANCE_SERVERS: &str = "ZONE_MCP_SERVERS";
+    const INSTANCE_CONFIGURATION: &str = "ZONE_MCP_CONFIG";
+    const INSTANCE_AUTO_CONNECT: &str = "ZONE_MCP_AUTO_CONNECT";
+    const INSTANCE_AUTO_MAGENTS: &str = "ZONE_MCP_AUTO_MAGENTS";
+    const INSTANCE_DOCUMENT: &str = r#"{"mcpServers":{"docs":{"url":"http://127.0.0.1:1/mcp"}}}"#;
 
     /// abnegate-agent-cli adds a read-only sandbox, which a turn that withholds codex's tools
     /// already runs in. An operator naming it for granted tools gets an error, not a codex that
@@ -1479,6 +1546,8 @@ mod tests {
             auto: Default::default(),
             host_mounts: Default::default(),
             connect_urls: Vec::new(),
+            mcp_enabled: true,
+            mcp_commands: false,
         }
     }
 
@@ -2099,6 +2168,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn zone_mcp_commands_is_off_unless_the_operator_turns_it_on() {
+        let mut environment = Variables::isolated(&[MCP_COMMANDS]);
+
+        assert!(
+            !servers::flag(MCP_COMMANDS, false),
+            "an unset ZONE_MCP_COMMANDS must keep stdio MCP servers off"
+        );
+
+        for value in ["1", "true", " true ", "YES", "on"] {
+            environment.set(MCP_COMMANDS, value);
+            assert!(
+                servers::flag(MCP_COMMANDS, false),
+                "{value} turns ZONE_MCP_COMMANDS on"
+            );
+        }
+
+        for value in ["0", "off", "", "garbage"] {
+            environment.set(MCP_COMMANDS, value);
+            assert!(
+                !servers::flag(MCP_COMMANDS, false),
+                "{value} keeps ZONE_MCP_COMMANDS off"
+            );
+        }
+    }
+
+    /// The instance layer reads `ZONE_MCP_ENABLED` through abnegate-agent-cli, so the
+    /// organization layer has to read it the same way: one value never leaves one layer on and
+    /// the other off.
+    #[test]
+    fn zone_mcp_enabled_reads_the_same_in_both_layers() {
+        let mut environment = Variables::isolated(ENVIRONMENT);
+        environment.clear(&[INSTANCE_CONFIGURATION, INSTANCE_AUTO_MAGENTS]);
+        environment.set(INSTANCE_SERVERS, INSTANCE_DOCUMENT);
+        environment.set(INSTANCE_AUTO_CONNECT, "false");
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
+        environment.set("DATABASE_URL", "postgres://database/zone");
+        environment.set("REDIS_URL", "redis://cache:6379");
+        environment.set("LITELLM_HOST", "http://models:4000");
+        environment.set("LITELLM_KEY", "models-key");
+
+        for (value, enabled) in [
+            (None, true),
+            (Some("1"), true),
+            (Some("true"), true),
+            (Some(" true "), true),
+            (Some("YES"), true),
+            (Some("on"), true),
+            (Some(""), true),
+            (Some("  "), true),
+            (Some("garbage"), true),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some(" false "), false),
+            (Some("Off"), false),
+            (Some("no"), false),
+        ] {
+            match value {
+                Some(value) => environment.set(MCP_ENABLED, value),
+                None => environment.remove(MCP_ENABLED),
+            }
+
+            let organization = Config::from_env()
+                .expect("required values are present")
+                .mcp_enabled;
+            let instance = !servers::config().servers.is_empty();
+
+            assert_eq!(
+                (organization, instance),
+                (enabled, enabled),
+                "ZONE_MCP_ENABLED={value:?}"
+            );
+        }
+    }
+
     /// The environment picks the default every organization without an agent
     /// provider of its own falls back to.
     #[test]
@@ -2275,51 +2420,7 @@ mod tests {
 
     #[test]
     fn environment_matrix_validates_secrets_and_loads_server_settings() {
-        let names = [
-            "APP_BASE_URL",
-            "GITHUB_API_URL",
-            "GITHUB_WEB_URL",
-            "CORS_ALLOW_CREDENTIALS",
-            "CORS_ORIGINS",
-            CONNECT_URLS,
-            "DATABASE_URL",
-            "ENCRYPTION_KEY",
-            "GPT4ALL_MODELS_URL",
-            "HOST",
-            "HUGGINGFACE_MODELS_URL",
-            "JWT_ACCESS_LIFETIME",
-            "JWT_REFRESH_LIFETIME",
-            "JWT_SECRET",
-            "LITELLM_HOST",
-            "LITELLM_KEY",
-            "MODEL_SEARCH_PROXY_URL",
-            "MONITORING_ENABLED",
-            "MONITORING_GRAFANA_ADMIN_PASSWORD",
-            "MONITORING_GRAFANA_ADMIN_USER",
-            "MONITORING_GRAFANA_TOKEN",
-            "MONITORING_GRAFANA_URL",
-            "MONITORING_PROMETHEUS_URL",
-            "OLLAMA_HOST",
-            "PORT",
-            "PROMETHEUS_URL",
-            "REDIS_URL",
-            "SEARCH_TIMEOUT_SECONDS",
-            "SEARCH_TIMEOUT_SECS",
-            "SOURCE_RESYNC_ENABLED",
-            "SOURCE_RESYNC_INTERVAL_SECS",
-            "SOURCE_RESYNC_POLL_SECS",
-            "TRAIN_UPLOAD_LIMIT_MB",
-            MODEL_BACKEND,
-            MODEL_BACKEND_EXECUTABLE,
-            AGENT_STATE,
-            AGENT_HOST_LOGIN,
-            CLAUDE_TOKEN_URL,
-            USAGE_TTL,
-            CLAUDE_API_URL,
-            CODEX_API_URL,
-            CODEX_SANDBOX,
-        ];
-        let mut environment = Variables::isolated(&names);
+        let mut environment = Variables::isolated(ENVIRONMENT);
 
         assert!(matches!(
             Config::from_env(),
@@ -2376,6 +2477,14 @@ mod tests {
         assert_eq!(defaults.monitoring, MonitoringConfig::from_env());
         assert_eq!(defaults.train_upload_limit_mb, 4096);
         assert!(defaults.connect_urls.is_empty());
+        assert!(
+            defaults.mcp_enabled,
+            "MCP servers stay on until the operator turns them off"
+        );
+        assert!(
+            !defaults.mcp_commands,
+            "API-created stdio MCP servers stay off until the operator opts in"
+        );
 
         environment.set("HOST", "127.0.0.1");
         environment.set("PORT", "9001");
@@ -2391,6 +2500,8 @@ mod tests {
             " http://192.168.1.10/, ,http://100.64.1.2 ",
         );
         environment.set("CORS_ALLOW_CREDENTIALS", "true");
+        environment.set(MCP_ENABLED, "off");
+        environment.set(MCP_COMMANDS, "true");
         environment.set("APP_BASE_URL", "https://zone.test");
         environment.set("GITHUB_API_URL", "https://github.example.com/api/v3/");
         environment.set("SOURCE_RESYNC_ENABLED", "off");
@@ -2430,6 +2541,14 @@ mod tests {
             ["http://192.168.1.10", "http://100.64.1.2"]
         );
         assert!(configured.cors_allow_credentials);
+        assert!(
+            !configured.mcp_enabled,
+            "ZONE_MCP_ENABLED=off connects no MCP server"
+        );
+        assert!(
+            configured.mcp_commands,
+            "ZONE_MCP_COMMANDS=true lets the API create stdio MCP servers"
+        );
         assert_eq!(configured.app_base_url, "https://zone.test");
         // The trailing slash goes, because every caller joins a rooted path.
         assert_eq!(

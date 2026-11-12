@@ -35,7 +35,7 @@ Your AI, your data, your infrastructure—put your backlog on autopilot.
 - **Role-Based Access Control**: Fine-grained permissions with users, roles, and policies
 - **Project & Task Management**: Organize work with agentic task execution
 - **Auto projects**: Describe a project, answer the interview, and Zone plans, builds, reviews with a second model, merges and reports every task until the project is complete
-- **MCP tools**: Attach stdio MCP servers (magents by default) so tasks can spawn or message other coding agents
+- **MCP tools**: Attach stdio and streamable HTTP MCP servers (magents by default) so tasks can spawn or message other coding agents
 - **Source Integration**: Connect and manage various data sources
 - **Wiki & Documentation**: Built-in knowledge base per workspace
 - **Theme Customization**: Workspace-specific theming
@@ -393,7 +393,7 @@ make install-cli
 
 ### Database Migrations
 
-Migrations are in `runner/zone_server/migrations/`. Fresh installs apply the `0001_v1.sql` baseline, then each later migration in order. Number a new migration after the highest one there (`0002_…`), and never edit one that has shipped: databases record its checksum and refuse to boot when it changes.
+Migrations are in `runner/zone_server/migrations/`. Fresh installs apply the `0001_v1.sql` baseline, then each later migration in order. Number a new migration one past the highest there, in the same four digits (`NNNN_name.sql`), and never edit one that has shipped: databases record its checksum and refuse to boot when it changes.
 
 A database migrated before the v1 baseline, through `024_chat_subagents.sql`, moves onto it at the next boot: the server swaps its 23 ledger rows for the baseline's one and leaves the schema and data alone. A database stopped short of 024 is refused; start a build from commit `218739e7` against it once to finish those migrations, then upgrade. Run `make backup` first: an image built before the baseline cannot start against a moved database, so going back means restoring that backup and losing whatever changed after it was taken. See [OPERATIONS.md](docs/OPERATIONS.md#upgrading-to-the-v1-baseline).
 
