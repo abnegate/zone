@@ -13,10 +13,8 @@ export function SelectionBar({
   onClear: () => void;
 }) {
   return (
-    <div role="toolbar" aria-label={LABEL} className="tasks-selection">
-      <span className="tasks-selection-count" aria-live="polite">
-        {count} selected
-      </span>
+    <div role="group" aria-label={LABEL} className="tasks-selection">
+      <span className="tasks-selection-count">{count} selected</span>
       <div className="tasks-selection-actions">
         <Button size="sm" onClick={onEdit}>
           Edit

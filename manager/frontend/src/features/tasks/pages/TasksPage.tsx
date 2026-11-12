@@ -8,6 +8,7 @@ import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
+import { ActiveRunError } from '../ActiveRunError';
 import {
   CreateTaskWizard,
   DeleteTaskDialog,
@@ -16,18 +17,12 @@ import {
   TaskDetail,
 } from '../components';
 import { Board, Skeleton, Unfolded, View } from '../components/board';
+import { RANGE } from '../gesture';
 import { TASKS_KEY, useTask, useTasks, useWorkspaceTasks } from '../hooks';
 import { Selection } from '../Selection';
 import { groupByStage, stageOf } from '../status';
 import { TitleDraft } from '../TitleDraft';
-import type {
-  BoardActions,
-  Gesture,
-  Renaming,
-  Task,
-  TaskChanges,
-  UpdateTaskRequest,
-} from '../types';
+import type { BoardActions, Renaming, Task, TaskChanges, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
 import './TasksPage.css';
 
@@ -40,7 +35,7 @@ const UPDATE_FAILED = 'The tasks could not be updated';
 const RELATIONS_FAILED =
   'Tasks in other projects could not be loaded, so related tasks outside this project are missing';
 
-const RANGE: Gesture = 'range';
+const CLEARED = 'Selection cleared';
 
 const ESCAPE = 'Escape';
 
@@ -48,6 +43,12 @@ const SHIELDED =
   'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="menu"], [role="listbox"]';
 
 const DRAGGING = '.board[data-dragging]';
+
+const CARD = '.board li[data-task-id]';
+
+const TITLE = '.task-card-open';
+
+const COLUMN = '.board section[data-stage]';
 
 function idsOf(tasks: readonly Task[]): string[] {
   return tasks.map((task) => task.id);
@@ -59,6 +60,33 @@ function columnOf(task: Task, tasks: readonly Task[]): string[] {
 
 function quantity(count: number): string {
   return `${count} ${count === 1 ? 'task' : 'tasks'}`;
+}
+
+function selected(count: number): string {
+  return `${quantity(count)} selected`;
+}
+
+function refusal(failure: unknown, tasks: readonly Task[]): string {
+  if (!(failure instanceof Error)) return UPDATE_FAILED;
+  if (!(failure instanceof ActiveRunError)) return failure.message;
+  const titles = new Map(tasks.map((task) => [task.id, task.title]));
+  const running = failure.ids.flatMap((id) => titles.get(id) ?? []);
+  if (running.length === 0) return failure.message;
+  if (running.length === 1) return `${running[0]} is running, so its status can't change`;
+  return `${running.length} tasks are running, so their status can't change: ${running.join(', ')}`;
+}
+
+function lost(): boolean {
+  const active = document.activeElement;
+  return active === null || active === document.body;
+}
+
+function returnFocus(id: string | null): void {
+  if (!lost()) return;
+  const card = Array.from(document.querySelectorAll<HTMLElement>(CARD)).find(
+    (candidate) => candidate.dataset.taskId === id
+  );
+  (card?.querySelector<HTMLElement>(TITLE) ?? document.querySelector<HTMLElement>(COLUMN))?.focus();
 }
 
 function keepsSelection(event: KeyboardEvent): boolean {
@@ -78,6 +106,9 @@ export default function TasksPage() {
   const [view, setView] = useState(() => new View());
   const [selection, setSelection] = useState(Selection.EMPTY);
   const [editing, setEditing] = useState(false);
+  const [announcement, setAnnouncement] = useState('');
+  const [returning, setReturning] = useState(false);
+  const toggled = useRef<string | null>(null);
   const linkedTaskId = searchParams.get('id');
   const taskParam = searchParams.get('task');
 
@@ -109,6 +140,15 @@ export default function TasksPage() {
   const listed = useMemo(() => idsOf(tasks), [tasks]);
   const visible = useMemo(() => selection.retain(listed), [selection, listed]);
   const chosen = useMemo(() => tasks.filter((task) => visible.has(task.id)), [tasks, visible]);
+
+  if (visible !== selection) {
+    setSelection(visible);
+  }
+
+  const spoken = visible.size > 0 ? selected(visible.size) : announcement && CLEARED;
+  if (spoken !== announcement) {
+    setAnnouncement(spoken);
+  }
 
   useLayoutEffect(() => {
     latest.current = tasks;
@@ -240,17 +280,20 @@ export default function TasksPage() {
         }
       },
       select: (task, gesture) => {
-        const current = latest.current;
-        const ids = idsOf(current);
-        const column = gesture === RANGE ? columnOf(task, current) : null;
-        setSelection((selected) => {
-          const kept = selected.retain(ids);
-          return column ? kept.extend(task.id, column) : kept.toggle(task.id);
-        });
+        const column = gesture === RANGE ? columnOf(task, latest.current) : null;
+        toggled.current = task.id;
+        setSelection((current) =>
+          column ? current.extend(task.id, column) : current.toggle(task.id)
+        );
       },
     }),
     [open, updateListedTask, moveTask]
   );
+
+  const clearSelection = useCallback(() => {
+    setSelection(Selection.EMPTY);
+    setReturning(true);
+  }, []);
 
   const saveSelection = async (changes: TaskChanges) => {
     const ids = [...visible.ids];
@@ -258,13 +301,13 @@ export default function TasksPage() {
       await updateTasks(ids, changes);
     } catch (failure) {
       toast.error(`Couldn't update ${quantity(ids.length)}`, {
-        description: failure instanceof Error ? failure.message : UPDATE_FAILED,
+        description: refusal(failure, chosen),
       });
       throw failure;
     }
     toast.success(`Updated ${quantity(ids.length)}`);
-    setSelection(Selection.EMPTY);
     setEditing(false);
+    clearSelection();
   };
 
   const loading = tasksLoading || projectsLoading;
@@ -275,11 +318,18 @@ export default function TasksPage() {
     if (!escapable) return undefined;
     const clear = (event: KeyboardEvent) => {
       if (keepsSelection(event)) return;
-      setSelection(Selection.EMPTY);
+      clearSelection();
     };
     window.addEventListener('keydown', clear);
     return () => window.removeEventListener('keydown', clear);
-  }, [escapable]);
+  }, [escapable, clearSelection]);
+
+  useEffect(() => {
+    if (!returning) return;
+    setReturning(false);
+    returnFocus(toggled.current);
+  }, [returning]);
+
   const displayError =
     tasksError ||
     (editorFailed ? editorError : null) ||
@@ -399,7 +449,7 @@ export default function TasksPage() {
         <SelectionBar
           count={visible.size}
           onEdit={() => setEditing(true)}
-          onClear={() => setSelection(Selection.EMPTY)}
+          onClear={clearSelection}
         />
       )}
 
@@ -411,6 +461,10 @@ export default function TasksPage() {
           onClose={() => setEditing(false)}
         />
       )}
+
+      <div className="sr-only tasks-announcement" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </div>
 
       {deleting && (
         <DeleteTaskDialog

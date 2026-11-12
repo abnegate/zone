@@ -10,6 +10,7 @@ import { chooseSelect } from '../../../test/select';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
 import { SOURCES_LOCATION } from '../../settings/navigation/sections';
+import { ActiveRunError } from '../ActiveRunError';
 import { STAGE_IDS, TASK_STATUSES } from '../status';
 import type { CreateTaskRequest, Task, TaskRun, TaskRunLog, TaskStatus } from '../types';
 import TasksPage from './TasksPage';
@@ -1995,7 +1996,15 @@ describe('TasksPage', () => {
     }
 
     function selectionBar(): HTMLElement | null {
-      return screen.queryByRole('toolbar', { name: 'Selected tasks' });
+      return screen.queryByRole('group', { name: 'Selected tasks' });
+    }
+
+    function announcer(): HTMLElement | null {
+      return document.querySelector<HTMLElement>('.tasks-announcement');
+    }
+
+    function settle(): Promise<void> {
+      return act(() => new Promise((resolve) => setTimeout(resolve, 0)));
     }
 
     async function check(...titles: string[]): Promise<void> {
@@ -2005,7 +2014,7 @@ describe('TasksPage', () => {
     }
 
     async function editSelection(name: string): Promise<HTMLElement> {
-      const bar = await screen.findByRole('toolbar', { name: 'Selected tasks' });
+      const bar = await screen.findByRole('group', { name: 'Selected tasks' });
       fireEvent.click(within(bar).getByRole('button', { name: 'Edit' }));
       const dialog = await screen.findByRole('dialog', { name });
       chooseSelect('Status', 'Paused');
@@ -2019,7 +2028,7 @@ describe('TasksPage', () => {
 
       await check('Implement login', 'Fix button styling');
 
-      expect(await screen.findByRole('toolbar', { name: 'Selected tasks' })).toHaveTextContent(
+      expect(await screen.findByRole('group', { name: 'Selected tasks' })).toHaveTextContent(
         '2 selected'
       );
       expect(checkbox('Implement login')).toBeChecked();
@@ -2056,6 +2065,87 @@ describe('TasksPage', () => {
       expect(await screen.findByText('3 selected')).toBeInTheDocument();
       expect(checkbox('Write the plan')).toBeChecked();
       expect(checkbox('Fix button styling')).not.toBeChecked();
+    });
+
+    it('announces the first selection from a live region that was already listening', async () => {
+      renderTasksPage();
+      await openTitle('Implement login');
+      const region = announcer();
+      expect(region).not.toBeNull();
+      expect(region).toHaveAttribute('aria-live', 'polite');
+      expect(region).toHaveAttribute('aria-atomic', 'true');
+      expect(region).toHaveClass('sr-only');
+      expect(region?.textContent).toBe('');
+
+      await check('Implement login');
+
+      await waitFor(() => expect(announcer()).toHaveTextContent('1 task selected'));
+      expect(announcer()).toBe(region);
+
+      await check('Fix button styling');
+
+      await waitFor(() => expect(region).toHaveTextContent('2 tasks selected'));
+    });
+
+    it('announces that the selection was cleared', async () => {
+      renderTasksPage();
+      await check('Implement login');
+      const bar = await screen.findByRole('group', { name: 'Selected tasks' });
+
+      fireEvent.click(within(bar).getByRole('button', { name: 'Clear' }));
+
+      await waitFor(() => expect(announcer()).toHaveTextContent('Selection cleared'));
+      expect(selectionBar()).toBeNull();
+    });
+
+    it('returns focus to the last card toggled when the selection is cleared', async () => {
+      renderTasksPage();
+      await check('Fix button styling', 'Implement login');
+      const bar = await screen.findByRole('group', { name: 'Selected tasks' });
+      within(bar).getByRole('button', { name: 'Clear' }).focus();
+
+      fireEvent.click(within(bar).getByRole('button', { name: 'Clear' }));
+
+      await waitFor(() => expect(focusedTitle()).toBe('task-1'));
+      await settle();
+      expect(focusedTitle()).toBe('task-1');
+    });
+
+    it('returns focus to the board when the last card toggled has left it', async () => {
+      let listed = mockTasks;
+      mockGetTasks.mockImplementation(() => Promise.resolve(listed));
+      renderTasksPage();
+      await check('Implement login', 'Fix button styling');
+      await screen.findByText('2 selected');
+
+      listed = [mockTasks[0]];
+      const loads = mockGetTasks.mock.calls.length;
+      await act(async () => {
+        window.dispatchEvent(new Event('visibilitychange'));
+        await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(loads + 1));
+      });
+      await waitFor(() => expect(screen.queryByText('Fix button styling')).toBeNull());
+
+      fireEvent.click(within(selectionBar() as HTMLElement).getByRole('button', { name: 'Clear' }));
+
+      await waitFor(() => {
+        expect(document.activeElement).toBe(document.querySelector('.board section[data-stage]'));
+      });
+    });
+
+    it('extends a later shift-click from the same anchor instead of adding to the last range', async () => {
+      mockGetTasks.mockImplementation(() => Promise.resolve([...planned, mockTasks[1]]));
+      renderTasksPage();
+
+      await check('Draft the spec');
+      fireEvent.click(checkbox('Review the plan'), { shiftKey: true });
+      await screen.findByText('3 selected');
+      fireEvent.click(checkbox('Write the plan'), { shiftKey: true });
+
+      expect(await screen.findByText('2 selected')).toBeInTheDocument();
+      expect(checkbox('Draft the spec')).toBeChecked();
+      expect(checkbox('Write the plan')).toBeChecked();
+      expect(checkbox('Review the plan')).not.toBeChecked();
     });
 
     it('clears the selection with Escape', async () => {
@@ -2152,6 +2242,17 @@ describe('TasksPage', () => {
 
       await waitFor(() => expect(screen.queryByText('Fix button styling')).toBeNull());
       expect(screen.getByText('1 selected')).toBeInTheDocument();
+
+      listed = mockTasks;
+      const reloads = mockGetTasks.mock.calls.length;
+      await act(async () => {
+        window.dispatchEvent(new Event('visibilitychange'));
+        await waitFor(() => expect(mockGetTasks.mock.calls.length).toBe(reloads + 1));
+      });
+
+      expect(await screen.findByText('Fix button styling')).toBeInTheDocument();
+      expect(checkbox('Fix button styling')).not.toBeChecked();
+      expect(screen.getByText('1 selected')).toBeInTheDocument();
     });
 
     it('edits the selected tasks together, then clears the selection', async () => {
@@ -2179,6 +2280,64 @@ describe('TasksPage', () => {
       expect(checkbox('Implement login')).not.toBeChecked();
       expect(mockUpdateTasks).toHaveBeenCalledTimes(1);
       expect(mockToastError).not.toHaveBeenCalled();
+      await waitFor(() => expect(focusedTitle()).toBe('task-2'));
+      await settle();
+      expect(focusedTitle()).toBe('task-2');
+    });
+
+    it('names the task whose run refused the edit', async () => {
+      mockUpdateTasks.mockImplementation(() =>
+        Promise.reject(new ActiveRunError(refusal, ['task-1']))
+      );
+      renderTasksPage();
+      await check('Implement login', 'Fix button styling');
+
+      const dialog = await editSelection('Edit 2 tasks');
+
+      await waitFor(() => {
+        expect(mockToastError).toHaveBeenCalledWith("Couldn't update 2 tasks", {
+          description: "Implement login is running, so its status can't change",
+        });
+      });
+      await waitFor(() => {
+        expect(within(dialog).getByRole('button', { name: 'Save changes' })).toBeEnabled();
+      });
+      expect(screen.getByRole('dialog', { name: 'Edit 2 tasks' })).toBeInTheDocument();
+      expect(screen.getByText('2 selected')).toBeInTheDocument();
+    });
+
+    it('counts and names every task whose run refused the edit', async () => {
+      mockUpdateTasks.mockImplementation(() =>
+        Promise.reject(new ActiveRunError(refusal, ['task-2', 'task-1', 'elsewhere']))
+      );
+      renderTasksPage();
+      await check('Implement login', 'Fix button styling');
+
+      await editSelection('Edit 2 tasks');
+
+      await waitFor(() => {
+        expect(mockToastError).toHaveBeenCalledWith("Couldn't update 2 tasks", {
+          description:
+            "2 tasks are running, so their status can't change: Fix button styling, Implement login",
+        });
+      });
+      expect(screen.getByText('2 selected')).toBeInTheDocument();
+    });
+
+    it('falls back to the refusal when no running task is listed', async () => {
+      mockUpdateTasks.mockImplementation(() =>
+        Promise.reject(new ActiveRunError(refusal, ['elsewhere']))
+      );
+      renderTasksPage();
+      await check('Implement login');
+
+      await editSelection('Edit 1 task');
+
+      await waitFor(() => {
+        expect(mockToastError).toHaveBeenCalledWith("Couldn't update 1 task", {
+          description: refusal,
+        });
+      });
     });
 
     it('keeps the dialog and the selection open when the edit is refused', async () => {

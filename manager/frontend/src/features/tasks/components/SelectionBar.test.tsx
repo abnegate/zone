@@ -10,22 +10,23 @@ function renderBar(count = 3) {
   const onEdit = mock();
   const onClear = mock();
   render(<SelectionBar count={count} onEdit={onEdit} onClear={onClear} />);
-  return { onEdit, onClear, toolbar: screen.getByRole('toolbar', { name: 'Selected tasks' }) };
+  return { onEdit, onClear, bar: screen.getByRole('group', { name: 'Selected tasks' }) };
 }
 
 describe('SelectionBar', () => {
-  it('names the toolbar for the selected tasks', () => {
-    const { toolbar } = renderBar();
-    expect(toolbar.className).toContain('tasks-selection');
+  it('groups the actions for the selected tasks under one name', () => {
+    const { bar } = renderBar();
+    expect(bar.className).toContain('tasks-selection');
+    expect(screen.queryByRole('toolbar')).toBeNull();
   });
 
-  it('announces how many tasks are selected', () => {
-    const { toolbar } = renderBar(4);
-    const status = within(toolbar).getByText('4 selected');
-    expect(status.getAttribute('aria-live')).toBe('polite');
+  it('shows how many tasks are selected without announcing it a second time', () => {
+    const { bar } = renderBar(4);
+    const count = within(bar).getByText('4 selected');
+    expect(count.closest('[aria-live]')).toBeNull();
   });
 
-  it('keeps the announcement current as the count changes', () => {
+  it('keeps the count current as it changes', () => {
     const { rerender } = render(<SelectionBar count={2} onEdit={() => {}} onClear={() => {}} />);
     const status = screen.getByText('2 selected');
     rerender(<SelectionBar count={5} onEdit={() => {}} onClear={() => {}} />);
@@ -34,22 +35,22 @@ describe('SelectionBar', () => {
   });
 
   it('edits the selected tasks', () => {
-    const { onEdit, onClear, toolbar } = renderBar();
-    fireEvent.click(within(toolbar).getByRole('button', { name: 'Edit' }));
+    const { onEdit, onClear, bar } = renderBar();
+    fireEvent.click(within(bar).getByRole('button', { name: 'Edit' }));
     expect(onEdit).toHaveBeenCalledTimes(1);
     expect(onClear).not.toHaveBeenCalled();
   });
 
   it('clears the selection', () => {
-    const { onEdit, onClear, toolbar } = renderBar();
-    fireEvent.click(within(toolbar).getByRole('button', { name: 'Clear' }));
+    const { onEdit, onClear, bar } = renderBar();
+    fireEvent.click(within(bar).getByRole('button', { name: 'Clear' }));
     expect(onClear).toHaveBeenCalledTimes(1);
     expect(onEdit).not.toHaveBeenCalled();
   });
 
   it('offers editing first and clearing as the quieter action', () => {
-    const { toolbar } = renderBar();
-    const buttons = within(toolbar).getAllByRole('button');
+    const { bar } = renderBar();
+    const buttons = within(bar).getAllByRole('button');
     expect(buttons.map((button) => button.textContent)).toEqual(['Edit', 'Clear']);
     expect(buttons[0].className).toContain('ui-btn-primary');
     expect(buttons[1].className).toContain('ui-btn-ghost');

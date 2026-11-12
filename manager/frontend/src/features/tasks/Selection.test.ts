@@ -30,14 +30,24 @@ describe('Selection', () => {
     expect(Selection.EMPTY.size).toBe(0);
   });
 
-  it('toggles a selected task off and anchors on it', () => {
+  it('toggles a selected task off and drops the anchor', () => {
     const original = new Selection(['task-1', 'task-2'], 'task-1');
     const selection = original.toggle('task-2');
 
     expect(idsOf(selection)).toEqual(['task-1']);
-    expect(selection.anchor).toBe('task-2');
+    expect(selection.anchor).toBeNull();
     expect(idsOf(original)).toEqual(['task-1', 'task-2']);
     expect(original.anchor).toBe('task-1');
+  });
+
+  it('extends from a fresh anchor after a task is toggled off', () => {
+    const selection = Selection.EMPTY.toggle('task-1')
+      .extend('task-3', COLUMN)
+      .toggle('task-2')
+      .extend('task-5', COLUMN);
+
+    expect(idsOf(selection)).toEqual(['task-1', 'task-3', 'task-5']);
+    expect(selection.anchor).toBe('task-5');
   });
 
   it('extends forward from the anchor through the column', () => {
@@ -69,6 +79,41 @@ describe('Selection', () => {
 
     expect(idsOf(selection)).toEqual(['task-1', 'task-2', 'task-3', 'task-4', 'task-5']);
     expect(selection.anchor).toBe('task-1');
+  });
+
+  it('replaces the last range when extending from the same anchor again', () => {
+    const selection = Selection.EMPTY.toggle('task-1')
+      .extend('task-4', COLUMN)
+      .extend('task-2', COLUMN);
+
+    expect(idsOf(selection)).toEqual(['task-1', 'task-2']);
+    expect(selection.anchor).toBe('task-1');
+  });
+
+  it('flips the range to the other side of the anchor', () => {
+    const selection = Selection.EMPTY.toggle('task-3')
+      .extend('task-5', COLUMN)
+      .extend('task-1', COLUMN);
+
+    expect(idsOf(selection)).toEqual(['task-1', 'task-2', 'task-3']);
+  });
+
+  it('keeps tasks selected before the anchor when the range shrinks', () => {
+    const selection = new Selection(['task-5'])
+      .toggle('task-1')
+      .extend('task-4', COLUMN)
+      .extend('task-2', COLUMN);
+
+    expect(idsOf(selection)).toEqual(['task-1', 'task-2', 'task-5']);
+  });
+
+  it('keeps a task selected before the anchor that the old range also covered', () => {
+    const selection = new Selection(['task-3'])
+      .toggle('task-1')
+      .extend('task-4', COLUMN)
+      .extend('task-1', COLUMN);
+
+    expect(idsOf(selection)).toEqual(['task-1', 'task-3']);
   });
 
   it('adds just the task and anchors on it without an anchor', () => {
@@ -141,11 +186,14 @@ describe('Selection', () => {
     expect(selection.anchor).toBe('task-3');
   });
 
-  it('clears to the empty selection', () => {
-    const original = new Selection(['task-1', 'task-2'], 'task-1');
+  it('forgets a task dropped from the listing when a later range shrinks', () => {
+    const selection = new Selection(['ghost'])
+      .toggle('task-1')
+      .extend('task-3', COLUMN)
+      .retain(COLUMN)
+      .extend('task-2', COLUMN);
 
-    expect(original.clear()).toBe(Selection.EMPTY);
-    expect(idsOf(original)).toEqual(['task-1', 'task-2']);
+    expect(idsOf(selection)).toEqual(['task-1', 'task-2']);
   });
 
   it('does not let callers change the selected ids from outside', () => {
