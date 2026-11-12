@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button, EmptyState, Select } from '@zone/ui';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { client } from '../../../api/client';
@@ -8,11 +8,21 @@ import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
-import { CreateTaskWizard, DeleteTaskDialog, TaskDetail } from '../components';
+import { ActiveRunError } from '../ActiveRunError';
+import {
+  CreateTaskWizard,
+  DeleteTaskDialog,
+  EditTasksDialog,
+  SelectionBar,
+  TaskDetail,
+} from '../components';
 import { Board, Skeleton, Unfolded, View } from '../components/board';
+import { RANGE } from '../gesture';
 import { TASKS_KEY, useTask, useTasks, useWorkspaceTasks } from '../hooks';
+import { Selection } from '../Selection';
+import { groupByStage, stageOf } from '../status';
 import { TitleDraft } from '../TitleDraft';
-import type { BoardActions, Renaming, Task, UpdateTaskRequest } from '../types';
+import type { BoardActions, Renaming, Task, TaskChanges, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
 import './TasksPage.css';
 
@@ -20,8 +30,76 @@ const ALL_PROJECTS = '';
 
 const MOVE_FAILED = 'The task could not be moved';
 
+const UPDATE_FAILED = 'The tasks could not be updated';
+
 const RELATIONS_FAILED =
   'Tasks in other projects could not be loaded, so related tasks outside this project are missing';
+
+const CLEARED = 'Selection cleared';
+
+const ESCAPE = 'Escape';
+
+const SHIELDED =
+  'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="menu"], [role="listbox"], [role="combobox"]';
+
+const DRAGGING = '.board[data-dragging]';
+
+const CARD = '.board li[data-task-id]';
+
+const TITLE = '.task-card-open';
+
+const CHECKBOX = '.task-card-select';
+
+const COLUMN = '.board section[data-stage]';
+
+function idsOf(tasks: readonly Task[]): string[] {
+  return tasks.map((task) => task.id);
+}
+
+function columnOf(task: Task, tasks: readonly Task[]): string[] {
+  return idsOf(groupByStage(tasks).get(stageOf(task.status).id) ?? []);
+}
+
+function quantity(count: number): string {
+  return `${count} ${count === 1 ? 'task' : 'tasks'}`;
+}
+
+function selected(count: number): string {
+  return `${quantity(count)} selected`;
+}
+
+function refusal(failure: unknown, tasks: readonly Task[]): string {
+  if (!(failure instanceof Error)) return UPDATE_FAILED;
+  if (!(failure instanceof ActiveRunError)) return failure.message;
+  const titles = new Map(tasks.map((task) => [task.id, task.title]));
+  const running = failure.ids.flatMap((id) => titles.get(id) ?? []);
+  if (running.length === 0) return failure.message;
+  if (running.length === 1) return `${running[0]} is running, so its status can't change`;
+  return `${running.length} tasks are running, so their status can't change: ${running.join(', ')}`;
+}
+
+function lost(): boolean {
+  const active = document.activeElement;
+  return active === null || active === document.body;
+}
+
+function stranded(): boolean {
+  return lost() || document.activeElement?.matches(CHECKBOX) === true;
+}
+
+function returnFocus(id: string | null): void {
+  if (!stranded()) return;
+  const card = Array.from(document.querySelectorAll<HTMLElement>(CARD)).find(
+    (candidate) => candidate.dataset.taskId === id
+  );
+  (card?.querySelector<HTMLElement>(TITLE) ?? document.querySelector<HTMLElement>(COLUMN))?.focus();
+}
+
+function keepsSelection(event: KeyboardEvent): boolean {
+  if (event.key !== ESCAPE || event.defaultPrevented) return true;
+  if (document.querySelector(DRAGGING)) return true;
+  return event.target instanceof Element && event.target.closest(SHIELDED) !== null;
+}
 
 export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -32,6 +110,10 @@ export default function TasksPage() {
   const [filterProject, setFilterProject] = useState(ALL_PROJECTS);
   const [renaming, setRenaming] = useState<Renaming | null>(null);
   const [view, setView] = useState(() => new View());
+  const [selection, setSelection] = useState(Selection.EMPTY);
+  const [editing, setEditing] = useState(false);
+  const [announcement, setAnnouncement] = useState('');
+  const toggled = useRef<string | null>(null);
   const linkedTaskId = searchParams.get('id');
   const taskParam = searchParams.get('task');
 
@@ -40,7 +122,14 @@ export default function TasksPage() {
     setFilterProject(ALL_PROJECTS);
     setRenaming(null);
     setView(new View());
+    setSelection(Selection.EMPTY);
+    setEditing(false);
   }
+
+  const filter = (project: string) => {
+    setFilterProject(project);
+    setSelection(Selection.EMPTY);
+  };
 
   const {
     tasks,
@@ -48,9 +137,31 @@ export default function TasksPage() {
     error: tasksError,
     createTask,
     updateTask: updateListedTask,
+    updateTasks,
     moveTask,
     deleteTask,
   } = useTasks(filterProject || undefined);
+  const latest = useRef(tasks);
+  const listed = useMemo(() => idsOf(tasks), [tasks]);
+  const visible = useMemo(() => selection.retain(listed), [selection, listed]);
+  const chosen = useMemo(() => tasks.filter((task) => visible.has(task.id)), [tasks, visible]);
+
+  if (visible !== selection) {
+    setSelection(visible);
+  }
+
+  const spoken = visible.size > 0 ? selected(visible.size) : announcement && CLEARED;
+  if (spoken !== announcement) {
+    setAnnouncement(spoken);
+  }
+
+  useLayoutEffect(() => {
+    latest.current = tasks;
+  }, [tasks]);
+
+  if (editing && visible.size === 0) {
+    setEditing(false);
+  }
   const filtered = filterProject !== ALL_PROJECTS;
   const workspace = useWorkspaceTasks(filtered);
   const known = workspace.tasks ?? tasks;
@@ -173,11 +284,54 @@ export default function TasksPage() {
           return false;
         }
       },
+      select: (task, gesture) => {
+        const column = gesture === RANGE ? columnOf(task, latest.current) : null;
+        toggled.current = task.id;
+        setSelection((current) =>
+          column ? current.extend(task.id, column) : current.toggle(task.id)
+        );
+      },
     }),
     [open, updateListedTask, moveTask]
   );
 
+  const clearSelection = useCallback(() => {
+    setSelection(Selection.EMPTY);
+  }, []);
+
+  const saveSelection = async (changes: TaskChanges) => {
+    const ids = [...visible.ids];
+    try {
+      await updateTasks(ids, changes);
+    } catch (failure) {
+      const description = refusal(failure, chosen);
+      toast.error(`Couldn't update ${quantity(ids.length)}`, { description });
+      throw new Error(description, { cause: failure });
+    }
+    toast.success(`Updated ${quantity(ids.length)}`);
+    setEditing(false);
+    clearSelection();
+  };
+
   const loading = tasksLoading || projectsLoading;
+  const selecting = listing && !loading && visible.size > 0;
+  const escapable = selecting && !editing;
+
+  useEffect(() => {
+    if (!escapable) return undefined;
+    const clear = (event: KeyboardEvent) => {
+      if (keepsSelection(event)) return;
+      clearSelection();
+    };
+    window.addEventListener('keydown', clear);
+    return () => window.removeEventListener('keydown', clear);
+  }, [escapable, clearSelection]);
+
+  const emptied = visible.size === 0;
+  useEffect(() => {
+    if (emptied && toggled.current !== null) returnFocus(toggled.current);
+  }, [emptied]);
+
   const displayError =
     tasksError ||
     (editorFailed ? editorError : null) ||
@@ -192,7 +346,7 @@ export default function TasksPage() {
               <Select
                 compact
                 value={filterProject}
-                onValueChange={setFilterProject}
+                onValueChange={filter}
                 aria-label="Filter by project"
                 disabled={loading}
                 options={[
@@ -212,7 +366,7 @@ export default function TasksPage() {
         ) : null}
       </PageBar>
 
-      <div className="page-body tasks-body">
+      <div className="page-body tasks-body" data-selecting={selecting || undefined}>
         {displayError && (
           <div className="error-banner" role="alert">
             {displayError}
@@ -246,6 +400,7 @@ export default function TasksPage() {
               renaming={renaming}
               removed={removed}
               view={view}
+              selected={visible.ids}
               actions={actions}
             />
           </Unfolded>
@@ -266,7 +421,7 @@ export default function TasksPage() {
             }
             action={
               filtered ? (
-                <Button variant="secondary" onClick={() => setFilterProject(ALL_PROJECTS)}>
+                <Button variant="secondary" onClick={() => filter(ALL_PROJECTS)}>
                   Show all tasks
                 </Button>
               ) : (
@@ -291,6 +446,27 @@ export default function TasksPage() {
       {executionTask && (
         <TaskExecutionView key={executionTask.id} task={executionTask} onClose={closeExecution} />
       )}
+
+      {selecting && (
+        <SelectionBar
+          count={visible.size}
+          onEdit={() => setEditing(true)}
+          onClear={clearSelection}
+        />
+      )}
+
+      {editing && (
+        <EditTasksDialog
+          tasks={chosen}
+          projects={projects}
+          onSave={saveSelection}
+          onClose={() => setEditing(false)}
+        />
+      )}
+
+      <div className="sr-only tasks-announcement" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </div>
 
       {deleting && (
         <DeleteTaskDialog

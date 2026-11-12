@@ -30,10 +30,12 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::WorkspaceScope;
+use super::actions::priority_property;
 use super::integrations::source_token;
 use crate::db::auto_projects::{self, Kind, PlannedRepository, PlannedTask, ProjectPlan};
 use crate::db::sources;
 use crate::db::sources::SourceRow;
+use crate::db::tasks;
 use crate::db::workspace_members;
 use crate::services::github::Refusal;
 use grant::Grant;
@@ -201,10 +203,12 @@ impl Blueprint {
             }
             if task
                 .priority
-                .is_some_and(|priority| !(1..=5).contains(&priority))
+                .is_some_and(|priority| !tasks::PRIORITIES.contains(&priority))
             {
                 return Err(format!(
-                    "Task {position}'s priority must be between 1 and 5."
+                    "Task {position}'s priority must be between {} and {}.",
+                    tasks::PRIORITIES.start(),
+                    tasks::PRIORITIES.end()
                 ));
             }
             for dependency in &task.depends_on {
@@ -598,7 +602,7 @@ impl Tool for FinalizeProjectTool {
                             "description": {"type": "string", "minLength": 1, "description": "What to build, precisely enough that a run needs no question answered."},
                             "acceptance_criteria": {"type": "string", "description": "How the run knows it is done."},
                             "depends_on": {"type": "array", "items": {"type": "integer", "minimum": 0}, "description": "Zero-based indices of earlier tasks this one needs merged first."},
-                            "priority": {"type": "integer", "minimum": 1, "maximum": 5}
+                            "priority": priority_property()
                         },
                         "required": ["kind", "title", "description"],
                         "additionalProperties": false
@@ -772,6 +776,35 @@ mod tests {
             ],
             json!({"deployment": {"target": "vercel"}}),
         )
+    }
+
+    #[test]
+    fn a_priority_outside_the_range_a_task_stores_is_refused() {
+        let mut outside = sound();
+        outside["tasks"][3]["priority"] = json!(*tasks::PRIORITIES.end() + 1);
+
+        assert_eq!(
+            Blueprint::parse(&outside).unwrap_err(),
+            "Task 4's priority must be between 1 and 5."
+        );
+    }
+
+    #[tokio::test]
+    async fn the_planner_is_told_the_highest_priority_is_the_most_urgent() {
+        let schema = FinalizeProjectTool(WorkspaceScope {
+            state: crate::state::AppState::for_tests(),
+            workspace_id: Uuid::new_v4(),
+            chat_id: None,
+            user_id: Uuid::new_v4(),
+            offline: false,
+            origin: tasks::Origin::Member,
+        })
+        .parameters_schema();
+
+        assert_eq!(
+            schema["properties"]["tasks"]["items"]["properties"]["priority"]["description"],
+            "5 is the most urgent, 1 the least."
+        );
     }
 
     #[test]

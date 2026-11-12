@@ -68,6 +68,7 @@ const ACTIONS: BoardActions = {
   finish: mock(),
   remove: mock(),
   move: mock(() => Promise.resolve(true)),
+  select: mock(),
 };
 
 describe('CardContent', () => {
@@ -94,5 +95,37 @@ describe('CardContent', () => {
     await screen.findByText('Moving Write the spec cancelled. It stays in Planned.');
 
     expect(menus).toEqual(rendered);
+  });
+
+  it('renders again only the cards whose selection changes', () => {
+    const view = new View();
+    const show = (selected: ReadonlySet<string>) => (
+      <Board
+        tasks={TASKS}
+        projects={new Map()}
+        renaming={null}
+        removed={null}
+        view={view}
+        selected={selected}
+        actions={ACTIONS}
+      />
+    );
+    const { rerender } = render(show(new Set()));
+    const rendered = new Map(menus);
+
+    rerender(show(new Set(['write', 'ship'])));
+    expect(screen.getByRole('checkbox', { name: 'Select Write the spec' })).toHaveAttribute(
+      'aria-checked',
+      'true'
+    );
+    rerender(show(new Set(['write', 'ship'])));
+    rerender(show(new Set()));
+
+    const again = (id: string) => (menus.get(id) ?? 0) - (rendered.get(id) ?? 0);
+    expect(TASKS.map((task) => [task.id, again(task.id)])).toEqual([
+      ['write', 2],
+      ['build', 0],
+      ['ship', 2],
+    ]);
   });
 });

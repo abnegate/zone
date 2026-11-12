@@ -1,9 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { type QueryKey, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useMemo, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { titlePoll } from '../title';
-import type { CreateTaskRequest, Task, TaskStatus, UpdateTaskRequest } from '../types';
+import type { CreateTaskRequest, Task, TaskChanges, TaskStatus, UpdateTaskRequest } from '../types';
 
 export const TASKS_KEY = ['tasks'] as const;
 
@@ -25,6 +25,31 @@ interface Move {
 }
 
 type Moves = ReadonlyMap<string, Move>;
+
+interface Edit {
+  ids: readonly string[];
+  changes: TaskChanges;
+}
+
+function projectOf(key: QueryKey): string | undefined {
+  const projectId = key[TASKS_KEY.length + 1];
+  return typeof projectId === 'string' ? projectId : undefined;
+}
+
+function replaced(
+  tasks: readonly Task[],
+  replacements: ReadonlyMap<string, Task>,
+  projectId: string | undefined
+): Task[] {
+  return tasks.flatMap((task) => {
+    const replacement = replacements.get(task.id);
+    if (!replacement) return [task];
+    if (projectId === undefined || replacement.project_ids.includes(projectId)) {
+      return [replacement];
+    }
+    return [];
+  });
+}
 
 function without(moves: Moves, move: Move): Moves {
   if (moves.get(move.id) !== move) return moves;
@@ -74,6 +99,23 @@ export function useTasks(projectId?: string) {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: TASKS_KEY }),
   });
 
+  const updateTasksMutation = useMutation({
+    mutationFn: ({ ids, changes }: Edit) => {
+      if (!workspaceId) throw new Error(NO_WORKSPACE);
+      return tasksApi.updateTasks(workspaceId, ids, changes);
+    },
+    onSuccess: async (updated) => {
+      await queryClient.cancelQueries({ queryKey: TASKS_KEY });
+      const replacements = new Map(updated.map((task) => [task.id, task]));
+      for (const [key, current] of queryClient.getQueriesData<Task[]>({ queryKey: TASKS_KEY })) {
+        if (current) queryClient.setQueryData(key, replaced(current, replacements, projectOf(key)));
+      }
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: TASKS_KEY });
+    },
+  });
+
   const moveTaskMutation = useMutation({
     mutationFn: ({ id, status }: Move) => tasksApi.updateTask(id, { status }),
     onSuccess: async (moved) => {
@@ -99,11 +141,17 @@ export function useTasks(projectId?: string) {
   });
 
   const { mutateAsync: update } = updateTaskMutation;
+  const { mutateAsync: updateMany } = updateTasksMutation;
   const { mutateAsync: move } = moveTaskMutation;
 
   const updateTask = useCallback(
     (id: string, request: UpdateTaskRequest) => update({ id, request }),
     [update]
+  );
+
+  const updateTasks = useCallback(
+    (ids: readonly string[], changes: TaskChanges) => updateMany({ ids, changes }),
+    [updateMany]
   );
 
   const moveTask = useCallback(
@@ -133,6 +181,7 @@ export function useTasks(projectId?: string) {
     error: error instanceof Error ? error.message : error ? LOAD_FAILED : null,
     createTask: createTaskMutation.mutateAsync,
     updateTask,
+    updateTasks,
     moveTask,
     deleteTask: deleteTaskMutation.mutateAsync,
     refetch,

@@ -119,6 +119,8 @@ export interface Renaming {
   draft: TitleDraft;
 }
 
+export type Gesture = 'toggle' | 'range';
+
 export interface BoardActions {
   open: (task: Task, host?: Task) => void;
   run: (task: Task) => void;
@@ -127,6 +129,7 @@ export interface BoardActions {
   finish: (task: Task) => void;
   remove: (task: Task) => void;
   move: (task: Task, status: TaskStatus) => Promise<boolean>;
+  select: (task: Task, gesture: Gesture) => void;
 }
 
 export interface UpdateTaskRequest {
@@ -148,6 +151,20 @@ export interface UpdateTaskRequest {
   source_id?: string;
   /** Multiple source IDs for agentic tasks */
   source_ids?: string[];
+}
+
+export type TaskSettings = Pick<
+  UpdateTaskRequest,
+  'status' | 'priority' | 'is_agentic' | 'require_plan_approval'
+>;
+
+export type TaskChanges = TaskSettings & {
+  add_project_ids?: string[];
+  remove_project_ids?: string[];
+};
+
+export interface UpdateTasksRequest extends TaskChanges {
+  ids: string[];
 }
 
 export type TaskProgressMessage = z.infer<typeof TaskProgressMessageSchema>;

@@ -933,6 +933,78 @@ async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_
     );
 }
 
+#[tokio::test]
+async fn driver_tasks_still_waiting_move_to_the_front_of_the_most_urgent_first_order() {
+    const MCP_SERVERS: i64 = 7;
+    const QUEUED: &str = "Queued by the driver";
+    const RANKED_BY_A_PERSON: &str = "Ranked by a person";
+    const SHIPPED: &str = "Shipped by the driver";
+    const DROPPED: &str = "Dropped by the driver";
+    let lowest = *tasks::PRIORITIES.start();
+    let highest = *tasks::PRIORITIES.end();
+    let database = Database::new(PREFIX).await;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    Migrator::new(directory.as_path())
+        .await
+        .unwrap()
+        .run_to(MCP_SERVERS, &database.pool)
+        .await
+        .unwrap();
+    let (workspace, _) = database.workspace().await;
+    let project: Uuid = sqlx::query_scalar(
+        "INSERT INTO projects(workspace_id, name, auto) VALUES ($1, 'Driven', TRUE) RETURNING id",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    for (title, status, auto_created) in [
+        (QUEUED, tasks::CREATED, true),
+        (RANKED_BY_A_PERSON, tasks::CREATED, false),
+        (SHIPPED, tasks::COMPLETE, true),
+        (DROPPED, tasks::CANCELLED, true),
+    ] {
+        sqlx::query(
+            "WITH task AS ( \
+               INSERT INTO tasks(workspace_id, title, description, status, priority, is_agentic) \
+               VALUES ($1, $2, 'Regression', $3, $4, TRUE) RETURNING id \
+             ) \
+             INSERT INTO task_automation(task_id, project_id, kind, auto_created) \
+             SELECT id, $5, 'ci', $6 FROM task",
+        )
+        .bind(workspace)
+        .bind(title)
+        .bind(status)
+        .bind(lowest)
+        .bind(project)
+        .bind(auto_created)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    }
+
+    migrations::run(&database.pool).await.unwrap();
+
+    let ranked: Vec<(String, i32)> =
+        sqlx::query_as("SELECT title, priority FROM tasks WHERE workspace_id = $1 ORDER BY title")
+            .bind(workspace)
+            .fetch_all(&database.pool)
+            .await
+            .unwrap();
+    database.cleanup().await;
+
+    assert_eq!(
+        ranked,
+        vec![
+            (DROPPED.to_string(), lowest),
+            (QUEUED.to_string(), highest),
+            (RANKED_BY_A_PERSON.to_string(), lowest),
+            (SHIPPED.to_string(), lowest),
+        ],
+        "only a driver task still to run is moved from the old front of the queue to the new one"
+    );
+}
+
 /// The tables `sql` holds a lock on until its transaction ends, upper-cased,
 /// read from each kind of statement a migration changes a live table with.
 fn locked_tables(sql: &str) -> BTreeSet<String> {

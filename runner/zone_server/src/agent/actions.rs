@@ -80,6 +80,17 @@ pub(crate) const TAIL_TASK_LOG_DESCRIPTION: &str = "Fetch new runner log lines s
 
 const GENERATED_TITLE_HINT: &str = "Omit to have one generated from the description.";
 
+/// The schema of a task's priority, wherever a model sets one.
+pub(crate) fn priority_property() -> Value {
+    let (least, most) = (*tasks::PRIORITIES.start(), *tasks::PRIORITIES.end());
+    json!({
+        "type": "integer",
+        "minimum": least,
+        "maximum": most,
+        "description": format!("{most} is the most urgent, {least} the least."),
+    })
+}
+
 /// Where each text an action hands the model sends it to wait_for: the end of
 /// every instruction in it to call the tool.
 const CREATE_REMINDER_WAITS: [&str; 2] = [
@@ -319,7 +330,7 @@ impl Tool for WorkspaceAction {
                 json!([]),
             ),
             Action::UpdateTask => (
-                json!({"task_id":identifier,"title":{"type":"string","minLength":1},"description":{"type":"string"},"status":{"type":"string","enum":actions::Status::ALL.map(actions::Status::as_str)},"priority":{"type":"integer","minimum":1,"maximum":5,"description":"1 is the most urgent, 5 the least."},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
+                json!({"task_id":identifier,"title":{"type":"string","minLength":1},"description":{"type":"string"},"status":{"type":"string","enum":actions::Status::ALL.map(actions::Status::as_str)},"priority":priority_property(),"assignee_id":{"type":["string","null"],"format":"uuid"}}),
                 json!(["task_id"]),
             ),
             Action::SendMessage => (
@@ -345,7 +356,7 @@ impl Tool for WorkspaceAction {
                     "acceptance_criteria":{"type":"string"},
                     "project_ids":{"type":"array","items":identifier},
                     "source_id":{"type":"string","format":"uuid"},
-                    "priority":{"type":"integer","minimum":1,"maximum":5}
+                    "priority":priority_property()
                 }),
                 json!(["description"]),
             ),
@@ -626,6 +637,18 @@ mod tests {
             serde_json::from_value(json!({"task_id": Uuid::new_v4(), "priority": 2}))
                 .expect("deny_unknown_fields must accept every property the schema advertises");
         assert_eq!(update.priority, Some(2));
+    }
+
+    #[tokio::test]
+    async fn every_task_tool_says_the_highest_priority_is_the_most_urgent() {
+        for action in [Action::UpdateTask, Action::StartTask] {
+            let schema = tool(action).parameters_schema();
+            assert_eq!(
+                schema["properties"]["priority"]["description"],
+                "5 is the most urgent, 1 the least.",
+                "{schema}"
+            );
+        }
     }
 
     #[tokio::test]

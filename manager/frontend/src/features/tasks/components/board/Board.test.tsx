@@ -59,10 +59,11 @@ function actions(): BoardActions {
     finish: mock(),
     remove: mock(),
     move: mock(() => Promise.resolve(true)),
+    select: mock(),
   };
 }
 
-function renderBoard(handlers: BoardActions = actions()) {
+function renderBoard(handlers: BoardActions = actions(), selected?: ReadonlySet<string>) {
   render(
     <Board
       tasks={TASKS}
@@ -70,6 +71,7 @@ function renderBoard(handlers: BoardActions = actions()) {
       renaming={null}
       removed={null}
       view={new View()}
+      selected={selected}
       actions={handlers}
     />
   );
@@ -280,6 +282,102 @@ describe('Board', () => {
 
       expect(board()).not.toHaveAttribute('data-dragging');
       expect(handlers.move).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('selection', () => {
+    function checkbox(title: string): HTMLElement {
+      return screen.getByRole('checkbox', { name: `Select ${title}` });
+    }
+
+    function marked(): string[] {
+      return Array.from(board().querySelectorAll<HTMLElement>('.task-card[data-selected]')).map(
+        (item) => item.dataset.taskId ?? ''
+      );
+    }
+
+    it('marks exactly the selected cards and checks their checkboxes', () => {
+      renderBoard(actions(), new Set(['write', 'ship']));
+
+      expect(marked()).toEqual(['write', 'ship']);
+      expect(checkbox('Write the spec')).toHaveAttribute('aria-checked', 'true');
+      expect(checkbox('Ship it')).toHaveAttribute('aria-checked', 'true');
+      expect(checkbox('Build the board')).toHaveAttribute('aria-checked', 'false');
+    });
+
+    it('marks no card when nothing is selected', () => {
+      renderBoard();
+
+      expect(marked()).toEqual([]);
+      expect(board()).not.toHaveAttribute('data-selecting');
+    });
+
+    it('marks the board as selecting only while a card is selected', () => {
+      const handlers = actions();
+      const show = (selected: ReadonlySet<string>) => (
+        <Board
+          tasks={TASKS}
+          projects={PROJECTS}
+          renaming={null}
+          removed={null}
+          view={new View()}
+          selected={selected}
+          actions={handlers}
+        />
+      );
+      const { rerender } = render(show(new Set()));
+      expect(board()).not.toHaveAttribute('data-selecting');
+
+      rerender(show(new Set(['build'])));
+      expect(board()).toHaveAttribute('data-selecting');
+      expect(marked()).toEqual(['build']);
+
+      rerender(show(new Set()));
+      expect(board()).not.toHaveAttribute('data-selecting');
+      expect(marked()).toEqual([]);
+    });
+
+    it('hands the checked card and gesture to the select action', () => {
+      const handlers = renderBoard();
+
+      fireEvent.click(checkbox('Build the board'));
+      fireEvent.click(checkbox('Ship it'), { shiftKey: true });
+
+      expect(handlers.select).toHaveBeenNthCalledWith(1, TASKS[2], 'toggle');
+      expect(handlers.select).toHaveBeenNthCalledWith(2, TASKS[3], 'range');
+    });
+
+    it('does not pick a card up with Space or Enter on its checkbox', async () => {
+      const restore = layOutBoard();
+      const handlers = renderBoard();
+      const box = checkbox('Build the board');
+      box.focus();
+
+      await pressKey(box, 'Space');
+      await pressKey(box, 'Enter');
+      restore();
+
+      expect(board()).not.toHaveAttribute('data-dragging');
+      expect(handlers.move).not.toHaveBeenCalled();
+    });
+
+    it('moves only the carried card while others are selected', async () => {
+      const restore = layOutBoard();
+      const handlers = renderBoard(actions(), new Set(['write', 'queue']));
+      const handle = screen.getByRole('button', { name: 'Move Write the spec' });
+      handle.focus();
+
+      await pressKey(handle, 'Space');
+      await screen.findByText('Picked up Write the spec, in Planned.');
+      await pressKey(handle, 'ArrowRight');
+      await screen.findByText('Write the spec is over In progress.');
+      await pressKey(handle, 'Space');
+      await screen.findByText('Write the spec moved to In progress.');
+      restore();
+
+      expect(handlers.move).toHaveBeenCalledTimes(1);
+      expect(handlers.move).toHaveBeenCalledWith(TASKS[0], 'in_progress');
+      expect(handlers.select).not.toHaveBeenCalled();
     });
   });
 

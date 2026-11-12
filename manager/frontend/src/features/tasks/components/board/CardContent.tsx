@@ -1,4 +1,5 @@
 import { memo, useLayoutEffect, useRef } from 'react';
+import { gestureOf, keepText } from '../../gesture';
 import type { Relations } from '../../relations';
 import type { TitleDraft } from '../../TitleDraft';
 import { awaitsTitle } from '../../title';
@@ -14,6 +15,7 @@ export interface CardContentProps {
   relations: Relations;
   now: number;
   renaming: TitleDraft | null;
+  selected: boolean;
   actions: BoardActions;
 }
 
@@ -23,6 +25,7 @@ export const CardContent = memo(function CardContent({
   relations,
   now,
   renaming,
+  selected,
   actions,
 }: CardContentProps) {
   const open = useRef<HTMLButtonElement>(null);
@@ -53,7 +56,16 @@ export const CardContent = memo(function CardContent({
       }
       title={task.title}
       aria-busy={pending || undefined}
-      onClick={() => actions.open(task)}
+      onMouseDown={keepText}
+      onClick={(event) => {
+        const gesture = gestureOf(event);
+        if (gesture === null) {
+          actions.open(task);
+          return;
+        }
+        event.preventDefault();
+        actions.select(task, gesture);
+      }}
     >
       {task.title}
     </button>
@@ -70,7 +82,7 @@ export const CardContent = memo(function CardContent({
         onOpen={(related) => actions.open(related, task)}
       />
       <div className="task-card-menu" onPointerDown={CardSensor.shield}>
-        <CardMenu task={task} actions={actions} />
+        <CardMenu task={task} selected={selected} actions={actions} />
       </div>
     </>
   );

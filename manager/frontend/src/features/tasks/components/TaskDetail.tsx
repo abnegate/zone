@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import PencilIcon from '../../../shared/components/PencilIcon/PencilIcon';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
+import { PRIORITIES } from '../priority';
 import { relationsOf } from '../relations';
 import { STATUS_OPTIONS } from '../status';
 import { awaitsTitle } from '../title';
@@ -36,14 +37,6 @@ type TaskDetailProps = {
 };
 
 const SAVE_FAILED = 'Failed to save task';
-
-const PRIORITIES: { value: number; label: string }[] = [
-  { value: 1, label: 'Lowest' },
-  { value: 2, label: 'Low' },
-  { value: 3, label: 'Medium' },
-  { value: 4, label: 'High' },
-  { value: 5, label: 'Highest' },
-];
 
 function sameIds(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;

@@ -19,6 +19,12 @@
   min-height: 0;
 }
 
+.tasks-body[data-selecting] {
+  padding-bottom: calc(
+    var(--ui-control-height-sm) + var(--ui-space-3) + var(--ui-space-8) + var(--ui-safe-bottom)
+  );
+}
+
 .tasks-body .error-banner {
   margin-bottom: var(--ui-space-4);
 }

@@ -159,8 +159,36 @@ interface TaskServer {
   hold: Promise<void> | null;
 }
 
+type TaskEdit = Partial<Omit<MockTask, 'project_ids'>> & {
+  ids: string[];
+  add_project_ids?: string[];
+  remove_project_ids?: string[];
+};
+
 function fulfillJson(route: Route, body: unknown, status = 200): Promise<void> {
   return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+}
+
+function relink(
+  projects: readonly string[],
+  add: readonly string[],
+  remove: readonly string[]
+): string[] {
+  const removed = new Set(remove);
+  return [...new Set([...projects, ...add])].filter((id) => !removed.has(id)).sort();
+}
+
+function applyEdit(server: TaskServer, edit: TaskEdit): MockTask[] {
+  const { ids, add_project_ids: add = [], remove_project_ids: remove = [], ...changes } = edit;
+  const edited = new Set(ids);
+  server.tasks = server.tasks.map((task) =>
+    edited.has(task.id)
+      ? { ...task, ...changes, project_ids: relink(task.project_ids, add, remove) }
+      : task
+  );
+  return server.tasks
+    .filter((task) => edited.has(task.id))
+    .sort((first, second) => first.id.localeCompare(second.id));
 }
 
 async function serveTasks(
@@ -179,8 +207,14 @@ async function serveTasks(
   await context.unroute(tasksRoutePattern);
   await page.unroute(tasksRoutePattern);
   await routeApiContext(context, tasksRoutePattern, (route) => {
-    if (route.request().method() !== 'GET') return route.continue();
-    const url = new URL(route.request().url());
+    const request = route.request();
+    if (request.method() === 'PATCH') {
+      const edit: TaskEdit = request.postDataJSON();
+      server.mutations.push({ method: 'PATCH', id: '', body: edit });
+      return fulfillJson(route, { tasks: applyEdit(server, edit) });
+    }
+    if (request.method() !== 'GET') return route.continue();
+    const url = new URL(request.url());
     server.listed.push(url);
     const project = url.searchParams.get('project_id');
     const tasks = project
@@ -238,6 +272,47 @@ function card(scope: Page | Locator, title: string): Locator {
 
 function moves(server: TaskServer): Mutation[] {
   return server.mutations.filter((mutation) => mutation.method === 'PUT');
+}
+
+function edits(server: TaskServer): Mutation[] {
+  return server.mutations
+    .filter((mutation) => mutation.method === 'PATCH')
+    .map((mutation) => {
+      const { ids, ...changes } = mutation.body as TaskEdit;
+      return { ...mutation, body: { ids: [...ids].sort(), ...changes } };
+    });
+}
+
+function selection(page: Page): Locator {
+  return page.getByRole('group', { name: 'Selected tasks', exact: true });
+}
+
+function checkbox(page: Page, title: string): Locator {
+  return page.getByRole('checkbox', { name: `Select ${title}`, exact: true });
+}
+
+async function select(page: Page, titles: readonly string[]): Promise<void> {
+  const [first, ...rest] = titles;
+  await page.getByRole('button', { name: first, exact: true }).click({
+    modifiers: ['ControlOrMeta'],
+  });
+  for (const title of rest) {
+    await checkbox(page, title).click();
+  }
+  await expect(selection(page)).toContainText(`${titles.length} selected`);
+}
+
+async function indents(page: Page, title: string) {
+  return card(page, title).evaluate((item) => {
+    const heading = item.querySelector<HTMLElement>('.task-card-open');
+    const meta = item.querySelector<HTMLElement>('.task-card-meta');
+    if (!heading || !meta) throw new Error('The card has no title or meta row');
+    const edge = item.getBoundingClientRect().left + item.clientLeft;
+    return {
+      title: heading.getBoundingClientRect().left - edge,
+      meta: meta.getBoundingClientRect().left - edge,
+    };
+  });
 }
 
 async function openMenu(page: Page, title: string): Promise<void> {
@@ -1256,6 +1331,97 @@ test.describe('Tasks Page', () => {
       await expect(column(page, 'Cancelled')).toBeFocused();
     });
 
+    test('two selected cards move to another column with one edit', async ({ context, page }) => {
+      const server = await serveTasks(context, page);
+
+      await select(page, ['Implement login page', 'Fix navigation bug']);
+      await selection(page).getByRole('button', { name: 'Edit', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Edit 2 tasks', exact: true });
+      const status = dialog.getByRole('combobox', { name: 'Status', exact: true });
+      await expect(status).toHaveText('Unchanged');
+      await chooseSelect(status, 'Blocked');
+      await dialog.getByRole('button', { name: 'Save changes', exact: true }).click();
+
+      await expect.poll(() => edits(server)).toEqual([
+        { method: 'PATCH', id: '', body: { ids: ['task-1', 'task-3'], status: 'blocked' } },
+      ]);
+      await expect(dialog).toHaveCount(0);
+      const blocked = column(page, 'Blocked');
+      await expect(card(blocked, 'Implement login page')).toBeVisible();
+      await expect(card(blocked, 'Fix navigation bug')).toBeVisible();
+      await expect(blocked.locator('.board-column-count')).toHaveText('3');
+      await expect(column(page, 'In progress').locator('p.board-column-empty')).toHaveText(
+        'No tasks'
+      );
+      await expect(selection(page)).toHaveCount(0);
+      expect(server.mutations).toHaveLength(1);
+      await expect(page).toHaveURL('/tasks');
+    });
+
+    test('checkboxes stay hidden until a card is selected from its menu', async ({
+      context,
+      page,
+    }) => {
+      await serveTasks(context, page);
+      await expect(card(page, 'Implement login page')).toBeVisible();
+      await expect(checkbox(page, 'Implement login page')).toBeHidden();
+      await expect(checkbox(page, 'Fix navigation bug')).toBeHidden();
+
+      await chooseFromMenu(page, 'Implement login page', 'Select');
+
+      await expect(selection(page)).toContainText('1 selected');
+      await expect(checkbox(page, 'Implement login page')).toBeChecked();
+      await expect(checkbox(page, 'Fix navigation bug')).toBeVisible();
+      await expect(checkbox(page, 'Fix navigation bug')).not.toBeChecked();
+      await checkbox(page, 'Fix navigation bug').click();
+      await expect(selection(page)).toContainText('2 selected');
+
+      await chooseFromMenu(page, 'Implement login page', 'Deselect');
+      await expect(selection(page)).toContainText('1 selected');
+      await checkbox(page, 'Fix navigation bug').click();
+      await expect(selection(page)).toHaveCount(0);
+      await expect(checkbox(page, 'Fix navigation bug')).toBeHidden();
+    });
+
+    test('a title stays flush with its meta row, and both indent together while selecting', async ({
+      context,
+      page,
+    }) => {
+      await serveTasks(context, page);
+      await expect(card(page, 'Implement login page')).toBeVisible();
+      expect(await indents(page, 'Implement login page')).toEqual({ title: 12, meta: 12 });
+
+      await select(page, ['Fix navigation bug']);
+
+      expect(await indents(page, 'Implement login page')).toEqual({ title: 36, meta: 36 });
+      expect(await indents(page, 'Fix navigation bug')).toEqual({ title: 36, meta: 36 });
+      const gap = await card(page, 'Implement login page').evaluate((item) => {
+        const box = item.querySelector<HTMLElement>('.task-card-select');
+        const title = item.querySelector<HTMLElement>('.task-card-open');
+        if (!box || !title) throw new Error('The card has no checkbox or title');
+        return title.getBoundingClientRect().left - box.getBoundingClientRect().right;
+      });
+      expect(gap).toBe(8);
+    });
+
+    test('dragging a selected card by its grip moves only that card', async ({
+      context,
+      page,
+    }) => {
+      const server = await serveTasks(context, page);
+
+      await select(page, ['Implement login page', 'Fix navigation bug']);
+      await pointerDrag(page, 'Fix navigation bug', column(page, 'Blocked'));
+
+      await expect.poll(() => server.mutations).toEqual([
+        { method: 'PUT', id: 'task-3', body: { status: 'blocked' } },
+      ]);
+      await expect(card(column(page, 'Blocked'), 'Fix navigation bug')).toBeVisible();
+      await expect(card(column(page, 'Planned'), 'Implement login page')).toBeVisible();
+      await expect(column(page, 'Blocked').locator('.board-column-count')).toHaveText('2');
+      expect(edits(server)).toEqual([]);
+    });
+
     test.describe('on a touch screen', () => {
       test.use({ hasTouch: true });
 
@@ -1264,6 +1430,7 @@ test.describe('Tasks Page', () => {
         await shrinkToPhone(page);
         const grip = page.getByRole('button', { name: 'Move Implement login page', exact: true });
         await expect(grip).toBeVisible();
+        await expect(checkbox(page, 'Implement login page')).toBeHidden();
 
         const target = await grip.evaluate((handle) => {
           const area = getComputedStyle(handle, '::after');
@@ -1295,6 +1462,57 @@ test.describe('Tasks Page', () => {
           width: 44,
           height: 44,
           hits: [true, true, true, true],
+        });
+      });
+
+      test('while selecting, the grip and the checkbox split the space before the title without overlapping', async ({
+        context,
+        page,
+      }) => {
+        await serveTasks(context, page);
+        await shrinkToPhone(page);
+        await chooseFromMenu(page, 'Implement login page', 'Select');
+        await expect(selection(page)).toContainText('1 selected');
+
+        const targets = await card(page, 'Implement login page').evaluate((item) => {
+          const handle = item.querySelector<HTMLElement>('.task-card-handle');
+          const box = item.querySelector<HTMLElement>('.task-card-select');
+          const title = item.querySelector<HTMLElement>('.task-card-open');
+          if (!handle || !box || !title) throw new Error('The card has no grip, checkbox or title');
+          const style = getComputedStyle(handle, '::after');
+          const grip = handle.getBoundingClientRect();
+          const left = grip.left + Number.parseFloat(style.left);
+          const top = grip.top + Number.parseFloat(style.top);
+          const width = Number.parseFloat(style.width);
+          const height = Number.parseFloat(style.height);
+          const start = box.getBoundingClientRect().left;
+          const end = title.getBoundingClientRect().left;
+          const owner = (x: number, y: number) => {
+            const element = document.elementFromPoint(x, y);
+            if (element?.closest('.task-card-handle')) return 'grip';
+            if (element?.closest('.task-card-select')) return 'checkbox';
+            if (element?.closest('.task-card-open')) return 'title';
+            return null;
+          };
+          const row = (y: number) =>
+            [left + 1, start - 1, start + 1, end - 1, end + 1].map((x) => owner(x, y));
+          return {
+            grip: [width, height],
+            checkbox: end - start,
+            between: start - (left + width),
+            top: row(top + 1),
+            bottom: row(top + height - 1),
+            below: owner(start + 1, top + height + 1),
+          };
+        });
+
+        expect(targets).toEqual({
+          grip: [28, 44],
+          checkbox: 24,
+          between: 0,
+          top: ['grip', 'grip', 'checkbox', 'checkbox', 'title'],
+          bottom: ['grip', 'grip', 'checkbox', 'checkbox', 'title'],
+          below: 'title',
         });
       });
 
