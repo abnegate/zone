@@ -104,6 +104,7 @@
   --ui-space-3xl: var(--ui-space-10);
 
   --ui-radius-none: 0;
+  --ui-radius-xs: 0.25rem; /* 4px */
   --ui-radius-sm: 0.5rem; /* 8px */
   --ui-radius-md: 0.75rem; /* 12px */
   --ui-radius-lg: 1rem; /* 16px */
@@ -209,6 +210,7 @@
   --ui-border: #d4cbb8;
   --ui-border-subtle: #e4dccb;
   --ui-border-strong: #b8ad98;
+  --ui-border-control: #857b6f;
   --ui-border-focus: #0011d9;
 
   /* Overlays */
@@ -240,6 +242,7 @@
   --ui-border: #2e2923;
   --ui-border-subtle: #221e1a;
   --ui-border-strong: #3f3830;
+  --ui-border-control: #776f63;
   --ui-border-focus: #00f3ff;
 
   /* Overlays */
