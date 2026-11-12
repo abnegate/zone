@@ -2058,7 +2058,9 @@ test.describe('Tasks Page', () => {
       });
       await expect(page.locator('section.task-details')).toBeVisible();
       await expect(selection(page)).toHaveCount(0);
-      await expect(page.getByLabel('Description')).toBeDisabled();
+      await expect(page.getByLabel('Description')).not.toBeEditable();
+      await page.getByLabel('Description').focus();
+      await expect(page.getByLabel('Description')).toBeFocused();
       await expect(page.getByRole('button', { name: 'Save' })).toBeDisabled();
       await expect(page.locator('.task-details-access')).toHaveText(READ_ONLY);
 

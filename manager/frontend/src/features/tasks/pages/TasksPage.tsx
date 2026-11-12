@@ -6,7 +6,7 @@ import { toast } from 'sonner';
 import { client } from '../../../api/client';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
-import { useWorkspace } from '../../../shared/context';
+import { permitsWrites, useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
 import { ActiveRunError } from '../ActiveRunError';
 import { READ_ONLY } from '../access';
@@ -105,7 +105,7 @@ function keepsSelection(event: KeyboardEvent): boolean {
 export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
-  const { currentWorkspace, writable } = useWorkspace();
+  const { currentWorkspace, workspaces, writable } = useWorkspace();
   const workspaceId = currentWorkspace?.id;
   const [scope, setScope] = useState(workspaceId);
   const [filterProject, setFilterProject] = useState(ALL_PROJECTS);
@@ -188,6 +188,16 @@ export default function TasksPage() {
   const [removed, setRemoved] = useState<string | null>(null);
   const [followed, setFollowed] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+
+  if (!writable && (renaming !== null || deleting !== null)) {
+    setRenaming(null);
+    setDeleting(null);
+  }
+
+  const writableFor = (task: Task) =>
+    task.workspace_id === workspaceId
+      ? writable
+      : permitsWrites(workspaces.find((workspace) => workspace.id === task.workspace_id));
 
   const projectNames = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
@@ -396,7 +406,7 @@ export default function TasksPage() {
             onClose={closeEditor}
             onExecute={() => setExecutionTask(editorTask)}
             onSave={handleSave}
-            writable={writable}
+            writable={writableFor(editorTask)}
           />
         ) : loading ? (
           <Skeleton />
@@ -459,7 +469,7 @@ export default function TasksPage() {
         <TaskExecutionView
           key={executionTask.id}
           task={executionTask}
-          writable={writable}
+          writable={writableFor(executionTask)}
           onClose={closeExecution}
         />
       )}
@@ -485,7 +495,7 @@ export default function TasksPage() {
         {announcement}
       </div>
 
-      {deleting && (
+      {writable && deleting && (
         <DeleteTaskDialog
           task={deleting}
           onConfirm={() => confirmDelete(deleting)}

@@ -24,6 +24,10 @@ const WS_STORAGE_KEY = 'manager_current_workspace';
 
 const VIEWER: WorkspaceRole = 'viewer';
 
+export function permitsWrites(workspace: Workspace | null | undefined): boolean {
+  return workspace?.role !== VIEWER;
+}
+
 export function WorkspaceProvider({
   children,
   useAuthHook,
@@ -46,7 +50,7 @@ export function WorkspaceProvider({
   const userId = user?.id;
   const workspacesLoading = organizationId !== undefined && workspacesFor !== organizationId;
   const loading = organizationsLoading || workspacesLoading;
-  const writable = currentWorkspace?.role !== VIEWER;
+  const writable = permitsWrites(currentWorkspace);
   const resolvingRole =
     currentOrganization !== null &&
     currentOrganization.role === undefined &&

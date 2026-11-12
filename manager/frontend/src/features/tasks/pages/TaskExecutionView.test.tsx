@@ -358,6 +358,8 @@ describe('a run read by a viewer', () => {
     render(<TaskExecutionView task={task} writable={false} onClose={() => {}} />);
 
     expect(await screen.findByText('This task has not run yet.')).toBeInTheDocument();
+    expect(screen.getByText('Not run')).toBeInTheDocument();
+    expect(screen.queryByText('Ready to run')).not.toBeInTheDocument();
     expect(
       screen.getByText('You have view access, so you can read tasks but not change them')
     ).toBeInTheDocument();

@@ -264,7 +264,9 @@ export function TaskExecutionView({
       ? 'Loading run'
       : run
         ? statusLabel(run, writable)
-        : 'Ready to run';
+        : writable
+          ? 'Ready to run'
+          : 'Not run';
   return (
     <Modal
       isOpen

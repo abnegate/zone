@@ -7,7 +7,7 @@ import { layOutBoard, pressKey } from '../../../test/board';
 import { clientModule } from '../../../test/client';
 import { chooseMenuItem, openMenu } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
-import type { Source } from '../../../types';
+import type { Source, WorkspaceRole } from '../../../types';
 import type { Project } from '../../projects/types';
 import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 import { ActiveRunError } from '../ActiveRunError';
@@ -51,15 +51,18 @@ const mockWorkspace = {
   updated_at: '2024-01-01T00:00:00Z',
 };
 
-let currentWorkspace = mockWorkspace;
+let currentWorkspace: typeof mockWorkspace & { role?: WorkspaceRole } = mockWorkspace;
+let workspaces: (typeof mockWorkspace & { role?: WorkspaceRole })[] = [mockWorkspace];
 let writable = true;
 
 mock.module('../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: mock(() => ({
     currentWorkspace,
+    workspaces,
     writable,
     loading: false,
   })),
+  permitsWrites: (workspace?: { role?: WorkspaceRole }) => workspace?.role !== 'viewer',
 }));
 
 mock.module('../../../api/tasks', () => ({
@@ -103,6 +106,7 @@ afterAll(() => {
 afterEach(() => {
   window.history.pushState({}, '', '/');
   currentWorkspace = mockWorkspace;
+  workspaces = [mockWorkspace];
   writable = true;
 });
 
@@ -2658,7 +2662,65 @@ describe('TasksPage', () => {
 
       const save = await screen.findByRole('button', { name: 'Save' });
       expect(save).toBeDisabled();
-      expect(screen.getByLabelText('Description').closest('fieldset')).toBeDisabled();
+      expect(screen.getByLabelText('Description')).toHaveAttribute('readonly');
+    });
+
+    it('closes a delete dialog opened before the role became view-only', async () => {
+      writable = true;
+      const { again } = renderTasksPage();
+      await screen.findByText('Implement login');
+      await chooseMenuItem('Actions for Implement login', 'Delete');
+      expect(screen.getByRole('dialog', { name: 'Delete "Implement login"?' })).toBeInTheDocument();
+
+      writable = false;
+      again();
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      expect(mockDeleteTask).not.toHaveBeenCalled();
+    });
+
+    it('closes a board rename started before the role became view-only', async () => {
+      writable = true;
+      const { again } = renderTasksPage();
+      await screen.findByText('Implement login');
+      await chooseMenuItem('Actions for Implement login', 'Rename');
+      expect(screen.getByRole('textbox', { name: 'Task title' })).toBeInTheDocument();
+
+      writable = false;
+      again();
+
+      await waitFor(() =>
+        expect(screen.queryByRole('textbox', { name: 'Task title' })).not.toBeInTheDocument()
+      );
+      expect(mockUpdateTask).not.toHaveBeenCalled();
+    });
+
+    it('edits a linked task in a workspace the caller writes to', async () => {
+      const other = { ...mockWorkspace, id: 'workspace-2', name: 'Other', role: 'member' as const };
+      currentWorkspace = { ...mockWorkspace, role: 'viewer' };
+      workspaces = [currentWorkspace, other];
+      mockGetTask.mockImplementation(() =>
+        Promise.resolve({ ...mockTasks[0], workspace_id: 'workspace-2' })
+      );
+      renderTasksPage('/tasks?task=task-1');
+
+      const description = await screen.findByLabelText('Description');
+      expect(description).not.toHaveAttribute('readonly');
+      expect(screen.getByRole('button', { name: 'Execute' })).toBeInTheDocument();
+    });
+
+    it('locks a linked task in a workspace the caller only views', async () => {
+      writable = true;
+      const other = { ...mockWorkspace, id: 'workspace-2', name: 'Other', role: 'viewer' as const };
+      workspaces = [mockWorkspace, other];
+      mockGetTask.mockImplementation(() =>
+        Promise.resolve({ ...mockTasks[0], workspace_id: 'workspace-2' })
+      );
+      renderTasksPage('/tasks?task=task-1');
+
+      const description = await screen.findByLabelText('Description');
+      expect(description).toHaveAttribute('readonly');
+      expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     });
 
     it('drops a selection made before the role became view-only', async () => {

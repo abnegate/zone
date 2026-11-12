@@ -114,10 +114,11 @@ export function TaskDetail({
   const [leaving, setLeaving] = useState<Task | null>(null);
   const hydrated = useRef(task);
   const renameButton = useRef<HTMLButtonElement>(null);
+  const titleText = useRef<HTMLSpanElement>(null);
   const wasRenaming = useRef(false);
 
   useEffect(() => {
-    if (focusTitle) renameButton.current?.focus();
+    if (focusTitle) (renameButton.current ?? titleText.current)?.focus();
   }, [focusTitle]);
 
   useEffect(() => {
@@ -196,7 +197,9 @@ export function TaskDetail({
                 <PencilIcon />
               </button>
             ) : (
-              <span className="task-title-text">{task.title}</span>
+              <span ref={titleText} className="task-title-text" tabIndex={-1}>
+                {task.title}
+              </span>
             )}
           </h2>
         )}
@@ -214,34 +217,36 @@ export function TaskDetail({
 
         <Links task={task} relations={relations} onOpen={openRelated} />
 
+        <div className="form-group">
+          <label htmlFor="task-detail-description">Description</label>
+          <textarea
+            id="task-detail-description"
+            rows={4}
+            readOnly={!writable}
+            value={draft.description}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, description: event.target.value }))
+            }
+          />
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="task-detail-criteria">
+            Acceptance Criteria
+            <span className="label-optional">optional</span>
+          </label>
+          <textarea
+            id="task-detail-criteria"
+            rows={3}
+            readOnly={!writable}
+            value={draft.acceptance_criteria}
+            onChange={(event) =>
+              setDraft((current) => ({ ...current, acceptance_criteria: event.target.value }))
+            }
+          />
+        </div>
+
         <fieldset className="task-details-fields" disabled={!writable}>
-          <div className="form-group">
-            <label htmlFor="task-detail-description">Description</label>
-            <textarea
-              id="task-detail-description"
-              rows={4}
-              value={draft.description}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, description: event.target.value }))
-              }
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="task-detail-criteria">
-              Acceptance Criteria
-              <span className="label-optional">optional</span>
-            </label>
-            <textarea
-              id="task-detail-criteria"
-              rows={3}
-              value={draft.acceptance_criteria}
-              onChange={(event) =>
-                setDraft((current) => ({ ...current, acceptance_criteria: event.target.value }))
-              }
-            />
-          </div>
-
           <div className="form-row">
             <Select
               id="task-detail-status"

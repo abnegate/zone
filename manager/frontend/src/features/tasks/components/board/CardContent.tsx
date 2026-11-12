@@ -40,38 +40,39 @@ export const CardContent = memo(function CardContent({
     wasRenaming.current = renaming !== null;
   }, [renaming]);
 
-  const title = renaming ? (
-    <TaskTitleInput
-      title={task.title}
-      draft={renaming}
-      onSave={(value) => actions.retitle(task, value)}
-      onDone={() => actions.finish(task)}
-    />
-  ) : (
-    <button
-      ref={open}
-      type="button"
-      className={
-        pending
-          ? 'task-card-title task-card-open task-card-title-pending'
-          : 'task-card-title task-card-open'
-      }
-      title={task.title}
-      aria-busy={pending || undefined}
-      onMouseDown={keepText}
-      onClick={(event) => {
-        const gesture = writable ? gestureOf(event) : null;
-        if (gesture === null) {
-          actions.open(task);
-          return;
+  const title =
+    renaming && writable ? (
+      <TaskTitleInput
+        title={task.title}
+        draft={renaming}
+        onSave={(value) => actions.retitle(task, value)}
+        onDone={() => actions.finish(task)}
+      />
+    ) : (
+      <button
+        ref={open}
+        type="button"
+        className={
+          pending
+            ? 'task-card-title task-card-open task-card-title-pending'
+            : 'task-card-title task-card-open'
         }
-        event.preventDefault();
-        actions.select(task, gesture);
-      }}
-    >
-      {task.title}
-    </button>
-  );
+        title={task.title}
+        aria-busy={pending || undefined}
+        onMouseDown={keepText}
+        onClick={(event) => {
+          const gesture = writable ? gestureOf(event) : null;
+          if (gesture === null) {
+            actions.open(task);
+            return;
+          }
+          event.preventDefault();
+          actions.select(task, gesture);
+        }}
+      >
+        {task.title}
+      </button>
+    );
 
   return (
     <>
