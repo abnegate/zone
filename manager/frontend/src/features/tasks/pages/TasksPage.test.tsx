@@ -2174,6 +2174,33 @@ describe('TasksPage', () => {
       expect(screen.getByText('1 selected')).toBeInTheDocument();
     });
 
+    it('keeps the selection when Escape is pressed on the project filter', async () => {
+      renderTasksPage();
+      await check('Fix button styling');
+      await screen.findByText('1 selected');
+      const filter = screen.getByRole('combobox', { name: 'Filter by project' });
+      filter.focus();
+
+      fireEvent.keyDown(filter, { key: 'Escape' });
+      await settle();
+
+      expect(screen.getByText('1 selected')).toBeInTheDocument();
+      expect(checkbox('Fix button styling')).toBeChecked();
+    });
+
+    it('moves focus from a checkbox that hides to its card when it empties the selection', async () => {
+      renderTasksPage();
+      await check('Implement login');
+      await screen.findByText('1 selected');
+      const box = checkbox('Implement login');
+      box.focus();
+
+      fireEvent.click(box);
+
+      await waitFor(() => expect(selectionBar()).toBeNull());
+      await waitFor(() => expect(focusedTitle()).toBe('task-1'));
+    });
+
     it('keeps the selection when Escape puts back a card picked up by keyboard', async () => {
       const restore = layOutBoard();
       try {

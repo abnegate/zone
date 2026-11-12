@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { type QueryKey, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useMemo, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
@@ -29,6 +29,26 @@ type Moves = ReadonlyMap<string, Move>;
 interface Edit {
   ids: readonly string[];
   changes: TaskChanges;
+}
+
+function projectOf(key: QueryKey): string | undefined {
+  const projectId = key[TASKS_KEY.length + 1];
+  return typeof projectId === 'string' ? projectId : undefined;
+}
+
+function replaced(
+  tasks: readonly Task[],
+  replacements: ReadonlyMap<string, Task>,
+  projectId: string | undefined
+): Task[] {
+  return tasks.flatMap((task) => {
+    const replacement = replacements.get(task.id);
+    if (!replacement) return [task];
+    if (projectId === undefined || replacement.project_ids.includes(projectId)) {
+      return [replacement];
+    }
+    return [];
+  });
 }
 
 function without(moves: Moves, move: Move): Moves {
@@ -87,9 +107,9 @@ export function useTasks(projectId?: string) {
     onSuccess: async (updated) => {
       await queryClient.cancelQueries({ queryKey: TASKS_KEY });
       const replacements = new Map(updated.map((task) => [task.id, task]));
-      queryClient.setQueriesData<Task[]>({ queryKey: TASKS_KEY }, (current) =>
-        current?.map((task) => replacements.get(task.id) ?? task)
-      );
+      for (const [key, current] of queryClient.getQueriesData<Task[]>({ queryKey: TASKS_KEY })) {
+        if (current) queryClient.setQueryData(key, replaced(current, replacements, projectOf(key)));
+      }
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: TASKS_KEY });

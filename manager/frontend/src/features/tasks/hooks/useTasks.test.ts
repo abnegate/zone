@@ -757,6 +757,23 @@ describe('useTasks updateTasks', () => {
     await waitFor(() => expect(priorities(result.current.tasks)).toEqual([['task-2', 5]]));
   });
 
+  it('drops an edited task from a project list it no longer belongs to', async () => {
+    const queryClient = keepingClient();
+    const { result, rerender } = await renderLoaded(queryClient);
+    rerender({ projectId: PROJECT });
+    await waitFor(() => expect(result.current.tasks).toEqual([other]));
+    holdReloads();
+    const moved = { ...other, project_ids: [] };
+    mockUpdateTasks.mockResolvedValueOnce([moved]);
+
+    await act(async () => {
+      await result.current.updateTasks([other.id], { remove_project_ids: [PROJECT] });
+    });
+
+    expect(queryClient.getQueryData<Task[]>(PROJECT_KEY)).toEqual([]);
+    expect(queryClient.getQueryData<Task[]>(QUERY_KEY)).toEqual([mockTask, moved, untouched]);
+  });
+
   it('keeps the edited tasks when a reload that began before the edit comes back', async () => {
     const queryClient = keepingClient();
     const { result } = await renderLoaded(queryClient);

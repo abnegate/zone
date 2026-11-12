@@ -14,6 +14,8 @@ const INDETERMINATE = 'indeterminate';
 
 type CheckState = boolean | typeof INDETERMINATE;
 
+const SAVE_FAILED = 'The tasks could not be updated';
+
 const UNCHANGED_OPTION = { value: UNCHANGED, label: 'Unchanged' };
 
 const STATUS_CHOICES = [UNCHANGED_OPTION, ...STATUS_OPTIONS];
@@ -85,6 +87,7 @@ function stateOf(original: CheckState, edit: ProjectEdit): CheckState {
 export function EditTasksDialog({ tasks, projects, onSave, onClose }: EditTasksDialogProps) {
   const [edits, setEdits] = useState(Edits.NONE);
   const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
   const membership = useMemo(() => membershipOf(tasks), [tasks]);
   const changes = edits.request();
 
@@ -101,10 +104,11 @@ export function EditTasksDialog({ tasks, projects, onSave, onClose }: EditTasksD
   const save = async () => {
     if (!edits.touched || saving) return;
     setSaving(true);
+    setFailure(null);
     try {
       await onSave(edits.request());
-    } catch {
-      // The page reports the failure; the dialog stays open so the edit can be retried.
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : SAVE_FAILED);
     } finally {
       setSaving(false);
     }
@@ -175,6 +179,12 @@ export function EditTasksDialog({ tasks, projects, onSave, onClose }: EditTasksD
               ))}
             </div>
           </fieldset>
+        )}
+
+        {failure && (
+          <div className="modal-error" role="alert">
+            {failure}
+          </div>
         )}
       </div>
 

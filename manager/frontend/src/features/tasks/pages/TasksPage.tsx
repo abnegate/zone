@@ -40,13 +40,15 @@ const CLEARED = 'Selection cleared';
 const ESCAPE = 'Escape';
 
 const SHIELDED =
-  'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="menu"], [role="listbox"]';
+  'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="menu"], [role="listbox"], [role="combobox"]';
 
 const DRAGGING = '.board[data-dragging]';
 
 const CARD = '.board li[data-task-id]';
 
 const TITLE = '.task-card-open';
+
+const CHECKBOX = '.task-card-select';
 
 const COLUMN = '.board section[data-stage]';
 
@@ -81,8 +83,12 @@ function lost(): boolean {
   return active === null || active === document.body;
 }
 
+function stranded(): boolean {
+  return lost() || document.activeElement?.matches(CHECKBOX) === true;
+}
+
 function returnFocus(id: string | null): void {
-  if (!lost()) return;
+  if (!stranded()) return;
   const card = Array.from(document.querySelectorAll<HTMLElement>(CARD)).find(
     (candidate) => candidate.dataset.taskId === id
   );
@@ -107,7 +113,6 @@ export default function TasksPage() {
   const [selection, setSelection] = useState(Selection.EMPTY);
   const [editing, setEditing] = useState(false);
   const [announcement, setAnnouncement] = useState('');
-  const [returning, setReturning] = useState(false);
   const toggled = useRef<string | null>(null);
   const linkedTaskId = searchParams.get('id');
   const taskParam = searchParams.get('task');
@@ -292,7 +297,6 @@ export default function TasksPage() {
 
   const clearSelection = useCallback(() => {
     setSelection(Selection.EMPTY);
-    setReturning(true);
   }, []);
 
   const saveSelection = async (changes: TaskChanges) => {
@@ -300,10 +304,9 @@ export default function TasksPage() {
     try {
       await updateTasks(ids, changes);
     } catch (failure) {
-      toast.error(`Couldn't update ${quantity(ids.length)}`, {
-        description: refusal(failure, chosen),
-      });
-      throw failure;
+      const description = refusal(failure, chosen);
+      toast.error(`Couldn't update ${quantity(ids.length)}`, { description });
+      throw new Error(description, { cause: failure });
     }
     toast.success(`Updated ${quantity(ids.length)}`);
     setEditing(false);
@@ -324,11 +327,10 @@ export default function TasksPage() {
     return () => window.removeEventListener('keydown', clear);
   }, [escapable, clearSelection]);
 
+  const emptied = visible.size === 0;
   useEffect(() => {
-    if (!returning) return;
-    setReturning(false);
-    returnFocus(toggled.current);
-  }, [returning]);
+    if (emptied && toggled.current !== null) returnFocus(toggled.current);
+  }, [emptied]);
 
   const displayError =
     tasksError ||

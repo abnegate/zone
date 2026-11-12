@@ -365,6 +365,28 @@ describe('EditTasksDialog', () => {
     expect(onSave.mock.calls[1][0]).toEqual({ status: 'paused' });
   });
 
+  it('shows why a save failed inside the dialog and clears it on retry', async () => {
+    const REASON = "Implement login is running, so its status can't change";
+    const retry = deferred();
+    let attempts = 0;
+    renderDialog(() => {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new Error(REASON)) : retry.promise;
+    });
+
+    chooseSelect('Status', 'Paused');
+    fireEvent.click(saveButton());
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(REASON));
+    expect(screen.getByRole('dialog', { name: TITLE }).contains(screen.getByRole('alert'))).toBe(
+      true
+    );
+
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    retry.resolve();
+  });
+
   it('closes from Cancel without saving', () => {
     const { onSave, onClose } = renderDialog();
 
