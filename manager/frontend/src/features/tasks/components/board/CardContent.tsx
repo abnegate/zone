@@ -1,8 +1,9 @@
-import { type MouseEvent, memo, useLayoutEffect, useRef } from 'react';
+import { memo, useLayoutEffect, useRef } from 'react';
+import { gestureOf, keepText } from '../../gesture';
 import type { Relations } from '../../relations';
 import type { TitleDraft } from '../../TitleDraft';
 import { awaitsTitle } from '../../title';
-import type { BoardActions, Gesture, Task } from '../../types';
+import type { BoardActions, Task } from '../../types';
 import { TaskTitleInput } from '../TaskTitleInput';
 import { CardBody } from './CardBody';
 import { CardMenu } from './CardMenu';
@@ -14,21 +15,8 @@ export interface CardContentProps {
   relations: Relations;
   now: number;
   renaming: TitleDraft | null;
+  selected: boolean;
   actions: BoardActions;
-}
-
-const TOGGLE: Gesture = 'toggle';
-
-const RANGE: Gesture = 'range';
-
-function gestureOf(event: MouseEvent): Gesture | null {
-  if (event.shiftKey) return RANGE;
-  if (event.metaKey || event.ctrlKey) return TOGGLE;
-  return null;
-}
-
-function keepText(event: MouseEvent): void {
-  if (event.shiftKey) event.preventDefault();
 }
 
 export const CardContent = memo(function CardContent({
@@ -37,6 +25,7 @@ export const CardContent = memo(function CardContent({
   relations,
   now,
   renaming,
+  selected,
   actions,
 }: CardContentProps) {
   const open = useRef<HTMLButtonElement>(null);
@@ -93,7 +82,7 @@ export const CardContent = memo(function CardContent({
         onOpen={(related) => actions.open(related, task)}
       />
       <div className="task-card-menu" onPointerDown={CardSensor.shield}>
-        <CardMenu task={task} actions={actions} />
+        <CardMenu task={task} selected={selected} actions={actions} />
       </div>
     </>
   );

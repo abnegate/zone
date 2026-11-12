@@ -652,12 +652,31 @@ describe('Card', () => {
     });
   }
 
-  it('lists Run, Rename and a destructive Delete in the menu', async () => {
+  it('lists Run, Rename, Select and a destructive Delete in the menu', async () => {
     renderCard();
     await openMenu(MENU);
     const items = screen.getAllByRole('menuitem');
-    expect(items.map((item) => item.textContent)).toEqual(['Run', 'Rename', 'Delete']);
-    expect(items[2]).toHaveClass('ui-action-menu-item-destructive');
+    expect(items.map((item) => item.textContent)).toEqual(['Run', 'Rename', 'Select', 'Delete']);
+    expect(items[3]).toHaveClass('ui-action-menu-item-destructive');
+  });
+
+  it("toggles the task into the selection from the menu's Select item without opening it", async () => {
+    const { task, actions } = renderCard();
+    await chooseMenuItem(MENU, 'Select');
+    expect(actions.select).toHaveBeenCalledTimes(1);
+    expect(actions.select).toHaveBeenCalledWith(task, 'toggle');
+    expect(actions.open).not.toHaveBeenCalled();
+  });
+
+  it("offers to deselect a selected task from the menu's Deselect item", async () => {
+    const { task, actions } = renderCard({}, { selected: true });
+    await openMenu(MENU);
+    const items = screen.getAllByRole('menuitem');
+    expect(items.map((item) => item.textContent)).toEqual(['Run', 'Rename', 'Deselect', 'Delete']);
+    fireEvent.click(items[2]);
+    await settleMenu();
+    expect(actions.select).toHaveBeenCalledTimes(1);
+    expect(actions.select).toHaveBeenCalledWith(task, 'toggle');
   });
 
   it('swaps the title for an input while renaming and saves the new title', async () => {

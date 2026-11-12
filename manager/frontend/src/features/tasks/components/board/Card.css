@@ -3,6 +3,8 @@
   --task-card-select-size: 1rem;
   --task-card-select-gap: var(--ui-space-2);
   --task-card-select-left: var(--ui-space-3);
+  --task-card-select-above: var(--ui-space-1);
+  --task-card-select-below: var(--ui-space-1);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -61,14 +63,17 @@
   --task-card-surface: color-mix(in srgb, var(--ui-accent) 12%, var(--ui-bg-hover));
 }
 
+.board[data-selecting] .task-card,
+.task-card[data-selected] {
+  padding-left: calc(
+    var(--task-card-select-left) + var(--task-card-select-size) + var(--task-card-select-gap)
+  );
+}
+
 .task-card-heading {
   display: flex;
   align-items: flex-start;
   min-width: 0;
-  padding-left: calc(
-    var(--task-card-select-left) - var(--ui-space-3) + var(--task-card-select-size) +
-      var(--task-card-select-gap)
-  );
 }
 
 .task-card-heading:has(.task-title-edit) {
@@ -181,9 +186,12 @@
   z-index: 1;
   top: calc(var(--ui-space-2-5) + (var(--ui-space-5) - var(--task-card-select-size)) / 2);
   left: var(--task-card-select-left);
+  display: none;
+}
+
+.board[data-selecting] .task-card-selector,
+.task-card[data-selected] .task-card-selector {
   display: flex;
-  opacity: 0;
-  transition: opacity var(--ui-transition-fast);
 }
 
 .task-card-selector .ui-checkbox-wrapper {
@@ -199,8 +207,16 @@
 
 .task-card-select::after {
   position: absolute;
-  inset: calc(-1 * var(--ui-space-1)) calc(-1 * var(--task-card-select-gap))
-    calc(-1 * var(--ui-space-1)) 0;
+  top: 50%;
+  left: 50%;
+  width: calc(var(--task-card-select-size) + var(--task-card-select-gap));
+  height: calc(
+    var(--task-card-select-above) + var(--task-card-select-size) + var(--task-card-select-below)
+  );
+  transform: translate(
+    calc(var(--task-card-select-size) / -2),
+    calc(-1 * (var(--task-card-select-above) + var(--task-card-select-size) / 2))
+  );
   content: '';
 }
 
@@ -230,12 +246,8 @@
 }
 
 .task-card:hover .task-card-handle,
-.task-card:hover .task-card-selector,
 .task-card:hover .task-card-menu,
-.task-card:focus-within .task-card-selector,
 .task-card:focus-within .task-card-menu,
-.task-card[data-selected] .task-card-selector,
-.board[data-selecting] .task-card-selector,
 .task-card-menu:has([data-state='open']) {
   opacity: 1;
 }
@@ -484,17 +496,13 @@ a.task-card-pull-request:hover .task-card-pull-request-number {
 @media (any-pointer: coarse) {
   .task-card {
     --task-card-select-left: calc(var(--ui-space-3) + var(--ui-space-2));
+    --task-card-select-above: var(--ui-space-3);
+    --task-card-select-below: var(--ui-space-4);
   }
 
   .task-card-handle,
-  .task-card-selector,
   .task-card-menu {
     opacity: 1;
-  }
-
-  .task-card-select::after {
-    inset: calc(-1 * var(--ui-space-3)) calc(-1 * var(--task-card-select-gap))
-      calc(-1 * var(--ui-space-4)) 0;
   }
 
   .task-card-heading {
@@ -513,15 +521,18 @@ a.task-card-pull-request:hover .task-card-pull-request-number {
     top: calc(-1 * var(--ui-space-2-5));
     right: auto;
     left: calc(-1 * var(--ui-space-2));
-    width: calc(var(--task-card-select-left) + var(--ui-space-2));
     transform: none;
+  }
+
+  .board[data-selecting] .task-card-handle::after,
+  .task-card[data-selected] .task-card-handle::after {
+    width: calc(var(--task-card-select-left) + var(--ui-space-2));
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .task-card,
   .task-card-handle,
-  .task-card-selector,
   .task-card-menu {
     transition: none;
   }

@@ -1,9 +1,9 @@
 import { useDraggable } from '@dnd-kit/core';
 import { Checkbox } from '@zone/ui';
-import type { MouseEvent } from 'react';
+import { gestureOf, keepText, TOGGLE } from '../../gesture';
 import type { Relations } from '../../relations';
 import type { TitleDraft } from '../../TitleDraft';
-import type { BoardActions, Gesture, Task } from '../../types';
+import type { BoardActions, Task } from '../../types';
 import { CardContent } from './CardContent';
 import { CardSensor } from './CardSensor';
 import { GripIcon } from './GripIcon';
@@ -17,14 +17,6 @@ export interface CardProps {
   renaming: TitleDraft | null;
   selected: boolean;
   actions: BoardActions;
-}
-
-const TOGGLE: Gesture = 'toggle';
-
-const RANGE: Gesture = 'range';
-
-function keepText(event: MouseEvent): void {
-  if (event.shiftKey) event.preventDefault();
 }
 
 export function Card({ task, projects, relations, now, renaming, selected, actions }: CardProps) {
@@ -58,7 +50,7 @@ export function Card({ task, projects, relations, now, renaming, selected, actio
           aria-label={`Select ${task.title}`}
           checked={selected}
           onMouseDown={keepText}
-          onClick={(event) => actions.select(task, event.shiftKey ? RANGE : TOGGLE)}
+          onClick={(event) => actions.select(task, gestureOf(event) ?? TOGGLE)}
         />
       </div>
       <CardContent
@@ -67,6 +59,7 @@ export function Card({ task, projects, relations, now, renaming, selected, actio
         relations={relations}
         now={now}
         renaming={renaming}
+        selected={selected}
         actions={actions}
       />
     </li>

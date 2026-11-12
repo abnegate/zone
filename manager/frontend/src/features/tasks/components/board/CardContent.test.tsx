@@ -97,7 +97,7 @@ describe('CardContent', () => {
     expect(menus).toEqual(rendered);
   });
 
-  it('does not render again when cards are selected and cleared', () => {
+  it('renders again only the cards whose selection changes', () => {
     const view = new View();
     const show = (selected: ReadonlySet<string>) => (
       <Board
@@ -118,8 +118,14 @@ describe('CardContent', () => {
       'aria-checked',
       'true'
     );
+    rerender(show(new Set(['write', 'ship'])));
     rerender(show(new Set()));
 
-    expect(menus).toEqual(rendered);
+    const again = (id: string) => (menus.get(id) ?? 0) - (rendered.get(id) ?? 0);
+    expect(TASKS.map((task) => [task.id, again(task.id)])).toEqual([
+      ['write', 2],
+      ['build', 0],
+      ['ship', 2],
+    ]);
   });
 });

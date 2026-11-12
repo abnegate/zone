@@ -334,6 +334,11 @@ describe('tasks page layout', () => {
   const board = read(join(boardStyles, 'Board.css'));
   const columns = read(join(boardStyles, 'Column.css'));
   const cards = read(join(boardStyles, 'Card.css'));
+  const SELECTING_SELECTOR =
+    '.board[data-selecting] .task-card-selector, .task-card[data-selected] .task-card-selector';
+  const SELECTING_CARD = '.board[data-selecting] .task-card, .task-card[data-selected]';
+  const SELECTING_GRIP =
+    '.board[data-selecting] .task-card-handle::after, .task-card[data-selected] .task-card-handle::after';
 
   it('scrolls the board sideways in its own row of fixed-width columns', () => {
     expect(rule(board, '.board')).toContain('overflow-x: auto');
@@ -373,12 +378,47 @@ describe('tasks page layout', () => {
     expect(target).not.toContain('left:');
   });
 
-  it('shows the grip, the selector and the menu wherever any pointer is coarse, not only without hover', () => {
+  it('shows the grip and the menu wherever any pointer is coarse, not only without hover', () => {
     expect(cards).not.toContain('(hover: none)');
     const touch = media(cards, '(any-pointer: coarse)');
-    expect(rule(touch, '.task-card-handle, .task-card-selector, .task-card-menu')).toContain(
-      'opacity: 1'
+    expect(rule(touch, '.task-card-handle, .task-card-menu')).toContain('opacity: 1');
+  });
+
+  it('shows the card checkboxes only while selecting, never on hover or focus', () => {
+    const selector = rule(cards, '.task-card-selector');
+    expect(selector).toContain('display: none');
+    expect(selector).not.toContain('opacity');
+    expect(rule(cards, SELECTING_SELECTOR)).toBe('display: flex;');
+    expect(cards).not.toMatch(/:(hover|focus-within) \.task-card-selector/);
+    expect(media(cards, '(any-pointer: coarse)')).not.toContain('.task-card-selector');
+  });
+
+  it('indents the title and everything under it together, and only while selecting', () => {
+    expect(rule(cards, '.task-card-heading')).not.toContain('padding-left');
+    expect(rule(cards, SELECTING_CARD)).toBe(
+      'padding-left: calc( var(--task-card-select-left) + var(--task-card-select-size) + var(--task-card-select-gap) );'
     );
+  });
+
+  it('gives the grip its whole 44px square on a touch screen until selecting shares it with the checkbox', () => {
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-handle::after')).not.toContain('width');
+    expect(rule(touch, SELECTING_GRIP)).toBe(
+      'width: calc(var(--task-card-select-left) + var(--ui-space-2));'
+    );
+    const card = rule(touch, '.task-card');
+    expect(card).toContain('--task-card-select-above: var(--ui-space-3)');
+    expect(card).toContain('--task-card-select-below: var(--ui-space-4)');
+  });
+
+  it('stretches the checkbox hit area from its outer edge to the title, whatever its border', () => {
+    const target = rule(cards, '.task-card-select::after');
+    expect(target).toContain('left: 50%');
+    expect(target).toContain(
+      'width: calc(var(--task-card-select-size) + var(--task-card-select-gap))'
+    );
+    expect(target).toContain('translate( calc(var(--task-card-select-size) / -2)');
+    expect(target).not.toContain('inset');
   });
 
   it('keeps the drag placeholder muted and dashed in the dark theme and under the pointer', () => {

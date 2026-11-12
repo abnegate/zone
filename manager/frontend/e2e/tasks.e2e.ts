@@ -267,14 +267,35 @@ function edits(server: TaskServer): Mutation[] {
 }
 
 function selection(page: Page): Locator {
-  return page.getByRole('toolbar', { name: 'Selected tasks', exact: true });
+  return page.getByRole('group', { name: 'Selected tasks', exact: true });
+}
+
+function checkbox(page: Page, title: string): Locator {
+  return page.getByRole('checkbox', { name: `Select ${title}`, exact: true });
 }
 
 async function select(page: Page, titles: readonly string[]): Promise<void> {
-  for (const title of titles) {
-    await page.getByRole('checkbox', { name: `Select ${title}`, exact: true }).click();
+  const [first, ...rest] = titles;
+  await page.getByRole('button', { name: first, exact: true }).click({
+    modifiers: ['ControlOrMeta'],
+  });
+  for (const title of rest) {
+    await checkbox(page, title).click();
   }
   await expect(selection(page)).toContainText(`${titles.length} selected`);
+}
+
+async function indents(page: Page, title: string) {
+  return card(page, title).evaluate((item) => {
+    const heading = item.querySelector<HTMLElement>('.task-card-open');
+    const meta = item.querySelector<HTMLElement>('.task-card-meta');
+    if (!heading || !meta) throw new Error('The card has no title or meta row');
+    const edge = item.getBoundingClientRect().left + item.clientLeft;
+    return {
+      title: heading.getBoundingClientRect().left - edge,
+      meta: meta.getBoundingClientRect().left - edge,
+    };
+  });
 }
 
 async function openMenu(page: Page, title: string): Promise<void> {
@@ -850,13 +871,8 @@ test.describe('Tasks Page', () => {
         });
       expect(await measure()).toEqual({ underHeader: 0, clear: 0 });
 
-      const tab = browserName === 'webkit' ? 'Alt+Tab' : 'Tab';
       await page.getByRole('button', { name: 'Move Implement login page', exact: true }).focus();
-      await page.keyboard.press(tab);
-      await expect(
-        page.getByRole('checkbox', { name: 'Select Implement login page', exact: true })
-      ).toBeFocused();
-      await page.keyboard.press(tab);
+      await page.keyboard.press(browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
       await expect(
         page.getByRole('button', { name: 'Implement login page', exact: true })
       ).toBeFocused();
@@ -1325,6 +1341,52 @@ test.describe('Tasks Page', () => {
       await expect(page).toHaveURL('/tasks');
     });
 
+    test('checkboxes stay hidden until a card is selected from its menu', async ({
+      context,
+      page,
+    }) => {
+      await serveTasks(context, page);
+      await expect(card(page, 'Implement login page')).toBeVisible();
+      await expect(checkbox(page, 'Implement login page')).toBeHidden();
+      await expect(checkbox(page, 'Fix navigation bug')).toBeHidden();
+
+      await chooseFromMenu(page, 'Implement login page', 'Select');
+
+      await expect(selection(page)).toContainText('1 selected');
+      await expect(checkbox(page, 'Implement login page')).toBeChecked();
+      await expect(checkbox(page, 'Fix navigation bug')).toBeVisible();
+      await expect(checkbox(page, 'Fix navigation bug')).not.toBeChecked();
+      await checkbox(page, 'Fix navigation bug').click();
+      await expect(selection(page)).toContainText('2 selected');
+
+      await chooseFromMenu(page, 'Implement login page', 'Deselect');
+      await expect(selection(page)).toContainText('1 selected');
+      await checkbox(page, 'Fix navigation bug').click();
+      await expect(selection(page)).toHaveCount(0);
+      await expect(checkbox(page, 'Fix navigation bug')).toBeHidden();
+    });
+
+    test('a title stays flush with its meta row, and both indent together while selecting', async ({
+      context,
+      page,
+    }) => {
+      await serveTasks(context, page);
+      await expect(card(page, 'Implement login page')).toBeVisible();
+      expect(await indents(page, 'Implement login page')).toEqual({ title: 12, meta: 12 });
+
+      await select(page, ['Fix navigation bug']);
+
+      expect(await indents(page, 'Implement login page')).toEqual({ title: 36, meta: 36 });
+      expect(await indents(page, 'Fix navigation bug')).toEqual({ title: 36, meta: 36 });
+      const gap = await card(page, 'Implement login page').evaluate((item) => {
+        const box = item.querySelector<HTMLElement>('.task-card-select');
+        const title = item.querySelector<HTMLElement>('.task-card-open');
+        if (!box || !title) throw new Error('The card has no checkbox or title');
+        return title.getBoundingClientRect().left - box.getBoundingClientRect().right;
+      });
+      expect(gap).toBe(8);
+    });
+
     test('dragging a selected card by its grip moves only that card', async ({
       context,
       page,
@@ -1346,14 +1408,12 @@ test.describe('Tasks Page', () => {
     test.describe('on a touch screen', () => {
       test.use({ hasTouch: true });
 
-      test('a grip can be hit anywhere in a 44px tall target that ends where its checkbox begins', async ({
-        context,
-        page,
-      }) => {
+      test('a grip can be hit anywhere in a 44px square around it', async ({ context, page }) => {
         await serveTasks(context, page);
         await shrinkToPhone(page);
         const grip = page.getByRole('button', { name: 'Move Implement login page', exact: true });
         await expect(grip).toBeVisible();
+        await expect(checkbox(page, 'Implement login page')).toBeHidden();
 
         const target = await grip.evaluate((handle) => {
           const area = getComputedStyle(handle, '::after');
@@ -1368,7 +1428,6 @@ test.describe('Tasks Page', () => {
             [left + 1, top + height - 1],
             [left + width - 1, top + height - 1],
           ];
-          const beyond = document.elementFromPoint(left + width + 1, box.top + box.height / 2);
           return {
             touch: matchMedia('(any-pointer: coarse)').matches,
             grip: [box.width, box.height],
@@ -1377,17 +1436,66 @@ test.describe('Tasks Page', () => {
             hits: corners.map(
               ([x, y]) => document.elementFromPoint(x, y)?.closest('.task-card-handle') === handle
             ),
-            checkbox: beyond?.closest('.task-card-select')?.getAttribute('aria-label') ?? null,
           };
         });
 
         expect(target).toEqual({
           touch: true,
           grip: [12, 20],
-          width: 28,
+          width: 44,
           height: 44,
           hits: [true, true, true, true],
-          checkbox: 'Select Implement login page',
+        });
+      });
+
+      test('while selecting, the grip and the checkbox split the space before the title without overlapping', async ({
+        context,
+        page,
+      }) => {
+        await serveTasks(context, page);
+        await shrinkToPhone(page);
+        await chooseFromMenu(page, 'Implement login page', 'Select');
+        await expect(selection(page)).toContainText('1 selected');
+
+        const targets = await card(page, 'Implement login page').evaluate((item) => {
+          const handle = item.querySelector<HTMLElement>('.task-card-handle');
+          const box = item.querySelector<HTMLElement>('.task-card-select');
+          const title = item.querySelector<HTMLElement>('.task-card-open');
+          if (!handle || !box || !title) throw new Error('The card has no grip, checkbox or title');
+          const style = getComputedStyle(handle, '::after');
+          const grip = handle.getBoundingClientRect();
+          const left = grip.left + Number.parseFloat(style.left);
+          const top = grip.top + Number.parseFloat(style.top);
+          const width = Number.parseFloat(style.width);
+          const height = Number.parseFloat(style.height);
+          const start = box.getBoundingClientRect().left;
+          const end = title.getBoundingClientRect().left;
+          const owner = (x: number, y: number) => {
+            const element = document.elementFromPoint(x, y);
+            if (element?.closest('.task-card-handle')) return 'grip';
+            if (element?.closest('.task-card-select')) return 'checkbox';
+            if (element?.closest('.task-card-open')) return 'title';
+            return null;
+          };
+          const row = (y: number) =>
+            [left + 1, start - 1, start + 1, end - 1, end + 1].map((x) => owner(x, y));
+          return {
+            grip: [width, height],
+            checkbox: end - start,
+            between: start - (left + width),
+            top: row(top + 1),
+            bottom: row(top + height - 1),
+            below: owner(start + 1, top + height + 1),
+          };
+        });
+
+        expect(targets).toEqual({
+          grip: [28, 44],
+          checkbox: 24,
+          between: 0,
+          top: ['grip', 'grip', 'checkbox', 'checkbox', 'title'],
+          bottom: ['grip', 'grip', 'checkbox', 'checkbox', 'title'],
+          below: 'title',
         });
       });
 
