@@ -720,11 +720,7 @@ async fn a_server_is_found_only_under_its_own_organization() {
     let stored = [(&ours, &own), (&theirs, &foreign)];
     let mut before = Vec::new();
     for (tenant, server) in stored {
-        let read = client
-            .get_auth(&tenant.server(server), &tenant.owner.token)
-            .await;
-        read.assert_status(StatusCode::OK);
-        before.push(read.json_value());
+        before.push(settle(&client, &tenant.server(server), &tenant.owner.token, FAILED).await);
     }
 
     for (tenant, server) in [(&ours, &foreign), (&theirs, &own)] {

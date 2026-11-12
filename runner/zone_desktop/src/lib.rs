@@ -2,16 +2,16 @@
 
 use std::path::PathBuf;
 
-#[cfg(desktop)]
-use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use zone_installer::client::{ClientPlatform, ManagerDirInputs, WEBVIEW_BIND};
 use zone_installer::frontend::{self, AppMode};
 use zone_installer::serve::AppState;
-use zone_installer::{ServeKind, bind, config_path, resolve_manager_dir, router};
+use zone_installer::{MANAGER_DIR, ServeKind, bind, config_path, resolve_manager_dir, router};
 
 mod manager_bundle;
+#[cfg(desktop)]
+mod menu;
 
 struct ClientState {
     server: AppState,
@@ -39,7 +39,7 @@ pub fn run() {
         let Some(state) = app.try_state::<ClientState>() else {
             return;
         };
-        if event.id().as_ref() == "change-server" {
+        if event.id().as_ref() == menu::CHANGE_SERVER {
             state.server.set_mode(AppMode::Setup);
             reload_main(app);
         }
@@ -92,7 +92,7 @@ async fn setup_client(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> 
     });
 
     #[cfg(desktop)]
-    build_menu(&app)?;
+    menu::build(&app)?;
 
     open_window(&app, &url)?;
     Ok(())
@@ -123,23 +123,6 @@ fn open_window(app: &AppHandle, url: &str) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
-#[cfg(desktop)]
-fn build_menu(app: &AppHandle) -> tauri::Result<()> {
-    let change_server = MenuItemBuilder::with_id("change-server", "Change Server…")
-        .accelerator("CmdOrCtrl+,")
-        .build(app)?;
-    let zone_menu = SubmenuBuilder::new(app, "Zone")
-        .about(None)
-        .separator()
-        .item(&change_server)
-        .separator()
-        .quit()
-        .build()?;
-    let menu = MenuBuilder::new(app).item(&zone_menu).build()?;
-    app.set_menu(menu)?;
-    Ok(())
-}
-
 fn reload_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.eval("window.location.reload()");
@@ -147,11 +130,15 @@ fn reload_main(app: &AppHandle) {
 }
 
 fn manager_dir(app: &AppHandle) -> PathBuf {
-    let app_data_dir = app.path().app_data_dir().ok();
-    if ClientPlatform::current().is_mobile()
-        && let Some(data) = &app_data_dir
-    {
-        let dest = data.join("manager");
+    let platform = ClientPlatform::current();
+    // A stub build must not read a bundle an earlier build unpacked, or it shadows the checkout.
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .ok()
+        .filter(|_| manager_bundle::unpacks(platform, manager_bundle::EMBEDDED));
+    if let Some(data) = &app_data_dir {
+        let dest = data.join(MANAGER_DIR);
         if let Err(error) = manager_bundle::materialize(&dest) {
             tracing::error!(
                 %error,
@@ -161,11 +148,11 @@ fn manager_dir(app: &AppHandle) -> PathBuf {
         }
     }
     resolve_manager_dir(ManagerDirInputs {
-        platform: ClientPlatform::current(),
+        platform,
         resource_dir: app.path().resource_dir().ok(),
         app_data_dir,
         cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-        system_share_dir: Some(PathBuf::from("/usr/share/zone/manager")),
+        system_share_dir: Some(PathBuf::from(frontend::DEBIAN_MANAGER_DIR)),
     })
 }
 

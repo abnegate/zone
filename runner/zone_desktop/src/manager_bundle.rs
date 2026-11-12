@@ -2,9 +2,15 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use zone_installer::ClientPlatform;
+
 include!(concat!(env!("OUT_DIR"), "/manager_files.rs"));
 
 const STAMP_NAME: &str = ".bundle-stamp";
+
+pub fn unpacks(platform: ClientPlatform, embedded: bool) -> bool {
+    embedded || platform.is_mobile()
+}
 
 pub fn materialize(dest: &Path) -> io::Result<()> {
     let stamp_path = dest.join(STAMP_NAME);
@@ -33,6 +39,24 @@ pub fn materialize(dest: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_unpacks_a_real_bundle() {
+        assert!(unpacks(ClientPlatform::Desktop, true));
+    }
+
+    #[test]
+    fn desktop_skips_the_stub_bundle() {
+        assert!(!unpacks(ClientPlatform::Desktop, false));
+    }
+
+    #[test]
+    fn mobile_always_unpacks() {
+        for platform in [ClientPlatform::Android, ClientPlatform::Ios] {
+            assert!(unpacks(platform, true));
+            assert!(unpacks(platform, false));
+        }
+    }
 
     #[test]
     fn materialize_writes_index_html() {
