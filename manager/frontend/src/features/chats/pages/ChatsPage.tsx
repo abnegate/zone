@@ -281,7 +281,13 @@ export default function ChatsPage() {
     indicators,
     loaded: indicatorsLoaded,
     error: indicatorsError,
-  } = useChatIndicators(currentWorkspace?.id, showArchived, streaming, chats.length);
+  } = useChatIndicators(
+    currentWorkspace?.id,
+    showArchived,
+    streaming,
+    chats.length,
+    listSort(sort)
+  );
   // The open chat's own socket knows it is writing before the next poll does,
   // and only ever adds that: a reading the server made stands until it is read
   // again, because this socket cannot see a turn somebody else's can.
@@ -1369,43 +1375,48 @@ export default function ChatsPage() {
             }
             action={!showArchived ? <Button onClick={openNewChat}>New chat</Button> : undefined}
           />
-        ) : matching.length === 0 && waitingForStatuses ? (
-          // A saved filter starts with no readings, so every chat is filtered
-          // out until the first one lands. Saying nothing matches before then
-          // would be answering a question nobody has read the answer to yet.
-          <div className="chats-loading">
-            <span className="spinner" /> Reading chat statuses...
-          </div>
-        ) : matching.length === 0 ? (
-          <EmptyState
-            icon={
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M4 5h16M7 12h10M10 19h4" />
-              </svg>
-            }
-            title="No chats match this filter"
-            description={
-              CHAT_FILTER_OPTIONS.find((option) => option.value === filter)?.label ?? filter
-            }
-            action={
-              <Button variant="secondary" onClick={clearFilter}>
-                Show all chats
-              </Button>
-            }
-          />
         ) : (
           <div className="chats-list">
-            {arranged.map((group) => (
-              <div
-                key={group.key}
-                className="chat-group"
-                role="group"
-                aria-label={group.label ?? undefined}
-              >
-                {group.label ? <h2 className="chat-group-header">{group.label}</h2> : null}
-                {group.chats.map(renderChatItem)}
+            {matching.length === 0 && waitingForStatuses ? (
+              // A saved filter starts with no readings, so every chat is
+              // filtered out until the first one lands. Saying nothing matches
+              // before then would answer a question nobody has read yet.
+              <div className="chats-loading">
+                <span className="spinner" /> Reading chat statuses...
               </div>
-            ))}
+            ) : matching.length === 0 ? (
+              // Nothing loaded matches, which is not the same as nothing
+              // matching: the pagination below stays, so the next page can be
+              // loaded without clearing the filter first.
+              <EmptyState
+                icon={
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M4 5h16M7 12h10M10 19h4" />
+                  </svg>
+                }
+                title="No loaded chats match this filter"
+                description={
+                  CHAT_FILTER_OPTIONS.find((option) => option.value === filter)?.label ?? filter
+                }
+                action={
+                  <Button variant="secondary" onClick={clearFilter}>
+                    Show all chats
+                  </Button>
+                }
+              />
+            ) : (
+              arranged.map((group) => (
+                <div
+                  key={group.key}
+                  className="chat-group"
+                  role="group"
+                  aria-label={group.label ?? undefined}
+                >
+                  {group.label ? <h2 className="chat-group-header">{group.label}</h2> : null}
+                  {group.chats.map(renderChatItem)}
+                </div>
+              ))
+            )}
             {moreChats ? (
               <MoreChats
                 remaining={chatsTotal - chats.length}

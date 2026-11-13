@@ -38,7 +38,7 @@ describe('useChatIndicators', () => {
     const { result } = renderHook(() => useChatIndicators('workspace-1', false, false, 25));
 
     await waitFor(() => expect(result.current.indicators).toEqual({ 'chat-1': WRITING }));
-    expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 25);
+    expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 25, undefined);
   });
 
   it('asks for nothing until the list has rows to read for', async () => {
@@ -57,13 +57,31 @@ describe('useChatIndicators', () => {
     );
 
     await waitFor(() =>
-      expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 25)
+      expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 25, undefined)
     );
 
     rerender({ listed: 50 });
 
     await waitFor(() =>
-      expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 50)
+      expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 50, undefined)
+    );
+  });
+
+  it('reads in the order the list was asked for, and again when that order changes', async () => {
+    mockGetChatIndicators.mockResolvedValue([WRITING]);
+    const { rerender } = renderHook(
+      ({ sort }) => useChatIndicators('workspace-1', false, false, 25, sort),
+      { initialProps: { sort: 'title_asc' as const } }
+    );
+
+    await waitFor(() =>
+      expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 25, 'title_asc')
+    );
+
+    rerender({ sort: 'created_desc' as const });
+
+    await waitFor(() =>
+      expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 25, 'created_desc')
     );
   });
 

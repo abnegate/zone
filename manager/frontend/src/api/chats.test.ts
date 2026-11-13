@@ -409,3 +409,53 @@ describe('chatsApi.getChats', () => {
     expect(page.total).toBe(51);
   });
 });
+
+describe('chatsApi.getChatIndicators', () => {
+  const indicator = (chat_id: string) => ({
+    chat_id,
+    activity: 'idle',
+    pull_request: null,
+    pull_requests: 0,
+  });
+
+  const pages = (request: ReturnType<typeof mock>): Array<Record<string, string | null>> =>
+    request.mock.calls.map(([url]) => {
+      const parameters = new URL(url as string, 'http://console.test').searchParams;
+      return {
+        limit: parameters.get('limit'),
+        offset: parameters.get('offset'),
+        sort: parameters.get('sort'),
+      };
+    });
+
+  it('splits a list loaded past the server limit into requests it accepts', async () => {
+    const request = mock(async () => Response.json({ chats: [indicator('chat-1')] }));
+    globalThis.fetch = request as unknown as typeof globalThis.fetch;
+
+    const readings = await chatsApi.getChatIndicators('ws-1', false, 125, 'title_asc');
+
+    expect(pages(request)).toEqual([
+      { limit: '100', offset: '0', sort: 'title_asc' },
+      { limit: '25', offset: '100', sort: 'title_asc' },
+    ]);
+    expect(readings).toHaveLength(2);
+  });
+
+  it('asks once when the loaded rows fit inside one request', async () => {
+    const request = mock(async () => Response.json({ chats: [] }));
+    globalThis.fetch = request as unknown as typeof globalThis.fetch;
+
+    await chatsApi.getChatIndicators('ws-1', false, 25, 'updated_desc');
+
+    expect(pages(request)).toEqual([{ limit: '25', offset: '0', sort: 'updated_desc' }]);
+  });
+
+  it('asks for the whole list when no loaded count is given', async () => {
+    const request = mock(async () => Response.json({ chats: [] }));
+    globalThis.fetch = request as unknown as typeof globalThis.fetch;
+
+    await chatsApi.getChatIndicators('ws-1', false);
+
+    expect(pages(request)).toEqual([{ limit: null, offset: null, sort: null }]);
+  });
+});

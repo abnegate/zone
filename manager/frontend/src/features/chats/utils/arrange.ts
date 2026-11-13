@@ -1,5 +1,6 @@
 import type { Chat, ChatIndicator } from '../types';
 import { attentionRank } from './indicators';
+import { readAllowed, writeStored } from './storage';
 
 export const CHAT_GROUP_BY = ['none', 'project', 'date'] as const;
 export type ChatGroupBy = (typeof CHAT_GROUP_BY)[number];
@@ -99,11 +100,11 @@ export function readChatSort(): ChatSort {
 }
 
 export function writeChatGroupBy(value: ChatGroupBy): void {
-  localStorage.setItem(CHAT_GROUP_STORAGE_KEY, value);
+  writeStored(CHAT_GROUP_STORAGE_KEY, value);
 }
 
 export function writeChatSort(value: ChatSort): void {
-  localStorage.setItem(CHAT_SORT_STORAGE_KEY, value);
+  writeStored(CHAT_SORT_STORAGE_KEY, value);
 }
 
 export function arrangeChats(chats: readonly Chat[], options: ArrangeChatsOptions): ChatGroup[] {
@@ -126,11 +127,6 @@ export function arrangeChats(chats: readonly Chat[], options: ArrangeChatsOption
   }
 
   return [...buckets.values()].sort((left, right) => compareGroups(left, right, groupBy, sort));
-}
-
-function readAllowed<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
-  const value = localStorage.getItem(key);
-  return value !== null && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
 }
 
 function compareChats(

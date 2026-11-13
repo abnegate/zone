@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import type { ChatIndicator } from '../types';
+import type { ServerChatSort } from '../utils/arrange';
 import { byChat } from '../utils/indicators';
 
 /**
@@ -47,7 +48,13 @@ export function useChatIndicators(
    * that slice, asked for again when another page lands, and not asked for at
    * all until the list has rows.
    */
-  listed = 0
+  listed = 0,
+  /**
+   * The order the list was asked for. The endpoint pages by it, so reading in
+   * any other order would describe a different set of chats than the rows on
+   * screen.
+   */
+  sort?: ServerChatSort
 ): ChatIndicators {
   const [indicators, setIndicators] = useState<Record<string, ChatIndicator>>({});
   const [loading, setLoading] = useState(false);
@@ -71,7 +78,7 @@ export function useChatIndicators(
     if (listed === 0) return;
     setLoading(true);
     try {
-      const loaded = await chatsApi.getChatIndicators(workspaceId, archived, listed);
+      const loaded = await chatsApi.getChatIndicators(workspaceId, archived, listed, sort);
       if (current !== read.current) return;
       setIndicators(byChat(loaded));
       setError(null);
@@ -84,7 +91,7 @@ export function useChatIndicators(
         setLoaded(true);
       }
     }
-  }, [workspaceId, archived, listed]);
+  }, [workspaceId, archived, listed, sort]);
 
   // A different workspace or tab is a different list, so its readings start
   // again. A further page of the same list is not: blanking the map there

@@ -1,4 +1,5 @@
 import type { ChatActivity, ChatIndicator, ChatPullIndicator } from '../types';
+import { readAllowed, writeStored } from './storage';
 
 /**
  * Whether the chat has stopped and is waiting for a person, which is the
@@ -78,12 +79,11 @@ export function isChatFilter(value: string): value is ChatFilter {
 }
 
 export function readChatFilter(): ChatFilter {
-  const value = localStorage.getItem(CHAT_FILTER_STORAGE_KEY);
-  return value !== null && isChatFilter(value) ? value : 'all';
+  return readAllowed(CHAT_FILTER_STORAGE_KEY, CHAT_FILTERS, 'all');
 }
 
 export function writeChatFilter(value: ChatFilter): void {
-  localStorage.setItem(CHAT_FILTER_STORAGE_KEY, value);
+  writeStored(CHAT_FILTER_STORAGE_KEY, value);
 }
 
 /**

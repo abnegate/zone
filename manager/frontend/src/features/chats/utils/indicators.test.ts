@@ -3,11 +3,14 @@ import type { ChatIndicator, ChatPullIndicator, PullRequestStatus } from '../typ
 import {
   attentionRank,
   byChat,
+  CHAT_FILTER_STORAGE_KEY,
   indicatorTitle,
   isChatFilter,
   matchesFilter,
   pullDetail,
   pullSignal,
+  readChatFilter,
+  writeChatFilter,
 } from './indicators';
 
 const STATUS: PullRequestStatus = {
@@ -190,6 +193,43 @@ describe('filtering', () => {
   it('knows which filters exist', () => {
     expect(isChatFilter('ready')).toBe(true);
     expect(isChatFilter('whatever')).toBe(false);
+  });
+});
+
+describe('the remembered filter', () => {
+  function withRefusingStorage(run: () => void): void {
+    const { getItem, setItem } = localStorage;
+    const refuse = () => {
+      throw new Error('The operation is insecure.');
+    };
+    localStorage.getItem = refuse;
+    localStorage.setItem = refuse;
+    try {
+      run();
+    } finally {
+      localStorage.getItem = getItem;
+      localStorage.setItem = setItem;
+    }
+  }
+
+  it('falls back to all chats when storage will not be read', () => {
+    withRefusingStorage(() => {
+      expect(readChatFilter()).toBe('all');
+    });
+  });
+
+  it('applies for the session when storage will not be written', () => {
+    withRefusingStorage(() => {
+      expect(() => writeChatFilter('ready')).not.toThrow();
+    });
+  });
+
+  it('round-trips a choice and ignores one it does not recognise', () => {
+    writeChatFilter('failing');
+    expect(readChatFilter()).toBe('failing');
+    localStorage.setItem(CHAT_FILTER_STORAGE_KEY, 'whatever');
+    expect(readChatFilter()).toBe('all');
+    localStorage.removeItem(CHAT_FILTER_STORAGE_KEY);
   });
 });
 

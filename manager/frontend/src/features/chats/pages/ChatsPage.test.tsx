@@ -6080,7 +6080,7 @@ describe('ChatsPage', () => {
       expect(localStorage.getItem(CHAT_FILTER_STORAGE_KEY)).toBe('failing');
 
       chooseSelect('Filter chats by status', 'Ready to merge');
-      expect(await screen.findByText('No chats match this filter')).toBeInTheDocument();
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Show all chats' }));
       expect(await screen.findByText('Chat 1')).toBeInTheDocument();
       expect(localStorage.getItem(CHAT_FILTER_STORAGE_KEY)).toBe('all');
@@ -6115,12 +6115,30 @@ describe('ChatsPage', () => {
       renderChatsPage();
 
       expect(await screen.findByText('Reading chat statuses...')).toBeInTheDocument();
-      expect(screen.queryByText('No chats match this filter')).toBeNull();
+      expect(screen.queryByText('No loaded chats match this filter')).toBeNull();
 
       await act(async () => {
         answer([]);
       });
-      expect(await screen.findByText('No chats match this filter')).toBeInTheDocument();
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+    });
+
+    it('still offers the next page when nothing loaded matches the filter', async () => {
+      mockGetChats.mockResolvedValue({ chats: mockChats, total: mockChats.length + 25 });
+      mockGetChatIndicators.mockResolvedValue(
+        mockChats.map((chat) => indicator(chat.id, { activity: 'idle' }))
+      );
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Filter chats by status' });
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /Load more chats/ })).toBeInTheDocument()
+      );
+
+      chooseSelect('Filter chats by status', 'Ready to merge');
+
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Load more chats/ })).toBeInTheDocument();
     });
 
     it('says the statuses are stale when the reading fails, and still lists the chats', async () => {
