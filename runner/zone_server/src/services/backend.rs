@@ -9,7 +9,6 @@ pub use resolved::Resolved;
 pub use routing::Routing;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use abnegate_agent_cli::{AgentKind, CliSettings, STDERR_HEADING, Session};
 use abnegate_llm::{Credential, ReasoningEffort};
@@ -119,10 +118,6 @@ fn resetting(resets_at: Option<DateTime<Utc>>) -> String {
         None => "none reports when it resets".to_string(),
     }
 }
-
-/// How long the crate may take to stop a coding agent that ran out of time, drain what it wrote
-/// and hand back the answer it kept.
-const STOPPING: Duration = Duration::from_secs(30);
 
 /// The instance-wide default the environment selects, with every variable its
 /// agent runs with.
@@ -352,22 +347,6 @@ pub fn remedied(backend: &LlmBackend, message: String) -> Remedied {
             signed_out: false,
         },
     }
-}
-
-/// `backend` with a coding agent's turn given `timeout`: the budget of what
-/// it runs for, a chat's or a task attempt's, rather than its own default.
-pub fn bounded(backend: LlmBackend, timeout: Duration) -> LlmBackend {
-    backend.configured(|settings| settings.with_timeout(timeout))
-}
-
-/// `backend` with a coding agent stopped far enough ahead of a deadline `remaining` away that
-/// the crate has stopped it, and handed back the answer it kept, before that deadline gives up
-/// on the turn. Stopping takes at most [`STOPPING`], and never more than a quarter of the time.
-pub fn ahead_of(backend: LlmBackend, remaining: Duration) -> LlmBackend {
-    bounded(
-        backend,
-        remaining.saturating_sub(STOPPING.min(remaining / 4)),
-    )
 }
 
 /// `backend` with a coding agent run in `directory`, where a chat's tools run, in place of the
@@ -1408,27 +1387,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bounded_agent_runs_for_the_budget_it_is_given_and_an_endpoint_is_left_alone() {
-        let budget = Duration::from_secs(3600);
-        let organizations = LlmBackend::cli(AgentKind::Codex, CliSettings::default())
-            .with_sign_in(SignIn::Organization);
-
-        let LlmBackend::Cli {
-            settings, sign_in, ..
-        } = bounded(organizations, budget)
-        else {
-            panic!("the agent was moved off its CLI");
-        };
-
-        assert_eq!(settings.timeout, budget);
-        assert_eq!(sign_in, SignIn::Organization, "only the timeout moves");
-        assert!(matches!(
-            bounded(LlmBackend::Http, budget),
-            LlmBackend::Http
-        ));
-    }
-
-    #[test]
     fn an_agent_is_told_the_chats_effort_and_an_endpoint_is_left_alone() {
         let organizations = LlmBackend::cli(AgentKind::Claude, CliSettings::default())
             .with_sign_in(SignIn::Organization);
@@ -1600,44 +1558,23 @@ mod tests {
         }
     }
 
-    /// Every backend Zone runs an agent on allows thirty minutes, not the crate's default
-    /// five, so a task or a review that never bounds its backend is not cut short.
+    /// Every backend Zone runs an agent on has no deadline in place of the crate's default five
+    /// minutes, so whatever runs on it, a chat turn, a task attempt or a review, runs until its
+    /// agent is done.
     #[test]
-    fn production_agent_backends_allow_thirty_minutes() {
+    fn production_agent_backends_have_no_deadline() {
         for &agent in AgentKind::ALL {
             for (reached, backend) in production_backends(agent, CodexSandbox::WorkspaceWrite) {
                 let (_, settings, _) = cli(Ok(backend));
-                assert_eq!(
-                    settings.timeout,
-                    cli::TURN_TIMEOUT,
-                    "{agent} on {reached} kept the crate's {:?}",
-                    abnegate_agent_cli::DEFAULT_TIMEOUT
+                assert!(
+                    std::time::Instant::now()
+                        .checked_add(settings.timeout)
+                        .is_none(),
+                    "{agent} on {reached} is stopped after {:?}",
+                    settings.timeout
                 );
             }
         }
-    }
-
-    #[test]
-    fn an_agent_is_stopped_ahead_of_a_deadline_with_time_to_keep_its_answer() {
-        for (remaining, expected) in [
-            (
-                Duration::from_secs(30 * 60),
-                Duration::from_secs(30 * 60 - 30),
-            ),
-            (Duration::from_secs(20), Duration::from_secs(15)),
-            (Duration::ZERO, Duration::ZERO),
-        ] {
-            let (_, settings, _) = cli(Ok(ahead_of(
-                LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
-                remaining,
-            )));
-
-            assert_eq!(settings.timeout, expected, "{remaining:?}");
-        }
-        assert!(matches!(
-            ahead_of(LlmBackend::Http, Duration::from_secs(60)),
-            LlmBackend::Http
-        ));
     }
 
     #[test]
@@ -1746,17 +1683,15 @@ mod tests {
         }
     }
 
-    /// `bounded`, `in_directory` and `effort` reconfigure a backend's agent and leave whose
-    /// sign-in it runs under alone, so a failed sign-in is still sent to whoever can renew it.
+    /// `in_directory` and `effort` reconfigure a backend's agent and leave whose sign-in it runs
+    /// under alone, so a failed sign-in is still sent to whoever can renew it.
     #[test]
-    fn bounding_a_backend_keeps_its_sign_in() {
+    fn reconfiguring_a_backend_keeps_its_sign_in() {
         let directory = TempDir::new().expect("a chat's directory");
-        let budget = Duration::from_secs(60);
         for &agent in AgentKind::ALL {
             for sign_in in SIGN_INS {
                 let backend = || LlmBackend::cli(agent, cli::settings()).with_sign_in(sign_in);
                 for (change, configured) in [
-                    ("bounded", bounded(backend(), budget)),
                     ("in_directory", in_directory(backend(), directory.path())),
                     ("effort", effort(backend(), ReasoningEffort::High)),
                 ] {

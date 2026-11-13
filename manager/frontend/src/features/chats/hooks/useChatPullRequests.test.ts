@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ChatPullRequest } from '../types';
+import { cached } from '../utils/cached';
 
 const mockGetChatPullRequests = mock();
 const mockUpdateChatPullRequest = mock();
@@ -82,6 +83,40 @@ describe('useChatPullRequests', () => {
     await waitFor(() => expect(mockGetChatPullRequests).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(mockGetChatPullRequests).toHaveBeenCalledTimes(3), {
       timeout: RECORDING_SETTLE_DELAY + 2_000,
+    });
+  });
+
+  describe('cache', () => {
+    it('draws the pull requests of a chat read before on its first render', () => {
+      cached.pullRequests.remember('chat-1', [OPEN]);
+      mockGetChatPullRequests.mockImplementation(() => new Promise(() => {}));
+
+      const { result } = renderHook(() => useChatPullRequests('chat-1', false));
+
+      expect(result.current.pullRequests).toEqual([OPEN]);
+    });
+
+    it('remembers what it reads and what it changes', async () => {
+      mockGetChatPullRequests.mockResolvedValueOnce([OPEN]);
+      const { result } = renderHook(() => useChatPullRequests('chat-1', false));
+      await waitFor(() => expect(cached.pullRequests.peek('chat-1')).toEqual([OPEN]));
+
+      mockUpdateChatPullRequest.mockResolvedValueOnce({ ...OPEN, dismissed: true });
+      await act(() => result.current.change(OPEN, { dismissed: true }));
+
+      expect(cached.pullRequests.peek('chat-1')).toEqual([]);
+    });
+
+    it('never draws the pull requests of one chat under another', () => {
+      cached.pullRequests.remember('chat-1', [OPEN]);
+      mockGetChatPullRequests.mockImplementation(() => new Promise(() => {}));
+      const { result, rerender } = renderHook(({ chatId }) => useChatPullRequests(chatId, false), {
+        initialProps: { chatId: 'chat-1' },
+      });
+
+      rerender({ chatId: 'chat-2' });
+
+      expect(result.current.pullRequests).toEqual([]);
     });
   });
 });

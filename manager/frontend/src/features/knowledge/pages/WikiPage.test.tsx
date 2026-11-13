@@ -49,6 +49,19 @@ mock.module('../../../api/sources', () => ({
   },
 }));
 
+const mockGetProjects = mock(() =>
+  Promise.resolve([
+    { id: 'proj-1', name: 'Zone Server' },
+    { id: 'proj-2', name: 'Manager' },
+  ])
+);
+
+mock.module('../../../api/projects', () => ({
+  projectsApi: {
+    getProjects: mockGetProjects,
+  },
+}));
+
 // Mock workspace context
 mock.module('../../../shared/context/WorkspaceContext', () => ({
   useWorkspace: () => ({
@@ -307,6 +320,71 @@ describe('WikiPage', () => {
       await waitFor(() => {
         expect(textFilter).toHaveAttribute('data-state', 'active');
       });
+    });
+  });
+
+  describe('Project Filter', () => {
+    /// A discovery recorded in a chat that belonged to a project, as the
+    /// store tags it, beside the two entries that belong to no project.
+    const recorded: KnowledgeEntry = {
+      ...defaultEntries[0],
+      id: 'kb-3',
+      title: 'Running the integration tests',
+      type: 'text',
+      content: 'Use cargo nextest; cargo test takes a single filter.',
+      excerpt: 'Use cargo nextest; cargo test takes a single filter.',
+      category: 'agent-discovery',
+      tags: ['agent-discovery', 'kind:lesson', 'project:proj-1'],
+    };
+
+    beforeEach(() => {
+      getMockState = () => ({
+        entries: [...defaultEntries, recorded],
+        loading: false,
+        error: null,
+      });
+    });
+
+    it('offers a pill for each project the entries name, by name', async () => {
+      renderWikiPage();
+      expect(await screen.findByRole('button', { name: 'Zone Server' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Manager' })).not.toBeInTheDocument();
+    });
+
+    it('filters down to the entries recorded in the chosen project', async () => {
+      const user = userEvent.setup();
+      renderWikiPage();
+
+      await user.click(await screen.findByRole('button', { name: 'Zone Server' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('Running the integration tests')).toBeInTheDocument();
+        expect(screen.queryByText('Text Entry')).not.toBeInTheDocument();
+        expect(screen.queryByText('URL Entry')).not.toBeInTheDocument();
+      });
+    });
+
+    it('clears the project filter when its pill is pressed again', async () => {
+      const user = userEvent.setup();
+      renderWikiPage();
+
+      const pill = await screen.findByRole('button', { name: 'Zone Server' });
+      await user.click(pill);
+      await waitFor(() => expect(pill).toHaveAttribute('aria-pressed', 'true'));
+      await user.click(pill);
+
+      await waitFor(() => {
+        expect(pill).toHaveAttribute('aria-pressed', 'false');
+        expect(screen.getByText('Text Entry')).toBeInTheDocument();
+        expect(screen.getByText('URL Entry')).toBeInTheDocument();
+      });
+    });
+
+    it('shows no project filter when no entry names one', async () => {
+      getMockState = () => ({ entries: defaultEntries, loading: false, error: null });
+      renderWikiPage();
+      await waitFor(() => expect(mockGetProjects).toHaveBeenCalled());
+      expect(screen.queryByRole('button', { name: 'Zone Server' })).not.toBeInTheDocument();
     });
   });
 

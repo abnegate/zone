@@ -22,8 +22,9 @@ use abnegate_llm::{Message, ReasoningEffort, Role};
 use abnegate_search::SearchContext;
 use base64::Engine;
 use serde_json::Value;
+use std::env::VarError;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
 use zone_core::llm::LlmClient;
 
@@ -55,13 +56,9 @@ const MCP_PENDING: &str =
     "Configured MCP tool definitions will be counted when their servers connect.";
 pub const WITHHELD_IMAGE: &str = "[An image is omitted here because this model can't view images.]";
 
-fn parse_timeout(seconds: u64) -> Result<Duration, String> {
-    let timeout = Duration::from_secs(seconds);
-    Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| "ZONE_CHAT_TIMEOUT_SECONDS exceeds a representable deadline".to_string())?;
-    Ok(timeout)
-}
+/// Not read: a chat turn runs until it finishes or is stopped, so a server
+/// that finds it set warns that it is ignored.
+const IGNORED_TIMEOUT: &str = "ZONE_CHAT_TIMEOUT_SECONDS";
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -69,7 +66,6 @@ pub struct Settings {
     pub calls: usize,
     pub output: u32,
     pub context: u64,
-    pub timeout: Duration,
 }
 
 impl Default for Settings {
@@ -79,27 +75,37 @@ impl Default for Settings {
             calls: 256,
             output: 4096,
             context: 32768,
-            timeout: Duration::from_secs(1800),
         }
     }
 }
 
 impl Settings {
     pub fn from_env() -> Result<Self, String> {
-        fn value(name: &str, default: u64) -> Result<u64, String> {
-            match std::env::var(name) {
+        Self::read(|name| std::env::var(name))
+    }
+
+    /// The settings `lookup` gives, which answers for a variable the way
+    /// [`std::env::var`] does.
+    fn read(lookup: impl Fn(&str) -> Result<String, VarError>) -> Result<Self, String> {
+        let value = |name: &str, default: u64| -> Result<u64, String> {
+            match lookup(name) {
                 Ok(value) => value
                     .parse::<u64>()
                     .ok()
                     .filter(|value| *value > 0)
                     .ok_or_else(|| format!("{name} must be a positive integer")),
-                Err(std::env::VarError::NotPresent) => Ok(default),
+                Err(VarError::NotPresent) => Ok(default),
                 Err(_) => Err(format!("{name} must contain valid text")),
             }
+        };
+        if !matches!(lookup(IGNORED_TIMEOUT), Err(VarError::NotPresent)) {
+            tracing::warn!(
+                "{IGNORED_TIMEOUT} is set but not read: a chat turn runs until it finishes or is \
+                 stopped"
+            );
         }
         Ok(Self {
             context: value("ZONE_CHAT_CONTEXT_TOKENS", 32768)?,
-            timeout: parse_timeout(value("ZONE_CHAT_TIMEOUT_SECONDS", 1800)?)?,
             rounds: usize::try_from(value("ZONE_CHAT_ROUNDS", 64)?)
                 .map_err(|_| "ZONE_CHAT_ROUNDS exceeds platform range")?,
             calls: usize::try_from(value("ZONE_CHAT_CALLS", 256)?)
@@ -315,7 +321,6 @@ pub struct Preparation {
     pub endpoint: Endpoint,
     pub stop: Vec<String>,
     pub budget: LoopBudget,
-    pub timeout: Duration,
     /// Built once here so a preview and the generation that follows it, and
     /// the retrieval-augmented reassembly in `ws::chat`, all read one clock.
     pub environment: Environment,
@@ -426,10 +431,9 @@ pub async fn build(
     };
     let backend = match &mode {
         Mode::Preview => backend::instance(state.config()),
-        Mode::Generation(generation) => backend::effort(
-            backend::ahead_of(generation.resolved.backend.clone(), settings.timeout),
-            chat.reasoning_effort,
-        ),
+        Mode::Generation(generation) => {
+            backend::effort(generation.resolved.backend.clone(), chat.reasoning_effort)
+        }
     };
     let session = match &mode {
         Mode::Preview => None,
@@ -599,7 +603,6 @@ pub async fn build(
         endpoint,
         stop,
         budget: settings.budget(),
-        timeout: settings.timeout,
         environment,
         findings,
         memory,
@@ -958,6 +961,7 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
     use zone_core::llm::LlmBackend;
 
     /// What `SearchContext::capability()` returns on its quieter arm. Non-empty
@@ -2009,19 +2013,57 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_timeout_is_rejected() {
-        assert_eq!(parse_timeout(1).unwrap(), Duration::from_secs(1));
-        assert_eq!(
-            parse_timeout(31_536_000).unwrap(),
-            Duration::from_secs(31_536_000)
-        );
-        if Instant::now()
-            .checked_add(Duration::from_secs(u64::MAX))
-            .is_none()
-        {
-            let error = parse_timeout(u64::MAX).expect_err("overflowing deadline");
-            assert!(error.contains("ZONE_CHAT_TIMEOUT_SECONDS"), "{error}");
+    fn a_chat_timeout_left_in_the_environment_is_ignored_with_a_warning() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Captured {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("the captured log")
+                    .extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
+
+        let read = |timeout: Option<&str>| {
+            let captured = Captured::default();
+            let writer = captured.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+            let settings = tracing::subscriber::with_default(subscriber, || {
+                Settings::read(|name| match (name, timeout) {
+                    (IGNORED_TIMEOUT, Some(seconds)) => Ok(seconds.to_string()),
+                    _ => Err(VarError::NotPresent),
+                })
+            });
+            let log =
+                String::from_utf8_lossy(&captured.0.lock().expect("the captured log")).into_owned();
+            (settings, log)
+        };
+
+        let (settings, log) = read(Some("1800"));
+        let settings = settings.expect("a leftover timeout does not stop the server");
+        assert_eq!(settings.rounds, Settings::default().rounds);
+        assert_eq!(
+            log.matches(IGNORED_TIMEOUT).count(),
+            1,
+            "the operator is told once that the variable is ignored: {log}"
+        );
+
+        let (settings, log) = read(None);
+        assert!(settings.is_ok());
+        assert!(!log.contains(IGNORED_TIMEOUT), "{log}");
     }
 
     #[tokio::test]
@@ -2095,7 +2137,7 @@ mod tests {
     #[tokio::test]
     async fn a_chats_effort_reaches_an_agent_on_its_backend_and_an_endpoint_in_its_body() {
         use crate::db::{chats, organizations, workspaces};
-        use abnegate_agent_cli::{AgentKind, CliSettings};
+        use abnegate_agent_cli::AgentKind;
         use serde_json::json;
         use sqlx::PgPool;
         use wiremock::matchers::{method, path};
@@ -2176,7 +2218,7 @@ mod tests {
             None,
             Mode::Generation(Generation::unrouted(LlmBackend::cli(
                 AgentKind::Claude,
-                CliSettings::default(),
+                zone_core::llm::cli::settings(),
             ))),
             endpoint.clone(),
             None,
@@ -2219,18 +2261,10 @@ mod tests {
             Some(ReasoningEffort::Max),
             "the agent is told the chat's effort"
         );
-        let LlmBackend::Cli {
-            settings: budgeted, ..
-        } = backend::ahead_of(
-            LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
-            state.config().chat.timeout,
-        )
-        else {
-            panic!("a CLI backend stays one");
-        };
-        assert_eq!(
-            settings.timeout, budgeted.timeout,
-            "the effort leaves the chat's budget in place"
+        assert!(
+            Instant::now().checked_add(settings.timeout).is_none(),
+            "a chat's agent runs until it is done, not for {:?}",
+            settings.timeout
         );
 
         let http = http.unwrap_or_else(|error| panic!("an endpoint turn prepares: {error}"));

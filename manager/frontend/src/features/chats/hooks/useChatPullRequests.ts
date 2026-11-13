@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import type { ChatPullRequest, PullRequestChange } from '../types';
+import { cached } from '../utils/cached';
 
 export const PULL_REQUEST_REFRESH_INTERVAL = 60_000;
 
@@ -28,8 +29,27 @@ function byCreation(left: ChatPullRequest, right: ChatPullRequest): number {
   return left.created_at.localeCompare(right.created_at);
 }
 
+interface Listing {
+  chatId: string | null;
+  pullRequests: ChatPullRequest[];
+}
+
+const NOTHING_LISTED: Listing = { chatId: null, pullRequests: [] };
+
+function remembered(chatId: string | null): ChatPullRequest[] {
+  return (chatId && cached.pullRequests.peek(chatId)) || NOTHING_LISTED.pullRequests;
+}
+
+function applied(rows: ChatPullRequest[], updated: ChatPullRequest): ChatPullRequest[] {
+  if (updated.dismissed) return rows.filter((row) => row.id !== updated.id);
+  return rows.some((row) => row.id === updated.id)
+    ? rows.map((row) => (row.id === updated.id ? updated : row))
+    : [...rows, updated].sort(byCreation);
+}
+
 export function useChatPullRequests(chatId: string | null, streaming: boolean): ChatPullRequests {
-  const [pullRequests, setPullRequests] = useState<ChatPullRequest[]>([]);
+  const [listing, setListing] = useState<Listing>(NOTHING_LISTED);
+  const pullRequests = listing.chatId === chatId ? listing.pullRequests : remembered(chatId);
   const [dismissed, setDismissed] = useState<ChatPullRequest | null>(null);
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
@@ -41,13 +61,14 @@ export function useChatPullRequests(chatId: string | null, streaming: boolean): 
   const refresh = useCallback(async () => {
     const current = ++read.current;
     if (!chatId) {
-      setPullRequests([]);
+      setListing(NOTHING_LISTED);
       return;
     }
     try {
       const loaded = await chatsApi.getChatPullRequests(chatId);
       if (current !== read.current) return;
-      setPullRequests(loaded);
+      cached.pullRequests.remember(chatId, loaded);
+      setListing({ chatId, pullRequests: loaded });
       setError(null);
     } catch (failure) {
       if (current !== read.current) return;
@@ -57,7 +78,6 @@ export function useChatPullRequests(chatId: string | null, streaming: boolean): 
 
   useEffect(() => {
     generation.current += 1;
-    setPullRequests([]);
     setDismissed(null);
     setPending(new Set());
     setError(null);
@@ -102,16 +122,16 @@ export function useChatPullRequests(chatId: string | null, streaming: boolean): 
         const updated = await chatsApi.updateChatPullRequest(chatId, pullRequest.id, requested);
         if (current !== generation.current) return;
         read.current += 1;
-        if (updated.dismissed) {
-          setPullRequests((rows) => rows.filter((row) => row.id !== updated.id));
-          setDismissed(updated);
-          return;
-        }
-        setDismissed((last) => (last?.id === updated.id ? null : last));
-        setPullRequests((rows) =>
-          rows.some((row) => row.id === updated.id)
-            ? rows.map((row) => (row.id === updated.id ? updated : row))
-            : [...rows, updated].sort(byCreation)
+        cached.pullRequests.update(chatId, (rows) => applied(rows, updated));
+        setListing((last) => ({
+          chatId,
+          pullRequests: applied(
+            last.chatId === chatId ? last.pullRequests : remembered(chatId),
+            updated
+          ),
+        }));
+        setDismissed((last) =>
+          updated.dismissed ? updated : last?.id === updated.id ? null : last
         );
       } catch (failure) {
         if (current !== generation.current) return;

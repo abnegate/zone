@@ -11,6 +11,7 @@ import {
   SubagentsRemovedFrameSchema,
 } from '../subagentSchemas';
 import type { ChatSubagent, SubagentStep } from '../subagentTypes';
+import { cached } from '../utils/cached';
 import { frameType, subscribeFrames } from '../utils/frames';
 import {
   absentSubagents,
@@ -56,7 +57,12 @@ const NONE_GONE: ReadonlySet<string> = new Set();
 const NOTHING_READ: Reading = { chatId: null, subagents: [], steps: NO_STEPS, error: null };
 
 function forChat(reading: Reading, chatId: string): Reading {
-  return reading.chatId === chatId ? reading : { ...NOTHING_READ, chatId };
+  if (reading.chatId === chatId) return reading;
+  return {
+    ...NOTHING_READ,
+    chatId,
+    subagents: cached.subagents.peek(chatId) ?? NOTHING_READ.subagents,
+  };
 }
 
 function loadedSteps(caches: StepCaches): SubagentStepLists {
@@ -93,7 +99,7 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
   const revisions = useRef(new Map<string, number>());
   const owed = useRef(false);
   const wasStreaming = useRef(streaming);
-  const current = reading.chatId === chatId ? reading : NOTHING_READ;
+  const current = chatId ? forChat(reading, chatId) : NOTHING_READ;
 
   const forget = useCallback((ids: ReadonlySet<string>) => {
     for (const id of ids) {
@@ -269,6 +275,10 @@ export function useChatSubagents(chatId: string | null, streaming: boolean): Cha
       }
     });
   }, [chatId, resync, forget, loadSteps]);
+
+  useEffect(() => {
+    if (reading.chatId) cached.subagents.remember(reading.chatId, reading.subagents);
+  }, [reading.chatId, reading.subagents]);
 
   const byMessage = useMemo(() => groupByMessage(current.subagents), [current.subagents]);
   const steps = useMemo(() => loadedSteps(current.steps), [current.steps]);

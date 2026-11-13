@@ -52,6 +52,8 @@ use super::tools::{WorkspaceScope, task_writer};
 use crate::db::knowledge::discovery::{
     self, Discovery, Kind, MAX_ENTRY_BYTES, Outcome, Provenance, Source,
 };
+use crate::db::{chats, tasks};
+use crate::state::AppState;
 
 pub const RECORD_DISCOVERY: &str = "record_discovery";
 
@@ -318,6 +320,7 @@ impl RecordTool {
             provenance: Provenance {
                 kind: entry.kind,
                 source,
+                project: project(&scope.state, source).await,
                 last_confirmed: Utc::now().date_naive(),
             },
         };
@@ -395,6 +398,27 @@ fn source(session: Session, chat: Option<Uuid>) -> Result<Source, Declined> {
     }
 }
 
+/// The project the call was made inside, when it was made inside one: a
+/// chat's own project, and for a run the project its task belongs to when its
+/// task belongs to exactly one.
+///
+/// A lookup that fails records the entry without a project rather than
+/// refusing it. The note is what the next run needs and the tag is what the
+/// knowledge base filters by, so an unreadable link costs a filter and not a
+/// write.
+async fn project(state: &AppState, source: Source) -> Option<Uuid> {
+    let found = match source {
+        Source::Chat(chat) => chats::link(state.db(), chat)
+            .await
+            .map(|link| link.and_then(|link| link.project_id)),
+        Source::Run(run) => tasks::run_project(state.db(), run).await,
+    };
+    found.unwrap_or_else(|error| {
+        tracing::warn!(%error, "A discovery's project could not be read");
+        None
+    })
+}
+
 /// The line a stored call answers with, and the statement it wrote over when
 /// it wrote over one.
 fn settled(outcome: Outcome) -> Result<(&'static str, Option<String>), Declined> {
@@ -410,7 +434,6 @@ fn settled(outcome: Outcome) -> Result<(&'static str, Option<String>), Declined>
 mod tests {
     use super::*;
     use crate::agent::memory::rules::test_support::{NOT_RECORDED, RECORDED as ACCEPTED};
-    use crate::state::AppState;
     use abnegate_agent::tool::REASON_PARAMETER;
 
     const SUBJECT: &str = "Running the integration tests";

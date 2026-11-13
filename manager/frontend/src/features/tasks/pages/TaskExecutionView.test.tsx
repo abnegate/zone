@@ -1,11 +1,16 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { fireEvent, render as renderTree, screen, waitFor } from '@testing-library/react';
+import type { ReactElement, ReactNode } from 'react';
 import type { Question, Waiting } from '../../chats/types';
 import type { Task, TaskRun, TaskRunLog } from '../types';
 
 const FAR_FUTURE = '2099-01-01T00:00:00Z';
 const LONG_PAST = '2000-01-01T00:00:00Z';
 const WAITING_ON_OUTCOME = 'Task run is waiting on something outside its loop';
+const STOPPED_MESSAGE = 'Task run was stopped';
+const INACTIVE_MESSAGE = 'Task run is not active';
+const SHUTTING_DOWN_MESSAGE = 'The stopped run is still shutting down; try again in a moment';
 
 const question: Question = {
   header: 'Scope',
@@ -59,6 +64,14 @@ const parked: TaskRun = {
   waiting_on: check,
 };
 
+const stopped: TaskRun = {
+  ...running,
+  status: 'cancelled',
+  current_phase: null,
+  error_message: STOPPED_MESSAGE,
+  completed_at: '2026-09-10T00:05:00Z',
+};
+
 const parkLine: TaskRunLog = {
   id: 'log-2',
   phase: 'waiting',
@@ -74,6 +87,7 @@ const mockGetTaskRuns = mock(() => Promise.resolve([] as TaskRun[]));
 const mockGetTaskRun = mock(() => Promise.resolve(running));
 const mockGetTaskRunLogs = mock(() => Promise.resolve([] as TaskRunLog[]));
 const mockAnswerRun = mock((_runId: string, _answers: unknown[]) => Promise.resolve(running));
+const mockStopRun = mock((_runId: string, _signal?: AbortSignal) => Promise.resolve(stopped));
 
 mock.module('../../../api/tasks', () => ({
   tasksApi: {
@@ -82,10 +96,21 @@ mock.module('../../../api/tasks', () => ({
     getTaskRun: mockGetTaskRun,
     getTaskRunLogs: mockGetTaskRunLogs,
     answerRun: mockAnswerRun,
+    stopRun: mockStopRun,
   },
 }));
 
 const { TaskExecutionView } = await import('./TaskExecutionView');
+
+const createClient = (): QueryClient =>
+  new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+const render = (view: ReactElement, client: QueryClient = createClient()) =>
+  renderTree(view, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
 
 const task: Task = {
   id: 'task-1',
@@ -343,6 +368,276 @@ describe('a task run that parked on a wait', () => {
   });
 });
 
+describe('stopping a task run', () => {
+  const show = (current: TaskRun): void => {
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([current]));
+    mockGetTaskRun.mockImplementation(() => Promise.resolve(current));
+  };
+
+  beforeEach(() => {
+    mockRunTask.mockReset();
+    mockGetTaskRuns.mockReset();
+    mockGetTaskRun.mockReset();
+    mockGetTaskRunLogs.mockReset();
+    mockAnswerRun.mockReset();
+    mockStopRun.mockReset();
+    show(running);
+    mockGetTaskRunLogs.mockImplementation(() => Promise.resolve([]));
+    mockStopRun.mockImplementation(() => Promise.resolve(stopped));
+  });
+
+  const live: [string, TaskRun][] = [
+    ['running', running],
+    ['waiting on a question', waiting],
+    ['parked on a wait', parked],
+  ];
+  for (const [state, current] of live) {
+    it(`offers Stop for a run that is ${state}`, async () => {
+      show(current);
+      render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+      expect(await screen.findByRole('button', { name: 'Stop' })).toBeEnabled();
+      expect(screen.queryByRole('button', { name: 'Run Again' })).not.toBeInTheDocument();
+    });
+  }
+
+  const finished: [TaskRun['status'], string][] = [
+    ['completed', 'Completed'],
+    ['failed', 'Failed'],
+    ['cancelled', 'Cancelled'],
+  ];
+  for (const [status, label] of finished) {
+    it(`offers no Stop for a ${status} run`, async () => {
+      show({ ...running, status, current_phase: null });
+      render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+      expect(await screen.findByRole('button', { name: 'Run Again' })).toBeInTheDocument();
+      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+    });
+  }
+
+  it('styles a failed run as an error and a stopped run as neutral', async () => {
+    show({ ...running, status: 'failed', current_phase: null, error_message: 'boom' });
+    const { unmount } = render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    const failure = await screen.findByRole('alert');
+    expect(failure).toHaveTextContent('Task failed');
+    expect(failure).toHaveClass('execution-notice');
+    expect(failure).not.toHaveClass('execution-notice--neutral');
+    unmount();
+
+    show({ ...running, status: 'cancelled', current_phase: null, error_message: null });
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    const stop = await screen.findByRole('status');
+    expect(stop).toHaveTextContent('Task stopped');
+    expect(stop).toHaveClass('execution-notice');
+    expect(stop).toHaveClass('execution-notice--neutral');
+  });
+
+  it('leaves the run alone when the stop is not confirmed', async () => {
+    const confirm = mock(() => false);
+    window.confirm = confirm;
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(mockStopRun).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
+    expect(screen.getByText('Running')).toBeInTheDocument();
+  });
+
+  it('stops the run once confirmed and shows it cancelled with the reason', async () => {
+    window.confirm = mock(() => true);
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    const button = await screen.findByRole('button', { name: 'Stop' });
+    show(stopped);
+    fireEvent.click(button);
+
+    await waitFor(() => expect(mockStopRun).toHaveBeenCalledWith('run-1', expect.any(AbortSignal)));
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument();
+    const notice = screen.getByRole('status');
+    expect(notice).toHaveTextContent('Task stopped');
+    expect(notice).toHaveTextContent(STOPPED_MESSAGE);
+    expect(notice).toHaveClass('execution-notice');
+    expect(notice).toHaveClass('execution-notice--neutral');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Run Again' })).toBeInTheDocument();
+    expect(mockStopRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes the task lists once the stop lands, so the board shows the task paused', async () => {
+    const client = createClient();
+    const invalidate = spyOn(client, 'invalidateQueries');
+    window.confirm = mock(() => true);
+    render(<TaskExecutionView task={task} onClose={() => {}} />, client);
+
+    const button = await screen.findByRole('button', { name: 'Stop' });
+    show(stopped);
+    fireEvent.click(button);
+
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument();
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['tasks'] });
+  });
+
+  it('says why Run Again was refused while the stopped run shuts down, and lets it retry', async () => {
+    show(stopped);
+    mockRunTask.mockImplementation(() => Promise.reject(new Error(SHUTTING_DOWN_MESSAGE)));
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Run Again' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not start task');
+    expect(alert).toHaveTextContent(SHUTTING_DOWN_MESSAGE);
+    const retry = await screen.findByRole('button', { name: 'Try Again' });
+    expect(retry).toBeEnabled();
+
+    show(running);
+    mockRunTask.mockImplementation(() => Promise.resolve(running));
+    fireEvent.click(retry);
+
+    expect(await screen.findByRole('button', { name: 'Stop' })).toBeEnabled();
+    expect(screen.queryByText(SHUTTING_DOWN_MESSAGE)).not.toBeInTheDocument();
+    expect(mockRunTask).toHaveBeenCalledTimes(2);
+  });
+
+  const holdStop = (): {
+    settle: (run: TaskRun) => void;
+    signal: () => AbortSignal | undefined;
+  } => {
+    let settle: (run: TaskRun) => void = () => {};
+    let signal: AbortSignal | undefined;
+    mockStopRun.mockImplementation(
+      (_runId: string, requestSignal?: AbortSignal) =>
+        new Promise<TaskRun>((resolve) => {
+          signal = requestSignal;
+          settle = resolve;
+        })
+    );
+    return { settle: (run) => settle(run), signal: () => signal };
+  };
+
+  it('holds the button while the stop is in flight', async () => {
+    const { settle } = holdStop();
+    window.confirm = mock(() => true);
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+
+    const pending = await screen.findByRole('button', { name: 'Stopping…' });
+    expect(pending).toBeDisabled();
+    fireEvent.click(pending);
+    expect(mockStopRun).toHaveBeenCalledTimes(1);
+
+    show(stopped);
+    settle(stopped);
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument();
+  });
+
+  const expectStopLanded = async (signal: AbortSignal | undefined): Promise<void> => {
+    expect(signal?.aborted).toBe(false);
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(STOPPED_MESSAGE);
+    expect(screen.queryByRole('button', { name: 'Stopping…' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Run Again' })).toBeEnabled();
+  };
+
+  it('finishes the stop when the status is refreshed while it is in flight', async () => {
+    const stop = holdStop();
+    mockGetTaskRunLogs.mockImplementation(() => Promise.reject(new Error('Gateway timeout')));
+    window.confirm = mock(() => true);
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    expect(await screen.findByText('Monitoring unavailable')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(await screen.findByRole('button', { name: 'Stopping…' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh status' }));
+    await waitFor(() => expect(mockGetTaskRuns).toHaveBeenCalledTimes(2));
+    show(stopped);
+    mockGetTaskRunLogs.mockImplementation(() => Promise.resolve([]));
+    stop.settle(stopped);
+
+    await expectStopLanded(stop.signal());
+    expect(mockStopRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('finishes the stop when a question is answered while it is in flight', async () => {
+    const stop = holdStop();
+    show(waiting);
+    window.confirm = mock(() => true);
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('radio', { name: 'Backfill' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    expect(await screen.findByRole('button', { name: 'Stopping…' })).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId('question-submit'));
+    await waitFor(() => expect(mockAnswerRun).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockGetTaskRuns).toHaveBeenCalledTimes(2));
+    show(stopped);
+    stop.settle(stopped);
+
+    await expectStopLanded(stop.signal());
+    expect(mockStopRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('still stops the run while its status cannot be verified', async () => {
+    mockGetTaskRunLogs.mockImplementation(() => Promise.reject(new Error('Gateway timeout')));
+    window.confirm = mock(() => true);
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    expect(await screen.findByText('Monitoring unavailable')).toBeInTheDocument();
+    const button = screen.getByRole('button', { name: 'Stop' });
+    expect(button).toBeEnabled();
+    show(stopped);
+    fireEvent.click(button);
+
+    await waitFor(() => expect(mockStopRun).toHaveBeenCalledWith('run-1', expect.any(AbortSignal)));
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+  });
+
+  it('says the stop failed and why, then reloads the run', async () => {
+    mockStopRun.mockImplementation(() => Promise.reject(new Error(INACTIVE_MESSAGE)));
+    const client = createClient();
+    const invalidate = spyOn(client, 'invalidateQueries');
+    window.confirm = mock(() => true);
+    render(<TaskExecutionView task={task} onClose={() => {}} />, client);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not stop task');
+    expect(alert).toHaveTextContent(INACTIVE_MESSAGE);
+    await waitFor(() => expect(mockGetTaskRuns).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('button', { name: 'Stop' })).toBeEnabled();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
+  it('drops the stop failure once the run is found to have finished', async () => {
+    mockStopRun.mockImplementation(() => Promise.reject(new Error(INACTIVE_MESSAGE)));
+    window.confirm = mock(() => true);
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    const button = await screen.findByRole('button', { name: 'Stop' });
+    show({ ...running, status: 'completed', current_phase: null });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(mockStopRun).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText('Task completed successfully.')).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText('Could not stop task')).not.toBeInTheDocument());
+    expect(screen.queryByText(INACTIVE_MESSAGE)).not.toBeInTheDocument();
+  });
+});
+
 describe('a run read by a viewer', () => {
   beforeEach(() => {
     mockRunTask.mockReset();
@@ -377,5 +672,14 @@ describe('a run read by a viewer', () => {
     expect(screen.getByText('Waiting')).toBeInTheDocument();
     expect(screen.queryByText('Waiting for you')).not.toBeInTheDocument();
     expect(screen.queryByTestId('question-card')).not.toBeInTheDocument();
+  });
+
+  it('offers no way to stop a running run', async () => {
+    mockGetTaskRuns.mockImplementation(() => Promise.resolve([running]));
+    mockGetTaskRun.mockImplementation(() => Promise.resolve(running));
+    render(<TaskExecutionView task={task} writable={false} onClose={() => {}} />);
+
+    expect(await screen.findByText('Running')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
   });
 });

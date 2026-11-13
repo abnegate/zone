@@ -219,6 +219,17 @@ export const TaskProgressMessageSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('completed'), status: RunStatusSchema }),
   z.object({ type: z.literal('failed'), error: z.string() }),
+  z
+    .object({
+      type: z.literal('cancelled'),
+      error: z.string().optional(),
+      message: z.string().optional(),
+    })
+    .transform(({ type, error, message }) => ({
+      type,
+      status: RunStatusSchema.enum.cancelled,
+      reason: error ?? message ?? null,
+    })),
   z.object({ type: z.literal('error'), message: z.string() }),
 ]);
 

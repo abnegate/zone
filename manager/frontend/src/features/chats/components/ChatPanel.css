@@ -442,6 +442,11 @@
   line-height: 1.4;
 }
 
+.chat-change-auto.is-fixing {
+  border-color: var(--chat-change-pending);
+  color: var(--chat-change-pending);
+}
+
 .chat-change-dot {
   flex-shrink: 0;
   width: 0.5rem;

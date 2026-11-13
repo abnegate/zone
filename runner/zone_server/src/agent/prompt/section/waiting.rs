@@ -6,9 +6,9 @@
 //! is the other half of that trade: it suspends the loop on the event itself
 //! and costs no iteration. The two ways to get it wrong are opposites — asking
 //! for far more time than the work needs, and asking for so little that the
-//! wait is a poll again — so both are stated. What a wait costs differs by
-//! surface, so the price is stated per surface. Only a catalog holding the tool
-//! renders this.
+//! wait is a poll again — so both are stated. Only a task run pays for a wait
+//! beyond the time it takes, so only a run is told the price. Only a catalog
+//! holding the tool renders this.
 
 use crate::agent::prompt::{Context, Surface};
 use crate::agent::wait::{
@@ -82,14 +82,6 @@ static TASK_KINDS: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-static CHAT_DEADLINE: LazyLock<String> = LazyLock::new(|| {
-    format!(
-        "- A wait runs inside this turn's own deadline, so one longer than the turn has left is \
-         cut short and comes back as a timeout. {MAX_WAIT_SECS}s is the whole turn, not an \
-         extension of it."
-    )
-});
-
 static CHAT_KINDS: LazyLock<String> = LazyLock::new(|| {
     format!(
         "- kind={KIND_TASK_RUN} is available here, so a run you started is something you can \
@@ -109,7 +101,6 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
             NOT_SUCCESS,
             EXCESSIVE.as_str(),
             UNCHANGED,
-            CHAT_DEADLINE.as_str(),
             CHAT_KINDS.as_str(),
         ],
         Surface::Task => vec![
@@ -233,9 +224,10 @@ mod tests {
         }
     }
 
-    /// A chat wait holds a turn somebody is watching; a task wait gives its
-    /// admission slot back and queues for it again. Neither cost describes the
-    /// other, so neither surface reads the other's sentence.
+    /// A task wait gives its admission slot back and queues for it again, so
+    /// a run is told what that costs. A chat turn runs until it is done, so a
+    /// chat wait is cut short by nothing the model could size around, and a
+    /// sentence warning it of a turn deadline would make it wait too little.
     #[test]
     fn each_surface_says_what_a_wait_costs_it() {
         let chat = chat();
@@ -244,8 +236,10 @@ mod tests {
         assert!(task.contains(TASK_PARK.as_str()), "{task}");
         assert!(!chat.contains("parks this run"), "{chat}");
 
-        assert!(chat.contains(CHAT_DEADLINE.as_str()), "{chat}");
-        assert!(!task.contains("this turn's own deadline"), "{task}");
+        for rendered in [&chat, &task] {
+            assert!(!rendered.contains("this turn's own deadline"), "{rendered}");
+            assert!(!rendered.contains("the whole turn"), "{rendered}");
+        }
     }
 
     #[test]

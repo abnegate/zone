@@ -80,6 +80,7 @@ mod halt;
 mod handover;
 mod meter;
 mod seat;
+pub(crate) mod stop;
 mod unprepared;
 
 use halt::Halt;
@@ -92,12 +93,9 @@ use unprepared::Unprepared;
 // Max concurrent task executions
 const MAX_CONCURRENT_TASKS: usize = 5;
 
-// Timeout for task execution (1 hour)
-const TASK_TIMEOUT_SECS: u64 = 3600;
-const TASK_TIMEOUT: Duration = Duration::from_secs(TASK_TIMEOUT_SECS);
-
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const CHECKOUT_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a run parked on questions it can proceed without waits before it
 /// proceeds on the option it recommended.
@@ -128,6 +126,7 @@ const WAITING_ON_ANSWER: &str = "Task run is waiting on a question";
 const WAITING_ON_OUTCOME: &str = "Task run is waiting on something outside its loop";
 const RESUMED_ON_ANSWER: &str = "Task run resumed on an answer";
 const LOST_LEASE: &str = "Task execution lost its lease";
+const LOST_LEASE_OR_ACCESS: &str = "Task execution lost its lease or writer access";
 /// Why an attempt whose coding agent ended partway through a later turn failed. An agent that
 /// runs out of the attempt's time fails as a timeout instead, since its time is the attempt's.
 const AGENT_CUT_SHORT: &str = "The coding agent ended before it finished the task";
@@ -171,8 +170,8 @@ static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// it belongs to is parked on a question.
 ///
 /// A run waiting on a person is not executing. Held through the wait, five runs
-/// parked on required questions take every slot in the deployment for the hour
-/// a question is allowed to go unanswered, and `required` is the model's to set.
+/// parked on required questions take every slot in the deployment for as long
+/// as their questions go unanswered, and `required` is the model's to set.
 struct Permit(std::sync::Mutex<Option<OwnedSemaphorePermit>>);
 
 impl Permit {
@@ -379,17 +378,6 @@ impl Fault {
             message: endpoint.scrub(&self.message),
             ..self
         }
-    }
-
-    fn timeout() -> Self {
-        Self::new(
-            Failure::Terminal,
-            "timeout",
-            format!(
-                "Task execution timed out after {} seconds",
-                TASK_TIMEOUT.as_secs()
-            ),
-        )
     }
 
     fn overloaded() -> Self {
@@ -951,6 +939,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
             return;
         }
     }
+    let signal = stop::register(run_id);
     if !matches!(
         tasks::claim_task_run(state.db(), run.id, owner).await,
         Ok(true)
@@ -978,32 +967,173 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
                 tokio::time::timeout(HEARTBEAT_TIMEOUT, refresh).await,
                 Ok(Ok(true))
             ) {
-                tracing::warn!(%run_id, "Task execution lost its lease or writer access; cancelling pipeline");
                 return;
             }
         }
     };
-    let cancelled = tokio::select! {
+    let mut obs = crate::metrics::TaskObs::new();
+    let usage = Usage::default();
+    let mut checkout = None;
+    let ending = tokio::select! {
         biased;
-        () = heartbeat => true,
-        () = execute_owned_task_run(state, execution) => false,
+        () = signal.requested() => Ending::Stopped,
+        () = heartbeat => Ending::LeaseLost,
+        () = execute_in_checkout(state, execution, &mut checkout, &mut obs, &usage) => Ending::Finished,
     };
-    if cancelled {
-        let _ = tokio::time::timeout(
+    drop(signal);
+    match ending {
+        Ending::Stopped => {
+            tracing::info!(%run_id, "Task execution was stopped by request; cancelled its pipeline");
+            obs.set_status(tasks::CANCELLED);
+        }
+        Ending::LeaseLost => match lose_lease(state, run_id, owner).await {
+            Lapse::Stopped => {
+                tracing::info!(%run_id, "Task execution was stopped elsewhere; cancelled its pipeline");
+                obs.set_status(tasks::CANCELLED);
+            }
+            Lapse::Lost => {
+                tracing::warn!(%run_id, "Task execution lost its lease or writer access; cancelled its pipeline");
+            }
+        },
+        Ending::Finished => {}
+    }
+    let teardown = async {
+        crate::mcp::settle(run_id).await;
+        reap(run_id).await;
+        if let Some(checkout) = checkout.take()
+            && tokio::time::timeout(CHECKOUT_FINISH_TIMEOUT, checkout.finish())
+                .await
+                .is_err()
+        {
+            tracing::warn!(%run_id, "The run's checkout removal outlasted its bound; recovery reclaims what is left");
+        }
+    };
+    tokio::select! {
+        () = teardown => {}
+        () = drain(state, run_id, owner) => {}
+    }
+    release(state, run_id, owner).await;
+    usage.settle(state).await;
+    crate::workers::auto_project::poke_task(state, task_id);
+}
+
+/// Hold a stopped run's reservation of its task for as long as its teardown
+/// lasts. Never ends: once nothing is reserved it waits for the teardown.
+async fn drain(state: &AppState, run_id: Uuid, owner: Uuid) {
+    let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let drained = tokio::time::timeout(
             HEARTBEAT_TIMEOUT,
-            tasks::complete_owned_task_run(
-                state.db(),
-                run_id,
-                Some(owner),
-                "failed",
-                Some("Task execution lost its lease or writer access"),
-                None,
-            ),
+            tasks::drain_task_run(state.db(), run_id, owner),
         )
         .await;
+        if matches!(drained, Ok(Ok(false))) {
+            return std::future::pending().await;
+        }
     }
-    crate::workers::auto_project::poke_task(state, task_id);
-    reap(run_id).await;
+}
+
+/// Free a stopped run's task for the next run once nothing of it is left.
+async fn release(state: &AppState, run_id: Uuid, owner: Uuid) {
+    let released = tokio::time::timeout(
+        HEARTBEAT_TIMEOUT,
+        tasks::release_task_run(state.db(), run_id, owner),
+    )
+    .await;
+    match released {
+        Ok(Ok(true)) => tracing::info!(%run_id, "Released the stopped run's task"),
+        Ok(Ok(false)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%run_id, %error, "Could not release the stopped run's task; recovery will")
+        }
+        Err(_) => {
+            tracing::warn!(%run_id, "Releasing the stopped run's task timed out; recovery will")
+        }
+    }
+}
+
+/// Fail a run whose heartbeat lapsed, and say why it lapsed: a stop taken on
+/// another replica cancels the run without reaching this one's signal, and
+/// leaves nothing here to fail.
+async fn lose_lease(state: &AppState, run_id: Uuid, owner: Uuid) -> Lapse {
+    let failed = tokio::time::timeout(
+        HEARTBEAT_TIMEOUT,
+        tasks::complete_owned_task_run(
+            state.db(),
+            run_id,
+            Some(owner),
+            RUN_FAILED,
+            Some(LOST_LEASE_OR_ACCESS),
+            None,
+        ),
+    )
+    .await;
+    if !matches!(failed, Ok(Ok(None))) {
+        return Lapse::Lost;
+    }
+    match tokio::time::timeout(HEARTBEAT_TIMEOUT, tasks::get_task_run(state.db(), run_id)).await {
+        Ok(Ok(Some(run))) if run.status == tasks::CANCELLED => Lapse::Stopped,
+        _ => Lapse::Lost,
+    }
+}
+
+/// Why a run's heartbeat lapsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lapse {
+    /// Someone stopped the run where its signal could not reach.
+    Stopped,
+    /// The lease or the writer's access is gone.
+    Lost,
+}
+
+/// Which of a claimed run's three races ended it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// Someone stopped it; the stop already wrote the run's status.
+    Stopped,
+    /// Its heartbeat could no longer prove the lease or the writer's access,
+    /// which a stop taken on another replica also ends in.
+    LeaseLost,
+    /// The pipeline ran to its own end and wrote the run's status itself.
+    Finished,
+}
+
+/// The usage an attempt's agent reported on its login, held outside the
+/// attempt so one stopped or cut off mid-attempt still records it.
+#[derive(Default)]
+struct Usage<'a>(tokio::sync::Mutex<Option<Metered<'a>>>);
+
+struct Metered<'a> {
+    login: Uuid,
+    meter: Meter<'a>,
+}
+
+impl<'a> Usage<'a> {
+    /// Hold a meter for the attempt on `login` for as long as the guard lives.
+    async fn begin(
+        &self,
+        state: &'a AppState,
+        login: Option<Uuid>,
+    ) -> tokio::sync::MutexGuard<'_, Option<Metered<'a>>> {
+        let mut metered = self.0.lock().await;
+        *metered = login.map(|login| Metered {
+            login,
+            meter: Meter::new(state, login),
+        });
+        metered
+    }
+
+    /// Record and settle what an attempt that never reached its own end left
+    /// on its login.
+    async fn settle(&self, state: &AppState) {
+        let Some(mut metered) = self.0.lock().await.take() else {
+            return;
+        };
+        metered.meter.record().await;
+        settle(state, metered.login);
+    }
 }
 
 /// Release what the run's session still owns, once its status is terminal.
@@ -1011,7 +1141,8 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
 /// One point rather than one per exit: every path that executed anything
 /// passes through the select above, the cancelled one included. A backgrounded
 /// job outlives the tool call that started it and nothing drops its child, so
-/// killing what the run left running is the run's own last act.
+/// what the run left running is killed once no call of the run can start
+/// another, and before the checkout it works in is removed under it.
 async fn reap(run_id: Uuid) {
     let session = Session::Task(run_id);
     let killed = Jobs::kill_session(session).await;
@@ -1021,20 +1152,15 @@ async fn reap(run_id: Uuid) {
     wait::reset_session(session);
 }
 
-async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
-    let mut checkout = None;
-    execute_in_checkout(state, execution, &mut checkout).await;
-    if let Some(checkout) = checkout {
-        checkout.finish().await;
-    }
-}
-
 /// Run the task in a checkout left in `slot`, for the caller to finish once
-/// the run is over however it ended; a run cancelled meanwhile drops it.
-async fn execute_in_checkout(
-    state: &AppState,
+/// the run is over however it ended, stopped or cut off mid-way included: off
+/// the runtime's threads, once the pipeline that worked in it is gone.
+async fn execute_in_checkout<'a>(
+    state: &'a AppState,
     execution: tasks::Execution,
     slot: &mut Option<crate::services::checkout::Checkout>,
+    obs: &mut crate::metrics::TaskObs,
+    usage: &Usage<'a>,
 ) {
     let tasks::Execution {
         task: task_id,
@@ -1042,7 +1168,6 @@ async fn execute_in_checkout(
         owner,
         ..
     } = execution;
-    let mut obs = crate::metrics::TaskObs::new();
 
     let permit = match Permit::acquire().await {
         Ok(permit) => permit,
@@ -1299,6 +1424,7 @@ async fn execute_in_checkout(
                 actor,
                 &backend,
                 login.as_ref().map(|login| login.id),
+                usage,
                 endpoint,
                 &model,
                 task_prompt,
@@ -1309,7 +1435,6 @@ async fn execute_in_checkout(
                 plan_approval,
                 unattended,
                 approval,
-                tokio::time::Instant::now() + TASK_TIMEOUT,
                 LoopBudget::task(),
             )
             .await;
@@ -2237,14 +2362,15 @@ where
 
 /// One attempt at the agent loop, scoped and lease-fenced like the owned run.
 #[allow(clippy::too_many_arguments)]
-async fn attempt_run(
-    state: &AppState,
+async fn attempt_run<'a>(
+    state: &'a AppState,
     run_id: Uuid,
     owner: Uuid,
     workspace_id: Uuid,
     actor: Option<Uuid>,
     backend: &LlmBackend,
     login: Option<Uuid>,
+    usage: &Usage<'a>,
     endpoint: &Endpoint,
     model: &str,
     task_prompt: &str,
@@ -2255,7 +2381,6 @@ async fn attempt_run(
     plan_approval: bool,
     unattended: bool,
     approval: &plan::Approval,
-    deadline: tokio::time::Instant,
     budget: LoopBudget,
 ) -> Result<TaskOutcome, Fault> {
     // A task that requires its plan approved changes nothing until it is:
@@ -2265,10 +2390,6 @@ async fn attempt_run(
     // with the approved plan in hand and no plan phase to go through again.
     let approved = approval.approved();
     let mut plan_held = plan_approval && approved.is_none();
-    let backend = &backend::bounded(
-        backend.clone(),
-        deadline.saturating_duration_since(tokio::time::Instant::now()),
-    );
     let mut tools = crate::mcp::offered(
         backend,
         task_tools(
@@ -2337,17 +2458,15 @@ async fn attempt_run(
     context.vision = session::sees_images(model, capacity.vision);
     context.reason = capacity.reason;
 
-    // One timeout covers every turn of the attempt, waiting included: a run
-    // parked on a required question is spending the same budget a wedged one
-    // would, and a second timer around the wait would end it on different terms.
-    let mut meter = login.map(|login| Meter::new(state, login));
+    let mut metered = usage.begin(state, login).await;
     let turns = async {
         let mut tools = tools;
         let mut context = context;
         // One budget covers every turn of the attempt. A fresh one per park is
         // no ceiling at all: a model looping on `ask_user` restarts it as often
         // as it likes, and an all-optional card answers itself in 30 seconds.
-        // Unlimited by default, so what ends a parking model is the deadline.
+        // Unlimited by default: a parking model runs until it finishes, is
+        // stopped, or loses its lease.
         let mut budget = budget;
         // The wait allowance shares that lifetime, so a retried attempt starts
         // at zero and the waits of one attempt cap only its own park churn.
@@ -2364,7 +2483,7 @@ async fn attempt_run(
                 budget,
                 &callback,
                 agent_tools.as_mut().map(|served| &mut served.calls),
-                meter.as_mut(),
+                metered.as_mut().map(|metered| &mut metered.meter),
             )
             .await
             {
@@ -2443,17 +2562,160 @@ async fn attempt_run(
         }
     };
 
-    // The agent's own timeout is the budget left at `deadline`, so a turn it
-    // ended reaches this point no earlier than the deadline itself.
-    let outcome = match tokio::time::timeout_at(deadline, turns).await {
-        Ok(Err(_)) if tokio::time::Instant::now() >= deadline => Err(Fault::timeout()),
-        Ok(outcome) => outcome,
-        Err(_) => Err(Fault::timeout()),
-    };
-    if let Some(meter) = meter.as_mut() {
-        meter.record().await;
-    }
+    let outcome = turns.await;
+    record_usage(&mut metered).await;
     outcome
+}
+
+/// Records what the attempt metered, and lets the meter go only once that returns: a stop that
+/// lands while it records leaves the meter for [`Usage::settle`] to record and settle.
+async fn record_usage(metered: &mut Option<Metered<'_>>) {
+    if let Some(finished) = metered.as_mut() {
+        finished.meter.record().await;
+    }
+    *metered = None;
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use abnegate_agent_cli::AgentKind;
+    use abnegate_llm::Window;
+    use zone_core::llm::window;
+
+    use super::*;
+    use crate::db::agent_logins::{self, Insert};
+
+    const STOPPED_WITHIN: Duration = Duration::from_millis(200);
+
+    struct Fixture {
+        pool: PgPool,
+        organization: Uuid,
+        login: Uuid,
+        state: AppState,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .expect("the test database");
+            let organization = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Usage', $1::text)",
+            )
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+            let login = agent_logins::insert(
+                &pool,
+                &Insert {
+                    organization_id: organization,
+                    agent: AgentKind::Claude.as_str(),
+                    account: Some("usage"),
+                    credential: None,
+                    label: Some("usage"),
+                    expires_at: None,
+                },
+            )
+            .await
+            .expect("a login")
+            .id;
+            let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+            Self {
+                pool,
+                organization,
+                login,
+                state,
+            }
+        }
+
+        async fn recorded(&self) -> Option<Vec<Window>> {
+            agent_logins::get(&self.pool, self.login)
+                .await
+                .expect("the login to be readable")
+                .expect("the login")
+                .snapshot()
+                .map(|snapshot| snapshot.windows)
+        }
+
+        async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .expect("the organization to be removed");
+        }
+    }
+
+    fn measured(name: &str, used_percent: f64) -> Window {
+        Window::new(name).with_used_percent(used_percent)
+    }
+
+    #[tokio::test]
+    async fn an_attempt_stopped_while_it_records_its_usage_still_settles_it() {
+        let fixture = Fixture::new().await;
+        let usage = Usage::default();
+        let mut metered = usage.begin(&fixture.state, Some(fixture.login)).await;
+        metered
+            .as_mut()
+            .expect("a meter for the login")
+            .meter
+            .observe(measured(window::FIVE_HOURS, 40.0));
+
+        let mut locking = fixture.pool.begin().await.expect("a transaction");
+        sqlx::query("SELECT 1 FROM agent_logins WHERE id = $1 FOR UPDATE")
+            .bind(fixture.login)
+            .execute(&mut *locking)
+            .await
+            .expect("the login's row held");
+        let stopped = tokio::time::timeout(STOPPED_WITHIN, record_usage(&mut metered)).await;
+        locking.rollback().await.expect("the row released");
+        drop(metered);
+        usage.settle(&fixture.state).await;
+        let recorded = fixture.recorded().await;
+        let left = usage.0.lock().await.is_some();
+        drop(usage);
+        fixture.remove().await;
+
+        assert!(
+            stopped.is_err(),
+            "the record waits on the held row until the stop drops it"
+        );
+        assert_eq!(
+            recorded,
+            Some(vec![measured(window::FIVE_HOURS, 40.0)]),
+            "settling records what the stopped record left"
+        );
+        assert!(!left, "settling lets the meter go");
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_recorded_its_usage_leaves_nothing_to_settle() {
+        let fixture = Fixture::new().await;
+        let usage = Usage::default();
+        let mut metered = usage.begin(&fixture.state, Some(fixture.login)).await;
+        metered
+            .as_mut()
+            .expect("a meter for the login")
+            .meter
+            .observe(measured(window::FIVE_HOURS, 40.0));
+
+        record_usage(&mut metered).await;
+        let left = metered.is_some();
+        drop(metered);
+        drop(usage);
+        let recorded = fixture.recorded().await;
+        fixture.remove().await;
+
+        assert_eq!(recorded, Some(vec![measured(window::FIVE_HOURS, 40.0)]));
+        assert!(
+            !left,
+            "a finished record lets the meter go, so settling cannot record it again"
+        );
+    }
 }
 
 /// Build the tool set one turn will consume.
@@ -2531,9 +2793,11 @@ fn proceeding_on_defaults(questions: &[Question]) -> String {
 
 /// Park the run on its questions and come back with the message that resumes it.
 ///
-/// The run keeps its lease and its admission slot throughout: the heartbeat
-/// future outside this call is what proves the process is still alive, and the
-/// widened status predicates are what let it keep proving it while parked.
+/// The run keeps its lease throughout: the heartbeat future outside this call
+/// is what proves the process is still alive, and the widened status
+/// predicates are what let it keep proving it while parked. Its admission slot
+/// it hands back for the length of the wait and queues for again before it
+/// resumes, since a run waiting on a person is not executing.
 async fn park_for_answer(
     state: &AppState,
     run_id: Uuid,
@@ -2549,7 +2813,7 @@ async fn park_for_answer(
     });
     // Registration precedes visibility: an answer posted the instant the row
     // reads 'waiting' has to find a claim already standing, or it resolves
-    // nothing and the run waits out the whole timeout.
+    // nothing and the run waits on an answer that was already given.
     let waiter = question::expect(run_id);
     // A plan outlives the question that carried it: once approval is asked
     // for, the row keeps what was asked about, so a reviewer can read it after
@@ -2622,10 +2886,10 @@ async fn park_for_answer(
 /// Symmetric with [`park_for_answer`] and for the same reasons, with one
 /// difference: the wait was registered by the call that opened it, strictly
 /// before its own receipt was streamed, so nothing can settle unobserved
-/// between the registration and the park. The admission slot is the one thing
-/// this park does not keep — a run waiting on a build is not executing, and
-/// [`MAX_CONCURRENT_TASKS`] runs holding slots through a half-hour wait would
-/// take the deployment's task throughput to zero.
+/// between the registration and the park. Like it, this park keeps the lease
+/// and hands the admission slot back for the length of the wait: a run waiting
+/// on a build is not executing, and [`MAX_CONCURRENT_TASKS`] runs holding slots
+/// through a half-hour wait would take the deployment's task throughput to zero.
 async fn park_for_wait(
     state: &AppState,
     run_id: Uuid,
@@ -2931,8 +3195,8 @@ pub(super) async fn complete_publication(
 /// Wait for the next event, announcing every [`STALL_AFTER`] of silence.
 ///
 /// A run that has gone quiet looks exactly like one that is working: both
-/// produce nothing. The announcement is what tells them apart while the run is
-/// still going, rather than an hour later when the timeout ends it.
+/// produce nothing, and nothing but a Stop or a lost lease ends either. The
+/// announcement is what tells them apart while the run is still going.
 ///
 /// A failed announcement ends the wait rather than being swallowed. The only
 /// way to write that line is through the run's own log, so losing it means the
@@ -3576,6 +3840,384 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_run_stopped_while_queued_for_a_slot_ends_and_frees_nothing_it_never_held() {
+        use crate::db::{organizations, users, workspace_members};
+
+        let _execution = EXECUTION.lock().await;
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("isolated TEST_DATABASE_URL"),
+        )
+        .await
+        .unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Stop test",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Stop test",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Stopper"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Queued",
+            "Must not run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let held = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+            .await
+            .unwrap();
+        let outcomes = Outcomes::default();
+        let _counting = metrics::set_default_local_recorder(&outcomes);
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+        let execution = tokio::spawn(async move {
+            execute_task_run(&state, run.id, task.id).await;
+        });
+        let lease = async || -> (bool, chrono::DateTime<chrono::Utc>) {
+            sqlx::query_as("SELECT owner IS NOT NULL, heartbeat_at FROM task_runs WHERE id = $1")
+                .bind(run.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let (true, beat) = lease().await {
+                    return beat;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker claimed the run");
+        tokio::time::timeout(HEARTBEAT_INTERVAL + Duration::from_secs(5), async {
+            while lease().await.1 <= claimed {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker beat after its claim, so its next beat is a whole interval away");
+        assert!(
+            stop::listening(run.id),
+            "the claimed run listens for a stop"
+        );
+        assert!(
+            matches!(
+                tasks::stop_task_run_authorized(&pool, user.id, run.id)
+                    .await
+                    .unwrap(),
+                tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+            ),
+            "the queued run was live to stop"
+        );
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            Some(run.id),
+            "the stopped run keeps its task while its worker tears down"
+        );
+        assert!(stop::request(run.id), "the stop reached the worker");
+        tokio::time::timeout(Duration::from_secs(5), execution)
+            .await
+            .expect("a stop ends the run long before its next heartbeat")
+            .unwrap();
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            None,
+            "the stopped worker frees its task once it has torn down"
+        );
+        let stopped = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
+        assert_eq!(stopped.status, tasks::CANCELLED);
+        assert_eq!(stopped.error_message.as_deref(), Some(tasks::STOPPED));
+        assert!(
+            !stop::request(run.id),
+            "the finished run no longer listens for a stop"
+        );
+        assert_eq!(
+            outcomes.counted(),
+            [tasks::CANCELLED],
+            "a stopped run is counted as cancelled, not as an error"
+        );
+        assert_eq!(
+            get_semaphore().available_permits(),
+            0,
+            "the stopped run handed back no slot it never took"
+        );
+        drop(held);
+        organizations::delete_organization(&pool, organization.id)
+            .await
+            .unwrap();
+    }
+
+    /// A stop another replica takes never reaches this one's signal: the run
+    /// ends when its heartbeat finds it cancelled, and is counted as the
+    /// cancelled run it is, not as an error.
+    #[tokio::test]
+    async fn a_run_stopped_on_another_replica_is_counted_as_cancelled() {
+        use crate::db::{organizations, users, workspace_members};
+
+        let _execution = EXECUTION.lock().await;
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("isolated TEST_DATABASE_URL"),
+        )
+        .await
+        .unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Remote stop test",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Remote stop test",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Stopper"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Queued",
+            "Must not run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let held = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+            .await
+            .unwrap();
+        let outcomes = Outcomes::default();
+        let _counting = metrics::set_default_local_recorder(&outcomes);
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+        let execution = tokio::spawn(async move {
+            execute_task_run(&state, run.id, task.id).await;
+        });
+        let lease = async || -> (bool, chrono::DateTime<chrono::Utc>) {
+            sqlx::query_as("SELECT owner IS NOT NULL, heartbeat_at FROM task_runs WHERE id = $1")
+                .bind(run.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let (true, beat) = lease().await {
+                    return beat;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker claimed the run");
+        tokio::time::timeout(HEARTBEAT_INTERVAL + Duration::from_secs(5), async {
+            while lease().await.1 <= claimed {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker beat after its claim, so its next beat is a whole interval away");
+        assert!(
+            matches!(
+                tasks::stop_task_run_authorized(&pool, user.id, run.id)
+                    .await
+                    .unwrap(),
+                tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+            ),
+            "the queued run was live to stop"
+        );
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            Some(run.id),
+            "the run stopped elsewhere keeps its task until its next heartbeat finds it stopped"
+        );
+        tokio::time::timeout(HEARTBEAT_INTERVAL + Duration::from_secs(5), execution)
+            .await
+            .expect("the run's next heartbeat finds it stopped and ends it")
+            .unwrap();
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            None,
+            "the worker frees its task once it has torn down"
+        );
+        let stopped = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
+        drop(held);
+        organizations::delete_organization(&pool, organization.id)
+            .await
+            .unwrap();
+        assert_eq!(stopped.status, tasks::CANCELLED);
+        assert_eq!(stopped.error_message.as_deref(), Some(tasks::STOPPED));
+        assert_eq!(
+            outcomes.counted(),
+            [tasks::CANCELLED],
+            "a run stopped on another replica is counted as cancelled, not as an error"
+        );
+    }
+
+    /// The run a task is held for.
+    async fn reserved(pool: &PgPool, task: Uuid) -> Option<Uuid> {
+        sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The task-run outcomes counted on the thread it is installed on.
+    #[derive(Default)]
+    struct Outcomes(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Outcomes {
+        fn counted(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    struct Outcome {
+        status: String,
+        counted: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl metrics::CounterFn for Outcome {
+        fn increment(&self, _: u64) {
+            self.counted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(self.status.clone());
+        }
+
+        fn absolute(&self, _: u64) {}
+    }
+
+    const TASK_RUNS: &str = "zone_task_run_total";
+    const STATUS: &str = "status";
+
+    impl metrics::Recorder for Outcomes {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            let status = key
+                .labels()
+                .find(|label| label.key() == STATUS)
+                .map(|label| label.value().to_string());
+            match status {
+                Some(status) if key.name() == TASK_RUNS => {
+                    metrics::Counter::from_arc(Arc::new(Outcome {
+                        status,
+                        counted: self.0.clone(),
+                    }))
+                }
+                _ => metrics::Counter::noop(),
+            }
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
     }
 
     // Integration tests are in zone_server/tests/integration/task_execution.rs
@@ -5108,17 +5750,6 @@ mod retry_tests {
     }
 
     #[test]
-    fn run_timeouts_are_terminal() {
-        let fault = Fault::timeout();
-        assert_eq!(fault.failure, Failure::Terminal);
-        assert_eq!(fault.status, "timeout");
-        assert_eq!(
-            RetryPolicy::default().decide(1, fault.failure, 0.0),
-            Decision::Terminal
-        );
-    }
-
-    #[test]
     fn rate_limits_back_off_further_than_transient_failures() {
         let policy = RetryPolicy::default();
         let throttled = classify("HTTP 429 Too Many Requests");
@@ -5634,8 +6265,8 @@ mod watchdog_tests {
     }
 
     /// The stall is announced while the run is still going, and keeps being
-    /// announced: one line an hour before the timeout would be a line nobody
-    /// sees the end of.
+    /// announced: one line, however long the silence lasts after it, would be
+    /// a line nobody sees the end of.
     #[tokio::test(start_paused = true)]
     async fn silence_is_announced_every_interval_until_an_event_arrives() {
         let announced = Arc::new(Mutex::new(Vec::new()));
@@ -5767,7 +6398,7 @@ mod watchdog_tests {
     }
 
     /// Nobody answers an unattended run, so a required question is given the
-    /// same window an optional one gets rather than the run's whole timeout.
+    /// same window an optional one gets rather than waiting on nobody forever.
     #[test]
     fn an_unattended_run_keeps_the_window_even_for_a_required_question() {
         assert_eq!(
@@ -5886,6 +6517,28 @@ mod watchdog_tests {
         assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
         let state = AppState::new(crate::state::test_config(), pool.clone(), None);
         (pool, observed, state, run.id, owner)
+    }
+
+    async fn workspace_of(pool: &PgPool, run: Uuid) -> Uuid {
+        sqlx::query_scalar(
+            "SELECT tasks.workspace_id FROM tasks \
+             JOIN task_runs ON task_runs.task_id = tasks.id WHERE task_runs.id = $1",
+        )
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn remove_organization_of(pool: &PgPool, workspace: Uuid) {
+        sqlx::query(
+            "DELETE FROM organizations \
+             WHERE id = (SELECT organization_id FROM workspaces WHERE id = $1)",
+        )
+        .bind(workspace)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn parked_row(pool: &PgPool, run: Uuid) -> (String, Option<serde_json::Value>) {
@@ -6292,7 +6945,7 @@ mod watchdog_tests {
 
         let _execution = EXECUTION.lock().await;
         let (pool, _observed, _state, run, owner) = parked_fixture().await;
-        let workspace_id: Uuid = sqlx::query_scalar("SELECT tasks.workspace_id FROM tasks JOIN task_runs ON task_runs.task_id=tasks.id WHERE task_runs.id=$1").bind(run).fetch_one(&pool).await.unwrap();
+        let workspace_id = workspace_of(&pool, run).await;
 
         let provider = MockServer::start().await;
         let cards = Arc::new(AtomicUsize::new(0));
@@ -6345,6 +6998,7 @@ mod watchdog_tests {
                 None,
                 &LlmBackend::Http,
                 None,
+                &Usage::default(),
                 &Endpoint::instance(state.config()),
                 "gpt-4",
                 "# Task: Budget\n\nKeep asking until something stops you",
@@ -6355,7 +7009,6 @@ mod watchdog_tests {
                 false,
                 false,
                 &plan::Approval::default(),
-                tokio::time::Instant::now() + TASK_TIMEOUT,
                 PARKING_CEILING,
             ),
         )
@@ -6388,14 +7041,14 @@ mod watchdog_tests {
             outcome.summary, "The budget for this run is spent.",
             "an exhausted budget must end the run the way any exhausted budget does"
         );
-        sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
+        remove_organization_of(&pool, workspace_id).await;
     }
 
     /// A parked run holds no work, only an answer it is waiting for. Holding
     /// its execution slot through that wait lets [`MAX_CONCURRENT_TASKS`] runs
     /// parked on required questions take the whole deployment's task throughput
-    /// to zero for the hour a question may go unanswered -- and `required` is
-    /// the model's to set.
+    /// to zero for as long as their questions go unanswered -- and `required`
+    /// is the model's to set.
     #[tokio::test]
     async fn a_parked_run_gives_its_execution_slot_back_while_it_waits() {
         use crate::db::{organizations, users, workspace_members, workspaces};
@@ -6584,21 +7237,6 @@ mod watchdog_tests {
         );
     }
 
-    #[test]
-    fn an_unanswered_required_question_ends_the_run_without_a_retry() {
-        let fault = Fault::timeout();
-        assert!(matches!(fault.failure, Failure::Terminal));
-        assert_eq!(
-            RetryPolicy::default().decide(1, fault.failure, 0.0),
-            Decision::Terminal,
-            "a run that timed out waiting has nothing different to try"
-        );
-        assert_eq!(
-            fault.message,
-            format!("Task execution timed out after {TASK_TIMEOUT_SECS} seconds")
-        );
-    }
-
     /// A run that parked three times ran four turns, and the artifacts report
     /// the run. Dropping the parked turns under-reports the work it did and
     /// loses everything it said before it stopped to ask.
@@ -6757,6 +7395,10 @@ mod watchdog_tests {
 
     /// A wait short enough to sit out in real time.
     const WAIT_TICK: Duration = Duration::from_secs(3);
+
+    /// An hour, far longer than any test runs: a park or a job lasting it is
+    /// still going when the test looks.
+    const LONG_PARK: Duration = Duration::from_secs(3_600);
 
     /// A wait on a background job, ending `seconds` from now.
     ///
@@ -7164,77 +7806,109 @@ mod watchdog_tests {
         );
     }
 
-    /// The wait sits inside the attempt's own timeout and gets no second one.
-    /// A wait that outlives it ends the run rather than the attempt being run
-    /// again: the retry would re-open the same wait on the same subject.
+    /// Nothing but an answer, a Stop or a lost lease ends a run parked on a
+    /// required question: one left unanswered for [`LONG_PARK`] still resumes
+    /// the run once it is answered.
     #[tokio::test]
-    async fn a_wait_that_outlives_the_attempt_timeout_ends_the_run_without_a_retry() {
+    async fn an_attempt_parked_past_an_hour_still_completes_when_answered() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const FINISHED: &str = "Backfilled the ledger.";
+
         let _execution = EXECUTION.lock().await;
-        let (_pool, observed, state, run, owner) = parked_fixture().await;
-        let permit = Arc::new(Permit::acquire().await.unwrap());
-        assert!(
-            Duration::from_secs(wait::MAX_WAIT_SECS) < TASK_TIMEOUT,
-            "one clamped wait can never reach the attempt timeout on its own"
-        );
-        let waited = claimed_wait(run, TASK_TIMEOUT.as_secs() as i64 * 2);
-
-        let mut parking = {
-            let state = state.clone();
-            let permit = permit.clone();
-            let waited = waited.clone();
-            tokio::spawn(async move { park_for_wait(&state, run, owner, &waited, &permit).await })
+        let (pool, observed, _state, run, owner) = parked_fixture().await;
+        let workspace_id = workspace_of(&pool, run).await;
+        let provider = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let delta = if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                    serde_json::json!({"tool_calls":[{"index":0,"id":"ask-scope","type":"function","function":{"name":crate::agent::ASK_USER,"arguments":ASK_SCOPE}}]})
+                } else {
+                    serde_json::json!({"content": FINISHED})
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(streamed(delta))
+            })
+            .mount(&provider)
+            .await;
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+        let permit = Permit::acquire().await.unwrap();
+        let workspace = std::env::temp_dir();
+        let environment = Environment {
+            directory: workspace.clone(),
+            ..Environment::here()
         };
-        // The park writes the row before it awaits anything, and a paused clock
-        // auto-advances straight through that write to the only timer left --
-        // the attempt timeout below, which would then elapse against a row
-        // still reading 'running'. So the park lands on the real clock first.
-        tokio::time::timeout(WAIT_TICK, async {
-            loop {
-                let (status, _, _, phase) = waiting_state(&observed, run).await;
-                if (status.as_str(), phase.as_deref()) == (PHASE_WAITING, Some(PHASE_WAITING)) {
-                    break;
+
+        let endpoint = Endpoint::instance(state.config());
+        let approval = plan::Approval::default();
+        let usage = Usage::default();
+        let attempt = attempt_run(
+            &state,
+            run,
+            owner,
+            workspace_id,
+            None,
+            &LlmBackend::Http,
+            None,
+            &usage,
+            &endpoint,
+            "gpt-4",
+            "# Task: Backfill\n\nAsk which scope, then do it",
+            "",
+            &workspace,
+            &environment,
+            &permit,
+            false,
+            false,
+            &approval,
+            LoopBudget::task(),
+        );
+        // The row is watched on the real clock: a paused one jumps to the next
+        // timer while a query is in flight. Only once the run is parked, with
+        // no I/O of its own outstanding, is `LONG_PARK` run out on a paused clock,
+        // and the clock resumed before the answer sends the run back to the
+        // database and the endpoint.
+        let answering = async {
+            tokio::time::timeout(HUNG_AFTER, async {
+                loop {
+                    let (status, pending, _) = parked_state(&observed, run).await;
+                    if status == PHASE_WAITING && pending.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(POLL).await;
                 }
-                tokio::time::sleep(POLL).await;
-            }
-        })
-        .await
-        .expect("the run never read as parked on its wait");
+            })
+            .await
+            .expect("the run never parked on its question");
+            tokio::time::pause();
+            tokio::time::advance(LONG_PARK + Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            tokio::time::resume();
+            question::answer(run, chose_backfill())
+        };
+        let (outcome, answered) = within(HUNG_AFTER, futures::future::join(attempt, answering))
+            .await
+            .expect("the answered run never finished");
 
-        tokio::time::pause();
-        // The wrapper the attempt puts around every turn of the run, waiting
-        // included. Nothing inside the park may bound the wait more tightly or
-        // survive this elapsing, so the clock has only one timer to reach.
-        let attempt = tokio::time::timeout(TASK_TIMEOUT, &mut parking).await;
-
-        assert!(
-            attempt.is_err(),
-            "the wait outlived the attempt and kept the run alive anyway"
-        );
-        // What the attempt's own wrapper does to the park it is holding: drop
-        // it where the elapsed timeout found it, mid-wait.
-        parking.abort();
-        assert!(
-            parking.await.unwrap_err().is_cancelled(),
-            "the park ended on its own rather than being cancelled mid-wait"
-        );
-        tokio::time::resume();
-        let (status, _, _, phase) = waiting_state(&observed, run).await;
-        assert_eq!(
-            (status.as_str(), phase.as_deref()),
-            (PHASE_WAITING, Some(PHASE_WAITING)),
-            "the attempt was cancelled mid-wait, and the terminal completion is what clears \
-             the row it left parked"
-        );
-        let fault = Fault::timeout();
-        assert!(
-            matches!(fault.failure, Failure::Terminal),
-            "an elapsed attempt was classified {}",
-            fault.failure.label()
-        );
-        assert_eq!(
-            RetryPolicy::default().decide(1, fault.failure, 0.0),
-            Decision::Terminal
-        );
+        let outcome = outcome.unwrap_or_else(|fault| {
+            panic!(
+                "a run parked past an hour ended before its answer: {}",
+                fault.message
+            )
+        });
+        assert!(answered, "nothing was waiting on the answer an hour in");
+        assert_eq!(outcome.summary, FINISHED);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        remove_organization_of(&pool, workspace_id).await;
     }
 
     /// A background job outlives the tool call that started it, and nothing
@@ -7257,7 +7931,7 @@ mod watchdog_tests {
         let started = Jobs::spawn(
             &abnegate_agent::tool::job::JobCommand::new(
                 "/bin/sleep",
-                vec![TASK_TIMEOUT.as_secs().to_string()],
+                vec![LONG_PARK.as_secs().to_string()],
             ),
             &context,
         )
@@ -7295,7 +7969,7 @@ mod watchdog_tests {
 
         let _execution = EXECUTION.lock().await;
         let (pool, _observed, _state, run, owner) = parked_fixture().await;
-        let workspace_id: Uuid = sqlx::query_scalar("SELECT tasks.workspace_id FROM tasks JOIN task_runs ON task_runs.task_id=tasks.id WHERE task_runs.id=$1").bind(run).fetch_one(&pool).await.unwrap();
+        let workspace_id = workspace_of(&pool, run).await;
         let provider = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -7315,7 +7989,7 @@ mod watchdog_tests {
 
         // What the attempt before this one left behind, still registered under
         // the run's session because its own park never consumed it.
-        let waited = claimed_wait(run, TASK_TIMEOUT.as_secs() as i64);
+        let waited = claimed_wait(run, LONG_PARK.as_secs() as i64);
         let workspace = std::env::temp_dir();
         let environment = Environment {
             directory: workspace.clone(),
@@ -7329,6 +8003,7 @@ mod watchdog_tests {
             None,
             &LlmBackend::Http,
             None,
+            &Usage::default(),
             &Endpoint::instance(state.config()),
             "gpt-4",
             "# Task: Retry\n\nFinish without waiting",
@@ -7339,7 +8014,6 @@ mod watchdog_tests {
             false,
             false,
             &plan::Approval::default(),
-            tokio::time::Instant::now() + TASK_TIMEOUT,
             LoopBudget::task(),
         )
         .await
@@ -7365,7 +8039,7 @@ mod watchdog_tests {
             0,
             "the allowance the refused eleventh wait is counted against has to start empty"
         );
-        sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
+        remove_organization_of(&pool, workspace_id).await;
     }
 }
 
@@ -7398,6 +8072,8 @@ mod cli_tests {
     const ARGUMENTS: &str = "arguments";
     const PROMPT: &str = "prompt";
     const TOKEN: &str = "token";
+    /// The file a run under [`Agent::lingering`] is served a write of.
+    const SERVED: &str = "served.txt";
 
     /// Prints the bearer token the stand-in was handed for Zone's MCP server. It arrives as the
     /// whole `Authorization` header, in a variable abnegate-agent-cli generates and the agent's
@@ -7408,6 +8084,7 @@ mod cli_tests {
     const INVOCATIONS: &str = "invocations";
     const FAILED: &str = "failed";
     const RELEASE: &str = "release";
+    const CHILD: &str = "child";
     const REFUSALS: &str = "refusals";
     /// Where a refusal [`Agent::limited`] prints names the second its window
     /// resets at.
@@ -7466,9 +8143,22 @@ mod cli_tests {
             })
         }
 
-        /// It answers once `seconds` have passed.
-        fn slow(seconds: u64) -> Self {
-            Self::with(|_| format!("sleep {seconds}\n{}", answer()))
+        /// It leaves a long sleep running behind it, recording its pid,
+        /// reports half its five-hour window used, then records its MCP token
+        /// and holds the turn open until released.
+        fn lingering() -> Self {
+            Self::with(|agent| {
+                format!(
+                    "sleep 600 > /dev/null 2>&1 &\nprintf '%s' \"$!\" > '{child}'\necho \
+                     '{window}'\nprintf '%s' \"{MCP_TOKEN}\" > '{token}'\nwhile [ ! -f \
+                     '{release}' ]; do sleep 0.05; done\n{answer}",
+                    child = agent.path(CHILD).display(),
+                    window = json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.5, "isUsingOverage": false}}),
+                    token = agent.path(TOKEN).display(),
+                    release = agent.path(RELEASE).display(),
+                    answer = answer(),
+                )
+            })
         }
 
         /// It records the claude token and the arguments of each invocation.
@@ -8490,13 +9180,12 @@ mod cli_tests {
         fixture.remove().await;
     }
 
-    /// One attempt of the fixture's run on `backend`, given until `deadline`.
+    /// One attempt of the fixture's run on `backend`.
     async fn attempt(
         state: &AppState,
         fixture: &Fixture,
         owner: Uuid,
         backend: &LlmBackend,
-        deadline: tokio::time::Instant,
     ) -> Result<TaskOutcome, Fault> {
         let workspace = std::env::temp_dir();
         let environment = Environment {
@@ -8511,6 +9200,7 @@ mod cli_tests {
             None,
             backend,
             None,
+            &Usage::default(),
             &Endpoint::instance(state.config()),
             "sonnet",
             "# Task: Agent run\n\nWrite the file",
@@ -8521,75 +9211,9 @@ mod cli_tests {
             false,
             false,
             &plan::Approval::default(),
-            deadline,
             LoopBudget::task(),
         )
         .await
-    }
-
-    /// An agent whose own default timeout is shorter than the attempt it
-    /// serves: the chat turn's thirty minutes, inside a task's hour.
-    fn impatient(agent: &Agent) -> LlmBackend {
-        LlmBackend::cli(
-            AgentKind::Claude,
-            CliSettings::default()
-                .with_executable(agent.path(EXECUTABLE))
-                .with_timeout(Duration::from_secs(1)),
-        )
-    }
-
-    #[tokio::test]
-    async fn an_attempts_agent_may_run_for_the_rest_of_the_attempt() {
-        let _execution = EXECUTION.lock().await;
-        let fixture = Fixture::new(false).await;
-        let owner = fixture.claim().await;
-        let agent = Agent::slow(2);
-        let provider = MockServer::start().await;
-        let state = fixture.state(config(&agent, &provider));
-
-        let outcome = attempt(
-            &state,
-            &fixture,
-            owner,
-            &impatient(&agent),
-            tokio::time::Instant::now() + SPAWN_TIMEOUT,
-        )
-        .await;
-
-        let outcome =
-            outcome.unwrap_or_else(|fault| panic!("the attempt still had time: {}", fault.message));
-        assert_eq!(outcome.summary, ANSWER);
-        fixture.remove().await;
-    }
-
-    /// The attempt's deadline ends the agent's turn whichever clock sees it
-    /// first, and a run that spent its budget is not given it again.
-    #[tokio::test]
-    async fn an_attempt_whose_agent_outruns_its_budget_is_not_retried() {
-        let _execution = EXECUTION.lock().await;
-        let fixture = Fixture::new(false).await;
-        let owner = fixture.claim().await;
-        let agent = Agent::slow(30);
-        let provider = MockServer::start().await;
-        let state = fixture.state(config(&agent, &provider));
-
-        let fault = attempt(
-            &state,
-            &fixture,
-            owner,
-            &impatient(&agent),
-            tokio::time::Instant::now() + Duration::from_secs(3),
-        )
-        .await
-        .expect_err("an agent still running at the attempt's deadline");
-
-        assert_eq!(
-            (fault.failure, fault.status),
-            (Failure::Terminal, "timeout"),
-            "{}",
-            fault.message
-        );
-        fixture.remove().await;
     }
 
     /// An answer stopped at the output cap is stopped there again by a retry,
@@ -8617,15 +9241,9 @@ mod cli_tests {
                 .with_output_limit(4 * 1024),
         );
 
-        let fault = attempt(
-            &state,
-            &fixture,
-            owner,
-            &capped,
-            tokio::time::Instant::now() + SPAWN_TIMEOUT,
-        )
-        .await
-        .expect_err("an answer that outgrew the cap");
+        let fault = attempt(&state, &fixture, owner, &capped)
+            .await
+            .expect_err("an answer that outgrew the cap");
 
         assert!(fault.message.contains("4096"), "{}", fault.message);
         assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
@@ -8656,15 +9274,9 @@ mod cli_tests {
             CliSettings::default().with_executable(agent.path(EXECUTABLE)),
         );
 
-        let fault = attempt(
-            &state,
-            &fixture,
-            owner,
-            &backend,
-            tokio::time::Instant::now() + SPAWN_TIMEOUT,
-        )
-        .await
-        .expect_err("an attempt its agent was cut short in");
+        let fault = attempt(&state, &fixture, owner, &backend)
+            .await
+            .expect_err("an attempt its agent was cut short in");
 
         assert_eq!(fault.message, AGENT_CUT_SHORT);
         assert_eq!(
@@ -8678,7 +9290,7 @@ mod cli_tests {
     /// Over MCP the agent runs the loop, so zone counts its calls where they
     /// arrive. A task's budget is unlimited, so those calls are not cut off:
     /// an attempt keeps working past any number zone's own loop once stopped
-    /// at, and what ends a runaway attempt is its deadline instead.
+    /// at, and what ends a runaway attempt is a Stop or a lost lease instead.
     #[tokio::test]
     async fn a_run_on_a_coding_agent_is_not_cut_off_by_a_tool_budget() {
         let _execution = EXECUTION.lock().await;
@@ -8945,6 +9557,415 @@ mod cli_tests {
             .find(|window| window.name == zone_core::llm::window::FIVE_HOURS)
             .unwrap_or_else(|| panic!("no five-hour window in {windows:?}"));
         assert_eq!(window.used_percent, Some(50.0));
+    }
+
+    /// Start the fixture's run on `state` under [`Agent::lingering`], wait
+    /// until the run has read the usage the agent reported and served it a
+    /// tool call, then stop it and wait for the run to end.
+    async fn stop_mid_attempt(state: &AppState, fixture: &Fixture, agent: &Agent) {
+        let running = start_mid_attempt(state, fixture, agent).await;
+        stop_running(fixture, running).await;
+    }
+
+    /// Start the fixture's run on `state` under [`Agent::lingering`] and wait
+    /// until the run has read the usage the agent reported and served it a
+    /// `write_file` of [`SERVED`] in its checkout.
+    async fn start_mid_attempt(
+        state: &AppState,
+        fixture: &Fixture,
+        agent: &Agent,
+    ) -> tokio::task::JoinHandle<()> {
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+        let token = tokio::time::timeout(SPAWN_TIMEOUT, async {
+            loop {
+                match std::fs::read_to_string(agent.path(TOKEN)) {
+                    Ok(token) if !token.is_empty() => return token,
+                    _ => tokio::time::sleep(POLL).await,
+                }
+            }
+        })
+        .await
+        .expect("the agent reported its usage and was served zone's tools");
+        let answer = rpc(
+            &token,
+            "tools/call",
+            json!({"name": "write_file", "arguments": {
+                "path": SERVED,
+                "content": "written",
+                "reason": "The task asked for this file.",
+            }}),
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        tokio::time::timeout(SPAWN_TIMEOUT, async {
+            while !tasks::get_task_run_logs(&fixture.pool, fixture.run)
+                .await
+                .unwrap()
+                .iter()
+                .any(|log| log.message == "Executing tool: write_file")
+            {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the run read the call the agent made after its usage");
+        running
+    }
+
+    /// Stop the fixture's run and wait for `running` to end it.
+    async fn stop_running(fixture: &Fixture, running: tokio::task::JoinHandle<()>) {
+        assert!(matches!(
+            tasks::stop_task_run_authorized(&fixture.pool, fixture.user, fixture.run)
+                .await
+                .unwrap(),
+            tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+        ));
+        assert!(
+            stop::request(fixture.run),
+            "the running run listens for a stop"
+        );
+        tokio::time::timeout(SPAWN_TIMEOUT, running)
+            .await
+            .expect("a stop ends the run")
+            .unwrap();
+        assert_eq!(fixture.finished().await.status, tasks::CANCELLED);
+    }
+
+    /// A run stopped mid-attempt still records the usage its agent reported,
+    /// so the next run is routed on what this one spent.
+    #[tokio::test]
+    async fn a_stopped_run_records_the_usage_its_agent_reported_on_its_login() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        let login = fixture.add(&state, "first-access", "a@example.com").await;
+
+        stop_mid_attempt(&state, &fixture, &agent).await;
+
+        let snapshot = agent_logins::get(&fixture.pool, login.id)
+            .await
+            .unwrap()
+            .expect("the run's login")
+            .snapshot();
+        fixture.remove().await;
+        let windows = snapshot
+            .expect("a snapshot of the usage the stopped attempt reported")
+            .windows;
+        let window = windows
+            .iter()
+            .find(|window| window.name == zone_core::llm::window::FIVE_HOURS)
+            .unwrap_or_else(|| panic!("no five-hour window in {windows:?}"));
+        assert_eq!(window.used_percent, Some(50.0));
+    }
+
+    /// A stopped run releases its checkout once the pipeline it cut off is
+    /// gone and off the runtime's threads, not in the middle of dropping that
+    /// pipeline on the thread that runs it. A file left where the directory
+    /// was makes the release fail, which it reports from the thread it ran on.
+    #[tokio::test]
+    async fn a_stopped_run_releases_its_checkout_off_the_runtime_thread() {
+        let _execution = EXECUTION.lock().await;
+        let failures = ReleaseFailures::capture();
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = start_mid_attempt(&state, &fixture, &agent).await;
+        let checkout = checkout_of(fixture.run);
+        assert!(
+            checkout.join(SERVED).is_file(),
+            "the run wrote in {}",
+            checkout.display()
+        );
+        let moved = TempDir::new().expect("a directory to move the checkout to");
+        std::fs::rename(&checkout, moved.path().join(fixture.run.to_string()))
+            .expect("the checkout moves");
+        std::fs::write(&checkout, b"").expect("a file stands where the checkout was");
+
+        stop_running(&fixture, running).await;
+
+        let threads = failures.of(&checkout);
+        std::fs::remove_file(&checkout).expect("the file left in the checkout's place");
+        fixture.remove().await;
+        assert_eq!(
+            threads.len(),
+            1,
+            "the stopped run released its checkout once: {threads:?}"
+        );
+        assert_ne!(
+            threads[0],
+            std::thread::current().id(),
+            "the stopped run released its checkout on the runtime's own thread"
+        );
+    }
+
+    /// A background job the run started keeps its own process group, so the
+    /// stop that kills the agent leaves it running. It dies before the
+    /// checkout it works in is removed, never with that checkout vanishing
+    /// under it: the job watches the file the run wrote and records, outside
+    /// the checkout, the moment it disappears.
+    #[tokio::test]
+    async fn a_stopped_run_kills_its_background_jobs_before_removing_its_checkout() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = start_mid_attempt(&state, &fixture, &agent).await;
+        let checkout = checkout_of(fixture.run);
+        let witness = TempDir::new().expect("a directory outside the checkout");
+        let started = witness.path().join("started");
+        let outlived = witness.path().join("outlived");
+        let context = abnegate_agent::ToolContext::default()
+            .within(&checkout)
+            .with_session(Session::Task(fixture.run))
+            .with_application(zone_core::application::application())
+            .with_environment(abnegate_agent::tool::EnvironmentPolicy::empty())
+            .with_proxy(abnegate_agent::tool::Proxy::default());
+        let job = Jobs::spawn(
+            &abnegate_agent::tool::job::JobCommand::new(
+                "/bin/sh",
+                vec![
+                    "-c".to_string(),
+                    format!(
+                        ": > '{}'; while [ -e '{SERVED}' ]; do :; done; : > '{}'",
+                        started.display(),
+                        outlived.display()
+                    ),
+                ],
+            ),
+            &context,
+        )
+        .await
+        .expect("the job starts");
+        tokio::time::timeout(SPAWN_TIMEOUT, async {
+            while !started.exists() {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the job is watching the checkout");
+
+        stop_running(&fixture, running).await;
+
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &job.pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill to run")
+            .success();
+        let removed = !checkout.exists();
+        fixture.remove().await;
+        assert!(
+            !outlived.exists(),
+            "the job saw {} removed while it was still running",
+            checkout.display()
+        );
+        assert!(!alive, "job {} outlived the stopped run", job.pid);
+        assert!(removed, "the stopped run removed {}", checkout.display());
+    }
+
+    /// A stopped run whose checkout removal never returns still frees its
+    /// task once the removal has had its bound, so Run Again is not refused
+    /// for as long as the process lives.
+    #[tokio::test]
+    async fn a_stopped_run_whose_checkout_removal_hangs_still_frees_its_task() {
+        const SLACK: Duration = Duration::from_secs(15);
+
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = start_mid_attempt(&state, &fixture, &agent).await;
+        let checkout = checkout_of(fixture.run);
+        let held = crate::services::checkout::hold::block(checkout.clone());
+
+        assert!(matches!(
+            tasks::stop_task_run_authorized(&fixture.pool, fixture.user, fixture.run)
+                .await
+                .unwrap(),
+            tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+        ));
+        assert!(
+            stop::request(fixture.run),
+            "the running run listens for a stop"
+        );
+        let ended = tokio::time::timeout(CHECKOUT_FINISH_TIMEOUT + SLACK, running).await;
+        let reserved: Option<Uuid> =
+            sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id = $1")
+                .bind(fixture.task)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        let removing = checkout.exists();
+        drop(held);
+        fixture.remove().await;
+        ended
+            .expect("the worker ended once its checkout removal had its bound")
+            .unwrap();
+        assert!(removing, "the held removal had not removed the checkout");
+        assert_eq!(reserved, None, "the stopped run freed its task");
+    }
+
+    /// The checkout the run `run` works in.
+    fn checkout_of(run: Uuid) -> PathBuf {
+        let prefix = format!("{run}.");
+        std::fs::read_dir(std::env::temp_dir())
+            .expect("the temporary directory")
+            .filter_map(Result::ok)
+            .filter(|root| {
+                root.file_name()
+                    .to_string_lossy()
+                    .starts_with(CHECKOUT_ROOT)
+            })
+            .filter_map(|root| std::fs::read_dir(root.path()).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .unwrap_or_else(|| panic!("no checkout for run {run}"))
+            .path()
+    }
+
+    const CHECKOUT_ROOT: &str = "zone-checkouts-v1-";
+    const CHECKOUT_TARGET: &str = "zone_server::services::checkout";
+    const RELEASE_FAILURE: &str = "Failed to remove task checkout";
+    const MESSAGE: &str = "message";
+    const PATH: &str = "path";
+
+    /// The threads every failed checkout release in the process reported
+    /// from, by the checkout's path. A release runs on whichever thread a
+    /// run's code puts it, which only a process-wide subscriber sees.
+    #[derive(Clone)]
+    struct ReleaseFailures(Arc<Mutex<Vec<(PathBuf, std::thread::ThreadId)>>>);
+
+    impl ReleaseFailures {
+        fn capture() -> Self {
+            static INSTALLED: OnceLock<ReleaseFailures> = OnceLock::new();
+            INSTALLED
+                .get_or_init(|| {
+                    use tracing_subscriber::layer::SubscriberExt;
+                    let failures = Self(Arc::default());
+                    tracing::subscriber::set_global_default(
+                        tracing_subscriber::registry().with(failures.clone()),
+                    )
+                    .expect("no other process-wide subscriber");
+                    failures
+                })
+                .clone()
+        }
+
+        fn watches(metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == CHECKOUT_TARGET && *metadata.level() == tracing::Level::ERROR
+        }
+
+        fn of(&self, checkout: &Path) -> Vec<std::thread::ThreadId> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter(|(path, _)| path.file_name() == checkout.file_name())
+                .map(|(_, thread)| *thread)
+                .collect()
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReleaseFailures {
+        fn register_callsite(
+            &self,
+            metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            if Self::watches(metadata) {
+                tracing::subscriber::Interest::always()
+            } else {
+                tracing::subscriber::Interest::never()
+            }
+        }
+
+        fn enabled(
+            &self,
+            metadata: &tracing::Metadata<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) -> bool {
+            Self::watches(metadata)
+        }
+
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = ReleaseFields::default();
+            event.record(&mut fields);
+            if fields.message == RELEASE_FAILURE {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((PathBuf::from(fields.path), std::thread::current().id()));
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct ReleaseFields {
+        message: String,
+        path: String,
+    }
+
+    impl tracing::field::Visit for ReleaseFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            match field.name() {
+                MESSAGE => self.message = format!("{value:?}"),
+                PATH => self.path = format!("{value:?}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// A stop kills the agent and everything it left running in its process
+    /// group, not only the agent itself.
+    #[tokio::test]
+    async fn a_stopped_run_kills_what_its_agent_left_running() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+
+        stop_mid_attempt(&state, &fixture, &agent).await;
+
+        let child = std::fs::read_to_string(agent.path(CHILD)).expect("the agent's child pid");
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", child.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("kill to run")
+                .success()
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while alive() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+        }
+        let survived = alive();
+        if survived {
+            let _ = std::process::Command::new("kill")
+                .arg(child.trim())
+                .status();
+        }
+        fixture.remove().await;
+        assert!(
+            !survived,
+            "the sleep the agent left running outlived the stop"
+        );
     }
 
     /// A login past its limit hands the run over to another of the

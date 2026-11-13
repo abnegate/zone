@@ -1,87 +1,86 @@
-//! Generation ownership and deadline acceptance through the real authenticated router.
+//! Generation ownership through the real authenticated router.
 
 use crate::common::MEDIA;
 use crate::common::comfy;
 use crate::common::context::{Harness, Socket, answer, finish, next, send, successful};
 use serde_json::json;
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
-use zone_server::services::chat::session::Settings;
+use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+use zone_server::services::stages::AUTO;
 
-#[test]
-fn settings_validate_deadline_range() {
-    const CHILD: &str = "ZONE_DEADLINE_TEST_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        let seconds: u64 = std::env::var("ZONE_CHAT_TIMEOUT_SECONDS")
-            .unwrap()
-            .parse()
-            .unwrap();
-        let timeout = Duration::from_secs(seconds);
-        let settings = Settings::from_env();
-        if Instant::now().checked_add(timeout).is_some() {
-            assert_eq!(settings.unwrap().timeout, timeout);
-        } else {
-            let error = settings.expect_err("an unrepresentable deadline must fail configuration");
-            assert!(error.contains("ZONE_CHAT_TIMEOUT_SECONDS"), "{error}");
-        }
-        return;
-    }
-    for seconds in [1, 1800, 31_536_000, u64::MAX] {
-        let mut command = Command::new(std::env::current_exe().unwrap());
-        command.args(["--exact", "settings_validate_deadline_range", "--nocapture"]);
-        for name in [
-            "ZONE_CHAT_CONTEXT_TOKENS",
-            "ZONE_CHAT_ROUNDS",
-            "ZONE_CHAT_CALLS",
-            "ZONE_CHAT_OUTPUT_TOKENS",
-        ] {
-            command.env_remove(name);
-        }
-        let output = command
-            .env(CHILD, "1")
-            .env("ZONE_CHAT_TIMEOUT_SECONDS", seconds.to_string())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "timeout {seconds}: {}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
+/// A turn that fails before it reaches inference, here on a saved endpoint
+/// with no model to run, ends with an error frame and gives the chat back:
+/// another owner can take the chat, and the next turn, once a model is set,
+/// answers.
 #[tokio::test]
-async fn unrepresentable_runtime_deadline_terminates_without_inference() {
-    let mut harness = Harness::new(Some(32768), false, vec![]).await;
-    let representable = harness.config.chat.timeout;
-    harness.config.chat.timeout = Duration::from_secs(u64::MAX);
-    harness.restart().await;
-    let mut socket = harness.connect().await;
-    send(
-        &mut socket,
-        json!({"type":"send","content":"A short ordinary question"}),
+async fn an_error_before_inference_releases_the_chat_for_the_next_turn() {
+    const UNANSWERED: &str = "http://127.0.0.1:9";
+
+    let harness = Harness::new(Some(32768), false, vec![]).await;
+    let organization: Uuid =
+        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id = $1")
+            .bind(harness.workspace)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "INSERT INTO organization_ai_settings \
+         (organization_id, provider, litellm_host, completions_routed) \
+         VALUES ($1, $2, $3, true)",
     )
-    .await;
-    let frames = finish(&mut socket).await;
+    .bind(organization)
+    .bind(PROVIDER_SELF_HOSTED)
+    .bind(UNANSWERED)
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+    let requested: String = sqlx::query_scalar("SELECT model_name FROM chats WHERE id = $1")
+        .bind(harness.chat)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE chats SET model_name = $2 WHERE id = $1")
+        .bind(harness.chat)
+        .bind(AUTO)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+    let frames = harness.turn("A short ordinary question").await;
     let terminal = frames.last().unwrap();
     assert_eq!(terminal["type"], "error", "{frames:?}");
-    assert!(terminal["message"].as_str().unwrap().contains("deadline"));
+    assert!(
+        terminal["message"]
+            .as_str()
+            .unwrap()
+            .contains("No model is set"),
+        "{terminal}"
+    );
     assert!(harness.requests().await.is_empty());
     let lease = harness
         .store()
         .acquire(Uuid::new_v4(), Duration::from_secs(30))
         .await
-        .expect("terminal error must release persistent ownership");
+        .expect("a terminal error must release persistent ownership");
     harness.store().release(&lease).await.unwrap();
-    harness.config.chat.timeout = representable;
+
+    sqlx::query("UPDATE chats SET model_name = $2 WHERE id = $1")
+        .bind(harness.chat)
+        .bind(requested)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM organization_ai_settings WHERE organization_id = $1")
+        .bind(organization)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
     harness.script.push(answer("Recovered"));
-    harness.restart().await;
     successful(&harness.turn("Please continue").await);
 }
 

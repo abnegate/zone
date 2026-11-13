@@ -56,6 +56,7 @@ impl Fixture {
     async fn record(&self, round: i32, reviewer: &str, verdict: Verdict) {
         auto_projects::record_review(
             &self.pool,
+            None,
             ReviewInsert {
                 task_id: self.task,
                 run_id: None,

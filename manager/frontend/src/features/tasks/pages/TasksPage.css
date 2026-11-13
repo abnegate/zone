@@ -273,6 +273,16 @@
   color: var(--ui-error-400);
 }
 
+.execution-notice--neutral {
+  background: var(--ui-bg-muted);
+  border-color: var(--ui-border);
+}
+
+.execution-notice--neutral strong,
+:root[data-theme='dark'] .execution-notice--neutral strong {
+  color: var(--ui-text-primary);
+}
+
 .execution-notice p {
   margin: 0;
   overflow-wrap: anywhere;

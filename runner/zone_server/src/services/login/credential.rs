@@ -15,11 +15,10 @@ use uuid::Uuid;
 use super::claude::{self, Sealed, Unbuilt};
 use super::homes;
 use super::locks::{Guard, Locks};
-use crate::config::Config;
 use crate::db::agent_logins::{self, AgentLoginRow};
 use crate::state::AppState;
 
-/// The longest a task attempt runs.
+/// How long before it expires a token of unknown lifetime is renewed.
 const MARGIN: Duration = Duration::from_secs(60 * 60);
 
 const UNOPENED: &str = "the stored sign-in could not be opened";
@@ -86,9 +85,8 @@ pub(crate) async fn resolve_claude(
     login: &AgentLoginRow,
     client: impl FnOnce() -> Result<Client, Unbuilt>,
 ) -> Result<Login, Error> {
-    let margin = margin(state.config());
     let tokens = open(state, login)?;
-    if !renewable(&tokens, Utc::now(), margin) {
+    if !renewable(&tokens, Utc::now()) {
         return current(tokens);
     }
 
@@ -98,7 +96,7 @@ pub(crate) async fn resolve_claude(
         .await?
         .ok_or(Error::Deleted)?;
     let tokens = open(state, &login)?;
-    if !renewable(&tokens, Utc::now(), margin) {
+    if !renewable(&tokens, Utc::now()) {
         return current(tokens);
     }
     let organization = login.organization_id;
@@ -171,20 +169,17 @@ async fn keep(
     }
 }
 
-/// Whether `tokens` are renewed before a turn that may run for `margin`. A renewal lasts no longer
-/// than their lifetime, so the margin never exceeds half of it, lest a token renewed a moment ago
-/// count as expiring; tokens of unknown lifetime use [`MARGIN`].
-fn renewable(tokens: &Tokens, now: DateTime<Utc>, margin: Duration) -> bool {
-    let margin = tokens
-        .lifetime()
-        .map_or(MARGIN, |lifetime| margin.min(lifetime / 2));
+/// Whether `tokens` are renewed before a turn: once half their lifetime has passed, the earliest
+/// that never counts a token renewed a moment ago as expiring, or within [`MARGIN`] of expiry when
+/// their lifetime is unknown.
+///
+/// The turn is handed only the access token, as `CLAUDE_CODE_OAUTH_TOKEN`, so claude cannot renew
+/// it mid-run. A turn that outlives what is left of it, as little as half its lifetime, about four
+/// hours for an eight-hour token, fails signed out, and its handover moves it to another login or
+/// ends it.
+fn renewable(tokens: &Tokens, now: DateTime<Utc>) -> bool {
+    let margin = tokens.lifetime().map_or(MARGIN, |lifetime| lifetime / 2);
     tokens.refresh.is_some() && tokens.expiring(now, margin)
-}
-
-/// The longest turn a Claude token may be handed to: a task attempt or a chat, whichever the
-/// operator allows longer.
-fn margin(config: &Config) -> Duration {
-    config.chat.timeout.max(MARGIN)
 }
 
 /// The access token as it is, while it has not expired.
@@ -230,7 +225,6 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, Config};
     use crate::db::agent_logins::Insert;
-    use crate::services::chat::session::Settings;
     use crate::services::login::claude::Explained;
 
     const TOKEN_PATH: &str = "/v1/oauth/token";
@@ -241,9 +235,6 @@ mod tests {
     const LIFETIME: i64 = 28_800;
     const GRANTED: Duration = Duration::from_secs(28_800);
     const TURNS: usize = 5;
-    /// A chat an operator allows longer than Claude grants a token for.
-    const LONG_CHAT: Duration = Duration::from_secs(12 * 60 * 60);
-    const TWO_HOUR_CHAT: Duration = Duration::from_secs(2 * 60 * 60);
     /// A pool small enough for turns waiting on one renewal to exhaust it, were each to hold a
     /// connection while it waits.
     const CONNECTIONS: u32 = 3;
@@ -336,11 +327,6 @@ mod tests {
 
         /// A fixture whose server runs on `server`.
         async fn on(server: PgPool, token_url: String) -> Self {
-            Self::chatting(server, token_url, Settings::default()).await
-        }
-
-        /// A fixture whose server runs on `server` and gives its chats `chat`.
-        async fn chatting(server: PgPool, token_url: String, chat: Settings) -> Self {
             let pool = connect().await;
             let organization = Uuid::new_v4();
             sqlx::query(
@@ -358,7 +344,6 @@ mod tests {
                         claude_token_url: token_url,
                         ..crate::state::test_agents()
                     },
-                    chat,
                     ..crate::state::test_config()
                 },
                 server,
@@ -478,13 +463,6 @@ mod tests {
         )
     }
 
-    fn chat(timeout: Duration) -> Settings {
-        Settings {
-            timeout,
-            ..Settings::default()
-        }
-    }
-
     async fn token_endpoint(response: ResponseTemplate, requests: u64) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -517,7 +495,7 @@ mod tests {
         let server = token_endpoint(renewed(), 0).await;
         let fixture = Fixture::answered_by(&server).await;
         fixture
-            .sign_in(&tokens(Utc::now() + TimeDelta::hours(2), Some(REFRESH)))
+            .sign_in(&tokens(Utc::now() + TimeDelta::hours(6), Some(REFRESH)))
             .await;
 
         let login = fixture.resolve().await;
@@ -528,11 +506,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_claude_login_that_would_expire_during_the_longest_turn_is_renewed_first() {
+    async fn a_claude_login_with_under_half_its_lifetime_left_is_renewed_before_a_turn() {
         let server = token_endpoint(renewed(), 1).await;
         let fixture = Fixture::answered_by(&server).await;
         fixture
-            .sign_in(&tokens(Utc::now() + TimeDelta::minutes(50), Some(REFRESH)))
+            .sign_in(&tokens(Utc::now() + TimeDelta::hours(2), Some(REFRESH)))
             .await;
 
         let login = fixture.resolve().await;
@@ -541,54 +519,13 @@ mod tests {
         assert_eq!(
             token(login),
             RENEWED,
-            "a token with 50 minutes left was handed to a turn that may run an hour"
+            "a token with 2 of its 8 hours left was handed to a turn that may run for longer"
         );
         server.verify().await;
     }
 
     #[test]
-    fn a_token_lasts_the_longer_of_a_task_attempt_and_a_chat() {
-        let chatting = |seconds| Config {
-            chat: Settings {
-                timeout: Duration::from_secs(seconds),
-                ..Settings::default()
-            },
-            ..crate::state::test_config()
-        };
-
-        assert_eq!(margin(&chatting(30 * 60)), MARGIN);
-        assert_eq!(margin(&chatting(60 * 60)), MARGIN);
-        assert_eq!(margin(&chatting(2 * 60 * 60)), TWO_HOUR_CHAT);
-    }
-
-    /// An operator may give a chat longer than a task attempt's hour, and a
-    /// token handed to that chat has to last it too.
-    #[tokio::test]
-    async fn a_claude_login_that_would_expire_during_a_longer_chat_is_renewed_first() {
-        let server = token_endpoint(renewed(), 1).await;
-        let fixture = Fixture::chatting(
-            connect().await,
-            format!("{}{TOKEN_PATH}", server.uri()),
-            chat(TWO_HOUR_CHAT),
-        )
-        .await;
-        fixture
-            .sign_in(&tokens(Utc::now() + TimeDelta::minutes(90), Some(REFRESH)))
-            .await;
-
-        let login = fixture.resolve().await;
-        fixture.remove().await;
-
-        assert_eq!(
-            token(login),
-            RENEWED,
-            "a token with 90 minutes left was handed to a chat that may run two hours"
-        );
-        server.verify().await;
-    }
-
-    #[test]
-    fn a_token_is_renewed_no_earlier_than_halfway_through_the_lifetime_claude_grants_it() {
+    fn a_token_is_renewed_once_half_the_lifetime_claude_grants_it_has_passed() {
         let now = Utc::now();
         let lasting = |lifetime: Option<TimeDelta>, left: TimeDelta| {
             granted(
@@ -598,37 +535,30 @@ mod tests {
             )
         };
         let (hours, year) = (Some(TimeDelta::hours(8)), Some(TimeDelta::days(365)));
-        let chat = TimeDelta::from_std(LONG_CHAT).expect("a representable chat timeout");
+        let half_year = TimeDelta::days(365) / 2;
         let hour = TimeDelta::from_std(MARGIN).expect("a representable margin");
 
         for (lifetime, left, expected) in [
             (hours, TimeDelta::hours(8), false),
             (hours, TimeDelta::hours(4) + TimeDelta::seconds(1), false),
             (hours, TimeDelta::hours(4), true),
-            (year, chat + TimeDelta::seconds(1), false),
-            (year, chat, true),
+            (year, half_year + TimeDelta::seconds(1), false),
+            (year, half_year, true),
             (None, hour + TimeDelta::seconds(1), false),
             (None, hour, true),
         ] {
             assert_eq!(
-                renewable(&lasting(lifetime, left), now, LONG_CHAT),
+                renewable(&lasting(lifetime, left), now),
                 expected,
                 "a token granted for {lifetime:?} with {left} left"
             );
         }
     }
 
-    /// A renewal cannot make a token outlast a chat allowed longer than Claude grants it for, so
-    /// such a chat renews it once rather than on every turn.
     #[tokio::test]
-    async fn a_chat_allowed_longer_than_a_tokens_lifetime_renews_it_once_and_not_on_every_turn() {
+    async fn a_renewed_claude_login_is_not_renewed_again_on_later_turns() {
         let server = token_endpoint(renewed(), 1).await;
-        let fixture = Fixture::chatting(
-            connect().await,
-            format!("{}{TOKEN_PATH}", server.uri()),
-            chat(LONG_CHAT),
-        )
-        .await;
+        let fixture = Fixture::answered_by(&server).await;
         fixture
             .sign_in(&tokens(Utc::now() + TimeDelta::minutes(1), Some(REFRESH)))
             .await;
@@ -647,18 +577,16 @@ mod tests {
         server.verify().await;
     }
 
-    /// A sign-in sealed before Zone recorded lifetimes is renewed within a task attempt's hour,
-    /// however long chats may run, and knows its lifetime once renewed.
+    /// A sign-in sealed before Zone recorded lifetimes is renewed within [`MARGIN`] of expiry, and
+    /// knows its lifetime once renewed.
     #[tokio::test]
     async fn a_login_of_unknown_lifetime_is_renewed_within_the_hour_and_then_knows_it() {
         let server = token_endpoint(renewed(), 1).await;
-        let token_url = format!("{}{TOKEN_PATH}", server.uri());
-        let lasting =
-            Fixture::chatting(connect().await, token_url.clone(), chat(TWO_HOUR_CHAT)).await;
+        let lasting = Fixture::answered_by(&server).await;
         lasting
             .sign_in(&untimed(Utc::now() + TimeDelta::minutes(90)))
             .await;
-        let expiring = Fixture::chatting(connect().await, token_url, chat(TWO_HOUR_CHAT)).await;
+        let expiring = Fixture::answered_by(&server).await;
         expiring
             .sign_in(&untimed(Utc::now() + TimeDelta::minutes(50)))
             .await;
@@ -967,7 +895,7 @@ mod tests {
     async fn a_claude_login_far_from_expiry_builds_no_client() {
         let fixture = Fixture::new(UNREACHABLE.to_string()).await;
         let login = fixture
-            .sign_in(&tokens(Utc::now() + TimeDelta::hours(2), Some(REFRESH)))
+            .sign_in(&tokens(Utc::now() + TimeDelta::hours(6), Some(REFRESH)))
             .await;
         let built = AtomicUsize::new(0);
 

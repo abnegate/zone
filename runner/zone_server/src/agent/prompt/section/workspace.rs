@@ -132,12 +132,18 @@ const BULLETS: &[Bullet] = &[
          check.",
     ),
     (
-        &[CREATE_PULL_REQUEST, COMMENT_ON_ISSUE],
+        &[COMMENT_ON_ISSUE],
         &[],
-        "- create_pull_request and comment_on_issue write to GitHub. Only use them when the user \
-         asked to open a PR or leave a comment.",
+        "- comment_on_issue writes to GitHub. Only use it when the user asked to leave a comment.",
     ),
 ];
+
+/// What a catalog holding the writer is told where [`tracked`] says nothing:
+/// a task run, whose pull request Zone opens itself, or a chat with no source
+/// for the tool to act on, where it could only fail. Neither can end work in a
+/// pull request, so the restraint is all there is to say.
+const ASK_FIRST: &str =
+    "- create_pull_request writes to GitHub. Only use it when the user asked to open a PR.";
 
 pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> {
     let mut bullets: Vec<String> = BULLETS
@@ -148,6 +154,9 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
         })
         .map(|(_, _, bullet)| (*bullet).to_string())
         .collect();
+    if context.tools.has(CREATE_PULL_REQUEST) && !connected(context) {
+        bullets.push(ASK_FIRST.to_string());
+    }
     bullets.extend(tracked(context));
 
     if bullets.is_empty() {
@@ -156,12 +165,24 @@ pub(in crate::agent::prompt) fn render(context: &Context<'_>) -> Option<String> 
     Some(format!("{HEADING}\n{}", bullets.join("\n")))
 }
 
+/// Whether this turn has a GitHub source of its own to act on, which is what
+/// separates the chat that ends its work in a pull request from the ones
+/// [`ASK_FIRST`] covers.
+fn connected(context: &Context<'_>) -> bool {
+    context.surface == Surface::Chat && context.environment.github
+}
+
 /// Zone records what its own GitHub tools open and can only guess at what a
 /// shell opened, so a chat holding them is sent to them first, by the name its
 /// model calls them. A chat without a GitHub source for them to act on is told
 /// nothing: the tool could only fail, and the shell is then the right way.
+///
+/// The pull request is also the one outward call a chat makes unasked. Work
+/// the user asked for is not delivered until it is reviewable, so a turn that
+/// changed a connected repository opens it the moment the work is done rather
+/// than stopping to ask for permission it already has.
 fn tracked(context: &Context<'_>) -> Vec<String> {
-    if context.surface != Surface::Chat || !context.environment.github {
+    if !connected(context) {
         return Vec::new();
     }
     let tools = context.tools;
@@ -169,8 +190,12 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
     if tools.has(CREATE_PULL_REQUEST) {
         let pull_request = tools.qualified(CREATE_PULL_REQUEST);
         bullets.push(format!(
-            "- On a repository connected as a GitHub source, open a pull request the user asked \
-             for by committing on its branch, then calling {pull_request} so Zone can track it. \
+            "- On a repository connected as a GitHub source, work that changed it ends in a pull \
+             request: as soon as the work is done and checked, open one by committing on its \
+             branch, then calling {pull_request} so Zone can track it. Asking for the work is \
+             asking for the pull request, so open it without asking and report it rather than \
+             offering to open one; a turn that changed nothing opens nothing, and a user who \
+             said to hold off is obeyed. \
              It pushes the branch for you: never git push it or use gh pr create, hub, the \
              GitHub web UI or another server's tool. Only if {pull_request} errors, reuse a pull \
              request gh pr list --head <branch> --base <base> finds; otherwise use gh pr create, say \
@@ -200,11 +225,14 @@ mod tests {
     use abnegate_agent_cli::AgentKind;
     use std::collections::BTreeSet;
 
-    /// Every tool any bullet asks for, which is the catalog that renders all of them.
+    /// Every tool any bullet asks for, which is the catalog that renders all
+    /// of them. `create_pull_request` is named because the rules about it are
+    /// chosen by surface rather than by a bullet's tool list.
     fn catalog() -> Vec<&'static str> {
         BULLETS
             .iter()
             .flat_map(|(requires, _, _)| requires.iter().copied())
+            .chain(std::iter::once(CREATE_PULL_REQUEST))
             .collect::<BTreeSet<&'static str>>()
             .into_iter()
             .collect()
@@ -229,7 +257,8 @@ mod tests {
             "Use an explicit future timestamp with its timezone",
             "inspect current state before retrying",
             "never prove a green build",
-            "Only use them when the user asked to open a PR",
+            "Only use it when the user asked to leave a comment",
+            "Only use it when the user asked to open a PR",
         ] {
             assert!(rendered.contains(sentence), "{sentence} missing");
         }
@@ -500,8 +529,61 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("Only use them when the user asked to open a PR"),
-            "this changes how a pull request is opened, never when: {rendered}"
+            !rendered.contains(ASK_FIRST),
+            "a connected chat opens the pull request its work needs, so the two rules must \
+             never render together: {rendered}"
+        );
+    }
+
+    /// The behaviour this section exists to fix: a turn that did the work and
+    /// then stopped to ask whether to open a pull request left the work
+    /// unreviewable. Asking for the work is the ask, and the only turn that
+    /// opens nothing is one that changed nothing or was told to hold off.
+    #[test]
+    fn work_on_a_connected_repository_ends_in_a_pull_request_without_asking() {
+        let tools = ChatTools::with_names(ToolProfile::Chat, &catalog(), None);
+        let rendered = prompted(&tools, &environment().with_github());
+
+        assert!(
+            rendered.contains("work that changed it ends in a pull request"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("as soon as the work is done and checked"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "Asking for the work is asking for the pull request, so open it without asking \
+                 and report it rather than offering to open one"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "a turn that changed nothing opens nothing, and a user who said to hold off is \
+                 obeyed"
+            ),
+            "{rendered}"
+        );
+    }
+
+    /// Where no pull request can be ended in — a run Zone publishes itself, or
+    /// a chat with nothing connected — the restraint is what is left.
+    #[test]
+    fn a_catalog_with_nowhere_to_open_one_keeps_the_rule_that_waits_to_be_asked() {
+        let tools = ChatTools::with_names(ToolProfile::Chat, &catalog(), None);
+
+        let unconnected = prompted(&tools, &environment());
+        assert!(unconnected.contains(ASK_FIRST), "{unconnected}");
+
+        let task = ChatTools::with_names(ToolProfile::Task, &catalog(), None);
+        let environment = environment().with_github();
+        let run = render(&task_context(&task, &environment)).unwrap_or_default();
+        assert!(run.contains(ASK_FIRST), "{run}");
+        assert!(
+            !run.contains("ends in a pull request"),
+            "Zone opens the run's own pull request: {run}"
         );
     }
 

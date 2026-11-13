@@ -74,6 +74,7 @@ impl Fixture {
             provenance: Provenance {
                 kind: Kind::Lesson,
                 source: Source::Run(self.run),
+                project: None,
                 last_confirmed: confirmed(),
             },
         }

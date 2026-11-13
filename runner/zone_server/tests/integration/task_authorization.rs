@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use abnegate_secret::MasterKey;
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use serde_json::json;
 use tokio::time::timeout;
 use uuid::Uuid;
@@ -17,6 +18,8 @@ use crate::common::{
     TestClient, create_test_pool, create_test_router, create_test_state, test_config, test_email,
     test_password,
 };
+
+const WAITING: &str = "waiting";
 
 struct Tenant {
     user: Uuid,
@@ -471,14 +474,14 @@ async fn only_a_workspace_writer_may_answer_a_parked_run() {
         .get_auth(&format!("/api/tasks/runs/{run}"), &viewer.token)
         .await;
     readable.assert_status(StatusCode::OK);
-    assert_eq!(readable.json_value()["run"]["status"], "waiting");
+    assert_eq!(readable.json_value()["run"]["status"], WAITING);
     let refused = client
         .post_json_auth(&route, &answer(), &viewer.token)
         .await;
     assert_task_run_hidden(&refused);
     assert_eq!(
         run_status(&pool, run).await,
-        "waiting",
+        WAITING,
         "a reader who cannot answer must not move the run"
     );
 
@@ -492,6 +495,90 @@ async fn only_a_workspace_writer_may_answer_a_parked_run() {
         .expect("the answer reached the run that asked");
     assert_eq!(delivered[0].header, "Scope");
     assert_eq!(delivered[0].labels, vec!["Backfill".to_string()]);
+}
+
+async fn stop(client: &TestClient, run: Uuid, token: &str) -> common::TestResponse {
+    client
+        .send_request(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/tasks/runs/{run}/stop"))
+                .header("Authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("the stop request builds"),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn only_a_workspace_writer_may_stop_a_run() {
+    use zone_server::db::workspace_members::{self, WorkspaceRole};
+
+    let pool = create_test_pool().await;
+    let state = create_test_state(test_config(), pool.clone());
+    let client = TestClient::new(create_test_router(state));
+    let owner = tenant(&client).await;
+    let stranger = tenant(&client).await;
+    let viewer = tenant(&client).await;
+    let member = tenant(&client).await;
+    for (user, role) in [
+        (viewer.user, WorkspaceRole::Viewer),
+        (member.user, WorkspaceRole::Member),
+    ] {
+        workspace_members::add_member(&pool, owner.workspace, user, role, None)
+            .await
+            .expect("the workspace takes the member");
+    }
+
+    let task = task(&client, &owner, project(&client, &owner).await).await;
+    let run = tasks::create_task_run_as(&pool, task, Some(owner.user))
+        .await
+        .expect("the task gets a run")
+        .id;
+    let _waiter = waiting(&pool, run).await;
+
+    assert_task_run_hidden(&stop(&client, run, &stranger.token).await);
+    assert_eq!(
+        run_status(&pool, run).await,
+        WAITING,
+        "a stranger must not move the run"
+    );
+
+    let readable = client
+        .get_auth(&format!("/api/tasks/runs/{run}"), &viewer.token)
+        .await;
+    readable.assert_status(StatusCode::OK);
+    assert_eq!(readable.json_value()["run"]["status"], WAITING);
+    assert_task_run_hidden(&stop(&client, run, &viewer.token).await);
+    assert_eq!(
+        run_status(&pool, run).await,
+        WAITING,
+        "a reader who cannot stop must not move the run"
+    );
+
+    let stopped = stop(&client, run, &member.token).await;
+    stopped.assert_status(StatusCode::OK);
+    let stopped = stopped.json_value();
+    assert_eq!(stopped["run"]["id"], run.to_string());
+    assert_eq!(stopped["run"]["status"], tasks::CANCELLED);
+    assert_eq!(stopped["run"]["error_message"], tasks::STOPPED);
+    assert_eq!(
+        run_status(&pool, run).await,
+        tasks::CANCELLED,
+        "a writer's stop must end the run"
+    );
+    assert_eq!(
+        task_status(&pool, task).await,
+        tasks::PAUSED,
+        "a stopped run must leave its task paused, not queued for another attempt"
+    );
+
+    let repeated = stop(&client, run, &member.token).await;
+    repeated.assert_status(StatusCode::CONFLICT);
+    assert_eq!(
+        repeated.json_value(),
+        json!({ "error": "Task run is not active" })
+    );
 }
 
 fn assert_task_run_hidden(response: &common::TestResponse) {
@@ -508,4 +595,12 @@ async fn run_status(pool: &sqlx::PgPool, run: Uuid) -> String {
         .fetch_one(pool)
         .await
         .expect("the run is still stored")
+}
+
+async fn task_status(pool: &sqlx::PgPool, task: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1")
+        .bind(task)
+        .fetch_one(pool)
+        .await
+        .expect("the task is still stored")
 }

@@ -14,10 +14,18 @@ import { pollInterval } from './pollInterval';
 const NO_SERVERS: McpServer[] = [];
 
 const IMPORT_FAILED = 'Failed to add the MCP server';
+const PROVIDER_IMPORT_FAILED = 'Failed to import the MCP servers';
 
 export interface McpImportResult {
   created: McpServer[];
   failures: { name: string; message: string }[];
+}
+
+/** The servers chosen from one connected provider, by the names that provider configured. */
+export interface McpProviderSelection {
+  provider: string;
+  label: string;
+  servers: string[];
 }
 
 export interface McpServersState {
@@ -33,6 +41,7 @@ export interface McpServersState {
   remove(serverId: string): Promise<void>;
   reconnect(serverId: string): Promise<McpServer>;
   importAll(requests: CreateMcpServerRequest[]): Promise<McpImportResult>;
+  importProviders(selections: McpProviderSelection[]): Promise<McpImportResult>;
 }
 
 function replaced(
@@ -121,6 +130,33 @@ export function useMcpServers(organizationId: string): McpServersState {
     [organizationId, invalidate]
   );
 
+  const importProviders = useCallback(
+    async (selections: McpProviderSelection[]): Promise<McpImportResult> => {
+      const result: McpImportResult = { created: [], failures: [] };
+      for (const selection of selections) {
+        if (selection.servers.length === 0) {
+          continue;
+        }
+        try {
+          const imported = await mcpApi.import(organizationId, {
+            provider: selection.provider,
+            servers: selection.servers,
+          });
+          result.created.push(...imported.created);
+          result.failures.push(...imported.failures);
+        } catch (failure) {
+          const message = messageOf(failure, PROVIDER_IMPORT_FAILED);
+          result.failures.push(
+            ...selection.servers.map((name) => ({ name: `${selection.label}: ${name}`, message }))
+          );
+        }
+      }
+      await invalidate();
+      return result;
+    },
+    [organizationId, invalidate]
+  );
+
   return {
     servers: data?.servers ?? NO_SERVERS,
     commands: data?.commands ?? false,
@@ -134,5 +170,6 @@ export function useMcpServers(organizationId: string): McpServersState {
     remove,
     reconnect,
     importAll,
+    importProviders,
   };
 }

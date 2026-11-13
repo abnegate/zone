@@ -314,6 +314,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/tasks/runs/{run_id}", get(tasks::get_run))
         .route("/api/tasks/runs/{run_id}/logs", get(tasks::get_run_logs))
         .route("/api/tasks/runs/{run_id}/answers", post(tasks::answer_run))
+        .route("/api/tasks/runs/{run_id}/stop", post(tasks::stop_run))
         // Chats
         .route(
             "/api/artifacts/{workspace_id}/{chat_id}/{owner_id}/{filename}/signature",
@@ -474,6 +475,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/mcp-servers",
             get(mcp_servers::list).post(mcp_servers::create),
+        )
+        .route(
+            "/api/organizations/{org_id}/mcp-servers/providers",
+            get(mcp_servers::list_providers),
+        )
+        .route(
+            "/api/organizations/{org_id}/mcp-servers/imports",
+            post(mcp_servers::import),
         )
         .route(
             "/api/organizations/{org_id}/mcp-servers/{server_id}",

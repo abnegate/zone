@@ -928,7 +928,9 @@ async fn claude_lanes() {
     .await
     .expect("the host's sign-in serves an organization without one of its own");
     assert!(resolved.login.is_none(), "the host's sign-in is no login");
-    let backend = backend::bounded(resolved.backend, TURN_TIMEOUT);
+    let backend = resolved
+        .backend
+        .configured(|settings| settings.with_timeout(TURN_TIMEOUT));
     let LlmBackend::Cli {
         agent,
         settings,
@@ -1032,7 +1034,7 @@ fn model(agent: AgentKind) -> &'static str {
 /// `backend` bounded to a live turn, at codex's lowest effort for codex; claude's haiku takes
 /// none.
 fn limited(agent: AgentKind, backend: LlmBackend) -> LlmBackend {
-    let bounded = backend::bounded(backend, TURN_TIMEOUT);
+    let bounded = backend.configured(|settings| settings.with_timeout(TURN_TIMEOUT));
     match agent {
         AgentKind::Codex => backend::effort(bounded, CODEX_EFFORT),
         _ => bounded,

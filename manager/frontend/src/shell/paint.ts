@@ -9,6 +9,7 @@ export interface ShellConfig {
   attribute: string;
   templateAttribute: string;
   themeKey: string;
+  systemDarkQuery: string;
   sessionKeys: string[];
   routes: Record<string, string>;
   tokenRoutes: string[];
@@ -51,7 +52,7 @@ export function paintShell(config: ShellConfig): void {
     const theme =
       stored === 'light' || stored === 'dark'
         ? stored
-        : window.matchMedia('(prefers-color-scheme: dark)').matches
+        : window.matchMedia(config.systemDarkQuery).matches
           ? 'dark'
           : 'light';
     const shell = document.createElement('div');

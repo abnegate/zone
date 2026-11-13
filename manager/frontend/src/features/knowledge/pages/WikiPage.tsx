@@ -1,10 +1,12 @@
 import { Badge, Button, EmptyState, Tabs, TabsList, TabsTrigger } from '@zone/ui';
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { projectsApi } from '../../../api/projects';
 import { sourcesApi } from '../../../api/sources';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import type { Project } from '../../projects/types';
 import type { Source } from '../../sources/types';
 import { CreateKnowledgeWizard, SearchResults } from '../components';
 import { useContextSearch, useKnowledge } from '../hooks';
@@ -12,6 +14,17 @@ import type { KnowledgeEntry, SearchMode } from '../types';
 import './WikiPage.css';
 
 type FilterType = 'all' | 'text' | 'url';
+
+/// How an entry says which project it belongs to. A discovery recorded in a
+/// chat or a run that belonged to a project carries the project's id in this
+/// tag, which is what the project filter reads.
+const PROJECT_TAG = 'project:';
+
+/// The project an entry was recorded in, or null when it names none.
+function entryProject(entry: KnowledgeEntry): string | null {
+  const tagged = entry.tags.find((tag) => tag.startsWith(PROJECT_TAG));
+  return tagged ? tagged.slice(PROJECT_TAG.length) : null;
+}
 
 /// What a card says about itself when the list carries no date: the size of
 /// the entry, or failing that its type, so the meta row is never blank.
@@ -65,6 +78,8 @@ export default function WikiPage() {
   const [sources, setSources] = useState<Source[]>([]);
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [sourcesLoading, setSourcesLoading] = useState(true);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<FilterType>('all');
   const [showCreateWizard, setShowCreateWizard] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<KnowledgeEntry | null>(null);
@@ -96,6 +111,29 @@ export default function WikiPage() {
       }
     };
     loadSources();
+    return () => {
+      mounted = false;
+    };
+  }, [workspaceId]);
+
+  // The projects are read for their names: an entry tags the project it was
+  // recorded in by id, and a filter pill reading `project:a3f2…` would tell
+  // nobody anything.
+  useEffect(() => {
+    let mounted = true;
+    const loadProjects = async () => {
+      if (!workspaceId) {
+        setProjects([]);
+        return;
+      }
+      try {
+        const data = await projectsApi.getProjects(workspaceId);
+        if (mounted) setProjects(data);
+      } catch (err) {
+        if (mounted) console.error('Failed to load projects:', err);
+      }
+    };
+    loadProjects();
     return () => {
       mounted = false;
     };
@@ -213,15 +251,22 @@ export default function WikiPage() {
     }
   };
 
+  // Only the projects the listed entries name get a pill: a workspace's
+  // other projects have nothing in the knowledge base to filter down to.
+  const taggedProjects = Array.from(
+    new Set(entries.map(entryProject).filter((id): id is string => id !== null))
+  ).map((id) => ({ id, name: projects.find((project) => project.id === id)?.name ?? 'Project' }));
+
   const filteredEntries = entries.filter((entry) => {
     const matchesFilter = filterType === 'all' || entry.type === filterType;
+    const matchesProject = selectedProject === null || entryProject(entry) === selectedProject;
     const matchesSearch =
       searchQuery === '' ||
       entry.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
       entry.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (entry.fetched_content?.toLowerCase().includes(searchQuery.toLowerCase()) ?? false) ||
       entry.tags.some((tag) => tag.toLowerCase().includes(searchQuery.toLowerCase()));
-    return matchesFilter && matchesSearch;
+    return matchesFilter && matchesProject && matchesSearch;
   });
 
   const searching = searchQuery.trim().length > 0;
@@ -308,6 +353,27 @@ export default function WikiPage() {
             </Tabs>
           </div>
 
+          {taggedProjects.length > 0 && (
+            <div className="filter-group">
+              <span className="filter-label">Project</span>
+              <div className="source-pills">
+                {taggedProjects.map((project) => (
+                  <button
+                    key={project.id}
+                    type="button"
+                    className={`source-pill ${selectedProject === project.id ? 'active' : ''}`}
+                    aria-pressed={selectedProject === project.id}
+                    onClick={() =>
+                      setSelectedProject((current) => (current === project.id ? null : project.id))
+                    }
+                  >
+                    {project.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {sources.length > 0 && (
             <div className="filter-group">
               <span className="filter-label">Sources</span>
@@ -360,18 +426,19 @@ export default function WikiPage() {
             }
             title={searching ? 'No results found' : 'No knowledge entries found'}
             description={
-              searching || filterType !== 'all'
+              searching || filterType !== 'all' || selectedProject !== null
                 ? 'Try adjusting your filters or search query'
                 : 'Add your first knowledge entry to build your knowledge base'
             }
             action={
-              !searchQuery && filterType === 'all' ? (
+              !searchQuery && filterType === 'all' && selectedProject === null ? (
                 <Button onClick={() => setShowCreateWizard(true)}>Add Entry</Button>
               ) : (
                 <Button
                   variant="secondary"
                   onClick={() => {
                     setFilterType('all');
+                    setSelectedProject(null);
                     setSearchQuery('');
                     clear();
                   }}

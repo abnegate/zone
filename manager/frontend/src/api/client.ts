@@ -170,7 +170,7 @@ class Client {
   // Chats API (delegates to chatsApi)
 
   async getChats(workspaceId: string, archived?: boolean): Promise<Chat[]> {
-    return chatsApi.getChats(workspaceId, archived);
+    return (await chatsApi.getChats(workspaceId, { archived })).chats;
   }
 
   async getChat(id: string): Promise<ChatWithMessages> {

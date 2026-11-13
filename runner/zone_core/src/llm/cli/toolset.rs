@@ -1,7 +1,7 @@
 use abnegate_agent_cli::McpServer;
 use abnegate_secret::SecretValue;
 
-use super::{STARTUP_TIMEOUT, TURN_TIMEOUT};
+use super::{STARTUP_TIMEOUT, TOOL_TIMEOUT};
 
 /// The header a turn's token authenticates Zone's MCP server with.
 const AUTHORIZATION: &str = "Authorization";
@@ -69,7 +69,7 @@ impl Toolset {
             .with_secret(Self::TOKEN_VARIABLE, self.token.clone())
             .with_tools(self.tools.iter().cloned())
             .exclusive()
-            .with_tool_timeout(TURN_TIMEOUT)
+            .with_tool_timeout(TOOL_TIMEOUT)
             .with_startup_timeout(STARTUP_TIMEOUT)
             .require()
             .eager()
