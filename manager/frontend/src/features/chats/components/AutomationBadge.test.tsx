@@ -58,6 +58,14 @@ describe('AutomationBadge', () => {
     expect(screen.getByTestId('automation-badge')).toHaveTextContent('Auto project');
   });
 
+  it('labels what auto-fix wrote while working on a pull request', () => {
+    render(<AutomationBadge metadata={{ source: 'pull_request_fix' }} />);
+
+    const badge = screen.getByTestId('automation-badge');
+    expect(badge).toHaveTextContent('Auto-fix');
+    expect(badge).toHaveTextContent('Written by auto-fix as it worked on a pull request');
+  });
+
   it('renders nothing for a message a person typed', () => {
     const { container } = render(<AutomationBadge metadata={{ attachments: [] }} />);
 

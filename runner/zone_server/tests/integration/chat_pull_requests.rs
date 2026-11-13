@@ -221,6 +221,7 @@ impl Workspace {
                 url,
                 title: Some(TITLE),
                 source_id,
+                opened_by: None,
             },
         )
         .await
@@ -1541,6 +1542,7 @@ async fn a_source_without_a_credential_never_stands_in_for_one_that_has_one() {
             url: &link(&github, 12),
             title: None,
             source_id: Some(bare),
+            opened_by: None,
         },
     )
     .await

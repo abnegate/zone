@@ -3720,7 +3720,7 @@ async fn handle_chat_generation(
         }),
     );
     let observer: Arc<dyn Observer> = Arc::new(Observers::new(
-        Recorder::new(state.clone(), chat_id, workspace_id),
+        Recorder::new(state.clone(), chat_id, workspace_id, user_id),
         tracker,
     ));
     let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);

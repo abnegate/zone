@@ -804,6 +804,7 @@ impl Integration {
             url: url.to_string(),
             title: created["title"].as_str().map(str::to_string),
             source_id: Some(arguments.source_id),
+            opened_by: Some(self.scope.user_id),
         };
         if let Err(error) = chat_pull_request::record(&self.scope.state, &opened).await {
             tracing::warn!(chat = %chat_id, %error, "could not record the pull request a chat opened");
