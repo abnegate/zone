@@ -1856,6 +1856,57 @@ mod tests {
         cleanup(&pool, organization, user).await;
     }
 
+    /// A claim that waited on another worker's longer than its lease is stamped
+    /// when it is taken, not when it began waiting, so it does not start out
+    /// lapsed and refused to the worker that took it.
+    ///
+    /// Compared against the moment the lock was let go rather than by renewing
+    /// it: other tests take the same lock, and a renewal queued behind one of
+    /// them could outwait a short lease whatever the claim was stamped with.
+    #[tokio::test]
+    async fn a_claim_that_waited_on_the_lock_starts_its_lease_when_taken() {
+        const SHORT: std::time::Duration = std::time::Duration::from_secs(1);
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+
+        let mut holding = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(reminders::CLAIM_LOCK)
+            .execute(&mut *holding)
+            .await
+            .unwrap();
+        let claim = tokio::spawn({
+            let pool = pool.clone();
+            async move { reminders::claim_turn(&pool, sweep, SHORT).await }
+        });
+        tokio::time::sleep(SHORT * 2).await;
+        let released: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *holding)
+            .await
+            .unwrap();
+        holding.commit().await.unwrap();
+        let turn = claim
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("the owed firing is claimed once the lock is free");
+        let claimed = claimed_at(&pool, turn.id).await;
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+
+        assert!(
+            claimed >= released,
+            "a claim that waited {SHORT:?} and more on the lock is stamped when it was taken \
+             ({claimed}), not before the lock was let go ({released})"
+        );
+    }
+
     /// A turn has no length limit, so the lease is a heartbeat rather than a
     /// guess at how long a turn takes: a claim that keeps being renewed is
     /// never offered to a second worker however old it is, and one that stops

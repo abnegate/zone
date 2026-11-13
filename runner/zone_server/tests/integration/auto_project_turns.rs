@@ -11,11 +11,14 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 use zone_server::config::AutoProjectConfig;
-use zone_server::db::auto_projects::{self, Kind, PlannedTask, ProjectPlan, Stage};
+use zone_server::db::auto_projects::{
+    self, Claim, Kind, PlannedTask, ProjectPlan, Stage, WriteError,
+};
 use zone_server::db::migrations;
 use zone_server::db::tasks::{self, Origin};
 use zone_server::state::AppState;
-use zone_server::workers::auto_project::{self, PROJECTS_PER_TICK, Services};
+use zone_server::workers::auto_project::lease::Lease;
+use zone_server::workers::auto_project::{self, PROJECTS_PER_TICK, Services, driver};
 
 use crate::common::{self, Database};
 
@@ -165,6 +168,19 @@ impl Fixture {
             .unwrap()
     }
 
+    /// A claim on the fixture's one open project that lapsed, and the claim
+    /// another instance took it over with.
+    async fn superseded(&self) -> (Claim, Claim) {
+        let [stale] = self.claim(SHORT_LEASE).await[..] else {
+            panic!("the one open project is claimed");
+        };
+        tokio::time::sleep(SHORT_LEASE * 2).await;
+        let [current] = self.claim(SHORT_LEASE).await[..] else {
+            panic!("a lapsed claim is offered again");
+        };
+        (stale, current)
+    }
+
     async fn stopped(&self) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM projects \
@@ -246,12 +262,16 @@ async fn a_drive_longer_than_its_lease_keeps_its_claim() {
         panic!("the one open project is claimed");
     };
 
-    let taken =
-        auto_project::lease::holding(fixture.database.pool.clone(), claim, SHORT_RENEWAL, async {
+    let taken = auto_project::lease::holding(
+        fixture.database.pool.clone(),
+        claim,
+        SHORT_RENEWAL,
+        |_| async {
             tokio::time::sleep(SHORT_LEASE * 3).await;
             fixture.claim(SHORT_LEASE).await
-        })
-        .await;
+        },
+    )
+    .await;
     let released = auto_projects::release(&fixture.database.pool, claim)
         .await
         .unwrap();
@@ -338,4 +358,136 @@ async fn a_tick_leaves_a_lapsed_claim_to_the_drive_still_running_it() {
     );
     assert!(renewed, "the running drive still renews its own claim");
     assert!(released, "the running drive still releases its own claim");
+}
+
+#[tokio::test]
+async fn a_superseded_drives_stage_write_is_refused_and_the_successors_stands() {
+    const SUCCESSOR: &str = "the successor's reason";
+    let fixture = Fixture::new().await;
+    let task = fixture.project("Contested stage").await;
+    let project = fixture.project_of(task).await;
+    let (stale, current) = fixture.superseded().await;
+    let pool = &fixture.database.pool;
+
+    let current_write = auto_projects::set_stage(
+        pool,
+        Some(current),
+        task,
+        project,
+        Stage::AwaitingChecks,
+        Some(SUCCESSOR),
+    )
+    .await;
+    let stale_write = auto_projects::set_stage(
+        pool,
+        Some(stale),
+        task,
+        project,
+        Stage::Paused,
+        Some("the superseded drive's reason"),
+    )
+    .await;
+    let row = auto_projects::task_stage(pool, task).await.unwrap();
+    fixture.database.cleanup().await;
+
+    assert!(current_write.is_ok(), "{current_write:?}");
+    assert!(
+        matches!(stale_write, Err(WriteError::Lost)),
+        "a drive whose claim was taken over writes nothing: {stale_write:?}"
+    );
+    let row = row.expect("the successor's row");
+    assert_eq!(row.stage(), Stage::AwaitingChecks);
+    assert_eq!(row.reason.as_deref(), Some(SUCCESSOR));
+}
+
+#[tokio::test]
+async fn a_drive_told_its_claim_was_lost_stops_at_its_next_step() {
+    const NOTICED_WITHIN: Duration = Duration::from_secs(10);
+    let fixture = Fixture::new().await;
+    let task = fixture.project("Taken over").await;
+    let (stale, _) = fixture.superseded().await;
+    let (state, services, config) = (&fixture.state, &fixture.services, &fixture.config);
+
+    let (noticed, driven) = auto_project::lease::holding(
+        fixture.database.pool.clone(),
+        stale,
+        SHORT_RENEWAL,
+        |lease: Lease| async move {
+            let noticed = tokio::time::timeout(NOTICED_WITHIN, async {
+                while !lease.lost() {
+                    tokio::time::sleep(SHORT_RENEWAL).await;
+                }
+            })
+            .await
+            .is_ok();
+            let driven =
+                driver::drive_project(state, services, config, stale.project_id, &lease).await;
+            (noticed, driven)
+        },
+    )
+    .await;
+    let admitted = fixture.unattended_runs(task).await;
+    let stage = auto_projects::task_stage(&fixture.database.pool, task)
+        .await
+        .unwrap()
+        .map(|row| row.stage());
+    fixture.database.cleanup().await;
+
+    assert!(
+        noticed,
+        "the renewal tells the drive its claim was taken over"
+    );
+    assert_eq!(
+        driven,
+        Ok(()),
+        "the drive stops at a boundary rather than failing on a refused write"
+    );
+    assert_eq!(admitted, 0, "a superseded drive starts nothing");
+    assert_ne!(stage, Some(Stage::Running));
+}
+
+#[tokio::test]
+async fn a_drive_whose_claim_was_taken_over_cannot_admit_a_run() {
+    const UNRENEWED: Duration = Duration::from_secs(60 * 60);
+    let fixture = Fixture::new().await;
+    let task = fixture.project("Admitted elsewhere").await;
+    let (stale, _) = fixture.superseded().await;
+    let project = auto_projects::automation(&fixture.database.pool, stale.project_id)
+        .await
+        .unwrap()
+        .expect("an automated project");
+    let (state, services, config) = (&fixture.state, &fixture.services, &fixture.config);
+
+    let (admission, lost) = auto_project::lease::holding(
+        fixture.database.pool.clone(),
+        stale,
+        UNRENEWED,
+        |lease: Lease| async move {
+            let drive = driver::Drive {
+                state,
+                services,
+                config,
+                project: &project,
+                workspace_id: fixture.workspace,
+                actor: fixture.actor,
+                lease: &lease,
+            };
+            let admission = drive.admit(task, None).await;
+            (admission, lease.lost())
+        },
+    )
+    .await;
+    let admitted = fixture.unattended_runs(task).await;
+    fixture.database.cleanup().await;
+
+    assert_eq!(
+        admission,
+        Ok(driver::Admission::Lost),
+        "a drive no renewal has yet told of the takeover is refused at admission"
+    );
+    assert!(lost, "a refused admission stops the drive at its next step");
+    assert_eq!(
+        admitted, 0,
+        "no run is started under a claim that was taken over"
+    );
 }

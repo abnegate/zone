@@ -95,6 +95,7 @@ const MAX_CONCURRENT_TASKS: usize = 5;
 
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const CHECKOUT_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a run parked on questions it can proceed without waits before it
 /// proceeds on the option it recommended.
@@ -999,8 +1000,12 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
     let teardown = async {
         crate::mcp::settle(run_id).await;
         reap(run_id).await;
-        if let Some(checkout) = checkout.take() {
-            checkout.finish().await;
+        if let Some(checkout) = checkout.take()
+            && tokio::time::timeout(CHECKOUT_FINISH_TIMEOUT, checkout.finish())
+                .await
+                .is_err()
+        {
+            tracing::warn!(%run_id, "The run's checkout removal outlasted its bound; recovery reclaims what is left");
         }
     };
     tokio::select! {
@@ -4055,20 +4060,30 @@ mod tests {
         let execution = tokio::spawn(async move {
             execute_task_run(&state, run.id, task.id).await;
         });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !sqlx::query_scalar::<_, bool>(
-                "SELECT owner IS NOT NULL FROM task_runs WHERE id = $1",
-            )
-            .bind(run.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-            {
+        let lease = async || -> (bool, chrono::DateTime<chrono::Utc>) {
+            sqlx::query_as("SELECT owner IS NOT NULL, heartbeat_at FROM task_runs WHERE id = $1")
+                .bind(run.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let (true, beat) = lease().await {
+                    return beat;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
         .expect("the worker claimed the run");
+        tokio::time::timeout(HEARTBEAT_INTERVAL + Duration::from_secs(5), async {
+            while lease().await.1 <= claimed {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker beat after its claim, so its next beat is a whole interval away");
         assert!(
             matches!(
                 tasks::stop_task_run_authorized(&pool, user.id, run.id)
@@ -4081,7 +4096,7 @@ mod tests {
         assert_eq!(
             reserved(&pool, task.id).await,
             Some(run.id),
-            "the run stopped elsewhere keeps its task while its worker is still live"
+            "the run stopped elsewhere keeps its task until its next heartbeat finds it stopped"
         );
         tokio::time::timeout(HEARTBEAT_INTERVAL + Duration::from_secs(5), execution)
             .await
@@ -9756,6 +9771,49 @@ mod cli_tests {
         );
         assert!(!alive, "job {} outlived the stopped run", job.pid);
         assert!(removed, "the stopped run removed {}", checkout.display());
+    }
+
+    /// A stopped run whose checkout removal never returns still frees its
+    /// task once the removal has had its bound, so Run Again is not refused
+    /// for as long as the process lives.
+    #[tokio::test]
+    async fn a_stopped_run_whose_checkout_removal_hangs_still_frees_its_task() {
+        const SLACK: Duration = Duration::from_secs(15);
+
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = start_mid_attempt(&state, &fixture, &agent).await;
+        let checkout = checkout_of(fixture.run);
+        let held = crate::services::checkout::hold::block(checkout.clone());
+
+        assert!(matches!(
+            tasks::stop_task_run_authorized(&fixture.pool, fixture.user, fixture.run)
+                .await
+                .unwrap(),
+            tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+        ));
+        assert!(
+            stop::request(fixture.run),
+            "the running run listens for a stop"
+        );
+        let ended = tokio::time::timeout(CHECKOUT_FINISH_TIMEOUT + SLACK, running).await;
+        let reserved: Option<Uuid> =
+            sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id = $1")
+                .bind(fixture.task)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        let removing = checkout.exists();
+        drop(held);
+        fixture.remove().await;
+        ended
+            .expect("the worker ended once its checkout removal had its bound")
+            .unwrap();
+        assert!(removing, "the held removal had not removed the checkout");
+        assert_eq!(reserved, None, "the stopped run freed its task");
     }
 
     /// The checkout the run `run` works in.

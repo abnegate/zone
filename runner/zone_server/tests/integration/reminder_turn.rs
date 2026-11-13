@@ -489,7 +489,7 @@ async fn a_watch_turn_that_lost_its_claim_is_stopped_and_its_successor_keeps_the
         let first = first.clone();
         async move { run(&state, first, lease).await }
     });
-    until_count(&harness, "user", 1).await;
+    until_requests(&harness, 1).await;
     lapse(&harness, first.id, lease).await;
     let successor = claim().await;
     assert_ne!(successor.id, first.id, "the next firing is the one taken");
@@ -558,24 +558,34 @@ async fn lapse(harness: &Harness, turn: Uuid, lease: Lease) {
     .unwrap();
 }
 
-/// Waits for the chat to hold `count` messages in `role`.
-async fn until_count(harness: &Harness, role: &str, count: usize) {
+/// Waits for the provider to have been asked for `count` streamed answers, so
+/// every scripted reply up to then has gone to the turn it was meant for.
+async fn until_requests(harness: &Harness, count: usize) {
     for _ in 0..300 {
-        let stored = messages(harness).await;
-        if stored
-            .iter()
-            .filter(|(stored, _, _)| stored == role)
-            .count()
-            >= count
-        {
+        if streamed_requests(harness).await >= count {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!(
-        "the chat never held {count} {role} messages: {:?}",
-        messages(harness).await
+        "the provider was asked for {} streamed answers, not {count}",
+        streamed_requests(harness).await
     );
+}
+
+async fn streamed_requests(harness: &Harness) -> usize {
+    harness
+        .provider
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .iter()
+        .filter(|request| {
+            request.url.path() == "/chat/completions"
+                && serde_json::from_slice::<Value>(&request.body)
+                    .is_ok_and(|body| body["stream"] == true)
+        })
+        .count()
 }
 
 /// A turn whose claim lapsed with nobody yet taking the firing over is stopped
@@ -644,7 +654,7 @@ async fn a_turn_stopped_for_a_lapsed_claim_leaves_its_firing_owed_for_the_next_a
         let first = first.clone();
         async move { run(&state, first, lease).await }
     });
-    until_count(&harness, "user", 1).await;
+    until_requests(&harness, 1).await;
     lapse(&harness, first.id, lease).await;
     tokio::time::timeout(SETTLED_WITHIN, running)
         .await
@@ -685,5 +695,130 @@ async fn a_turn_stopped_for_a_lapsed_claim_leaves_its_firing_owed_for_the_next_a
         owed(&harness, reminder).await,
         0,
         "the attempt that ran the firing through finished it"
+    );
+}
+
+/// A watch's turn that outlived its lease before any renewal could notice:
+/// its answer reached the chat, but the claim it would be kept under had
+/// already lapsed, so the reading is refused. The firing is left owed rather
+/// than finished, and the next attempt takes the reading the baseline keeps.
+#[tokio::test]
+async fn a_watch_turn_that_outlived_its_lease_leaves_its_firing_owed() {
+    const PRECEDING: &str = "Three jobs, all green.";
+    const LATE: &str = "The lint job is red.";
+    const RETRIED: &str = "The lint job is red; it was green last time.";
+    const SETTLED_WITHIN: Duration = Duration::from_secs(20);
+    let short = Lease {
+        duration: Duration::from_secs(1),
+        renewal: Duration::from_secs(600),
+    };
+    let long = Lease {
+        duration: Duration::from_secs(600),
+        renewal: Duration::from_secs(600),
+    };
+    let harness = Harness::new(
+        Some(32_768),
+        false,
+        vec![answer(LATE).set_delay(short.duration * 3), answer(RETRIED)],
+    )
+    .await;
+    let sweep = Sweep::Workspace(harness.workspace);
+
+    let user: Uuid = sqlx::query_scalar(
+        "SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND role = 'owner' \
+         AND is_active LIMIT 1",
+    )
+    .bind(harness.workspace)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the harness workspace has an owner");
+    let created = zone_server::db::reminders::create(
+        &harness.pool,
+        harness.workspace,
+        user,
+        harness.chat,
+        zone_server::db::reminders::Reminder {
+            content: "Release branch".into(),
+            due_at: (chrono::Utc::now() + chrono::Duration::hours(1)).fixed_offset(),
+            rrule: Some("FREQ=DAILY".into()),
+            prompt: Some("Check whether the release branch is green.".into()),
+            timing_mode: Some("condition_watch".into()),
+            time_zone: None,
+        },
+    )
+    .await
+    .expect("a watch is storable");
+    let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+    sqlx::query("UPDATE reminders SET last_observation = $2 WHERE id = $1")
+        .bind(reminder)
+        .bind(PRECEDING)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    make_due(&harness, reminder).await;
+    zone_server::db::reminders::deliver_next(&harness.pool, sweep)
+        .await
+        .expect("the due firing is written down as an owed turn");
+    let claim = || async {
+        zone_server::db::reminders::claim_turn(&harness.pool, sweep, short.duration)
+            .await
+            .unwrap()
+            .expect("the owed firing is offered")
+    };
+    let state = common::create_test_state(harness.config.clone(), harness.pool.clone());
+
+    let first = claim().await;
+    tokio::time::timeout(SETTLED_WITHIN, run(&state, first.clone(), short))
+        .await
+        .expect("the turn runs to its own end");
+    let still_owed = owed(&harness, reminder).await;
+    let baseline_after_late = baseline(&harness, reminder).await;
+    let after_late = messages(&harness).await;
+
+    let retaken = claim().await;
+    tokio::time::timeout(SETTLED_WITHIN, run(&state, retaken.clone(), long))
+        .await
+        .expect("the next attempt runs to its own end");
+    let stored = messages(&harness).await;
+
+    assert!(
+        after_late
+            .iter()
+            .any(|(role, content, _)| role == "assistant" && content == LATE),
+        "the late turn's answer reached the chat: {after_late:?}"
+    );
+    assert_eq!(
+        baseline_after_late.as_deref(),
+        Some(PRECEDING),
+        "a reading taken under a lapsed claim is refused"
+    );
+    assert_eq!(
+        still_owed, 1,
+        "a firing whose reading was refused is left owed"
+    );
+    assert_eq!(retaken.id, first.id, "the same firing is offered again");
+    assert_eq!(
+        retaken.attempts,
+        first.attempts + 1,
+        "the firing is offered again as its next attempt"
+    );
+    let (_, retried_prompt, _) = stored
+        .iter()
+        .filter(|(role, _, _)| role == "user")
+        .nth(1)
+        .expect("the next attempt asked its question");
+    assert!(
+        retried_prompt.contains(PRECEDING),
+        "the next attempt is compared with the reading before it: {retried_prompt}"
+    );
+    assert_eq!(
+        baseline(&harness, reminder).await.as_deref(),
+        Some(RETRIED),
+        "the next attempt keeps its reading"
+    );
+    assert_eq!(
+        owed(&harness, reminder).await,
+        0,
+        "the attempt that kept its reading finished the firing"
     );
 }

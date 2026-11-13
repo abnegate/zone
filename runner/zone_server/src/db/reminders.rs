@@ -617,9 +617,12 @@ pub async fn claim_turn(
     // Dropped here rather than skipped, so the queue does not silt up with
     // firings nothing will ever run. Named in the log, because a firing nobody
     // receives is worth one line saying which schedule it belonged to.
+    // Timed from each statement, not the transaction: `NOW()` is when this
+    // transaction began, before it waited on the lock, and a claim stamped
+    // with it after a wait longer than the lease would start out lapsed.
     let abandoned: Vec<Uuid> = sqlx::query_scalar(
         "DELETE FROM reminder_turns WHERE attempts >= $1 AND claimed_at IS NOT NULL \
-         AND claimed_at <= NOW() - make_interval(secs => $2) \
+         AND claimed_at <= statement_timestamp() - make_interval(secs => $2) \
          AND ($3::uuid IS NULL OR workspace_id = $3) RETURNING reminder_id",
     )
     .bind(MAX_TURN_ATTEMPTS)
@@ -658,15 +661,17 @@ pub async fn claim_turn(
     // being taken, which is a different question from whether another one is
     // already out.
     let claimed = sqlx::query_as::<_, PendingTurn>(
-        "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = NOW() WHERE id = ( \
+        "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = statement_timestamp() \
+         WHERE id = ( \
          SELECT owed.id FROM reminder_turns AS owed WHERE owed.attempts < $1 \
-         AND (owed.claimed_at IS NULL OR owed.claimed_at <= NOW() - make_interval(secs => $2)) \
+         AND (owed.claimed_at IS NULL \
+           OR owed.claimed_at <= statement_timestamp() - make_interval(secs => $2)) \
          AND ($3::uuid IS NULL OR owed.workspace_id = $3) \
          AND NOT EXISTS ( \
            SELECT 1 FROM reminder_turns AS ahead \
            WHERE ahead.reminder_id = owed.reminder_id AND ahead.id <> owed.id \
            AND ahead.claimed_at IS NOT NULL \
-           AND ahead.claimed_at > NOW() - make_interval(secs => $2)) \
+           AND ahead.claimed_at > statement_timestamp() - make_interval(secs => $2)) \
          ORDER BY owed.created_at, owed.id LIMIT 1 FOR UPDATE SKIP LOCKED) \
          RETURNING id, reminder_id, workspace_id, chat_id, created_by AS user_id, prompt, \
          attempts",

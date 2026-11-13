@@ -161,7 +161,10 @@ pub async fn tick(
         let config = Arc::clone(config);
         let driving = Arc::clone(driving);
         tokio::spawn(async move {
-            let drive = driver::drive_project(&state, &services, &config, project_id);
+            let drive = |lease: lease::Lease| {
+                let (state, services, config) = (&state, &services, &config);
+                async move { driver::drive_project(state, services, config, project_id, &lease).await }
+            };
             if let Err(error) =
                 lease::holding(state.db().clone(), claim, CLAIM_RENEWAL, drive).await
             {
@@ -189,5 +192,12 @@ pub async fn drive_once(
     config: &AutoProjectConfig,
     project_id: Uuid,
 ) -> Result<(), String> {
-    driver::drive_project(state, services, config, project_id).await
+    driver::drive_project(
+        state,
+        services,
+        config,
+        project_id,
+        &lease::Lease::unclaimed(),
+    )
+    .await
 }

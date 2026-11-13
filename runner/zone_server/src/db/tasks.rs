@@ -11,6 +11,7 @@ use crate::services::task_progress;
 
 use super::{
     DbResult,
+    auto_projects::{self, Claim},
     workspace_members::{self, WorkspaceRole},
 };
 
@@ -2045,6 +2046,8 @@ pub enum Unattended {
     Created(Uuid),
     Active,
     Withheld,
+    /// The drive admitting it no longer holds its project's claim.
+    Lost,
 }
 
 /// Admit a run nobody will be watching, as the person automation runs as.
@@ -2054,17 +2057,27 @@ pub enum Unattended {
 /// started would. A task that already has a run is reported rather than
 /// admitted twice, and a task a person paused or cancelled is refused under
 /// the same row lock, so a move that lands after the driver last read the
-/// task still wins.
+/// task still wins. A drive admits under its `claim`, held on the project's
+/// row until the run is in, so a drive another instance took over admits
+/// nothing.
 pub async fn create_unattended_task_run(
     pool: &PgPool,
     task_id: Uuid,
     actor: Uuid,
+    claim: Option<Claim>,
 ) -> DbResult<Unattended> {
     let mut transaction = pool.begin().await?;
     // Membership before the task lock, as every user-triggered admission
     // orders them; then the row is held so two drivers cannot both find no
-    // active run and each insert one.
+    // active run and each insert one. The project's row goes between them,
+    // as the drive's other writes lock it before any task.
     authorize_task_in(&mut transaction, task_id, actor, true).await?;
+    if let Some(claim) = claim
+        && !auto_projects::holds(&mut transaction, claim).await?
+    {
+        transaction.rollback().await?;
+        return Ok(Unattended::Lost);
+    }
     let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
         .fetch_one(&mut *transaction)

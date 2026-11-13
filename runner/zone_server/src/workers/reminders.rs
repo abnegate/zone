@@ -254,11 +254,14 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease) {
     if baseline.is_some() {
         match reminders::record_observation(state.db(), &turn, message_id, lease.duration).await {
             Ok(Observation::Kept | Observation::Unanswered) => {}
-            Ok(Observation::Superseded) => tracing::warn!(
-                reminder_id = %turn.reminder_id,
-                "A watch's turn lost its claim before its reading was kept; the reading is \
-                 dropped so the firing that took over keeps the baseline"
-            ),
+            Ok(Observation::Superseded) => {
+                tracing::warn!(
+                    reminder_id = %turn.reminder_id,
+                    "A watch's turn lost its claim before its reading was kept; the reading is \
+                     dropped and the firing left owed to whichever claim runs it next"
+                );
+                return;
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,

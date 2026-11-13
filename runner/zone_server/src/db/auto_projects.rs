@@ -11,7 +11,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::{PgConnection, PgPool};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use std::collections::HashSet;
 use std::time::Duration;
 use thiserror::Error;
@@ -197,19 +197,70 @@ pub async fn release(pool: &PgPool, claim: Claim) -> DbResult<bool> {
         == 1)
 }
 
+/// Why a drive's write was not made.
+#[derive(Debug, Error)]
+pub enum WriteError {
+    #[error("the drive's claim on the project was taken over, so its write was not made")]
+    Lost,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+}
+
+pub type WriteResult<T> = Result<T, WriteError>;
+
+/// Begin a write for the drive holding `claim`. The project's row stays locked
+/// until the write commits, so no other instance can claim the project between
+/// the check and the write. A write made outside a drive, by `None`, is not
+/// fenced.
+async fn fenced(
+    pool: &PgPool,
+    claim: Option<Claim>,
+) -> WriteResult<Transaction<'static, Postgres>> {
+    let mut transaction = pool.begin().await?;
+    if let Some(claim) = claim
+        && !holds(&mut transaction, claim).await?
+    {
+        return Err(WriteError::Lost);
+    }
+    Ok(transaction)
+}
+
+/// Whether `claim` still holds its project, locking the project's row until
+/// the transaction ends so no other instance can claim it meanwhile.
+pub(crate) async fn holds(connection: &mut PgConnection, claim: Claim) -> DbResult<bool> {
+    Ok(
+        sqlx::query(
+            "SELECT 1 FROM projects WHERE id = $1 AND auto_claim_id = $2 FOR NO KEY UPDATE",
+        )
+        .bind(claim.project_id)
+        .bind(claim.owner)
+        .fetch_optional(connection)
+        .await?
+        .is_some(),
+    )
+}
+
 /// Stop driving a project and say why. Nothing already running is touched.
-pub async fn pause(pool: &PgPool, project_id: Uuid, reason: &str) -> DbResult<bool> {
-    Ok(sqlx::query(
+pub async fn pause(
+    pool: &PgPool,
+    claim: Option<Claim>,
+    project_id: Uuid,
+    reason: &str,
+) -> WriteResult<bool> {
+    let mut transaction = fenced(pool, claim).await?;
+    let paused = sqlx::query(
         "UPDATE projects SET auto_paused_reason = $2, auto_stalled = FALSE, \
            auto_claimed_at = NULL, updated_at = NOW() \
          WHERE id = $1 AND auto AND auto_paused_reason IS NULL",
     )
     .bind(project_id)
     .bind(reason)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?
     .rows_affected()
-        == 1)
+        == 1;
+    transaction.commit().await?;
+    Ok(paused)
 }
 
 /// Hold a project's row until the transaction ends. Read what the write
@@ -226,8 +277,13 @@ async fn hold(connection: &mut PgConnection, project_id: Uuid) -> DbResult<()> {
 /// stop it: false when a task became runnable or went in flight after the
 /// driver looked, or when every task left to do is by now one a person paused
 /// or cancelled. The next pass then decides afresh.
-pub async fn pause_stalled(pool: &PgPool, project_id: Uuid, reason: &str) -> DbResult<bool> {
-    let mut transaction = pool.begin().await?;
+pub async fn pause_stalled(
+    pool: &PgPool,
+    claim: Option<Claim>,
+    project_id: Uuid,
+    reason: &str,
+) -> WriteResult<bool> {
+    let mut transaction = fenced(pool, claim).await?;
     hold(&mut transaction, project_id).await?;
     let paused = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE projects SET auto_paused_reason = $3, auto_stalled = TRUE, \
@@ -270,7 +326,8 @@ pub const CANCELLED_BY_PERSON: &str = "The task was cancelled";
 /// parked; only the reason it shows follows its task between paused and
 /// cancelled. A row automation paused for its own reasons is not parked, so
 /// un-withholding its task does not release it, and a merge is a fact.
-pub async fn park(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
+pub async fn park(pool: &PgPool, claim: Option<Claim>, project_id: Uuid) -> WriteResult<()> {
+    let mut transaction = fenced(pool, claim).await?;
     sqlx::query(
         "UPDATE task_automation a SET \
            parked_stage = CASE WHEN a.stage = $2 THEN a.parked_stage ELSE a.stage END, \
@@ -288,8 +345,9 @@ pub async fn park(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
     .bind(PAUSED_BY_PERSON)
     .bind(CANCELLED_BY_PERSON)
     .bind(Stage::Merged.as_str())
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -300,7 +358,8 @@ pub async fn park(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
 /// is checked from the start. A task a person started a run on stays parked
 /// until that run ends. The clock starts over so the time spent parked does
 /// not count against checks and reviews.
-pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
+pub async fn unpark(pool: &PgPool, claim: Option<Claim>, project_id: Uuid) -> WriteResult<()> {
+    let mut transaction = fenced(pool, claim).await?;
     let driving: Vec<&str> = Stage::DRIVING.into_iter().map(Stage::as_str).collect();
     sqlx::query(
         "UPDATE task_automation a SET \
@@ -323,8 +382,9 @@ pub async fn unpark(pool: &PgPool, project_id: Uuid) -> DbResult<()> {
     .bind(Stage::Idle.as_str())
     .bind(driving)
     .bind(Stage::AwaitingChecks.as_str())
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -406,8 +466,8 @@ pub async fn resume_paused_tasks(pool: &PgPool, project_id: Uuid) -> DbResult<u6
 /// Record that no agentic task of the project has work left; false when the
 /// project does not exist or one has by now, as when a person un-cancels a
 /// task mid-pass. The next pass then decides afresh.
-pub async fn complete(pool: &PgPool, project_id: Uuid) -> DbResult<bool> {
-    let mut transaction = pool.begin().await?;
+pub async fn complete(pool: &PgPool, claim: Option<Claim>, project_id: Uuid) -> WriteResult<bool> {
+    let mut transaction = fenced(pool, claim).await?;
     hold(&mut transaction, project_id).await?;
     let completed = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE projects SET auto_completed_at = NOW(), auto_claimed_at = NULL, updated_at = NOW() \
@@ -585,11 +645,13 @@ pub async fn task_stage(pool: &PgPool, task_id: Uuid) -> DbResult<Option<TaskAut
 /// person's move un-parks.
 pub async fn set_stage(
     pool: &PgPool,
+    claim: Option<Claim>,
     task_id: Uuid,
     project_id: Uuid,
     stage: Stage,
     reason: Option<&str>,
-) -> DbResult<()> {
+) -> WriteResult<()> {
+    let mut transaction = fenced(pool, claim).await?;
     sqlx::query(
         "INSERT INTO task_automation (task_id, project_id, stage, reason) VALUES ($1, $2, $3, $4) \
          ON CONFLICT (task_id) DO UPDATE SET stage = EXCLUDED.stage, reason = EXCLUDED.reason, \
@@ -599,8 +661,9 @@ pub async fn set_stage(
     .bind(project_id)
     .bind(stage.as_str())
     .bind(reason)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -632,11 +695,13 @@ pub async fn set_kind(
 /// a re-read of the same head keeps the clock it already had.
 pub async fn set_head(
     pool: &PgPool,
+    claim: Option<Claim>,
     task_id: Uuid,
     head: &str,
     checks: Option<&str>,
     fresh: bool,
-) -> DbResult<()> {
+) -> WriteResult<()> {
+    let mut transaction = fenced(pool, claim).await?;
     sqlx::query(
         "UPDATE task_automation SET head = $2, checks = $3, \
            checks_since = CASE WHEN $4 OR checks_since IS NULL THEN NOW() ELSE checks_since END, \
@@ -646,53 +711,72 @@ pub async fn set_head(
     .bind(head)
     .bind(checks)
     .bind(fresh)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
 /// Start the wait for reviews over: the grace a bot gets is measured from
 /// when the change became reviewable, and again from when the bot was asked.
-pub async fn restart_clock(pool: &PgPool, task_id: Uuid) -> DbResult<()> {
+pub async fn restart_clock(pool: &PgPool, claim: Option<Claim>, task_id: Uuid) -> WriteResult<()> {
+    let mut transaction = fenced(pool, claim).await?;
     sqlx::query(
         "UPDATE task_automation SET checks_since = NOW(), updated_at = NOW() WHERE task_id = $1",
     )
     .bind(task_id)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
 /// Remember the head a review bot was asked to review, so it is asked once per head.
-pub async fn set_bot_trigger_head(pool: &PgPool, task_id: Uuid, head: &str) -> DbResult<()> {
+pub async fn set_bot_trigger_head(
+    pool: &PgPool,
+    claim: Option<Claim>,
+    task_id: Uuid,
+    head: &str,
+) -> WriteResult<()> {
+    let mut transaction = fenced(pool, claim).await?;
     sqlx::query(
         "UPDATE task_automation SET bot_trigger_head = $2, updated_at = NOW() WHERE task_id = $1",
     )
     .bind(task_id)
     .bind(head)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
 /// Record the commit the squash merge produced.
-pub async fn set_merge_sha(pool: &PgPool, task_id: Uuid, sha: &str) -> DbResult<()> {
+pub async fn set_merge_sha(
+    pool: &PgPool,
+    claim: Option<Claim>,
+    task_id: Uuid,
+    sha: &str,
+) -> WriteResult<()> {
+    let mut transaction = fenced(pool, claim).await?;
     sqlx::query("UPDATE task_automation SET merge_sha = $2, updated_at = NOW() WHERE task_id = $1")
         .bind(task_id)
         .bind(sha)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
 /// Count a run admitted for a task and put the task in the running stage.
 pub async fn record_admission(
     pool: &PgPool,
+    claim: Option<Claim>,
     task_id: Uuid,
     project_id: Uuid,
     run_id: Uuid,
-) -> DbResult<i32> {
-    sqlx::query_scalar(
+) -> WriteResult<i32> {
+    let mut transaction = fenced(pool, claim).await?;
+    let written = sqlx::query_scalar(
         "INSERT INTO task_automation (task_id, project_id, stage, runs, last_run_id) \
          VALUES ($1, $2, 'running', 1, $3) \
          ON CONFLICT (task_id) DO UPDATE SET stage = 'running', reason = NULL, \
@@ -703,19 +787,28 @@ pub async fn record_admission(
     .bind(task_id)
     .bind(project_id)
     .bind(run_id)
-    .fetch_one(pool)
-    .await
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(written)
 }
 
 /// Count one more review round and return the new total.
-pub async fn bump_review_round(pool: &PgPool, task_id: Uuid) -> DbResult<i32> {
-    sqlx::query_scalar(
+pub async fn bump_review_round(
+    pool: &PgPool,
+    claim: Option<Claim>,
+    task_id: Uuid,
+) -> WriteResult<i32> {
+    let mut transaction = fenced(pool, claim).await?;
+    let written = sqlx::query_scalar(
         "UPDATE task_automation SET review_rounds = review_rounds + 1, updated_at = NOW() \
          WHERE task_id = $1 RETURNING review_rounds",
     )
     .bind(task_id)
-    .fetch_one(pool)
-    .await
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(written)
 }
 
 /// Every task of a project the pipeline still has something to do for.
@@ -1080,8 +1173,13 @@ const REVIEW_COLUMNS: &str = "id, task_id, run_id, round, head, reviewer_kind, r
      verdict, summary, findings, addressed, external_id, created_at";
 
 /// Store one review round and return its id.
-pub async fn record_review(pool: &PgPool, review: ReviewInsert<'_>) -> DbResult<Uuid> {
-    sqlx::query_scalar(
+pub async fn record_review(
+    pool: &PgPool,
+    claim: Option<Claim>,
+    review: ReviewInsert<'_>,
+) -> WriteResult<Uuid> {
+    let mut transaction = fenced(pool, claim).await?;
+    let written = sqlx::query_scalar(
         "INSERT INTO task_reviews (task_id, run_id, round, head, reviewer_kind, reviewer, author_model, \
            same_model, verdict, summary, findings, addressed, external_id) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id",
@@ -1099,8 +1197,10 @@ pub async fn record_review(pool: &PgPool, review: ReviewInsert<'_>) -> DbResult<
     .bind(json!(review.findings))
     .bind(json!(review.addressed))
     .bind(review.external_id)
-    .fetch_one(pool)
-    .await
+    .fetch_one(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(written)
 }
 
 /// Every review round of a task, oldest first.
@@ -1341,6 +1441,7 @@ const YET_TO_START: [&str; 2] = [tasks::CREATED, tasks::PAUSED];
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_auto_task(
     pool: &PgPool,
+    claim: Option<Claim>,
     project_id: Uuid,
     workspace_id: Uuid,
     actor: Uuid,
@@ -1348,8 +1449,8 @@ pub async fn insert_auto_task(
     title: &str,
     description: &str,
     acceptance_criteria: Option<&str>,
-) -> DbResult<Uuid> {
-    let mut transaction = pool.begin().await?;
+) -> WriteResult<Uuid> {
+    let mut transaction = fenced(pool, claim).await?;
     let created = tasks::create_task_in(
         &mut transaction,
         &Create {
@@ -1505,7 +1606,7 @@ pub(crate) mod testing {
                 .execute(&self.pool)
                 .await
                 .expect("the task is placed");
-            set_stage(&self.pool, task, self.id, stage, None)
+            set_stage(&self.pool, None, task, self.id, stage, None)
                 .await
                 .expect("the task's stage");
         }
@@ -1872,9 +1973,11 @@ mod tests {
             .place(merged, tasks::CANCELLED, Some(PULL), Stage::Merged)
             .await;
 
-        park(&project.pool, project.id).await.expect("the park");
+        park(&project.pool, None, project.id)
+            .await
+            .expect("the park");
         let first = project.automation(paused).await.updated_at;
-        park(&project.pool, project.id)
+        park(&project.pool, None, project.id)
             .await
             .expect("a second park");
         let settled: Vec<Uuid> = settled_runs(&project.pool, project.id)
@@ -2040,14 +2143,14 @@ mod tests {
             .place(merged, tasks::COMPLETE, None, Stage::Merged)
             .await;
 
-        let with_work_left = complete(&project.pool, project.id)
+        let with_work_left = complete(&project.pool, None, project.id)
             .await
             .expect("the completion");
         project.set_status(open, tasks::CANCELLED).await;
-        let with_none = complete(&project.pool, project.id)
+        let with_none = complete(&project.pool, None, project.id)
             .await
             .expect("the completion");
-        let again = complete(&project.pool, project.id)
+        let again = complete(&project.pool, None, project.id)
             .await
             .expect("the completion");
         let after = automation(&project.pool, project.id)
@@ -2078,7 +2181,7 @@ mod tests {
         let run = tasks::create_task_run(&project.pool, blocker)
             .await
             .expect("a run a person started");
-        let in_flight = pause_stalled(&project.pool, project.id, STALLED)
+        let in_flight = pause_stalled(&project.pool, None, project.id, STALLED)
             .await
             .expect("the pause");
         tasks::complete_task_run(&project.pool, run.id, tasks::FAILED, None, None)
@@ -2086,11 +2189,11 @@ mod tests {
             .expect("the run ends");
         let ended = project.status(blocker).await;
         project.set_status(blocker, tasks::CREATED).await;
-        let runnable = pause_stalled(&project.pool, project.id, STALLED)
+        let runnable = pause_stalled(&project.pool, None, project.id, STALLED)
             .await
             .expect("the pause");
         project.set_status(blocker, tasks::BLOCKED).await;
-        let stalled = pause_stalled(&project.pool, project.id, STALLED)
+        let stalled = pause_stalled(&project.pool, None, project.id, STALLED)
             .await
             .expect("the pause");
         let after = automation(&project.pool, project.id)
@@ -2118,15 +2221,15 @@ mod tests {
         project.set_status(first, tasks::CANCELLED).await;
 
         project.set_status(second, tasks::PAUSED).await;
-        let held = pause_stalled(&project.pool, project.id, STALLED)
+        let held = pause_stalled(&project.pool, None, project.id, STALLED)
             .await
             .expect("the pause");
         project.set_status(second, tasks::CANCELLED).await;
-        let finished = pause_stalled(&project.pool, project.id, STALLED)
+        let finished = pause_stalled(&project.pool, None, project.id, STALLED)
             .await
             .expect("the pause");
         project.set_status(second, tasks::BLOCKED).await;
-        let stalled = pause_stalled(&project.pool, project.id, STALLED)
+        let stalled = pause_stalled(&project.pool, None, project.id, STALLED)
             .await
             .expect("the pause");
         project.remove().await;
@@ -2146,7 +2249,7 @@ mod tests {
         let task = project.tasks[0];
         project.set_status(task, tasks::BLOCKED).await;
 
-        let stalled = pause_stalled(&project.pool, project.id, STALLED)
+        let stalled = pause_stalled(&project.pool, None, project.id, STALLED)
             .await
             .expect("the pause for stalling");
         reopen(&project.pool, &[task]).await.expect("the reopen");
@@ -2154,7 +2257,7 @@ mod tests {
             .await
             .expect("the project's automation")
             .expect("an automated project");
-        let refused = pause(&project.pool, project.id, WITHOUT_ACCESS)
+        let refused = pause(&project.pool, None, project.id, WITHOUT_ACCESS)
             .await
             .expect("the pause for access");
         sqlx::query("UPDATE projects SET auto_completed_at = NOW() WHERE id = $1")
@@ -2192,7 +2295,7 @@ mod tests {
         let second = Project::new(1).await;
         for project in [&first, &second] {
             project.set_status(project.tasks[0], tasks::BLOCKED).await;
-            pause_stalled(&project.pool, project.id, STALLED)
+            pause_stalled(&project.pool, None, project.id, STALLED)
                 .await
                 .expect("the pause for stalling");
         }
@@ -2268,14 +2371,15 @@ mod tests {
         let mut refused = Vec::new();
         for task in [paused, cancelled] {
             refused.push(
-                tasks::create_unattended_task_run(&project.pool, task, project.actor)
+                tasks::create_unattended_task_run(&project.pool, task, project.actor, None)
                     .await
                     .expect("the admission"),
             );
         }
-        let admitted = tasks::create_unattended_task_run(&project.pool, created, project.actor)
-            .await
-            .expect("the admission");
+        let admitted =
+            tasks::create_unattended_task_run(&project.pool, created, project.actor, None)
+                .await
+                .expect("the admission");
         let runs = (
             project.runs(paused).await,
             project.runs(cancelled).await,
@@ -2311,21 +2415,32 @@ mod tests {
         project
             .place(task, tasks::REVIEW, Some(PULL), Stage::Idle)
             .await;
-        set_stage(&project.pool, task, project.id, Stage::Fixing, Some(FIX))
-            .await
-            .expect("the fix the pipeline asked for");
+        set_stage(
+            &project.pool,
+            None,
+            task,
+            project.id,
+            Stage::Fixing,
+            Some(FIX),
+        )
+        .await
+        .expect("the fix the pipeline asked for");
 
         project.set_status(task, tasks::CANCELLED).await;
-        park(&project.pool, project.id).await.expect("the park");
+        park(&project.pool, None, project.id)
+            .await
+            .expect("the park");
         let cancelled = project.automation(task).await;
         project.set_status(task, tasks::PAUSED).await;
-        park(&project.pool, project.id)
+        park(&project.pool, None, project.id)
             .await
             .expect("a park of a row parked already");
         let paused = project.automation(task).await;
         let saved = project.parked(task).await;
         project.set_status(task, tasks::REVIEW).await;
-        unpark(&project.pool, project.id).await.expect("the unpark");
+        unpark(&project.pool, None, project.id)
+            .await
+            .expect("the unpark");
         let after = project.automation(task).await;
         let cleared = project.parked(task).await;
         project.remove().await;
@@ -2360,18 +2475,22 @@ mod tests {
         let project = Project::new(1).await;
         let task = project.tasks[0];
         project.place(task, tasks::PAUSED, None, Stage::Idle).await;
-        park(&project.pool, project.id).await.expect("the park");
+        park(&project.pool, None, project.id)
+            .await
+            .expect("the park");
         let while_paused = next_runnable(&project.pool, project.id)
             .await
             .expect("the next runnable task");
 
         project.set_status(task, tasks::CREATED).await;
-        unpark(&project.pool, project.id).await.expect("the unpark");
+        unpark(&project.pool, None, project.id)
+            .await
+            .expect("the unpark");
         let after = project.automation(task).await;
         let runnable = next_runnable(&project.pool, project.id)
             .await
             .expect("the next runnable task");
-        let admitted = tasks::create_unattended_task_run(&project.pool, task, project.actor)
+        let admitted = tasks::create_unattended_task_run(&project.pool, task, project.actor, None)
             .await
             .expect("the admission");
         project.remove().await;
@@ -2391,12 +2510,14 @@ mod tests {
         let project = Project::new(1).await;
         let task = project.tasks[0];
         project.place(task, tasks::PAUSED, None, Stage::Idle).await;
-        park(&project.pool, project.id).await.expect("the park");
+        park(&project.pool, None, project.id)
+            .await
+            .expect("the park");
 
         let run = tasks::create_task_run(&project.pool, task)
             .await
             .expect("a run a person started");
-        unpark(&project.pool, project.id)
+        unpark(&project.pool, None, project.id)
             .await
             .expect("an unpark during the run");
         let during = project.automation(task).await;
@@ -2410,7 +2531,7 @@ mod tests {
             .execute(&project.pool)
             .await
             .expect("the run's pull request");
-        unpark(&project.pool, project.id)
+        unpark(&project.pool, None, project.id)
             .await
             .expect("an unpark after the run");
         let after = project.automation(task).await;
@@ -2432,16 +2553,27 @@ mod tests {
         let project = Project::new(1).await;
         let task = project.tasks[0];
         project.place(task, tasks::BLOCKED, None, Stage::Idle).await;
-        set_stage(&project.pool, task, project.id, Stage::Paused, Some(SPENT))
-            .await
-            .expect("automation gives up on the task");
+        set_stage(
+            &project.pool,
+            None,
+            task,
+            project.id,
+            Stage::Paused,
+            Some(SPENT),
+        )
+        .await
+        .expect("automation gives up on the task");
 
         project.set_status(task, tasks::PAUSED).await;
-        park(&project.pool, project.id).await.expect("the park");
+        park(&project.pool, None, project.id)
+            .await
+            .expect("the park");
         let while_paused = project.automation(task).await;
         let saved = project.parked(task).await;
         project.set_status(task, tasks::BLOCKED).await;
-        unpark(&project.pool, project.id).await.expect("the unpark");
+        unpark(&project.pool, None, project.id)
+            .await
+            .expect("the unpark");
         let after = project.automation(task).await;
         project.remove().await;
 
@@ -2462,10 +2594,14 @@ mod tests {
         project
             .place(task, tasks::PAUSED, Some(PULL), Stage::AwaitingChecks)
             .await;
-        park(&project.pool, project.id).await.expect("the park");
+        park(&project.pool, None, project.id)
+            .await
+            .expect("the park");
 
         project.set_status(task, tasks::COMPLETE).await;
-        unpark(&project.pool, project.id).await.expect("the unpark");
+        unpark(&project.pool, None, project.id)
+            .await
+            .expect("the unpark");
         let after = project.automation(task).await;
         let changes = pipeline(&project.pool, project.id)
             .await
@@ -2484,10 +2620,13 @@ mod tests {
         project
             .place(task, tasks::PAUSED, Some(PULL), Stage::Fixing)
             .await;
-        park(&project.pool, project.id).await.expect("the park");
+        park(&project.pool, None, project.id)
+            .await
+            .expect("the park");
 
         set_stage(
             &project.pool,
+            None,
             task,
             project.id,
             Stage::Paused,
@@ -2497,7 +2636,9 @@ mod tests {
         .expect("a step that was already under way pauses the task");
         let saved = project.parked(task).await;
         project.set_status(task, tasks::REVIEW).await;
-        unpark(&project.pool, project.id).await.expect("the unpark");
+        unpark(&project.pool, None, project.id)
+            .await
+            .expect("the unpark");
         let after = project.automation(task).await;
         project.remove().await;
 
@@ -2542,6 +2683,7 @@ mod tests {
         let project = Project::new(1).await;
         let added = insert_auto_task(
             &project.pool,
+            None,
             project.id,
             project.workspace,
             project.actor,
@@ -2573,6 +2715,7 @@ mod tests {
 
         let added = insert_auto_task(
             &project.pool,
+            None,
             project.id,
             project.workspace,
             project.actor,
@@ -2656,6 +2799,7 @@ mod tests {
         rank(&project, planned, *tasks::PRIORITIES.end() - 1).await;
         let added = insert_auto_task(
             &project.pool,
+            None,
             project.id,
             project.workspace,
             project.actor,
