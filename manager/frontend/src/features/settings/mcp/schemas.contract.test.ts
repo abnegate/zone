@@ -19,9 +19,13 @@ import { SERVER_NAME_LIMIT, Source, Status, Transport } from './constants';
 import { urlRefusal } from './failure';
 import { COMMANDS_OFF_NOTICE } from './McpServerForm';
 import {
+  ImportedMcpServersSchema,
   McpSecretFieldSchema,
   McpServerListSchema,
   McpServerSchema,
+  ProviderMcpServerListSchema,
+  ProviderMcpServerSchema,
+  ProviderMcpServersSchema,
   WorkspaceMcpServerListSchema,
   WorkspaceMcpServerSchema,
 } from './schemas';
@@ -103,6 +107,31 @@ describe('the servers the console parses are the ones routes/mcp_servers.rs send
     expect(keys(WorkspaceMcpServerListSchema)).toEqual(
       names(ROUTES_RS, 'WorkspaceMcpServerListResponse')
     );
+  });
+
+  test('a provider server carries exactly the fields ProviderMcpServerResponse declares', () => {
+    expect(keys(ProviderMcpServerSchema)).toEqual(names(ROUTES_RS, 'ProviderMcpServerResponse'));
+  });
+
+  test('a provider carries exactly the fields ProviderMcpServersResponse declares', () => {
+    expect(keys(ProviderMcpServersSchema)).toEqual(names(ROUTES_RS, 'ProviderMcpServersResponse'));
+  });
+
+  test('the provider listing carries exactly the fields ProviderMcpServerListResponse declares', () => {
+    expect(keys(ProviderMcpServerListSchema)).toEqual(
+      names(ROUTES_RS, 'ProviderMcpServerListResponse')
+    );
+  });
+
+  test('an import answers exactly the fields ImportedMcpServersResponse declares', () => {
+    expect(keys(ImportedMcpServersSchema)).toEqual(names(ROUTES_RS, 'ImportedMcpServersResponse'));
+    expect(Object.keys(ImportedMcpServersSchema.shape.failures.element.shape).sort()).toEqual(
+      names(ROUTES_RS, 'ImportedMcpServerFailure')
+    );
+  });
+
+  test('an import asks for exactly what ImportMcpServersRequest reads', () => {
+    expect(names(ROUTES_RS, 'ImportMcpServersRequest')).toEqual(['provider', 'servers']);
   });
 
   test('every status, source and transport the server names is one the console knows', () => {

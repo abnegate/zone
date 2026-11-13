@@ -1,12 +1,16 @@
 import { z } from 'zod';
 import { Source, Status, Transport } from './constants';
 import type {
+  ImportedMcpServers,
   McpSecretField,
   McpServer,
   McpServerList,
   McpServerSource,
   McpServerStatus,
   McpTransport,
+  ProviderMcpServer,
+  ProviderMcpServerList,
+  ProviderMcpServers,
   WorkspaceMcpServer,
   WorkspaceMcpServerList,
 } from './types';
@@ -54,3 +58,34 @@ export const WorkspaceMcpServerSchema = McpServerSchema.extend({
 export const WorkspaceMcpServerListSchema = z.object({
   servers: z.array(WorkspaceMcpServerSchema),
 }) satisfies z.ZodType<WorkspaceMcpServerList>;
+
+export const ProviderMcpServerSchema = z.object({
+  name: z.string(),
+  transport: McpTransportSchema,
+  command: z.string().nullable(),
+  arguments: z.array(z.string()),
+  url: z.string().nullable(),
+  tools: z.array(z.string()).nullable(),
+  enabled: z.boolean(),
+  environment: z.array(McpSecretFieldSchema),
+  headers: z.array(McpSecretFieldSchema),
+  ignored: z.array(z.string()),
+  refusal: z.string().nullable(),
+}) satisfies z.ZodType<ProviderMcpServer>;
+
+export const ProviderMcpServersSchema = z.object({
+  provider: z.string(),
+  label: z.string(),
+  servers: z.array(ProviderMcpServerSchema),
+  errors: z.array(z.string()),
+}) satisfies z.ZodType<ProviderMcpServers>;
+
+export const ProviderMcpServerListSchema = z.object({
+  commands: z.boolean(),
+  providers: z.array(ProviderMcpServersSchema),
+}) satisfies z.ZodType<ProviderMcpServerList>;
+
+export const ImportedMcpServersSchema = z.object({
+  created: z.array(McpServerSchema),
+  failures: z.array(z.object({ name: z.string(), message: z.string() })),
+}) satisfies z.ZodType<ImportedMcpServers>;

@@ -1,12 +1,17 @@
 import {
+  ImportedMcpServersSchema,
   McpServerListSchema,
   McpServerSchema,
+  ProviderMcpServerListSchema,
   WorkspaceMcpServerListSchema,
 } from '../features/settings/mcp/schemas';
 import type {
   CreateMcpServerRequest,
+  ImportedMcpServers,
+  ImportMcpServersRequest,
   McpServer,
   McpServerList,
+  ProviderMcpServerList,
   UpdateMcpServerRequest,
   UpdateWorkspaceMcpServersRequest,
   WorkspaceMcpServerList,
@@ -86,6 +91,27 @@ export const mcpApi = {
       'Failed to reconnect the MCP server'
     );
     return parse(McpServerSchema, await response.json());
+  },
+
+  async providers(organizationId: string): Promise<ProviderMcpServerList> {
+    const response = await send(
+      `${serversUrl(organizationId)}/providers`,
+      { method: 'GET' },
+      'Failed to load the MCP servers your providers have configured'
+    );
+    return parse(ProviderMcpServerListSchema, await response.json());
+  },
+
+  async import(
+    organizationId: string,
+    request: ImportMcpServersRequest
+  ): Promise<ImportedMcpServers> {
+    const response = await send(
+      `${serversUrl(organizationId)}/imports`,
+      { method: 'POST', body: JSON.stringify(request) },
+      'Failed to import the MCP servers'
+    );
+    return parse(ImportedMcpServersSchema, await response.json());
   },
 
   async workspace(organizationId: string, workspaceId: string): Promise<WorkspaceMcpServerList> {
