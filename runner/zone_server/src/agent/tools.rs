@@ -17,6 +17,7 @@ use abnegate_agent::mcp::{self, McpHub};
 use abnegate_agent::tool::{Session, Tier};
 use abnegate_agent::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 use abnegate_agent_cli::AgentKind;
+use abnegate_exec::Niceness;
 use abnegate_llm::ToolDefinition;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -194,11 +195,13 @@ fn context(
     session: Session,
     denied: Vec<PathBuf>,
     chat_offline: bool,
+    niceness: Niceness,
 ) -> ToolContext {
     context::build(context::Config {
         working_directory,
         session,
         denied,
+        niceness,
         unrestricted: profile == ToolProfile::Chat,
         maximum_file_size: MAX_TOOL_FILE_BYTES,
         command_timeout: Duration::from_secs(TOOL_COMMAND_TIMEOUT_SECS),
@@ -335,14 +338,24 @@ impl ChatTools {
     /// Search tools stay registered and degrade to keyword search when
     /// embeddings are unavailable, so the model can still look things up.
     pub async fn build(scope: WorkspaceScope) -> Self {
-        let denied = scope.state.config().agents.state.clone();
-        Self::assemble(Some(scope), ToolProfile::Chat, None, true, denied).await
+        let agents = &scope.state.config().agents;
+        let (denied, niceness) = (agents.state.clone(), agents.niceness);
+        Self::assemble(Some(scope), ToolProfile::Chat, None, true, denied, niceness).await
     }
 
     /// Preview only the known catalog; never start MCP processes while drafting.
     pub async fn preview(scope: WorkspaceScope) -> Self {
-        let denied = scope.state.config().agents.state.clone();
-        Self::assemble(Some(scope), ToolProfile::Chat, None, false, denied).await
+        let agents = &scope.state.config().agents;
+        let (denied, niceness) = (agents.state.clone(), agents.niceness);
+        Self::assemble(
+            Some(scope),
+            ToolProfile::Chat,
+            None,
+            false,
+            denied,
+            niceness,
+        )
+        .await
     }
 
     /// Point relative paths at `directory`, which a chat's project gave it, or
@@ -410,6 +423,7 @@ impl ChatTools {
                 Session::Detached,
                 Vec::new(),
                 false,
+                Niceness::DEFAULT,
             ),
             scope: None,
             workspace: Vec::new(),
@@ -481,7 +495,14 @@ impl ChatTools {
         let mut sorted: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
         sorted.sort();
         Self {
-            context: context(profile, host_root(), Session::Detached, Vec::new(), false),
+            context: context(
+                profile,
+                host_root(),
+                Session::Detached,
+                Vec::new(),
+                false,
+                Niceness::DEFAULT,
+            ),
             profile,
             name_set: sorted.iter().cloned().collect(),
             // A catalog stated by name is stated in full: nothing is deferred
@@ -571,8 +592,16 @@ impl ChatTools {
             offline: false,
             origin: Origin::Automation,
         });
-        let denied = state.config().agents.state.clone();
-        Self::assemble(scope, ToolProfile::Task, Some(cwd), true, denied).await
+        let agents = &state.config().agents;
+        Self::assemble(
+            scope,
+            ToolProfile::Task,
+            Some(cwd),
+            true,
+            agents.state.clone(),
+            agents.niceness,
+        )
+        .await
     }
 
     /// A task that requires its plan approved is handed `submit_plan`, and
@@ -682,6 +711,7 @@ impl ChatTools {
         task_cwd: Option<PathBuf>,
         connect: bool,
         denied: PathBuf,
+        niceness: Niceness,
     ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
@@ -835,7 +865,7 @@ impl ChatTools {
             .and_then(|scope| scope.chat_id)
             .map_or(Session::Detached, Session::Chat);
         let offline = scope.as_ref().is_some_and(|scope| scope.offline);
-        let context = context(profile, cwd, session, vec![denied], offline);
+        let context = context(profile, cwd, session, vec![denied], offline, niceness);
         let mcp_guidance = servers::prompt(connected_servers, &registry.names());
 
         let mut assembled = Self {
