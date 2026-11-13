@@ -411,7 +411,17 @@ enum Routing {
 /// What a provider reported when a turn failed, remedied for a coding agent's
 /// sign-in and without the endpoint's key.
 fn failure(endpoint: &Endpoint, backend: &LlmBackend, message: String) -> String {
-    endpoint.scrub(&crate::services::backend::remedied(backend, message).message)
+    reported(
+        endpoint,
+        crate::services::backend::remedied(backend, message).message,
+    )
+}
+
+/// `message` as the reader sees it: a gateway's report that it reached
+/// nothing said plainly, and never the endpoint's key.
+fn reported(endpoint: &Endpoint, message: String) -> String {
+    let message = crate::services::failure::unreachable(&message).unwrap_or(message);
+    endpoint.scrub(&message)
 }
 
 /// Client message types
@@ -3702,7 +3712,7 @@ async fn handle_chat_generation(
                             if remedied.signed_out && handover.is_some() {
                                 handing = Some(Cause::signed_out(remedied.message));
                             } else {
-                                failure = Some(endpoint.scrub(&remedied.message));
+                                failure = Some(reported(&endpoint, remedied.message));
                             }
                             break;
                         }
@@ -6195,6 +6205,22 @@ cat 'DIR/reply.jsonl'
         assert!(
             message.contains("Incorrect API key provided") && message.contains(REDACTED),
             "the reader lost why the turn failed: {message}"
+        );
+    }
+
+    /// A self-hosted chat whose model host is not running: the gateway answers
+    /// 500 with the connection it could not make, and the reader is told what
+    /// that means rather than handed the traceback.
+    #[test]
+    fn a_model_host_that_is_not_running_is_reported_as_down() {
+        let endpoint = Endpoint::instance(&crate::state::test_config());
+        let gateway = "Failed to generate response: API error: 500 - {\"error\":{\"message\":\"litellm.APIConnectionError: Ollama_chatException - Cannot connect to host host.docker.internal:11434 ssl:<ssl.SSLContext object at 0xffffadbabb10> [Connect call failed ('192.168.65.254', 11434)]No fallback model group found for original model_group=qwen3:27b. LiteLLM Retried: 2 times, LiteLLM Max Retries: 2\",\"code\":\"500\"}}";
+
+        let message = failure(&endpoint, &LlmBackend::Http, gateway.to_string());
+
+        assert_eq!(
+            message,
+            "Ollama is down: nothing answered at host.docker.internal:11434."
         );
     }
 
