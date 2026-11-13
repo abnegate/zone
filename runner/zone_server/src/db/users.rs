@@ -7,6 +7,51 @@ use uuid::Uuid;
 use super::DbResult;
 use crate::services::time_zone::{self, TimeZone};
 
+const ADMINISTRATOR_ROLE: &str = "admin";
+
+const ADMINISTRATOR_PERMISSIONS: [&str; 40] = [
+    "organizations:create",
+    "organizations:read",
+    "organizations:update",
+    "organizations:delete",
+    "workspaces:create",
+    "workspaces:read",
+    "workspaces:update",
+    "workspaces:delete",
+    "projects:create",
+    "projects:read",
+    "projects:update",
+    "projects:delete",
+    "tasks:create",
+    "tasks:read",
+    "tasks:update",
+    "tasks:delete",
+    "chats:create",
+    "chats:read",
+    "chats:update",
+    "chats:delete",
+    "sources:create",
+    "sources:read",
+    "sources:update",
+    "sources:delete",
+    "models:create",
+    "models:read",
+    "models:update",
+    "models:delete",
+    "wiki:create",
+    "wiki:read",
+    "wiki:update",
+    "wiki:delete",
+    "users:create",
+    "users:read",
+    "users:update",
+    "users:delete",
+    "pull_requests:read",
+    "pull_requests:update",
+    "releases:read",
+    "releases:create",
+];
+
 /// User row from database
 #[derive(Debug, Clone)]
 pub struct UserRow {
@@ -168,61 +213,21 @@ pub async fn get_user_with_permissions(
     pool: &PgPool,
     user_id: Uuid,
 ) -> DbResult<Option<UserWithPermissions>> {
-    // Get user
-    let user = match get_user_by_id(pool, user_id).await? {
-        Some(u) => u,
-        None => return Ok(None),
+    let Some(user) = get_user_by_id(pool, user_id).await? else {
+        return Ok(None);
     };
 
-    // Admin users get all permissions
     if user.is_admin.unwrap_or(false) {
-        let roles = vec!["admin".to_string()];
-        let permissions = vec![
-            "organizations:create".to_string(),
-            "organizations:read".to_string(),
-            "organizations:update".to_string(),
-            "organizations:delete".to_string(),
-            "workspaces:create".to_string(),
-            "workspaces:read".to_string(),
-            "workspaces:update".to_string(),
-            "workspaces:delete".to_string(),
-            "projects:create".to_string(),
-            "projects:read".to_string(),
-            "projects:update".to_string(),
-            "projects:delete".to_string(),
-            "tasks:create".to_string(),
-            "tasks:read".to_string(),
-            "tasks:update".to_string(),
-            "tasks:delete".to_string(),
-            "chats:create".to_string(),
-            "chats:read".to_string(),
-            "chats:update".to_string(),
-            "chats:delete".to_string(),
-            "sources:create".to_string(),
-            "sources:read".to_string(),
-            "sources:update".to_string(),
-            "sources:delete".to_string(),
-            "models:create".to_string(),
-            "models:read".to_string(),
-            "models:update".to_string(),
-            "models:delete".to_string(),
-            "wiki:create".to_string(),
-            "wiki:read".to_string(),
-            "wiki:update".to_string(),
-            "wiki:delete".to_string(),
-            "users:create".to_string(),
-            "users:read".to_string(),
-            "users:update".to_string(),
-            "users:delete".to_string(),
-        ];
         return Ok(Some(UserWithPermissions {
             user,
-            roles,
-            permissions,
+            roles: vec![ADMINISTRATOR_ROLE.to_string()],
+            permissions: ADMINISTRATOR_PERMISSIONS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
         }));
     }
 
-    // Get roles
     let roles: Vec<String> = sqlx::query_scalar!(
         r#"
         SELECT r.name
@@ -235,7 +240,6 @@ pub async fn get_user_with_permissions(
     .fetch_all(pool)
     .await?;
 
-    // Get permissions from roles
     let permissions: Vec<String> = sqlx::query_scalar!(
         r#"
         SELECT DISTINCT p.name

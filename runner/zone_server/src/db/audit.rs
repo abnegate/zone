@@ -102,6 +102,9 @@ pub mod actions {
     pub const GITHUB_INSTALLATION_REMOVED: &str = "github_installation.removed";
     pub const GITHUB_INSTALLATIONS_SYNCED: &str = "github_installation.synced";
 
+    pub const PULL_REQUEST_MERGED: &str = "pull_request.merged";
+    pub const RELEASE_CREATED: &str = "release.created";
+
     pub const MCP_SERVER_CREATED: &str = "mcp_server.created";
     pub const MCP_SERVER_UPDATED: &str = "mcp_server.updated";
     pub const MCP_SERVER_DELETED: &str = "mcp_server.deleted";
@@ -121,6 +124,8 @@ pub mod resources {
     pub const DEVICE_POLICY: &str = "device_policy";
     pub const GITHUB_APP: &str = "github_app";
     pub const GITHUB_INSTALLATION: &str = "github_installation";
+    pub const PULL_REQUEST: &str = "pull_request";
+    pub const RELEASE: &str = "release";
     pub const MCP_SERVER: &str = "mcp_server";
     pub const WORKSPACE_MCP_SERVERS: &str = "workspace_mcp_servers";
 }
