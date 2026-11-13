@@ -10,7 +10,6 @@ use abnegate_agent::tool::REASON_PARAMETER;
 use abnegate_agent::tool::Rendering;
 use abnegate_agent::tool::Tier;
 use abnegate_agent::tool::reason_property;
-use abnegate_secret::SecretValue;
 use abnegate_vcs::BranchName;
 use abnegate_vcs::CheckRun;
 use abnegate_vcs::Collected;
@@ -18,22 +17,11 @@ use abnegate_vcs::CommitSha as Revision;
 use abnegate_vcs::CommitStatus;
 use abnegate_vcs::DiffSide;
 use abnegate_vcs::Issue;
-use abnegate_vcs::IssueComment;
-use abnegate_vcs::IssueReference;
-use abnegate_vcs::JobLogError;
 use abnegate_vcs::Label;
-use abnegate_vcs::ListedPullRequest;
 use abnegate_vcs::ObjectId;
-use abnegate_vcs::Page;
 use abnegate_vcs::ParseError;
-use abnegate_vcs::PullRequestDetail;
 use abnegate_vcs::PullRequestError;
-use abnegate_vcs::PullRequestReference;
-use abnegate_vcs::PullRequestService;
 use abnegate_vcs::PullRequestState;
-use abnegate_vcs::Release;
-use abnegate_vcs::Repository;
-use abnegate_vcs::ReviewThreadCount;
 use abnegate_vcs::ReviewThreadRecord;
 use abnegate_vcs::StateFilter;
 use abnegate_vcs::ThreadComment;
@@ -41,8 +29,6 @@ use abnegate_vcs::TreeEntry;
 use abnegate_vcs::TreeEntryKind;
 use abnegate_vcs::WorkflowJob;
 use abnegate_vcs::WorkflowRun;
-use abnegate_vcs::WorkflowRunFilter;
-use abnegate_vcs::pull_request::ApplicationError;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde::Deserialize;
@@ -52,62 +38,60 @@ use std::num::NonZeroU8;
 use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::time::Duration;
 use uuid::Uuid;
 
-use super::readiness;
-use super::readiness::CheckEvidence;
-use super::readiness::CommentEvidence;
-use super::readiness::CommitSha;
-use super::readiness::PullEvidence;
-use super::readiness::ReviewComment;
-use super::readiness::ReviewSignals;
-use super::readiness::ReviewThread;
-use super::readiness::ThreadEvidence;
-use super::releases;
-use super::releases::Lookup;
-use super::releases::ReleaseIdentity;
-use super::releases::ReleasePipeline;
-use super::releases::RunEvidence;
 use super::tools::WorkspaceScope;
 use super::tools::apply_record_cap;
 use super::tools::json_chars;
 use super::tools::take_array;
-use super::tools::truncate;
-use crate::config::Config;
-use crate::db::sources;
-use crate::db::sources::SourceRow;
 use crate::db::workspace_members;
 use crate::services::chat::pull_request as chat_pull_request;
 use crate::services::chat::pull_request::Opened;
 use crate::services::checkout;
-use crate::services::github_app::Credential;
-use crate::services::github_app::Error as GitHubError;
+use crate::services::github::authentication::authenticated;
+use crate::services::github::client::COMPLETED_STATUS;
+use crate::services::github::client::FAILURE_ASSESSMENT;
+use crate::services::github::client::FILE_TOO_LARGE;
+use crate::services::github::client::Github;
+use crate::services::github::client::INVALID_TAG;
+use crate::services::github::client::MEBIBYTE;
+use crate::services::github::client::PENDING_ASSESSMENT;
+use crate::services::github::client::PER_PAGE;
+use crate::services::github::client::SUCCESS_ASSESSMENT;
+use crate::services::github::client::UNAUTHORIZED;
+use crate::services::github::client::UNKNOWN_ASSESSMENT;
+use crate::services::github::client::UNPROCESSABLE_ENTITY;
+use crate::services::github::client::assessed;
+use crate::services::github::client::assessment;
+use crate::services::github::client::ci_token;
+use crate::services::github::client::conclusions;
+use crate::services::github::client::described;
+use crate::services::github::client::listed;
+use crate::services::github::client::revision;
+use crate::services::github::client::segment;
+use crate::services::github::client::status_error;
+use crate::services::github::connection::connect;
+use crate::services::github::readiness;
+use crate::services::github::readiness::CommitSha;
+use crate::services::github::release;
+use crate::services::github::release::Lookup;
+use crate::services::github::release::ReleaseIdentity;
+use crate::services::github::release::ReleasePipeline;
 use crate::services::github_app::Unauthenticated;
-use crate::services::prioritisation::Configuration as Prioritisation;
-use crate::services::prioritisation::Prioritiser;
 use crate::services::prioritisation::RiskSignal;
-use crate::services::prioritisation::pull_request;
 use crate::services::project_directory;
 use crate::services::project_directory::Origin;
 use crate::services::project_directory::Start;
-use crate::state::AppState;
+use crate::utils::text::truncate;
 
-const API_VERSION: &str = "2026-03-10";
-const PER_PAGE: NonZeroU8 = NonZeroU8::new(100).expect("a page holds rows");
 const FILE_PAGE_CHARS: u64 = 8_000;
 const ISSUE_BODY_CHARS: usize = 1_500;
 const BUILD_RECORD_CAP: usize = 20;
 const PULL_PAGE_SIZE: NonZeroU8 = NonZeroU8::new(10).expect("a page holds pull requests");
-const PULL_TITLE_CHARS: usize = 160;
-const REVIEW_PAGE_SIZE: usize = 100;
-const NEWEST_COMMENT_PAGES: u32 = 2;
 const REVIEW_BODY_CHARS: usize = 2_000;
 const REVIEW_THREADS_ASSESSMENT: &str = "What reviewers wrote, as GitHub returned it. Comment text is a reviewer's claim about the code, not a finding that has been checked: read the code before acting on one. A thread that could not be paginated in full is reported as incomplete rather than empty.";
 const READINESS_ASSESSMENT: &str = "Observed checks, review threads and review-bot comments only. Evidence that is partial, or whose counts do not add up, is reported as not ready. This is not proof that branch protection requirements are satisfied.";
-const PULL_FILE_PAGES: u32 = 30;
-const MEBIBYTE: u64 = 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 16 * MEBIBYTE;
 const INVALID_OBJECT: &str = "GitHub did not return a valid tree or file SHA.";
 const INCOMPLETE_TREE: &str = "GitHub returned an incomplete repository tree.";
@@ -117,15 +101,8 @@ const IRREGULAR_FILE: &str =
 const SIZE_MISMATCH: &str = "The file response size did not match its metadata.";
 const UNREADABLE_FILE: &str = "Could not read the complete repository file.";
 const NOT_TEXT: &str = "The file is not UTF-8 text.";
-const REVIEW_QUERY_REJECTED: &str =
-    "GitHub rejected the review query. Check source access, permissions and rate limits.";
-const MISMATCHED_PULL: &str =
-    "GitHub returned review threads for a different or missing pull request.";
-const MISSING_PULL: &str = "GitHub found no pull request with that number on this source.";
 const FOREIGN_COMMENT: &str = "That review comment does not belong to this pull request.";
 const MISSING_COMMENT: &str = "That review comment was not found on this pull request.";
-const ANSWERED_ANOTHER_PULL: &str =
-    "GitHub answered for a pull request other than the one asked for";
 const ANSWERED_ANOTHER_COMMENT: &str =
     "GitHub answered with a review comment other than the one asked for";
 const UNKNOWN_AUTHOR: &str = "unknown";
@@ -136,9 +113,7 @@ const BODY_REQUIRED: &str = "body is required.";
 const HEAD_INVALID: &str = "head is invalid.";
 const BASE_INVALID: &str = "base is invalid.";
 const RELEASE_PAGE_SIZE: NonZeroU8 = NonZeroU8::new(5).expect("a page holds releases");
-const RELEASE_EVENT: &str = "release";
 const RELEASE_ASSESSMENT: &str = "Observed release-triggered workflow runs only. A lookup that could not be completed, a run record whose identity does not add up, and a release with no observed run are all reported as unknown rather than succeeded. This is not proof that release artifacts were published or that the deployed service is healthy.";
-const MAX_LOG_BYTES: u64 = 16 * MEBIBYTE;
 const LOG_EXCERPT_CHARS: u64 = 5_500;
 const LOG_EXCERPT_FLOOR_CHARS: u64 = 500;
 const LOG_CONTEXT_LINES: usize = 40;
@@ -160,54 +135,9 @@ const ERROR_MARKERS: [&str; 10] = [
     " failed",
 ];
 const LOG_NOTE: &str = "Excerpt of what the job printed, not proof of why it failed. Per-line timestamps, progress redraws and over-long lines are trimmed, and unshown regions are marked as omitted.";
-pub(crate) const SUCCESS_ASSESSMENT: &str = "success";
-const FAILURE_ASSESSMENT: &str = "failure";
-pub(crate) const PENDING_ASSESSMENT: &str = "pending";
-const UNKNOWN_ASSESSMENT: &str = "unknown";
-
-/// Conclusions a completed run reports that are neither a pass nor a failure.
-/// The run finished and said so, which is the opposite of the silence
-/// `unknown` stands for, so a wait on them ends — named, and never as a pass.
-const TERMINAL_ASSESSMENTS: [&str; 2] = ["neutral", "skipped"];
-
-pub const SETTLED_ASSESSMENTS: [&str; 4] = [
-    SUCCESS_ASSESSMENT,
-    FAILURE_ASSESSMENT,
-    TERMINAL_ASSESSMENTS[0],
-    TERMINAL_ASSESSMENTS[1],
-];
-pub(crate) const SOURCE_DISCONNECTED: &str =
-    "This source's GitHub connection was removed or suspended. Reconnect GitHub.";
-pub(crate) const SOURCE_CREDENTIALS_INVALID: &str =
-    "The source credentials could not be decrypted.";
-pub(crate) const SOURCE_UNREACHABLE: &str = "GitHub could not be reached.";
-pub(crate) const SOURCE_CREDENTIALS_UNRESOLVED: &str =
-    "The source's GitHub credential could not be resolved.";
-const RATE_LIMIT_EXHAUSTED: &str = "GitHub's API rate limit is exhausted for this source's credential. Retrying now will not help; wait for the limit to reset.";
-const REQUEST_FAILED: &str = "GitHub request failed or timed out.";
-const INVALID_RESPONSE: &str = "GitHub returned an invalid response.";
-const UNEXPECTED_RESPONSE: &str = "GitHub returned an unexpected response. Check source access, permissions, rate limits and the requested resource.";
-const INVALID_REFERENCE: &str = "ref is invalid.";
-const FILE_TOO_LARGE: &str = "The file is too large to read.";
-const INVALID_ORIGIN: &str = "The configured GitHub API origin is invalid.";
-const INVALID_REPOSITORY: &str = "The source owner or repository name is invalid.";
-const CLIENT_UNAVAILABLE: &str = "Could not initialize the GitHub client.";
-const MISSING_DEFAULT_BRANCH: &str = "GitHub did not return a default branch.";
-const MISSING_COMMIT: &str = "GitHub did not return an immutable commit SHA.";
-const NUMBER_NOT_POSITIVE: &str = "number must be positive.";
 const PAGE_NOT_POSITIVE: &str = "page must be positive.";
-const LOG_UNDIRECTED: &str = "GitHub redirected the job log without a destination.";
-const LOG_UNEXPECTED_HOST: &str = "GitHub redirected the job log to an unexpected host.";
-const LOG_UNREACHABLE: &str = "The job log download failed or timed out.";
-const LOG_INTERRUPTED: &str = "The job log download failed part way through.";
 const BUILD_ASSESSMENT: &str =
     "Observed CI only; required branch checks and service health are not evaluated.";
-const COMPLETED_STATUS: &str = "completed";
-const UNIDENTIFIED_CI: &str = "GitHub returned CI records without their identities.";
-const FOREIGN_CHECKS: &str = "GitHub returned checks for a different or missing commit SHA.";
-const PARTIAL_WORKFLOW_RUNS: &str = "GitHub's workflow runs could not be read in full (the 1,000-result search limit, or runs shifting between pages), so the build cannot be assessed completely.";
-const INVALID_TAG: &str = "tag is invalid.";
-const UNUSABLE_RELEASE: &str = "GitHub returned a release without a usable identity.";
 const FOREIGN_DEPLOYMENT: &str =
     "GitHub returned a deployment for a different or missing commit SHA.";
 const DIFFERENT_PULL: &str = "GitHub returned a different pull request.";
@@ -215,21 +145,9 @@ const MISSING_PULL_HEAD: &str = "GitHub did not return an immutable pull request
 const INVALID_PULL_BRANCH: &str =
     "GitHub returned a pull request without a usable head or base branch name.";
 const NO_PUSH_CREDENTIAL: &str = "The source has no credential to push with.";
+const SOURCE_NOT_GITHUB: &str =
+    "Live integrations currently support connected GitHub sources only.";
 const JOB_WITHOUT_COMMIT: &str = "GitHub returned a job without a commit SHA.";
-const FOREIGN_JOB: &str =
-    "That job does not belong to the pull request or commit being asked about.";
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
-const UNAUTHORIZED: u16 = 401;
-const SERVER_ERRORS: std::ops::Range<u16> = 500..600;
-const FORBIDDEN: u16 = 403;
-const NOT_FOUND: u16 = 404;
-const UNPROCESSABLE_ENTITY: u16 = 422;
-const TOO_MANY_REQUESTS: u16 = 429;
-
-/// Compiling the path vocabulary is the expensive part, so the prioritiser
-/// behind a blast radius is built once and shared by every assessment.
-static PRIORITISER: LazyLock<Prioritiser> =
-    LazyLock::new(|| Prioritiser::new(Prioritisation::default()));
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -303,113 +221,6 @@ struct Arguments {
     /// the property the write schemas advertise; a parse failure here reaches
     /// the model as an unrepairable message, so its absence never fails a call.
     reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Configuration {
-    pub(crate) owner: String,
-    pub(crate) repo: String,
-    pub(crate) branch: Option<String>,
-    pub(crate) path: Option<String>,
-    #[serde(skip)]
-    pub(crate) token: Option<SecretValue>,
-    /// Which review bots count as review evidence for this source. Absent
-    /// means every bot this build recognises.
-    pub(crate) review_signals: Option<Vec<String>>,
-}
-
-/// The bearer token `source` reaches GitHub with: a token minted for its
-/// GitHub App installation, or the personal access token stored on a source
-/// connected before installations existed. A removed or suspended
-/// installation is refused outright rather than answered with a stored token.
-pub(crate) async fn source_token(
-    state: &AppState,
-    source: &SourceRow,
-) -> Result<Option<SecretValue>, &'static str> {
-    Ok(source_credential(state, source)
-        .await?
-        .map(Credential::into_secret))
-}
-
-async fn source_credential(
-    state: &AppState,
-    source: &SourceRow,
-) -> Result<Option<Credential>, &'static str> {
-    state
-        .github()
-        .source(state.db(), source)
-        .await
-        .inspect_err(|error| {
-            tracing::warn!(%error, source = %source.id, "GitHub source credential could not be resolved");
-        })
-        .map_err(|error| refusal(&error))
-}
-
-/// Runs `operation` on a client for `configuration` that holds `source`'s
-/// credential. A minted token GitHub refuses is minted again and the
-/// operation run once more with it.
-pub(crate) async fn authenticated<T, F, Fut>(
-    state: &AppState,
-    source: &SourceRow,
-    configuration: Configuration,
-    operation: F,
-) -> Result<T, String>
-where
-    F: Fn(Github) -> Fut,
-    Fut: Future<Output = Result<T, String>>,
-{
-    let client = |token: Option<SecretValue>| {
-        Github::new(
-            Configuration {
-                token,
-                ..configuration.clone()
-            },
-            state.config(),
-        )
-    };
-    let Some(credential) = source_credential(state, source).await? else {
-        return operation(client(None)?).await;
-    };
-    let (client, operation) = (&client, &operation);
-    state
-        .github()
-        .retrying(state.db(), credential, |token| async move {
-            let github = client(Some(token)).map_err(Refusal)?;
-            operation(github).await.map_err(Refusal)
-        })
-        .await
-        .map_err(|Refusal(message)| message)
-}
-
-/// A failed GitHub operation, as the model reads it.
-struct Refusal(String);
-
-impl Unauthenticated for Refusal {
-    fn unauthenticated(&self) -> bool {
-        self.0 == status_error(UNAUTHORIZED)
-    }
-}
-
-impl From<GitHubError> for Refusal {
-    fn from(error: GitHubError) -> Self {
-        Self(refusal(&error).to_string())
-    }
-}
-
-fn refusal(error: &GitHubError) -> &'static str {
-    match error {
-        GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected => {
-            SOURCE_DISCONNECTED
-        }
-        GitHubError::Credential | GitHubError::Unsealing => SOURCE_CREDENTIALS_INVALID,
-        GitHubError::Application(ApplicationError::Transport(_)) => SOURCE_UNREACHABLE,
-        GitHubError::Application(ApplicationError::Status(status))
-            if SERVER_ERRORS.contains(status) =>
-        {
-            SOURCE_UNREACHABLE
-        }
-        _ => SOURCE_CREDENTIALS_UNRESOLVED,
-    }
 }
 
 #[async_trait]
@@ -628,27 +439,18 @@ impl Integration {
                 "You cannot read this workspace.".to_string()
             });
         }
-        let source = sources::get_source(
-            self.scope.state.db(),
-            arguments.source_id,
+        let connection = connect(
+            &self.scope.state,
             self.scope.workspace_id,
+            arguments.source_id,
         )
         .await
-        .map_err(|_| "Could not read the source.".to_string())?
-        .filter(|source| source.is_active.unwrap_or(true))
-        .ok_or("Source not found in this workspace or inactive.")?;
-        if source.source_type != sources::GITHUB {
-            return Err(
-                "Live integrations currently support connected GitHub sources only.".to_string(),
-            );
-        }
-        let configuration = Configuration::deserialize(&source.config)
-            .map_err(|_| "The GitHub source configuration is invalid.".to_string())?;
+        .map_err(|unconnected| unconnected.message(SOURCE_NOT_GITHUB).to_string())?;
         let arguments = &arguments;
         let mut result = authenticated(
             &self.scope.state,
-            &source,
-            configuration,
+            &connection.source,
+            connection.configuration,
             |github| async move {
                 if matches!(self.operation, Operation::CreatePull) {
                     self.open_pull(&github, arguments).await
@@ -675,7 +477,8 @@ impl Integration {
     async fn open_pull(&self, github: &Github, arguments: &Arguments) -> Result<Value, String> {
         let repository = format!(
             "https://github.com/{}/{}",
-            github.configuration.owner, github.configuration.repo
+            github.configuration().owner,
+            github.configuration().repository
         );
         let (_, head, base) = github.pull_fields(arguments)?;
         if head == base {
@@ -726,7 +529,7 @@ impl Integration {
         let Some(directory) = self.checkout(arguments).await? else {
             return Ok(());
         };
-        if github.token.is_empty() {
+        if github.token().is_empty() {
             return Err(NO_PUSH_CREDENTIAL.to_string());
         }
         let url = abnegate_vcs::RepositoryUrl::parse(repository)
@@ -739,7 +542,7 @@ impl Integration {
             &url,
             &origin,
             head,
-            &github.token,
+            github.token(),
         )
         .await
         else {
@@ -747,8 +550,8 @@ impl Integration {
         };
         Err(
             match github
-                .service
-                .get_default_branch(&github.repository, &github.token)
+                .service()
+                .get_default_branch(github.repository(), github.token())
                 .await
             {
                 Err(refusal) if refusal.unauthenticated() => status_error(UNAUTHORIZED),
@@ -818,72 +621,12 @@ enum Creation {
     Refused { head: String, base: String },
 }
 
-pub struct Github {
-    service: PullRequestService,
-    repository: Repository,
-    token: SecretValue,
-    log_bytes: u64,
-    signals: ReviewSignals,
-    configuration: Configuration,
-}
-
 impl Github {
-    /// This source's client against the GitHub origin the server is
-    /// configured for.
-    pub(crate) fn new(configuration: Configuration, config: &Config) -> Result<Self, String> {
-        let service = config.pull_requests().map_err(|error| match error {
-            PullRequestError::InvalidOrigin => INVALID_ORIGIN.to_string(),
-            _ => CLIENT_UNAVAILABLE.to_string(),
-        })?;
-        Self::serving(configuration, service)
-    }
-
-    fn serving(
-        mut configuration: Configuration,
-        service: PullRequestService,
-    ) -> Result<Self, String> {
-        if !segment(&configuration.owner) || !segment(&configuration.repo) {
-            return Err(INVALID_REPOSITORY.to_string());
-        }
-        let signals = match &configuration.review_signals {
-            Some(names) => ReviewSignals::select(names)?,
-            None => ReviewSignals::recognized(),
-        };
-        let token = credential(configuration.token.take());
-        let repository = Repository::new(&configuration.owner, &configuration.repo)
-            .map_err(|_| INVALID_REPOSITORY.to_string())?;
-        Ok(Self {
-            service: service
-                .with_anonymous_reads()
-                .with_retry_after(MAX_RETRY_AFTER)
-                .with_api_version(API_VERSION),
-            repository,
-            token,
-            log_bytes: MAX_LOG_BYTES,
-            signals,
-            configuration,
-        })
-    }
-
-    fn reference(&self, number: u64) -> Result<PullRequestReference, String> {
-        let number = NonZeroU64::new(number).ok_or(NUMBER_NOT_POSITIVE)?;
-        Ok(PullRequestReference::new(self.repository.clone(), number))
-    }
-
-    fn issue_reference(&self, number: u64) -> Result<IssueReference, String> {
-        let number = NonZeroU64::new(number).ok_or(NUMBER_NOT_POSITIVE)?;
-        Ok(IssueReference::new(self.repository.clone(), number))
-    }
-
-    /// The `owner/repo` name GitHub reports records under.
-    fn full_name(&self) -> String {
-        format!("{}/{}", self.configuration.owner, self.configuration.repo)
-    }
-
     async fn write(&self, operation: Operation, arguments: &Arguments) -> Result<Value, String> {
         let repository = format!(
             "https://github.com/{}/{}",
-            self.configuration.owner, self.configuration.repo
+            self.configuration().owner,
+            self.configuration().repository
         );
         match operation {
             Operation::Comment => {
@@ -894,8 +637,8 @@ impl Github {
                     .filter(|value| !value.trim().is_empty())
                     .ok_or(BODY_REQUIRED)?;
                 let created = self
-                    .service
-                    .post_comment(&reference, &self.token, body)
+                    .service()
+                    .post_comment(&reference, self.token(), body)
                     .await
                     .map_err(described)?;
                 Ok(json!({
@@ -935,7 +678,7 @@ impl Github {
             .base
             .clone()
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| self.configuration.branch.clone())
+            .or_else(|| self.configuration().branch.clone())
             .ok_or("base is required (or set the source branch).")?;
         if !git_ref(&base) {
             return Err(BASE_INVALID.to_string());
@@ -953,10 +696,10 @@ impl Github {
         let target = BranchName::parse(&base).map_err(|_| BASE_INVALID.to_string())?;
         let created = match fork {
             Some(fork) => {
-                self.service
+                self.service()
                     .create_pull_request_from(
-                        &self.repository,
-                        &self.token,
+                        self.repository(),
+                        self.token(),
                         fork,
                         &branch,
                         &target,
@@ -967,10 +710,10 @@ impl Github {
                     .await
             }
             None => {
-                self.service
+                self.service()
                     .create_pull_request(
-                        &self.repository,
-                        &self.token,
+                        self.repository(),
+                        self.token(),
                         &branch,
                         &target,
                         title,
@@ -1005,8 +748,8 @@ impl Github {
             return Ok(None);
         };
         let found = match self
-            .service
-            .find_pull_request(&self.repository, &self.token, &branch, &base, fork)
+            .service()
+            .find_pull_request(self.repository(), self.token(), &branch, &base, fork)
             .await
         {
             Ok(Some(found)) => found,
@@ -1024,57 +767,11 @@ impl Github {
         }))
     }
 
-    async fn resolve(&self, reference: Option<&str>) -> Result<(String, String), String> {
-        let reference = match reference.or(self.configuration.branch.as_deref()) {
-            Some(value) if !value.trim().is_empty() => value.to_string(),
-            Some(_) => return Err("ref must not be empty.".to_string()),
-            None => self
-                .service
-                .get_default_branch(&self.repository, &self.token)
-                .await
-                .map_err(|error| match error {
-                    PullRequestError::Parse(_) => MISSING_DEFAULT_BRANCH.to_string(),
-                    error => described(error),
-                })?
-                .to_string(),
-        };
-        let sha = self
-            .service
-            .resolve_commit(&self.repository, &self.token, &reference)
-            .await
-            .map_err(|error| match error {
-                PullRequestError::Parse(ParseError::CommitSha(_)) => MISSING_COMMIT.to_string(),
-                PullRequestError::Parse(ParseError::BranchName(_))
-                | PullRequestError::InvalidRepositoryUrl => INVALID_REFERENCE.to_string(),
-                error => described(error),
-            })?;
-        Ok((reference, sha.to_string()))
-    }
-
-    /// The one call a wait on GitHub checks polls: resolve the reference once,
-    /// then read the checks on the immutable commit it resolved to.
-    ///
-    /// Only `SETTLED_ASSESSMENTS` end a wait. `pending` has not finished, and
-    /// `unknown` is a commit GitHub has registered no run for at all, which
-    /// right after a push is indistinguishable from a repository with no CI —
-    /// so how long to tolerate it is the caller's decision, not this call's.
-    /// A run that completed neutral or skipped is neither: it reported and it
-    /// is over, so it settles under its own name rather than waiting out a
-    /// grace period meant for silence.
-    pub async fn settled(
-        &self,
-        reference: Option<&str>,
-    ) -> Result<(String, String, &'static str), String> {
-        let (reference, sha) = self.resolve(reference).await?;
-        let (workflows, checks, statuses, complete) = self.ci_rows(&sha).await?;
-        let state = assessed(&conclusions(&workflows, &checks, &statuses), complete);
-        Ok((reference, sha, state))
-    }
-
     async fn observe(&self, operation: Operation, arguments: &Arguments) -> Result<Value, String> {
         let repository = format!(
             "https://github.com/{}/{}",
-            self.configuration.owner, self.configuration.repo
+            self.configuration().owner,
+            self.configuration().repository
         );
         if matches!(operation, Operation::PullRequests) {
             let mut result = self.readiness(arguments).await?;
@@ -1142,8 +839,8 @@ impl Github {
         let state = state_filter(arguments.state.as_deref()).ok_or(ISSUE_STATE_INVALID)?;
         let page = page(arguments.page.unwrap_or(1))?;
         let listed = self
-            .service
-            .list_issues(&self.repository, &self.token, state, page, PER_PAGE)
+            .service()
+            .list_issues(self.repository(), self.token(), state, page, PER_PAGE)
             .await
             .map_err(described)?;
         let issues: Vec<Value> = listed.items.iter().map(issue_record).collect();
@@ -1156,8 +853,8 @@ impl Github {
     async fn issue(&self, number: u64) -> Result<Value, String> {
         let reference = self.issue_reference(number)?;
         let issue = self
-            .service
-            .fetch_issue(&reference, &self.token)
+            .service()
+            .fetch_issue(&reference, self.token())
             .await
             .map_err(described)?;
         if issue.pull_request {
@@ -1166,8 +863,8 @@ impl Github {
             ));
         }
         let comments = self
-            .service
-            .list_comments(&reference, &self.token, NonZeroU32::MIN, PER_PAGE)
+            .service()
+            .list_comments(&reference, self.token(), NonZeroU32::MIN, PER_PAGE)
             .await
             .map_err(described)?;
         let mut record = issue_record(&issue);
@@ -1187,53 +884,6 @@ impl Github {
         }))
     }
 
-    async fn ci_rows(
-        &self,
-        sha: &str,
-    ) -> Result<(Vec<WorkflowRun>, Vec<CheckRun>, Vec<CommitStatus>, bool), String> {
-        let commit = revision(sha)?;
-        let filter = WorkflowRunFilter::new().with_head_sha(commit.clone());
-        let (workflows, checks, statuses) = tokio::join!(
-            self.service
-                .collect_workflow_runs(&self.repository, &self.token, &filter),
-            self.service
-                .collect_check_runs(&self.repository, &self.token, &commit),
-            self.service
-                .collect_statuses(&self.repository, &self.token, &commit),
-        );
-        let workflows = workflows.map_err(ci_described)?;
-        if !workflows.complete {
-            return Err(PARTIAL_WORKFLOW_RUNS.to_string());
-        }
-        let checks = checks.map_err(ci_described)?;
-        let statuses = statuses.map_err(ci_described)?;
-        if statuses
-            .items
-            .iter()
-            .any(|status| status.context.is_empty())
-        {
-            return Err(UNIDENTIFIED_CI.to_string());
-        }
-        let mut identities = std::collections::HashSet::new();
-        let workflows: Vec<WorkflowRun> = workflows
-            .items
-            .into_iter()
-            .filter(|run| {
-                identities.insert((run.workflow_id, run.event.clone(), run.head_branch.clone()))
-            })
-            .collect();
-        if workflows.iter().any(|run| run.head_sha != commit)
-            || checks
-                .items
-                .iter()
-                .any(|check| check.head_sha.as_ref() != Some(&commit))
-        {
-            return Err(FOREIGN_CHECKS.to_string());
-        }
-        let complete = checks.complete && statuses.complete;
-        Ok((workflows, checks.items, statuses.items, complete))
-    }
-
     async fn build(&self, sha: &str) -> Result<Value, String> {
         let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
         let state = assessed(&conclusions(&workflows, &checks, &statuses), complete);
@@ -1247,14 +897,6 @@ impl Github {
         })))
     }
 
-    async fn check_evidence(&self, sha: &str) -> Result<CheckEvidence, String> {
-        let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
-        Ok(CheckEvidence {
-            complete,
-            ..tally(conclusions(&workflows, &checks, &statuses).into_iter())
-        })
-    }
-
     async fn readiness(&self, arguments: &Arguments) -> Result<Value, String> {
         let (rows, next) = match arguments.number {
             Some(number) => {
@@ -1266,8 +908,14 @@ impl Github {
                 let state = state_filter(arguments.state.as_deref()).ok_or(PULL_STATE_INVALID)?;
                 let page = page(arguments.page.unwrap_or(1))?;
                 let listed = self
-                    .service
-                    .list_pull_requests(&self.repository, &self.token, state, page, PULL_PAGE_SIZE)
+                    .service()
+                    .list_pull_requests(
+                        self.repository(),
+                        self.token(),
+                        state,
+                        page,
+                        PULL_PAGE_SIZE,
+                    )
                     .await
                     .map_err(described)?;
                 (
@@ -1292,79 +940,6 @@ impl Github {
             &assessed,
             &Utc::now().to_rfc3339(),
         ))
-    }
-
-    /// One pull request's readiness. `detail` is the pull request as read by
-    /// number, when it already was; a listed row is read again by number, and
-    /// a head the two reads disagree on is never verified.
-    async fn assess(
-        &self,
-        row: &ListedPullRequest,
-        detail: Option<PullRequestDetail>,
-    ) -> Result<(readiness::Assessment, RiskSignal), String> {
-        let detail = match detail {
-            Some(detail) => detail,
-            None => self.pull(&row.reference).await?,
-        };
-        let review = self.review(&detail).await?;
-        let head = row
-            .head_sha
-            .as_ref()
-            .and_then(|listed| CommitSha::parse(listed.as_str()))
-            .filter(|listed| review.head.as_ref() == Some(listed));
-        let checks = match &head {
-            Some(head) => self.check_evidence(head.as_str()).await?,
-            None => CheckEvidence::default(),
-        };
-        let risk = pull_request::risk(&PRIORITISER, &self.changed_paths(&row.reference).await);
-        Ok((
-            readiness::assess(
-                PullEvidence {
-                    number: row.reference.number().get(),
-                    title: truncate(&row.title, PULL_TITLE_CHARS),
-                    url: row.url.clone(),
-                    updated_at: row.updated_at.clone().unwrap_or_default(),
-                    draft: row.draft || review.draft,
-                    head,
-                    threads: review.threads,
-                    comments: review.comments,
-                    checks,
-                },
-                &self.signals,
-            ),
-            risk,
-        ))
-    }
-
-    /// The repository-relative paths a pull request touches.
-    ///
-    /// A list that could not be retrieved in full is returned as no paths at
-    /// all. The blast radius that follows then reads as assumed rather than
-    /// measured, which is the honest answer: a partial diff would produce a
-    /// confident tier from evidence that was never complete.
-    async fn changed_paths(&self, reference: &PullRequestReference) -> Vec<String> {
-        let mut paths = Vec::new();
-        let mut page = NonZeroU32::MIN;
-        loop {
-            let Ok(listed) = self
-                .service
-                .list_files(reference, &self.token, page, PER_PAGE)
-                .await
-            else {
-                return Vec::new();
-            };
-            for file in listed.items {
-                if file.filename.trim().is_empty() {
-                    return Vec::new();
-                }
-                paths.push(file.filename);
-            }
-            match listed.next {
-                None => return paths,
-                Some(next) if next.get() <= PULL_FILE_PAGES => page = next,
-                Some(_) => return Vec::new(),
-            }
-        }
     }
 
     /// Every review thread on the pull request, with what each reviewer wrote.
@@ -1399,7 +974,7 @@ impl Github {
             items: threads,
             complete,
             ..
-        } = self.all_review_threads(number).await?;
+        } = self.threads(number).await?;
         let unresolved = threads.iter().filter(|thread| !thread.resolved).count();
         let kept: Vec<(usize, &ReviewThreadRecord)> = threads
             .iter()
@@ -1427,23 +1002,13 @@ impl Github {
         Ok(page)
     }
 
-    async fn all_review_threads(
-        &self,
-        number: u64,
-    ) -> Result<Collected<ReviewThreadRecord>, String> {
-        self.service
-            .collect_review_threads(&self.reference(number)?, &self.token)
-            .await
-            .map_err(thread_described)
-    }
-
     /// One review comment's whole body, for a comment `read_review_threads`
     /// had to cut. Read over REST by id, and refused unless it belongs to the
     /// pull request being read.
     async fn whole_comment(&self, number: u64, id: u64, offset: u64) -> Result<Value, String> {
         let comment = self
-            .service
-            .fetch_review_comment(&self.reference(number)?, &self.token, id)
+            .service()
+            .fetch_review_comment(&self.reference(number)?, self.token(), id)
             .await
             .map_err(comment_described)?;
         let body = comment.body.as_str();
@@ -1477,18 +1042,6 @@ impl Github {
         Ok(page)
     }
 
-    async fn pull(&self, reference: &PullRequestReference) -> Result<PullRequestDetail, String> {
-        let detail = self
-            .service
-            .fetch_pull(reference, &self.token)
-            .await
-            .map_err(described)?;
-        if detail.number != reference.number() {
-            return Err(MISMATCHED_PULL.to_string());
-        }
-        Ok(detail)
-    }
-
     /// The tree entry `path` names at `commit`, walked one tree at a time so
     /// every entry passed on the way is checked: a symbolic link or a
     /// submodule anywhere along it refuses the read.
@@ -1497,8 +1050,8 @@ impl Github {
         let mut components = path.split('/').peekable();
         while let Some(component) = components.next() {
             let listed = self
-                .service
-                .fetch_tree(&self.repository, &self.token, &tree, false)
+                .service()
+                .fetch_tree(self.repository(), self.token(), &tree, false)
                 .await
                 .map_err(|error| match error {
                     PullRequestError::Parse(_) => INVALID_OBJECT.to_string(),
@@ -1524,83 +1077,6 @@ impl Github {
         Err(MISSING_PATH.to_string())
     }
 
-    async fn review(&self, detail: &PullRequestDetail) -> Result<Review, String> {
-        let reference = self.reference(detail.number.get())?;
-        let counts = self
-            .service
-            .fetch_review_thread_counts(&reference, &self.token)
-            .await
-            .map_err(thread_described)?;
-        Ok(Review {
-            draft: detail.draft,
-            head: CommitSha::parse(detail.head_sha.as_str()),
-            threads: thread_evidence(counts),
-            comments: self
-                .review_comments(&IssueReference::from(&reference))
-                .await?,
-        })
-    }
-
-    /// The newest of a pull request's conversation comments, where review
-    /// bots post their summaries, so a conversation longer than a readiness
-    /// verdict weighs reads as incomplete rather than as all of it.
-    ///
-    /// GitHub lists them oldest first, so the second page says whether the
-    /// first held all of them, and past two full pages the conversation's
-    /// own count says which pages hold the newest.
-    async fn review_comments(&self, reference: &IssueReference) -> Result<CommentEvidence, String> {
-        let first = self.comment_page(reference, NonZeroU32::MIN).await?;
-        let Some(second) = first.next else {
-            return Ok(comment_evidence(first.items, true));
-        };
-        let rest = self.comment_page(reference, second).await?;
-        if rest.items.is_empty() {
-            return Ok(comment_evidence(first.items, true));
-        }
-        let comments = match rest.next {
-            None => {
-                let mut comments = first.items;
-                comments.extend(rest.items);
-                comments
-            }
-            Some(_) => self.newest_comments(reference).await?,
-        };
-        Ok(comment_evidence(comments, false))
-    }
-
-    /// The last pages of a conversation, found from how many comments GitHub
-    /// counts on it.
-    async fn newest_comments(
-        &self,
-        reference: &IssueReference,
-    ) -> Result<Vec<IssueComment>, String> {
-        let counted = self
-            .service
-            .fetch_issue(reference, &self.token)
-            .await
-            .map_err(described)?
-            .comments;
-        let pages = u32::try_from(counted.div_ceil(u64::from(PER_PAGE.get())))
-            .map_err(|_| INVALID_RESPONSE.to_string())?
-            .max(NEWEST_COMMENT_PAGES);
-        let mut comments = Vec::new();
-        for page in (pages - NEWEST_COMMENT_PAGES + 1..=pages).filter_map(NonZeroU32::new) {
-            comments.extend(self.comment_page(reference, page).await?.items);
-        }
-        Ok(comments)
-    }
-
-    async fn comment_page(
-        &self,
-        reference: &IssueReference,
-        page: NonZeroU32,
-    ) -> Result<Page<IssueComment>, String> {
-        self.service
-            .list_comments(reference, &self.token, page, PER_PAGE)
-            .await
-            .map_err(described)
-    }
-
     async fn release_pipelines(&self, arguments: &Arguments) -> Result<Value, String> {
         let (listed, next) = match arguments.tag.as_deref() {
             Some(tag) => {
@@ -1608,8 +1084,8 @@ impl Github {
                     return Err(INVALID_TAG.to_string());
                 }
                 let release = self
-                    .service
-                    .fetch_release(&self.repository, &self.token, tag)
+                    .service()
+                    .fetch_release(self.repository(), self.token(), tag)
                     .await
                     .map_err(|error| match error {
                         PullRequestError::Parse(ParseError::Tag(_))
@@ -1620,10 +1096,10 @@ impl Github {
             }
             None => {
                 let listed = self
-                    .service
+                    .service()
                     .list_releases(
-                        &self.repository,
-                        &self.token,
+                        self.repository(),
+                        self.token(),
                         page(arguments.page.unwrap_or(1))?,
                         RELEASE_PAGE_SIZE,
                     )
@@ -1647,7 +1123,7 @@ impl Github {
             let pipeline = if observed.lookup == Lookup::Complete {
                 observed
             } else {
-                releases::merge(
+                release::merge(
                     Some(observed),
                     self.exact_pipeline(&release, &checked_at).await,
                 )
@@ -1667,74 +1143,13 @@ impl Github {
         ))
     }
 
-    fn release_identity(&self, release: &Release) -> Result<ReleaseIdentity, String> {
-        let identity = ReleaseIdentity {
-            repository: self.full_name(),
-            id: release.id,
-            tag: release.tag.clone(),
-            published_at: release.published_at.clone().unwrap_or_default(),
-            url: release.url.clone(),
-        };
-        identity
-            .valid()
-            .then_some(identity)
-            .ok_or_else(|| UNUSABLE_RELEASE.to_string())
-    }
-
-    /// One pass over the repository's release-triggered runs, bounded to the
-    /// window the listed releases were published in.
-    ///
-    /// `None` means the sweep could not be completed, which is not the same as
-    /// finding nothing: every release then falls back to its own lookup rather
-    /// than reading an empty sweep as an absent pipeline.
-    async fn pipeline_sweep(&self, releases: &[ReleaseIdentity]) -> Option<Vec<RunEvidence>> {
-        let earliest = releases
-            .iter()
-            .min_by_key(|release| release.published())
-            .map(|release| release.published_at.as_str())?;
-        self.pipeline_runs(WorkflowRunFilter::new().with_created(format!(">={earliest}")))
-            .await
-            .ok()
-    }
-
-    /// The runs GitHub itself attributes to one release's tag.
-    async fn exact_pipeline(&self, release: &ReleaseIdentity, checked_at: &str) -> ReleasePipeline {
-        let runs = match BranchName::parse(&release.tag) {
-            Ok(branch) => {
-                self.pipeline_runs(WorkflowRunFilter::new().with_branch(branch))
-                    .await
-            }
-            Err(_) => Err(INVALID_TAG.to_string()),
-        };
-        match runs {
-            Ok(records) => ReleasePipeline::observe(release.clone(), &records, checked_at),
-            Err(_) => ReleasePipeline::unavailable(release.clone(), checked_at),
-        }
-    }
-
-    async fn pipeline_runs(&self, filter: WorkflowRunFilter) -> Result<Vec<RunEvidence>, String> {
-        let runs = self
-            .service
-            .collect_workflow_runs(
-                &self.repository,
-                &self.token,
-                &filter.with_event(RELEASE_EVENT),
-            )
-            .await
-            .map_err(described)?;
-        if !runs.complete {
-            return Err(PARTIAL_WORKFLOW_RUNS.to_string());
-        }
-        Ok(runs.items.iter().map(run_evidence).collect())
-    }
-
     async fn deployments(&self, sha: &str, number: u32) -> Result<Value, String> {
         let commit = revision(sha)?;
         let listed = self
-            .service
+            .service()
             .list_deployments(
-                &self.repository,
-                &self.token,
+                self.repository(),
+                self.token(),
                 &commit,
                 page(number)?,
                 PER_PAGE,
@@ -1777,17 +1192,17 @@ impl Github {
     }
 
     async fn file(&self, sha: &str, path: &str, offset: u64, limit: u64) -> Result<Value, String> {
-        validate_path(path, self.configuration.path.as_deref())?;
+        validate_path(path, self.configuration().path.as_deref())?;
         let entry = self.entry(&revision(sha)?, path).await?;
         let size = entry.size.ok_or(SIZE_MISMATCH)?;
         if size > MAX_FILE_BYTES {
             return Err(FILE_TOO_LARGE.to_string());
         }
         let blob = self
-            .service
+            .service()
             .fetch_blob(
-                &self.repository,
-                &self.token,
+                self.repository(),
+                self.token(),
                 &entry.sha,
                 MAX_FILE_BYTES as usize,
             )
@@ -1808,7 +1223,7 @@ impl Github {
         Ok(
             json!({"path": path, "content": page, "bytes": bytes.len(), "blob_sha": entry.sha.as_str(),
             "offset": offset, "next": next, "total": total, "complete": next.is_none(),
-            "url": format!("https://github.com/{}/{}/blob/{}/{}", self.configuration.owner, self.configuration.repo, sha, path.split('/').map(|part| urlencoding::encode(part).into_owned()).collect::<Vec<_>>().join("/"))}),
+            "url": format!("https://github.com/{}/{}/blob/{}/{}", self.configuration().owner, self.configuration().repository, sha, path.split('/').map(|part| urlencoding::encode(part).into_owned()).collect::<Vec<_>>().join("/"))}),
         )
     }
     async fn check_logs(&self, arguments: &Arguments) -> Result<Value, String> {
@@ -1816,8 +1231,8 @@ impl Github {
         let job_id = NonZeroU64::new(job_id).ok_or("job_id must be positive.")?;
         let (reference, sha, pull) = self.log_target(arguments).await?;
         let job = self
-            .service
-            .fetch_workflow_job(&self.repository, &self.token, job_id)
+            .service()
+            .fetch_workflow_job(self.repository(), self.token(), job_id)
             .await
             .map_err(|error| match error {
                 PullRequestError::Parse(ParseError::CommitSha(_)) => JOB_WITHOUT_COMMIT.to_string(),
@@ -1825,12 +1240,12 @@ impl Github {
             })?;
         let run_id = self.verify_job(&job, job_id.get(), &sha)?;
         let downloaded = self
-            .service
+            .service()
             .fetch_job_log(
-                &self.repository,
-                &self.token,
+                self.repository(),
+                self.token(),
                 job_id,
-                self.log_bytes as usize,
+                self.log_bytes() as usize,
             )
             .await
             .map_err(described)?;
@@ -1869,8 +1284,8 @@ impl Github {
         };
         let reference = self.reference(number)?;
         let pull = self
-            .service
-            .fetch_pull(&reference, &self.token)
+            .service()
+            .fetch_pull(&reference, self.token())
             .await
             .map_err(|error| match error {
                 PullRequestError::Parse(ParseError::CommitSha(_)) => MISSING_PULL_HEAD.to_string(),
@@ -1893,23 +1308,6 @@ impl Github {
                 "html_url": pull.url,
             })),
         ))
-    }
-
-    fn verify_job(&self, job: &WorkflowJob, job_id: u64, sha: &str) -> Result<u64, String> {
-        let run_id = job.run_id.get();
-        if job.id.get() != job_id
-            || !job.head_sha.as_str().eq_ignore_ascii_case(sha)
-            || !is_job_url(
-                job.url.as_deref().unwrap_or_default(),
-                &self.configuration.owner,
-                &self.configuration.repo,
-                run_id,
-                job_id,
-            )
-        {
-            return Err(FOREIGN_JOB.to_string());
-        }
-        Ok(run_id)
     }
 }
 
@@ -1983,12 +1381,6 @@ impl JobLog {
             "note": LOG_NOTE,
         })
     }
-}
-
-fn is_job_url(value: &str, owner: &str, repo: &str, run_id: u64, job_id: u64) -> bool {
-    value.eq_ignore_ascii_case(&format!(
-        "https://github.com/{owner}/{repo}/actions/runs/{run_id}/job/{job_id}"
-    ))
 }
 
 /// Strip the RFC 3339 stamp GitHub prefixes to every line of a job log.
@@ -2275,15 +1667,6 @@ fn text_page(content: &str, offset: u64, limit: u64) -> Result<(String, u64, Opt
     Ok((page, total, (end < total).then_some(end)))
 }
 
-fn segment(value: &str) -> bool {
-    !value.is_empty()
-        && value != "."
-        && value != ".."
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-}
-
 fn git_ref(value: &str) -> bool {
     let branch = match value.split_once(':') {
         Some((owner, branch)) if segment(owner) => branch,
@@ -2329,56 +1712,6 @@ fn state_filter(state: Option<&str>) -> Option<StateFilter> {
     }
 }
 
-fn listed(reference: PullRequestReference, detail: &PullRequestDetail) -> ListedPullRequest {
-    let row = ListedPullRequest::new(
-        reference,
-        detail.node_id.clone(),
-        detail.url.clone(),
-        detail.head.clone(),
-        detail.base.clone(),
-    )
-    .with_title(detail.title.clone())
-    .with_state(detail.state)
-    .with_draft(detail.draft)
-    .with_head_sha(detail.head_sha.clone());
-    match &detail.updated_at {
-        Some(updated_at) => row.with_updated_at(updated_at.clone()),
-        None => row,
-    }
-}
-
-fn thread_evidence(counts: ReviewThreadCount) -> ThreadEvidence {
-    let open = std::iter::repeat_n(ReviewThread { resolved: false }, counts.open as usize);
-    let resolved = std::iter::repeat_n(ReviewThread { resolved: true }, counts.resolved as usize);
-    ThreadEvidence {
-        complete: counts.complete,
-        threads: open.chain(resolved).collect(),
-    }
-}
-
-/// The newest of `comments`, as many as a readiness verdict weighs.
-fn comment_evidence(comments: Vec<IssueComment>, complete: bool) -> CommentEvidence {
-    let excess = comments.len().saturating_sub(REVIEW_PAGE_SIZE);
-    CommentEvidence {
-        complete,
-        comments: comments
-            .into_iter()
-            .skip(excess)
-            .map(issue_comment)
-            .collect(),
-    }
-}
-
-fn issue_comment(comment: IssueComment) -> ReviewComment {
-    ReviewComment {
-        id: comment.id,
-        author: comment.author,
-        body: comment.body,
-        url: comment.url,
-        created_at: comment.created_at,
-    }
-}
-
 fn labels(labels: &[Label]) -> Vec<Value> {
     labels
         .iter()
@@ -2392,74 +1725,8 @@ fn labels(labels: &[Label]) -> Vec<Value> {
         .collect()
 }
 
-fn credential(token: Option<SecretValue>) -> SecretValue {
-    token.unwrap_or_else(|| SecretValue::new(""))
-}
-
 fn page(number: u32) -> Result<NonZeroU32, String> {
     NonZeroU32::new(number).ok_or_else(|| PAGE_NOT_POSITIVE.to_string())
-}
-
-fn revision(sha: &str) -> Result<Revision, String> {
-    Revision::parse(sha).map_err(|_| MISSING_COMMIT.to_string())
-}
-
-/// What a crate error says in Zone's words. GitHub's own words in
-/// `GitHubApi` and `Refused` can quote the request, so they are never
-/// repeated.
-fn described(error: PullRequestError) -> String {
-    match error {
-        PullRequestError::QuotaExhausted { .. } => RATE_LIMIT_EXHAUSTED.to_string(),
-        PullRequestError::AuthenticationFailed | PullRequestError::AuthenticationRequired => {
-            status_error(UNAUTHORIZED)
-        }
-        PullRequestError::Forbidden => status_error(FORBIDDEN),
-        PullRequestError::NotFound
-        | PullRequestError::RepositoryNotFound
-        | PullRequestError::PullRequestNotFound => status_error(NOT_FOUND),
-        PullRequestError::RateLimited => status_error(TOO_MANY_REQUESTS),
-        PullRequestError::PullRequestAlreadyExists(_) => status_error(UNPROCESSABLE_ENTITY),
-        PullRequestError::Refused { status, .. } => status_error(status),
-        PullRequestError::Http(_) => REQUEST_FAILED.to_string(),
-        PullRequestError::JobLog(failure) => match failure {
-            JobLogError::Undirected => LOG_UNDIRECTED.to_string(),
-            JobLogError::UnexpectedHost => LOG_UNEXPECTED_HOST.to_string(),
-            JobLogError::Unreachable => LOG_UNREACHABLE.to_string(),
-            JobLogError::Refused(status) => log_status_error(status),
-            JobLogError::Interrupted => LOG_INTERRUPTED.to_string(),
-            _ => UNEXPECTED_RESPONSE.to_string(),
-        },
-        PullRequestError::TooLarge => FILE_TOO_LARGE.to_string(),
-        PullRequestError::InvalidOrigin => INVALID_ORIGIN.to_string(),
-        PullRequestError::InvalidRepositoryName | PullRequestError::InvalidRepositoryUrl => {
-            INVALID_REPOSITORY.to_string()
-        }
-        PullRequestError::Parse(_) => INVALID_RESPONSE.to_string(),
-        _ => UNEXPECTED_RESPONSE.to_string(),
-    }
-}
-
-fn status_error(status: u16) -> String {
-    format!(
-        "GitHub returned HTTP {status}. Check source access, permissions, rate limits and the requested resource."
-    )
-}
-
-fn log_status_error(status: u16) -> String {
-    format!("The job log download returned HTTP {status}.")
-}
-
-fn thread_described(error: PullRequestError) -> String {
-    match error {
-        PullRequestError::PullRequestNotFound => MISSING_PULL.to_string(),
-        PullRequestError::GitHubApi(message) if message == ANSWERED_ANOTHER_PULL => {
-            MISMATCHED_PULL.to_string()
-        }
-        PullRequestError::GitHubApi(_) | PullRequestError::RepositoryNotFound => {
-            REVIEW_QUERY_REJECTED.to_string()
-        }
-        error => described(error),
-    }
 }
 
 fn comment_described(error: PullRequestError) -> String {
@@ -2469,36 +1736,6 @@ fn comment_described(error: PullRequestError) -> String {
             FOREIGN_COMMENT.to_string()
         }
         error => described(error),
-    }
-}
-
-fn ci_described(error: PullRequestError) -> String {
-    match error {
-        PullRequestError::Parse(_) => FOREIGN_CHECKS.to_string(),
-        error => described(error),
-    }
-}
-
-fn conclusions<'a>(
-    workflows: &'a [WorkflowRun],
-    checks: &'a [CheckRun],
-    statuses: &'a [CommitStatus],
-) -> Vec<&'a str> {
-    workflows
-        .iter()
-        .map(run_token)
-        .chain(checks.iter().map(check_token))
-        .chain(statuses.iter().map(|status| status.state.as_str()))
-        .collect()
-}
-
-/// A read that did not reach every check can still prove a failure, never a
-/// pass or a settled non-pass.
-fn assessed(conclusions: &[&str], complete: bool) -> &'static str {
-    match assessment(conclusions) {
-        FAILURE_ASSESSMENT => FAILURE_ASSESSMENT,
-        _ if !complete => PENDING_ASSESSMENT,
-        state => state,
     }
 }
 
@@ -2537,84 +1774,12 @@ fn status_record(status: &CommitStatus) -> Value {
     })
 }
 
-fn run_evidence(run: &WorkflowRun) -> RunEvidence {
-    RunEvidence {
-        id: run.id.get(),
-        workflow_id: run.workflow_id.get(),
-        attempt: run.attempt.unwrap_or_default(),
-        name: run.name.clone().unwrap_or_default(),
-        path: run.path.clone(),
-        event: run.event.clone(),
-        status: run.status.clone().unwrap_or_default(),
-        conclusion: run.conclusion.clone(),
-        head_branch: run.head_branch.clone().unwrap_or_default(),
-        head_sha: run.head_sha.to_string(),
-        created_at: run.created_at.clone(),
-        started_at: run.started_at.clone(),
-        updated_at: run.updated_at.clone(),
-        url: run.url.clone(),
-        repository: run.repository.clone(),
-    }
-}
-
 fn text(value: &Value, key: &str) -> String {
     value
         .get(key)
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
-}
-
-/// What a commit's checks add up to, in one word a wait can act on.
-///
-/// `unknown` is silence — nothing registered, or a token this does not know —
-/// and a wait tolerates it for a grace period before giving up on it. A
-/// completed run that concluded neutral or skipped is not silence: it reported,
-/// and it is over. Folding those into `unknown` had a wait sit out the whole
-/// grace period and then say no checks were configured or reporting, about
-/// checks that had reported. They settle under their own name instead, which
-/// reads as the non-pass they are.
-fn assessment(conclusions: &[&str]) -> &'static str {
-    if conclusions.is_empty() {
-        return UNKNOWN_ASSESSMENT;
-    }
-    if conclusions.iter().any(|value| {
-        matches!(
-            *value,
-            "failure"
-                | "error"
-                | "cancelled"
-                | "timed_out"
-                | "action_required"
-                | "startup_failure"
-                | "stale"
-        )
-    }) {
-        return FAILURE_ASSESSMENT;
-    }
-    if conclusions.iter().any(|value| {
-        matches!(
-            *value,
-            "pending" | "queued" | "in_progress" | "waiting" | "requested"
-        )
-    }) {
-        return PENDING_ASSESSMENT;
-    }
-    if !conclusions
-        .iter()
-        .all(|value| *value == SUCCESS_ASSESSMENT || TERMINAL_ASSESSMENTS.contains(value))
-    {
-        return UNKNOWN_ASSESSMENT;
-    }
-    conclusions
-        .iter()
-        .find_map(|value| {
-            TERMINAL_ASSESSMENTS
-                .iter()
-                .copied()
-                .find(|terminal| terminal == value)
-        })
-        .unwrap_or(SUCCESS_ASSESSMENT)
 }
 
 fn issue_record(issue: &Issue) -> Value {
@@ -2694,22 +1859,6 @@ fn bound_releases(mut result: Value, pipelines: &[Value], observed_at: &str) -> 
     }
 }
 
-fn ci_token<'a>(status: Option<&'a str>, conclusion: Option<&'a str>) -> &'a str {
-    match status {
-        Some(COMPLETED_STATUS) => conclusion.unwrap_or(UNKNOWN_ASSESSMENT),
-        Some(status) => status,
-        None => UNKNOWN_ASSESSMENT,
-    }
-}
-
-fn run_token(run: &WorkflowRun) -> &str {
-    ci_token(run.status.as_deref(), run.conclusion.as_deref())
-}
-
-fn check_token(check: &CheckRun) -> &str {
-    ci_token(Some(&check.status), check.conclusion.as_deref())
-}
-
 fn ci_priority(row: &Value) -> u8 {
     let token = row["state"]
         .as_str()
@@ -2728,51 +1877,6 @@ fn pull_priority(row: &Value) -> u8 {
 
 fn release_priority(row: &Value) -> u8 {
     u8::from(row["succeeded"] == true)
-}
-
-struct Review {
-    draft: bool,
-    head: Option<CommitSha>,
-    threads: ThreadEvidence,
-    comments: CommentEvidence,
-}
-
-/// Count observed checks into buckets that add up by construction, so a state
-/// that disagrees with them can only come from the provider.
-fn tally<'a>(tokens: impl Iterator<Item = &'a str>) -> CheckEvidence {
-    let mut evidence = CheckEvidence {
-        complete: true,
-        ..CheckEvidence::default()
-    };
-    for token in tokens {
-        evidence.total += 1;
-        match assessment(&[token]) {
-            "failure" => evidence.failed += 1,
-            "success" => evidence.passed += 1,
-            "pending" => {
-                evidence.running += 1;
-                if matches!(token, "queued" | "requested" | "waiting") {
-                    evidence.queued += 1;
-                } else {
-                    evidence.in_progress += 1;
-                }
-            }
-            _ => evidence.unknown += 1,
-        }
-    }
-    evidence.state = if evidence.total == 0 {
-        "none"
-    } else if evidence.failed > 0 {
-        "failure"
-    } else if evidence.running > 0 {
-        "pending"
-    } else if evidence.unknown > 0 {
-        "unknown"
-    } else {
-        "success"
-    }
-    .to_string();
-    evidence
 }
 
 /// The blast radius sits beside the blockers, never among them: how far a
@@ -2895,17 +1999,46 @@ fn readiness_citation(record: &Value, observed_at: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::testing::Connected;
-    use crate::agent::testing::MINTED_TOKEN;
-    use crate::agent::testing::OWNER;
-    use crate::agent::testing::REPOSITORY;
-    use crate::agent::testing::STORED_TOKEN;
-    use crate::agent::testing::number;
+    use crate::db::sources;
+    use crate::services::github::authentication::SOURCE_DISCONNECTED;
+    use crate::services::github::authentication::SOURCE_UNREACHABLE;
+    use crate::services::github::client::PARTIAL_WORKFLOW_RUNS;
+    use crate::services::github::client::REQUEST_FAILED;
+    use crate::services::github::client::UNEXPECTED_RESPONSE;
+    use crate::services::github::readiness::ReviewSignals;
+    use crate::services::github::testing::BLOB;
+    use crate::services::github::testing::COMMIT;
+    use crate::services::github::testing::MINTED_TOKEN;
+    use crate::services::github::testing::OWNER;
+    use crate::services::github::testing::REPOSITORY;
+    use crate::services::github::testing::STORED_TOKEN;
+    use crate::services::github::testing::assert_sent_without_authorization;
+    use crate::services::github::testing::check_runs;
+    use crate::services::github::testing::commit_and_empty_ci;
+    use crate::services::github::testing::connected::Connected;
+    use crate::services::github::testing::conversation_comment;
+    use crate::services::github::testing::github_named;
+    use crate::services::github::testing::github_with_token;
+    use crate::services::github::testing::mock;
+    use crate::services::github::testing::mock_answering;
+    use crate::services::github::testing::mock_graphql;
+    use crate::services::github::testing::mock_green_ci;
+    use crate::services::github::testing::mock_pull;
+    use crate::services::github::testing::mock_review;
+    use crate::services::github::testing::mock_statuses;
+    use crate::services::github::testing::mocked;
+    use crate::services::github::testing::number;
+    use crate::services::github::testing::pull_detail;
+    use crate::services::github::testing::served;
+    use crate::services::github::testing::summary;
+    use crate::services::github::testing::thread_counts;
+    use crate::services::github::unavailable::Unavailable;
+    use crate::services::github::unconnected::Unconnected;
     use crate::services::github_app::testing::issuing;
+    use crate::state::AppState;
     use abnegate_agent::tool::REASON_DESCRIPTION;
-    use abnegate_vcs::RateLimit;
-    use chrono::DateTime;
-    use std::time::Instant;
+    use abnegate_vcs::IssueReference;
+    use abnegate_vcs::Repository;
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
@@ -2916,8 +2049,6 @@ mod tests {
     use wiremock::matchers::query_param;
 
     const PAGE_SIZE: usize = PER_PAGE.get() as usize;
-    const RETRY_AFTER_HEADER: &str = "Retry-After";
-    const RATE_LIMIT_REMAINING_HEADER: &str = "X-RateLimit-Remaining";
 
     #[test]
     fn heads_may_be_slashed_branch_names() {
@@ -2928,8 +2059,6 @@ mod tests {
         assert!(!git_ref(""));
     }
 
-    const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const BLOB: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const WHY: &str = "The user asked for this to be opened.";
 
     fn tool(operation: Operation) -> Integration {
@@ -2943,80 +2072,6 @@ mod tests {
                 origin: crate::db::tasks::Origin::Member,
             },
             operation,
-        }
-    }
-
-    fn github(server: &MockServer) -> Github {
-        github_named(server, "owner", "repository")
-    }
-
-    fn configured(owner: &str, repo: &str) -> Configuration {
-        Configuration {
-            owner: owner.into(),
-            repo: repo.into(),
-            branch: Some("main".into()),
-            path: None,
-            token: Some("test-secret".into()),
-            review_signals: None,
-        }
-    }
-
-    fn github_named(server: &MockServer, owner: &str, repo: &str) -> Github {
-        github_serving(server, configured(owner, repo))
-    }
-
-    fn github_serving(server: &MockServer, configuration: Configuration) -> Github {
-        Github::serving(
-            configuration,
-            PullRequestService::standing_in_for("github.com", &server.uri()).unwrap(),
-        )
-        .unwrap()
-    }
-
-    fn github_with_token(server: &MockServer, token: Option<&str>) -> Github {
-        github_serving(
-            server,
-            Configuration {
-                token: token.map(SecretValue::from),
-                ..configured("owner", "repository")
-            },
-        )
-    }
-
-    const BEARER: &str = "Bearer test-secret";
-
-    async fn mock(server: &MockServer, endpoint: &str, response: Value) {
-        mock_answering(server, endpoint, response, Some(BEARER)).await;
-    }
-
-    async fn mock_answering(
-        server: &MockServer,
-        endpoint: &str,
-        response: Value,
-        authorization: Option<&str>,
-    ) {
-        let request =
-            Mock::given(method("GET")).and(path(format!("/repos/owner/repository/{endpoint}")));
-        let request = match authorization {
-            Some(value) => request.and(header("Authorization", value)),
-            None => request,
-        };
-        request
-            .respond_with(ResponseTemplate::new(200).set_body_json(response))
-            .mount(server)
-            .await;
-    }
-
-    async fn assert_sent_without_authorization(server: &MockServer) {
-        let requests = server.received_requests().await.unwrap();
-        assert!(!requests.is_empty(), "the source must have been read");
-        for request in requests {
-            assert!(
-                !request.headers.contains_key("authorization"),
-                "{} {} carried an Authorization header",
-                request.method,
-                request.url.path()
-            );
         }
     }
 
@@ -3171,7 +2226,7 @@ mod tests {
             tag: None,
             reason: None,
         };
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::Issue, &arguments(5))
             .await
             .unwrap();
@@ -3193,7 +2248,7 @@ mod tests {
         assert_eq!(result["comments_complete"], true);
         assert_eq!(result["repository"], "https://github.com/owner/repository");
 
-        let refused = github(&server)
+        let refused = mocked(&server)
             .observe(Operation::Issue, &arguments(8))
             .await
             .unwrap_err();
@@ -3203,55 +2258,6 @@ mod tests {
 
     fn purpose_of(description: &str) -> String {
         crate::agent::toolbox::purpose(description)
-    }
-
-    #[test]
-    fn absent_unknown_and_pending_results_are_not_green() {
-        for conclusions in [vec![], vec!["unknown"], vec!["success", "unexpected"]] {
-            assert_eq!(assessment(&conclusions), UNKNOWN_ASSESSMENT);
-        }
-        assert_eq!(assessment(&["success"]), SUCCESS_ASSESSMENT);
-        assert_eq!(assessment(&["success", "pending"]), PENDING_ASSESSMENT);
-        assert_eq!(assessment(&["pending", "failure"]), FAILURE_ASSESSMENT);
-        assert_eq!(assessment(&["cancelled"]), FAILURE_ASSESSMENT);
-    }
-
-    /// A completed run that concluded neutral or skipped has reported, and
-    /// reporting is the one thing `unknown` says did not happen. Reading it as
-    /// unknown had a wait sit out the whole grace period and then answer that
-    /// no checks are configured or reporting on the commit — about a commit
-    /// whose checks had reported and finished. Each settles under its own name,
-    /// and none of those names is a pass.
-    #[test]
-    fn a_completed_run_that_neither_passed_nor_failed_settles_under_its_own_name() {
-        for conclusion in TERMINAL_ASSESSMENTS {
-            assert_eq!(assessment(&[conclusion]), conclusion);
-            assert_eq!(
-                assessment(&["success", conclusion]),
-                conclusion,
-                "the conclusion that is not a pass is the one the commit is reported as"
-            );
-            assert_ne!(assessment(&[conclusion]), SUCCESS_ASSESSMENT);
-            assert_ne!(
-                assessment(&[conclusion]),
-                UNKNOWN_ASSESSMENT,
-                "{conclusion} reported, which is the opposite of what unknown stands for"
-            );
-            assert!(
-                SETTLED_ASSESSMENTS.contains(&assessment(&[conclusion])),
-                "{conclusion} is over, so a wait on it has nothing left to wait for"
-            );
-        }
-        assert_eq!(
-            assessment(&["queued", "skipped"]),
-            PENDING_ASSESSMENT,
-            "a run still queued beside a skipped one has not finished"
-        );
-        assert_eq!(
-            assessment(&["failure", "neutral"]),
-            FAILURE_ASSESSMENT,
-            "a failure outranks every other conclusion on the commit"
-        );
     }
 
     #[test]
@@ -3287,7 +2293,7 @@ mod tests {
             .await;
         mock(&server, &format!("commits/{COMMIT}/check-runs"), json!({"check_runs": [{"head_sha": COMMIT,"status":"completed","conclusion":"success"}]})).await;
         mock_statuses(&server, json!([])).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(
                 Operation::Build,
                 &Arguments {
@@ -3358,7 +2364,7 @@ mod tests {
         .mount(&server)
         .await;
         mock_statuses(&server, json!([])).await;
-        let result = github(&server).build(COMMIT).await.unwrap();
+        let result = mocked(&server).build(COMMIT).await.unwrap();
         let checks = result["checks"].as_array().unwrap();
         assert_eq!(result["complete"], true);
         assert_eq!(result["state"], "failure");
@@ -3381,7 +2387,7 @@ mod tests {
         )
         .await;
         assert!(
-            github(&server)
+            mocked(&server)
                 .build(COMMIT)
                 .await
                 .unwrap_err()
@@ -3402,7 +2408,7 @@ mod tests {
         .await;
         mock_statuses(&server, json!([])).await;
         assert!(
-            github(&server)
+            mocked(&server)
                 .build(COMMIT)
                 .await
                 .unwrap_err()
@@ -3426,7 +2432,7 @@ mod tests {
         )
         .await;
         mock_statuses(&server, json!([])).await;
-        let empty = github(&server).build(COMMIT).await.unwrap();
+        let empty = mocked(&server).build(COMMIT).await.unwrap();
         assert_eq!(empty["state"], "unknown");
         let citation = crate::agent::citations::from_tool_at(
             "get_build_status",
@@ -3468,7 +2474,7 @@ mod tests {
         )
         .await;
         mock_statuses(&recovered, json!([{"context":"test","state":"success"}])).await;
-        let build = github(&recovered).build(COMMIT).await.unwrap();
+        let build = mocked(&recovered).build(COMMIT).await.unwrap();
         assert_eq!(
             build["state"], "success",
             "the combined status keeps only each context's latest state"
@@ -3483,316 +2489,6 @@ mod tests {
                 .all(|request| !request.url.path().ends_with("/statuses")),
             "every status a context ever reported is never read"
         );
-    }
-
-    #[tokio::test]
-    async fn provider_errors_never_echo_secret_or_follow_redirects() {
-        let server = MockServer::start().await;
-        let external = MockServer::start().await;
-        let unbranched = |server: &MockServer| {
-            let mut github = github(server);
-            github.configuration.branch = None;
-            github
-        };
-        Mock::given(method("GET"))
-            .respond_with(
-                ResponseTemplate::new(302)
-                    .insert_header("Location", external.uri())
-                    .set_body_string("test-secret"),
-            )
-            .mount(&server)
-            .await;
-        let error = unbranched(&server).resolve(None).await.unwrap_err();
-        assert_eq!(error, status_error(302));
-        assert!(error.contains("302"));
-        assert!(!error.contains("test-secret"));
-        assert!(external.received_requests().await.unwrap().is_empty());
-        server.reset().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(403).set_body_string("test-secret"))
-            .mount(&server)
-            .await;
-        let error = unbranched(&server).resolve(None).await.unwrap_err();
-        assert_eq!(error, status_error(FORBIDDEN));
-        assert!(!error.contains("test-secret"));
-    }
-
-    #[tokio::test]
-    async fn an_unclassified_status_names_itself_and_never_github_s_words() {
-        for status in [400, 409, 410, UNPROCESSABLE_ENTITY, 500, 503] {
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .and(path("/repos/owner/repository/commits/main"))
-                .respond_with(
-                    ResponseTemplate::new(status).set_body_json(json!({"message": "test-secret"})),
-                )
-                .expect(1)
-                .mount(&server)
-                .await;
-            let error = github(&server).resolve(None).await.unwrap_err();
-            assert_eq!(error, status_error(status), "HTTP {status}");
-            assert!(!error.contains("test-secret"), "HTTP {status}: {error}");
-        }
-    }
-
-    #[tokio::test]
-    async fn every_request_names_the_api_version() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/repos/owner/repository"))
-            .and(header("X-GitHub-Api-Version", API_VERSION))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({"default_branch": "main"})),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/repos/owner/repository/commits/main"))
-            .and(header("X-GitHub-Api-Version", API_VERSION))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"sha": COMMIT})))
-            .mount(&server)
-            .await;
-        let mut github = github(&server);
-        github.configuration.branch = None;
-        let resolved = github.resolve(None).await.unwrap();
-        assert_eq!(resolved, ("main".to_string(), COMMIT.to_string()));
-        let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(
-            requests.iter().all(|request| request
-                .headers
-                .get("x-github-api-version")
-                .is_some_and(|version| version == API_VERSION)),
-            "every request names the API version"
-        );
-    }
-
-    #[test]
-    fn crate_errors_keep_zones_words() {
-        let cases = [
-            (
-                PullRequestError::quota_exhausted(
-                    RateLimit::default()
-                        .with_limit(5000)
-                        .with_remaining(0)
-                        .with_resource("core"),
-                ),
-                RATE_LIMIT_EXHAUSTED.to_string(),
-            ),
-            (
-                PullRequestError::quota_exhausted(RateLimit::default()),
-                RATE_LIMIT_EXHAUSTED.to_string(),
-            ),
-            (
-                PullRequestError::AuthenticationFailed,
-                status_error(UNAUTHORIZED),
-            ),
-            (
-                PullRequestError::AuthenticationRequired,
-                status_error(UNAUTHORIZED),
-            ),
-            (PullRequestError::Forbidden, status_error(FORBIDDEN)),
-            (PullRequestError::NotFound, status_error(NOT_FOUND)),
-            (
-                PullRequestError::RepositoryNotFound,
-                status_error(NOT_FOUND),
-            ),
-            (
-                PullRequestError::PullRequestNotFound,
-                status_error(NOT_FOUND),
-            ),
-            (
-                PullRequestError::RateLimited,
-                status_error(TOO_MANY_REQUESTS),
-            ),
-            (
-                PullRequestError::PullRequestAlreadyExists(BranchName::parse("feature").unwrap()),
-                status_error(UNPROCESSABLE_ENTITY),
-            ),
-            (
-                PullRequestError::JobLog(JobLogError::Undirected),
-                LOG_UNDIRECTED.to_string(),
-            ),
-            (
-                PullRequestError::JobLog(JobLogError::UnexpectedHost),
-                LOG_UNEXPECTED_HOST.to_string(),
-            ),
-            (
-                PullRequestError::JobLog(JobLogError::Unreachable),
-                LOG_UNREACHABLE.to_string(),
-            ),
-            (
-                PullRequestError::JobLog(JobLogError::Refused(503)),
-                "The job log download returned HTTP 503.".to_string(),
-            ),
-            (
-                PullRequestError::JobLog(JobLogError::Interrupted),
-                LOG_INTERRUPTED.to_string(),
-            ),
-            (PullRequestError::TooLarge, FILE_TOO_LARGE.to_string()),
-            (PullRequestError::InvalidOrigin, INVALID_ORIGIN.to_string()),
-            (
-                PullRequestError::InvalidRepositoryName,
-                INVALID_REPOSITORY.to_string(),
-            ),
-            (
-                PullRequestError::InvalidRepositoryUrl,
-                INVALID_REPOSITORY.to_string(),
-            ),
-            (
-                PullRequestError::Parse(ParseError::BranchName("test-secret".into())),
-                INVALID_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::Parse(ParseError::CommitSha("test-secret".into())),
-                INVALID_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::Parse(ParseError::ObjectId("test-secret".into())),
-                INVALID_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::Parse(ParseError::RepositoryPath("test-secret".into())),
-                INVALID_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::Parse(ParseError::RepositoryUrl),
-                INVALID_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::Parse(ParseError::Tag("test-secret".into())),
-                INVALID_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::GitHubApi(
-                    "GitHub API returned 500 Internal Server Error: test-secret".into(),
-                ),
-                UNEXPECTED_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::GitHubApi("GitHub API returned 302 Found".into()),
-                UNEXPECTED_RESPONSE.to_string(),
-            ),
-            (PullRequestError::refused(302, ""), status_error(302)),
-            (
-                PullRequestError::refused(400, "Problems parsing JSON"),
-                status_error(400),
-            ),
-            (
-                PullRequestError::refused(409, "Git Repository is empty."),
-                status_error(409),
-            ),
-            (
-                PullRequestError::refused(
-                    UNPROCESSABLE_ENTITY,
-                    "Validation Failed; No commits between main and test-secret",
-                ),
-                status_error(UNPROCESSABLE_ENTITY),
-            ),
-            (
-                PullRequestError::refused(500, "test-secret"),
-                status_error(500),
-            ),
-            (PullRequestError::refused(503, ""), status_error(503)),
-            (
-                PullRequestError::RepositoryExists("test-secret".into()),
-                UNEXPECTED_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::NotMergeable("test-secret".into()),
-                UNEXPECTED_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::Protected("test-secret".into()),
-                UNEXPECTED_RESPONSE.to_string(),
-            ),
-            (PullRequestError::HeadMoved, UNEXPECTED_RESPONSE.to_string()),
-            (
-                PullRequestError::AutoMergeNotAllowed,
-                UNEXPECTED_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::MergeMethodNotAllowed("test-secret".into()),
-                UNEXPECTED_RESPONSE.to_string(),
-            ),
-            (
-                PullRequestError::AlreadyMergeable,
-                UNEXPECTED_RESPONSE.to_string(),
-            ),
-        ];
-        for (error, expected) in cases {
-            let shown = format!("{error:?}");
-            let said = described(error);
-            assert_eq!(said, expected, "{shown}");
-            assert!(!said.contains("test-secret"), "{shown} echoed its payload");
-        }
-    }
-
-    #[tokio::test]
-    async fn an_unreachable_github_reads_as_failed_or_timed_out() {
-        let address = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        let github = Github::serving(
-            configured("owner", "repository"),
-            PullRequestService::standing_in_for("github.com", &format!("http://{address}"))
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(github.resolve(None).await.unwrap_err(), REQUEST_FAILED);
-    }
-
-    #[tokio::test]
-    async fn default_branch_and_commit_answers_keep_their_site_words() {
-        let server = MockServer::start().await;
-        let mut github = github(&server);
-        github.configuration.branch = None;
-        for (repository, commit, expected) in [
-            (
-                json!({"default_branch": "bad..name"}),
-                json!({"sha": COMMIT}),
-                MISSING_DEFAULT_BRANCH,
-            ),
-            (json!({}), json!({"sha": COMMIT}), UNEXPECTED_RESPONSE),
-            (
-                json!({"default_branch": "main"}),
-                json!({"sha": "abc123"}),
-                MISSING_COMMIT,
-            ),
-            (
-                json!({"default_branch": "main"}),
-                json!({}),
-                UNEXPECTED_RESPONSE,
-            ),
-        ] {
-            server.reset().await;
-            Mock::given(method("GET"))
-                .and(path("/repos/owner/repository"))
-                .respond_with(ResponseTemplate::new(200).set_body_json(repository.clone()))
-                .mount(&server)
-                .await;
-            mock(&server, "commits/main", commit.clone()).await;
-            assert_eq!(
-                github.resolve(None).await.unwrap_err(),
-                expected,
-                "{repository} then {commit}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn a_revision_expression_is_refused_before_anything_is_sent() {
-        let server = MockServer::start().await;
-        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
-        for expression in ["main~1", "main^", "HEAD@{1}"] {
-            assert_eq!(
-                github(&server).resolve(Some(expression)).await.unwrap_err(),
-                INVALID_REFERENCE,
-                "{expression}"
-            );
-        }
-        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[test]
@@ -3819,7 +2515,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(content))
             .mount(&server)
             .await;
-        let result = github(&server)
+        let result = mocked(&server)
             .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
             .await
             .unwrap();
@@ -3830,7 +2526,7 @@ mod tests {
         server.reset().await;
         mock(&server, &format!("git/trees/{COMMIT}"), json!({"sha":COMMIT,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"120000","sha":BLOB,"size":9}]})).await;
         assert!(
-            github(&server)
+            mocked(&server)
                 .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
                 .await
                 .unwrap_err()
@@ -3849,7 +2545,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(content.clone()))
             .mount(&server)
             .await;
-        let result = github(&server)
+        let result = mocked(&server)
             .file(COMMIT, "README.md", 0, u64::MAX)
             .await
             .unwrap();
@@ -3860,7 +2556,7 @@ mod tests {
         assert_eq!(result["offset"], 0);
         assert_eq!(result["total"], content.chars().count() as u64);
         assert!(page.chars().count() < content.chars().count());
-        let continued = github(&server)
+        let continued = mocked(&server)
             .file(COMMIT, "README.md", FILE_PAGE_CHARS, FILE_PAGE_CHARS)
             .await
             .unwrap();
@@ -3879,7 +2575,7 @@ mod tests {
     async fn a_file_larger_than_the_cap_is_refused_before_its_blob_is_read() {
         let server = MockServer::start().await;
         mock(&server, &format!("git/trees/{COMMIT}"), json!({"sha":COMMIT,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB,"size":MAX_FILE_BYTES + 1}]})).await;
-        let refused = github(&server)
+        let refused = mocked(&server)
             .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
             .await
             .unwrap_err();
@@ -3895,7 +2591,7 @@ mod tests {
     async fn a_tree_entry_without_a_size_is_refused_before_its_blob_is_read() {
         let server = MockServer::start().await;
         mock(&server, &format!("git/trees/{COMMIT}"), json!({"sha":COMMIT,"truncated":false,"tree":[{"path":"README.md","type":"blob","mode":"100644","sha":BLOB}]})).await;
-        let refused = github(&server)
+        let refused = mocked(&server)
             .file(COMMIT, "README.md", 0, FILE_PAGE_CHARS)
             .await
             .unwrap_err();
@@ -3924,7 +2620,7 @@ mod tests {
             ))
             .mount(&server)
             .await;
-        let result = github(&server).deployments(COMMIT, 1).await.unwrap();
+        let result = mocked(&server).deployments(COMMIT, 1).await.unwrap();
         assert_eq!(result["deployments"][0]["status"]["state"], "pending");
         assert_eq!(result["deployments"][0]["ref"], "main");
         assert_eq!(
@@ -3955,7 +2651,7 @@ mod tests {
         issues.push(issue(99, "Tiny", "ok"));
         issues.push(issue(100, "Bug", &body));
         mock(&server, "issues", json!(issues)).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(
                 Operation::Issues,
                 &Arguments {
@@ -4097,7 +2793,7 @@ mod tests {
             .await;
         let result = tool(Operation::CreatePull)
             .open_pull(
-                &github(&server),
+                &mocked(&server),
                 &Arguments {
                     source_id: Uuid::new_v4(),
                     reference: None,
@@ -4185,7 +2881,7 @@ mod tests {
         refuse_duplicate(&server).await;
         mock_found(&server, "owner", json!([found_pull(12, "owner", "closed")])).await;
         let refused = tool(Operation::CreatePull)
-            .open_pull(&github(&server), &pull_args("feature", Some("main"), None))
+            .open_pull(&mocked(&server), &pull_args("feature", Some("main"), None))
             .await
             .expect_err("a closed pull request is not the one GitHub says is open");
         assert_eq!(refused, status_error(UNPROCESSABLE_ENTITY));
@@ -4202,7 +2898,7 @@ mod tests {
         )
         .await;
         let answer = tool(Operation::CreatePull)
-            .open_pull(&github(&server), &pull_args("feature", Some("main"), None))
+            .open_pull(&mocked(&server), &pull_args("feature", Some("main"), None))
             .await
             .expect("the open pull request answers a duplicate create");
         assert_eq!(answer["already_open"], true, "{answer}");
@@ -4225,7 +2921,7 @@ mod tests {
             .mount(&server)
             .await;
         let refused = tool(Operation::CreatePull)
-            .open_pull(&github(&server), &pull_args("feature", Some("main"), None))
+            .open_pull(&mocked(&server), &pull_args("feature", Some("main"), None))
             .await
             .expect_err("a refusal that is not a duplicate is an error");
         assert_eq!(refused, status_error(UNPROCESSABLE_ENTITY));
@@ -4255,7 +2951,7 @@ mod tests {
             .await;
         let created = tool(Operation::CreatePull)
             .open_pull(
-                &github(&server),
+                &mocked(&server),
                 &pull_args("contributor:feature", Some("main"), None),
             )
             .await
@@ -4272,7 +2968,7 @@ mod tests {
         .await;
         let answer = tool(Operation::CreatePull)
             .open_pull(
-                &github(&server),
+                &mocked(&server),
                 &pull_args("contributor:feature", Some("main"), None),
             )
             .await
@@ -4296,7 +2992,7 @@ mod tests {
             })))
             .mount(&server)
             .await;
-        let result = github(&server)
+        let result = mocked(&server)
             .write(
                 Operation::Comment,
                 &Arguments {
@@ -4349,7 +3045,7 @@ mod tests {
             .mount(&server)
             .await;
         let refused = tool(Operation::CreatePull)
-            .open_pull(&github(&server), &pull_args("main", None, Some("/nowhere")))
+            .open_pull(&mocked(&server), &pull_args("main", None, Some("/nowhere")))
             .await
             .expect_err("a pull request from main into main is refused");
         assert!(refused.contains("head and base are both main"), "{refused}");
@@ -4363,7 +3059,7 @@ mod tests {
             ..pull_args("feature", None, Some("/nowhere"))
         };
         let refused = tool(Operation::CreatePull)
-            .open_pull(&github(&server), &arguments)
+            .open_pull(&mocked(&server), &arguments)
             .await
             .expect_err("a pull request with no title is refused");
         assert!(refused.contains("title is required"), "{refused}");
@@ -4380,7 +3076,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let refused = tool(Operation::CreatePull)
             .open_pull(
-                &github(&server),
+                &mocked(&server),
                 &pull_args("feature", None, outside.path().to_str()),
             )
             .await
@@ -4440,7 +3136,7 @@ mod tests {
     #[tokio::test]
     async fn create_pull_rejects_empty_title_and_invalid_head() {
         let server = MockServer::start().await;
-        let github = github(&server);
+        let github = mocked(&server);
         assert!(
             tool(Operation::CreatePull)
                 .open_pull(&github, &write_args(None, Some("feature"), None, None))
@@ -4471,7 +3167,7 @@ mod tests {
     #[tokio::test]
     async fn comment_rejects_zero_and_empty_body() {
         let server = MockServer::start().await;
-        let github = github(&server);
+        let github = mocked(&server);
         assert!(
             github
                 .write(
@@ -4500,52 +3196,6 @@ mod tests {
                 .contains("read-only")
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 0);
-    }
-
-    async fn mock_graphql(server: &MockServer, response: Value) {
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .and(header("Authorization", "Bearer test-secret"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(response))
-            .mount(server)
-            .await;
-    }
-
-    fn summary(score: u8, sha: &str) -> String {
-        format!("**Confidence Score:** {score}/5\n_Last reviewed commit: {sha}_")
-    }
-
-    fn thread_counts(resolved: bool, more_threads: bool) -> Value {
-        json!({"data": {"repository": {"pullRequest": {
-            "number": 7,
-            "reviewThreads": {
-                "pageInfo": {"hasNextPage": more_threads, "endCursor": null},
-                "nodes": [{"id": "PRRT_1", "isResolved": resolved}]
-            }
-        }}}})
-    }
-
-    fn conversation_comment(id: u64, author: &str, body: &str) -> Value {
-        json!({
-            "id": id,
-            "body": body,
-            "html_url": format!("https://github.com/owner/repository/pull/7#issuecomment-{id}"),
-            "created_at": "2026-09-05T00:00:00Z",
-            "user": {"login": author}
-        })
-    }
-
-    /// Pull request 7's review: one thread, resolved or not, more of them
-    /// GitHub would not page to when `more_threads`, and the conversation
-    /// comment a review bot summarised the change in.
-    async fn mock_review(server: &MockServer, resolved: bool, body: &str, more_threads: bool) {
-        mock_graphql(server, thread_counts(resolved, more_threads)).await;
-        mock(
-            server,
-            "issues/7/comments",
-            json!([conversation_comment(11, "greptile-apps", body)]),
-        )
-        .await;
     }
 
     fn readiness_args(number: Option<u64>) -> Arguments {
@@ -4646,7 +3296,7 @@ mod tests {
         let server = MockServer::start().await;
         mock_graphql(&server, thread_payload(false, false)).await;
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("the threads are readable");
@@ -4676,7 +3326,7 @@ mod tests {
         let mut arguments = readiness_args(Some(7));
         arguments.resolved = Some(true);
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&arguments)
             .await
             .expect("the threads are readable");
@@ -4703,7 +3353,7 @@ mod tests {
         thread["originalLine"] = json!(40);
         mock_graphql(&server, payload).await;
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("the threads are readable");
@@ -4731,7 +3381,7 @@ mod tests {
         let mut arguments = readiness_args(Some(7));
         arguments.reference = Some("an-old-commit".into());
 
-        let refused = github(&server)
+        let refused = mocked(&server)
             .review_threads(&arguments)
             .await
             .expect_err("current threads must not pass for the threads at a ref");
@@ -4753,7 +3403,8 @@ mod tests {
     fn delivered(mut read: Value, github: &Github) -> usize {
         read["repository"] = json!(format!(
             "https://github.com/{}/{}",
-            github.configuration.owner, github.configuration.repo
+            github.configuration().owner,
+            github.configuration().repository
         ));
         read["source_id"] = json!(Uuid::new_v4());
         read["observed_at"] = json!(Utc::now().to_rfc3339());
@@ -4893,13 +3544,13 @@ mod tests {
             [0]["body"] = json!("\u{1}".repeat(REVIEW_BODY_CHARS));
         mock_graphql(&server, payload).await;
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("the threads are readable");
         assert_eq!(read["threads"][0]["comments"][0]["truncated"], true);
 
-        let size = delivered(read, &github(&server));
+        let size = delivered(read, &mocked(&server));
         assert!(
             size <= MAXIMUM_TOOL_MESSAGE_CHARACTERS,
             "a body that escapes to six times its length must still fit, got {size}"
@@ -4923,7 +3574,7 @@ mod tests {
             }),
         )
         .await;
-        let github = github(&server);
+        let github = mocked(&server);
         let mut read = String::new();
         let mut offset = Some(0);
         let mut pages = 0;
@@ -4957,7 +3608,7 @@ mod tests {
         let mut arguments = readiness_args(Some(7));
         arguments.after = Some(99);
 
-        let refused = github(&server)
+        let refused = mocked(&server)
             .review_threads(&arguments)
             .await
             .expect_err("a cursor that no longer lands anywhere must not restart silently");
@@ -4996,7 +3647,7 @@ mod tests {
         let mut arguments = readiness_args(Some(7));
         arguments.resolved = Some(resolved);
         arguments.after = Some(after);
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&arguments)
             .await
             .expect("the comment that marked the place still exists");
@@ -5056,7 +3707,7 @@ mod tests {
                 .await;
         }
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("a cycling cursor still reads what it found");
@@ -5131,7 +3782,7 @@ mod tests {
         nodes.as_array_mut().unwrap().insert(0, repeated);
         mock_thread_page(&server, json!("cursor-1"), second).await;
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("both pages are readable");
@@ -5166,7 +3817,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("the pages read so far are readable");
@@ -5188,7 +3839,7 @@ mod tests {
         threads[1].as_object_mut().unwrap().remove("diffSide");
         mock_graphql(&server, payload).await;
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("the threads are readable");
@@ -5211,7 +3862,7 @@ mod tests {
             let server = MockServer::start().await;
             mock_graphql(&server, json!({ "data": data })).await;
 
-            let refused = github(&server)
+            let refused = mocked(&server)
                 .review_threads(&readiness_args(Some(7)))
                 .await;
 
@@ -5226,7 +3877,7 @@ mod tests {
         let mut arguments = readiness_args(Some(7));
         arguments.offset = Some(3);
 
-        let refused = github(&server)
+        let refused = mocked(&server)
             .review_threads(&arguments)
             .await
             .expect_err("a character offset means nothing across threads");
@@ -5268,7 +3919,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("every page is readable");
@@ -5310,7 +3961,7 @@ mod tests {
         )
         .await;
 
-        let refused = github(&server)
+        let refused = mocked(&server)
             .review_threads(&readiness_args(Some(9_999)))
             .await
             .expect_err("a missing pull request is not an access problem");
@@ -5334,7 +3985,7 @@ mod tests {
         )
         .await;
 
-        let refused = github(&server)
+        let refused = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect_err("a repository the token cannot see is not a wrong number");
@@ -5346,7 +3997,7 @@ mod tests {
     async fn a_number_github_cannot_hold_is_refused_before_asking() {
         let server = MockServer::start().await;
 
-        let refused = github(&server)
+        let refused = mocked(&server)
             .review_threads(&readiness_args(Some(i32::MAX as u64 + 1)))
             .await
             .expect_err("GraphQL numbers are 32-bit");
@@ -5368,7 +4019,7 @@ mod tests {
         thread["originalStartLine"] = json!(25);
         mock_graphql(&server, payload).await;
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("the threads are readable");
@@ -5400,7 +4051,7 @@ mod tests {
             }),
         )
         .await;
-        let github = github(&server);
+        let github = mocked(&server);
 
         let threads = github
             .review_threads(&readiness_args(Some(7)))
@@ -5440,7 +4091,7 @@ mod tests {
         let mut arguments = readiness_args(Some(7));
         arguments.comment = Some(1);
 
-        let refused = github(&server)
+        let refused = mocked(&server)
             .review_threads(&arguments)
             .await
             .expect_err("a comment on pull request 70 is not feedback on 7");
@@ -5474,23 +4125,25 @@ mod tests {
         assert_eq!(read["body"], "found it");
     }
 
-    /// Read comment 1 of pull request `number` on `owner/repo`, which GitHub
-    /// answers for with `answer`.
+    /// Read comment 1 of pull request `number` on `owner/repository`, which
+    /// GitHub answers for with `answer`.
     async fn comment_read(
         owner: &str,
-        repo: &str,
+        repository: &str,
         number: u64,
         answer: Value,
     ) -> Result<Value, String> {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(format!("/repos/{owner}/{repo}/pulls/comments/1")))
+            .and(path(format!(
+                "/repos/{owner}/{repository}/pulls/comments/1"
+            )))
             .respond_with(ResponseTemplate::new(200).set_body_json(answer))
             .mount(&server)
             .await;
         let mut arguments = readiness_args(Some(number));
         arguments.comment = Some(1);
-        github_named(&server, owner, repo)
+        github_named(&server, owner, repository)
             .review_threads(&arguments)
             .await
     }
@@ -5547,7 +4200,7 @@ mod tests {
             .await;
         let mut arguments = readiness_args(Some(182));
         arguments.comment = Some(1);
-        let refused = github(&server)
+        let refused = mocked(&server)
             .review_threads(&arguments)
             .await
             .unwrap_err();
@@ -5573,7 +4226,7 @@ mod tests {
         let server = MockServer::start().await;
         mock_graphql(&server, thread_payload(true, true)).await;
 
-        let read = github(&server)
+        let read = mocked(&server)
             .review_threads(&readiness_args(Some(7)))
             .await
             .expect("the threads are readable");
@@ -5587,25 +4240,12 @@ mod tests {
         let server = MockServer::start().await;
         mock_graphql(&server, thread_payload(false, false)).await;
 
-        let refused = github(&server)
+        let refused = mocked(&server)
             .review_threads(&readiness_args(Some(8)))
             .await
             .expect_err("threads numbered for a different pull request are not evidence");
 
         assert!(refused.contains("different or missing"), "{refused}");
-    }
-
-    fn pull_detail(head: &str) -> Value {
-        json!({"node_id": "PR_7", "number": 7, "draft": false, "state": "open",
-               "title": "Ship the billing export",
-               "html_url": "https://github.com/owner/repository/pull/7",
-               "updated_at": "2026-09-05T00:00:00Z",
-               "head": {"ref": "feature", "sha": head},
-               "base": {"ref": "main", "sha": COMMIT}})
-    }
-
-    async fn mock_pull(server: &MockServer, head: &str) {
-        mock(server, "pulls/7", pull_detail(head)).await;
     }
 
     fn listed_pull(draft: bool) -> Value {
@@ -5615,70 +4255,6 @@ mod tests {
                "updated_at": "2026-09-05T00:00:00Z",
                "head": {"ref": "feature", "label": "owner:feature", "sha": COMMIT},
                "base": {"ref": "main", "label": "owner:main"}})
-    }
-
-    async fn mock_green_ci(server: &MockServer) {
-        mock_green_ci_answering(server, Some(BEARER)).await;
-    }
-
-    async fn mock_green_ci_answering(server: &MockServer, authorization: Option<&str>) {
-        mock_answering(
-            server,
-            "actions/runs",
-            json!({"workflow_runs": [{"id": 11, "workflow_id": 1, "name": "CI",
-                   "path": ".github/workflows/ci.yml", "event": "pull_request",
-                   "head_sha": COMMIT, "status": "completed", "conclusion": "success",
-                   "created_at": "2026-09-05T00:00:00Z", "updated_at": "2026-09-05T00:05:00Z",
-                   "html_url": "https://github.com/owner/repository/actions/runs/11",
-                   "repository": {"full_name": "owner/repository"}}], "total_count": 1}),
-            authorization,
-        )
-        .await;
-        mock_answering(
-            server,
-            &format!("commits/{COMMIT}/check-runs"),
-            json!({"check_runs": [{"id": 21, "name": "test", "head_sha": COMMIT, "status": "completed", "conclusion": "success"}]}),
-            authorization,
-        )
-        .await;
-        mock_answering(
-            server,
-            &format!("commits/{COMMIT}/status"),
-            json!({"statuses": [], "total_count": 0}),
-            authorization,
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn a_source_without_a_credential_reads_without_an_authorization_header() {
-        let server = MockServer::start().await;
-        mock_answering(&server, "commits/main", json!({"sha": COMMIT}), None).await;
-        mock_green_ci_answering(&server, None).await;
-        let github = github_with_token(&server, None);
-        assert_eq!(
-            github.resolve(None).await.unwrap(),
-            ("main".to_string(), COMMIT.to_string())
-        );
-        assert_eq!(
-            github.settled(None).await.unwrap(),
-            ("main".to_string(), COMMIT.to_string(), SUCCESS_ASSESSMENT)
-        );
-        assert_sent_without_authorization(&server).await;
-    }
-
-    #[tokio::test]
-    async fn a_source_with_an_empty_token_reads_anonymously() {
-        let server = MockServer::start().await;
-        mock_answering(&server, "commits/main", json!({"sha": COMMIT}), None).await;
-        mock_green_ci_answering(&server, None).await;
-        let (reference, sha, state) = github_with_token(&server, Some(""))
-            .settled(None)
-            .await
-            .unwrap();
-        assert_eq!((reference.as_str(), sha.as_str()), ("main", COMMIT));
-        assert_eq!(state, SUCCESS_ASSESSMENT);
-        assert_sent_without_authorization(&server).await;
     }
 
     #[tokio::test]
@@ -5758,7 +4334,7 @@ mod tests {
                 .expect(1)
                 .mount(&server)
                 .await;
-            let error = github(&server)
+            let error = mocked(&server)
                 .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
                 .await
                 .unwrap_err();
@@ -5773,7 +4349,7 @@ mod tests {
         mock_pull(&server, COMMIT).await;
         mock_review(&server, true, &summary(5, COMMIT), false).await;
         mock_green_ci(&server).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
             .await
             .unwrap();
@@ -5807,7 +4383,7 @@ mod tests {
         mock_pull(&server, BLOB).await;
         mock_review(&server, true, &summary(5, BLOB), false).await;
         mock_green_ci(&server).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::PullRequests, &readiness_args(None))
             .await
             .unwrap();
@@ -5841,7 +4417,7 @@ mod tests {
         mock_pull(&server, COMMIT).await;
         mock_review(&server, true, &summary(5, COMMIT), true).await;
         mock_green_ci(&server).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
             .await
             .unwrap();
@@ -5857,98 +4433,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_query_failures_and_mismatched_pull_requests_fail_closed() {
-        let server = MockServer::start().await;
-        mock_pull(&server, COMMIT).await;
-        mock_graphql(
-            &server,
-            json!({"data": Value::Null, "errors": [{"message": "test-secret"}]}),
-        )
-        .await;
-        let error = github(&server)
-            .observe(Operation::PullRequests, &readiness_args(Some(7)))
-            .await
-            .unwrap_err();
-        assert_eq!(error, REVIEW_QUERY_REJECTED);
-        assert!(!error.contains("test-secret"));
-        server.reset().await;
-        mock_pull(&server, COMMIT).await;
-        mock_graphql(&server, json!({"data": {"repository": Value::Null}})).await;
-        assert_eq!(
-            github(&server)
-                .observe(Operation::PullRequests, &readiness_args(Some(7)))
-                .await
-                .unwrap_err(),
-            REVIEW_QUERY_REJECTED,
-            "a repository GitHub's review query cannot see reads as a rejected query"
-        );
-        server.reset().await;
-        let mut other = pull_detail(COMMIT);
-        other["number"] = json!(8);
-        mock(&server, "pulls/7", other).await;
-        mock_review(&server, true, &summary(5, COMMIT), false).await;
-        assert_eq!(
-            github(&server)
-                .observe(Operation::PullRequests, &readiness_args(Some(7)))
-                .await
-                .unwrap_err(),
-            MISMATCHED_PULL
-        );
-    }
-
-    #[tokio::test]
-    async fn a_pull_request_the_review_query_cannot_find_says_so() {
-        for answer in [
-            json!({"data": {"repository": {"pullRequest": Value::Null}}}),
-            json!({"data": {"repository": {"pullRequest": Value::Null}}, "errors": [{
-                "type": "NOT_FOUND",
-                "path": ["repository", "pullRequest"],
-                "message": "Could not resolve to a PullRequest with the number of 7."
-            }]}),
-        ] {
-            let server = MockServer::start().await;
-            mock_pull(&server, COMMIT).await;
-            mock_graphql(&server, answer.clone()).await;
-
-            assert_eq!(
-                github(&server)
-                    .observe(Operation::PullRequests, &readiness_args(Some(7)))
-                    .await
-                    .unwrap_err(),
-                MISSING_PULL,
-                "{answer}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn review_threads_counted_for_another_pull_request_fail_closed() {
-        for number in [json!(8), Value::Null] {
-            let server = MockServer::start().await;
-            mock_pull(&server, COMMIT).await;
-            let mut counts = thread_counts(true, false);
-            counts["data"]["repository"]["pullRequest"]["number"] = number.clone();
-            mock_graphql(&server, counts).await;
-
-            assert_eq!(
-                github(&server)
-                    .observe(Operation::PullRequests, &readiness_args(Some(7)))
-                    .await
-                    .unwrap_err(),
-                MISMATCHED_PULL,
-                "threads numbered {number} are not pull request 7's"
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn pull_requests_without_a_number_or_draft_state_fail_closed() {
         let server = MockServer::start().await;
         let mut thin = listed_pull(false);
         thin.as_object_mut().unwrap().remove("draft");
         mock(&server, "pulls", json!([thin])).await;
         assert_eq!(
-            github(&server)
+            mocked(&server)
                 .observe(Operation::PullRequests, &readiness_args(None))
                 .await
                 .unwrap_err(),
@@ -5958,7 +4449,7 @@ mod tests {
         server.reset().await;
         mock(&server, "pulls/7", json!({"draft": false})).await;
         assert_eq!(
-            github(&server)
+            mocked(&server)
                 .observe(Operation::PullRequests, &readiness_args(Some(7)))
                 .await
                 .unwrap_err(),
@@ -5966,7 +4457,7 @@ mod tests {
             "a pull request without a number is unreadable"
         );
         assert!(
-            github(&server)
+            mocked(&server)
                 .observe(Operation::PullRequests, &readiness_args(Some(0)))
                 .await
                 .unwrap_err()
@@ -5982,7 +4473,7 @@ mod tests {
         mock(&server, "pulls/7", detail).await;
         mock_review(&server, true, &summary(5, COMMIT), false).await;
         mock_green_ci(&server).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
             .await
             .unwrap();
@@ -6017,7 +4508,7 @@ mod tests {
                     .mount(&server)
                     .await;
             }
-            let result = github(&server)
+            let result = mocked(&server)
                 .observe(Operation::PullRequests, &readiness_args(Some(7)))
                 .await
                 .unwrap();
@@ -6050,7 +4541,7 @@ mod tests {
         mock_pull(&server, COMMIT).await;
         mock_review(&server, true, &summary(5, COMMIT), false).await;
         mock_green_ci(&server).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::PullRequests, &readiness_args(None))
             .await
             .unwrap();
@@ -6071,7 +4562,7 @@ mod tests {
         let mut arguments = readiness_args(None);
         arguments.state = Some("merged".into());
         assert!(
-            github(&server)
+            mocked(&server)
                 .observe(Operation::PullRequests, &arguments)
                 .await
                 .unwrap_err()
@@ -6081,77 +4572,7 @@ mod tests {
     }
 
     #[test]
-    fn tallied_counts_always_add_up_and_split_running_checks() {
-        let evidence = tally(
-            [
-                "success",
-                "failure",
-                "queued",
-                "in_progress",
-                "neutral",
-                "success",
-            ]
-            .into_iter(),
-        );
-        assert_eq!(evidence.total, 6);
-        assert_eq!(evidence.passed, 2);
-        assert_eq!(evidence.failed, 1);
-        assert_eq!(evidence.running, 2);
-        assert_eq!(evidence.queued, 1);
-        assert_eq!(evidence.in_progress, 1);
-        assert_eq!(evidence.unknown, 1);
-        let summary = evidence.normalize();
-        assert!(summary.complete, "a tally must survive its own normalizer");
-        assert_eq!(summary.state, readiness::CheckState::Failure);
-        let absent = tally(std::iter::empty()).normalize();
-        assert_eq!(absent.state, readiness::CheckState::None);
-        assert_eq!(absent.counts.total, 0);
-        let green = tally(["success"].into_iter()).normalize();
-        assert_eq!(green.state, readiness::CheckState::Success);
-        let skipped = tally(["success", "skipped"].into_iter()).normalize();
-        assert_eq!(
-            skipped.state,
-            readiness::CheckState::Unknown,
-            "results outside the known set are not green"
-        );
-    }
-
-    #[test]
-    fn ci_tokens_come_from_the_record_that_carries_them() {
-        let commit = Revision::parse(COMMIT).unwrap();
-        let run = WorkflowRun::new(
-            NonZeroU64::new(11).unwrap(),
-            NonZeroU64::new(1).unwrap(),
-            ".github/workflows/ci.yml",
-            "push",
-            commit.clone(),
-            "2026-09-05T00:00:00Z",
-            "2026-09-05T00:05:00Z",
-            "https://github.com/owner/repository/actions/runs/11",
-            "owner/repository",
-        );
-        assert_eq!(
-            run_token(
-                &run.clone()
-                    .with_status("completed")
-                    .with_conclusion("failure")
-            ),
-            "failure"
-        );
-        assert_eq!(run_token(&run.clone().with_status("completed")), "unknown");
-        assert_eq!(
-            run_token(&run),
-            "unknown",
-            "a run without a status has not said anything"
-        );
-        assert_eq!(check_token(&CheckRun::new("queued")), "queued");
-        assert_eq!(check_token(&CheckRun::new("in_progress")), "in_progress");
-        assert_eq!(
-            check_token(&CheckRun::new("completed").with_conclusion("success")),
-            "success"
-        );
-        let statuses = [CommitStatus::new("lint", "pending")];
-        assert_eq!(conclusions(&[run], &[], &statuses), ["unknown", "pending"]);
+    fn failed_checks_are_listed_before_queued_ones() {
         assert_eq!(ci_priority(&json!({"status": "queued"})), 1);
         assert_eq!(
             ci_priority(&json!({"status": "completed", "conclusion": "failure"})),
@@ -6408,7 +4829,7 @@ mod tests {
         mock_pull_for_job(&server, 7, COMMIT).await;
         mock(&server, &format!("actions/jobs/{JOB_ID}"), job(BLOB)).await;
         mock_log(&server, "secret log".into()).await;
-        let error = github(&server)
+        let error = mocked(&server)
             .observe(
                 Operation::CheckLogs,
                 &check_args(Some(JOB_ID), Some(7), None),
@@ -6431,60 +4852,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn job_identity_must_match_the_repository_and_the_requested_job() {
+    async fn a_job_github_answers_without_its_identity_is_never_followed_to_its_log() {
         let server = MockServer::start().await;
-        let at = |run: u64, job: u64| -> String {
-            format!("https://github.com/owner/repository/actions/runs/{run}/job/{job}")
-        };
-        let fetched = |id: u64, head_sha: &str, url: String| {
-            WorkflowJob::new(
-                NonZeroU64::new(id).unwrap(),
-                NonZeroU64::new(RUN_ID).unwrap(),
-                "build",
-                "completed",
-                Revision::parse(head_sha).unwrap(),
-            )
-            .with_conclusion("failure")
-            .with_url(url)
-        };
-        let foreign_repository = fetched(
-            JOB_ID,
-            COMMIT,
-            format!("https://github.com/attacker/private/actions/runs/{RUN_ID}/job/{JOB_ID}"),
-        );
-        let renumbered = fetched(JOB_ID + 1, COMMIT, at(RUN_ID, JOB_ID));
-        let elsewhere = fetched(JOB_ID, BLOB, at(RUN_ID, JOB_ID));
-        let unlinked = WorkflowJob::new(
-            NonZeroU64::new(JOB_ID).unwrap(),
-            NonZeroU64::new(RUN_ID).unwrap(),
-            "build",
-            "completed",
-            Revision::parse(COMMIT).unwrap(),
-        );
-        for metadata in [foreign_repository, renumbered, elsewhere, unlinked] {
-            assert_eq!(
-                github(&server).verify_job(&metadata, JOB_ID, COMMIT),
-                Err(FOREIGN_JOB.to_string())
-            );
-        }
-        assert_eq!(
-            github(&server).verify_job(
-                &fetched(JOB_ID, COMMIT, at(RUN_ID, JOB_ID)),
-                JOB_ID,
-                COMMIT
-            ),
-            Ok(RUN_ID)
-        );
-        assert!(
-            github(&server)
-                .verify_job(
-                    &fetched(JOB_ID, COMMIT, at(RUN_ID, JOB_ID).to_uppercase()),
-                    JOB_ID,
-                    COMMIT
-                )
-                .is_ok()
-        );
-
         mock(&server, "commits/main", json!({"sha": COMMIT})).await;
         mock_log(&server, "secret log".into()).await;
         for (metadata, expected) in [
@@ -6511,7 +4880,7 @@ mod tests {
                 .mount_as_scoped(&server)
                 .await;
             assert_eq!(
-                github(&server)
+                mocked(&server)
                     .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
                     .await
                     .unwrap_err(),
@@ -6529,22 +4898,6 @@ mod tests {
                 .all(|request| !request.url.path().ends_with("/logs")),
             "a job that cannot be read is never followed to its log"
         );
-        assert!(!is_job_url(
-            &format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}?x=1"),
-            "owner",
-            "repository",
-            RUN_ID,
-            JOB_ID
-        ));
-        assert!(!is_job_url(
-            &format!(
-                "https://github.com.evil.test/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}"
-            ),
-            "owner",
-            "repository",
-            RUN_ID,
-            JOB_ID
-        ));
     }
 
     #[tokio::test]
@@ -6553,8 +4906,7 @@ mod tests {
         mock(&server, "commits/main", json!({"sha": COMMIT})).await;
         mock(&server, &format!("actions/jobs/{JOB_ID}"), job(COMMIT)).await;
         mock_log(&server, noisy_log(400, 10)).await;
-        let mut github = github(&server);
-        github.log_bytes = 1_000;
+        let github = mocked(&server).with_log_bytes(1_000);
         let result = github
             .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
             .await
@@ -6585,7 +4937,7 @@ mod tests {
         mock_pull_for_job(&server, 7, COMMIT).await;
         mock(&server, &format!("actions/jobs/{JOB_ID}"), job(COMMIT)).await;
         mock_log(&server, noisy_log(4_000, 900)).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(
                 Operation::CheckLogs,
                 &check_args(Some(JOB_ID), Some(7), None),
@@ -6646,7 +4998,7 @@ mod tests {
             "detail ".repeat(400)
         ));
         mock_log(&server, lines.join("\r\n")).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::CheckLogs, &check_args(Some(JOB_ID), None, None))
             .await
             .unwrap();
@@ -6722,7 +5074,7 @@ mod tests {
         mock_pull(server, COMMIT).await;
         mock_review(server, true, &summary(5, COMMIT), false).await;
         mock_green_ci(server).await;
-        github(server)
+        mocked(server)
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
             .await
             .unwrap()
@@ -6821,7 +5173,7 @@ mod tests {
                 )
                 .await;
                 mock_green_ci(&server).await;
-                let result = github(&server)
+                let result = mocked(&server)
                     .observe(Operation::PullRequests, &readiness_args(Some(7)))
                     .await
                     .unwrap();
@@ -6848,8 +5200,7 @@ mod tests {
         mock_pull(&server, COMMIT).await;
         mock_review(&server, true, &summary(5, COMMIT), false).await;
         mock_green_ci(&server).await;
-        let mut github = github(&server);
-        github.signals = ReviewSignals::select(&["coderabbit"]).unwrap();
+        let github = mocked(&server).with_signals(ReviewSignals::select(&["coderabbit"]).unwrap());
         let result = github
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
             .await
@@ -6861,37 +5212,6 @@ mod tests {
             pull["blockers"][0]["detail"],
             "coderabbitai summary missing"
         );
-    }
-
-    #[test]
-    fn a_configured_review_signal_set_is_validated_when_the_source_is_read() {
-        let configuration = |signals: Option<Vec<String>>| Configuration {
-            owner: "owner".into(),
-            repo: "repository".into(),
-            branch: None,
-            path: None,
-            token: None,
-            review_signals: signals,
-        };
-        let config = crate::state::test_config();
-        assert_eq!(
-            Github::new(configuration(None), &config)
-                .unwrap()
-                .signals
-                .reviewers(),
-            ReviewSignals::recognized().reviewers()
-        );
-        assert_eq!(
-            Github::new(configuration(Some(vec!["greptile".into()])), &config)
-                .unwrap()
-                .signals
-                .reviewers(),
-            vec!["greptile-apps".to_string()]
-        );
-        let error = Github::new(configuration(Some(vec!["sonarcloud".into()])), &config)
-            .err()
-            .expect("an unrecognised review signal is rejected");
-        assert!(error.contains("sonarcloud"), "{error}");
     }
 
     const RELEASE_TAG: &str = "v1.4.0";
@@ -6961,7 +5281,7 @@ mod tests {
             ],
         )
         .await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::ReleasePipelines, &release_args(None))
             .await
             .unwrap();
@@ -7006,7 +5326,7 @@ mod tests {
             ],
         )
         .await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::ReleasePipelines, &release_args(None))
             .await
             .unwrap();
@@ -7033,7 +5353,7 @@ mod tests {
         let server = MockServer::start().await;
         mock_release(&server).await;
         mock_release_runs(&server, Vec::new()).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::ReleasePipelines, &release_args(None))
             .await
             .unwrap();
@@ -7061,7 +5381,7 @@ mod tests {
         let mut impostor = workflow_run(2, 20, "success");
         impostor["html_url"] = json!("https://github.com/owner/repository/actions/runs/999");
         mock_release_runs(&server, vec![workflow_run(1, 10, "success"), impostor]).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::ReleasePipelines, &release_args(None))
             .await
             .unwrap();
@@ -7093,7 +5413,7 @@ mod tests {
         )
         .await;
         mock_release_runs(&server, vec![workflow_run(1, 10, "success")]).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(
                 Operation::ReleasePipelines,
                 &release_args(Some(RELEASE_TAG)),
@@ -7104,7 +5424,7 @@ mod tests {
         assert_eq!(result["next_page"], Value::Null);
         assert_eq!(result["complete"], true);
         assert_eq!(
-            github(&server)
+            mocked(&server)
                 .observe(Operation::ReleasePipelines, &release_args(Some("../etc")))
                 .await
                 .unwrap_err(),
@@ -7125,7 +5445,7 @@ mod tests {
             .mount(&server)
             .await;
         mock_release_runs(&server, Vec::new()).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::ReleasePipelines, &release_args(None))
             .await
             .unwrap();
@@ -7135,26 +5455,6 @@ mod tests {
             "an empty repository sweep is not evidence that a release has no pipeline"
         );
         assert_eq!(release["lookup"], "complete");
-    }
-
-    #[tokio::test]
-    async fn a_release_without_a_usable_identity_fails_closed() {
-        let server = MockServer::start().await;
-        mock(
-            &server,
-            "releases",
-            json!([{"id": 90, "tag_name": "", "published_at": "2026-09-05T00:00:00Z",
-                    "html_url": "https://github.com/owner/repository/releases/tag/",
-                    "draft": false, "prerelease": false}]),
-        )
-        .await;
-        assert_eq!(
-            github(&server)
-                .observe(Operation::ReleasePipelines, &release_args(None))
-                .await
-                .unwrap_err(),
-            UNUSABLE_RELEASE
-        );
     }
 
     #[tokio::test]
@@ -7186,7 +5486,7 @@ mod tests {
         let mut older = workflow_run(2, 20, "failure");
         older["head_branch"] = json!("v1.3.0");
         mock_release_runs(&server, vec![workflow_run(1, 10, "success"), older]).await;
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::ReleasePipelines, &release_args(None))
             .await
             .unwrap();
@@ -7207,158 +5507,8 @@ mod tests {
         assert_eq!(result["succeeded"], 1);
     }
 
-    async fn commit_and_empty_ci(server: &MockServer) {
-        mock(server, "commits/main", json!({"sha": COMMIT})).await;
-        mock(
-            server,
-            "actions/runs",
-            json!({"workflow_runs": [], "total_count": 0}),
-        )
-        .await;
-        mock_statuses(server, json!([])).await;
-    }
-
-    async fn mock_statuses(server: &MockServer, statuses: Value) {
-        let total = statuses.as_array().map_or(0, Vec::len);
-        mock(
-            server,
-            &format!("commits/{COMMIT}/status"),
-            json!({"statuses": statuses, "total_count": total}),
-        )
-        .await;
-    }
-
-    async fn check_runs(server: &MockServer, rows: Value) {
-        mock(
-            server,
-            &format!("commits/{COMMIT}/check-runs"),
-            json!({ "check_runs": rows }),
-        )
-        .await;
-    }
-
     #[tokio::test]
-    async fn a_running_check_does_not_settle_until_it_succeeds() {
-        let server = MockServer::start().await;
-        commit_and_empty_ci(&server).await;
-        Mock::given(path(format!(
-            "/repos/owner/repository/commits/{COMMIT}/check-runs"
-        )))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(
-                json!({"check_runs": [{"head_sha": COMMIT, "status": "in_progress"}]}),
-            ),
-        )
-        .up_to_n_times(1)
-        .with_priority(1)
-        .mount(&server)
-        .await;
-        check_runs(
-            &server,
-            json!([{"head_sha": COMMIT, "status": "completed", "conclusion": "success"}]),
-        )
-        .await;
-        let github = github(&server);
-        let (reference, sha, running) = github.settled(None).await.unwrap();
-        assert_eq!(reference, "main");
-        assert_eq!(sha, COMMIT);
-        assert_eq!(running, "pending");
-        assert!(
-            !SETTLED_ASSESSMENTS.contains(&running),
-            "a check still running must not end a wait"
-        );
-        let (_, _, finished) = github.settled(None).await.unwrap();
-        assert_eq!(finished, "success");
-        assert!(
-            SETTLED_ASSESSMENTS.contains(&finished),
-            "a successful check must end a wait"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_failed_check_settles_the_wait() {
-        let server = MockServer::start().await;
-        commit_and_empty_ci(&server).await;
-        check_runs(
-            &server,
-            json!([{"head_sha": COMMIT, "status": "completed", "conclusion": "failure"}]),
-        )
-        .await;
-        let (_, _, state) = github(&server).settled(None).await.unwrap();
-        assert_eq!(state, "failure");
-        assert!(
-            SETTLED_ASSESSMENTS.contains(&state),
-            "a failed check must end a wait"
-        );
-    }
-
-    /// The whole point of the finding: at the Checks level, a run GitHub has
-    /// completed with a skipped conclusion ends a wait, and one it has only
-    /// queued does not. The first used to be indistinguishable from a
-    /// repository with no CI at all.
-    #[tokio::test]
-    async fn a_completed_skipped_run_settles_the_wait_and_a_queued_one_does_not() {
-        let server = MockServer::start().await;
-        commit_and_empty_ci(&server).await;
-        check_runs(
-            &server,
-            json!([{"head_sha": COMMIT, "status": "completed", "conclusion": "skipped"}]),
-        )
-        .await;
-        let (_, _, state) = github(&server).settled(None).await.unwrap();
-        assert_eq!(state, "skipped");
-        assert!(
-            SETTLED_ASSESSMENTS.contains(&state),
-            "a run that completed and said skipped has reported, so the wait is over"
-        );
-
-        let pending = MockServer::start().await;
-        commit_and_empty_ci(&pending).await;
-        check_runs(
-            &pending,
-            json!([{"head_sha": COMMIT, "status": "queued", "conclusion": null}]),
-        )
-        .await;
-        let (_, _, state) = github(&pending).settled(None).await.unwrap();
-        assert!(
-            !SETTLED_ASSESSMENTS.contains(&state),
-            "a queued run has not reported anything yet: {state}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_commit_with_no_checks_is_unknown_and_never_settles() {
-        let server = MockServer::start().await;
-        commit_and_empty_ci(&server).await;
-        check_runs(&server, json!([])).await;
-        let (_, _, state) = github(&server).settled(None).await.unwrap();
-        assert_eq!(state, "unknown");
-        assert!(
-            !SETTLED_ASSESSMENTS.contains(&state),
-            "a commit GitHub has registered no run for is not a settled wait"
-        );
-    }
-
-    #[tokio::test]
-    async fn settled_refuses_checks_reported_for_another_commit() {
-        let server = MockServer::start().await;
-        commit_and_empty_ci(&server).await;
-        check_runs(
-            &server,
-            json!([{"head_sha": BLOB, "status": "completed", "conclusion": "success"}]),
-        )
-        .await;
-        assert!(
-            github(&server)
-                .settled(None)
-                .await
-                .unwrap_err()
-                .contains("different")
-        );
-    }
-
-    #[tokio::test]
-    async fn check_rows_that_shift_between_pages_never_settle_as_success() {
+    async fn check_rows_that_shift_between_pages_never_build_as_success() {
         let server = MockServer::start().await;
         commit_and_empty_ci(&server).await;
         let first: Vec<Value> = (1..=100)
@@ -7384,282 +5534,9 @@ mod tests {
         )
         .mount(&server)
         .await;
-        let github = github(&server);
-
-        let (_, _, state) = github.settled(None).await.unwrap();
-        assert_eq!(state, PENDING_ASSESSMENT);
-        assert!(
-            !SETTLED_ASSESSMENTS.contains(&state),
-            "a check read twice may have pushed another past the pages read"
-        );
-
-        let build = github.build(COMMIT).await.unwrap();
+        let build = mocked(&server).build(COMMIT).await.unwrap();
         assert_eq!(build["complete"], false);
         assert_ne!(build["state"], SUCCESS_ASSESSMENT);
-
-        let evidence = github.check_evidence(COMMIT).await.unwrap();
-        assert!(!evidence.complete);
-        assert_ne!(evidence.normalize().state, readiness::CheckState::Success);
-    }
-
-    async fn rate_limited(server: &MockServer, response: ResponseTemplate) {
-        Mock::given(path("/repos/owner/repository/commits/main"))
-            .respond_with(response)
-            .up_to_n_times(1)
-            .with_priority(1)
-            .mount(server)
-            .await;
-        mock(server, "commits/main", json!({"sha": COMMIT})).await;
-    }
-
-    #[tokio::test]
-    async fn a_retry_after_in_seconds_is_honoured_once() {
-        let server = MockServer::start().await;
-        rate_limited(
-            &server,
-            ResponseTemplate::new(429).insert_header(RETRY_AFTER_HEADER, "3"),
-        )
-        .await;
-        let started = Instant::now();
-        let (_, sha) = github(&server).resolve(None).await.unwrap();
-        let waited = started.elapsed();
-        assert_eq!(sha, COMMIT);
-        assert!(
-            waited >= Duration::from_secs(3),
-            "Retry-After was not honoured, waited {waited:?}"
-        );
-        assert_eq!(
-            server.received_requests().await.unwrap().len(),
-            2,
-            "a rate-limited request is retried exactly once, never in a loop"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_retry_after_http_date_is_honoured_once() {
-        const DATE_FORMAT: &str = "%a, %d %b %Y %H:%M:%S GMT";
-        const DISTANCE_SECONDS: i64 = 4;
-
-        let server = MockServer::start().await;
-        let at = (Utc::now() + chrono::Duration::seconds(DISTANCE_SECONDS))
-            .format(DATE_FORMAT)
-            .to_string();
-        // A date names an instant, so the retry is held to that instant and not
-        // to an elapsed floor a slow run exhausts before the wait even begins.
-        let date = DateTime::parse_from_rfc2822(&at)
-            .unwrap()
-            .with_timezone(&Utc);
-        rate_limited(
-            &server,
-            ResponseTemplate::new(429).insert_header(RETRY_AFTER_HEADER, at.as_str()),
-        )
-        .await;
-        let (_, sha) = github(&server).resolve(None).await.unwrap();
-        let retried = Utc::now();
-        assert_eq!(sha, COMMIT);
-        assert!(
-            retried >= date,
-            "an HTTP-date Retry-After was not honoured, retried at {retried} before {date}"
-        );
-        assert_eq!(
-            server.received_requests().await.unwrap().len(),
-            2,
-            "a rate-limited request is retried exactly once, never in a loop"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_exhausted_rate_limit_is_reported_and_never_retried() {
-        let server = MockServer::start().await;
-        for status in [403, 429] {
-            server.reset().await;
-            rate_limited(
-                &server,
-                ResponseTemplate::new(status)
-                    .insert_header(RATE_LIMIT_REMAINING_HEADER, "0")
-                    .insert_header(RETRY_AFTER_HEADER, "1"),
-            )
-            .await;
-            let error = github(&server).resolve(None).await.unwrap_err();
-            assert_eq!(error, RATE_LIMIT_EXHAUSTED, "HTTP {status}");
-            assert_eq!(
-                server.received_requests().await.unwrap().len(),
-                1,
-                "an exhausted quota must not be retried"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn a_forbidden_response_without_an_exhausted_quota_keeps_its_status() {
-        let server = MockServer::start().await;
-        mock(&server, "commits/main", json!({"sha": COMMIT})).await;
-        Mock::given(path("/repos/owner/repository/commits/main"))
-            .respond_with(ResponseTemplate::new(403))
-            .with_priority(1)
-            .mount(&server)
-            .await;
-        let error = github(&server).resolve(None).await.unwrap_err();
-        assert!(error.contains("HTTP 403"), "{error}");
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_forbidden_response_asking_for_too_long_a_wait_reads_as_rate_limited() {
-        let server = MockServer::start().await;
-        rate_limited(
-            &server,
-            ResponseTemplate::new(FORBIDDEN).insert_header(RETRY_AFTER_HEADER, "120"),
-        )
-        .await;
-        let error = github(&server).resolve(None).await.unwrap_err();
-        assert_eq!(error, status_error(TOO_MANY_REQUESTS));
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    }
-
-    async fn retried(retry_after: &str) -> (Result<(String, String), String>, usize) {
-        let server = MockServer::start().await;
-        rate_limited(
-            &server,
-            ResponseTemplate::new(429).insert_header(RETRY_AFTER_HEADER, retry_after),
-        )
-        .await;
-        let resolved = github(&server).resolve(None).await;
-        (resolved, server.received_requests().await.unwrap().len())
-    }
-
-    fn soon(format: &str) -> String {
-        (Utc::now() + chrono::Duration::seconds(2))
-            .format(format)
-            .to_string()
-    }
-
-    #[tokio::test]
-    async fn retry_after_values_the_crate_will_not_wait_on_fail_at_once() {
-        const IMF_FIXDATE: &str = "%a, %d %b %Y %H:%M:%S GMT";
-        let distant = (Utc::now() + chrono::Duration::seconds(120))
-            .format(IMF_FIXDATE)
-            .to_string();
-        for value in [
-            soon("%a, %d %b %Y %H:%M:%S +0000"),
-            "61".to_string(),
-            "18446744073709551616".to_string(),
-            "Thu, 01 Jan 1969 00:00:00 GMT".to_string(),
-            soon(IMF_FIXDATE).to_lowercase().replace("gmt", "GMT"),
-            soon("%d %b %Y %H:%M:%S GMT"),
-            String::new(),
-            "soon".to_string(),
-            distant,
-        ] {
-            let (resolved, requests) = retried(&value).await;
-            assert_eq!(
-                resolved.unwrap_err(),
-                status_error(TOO_MANY_REQUESTS),
-                "{value:?}"
-            );
-            assert_eq!(requests, 1, "{value:?} was waited on");
-        }
-    }
-
-    #[tokio::test]
-    async fn retry_after_dates_in_every_rfc_9110_form_are_waited_on_once() {
-        for value in [
-            "Sun, 06 Nov 1994 08:48:00 GMT".to_string(),
-            " 1 ".to_string(),
-            soon("%A, %d-%b-%y %H:%M:%S GMT"),
-            soon("%a %b %e %H:%M:%S %Y"),
-        ] {
-            let (resolved, requests) = retried(&value).await;
-            assert_eq!(resolved.unwrap().1, COMMIT, "{value:?}");
-            assert_eq!(requests, 2, "{value:?} was not retried exactly once");
-        }
-    }
-
-    async fn review_query_failure(response: ResponseTemplate, readiness: bool) -> (String, usize) {
-        let server = MockServer::start().await;
-        mock_pull(&server, COMMIT).await;
-        Mock::given(method("POST"))
-            .and(path("/graphql"))
-            .respond_with(response)
-            .mount(&server)
-            .await;
-        let github = github(&server);
-        let failed = if readiness {
-            github
-                .observe(Operation::PullRequests, &readiness_args(Some(7)))
-                .await
-        } else {
-            github.review_threads(&readiness_args(Some(7))).await
-        };
-        let queries = server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|request| request.url.path() == "/graphql")
-            .count();
-        (failed.unwrap_err(), queries)
-    }
-
-    #[tokio::test]
-    async fn a_review_query_github_refuses_over_http_names_the_status() {
-        let cases = [
-            (
-                ResponseTemplate::new(FORBIDDEN).set_body_json(
-                    json!({"message": "Resource not accessible by integration test-secret"}),
-                ),
-                status_error(FORBIDDEN),
-                1,
-            ),
-            (
-                ResponseTemplate::new(NOT_FOUND).set_body_json(json!({"message": "Not Found"})),
-                status_error(NOT_FOUND),
-                1,
-            ),
-            (
-                ResponseTemplate::new(TOO_MANY_REQUESTS),
-                status_error(TOO_MANY_REQUESTS),
-                1,
-            ),
-            (
-                ResponseTemplate::new(TOO_MANY_REQUESTS).insert_header(RETRY_AFTER_HEADER, "1"),
-                status_error(TOO_MANY_REQUESTS),
-                2,
-            ),
-            (
-                ResponseTemplate::new(TOO_MANY_REQUESTS)
-                    .insert_header(RATE_LIMIT_REMAINING_HEADER, "0"),
-                RATE_LIMIT_EXHAUSTED.to_string(),
-                1,
-            ),
-        ];
-        for (response, expected, sent) in cases {
-            for readiness in [false, true] {
-                let (error, queries) = review_query_failure(response.clone(), readiness).await;
-                assert_eq!(error, expected, "readiness={readiness}");
-                assert!(!error.contains("test-secret"), "{error}");
-                assert_eq!(queries, sent, "readiness={readiness}: {expected}");
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn review_query_errors_github_names_the_kind_of_read_as_that_status() {
-        for (kind, status) in [
-            ("FORBIDDEN", FORBIDDEN),
-            ("NOT_FOUND", NOT_FOUND),
-            ("RATE_LIMITED", TOO_MANY_REQUESTS),
-        ] {
-            let response = ResponseTemplate::new(200).set_body_json(json!({
-                "data": Value::Null,
-                "errors": [{"type": kind, "path": ["node"], "message": "test-secret"}]
-            }));
-            for readiness in [false, true] {
-                let (error, queries) = review_query_failure(response.clone(), readiness).await;
-                assert_eq!(error, status_error(status), "{kind} readiness={readiness}");
-                assert_eq!(queries, 1, "{kind} readiness={readiness}");
-            }
-        }
     }
 
     #[tokio::test]
@@ -7684,18 +5561,11 @@ mod tests {
                 .mount(&server)
                 .await;
         }
-        let github = github(&server);
-
-        let build = github.build(COMMIT).await.unwrap_err();
+        let build = mocked(&server).build(COMMIT).await.unwrap_err();
         assert_eq!(build, PARTIAL_WORKFLOW_RUNS);
         assert!(
             build.contains("1,000") && build.contains("shifting"),
             "{build}"
-        );
-        assert_eq!(
-            github.settled(None).await.unwrap_err(),
-            PARTIAL_WORKFLOW_RUNS,
-            "a run GitHub listed twice may have pushed another past the pages read"
         );
     }
 
@@ -7740,7 +5610,7 @@ mod tests {
         )
         .await;
 
-        let result = github(&server)
+        let result = mocked(&server)
             .observe(Operation::PullRequests, &readiness_args(Some(7)))
             .await
             .unwrap();
@@ -7781,14 +5651,6 @@ mod tests {
                 .description()
                 .contains("when pull requests are listed rather than read by number")
         );
-    }
-
-    #[tokio::test]
-    async fn a_source_token_is_kept_only_as_a_secret() {
-        let server = MockServer::start().await;
-        let github = github(&server);
-        assert_eq!(github.configuration.token, None);
-        assert_eq!(github.token.expose(), "test-secret");
     }
 
     #[tokio::test]
@@ -7835,7 +5697,7 @@ mod tests {
             let mut detail = pull_detail(COMMIT);
             detail["head"] = head.clone();
             mock(&server, "pulls/7", detail).await;
-            let refused = github(&server)
+            let refused = mocked(&server)
                 .observe(
                     Operation::CheckLogs,
                     &check_args(Some(JOB_ID), Some(7), None),
@@ -7881,12 +5743,7 @@ mod tests {
                 let _ = stream.write_all(answer.as_bytes()).await;
             }
         });
-        Github::serving(
-            configured("owner", "repository"),
-            PullRequestService::standing_in_for("github.com", &format!("http://{address}"))
-                .unwrap(),
-        )
-        .unwrap()
+        served(&format!("http://{address}"))
     }
 
     #[tokio::test]
@@ -7915,6 +5772,48 @@ mod tests {
             scope: connected.scope(),
             operation,
         }
+    }
+
+    #[tokio::test]
+    async fn a_source_that_cannot_be_connected_says_why_in_the_tools_words() {
+        let connected = Connected::new().await;
+        let web = connected
+            .source_of(sources::WEB, json!({"url": "https://example.com"}))
+            .await;
+        let inactive = connected.source(None, None).await;
+        connected.deactivate(&inactive).await;
+        let unconfigured = connected.source_of(sources::GITHUB, json!({})).await;
+
+        for (source, expected) in [
+            (
+                web.id,
+                "Live integrations currently support connected GitHub sources only.",
+            ),
+            (
+                inactive.id,
+                "Source not found in this workspace or inactive.",
+            ),
+            (
+                Uuid::new_v4(),
+                "Source not found in this workspace or inactive.",
+            ),
+            (
+                unconfigured.id,
+                "The GitHub source configuration is invalid.",
+            ),
+        ] {
+            assert_eq!(
+                connected_tool(&connected, Operation::Issues)
+                    .run(json!({"source_id": source}))
+                    .await
+                    .unwrap_err(),
+                expected
+            );
+        }
+        assert_eq!(
+            Unconnected::Unavailable(Unavailable::Unreadable).message(SOURCE_NOT_GITHUB),
+            "Could not read the source."
+        );
     }
 
     async fn issues(connected: &Connected, token: &str, calls: u64) {
@@ -8059,68 +5958,5 @@ mod tests {
             .expect_err("a checkout that is not there cannot be pushed from");
 
         assert!(refusal.starts_with("Could not push feature"), "{refusal}");
-    }
-
-    #[test]
-    fn each_provider_failure_is_refused_for_what_it_is() {
-        for (error, expected) in [
-            (GitHubError::Revoked, SOURCE_DISCONNECTED),
-            (GitHubError::Suspended, SOURCE_DISCONNECTED),
-            (GitHubError::NotConnected, SOURCE_DISCONNECTED),
-            (GitHubError::Credential, SOURCE_CREDENTIALS_INVALID),
-            (GitHubError::Unsealing, SOURCE_CREDENTIALS_INVALID),
-            (
-                GitHubError::Application(ApplicationError::Transport("reset".into())),
-                SOURCE_UNREACHABLE,
-            ),
-            (
-                GitHubError::Application(ApplicationError::Status(500)),
-                SOURCE_UNREACHABLE,
-            ),
-            (
-                GitHubError::Application(ApplicationError::Status(503)),
-                SOURCE_UNREACHABLE,
-            ),
-            (
-                GitHubError::Application(ApplicationError::Status(401)),
-                SOURCE_CREDENTIALS_UNRESOLVED,
-            ),
-            (
-                GitHubError::Application(ApplicationError::PrivateKey),
-                SOURCE_CREDENTIALS_UNRESOLVED,
-            ),
-            (GitHubError::Sealing, SOURCE_CREDENTIALS_UNRESOLVED),
-        ] {
-            assert_eq!(refusal(&error), expected, "{error:?}");
-        }
-    }
-
-    #[test]
-    fn a_configuration_never_prints_its_token() {
-        let configuration = Configuration {
-            owner: OWNER.into(),
-            repo: REPOSITORY.into(),
-            branch: None,
-            path: None,
-            token: Some(STORED_TOKEN.into()),
-            review_signals: None,
-        };
-
-        let printed = format!("{configuration:?}");
-
-        assert!(!printed.contains(STORED_TOKEN), "{printed}");
-        assert!(printed.contains(OWNER), "{printed}");
-    }
-
-    #[test]
-    fn a_token_in_the_stored_configuration_is_never_read_as_the_credential() {
-        let configuration = Configuration::deserialize(&json!({
-            "owner": OWNER,
-            "repo": REPOSITORY,
-            "token": STORED_TOKEN,
-        }))
-        .expect("the configuration parses");
-
-        assert!(configuration.token.is_none());
     }
 }

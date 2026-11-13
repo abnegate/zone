@@ -12,32 +12,50 @@
 //! timeout and a commit nothing is reporting on both have to be unphrasable as
 //! a pass, or a model reads "no news" as "green".
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
 use abnegate_agent::chat::NewEntry;
 use abnegate_agent::context::Entry;
-use abnegate_agent::tool::job::{JobExited, Jobs};
-use abnegate_agent::tool::{Session, Tier};
-use abnegate_agent::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
-use abnegate_llm::{Message as LlmMessage, ToolCall};
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::Tier;
+use abnegate_agent::tool::job::JobExited;
+use abnegate_agent::tool::job::Jobs;
+use abnegate_llm::Message as LlmMessage;
+use abnegate_llm::ToolCall;
 use async_trait::async_trait;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::DateTime;
+use chrono::SecondsFormat;
+use chrono::Utc;
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::integrations::{Configuration, SETTLED_ASSESSMENTS, authenticated};
 use super::tools::WorkspaceScope;
-use crate::db::sources::{self, SourceRow};
-use crate::db::{task_access, tasks, workspace_members};
+use crate::db::sources::SourceRow;
+use crate::db::task_access;
+use crate::db::tasks;
+use crate::db::workspace_members;
 use crate::services::chat::session::RunContext;
-use crate::services::task_progress::{ProgressMessage, UNKNOWN_ERROR};
+use crate::services::github::authentication::authenticated;
+use crate::services::github::client::SETTLED_ASSESSMENTS;
+use crate::services::github::configuration::Configuration;
+use crate::services::github::connection::connect;
+use crate::services::task_progress::ProgressMessage;
+use crate::services::task_progress::UNKNOWN_ERROR;
 use crate::state::AppState;
 
 pub use abnegate_agent::tool::job::WAIT_FOR;
@@ -314,11 +332,8 @@ const RUN_ID_INVALID: &str = "id must be a task run id for kind=task_run.";
 const SOURCE_ID_INVALID: &str = "id must be a source id for kind=check.";
 const RUN_UNREADABLE: &str = "Could not read the task run.";
 const RUN_FOREIGN: &str = "Task run not found in this workspace.";
-const SOURCE_UNREADABLE: &str = "Could not read the source.";
-const SOURCE_FOREIGN: &str = "Source not found in this workspace or inactive.";
 const SOURCE_NOT_GITHUB: &str = "Waiting on checks currently supports connected GitHub sources \
     only.";
-const SOURCE_CONFIGURATION_INVALID: &str = "The GitHub source configuration is invalid.";
 const WORKSPACE_UNREADABLE: &str = "You cannot read this workspace.";
 
 /// What a wait nobody registered is called, so even that reads as a timeout
@@ -961,20 +976,13 @@ impl WaitForTool {
         {
             return Err(WORKSPACE_UNREADABLE.to_string());
         }
-        let source = sources::get_source(database, source, scope.workspace_id)
+        let connection = connect(&scope.state, scope.workspace_id, source)
             .await
-            .map_err(|_| SOURCE_UNREADABLE.to_string())?
-            .filter(|source| source.is_active.unwrap_or(true))
-            .ok_or(SOURCE_FOREIGN)?;
-        if source.source_type != sources::GITHUB {
-            return Err(SOURCE_NOT_GITHUB.to_string());
-        }
-        let configuration = Configuration::deserialize(&source.config)
-            .map_err(|_| SOURCE_CONFIGURATION_INVALID.to_string())?;
+            .map_err(|unconnected| unconnected.message(SOURCE_NOT_GITHUB).to_string())?;
         Ok(Watched {
             state: scope.state.clone(),
-            source,
-            configuration,
+            source: connection.source,
+            configuration: connection.configuration,
         })
     }
 }
@@ -983,16 +991,19 @@ impl WaitForTool {
 mod tests {
     use super::*;
 
-    use crate::agent::integrations::Github;
-    use crate::agent::integrations::PENDING_ASSESSMENT;
-    use crate::agent::integrations::SOURCE_DISCONNECTED;
-    use crate::agent::integrations::SUCCESS_ASSESSMENT;
-    use crate::agent::testing::Connected;
-    use crate::agent::testing::MINTED_TOKEN;
-    use crate::agent::testing::OWNER;
-    use crate::agent::testing::REPOSITORY;
-    use crate::agent::testing::STORED_TOKEN;
-    use crate::agent::testing::number;
+    use crate::db::sources;
+    use crate::services::github::authentication::SOURCE_DISCONNECTED;
+    use crate::services::github::client::Github;
+    use crate::services::github::client::PENDING_ASSESSMENT;
+    use crate::services::github::client::SUCCESS_ASSESSMENT;
+    use crate::services::github::testing::MINTED_TOKEN;
+    use crate::services::github::testing::OWNER;
+    use crate::services::github::testing::REPOSITORY;
+    use crate::services::github::testing::STORED_TOKEN;
+    use crate::services::github::testing::connected::Connected;
+    use crate::services::github::testing::number;
+    use crate::services::github::unavailable::Unavailable;
+    use crate::services::github::unconnected::Unconnected;
     use crate::services::github_app::testing::issuing;
     use crate::services::github_app::testing::uninstalled;
     use crate::state::AppState;
@@ -1160,7 +1171,7 @@ mod tests {
         let github = Github::new(
             Configuration {
                 owner: "owner".into(),
-                repo: "repository".into(),
+                repository: "repository".into(),
                 branch: None,
                 path: None,
                 token: None,
@@ -2157,7 +2168,9 @@ mod tests {
 
     impl Fixture {
         async fn create() -> Self {
-            use crate::db::{organizations, users, workspaces};
+            use crate::db::organizations;
+            use crate::db::users;
+            use crate::db::workspaces;
             let pool = PgPool::connect(
                 &std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL required"),
             )
@@ -2282,6 +2295,47 @@ mod tests {
         source: Uuid,
     ) -> Result<(String, String, &'static str), String> {
         tool.watched(scope, source).await?.settled(None).await
+    }
+
+    #[tokio::test]
+    async fn a_source_a_check_wait_cannot_connect_to_says_why_in_the_waits_words() {
+        let connected = Connected::new().await;
+        let web = connected
+            .source_of(sources::WEB, json!({"url": "https://example.com"}))
+            .await;
+        let inactive = connected.source(None, None).await;
+        connected.deactivate(&inactive).await;
+        let unconfigured = connected.source_of(sources::GITHUB, json!({})).await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        for (source, expected) in [
+            (
+                web.id,
+                "Waiting on checks currently supports connected GitHub sources only.",
+            ),
+            (
+                inactive.id,
+                "Source not found in this workspace or inactive.",
+            ),
+            (
+                Uuid::new_v4(),
+                "Source not found in this workspace or inactive.",
+            ),
+            (
+                unconfigured.id,
+                "The GitHub source configuration is invalid.",
+            ),
+        ] {
+            assert_eq!(
+                tool.watched(scope, source).await.err().as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            Unconnected::Unavailable(Unavailable::Unreadable).message(SOURCE_NOT_GITHUB),
+            "Could not read the source."
+        );
     }
 
     #[tokio::test]

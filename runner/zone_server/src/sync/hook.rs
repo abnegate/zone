@@ -10,17 +10,23 @@
 use std::future::Future;
 
 use abnegate_secret::SecretValue;
-use abnegate_vcs::pull_request::{Repository, WebhookEvent};
-use abnegate_vcs::{PullRequestError, PullRequestService};
+use abnegate_vcs::PullRequestError;
+use abnegate_vcs::PullRequestService;
+use abnegate_vcs::pull_request::Repository;
+use abnegate_vcs::pull_request::WebhookEvent;
 use reqwest::Url;
 use serde_json::Value;
 use thiserror::Error;
 
-use super::{Provider, webhook_path};
+use super::Provider;
+use super::webhook_path;
 use crate::db::projects;
-use crate::db::sync_config::{self, SyncConfigRow};
-use crate::services::github::Refusal;
-use crate::services::github_app::{self, Credential, Unauthenticated};
+use crate::db::sync_config;
+use crate::db::sync_config::SyncConfigRow;
+use crate::services::github::refusal::Refusal;
+use crate::services::github_app;
+use crate::services::github_app::Credential;
+use crate::services::github_app::Unauthenticated;
 use crate::state::AppState;
 use uuid::Uuid;
 
@@ -347,15 +353,23 @@ async fn record(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     use super::*;
     use crate::config::Config;
-    use crate::db::github_apps::testing::{pool, seed_organization, seed_workspace};
-    use crate::services::github_app::testing::{
-        installation_number, installed, issuing, issuing_once, provider,
-    };
+    use crate::db::github_apps::testing::pool;
+    use crate::db::github_apps::testing::seed_organization;
+    use crate::db::github_apps::testing::seed_workspace;
+    use crate::services::github_app::testing::installation_number;
+    use crate::services::github_app::testing::installed;
+    use crate::services::github_app::testing::issuing;
+    use crate::services::github_app::testing::issuing_once;
+    use crate::services::github_app::testing::provider;
 
     const WEBHOOK: u64 = 7;
 

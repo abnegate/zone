@@ -138,12 +138,12 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::agent::testing::Connected;
-    use crate::agent::testing::MINTED_TOKEN;
-    use crate::agent::testing::number;
     use crate::db::projects::NewProject;
     use crate::db::sources::NewSource;
     use crate::db::sources::SLACK;
+    use crate::services::github::testing::MINTED_TOKEN;
+    use crate::services::github::testing::connected::Connected;
+    use crate::services::github::testing::number;
     use crate::services::github_app::testing::issuing;
 
     #[tokio::test]

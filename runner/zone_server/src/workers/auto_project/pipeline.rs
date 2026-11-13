@@ -8,31 +8,60 @@
 use std::collections::HashSet;
 
 use abnegate_secret::SecretValue;
-use abnegate_vcs::{
-    ChecksOutcome, CommitSha, ConflictError, ConflictRequest, MergeMethod, MergeableState,
-    MergedPullRequest, PullRequestDetail, PullRequestError, PullRequestReference,
-    PullRequestService, PullRequestState, RepositoryUrl, ReviewEvent, ReviewRecord,
-    ReviewThreadRecord,
-};
-use chrono::{DateTime, Utc};
+use abnegate_vcs::ChecksOutcome;
+use abnegate_vcs::CommitSha;
+use abnegate_vcs::ConflictError;
+use abnegate_vcs::ConflictRequest;
+use abnegate_vcs::MergeMethod;
+use abnegate_vcs::MergeableState;
+use abnegate_vcs::MergedPullRequest;
+use abnegate_vcs::PullRequestDetail;
+use abnegate_vcs::PullRequestError;
+use abnegate_vcs::PullRequestReference;
+use abnegate_vcs::PullRequestService;
+use abnegate_vcs::PullRequestState;
+use abnegate_vcs::RepositoryUrl;
+use abnegate_vcs::ReviewEvent;
+use abnegate_vcs::ReviewRecord;
+use abnegate_vcs::ReviewThreadRecord;
+use chrono::DateTime;
+use chrono::Utc;
 use uuid::Uuid;
 
-use crate::agent::readiness::SignalKind;
-use crate::db::auto_projects::{
-    self, Finding, Kind, ReviewInsert, ReviewRow, ReviewerKind, Stage, TaskAutomation,
-    Verdict as Recorded,
-};
-use crate::db::tasks::{self, TaskRow};
+use crate::db::auto_projects;
+use crate::db::auto_projects::Finding;
+use crate::db::auto_projects::Kind;
+use crate::db::auto_projects::ReviewInsert;
+use crate::db::auto_projects::ReviewRow;
+use crate::db::auto_projects::ReviewerKind;
+use crate::db::auto_projects::Stage;
+use crate::db::auto_projects::TaskAutomation;
+use crate::db::auto_projects::Verdict as Recorded;
+use crate::db::tasks;
+use crate::db::tasks::TaskRow;
 use crate::services::endpoint::Origin;
+use crate::services::github::readiness::SignalKind;
 use crate::services::github_app::Error as GitHubError;
 use crate::workers::conflict::RepairOutcome;
-use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception};
+use crate::workers::pr::access_token;
+use crate::workers::pr::repair_conflicts_for_task;
+use crate::workers::pr::sync_reception;
 
-use super::driver::{Admission, Drive};
-use super::notification::{self, MergeReport};
-use super::review::model::{self, Author, Unavailable, Venue};
+use super::driver::Admission;
+use super::driver::Drive;
+use super::notification;
+use super::notification::MergeReport;
+use super::review;
+use super::review::Outcome;
+use super::review::ReviewError;
+use super::review::ReviewRequest;
+use super::review::bots;
+use super::review::model;
+use super::review::model::Author;
+use super::review::model::Unavailable;
+use super::review::model::Venue;
 use super::review::outage::Outages;
-use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, verdict};
+use super::review::verdict;
 use super::summary;
 
 /// Rounds on one head that may end without a verdict, unreadable or failed,
@@ -2060,8 +2089,11 @@ mod tests {
     }
 
     async fn github(status: u16) -> wiremock::MockServer {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::MockServer;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -2133,8 +2165,11 @@ mod tests {
     /// merged pull request is read back for it instead.
     #[tokio::test]
     async fn a_merge_answered_without_its_commit_reads_it_back_from_the_pull_request() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::MockServer;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -2197,8 +2232,13 @@ mod tests {
 
     impl Merged {
         async fn new(server: &wiremock::MockServer) -> Self {
-            use crate::db::auto_projects::{PlannedRepository, PlannedTask, ProjectPlan};
-            use crate::db::{organizations, users, workspace_members, workspaces};
+            use crate::db::auto_projects::PlannedRepository;
+            use crate::db::auto_projects::PlannedTask;
+            use crate::db::auto_projects::ProjectPlan;
+            use crate::db::organizations;
+            use crate::db::users;
+            use crate::db::workspace_members;
+            use crate::db::workspaces;
 
             let pool = sqlx::PgPool::connect(
                 &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
@@ -2323,8 +2363,11 @@ mod tests {
     /// post-merge finishes the task rather than asking about an empty commit.
     #[tokio::test]
     async fn a_merge_whose_commit_was_never_named_finishes_without_watching_jobs() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::MockServer;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -2395,8 +2438,10 @@ mod tests {
     /// The merged pull request GitHub answers, its head and base fixed and its
     /// merge commit `merge_commit`, if any.
     async fn serve_merged_pull(server: &wiremock::MockServer, merge_commit: Option<&str>) {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         Mock::given(method("GET"))
             .and(path("/repos/acme/shop/pulls/7"))
@@ -2544,8 +2589,9 @@ mod tests {
 
     /// GitHub refuses, and the test fails on, any request carrying `token`.
     async fn refusing(server: &wiremock::MockServer, token: &str) {
+        use wiremock::Mock;
+        use wiremock::ResponseTemplate;
         use wiremock::matchers::header;
-        use wiremock::{Mock, ResponseTemplate};
 
         Mock::given(header("authorization", format!("Bearer {token}")))
             .respond_with(ResponseTemplate::new(401))
@@ -2576,7 +2622,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoked_installation_pauses_the_task_to_reconnect_github_and_lends_no_token() {
-        use crate::services::github_app::testing::{installation_number, installed, provider};
+        use crate::services::github_app::testing::installation_number;
+        use crate::services::github_app::testing::installed;
+        use crate::services::github_app::testing::provider;
 
         let server = wiremock::MockServer::start().await;
         refusing(&server, "fallback-token").await;
@@ -2698,8 +2746,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_task_cancelled_after_its_step_was_read_is_parked_not_merged() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = wiremock::MockServer::start().await;
         Mock::given(method("GET"))
@@ -2787,8 +2837,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_continuous_integration_task_is_replaced_instead_of_waited_on() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = wiremock::MockServer::start().await;
         Mock::given(method("GET"))
