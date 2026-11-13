@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { WorkspaceTheme } from '../../types';
 import {
   FONT_MAP,
+  LEGACY_THEME_STORAGE_KEY,
   RADIUS_MAP,
   SYSTEM_DARK_QUERY,
   THEME_STORAGE_KEY,
@@ -220,17 +221,33 @@ describe('ThemeContext', () => {
       }
     });
 
-    it('ignores a theme saved by the old always-on toggle', () => {
+    it('forgets an override the system has since caught up with', () => {
       const system = systemAppearance(true);
       try {
-        localStorage.setItem('manager_theme', 'light');
+        localStorage.setItem(THEME_STORAGE_KEY, 'dark');
         render(
           <ThemeProvider>
             <TestComponent />
           </ThemeProvider>
         );
         expect(screen.getByTestId('theme')).toHaveTextContent('dark');
-        expect(localStorage.getItem('manager_theme')).toBeNull();
+        expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+      } finally {
+        system.restore();
+      }
+    });
+
+    it('ignores a theme saved by the old always-on toggle', () => {
+      const system = systemAppearance(true);
+      try {
+        localStorage.setItem(LEGACY_THEME_STORAGE_KEY, 'light');
+        render(
+          <ThemeProvider>
+            <TestComponent />
+          </ThemeProvider>
+        );
+        expect(screen.getByTestId('theme')).toHaveTextContent('dark');
+        expect(localStorage.getItem(LEGACY_THEME_STORAGE_KEY)).toBeNull();
       } finally {
         system.restore();
       }
@@ -309,7 +326,6 @@ describe('ThemeContext', () => {
 
     it('clears workspace theme', () => {
       localStorage.setItem(THEME_STORAGE_KEY, 'light');
-      // Use a properly structured theme object
       localStorage.setItem(
         'manager_workspace_theme',
         JSON.stringify({

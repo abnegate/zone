@@ -4,7 +4,7 @@ import { StaticRouter } from 'react-router-dom';
 import App from '../App';
 import { ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY } from '../api/session';
 import { TOKEN_PATTERN } from '../features/auth/utils';
-import { THEME_STORAGE_KEY } from '../shared/context/ThemeContext';
+import { SYSTEM_DARK_QUERY, THEME_STORAGE_KEY } from '../shared/context/ThemeContext';
 import {
   paintShell,
   SHELL_ATTRIBUTE,
@@ -114,6 +114,7 @@ export const config: ShellConfig = {
   attribute: SHELL_ATTRIBUTE,
   templateAttribute: SHELL_TEMPLATE_ATTRIBUTE,
   themeKey: THEME_STORAGE_KEY,
+  systemDarkQuery: SYSTEM_DARK_QUERY,
   sessionKeys: [ACCESS_TOKEN_KEY, REFRESH_TOKEN_KEY],
   routes: ROUTES,
   tokenRoutes: TOKEN_ROUTES,

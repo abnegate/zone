@@ -26,7 +26,7 @@ interface ThemeContextType {
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 export const THEME_STORAGE_KEY = 'manager_theme_override';
 export const SYSTEM_DARK_QUERY = '(prefers-color-scheme: dark)';
-const LEGACY_THEME_STORAGE_KEY = 'manager_theme';
+export const LEGACY_THEME_STORAGE_KEY = 'manager_theme';
 
 export const FONT_SIZE_PROPERTY = 'font-size';
 const WORKSPACE_THEME_STORAGE_KEY = 'manager_workspace_theme';
@@ -249,6 +249,9 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     localStorage.removeItem(WORKSPACE_THEME_STORAGE_KEY);
     localStorage.removeItem(LEGACY_THEME_STORAGE_KEY);
+    if (storedOverride(systemTheme()) === null) {
+      localStorage.removeItem(THEME_STORAGE_KEY);
+    }
   }, []);
 
   useLayoutEffect(() => {
