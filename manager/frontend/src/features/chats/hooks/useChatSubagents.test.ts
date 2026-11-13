@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, spyOn } fr
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { SubagentFrameSchema } from '../subagentSchemas';
 import type { ChatSubagent, SubagentList, SubagentStep } from '../subagentTypes';
+import { cached } from '../utils/cached';
 import { publishFrame } from '../utils/frames';
 
 const mockGetChatSubagents = mock();
@@ -626,6 +627,24 @@ describe('useChatSubagents', () => {
       });
 
       expect(result.current.steps).toEqual({});
+    });
+  });
+
+  describe('cache', () => {
+    it('draws the agents of a chat read before on its first render', () => {
+      cached.subagents.remember('chat-1', [RUNNING]);
+      mockGetChatSubagents.mockImplementation(() => new Promise(() => {}));
+
+      const { result } = renderHook(() => useChatSubagents('chat-1', false));
+
+      expect(result.current.subagents).toEqual([RUNNING]);
+    });
+
+    it('remembers the agents it reads and the ones frames bring', async () => {
+      mockGetChatSubagents.mockResolvedValue({ subagents: [RUNNING], complete: true });
+      renderHook(() => useChatSubagents('chat-1', false));
+
+      await waitFor(() => expect(cached.subagents.peek('chat-1')).toEqual([RUNNING]));
     });
   });
 });

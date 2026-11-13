@@ -27,6 +27,21 @@ const chatOf = (id: string, title: string, messages: ReturnType<typeof message>[
 
 type Listed = ReturnType<typeof chatOf>;
 
+const GARDEN_PULL_REQUEST = {
+  id: 'pr-garden',
+  provider: 'github',
+  owner: 'acme',
+  repo: 'garden',
+  number: 7,
+  url: 'https://github.com/acme/garden/pull/7',
+  title: 'Plant the tomatoes in the south bed',
+  dismissed: false,
+  created_at: new Date().toISOString(),
+  status: null,
+  writable: true,
+  credentialed: true,
+};
+
 const LIST = 'list';
 
 interface Server {
@@ -106,19 +121,31 @@ test('a listed chat opens at once from its preloaded history and reconciles behi
       : chat
   );
 
+  let pullRequestReads = 0;
+  let releasePullRequests: () => void = () => {};
+  await routeApi(page, '**/api/chats/chat-garden/pull-requests', async (route) => {
+    pullRequestReads += 1;
+    if (pullRequestReads > 1) await new Promise<void>((resolve) => (releasePullRequests = resolve));
+    await route.fulfill({ json: { pull_requests: [GARDEN_PULL_REQUEST] } });
+  });
+
   await page.goto('/chats');
   await expect.poll(() => server.fetches(garden.id)).toBe(1);
   await expect.poll(() => server.fetches(trip.id)).toBe(1);
+  await expect.poll(() => pullRequestReads).toBe(1);
 
   server.hold(garden.id);
   reconciled = true;
   await page.getByText('Garden plans', { exact: true }).click();
   await expect(page.getByText('Put them in the sunniest bed.')).toBeVisible();
+  await expect(page.getByText(GARDEN_PULL_REQUEST.title)).toBeVisible();
   await expect(page.locator('.chat-placeholder .chats-loading')).toHaveCount(0);
+  await expect.poll(() => pullRequestReads).toBe(2);
   await expect.poll(() => server.fetches(garden.id)).toBe(2);
   if (SCREENSHOT) await page.screenshot({ path: `${SCREENSHOT}-preloaded.png` });
 
   server.release(garden.id);
+  releasePullRequests();
   await expect(page.getByText('Water them every morning.')).toBeVisible();
 
   await page.getByText('Trip ideas', { exact: true }).click();

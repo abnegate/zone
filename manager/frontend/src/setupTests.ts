@@ -1,7 +1,7 @@
 import { afterEach, expect, mock, vi } from 'bun:test';
 import '@testing-library/dom';
 import { cleanup } from '@testing-library/react';
-import { histories } from './features/chats/utils/history';
+import { clearChatCaches } from './features/chats/utils/cache';
 
 if (typeof globalThis.HTMLFormElement === 'undefined') {
   globalThis.HTMLFormElement = window.HTMLFormElement;
@@ -68,7 +68,7 @@ function unstubbedConfirm(): never {
 afterEach(() => {
   vi.useRealTimers();
   cleanup();
-  histories.clear();
+  clearChatCaches();
   window.confirm = unstubbedConfirm as unknown as typeof window.confirm;
 });
 

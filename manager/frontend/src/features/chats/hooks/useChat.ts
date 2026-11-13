@@ -36,10 +36,10 @@ import {
   type WaitSettled,
 } from '../types';
 import { automated } from '../utils/automation';
+import { cached } from '../utils/cached';
 import { mergeCitations } from '../utils/citations';
 import { publishFrame } from '../utils/frames';
 import { appendHandover } from '../utils/handover';
-import { histories } from '../utils/history';
 import { requestedModel } from '../utils/providerOptions';
 
 // How many frames to hold while the chat they belong to is still loading.
@@ -243,7 +243,7 @@ export function useChat(
   draft?: SendMessageRequest
 ) {
   const [chat, setChat] = useState<ChatWithMessages | null>(() =>
-    chatId ? histories.recall(chatId) : null
+    chatId ? (cached.histories.recall(chatId) ?? null) : null
   );
   const [loading, setLoading] = useState(Boolean(chatId) && chat === null);
   const [error, setError] = useState<string | null>(null);
@@ -285,7 +285,7 @@ export function useChat(
 
   const applyTitle = useCallback((id: string, title: string): void => {
     titles.current.set(id, { title, revision: ++revision.current });
-    histories.retitle(id, title);
+    cached.histories.update(id, (remembered) => ({ ...remembered, title }));
     setChat((previous) => (previous?.id === id ? { ...previous, title } : previous));
   }, []);
 
@@ -337,7 +337,7 @@ export function useChat(
         titleCallback.current?.(updated.id, updated.title);
       } catch (err) {
         if (requestId !== requestIdRef.current) return;
-        histories.forget(chatId);
+        cached.histories.forget(chatId);
         setSynced(chatId);
         setError(err instanceof Error ? err.message : 'Failed to fetch chat');
       } finally {
@@ -352,7 +352,7 @@ export function useChat(
   useEffect(() => {
     // Swap the previous conversation out as soon as the selection changes so
     // the UI never keeps rendering chat A under chat B's selection.
-    const remembered = chatId ? histories.recall(chatId) : null;
+    const remembered = chatId ? (cached.histories.recall(chatId) ?? null) : null;
     setChat(remembered);
     setSynced(null);
     if (remembered) setLoading(false);
@@ -366,7 +366,7 @@ export function useChat(
   }, [chatId, fetchChat]);
 
   useEffect(() => {
-    if (chat) histories.remember(chat);
+    if (chat) cached.histories.remember(chat.id, chat);
   }, [chat]);
 
   const draftKey = draft === undefined ? null : JSON.stringify(draft);

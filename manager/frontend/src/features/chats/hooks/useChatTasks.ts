@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import type { ChatTask } from '../types';
+import { cached } from '../utils/cached';
 import { taskActive } from '../utils/tasks';
 import { RECORDING_SETTLE_DELAY } from './useChatPullRequests';
 
@@ -21,11 +22,16 @@ interface Reading {
 
 const NOTHING_READ: Reading = { chatId: null, tasks: [], error: null };
 
+function remembered(chatId: string | null): Reading {
+  if (!chatId) return NOTHING_READ;
+  return { chatId, tasks: cached.tasks.peek(chatId) ?? NOTHING_READ.tasks, error: null };
+}
+
 export function useChatTasks(chatId: string | null, streaming: boolean): ChatTasks {
   const [reading, setReading] = useState<Reading>(NOTHING_READ);
   const read = useRef(0);
   const wasStreaming = useRef(streaming);
-  const current = reading.chatId === chatId ? reading : NOTHING_READ;
+  const current = reading.chatId === chatId ? reading : remembered(chatId);
   const watching = streaming || current.tasks.some(taskActive);
 
   const refresh = useCallback(async () => {
@@ -37,13 +43,14 @@ export function useChatTasks(chatId: string | null, streaming: boolean): ChatTas
     try {
       const loaded = await chatsApi.getChatTasks(chatId);
       if (attempt !== read.current) return;
+      cached.tasks.remember(chatId, loaded);
       setReading({ chatId, tasks: loaded, error: null });
     } catch (failure) {
       if (attempt !== read.current) return;
       const error = failure instanceof Error ? failure.message : 'Failed to load tasks';
       setReading((last) => ({
         chatId,
-        tasks: last.chatId === chatId ? last.tasks : [],
+        tasks: last.chatId === chatId ? last.tasks : remembered(chatId).tasks,
         error,
       }));
     }
