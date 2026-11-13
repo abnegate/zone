@@ -7,6 +7,9 @@ use crate::db::reminders::PendingTurn;
 use crate::db::reminders::Sweep;
 use crate::state::AppState;
 use serde_json::json;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::task::AbortHandle;
 use tokio::time::Instant;
@@ -54,8 +57,15 @@ impl Default for Lease {
     }
 }
 
-/// Runs `turn` to completion while renewing its claim alongside it, and calls
-/// `lost` once if a renewal finds the claim gone.
+/// Whether a turn still held its claim when it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+    Kept,
+    Lost,
+}
+
+/// Runs `turn` to completion while renewing its claim alongside it, calls
+/// `lost` once if a renewal finds the claim gone, and says which it was.
 ///
 /// The renewals run as a task of their own rather than racing the turn,
 /// because the turn is never dropped: it holds the chat's queue until its
@@ -68,16 +78,29 @@ async fn renewing<Turn, Renew, Attempt, Lost>(
     renew: Renew,
     lost: Lost,
     turn: Turn,
-) -> Turn::Output
+) -> (Turn::Output, Claim)
 where
     Turn: Future,
     Renew: FnMut() -> Attempt + Send + 'static,
     Attempt: Future<Output = DbResult<bool>> + Send + 'static,
     Lost: FnOnce() + Send + 'static,
 {
-    let _renewal =
-        Renewal(tokio::spawn(heartbeat(reminder_id, renewal, renew, lost)).abort_handle());
-    turn.await
+    let gone = Arc::new(AtomicBool::new(false));
+    let noticed = gone.clone();
+    let losing = move || {
+        noticed.store(true, Ordering::SeqCst);
+        lost();
+    };
+    let renewals =
+        Renewal(tokio::spawn(heartbeat(reminder_id, renewal, renew, losing)).abort_handle());
+    let output = turn.await;
+    drop(renewals);
+    let claim = if gone.load(Ordering::SeqCst) {
+        Claim::Lost
+    } else {
+        Claim::Kept
+    };
+    (output, claim)
 }
 
 async fn heartbeat<Renew, Attempt, Lost>(
@@ -99,8 +122,8 @@ async fn heartbeat<Renew, Attempt, Lost>(
             Ok(false) => {
                 tracing::warn!(
                     %reminder_id,
-                    "A running reminder turn lost its claim; stopping it so the firing that took \
-                     over runs alone"
+                    "A running reminder turn lost its claim; stopping it and leaving the firing \
+                     owed to whichever claim runs it next"
                 );
                 lost();
                 return;
@@ -189,7 +212,7 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease) {
     let pool = state.db().clone();
     let (id, attempts, chat_id) = (turn.id, turn.attempts, turn.chat_id);
     let message_id = Uuid::new_v4();
-    renewing(
+    let (_, claim) = renewing(
         turn.reminder_id,
         lease.renewal,
         move || {
@@ -214,6 +237,12 @@ pub async fn run(state: &AppState, turn: PendingTurn, lease: Lease) {
         ),
     )
     .await;
+    // A turn stopped for losing its claim may not have delivered its firing:
+    // whichever claim takes the firing next runs it, so it stays owed and its
+    // reading, if it had one, is not this turn's to keep.
+    if claim == Claim::Lost {
+        return;
+    }
     // What this firing found becomes what the next one is compared with, and
     // the turn stays owed until it is written down. A turn that reached the
     // chat is normally finished whatever it made of the question, because its
@@ -300,6 +329,7 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::Claim;
     use super::LEASE;
     use super::RENEWAL;
     use super::renewing;
@@ -351,12 +381,13 @@ mod tests {
         });
         let (stops, stop) = stopping();
         let runs = LEASE + RENEWAL / 2;
-        let answer = renewing(Uuid::new_v4(), RENEWAL, renew, stop, async {
+        let (answer, claim) = renewing(Uuid::new_v4(), RENEWAL, renew, stop, async {
             tokio::time::sleep(runs).await;
             "answered"
         })
         .await;
         assert_eq!(answer, "answered", "the turn runs to its own end");
+        assert_eq!(claim, Claim::Kept, "a turn that kept its claim says so");
         assert_eq!(
             stops.load(Ordering::SeqCst),
             0,
@@ -401,15 +432,15 @@ mod tests {
         );
     }
 
-    /// A claim another worker took over belongs to that worker, and so does
-    /// the firing: the turn is told to stop the first time a renewal finds the
-    /// claim gone, and nothing renews it after that.
+    /// A claim that lapsed or was taken over is no longer this turn's, and nor
+    /// is the firing: the turn is told to stop the first time a renewal finds
+    /// the claim gone, says so, and nothing renews it after that.
     #[tokio::test(start_paused = true)]
     async fn a_turn_whose_claim_was_taken_over_is_stopped() {
         let (renewals, renew) = counting(|_| Ok(false));
         let (stopped, stop) = tokio::sync::oneshot::channel();
         let started = tokio::time::Instant::now();
-        let answer = renewing(
+        let (answer, claim) = renewing(
             Uuid::new_v4(),
             RENEWAL,
             renew,
@@ -425,6 +456,11 @@ mod tests {
         )
         .await;
         assert_eq!(answer, "stopped", "a superseded turn is stopped");
+        assert_eq!(
+            claim,
+            Claim::Lost,
+            "a stopped turn says its claim is gone, so its firing is left owed"
+        );
         assert_eq!(
             started.elapsed(),
             RENEWAL,

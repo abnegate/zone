@@ -577,3 +577,113 @@ async fn until_count(harness: &Harness, role: &str, count: usize) {
         messages(harness).await
     );
 }
+
+/// A turn whose claim lapsed with nobody yet taking the firing over is stopped
+/// all the same, and the firing it never delivered stays owed: the next claim
+/// is offered it again as its next attempt, and that one runs it through.
+#[tokio::test]
+async fn a_turn_stopped_for_a_lapsed_claim_leaves_its_firing_owed_for_the_next_attempt() {
+    const DELIVERED: &str = "Two dependency PRs have been red since Tuesday.";
+    const HANG: Duration = Duration::from_secs(120);
+    const SETTLED_WITHIN: Duration = Duration::from_secs(20);
+    let harness = Harness::new(
+        Some(32_768),
+        false,
+        vec![
+            answer("Never delivered.").set_delay(HANG),
+            answer(DELIVERED),
+        ],
+    )
+    .await;
+    let sweep = Sweep::Workspace(harness.workspace);
+    let lease = Lease {
+        duration: Duration::from_secs(60),
+        renewal: Duration::from_secs(1),
+    };
+
+    let user: Uuid = sqlx::query_scalar(
+        "SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND role = 'owner' \
+         AND is_active LIMIT 1",
+    )
+    .bind(harness.workspace)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the harness workspace has an owner");
+    let created = zone_server::db::reminders::create(
+        &harness.pool,
+        harness.workspace,
+        user,
+        harness.chat,
+        zone_server::db::reminders::Reminder {
+            content: "Dependency check".into(),
+            due_at: (chrono::Utc::now() + chrono::Duration::hours(1)).fixed_offset(),
+            rrule: None,
+            prompt: Some("Report any dependency PR that has been red for a week.".into()),
+            timing_mode: None,
+            time_zone: None,
+        },
+    )
+    .await
+    .expect("a prompt-bearing reminder is storable");
+    let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+    make_due(&harness, reminder).await;
+    zone_server::db::reminders::deliver_next(&harness.pool, sweep)
+        .await
+        .expect("the due firing is written down as an owed turn");
+    let claim = || async {
+        zone_server::db::reminders::claim_turn(&harness.pool, sweep, lease.duration)
+            .await
+            .unwrap()
+            .expect("the owed firing is offered")
+    };
+    let first = claim().await;
+
+    let state = common::create_test_state(harness.config.clone(), harness.pool.clone());
+    let running = tokio::spawn({
+        let state = state.clone();
+        let first = first.clone();
+        async move { run(&state, first, lease).await }
+    });
+    until_count(&harness, "user", 1).await;
+    lapse(&harness, first.id, lease).await;
+    tokio::time::timeout(SETTLED_WITHIN, running)
+        .await
+        .expect("a turn whose claim lapsed is stopped rather than left generating")
+        .expect("the stopped turn ends without panicking");
+    let still_owed = owed(&harness, reminder).await;
+    let after_stop = messages(&harness).await;
+
+    let retaken = claim().await;
+    tokio::time::timeout(SETTLED_WITHIN, run(&state, retaken.clone(), lease))
+        .await
+        .expect("the stopped turn released the chat's queue for the next attempt");
+    let stored = messages(&harness).await;
+
+    assert_eq!(
+        still_owed, 1,
+        "a turn stopped for a lapsed claim leaves its firing owed"
+    );
+    assert!(
+        after_stop
+            .iter()
+            .all(|(role, content, _)| role != "assistant" || content.is_empty()),
+        "the stopped turn ended as cancelled, with no answer: {after_stop:?}"
+    );
+    assert_eq!(retaken.id, first.id, "the same firing is offered again");
+    assert_eq!(
+        retaken.attempts,
+        first.attempts + 1,
+        "the firing is offered again as its next attempt"
+    );
+    assert!(
+        stored
+            .iter()
+            .any(|(role, content, _)| role == "assistant" && content == DELIVERED),
+        "the next attempt delivered the firing: {stored:?}"
+    );
+    assert_eq!(
+        owed(&harness, reminder).await,
+        0,
+        "the attempt that ran the firing through finished it"
+    );
+}
