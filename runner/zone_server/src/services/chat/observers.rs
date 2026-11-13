@@ -126,7 +126,7 @@ mod tests {
         }
 
         fn recorder(&self) -> Recorder {
-            Recorder::new(self.state.clone(), self.chat_id, Uuid::new_v4())
+            Recorder::new(self.state.clone(), self.chat_id, Uuid::new_v4(), Uuid::new_v4())
         }
 
         /// The chat's observers, as a turn's agent is handed them, and what

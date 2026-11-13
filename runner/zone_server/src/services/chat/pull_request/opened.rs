@@ -10,4 +10,7 @@ pub struct Opened {
     /// The source it was opened through, when the turn knows. Otherwise the
     /// workspace's source for its repository, if it has one.
     pub source_id: Option<Uuid>,
+    /// The member whose turn opened it, whom auto-fix acts as. A pull request
+    /// opened with nobody to act as is recorded without auto-fix.
+    pub opened_by: Option<Uuid>,
 }

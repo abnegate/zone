@@ -11,6 +11,10 @@ export const DISCONNECTED_HINT =
 export const UNAVAILABLE_HINT = 'GitHub is temporarily unreachable. Try again in a moment.';
 export const READ_ONLY_HINT = 'Needs write access to this workspace.';
 export const AUTO_MERGE_HINT = 'GitHub merges it once its checks and reviews pass.';
+export const AUTO_FIX_HINT =
+  'Zone starts a run to fix it whenever GitHub reports failing checks or a conflict with its base branch.';
+export const AUTO_FIXING_HINT =
+  'A run is working on its branch now, and pushes what it changes when it finishes.';
 
 export type PullRequestKind =
   | 'merged'
