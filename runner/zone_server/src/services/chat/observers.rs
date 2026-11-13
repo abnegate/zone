@@ -85,6 +85,9 @@ mod tests {
         state: AppState,
         chat_id: Uuid,
         message_id: Uuid,
+        /// The member whose turn it is. A pull request is recorded watching
+        /// itself for them, and that is a foreign key to a stored user.
+        user_id: Uuid,
     }
 
     impl Turn {
@@ -118,15 +121,29 @@ mod tests {
             .execute(&pool)
             .await
             .expect("a turn");
+            let user_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO users (id, email, password_hash, display_name) VALUES ($1, $1::text, 'test-only', 'Observer')",
+            )
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("a user");
             Self {
                 state: AppState::new(crate::state::test_config(), pool, None),
                 chat_id,
                 message_id,
+                user_id,
             }
         }
 
         fn recorder(&self) -> Recorder {
-            Recorder::new(self.state.clone(), self.chat_id, Uuid::new_v4(), Uuid::new_v4())
+            Recorder::new(
+                self.state.clone(),
+                self.chat_id,
+                Uuid::new_v4(),
+                self.user_id,
+            )
         }
 
         /// The chat's observers, as a turn's agent is handed them, and what

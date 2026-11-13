@@ -189,9 +189,13 @@ async fn start(
         head: fix.head.as_str(),
         url: &row.url,
     };
-    let Some(started) =
-        chat_pull_requests::start_auto_fix(state.db(), &claim, &task, &starting(row, fix.complaint))
-            .await?
+    let Some(started) = chat_pull_requests::start_auto_fix(
+        state.db(),
+        &claim,
+        &task,
+        &starting(row, fix.complaint),
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -251,6 +255,13 @@ impl Finished {
                 return;
             }
         };
+        // Completing a run can fail to write at all: it wants the owner's
+        // lease, and a run that lost its heartbeat matches no row. Such a run
+        // is still active whatever its status column says, and the pull
+        // request's next status read is what answers for it.
+        if run.completed_at.is_none() {
+            return;
+        }
         let content = match run.status.as_str() {
             "completed" => format!(
                 "The run fixing [{name}]({url}) finished. If GitHub still reports a problem on \

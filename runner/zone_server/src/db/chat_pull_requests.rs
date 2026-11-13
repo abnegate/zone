@@ -450,7 +450,10 @@ mod tests {
             .await
             .expect("a pull request");
 
-        assert!(!row.auto_fix, "auto-fix with no one to act as starts nothing");
+        assert!(
+            !row.auto_fix,
+            "auto-fix with no one to act as starts nothing"
+        );
         assert_eq!(row.auto_fix_by, None);
     }
 
