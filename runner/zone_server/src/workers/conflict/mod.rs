@@ -19,13 +19,13 @@
 //!   The push itself is never forced, so a branch that moved meanwhile rejects it.
 
 pub mod agent;
+pub mod credentials;
 pub mod environment;
 pub mod prompt;
 pub mod scope;
 
 use std::sync::Arc;
 
-use abnegate_secret::SecretValue;
 use abnegate_vcs::conflict::validate;
 use abnegate_vcs::resolution::{ResolutionVerdict, judge};
 use abnegate_vcs::{
@@ -34,6 +34,7 @@ use abnegate_vcs::{
 };
 
 use agent::{RepairAgent, RepairTask};
+use credentials::Credentials;
 use prompt::RepairBrief;
 use scope::RepairScope;
 
@@ -51,7 +52,6 @@ pub fn service() -> ConflictService {
 #[derive(Debug, Clone)]
 pub struct RepairRequest {
     pub remote: RepositoryUrl,
-    pub token: Option<SecretValue>,
     pub head: BranchName,
     pub base: BranchName,
     pub expected_head: Option<CommitSha>,
@@ -102,6 +102,7 @@ fn message(request: &RepairRequest) -> String {
 pub async fn repair(
     service: &ConflictService,
     repairer: &dyn RepairAgent,
+    credentials: &dyn Credentials,
     request: &RepairRequest,
 ) -> RepairOutcome {
     let mut reproduction = ConflictRequest::new(
@@ -109,8 +110,10 @@ pub async fn repair(
         request.head.clone(),
         request.base.clone(),
     );
-    if let Some(token) = &request.token {
-        reproduction = reproduction.with_token(token.clone());
+    match credentials.token().await {
+        Ok(Some(token)) => reproduction = reproduction.with_token(token),
+        Ok(None) => {}
+        Err(error) => return RepairOutcome::Failed(error),
     }
     if let Some(commit) = &request.expected_head {
         reproduction = reproduction.with_expected_head(commit.clone());
@@ -147,10 +150,8 @@ pub async fn repair(
         }),
     };
 
-    match tokio::time::timeout(agent::REPAIR_TIMEOUT, repairer.repair(&task)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return RepairOutcome::Failed(error),
-        Err(_) => return RepairOutcome::Failed("the repair ran out of time".to_string()),
+    if let Err(error) = repairer.repair(&task).await {
+        return RepairOutcome::Failed(error);
     }
 
     if let Err(error) = conflict.verify(service).await {
@@ -183,7 +184,11 @@ pub async fn repair(
         Err(error) => return RepairOutcome::Failed(error.to_string()),
     };
 
-    if let Err(error) = service.publish(&conflict, request.token.as_ref()).await {
+    let token = match credentials.token().await {
+        Ok(token) => token,
+        Err(error) => return RepairOutcome::Failed(error),
+    };
+    if let Err(error) = service.publish(&conflict, token.as_ref()).await {
         return RepairOutcome::Failed(error.to_string());
     }
 
@@ -210,10 +215,13 @@ fn read_all(conflict: &Conflict) -> Result<Vec<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_secret::SecretValue;
     use abnegate_vcs::resolution::ConflictSide;
     use async_trait::async_trait;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
 
     /// The checkout is detached at the head branch and merges the base into it,
@@ -248,6 +256,72 @@ mod tests {
             Writer(MERGED).repair(task).await?;
             std::fs::write(task.conflict.path().join("README.md"), "rewritten")
                 .map_err(|error| error.to_string())
+        }
+    }
+
+    /// Resolves properly once its duration has passed on a paused clock.
+    struct Slow(std::time::Duration);
+
+    #[async_trait]
+    impl RepairAgent for Slow {
+        async fn repair(&self, task: &RepairTask<'_>) -> Result<(), String> {
+            tokio::time::pause();
+            tokio::time::sleep(self.0).await;
+            tokio::time::resume();
+            Writer(MERGED).repair(task).await
+        }
+    }
+
+    /// A remote that needs no token.
+    struct Anonymous;
+
+    #[async_trait]
+    impl Credentials for Anonymous {
+        async fn token(&self) -> Result<Option<SecretValue>, String> {
+            Ok(None)
+        }
+    }
+
+    /// Resolves properly, and keeps whether each token was asked for before or
+    /// after it finished.
+    #[derive(Default)]
+    struct Ledger {
+        repaired: AtomicBool,
+        asked: Mutex<Vec<bool>>,
+    }
+
+    #[async_trait]
+    impl RepairAgent for Ledger {
+        async fn repair(&self, task: &RepairTask<'_>) -> Result<(), String> {
+            Writer(MERGED).repair(task).await?;
+            self.repaired.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Credentials for Ledger {
+        async fn token(&self) -> Result<Option<SecretValue>, String> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push(self.repaired.load(Ordering::SeqCst));
+            Ok(None)
+        }
+    }
+
+    const EXPIRED: &str = "the installation could not mint a token";
+
+    /// Gives the fetch its token, then refuses the push one.
+    struct Expired(AtomicBool);
+
+    #[async_trait]
+    impl Credentials for Expired {
+        async fn token(&self) -> Result<Option<SecretValue>, String> {
+            match self.0.swap(true, Ordering::SeqCst) {
+                false => Ok(None),
+                true => Err(EXPIRED.to_string()),
+            }
         }
     }
 
@@ -326,7 +400,6 @@ mod tests {
     fn request(remote: &Path) -> RepairRequest {
         RepairRequest {
             remote: RepositoryUrl::local(remote).unwrap(),
-            token: None,
             head: BranchName::parse("feature").unwrap(),
             base: BranchName::parse("main").unwrap(),
             expected_head: None,
@@ -348,7 +421,13 @@ mod tests {
         let origin = origin(false);
         let before = feature_head(origin.path());
 
-        let outcome = repair(&service(), &Writer(MERGED), &request(origin.path())).await;
+        let outcome = repair(
+            &service(),
+            &Writer(MERGED),
+            &Anonymous,
+            &request(origin.path()),
+        )
+        .await;
 
         assert_eq!(outcome, RepairOutcome::NotConflicted);
         assert_eq!(
@@ -363,7 +442,13 @@ mod tests {
         let origin = origin(true);
         let before = feature_head(origin.path());
 
-        let outcome = repair(&service(), &Writer(MERGED), &request(origin.path())).await;
+        let outcome = repair(
+            &service(),
+            &Writer(MERGED),
+            &Anonymous,
+            &request(origin.path()),
+        )
+        .await;
 
         match &outcome {
             RepairOutcome::Repaired { files, commit } => {
@@ -387,6 +472,61 @@ mod tests {
         assert!(published.contains("let mainline = 1;"));
     }
 
+    /// A repair is bounded by its turns, not by the clock: one that takes an hour still lands.
+    #[tokio::test]
+    async fn a_repair_that_takes_an_hour_is_still_published() {
+        let origin = origin(true);
+        let before = feature_head(origin.path());
+
+        let outcome = repair(
+            &service(),
+            &Slow(std::time::Duration::from_secs(60 * 60)),
+            &Anonymous,
+            &request(origin.path()),
+        )
+        .await;
+
+        assert!(
+            outcome.repaired(),
+            "a slow repair must still land, got {outcome:?}"
+        );
+        assert_ne!(feature_head(origin.path()), before);
+    }
+
+    /// An installation token outlives an hour-long repair only if the push asks
+    /// for its own rather than reusing the one the checkout was fetched with.
+    #[tokio::test]
+    async fn the_push_presents_a_token_asked_for_after_the_repair() {
+        let origin = origin(true);
+        let ledger = Ledger::default();
+
+        let outcome = repair(&service(), &ledger, &ledger, &request(origin.path())).await;
+
+        assert!(outcome.repaired(), "{outcome:?}");
+        assert_eq!(
+            *ledger.asked.lock().unwrap(),
+            [false, true],
+            "the fetch asks for a token before the repair and the push asks again after it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_that_cannot_be_had_after_the_repair_publishes_nothing() {
+        let origin = origin(true);
+        let before = feature_head(origin.path());
+
+        let outcome = repair(
+            &service(),
+            &Writer(MERGED),
+            &Expired(AtomicBool::new(false)),
+            &request(origin.path()),
+        )
+        .await;
+
+        assert_eq!(outcome, RepairOutcome::Failed(EXPIRED.to_string()));
+        assert_eq!(feature_head(origin.path()), before);
+    }
+
     #[tokio::test]
     async fn a_resolution_that_discards_one_side_is_rejected_and_never_pushed() {
         for (resolution, discarded) in [
@@ -396,7 +536,13 @@ mod tests {
             let origin = origin(true);
             let before = feature_head(origin.path());
 
-            let outcome = repair(&service(), &Writer(resolution), &request(origin.path())).await;
+            let outcome = repair(
+                &service(),
+                &Writer(resolution),
+                &Anonymous,
+                &request(origin.path()),
+            )
+            .await;
 
             match &outcome {
                 RepairOutcome::Rejected { path, verdict } => {
@@ -420,7 +566,7 @@ mod tests {
         let origin = origin(true);
         let before = feature_head(origin.path());
 
-        let outcome = repair(&service(), &Idle, &request(origin.path())).await;
+        let outcome = repair(&service(), &Idle, &Anonymous, &request(origin.path())).await;
 
         match &outcome {
             RepairOutcome::Rejected { verdict, .. } => {
@@ -436,7 +582,7 @@ mod tests {
         let origin = origin(true);
         let before = feature_head(origin.path());
 
-        let outcome = repair(&service(), &Wanderer, &request(origin.path())).await;
+        let outcome = repair(&service(), &Wanderer, &Anonymous, &request(origin.path())).await;
 
         assert_eq!(
             outcome,
@@ -453,7 +599,7 @@ mod tests {
         request.expected_head =
             Some(CommitSha::parse("0123456789abcdef0123456789abcdef01234567").unwrap());
 
-        let outcome = repair(&service(), &Writer(MERGED), &request).await;
+        let outcome = repair(&service(), &Writer(MERGED), &Anonymous, &request).await;
 
         match outcome {
             RepairOutcome::Failed(reason) => assert!(

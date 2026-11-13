@@ -1149,8 +1149,8 @@ const STOPPED_BEFORE_ANSWERING: &str = "[Stopped before answering]";
 /// waiting on the reader rather than stopped.
 const AWAITING_ANSWER: &str = "[Waiting for your answer]";
 
-/// The same again, for a turn whose wait was cut short by cancellation, a lost
-/// lease or the turn's own deadline. It stopped waiting rather than gave up,
+/// The same again, for a turn whose wait was cut short by cancellation or a lost
+/// lease. It stopped waiting rather than gave up,
 /// and the two read very differently to whoever comes back to the chat.
 const STOPPED_AFTER_WAITING: &str = "[Stopped while waiting]";
 
@@ -1180,9 +1180,6 @@ fn leave_unfinished(tool_calls: &mut [ToolCallRecord]) {
 
 /// Another writer took the chat's lease, so this turn may no longer persist.
 const OWNERSHIP_LOST: &str = "Chat generation ownership was lost";
-
-/// The turn's own wall clock ran out, wherever it was spent.
-const GENERATION_TIMED_OUT: &str = "Response generation timed out";
 
 /// What a turn that produced neither prose nor an image is stored as.
 ///
@@ -1267,33 +1264,28 @@ enum WaitEnd {
     Settled(Outcome),
     Cancelled,
     Lost,
-    Expired,
 }
 
-/// The first of the four things that can end a wait.
+/// The first of the three things that can end a wait.
 ///
 /// Cancellation and the lease guard are passed in rather than awaited inside
 /// the turn's own event arm, where neither would ever be reached: those arms
 /// are biased and only re-read when the select is re-entered. It matters most
 /// to the turn a disconnected socket leaves running, where a reconnected
-/// client's cancel is the only thing that can stop the wait before the turn's
-/// own clock does.
+/// client's cancel is the only thing that can stop the wait before it settles.
 ///
-/// Polled in the order written: an outcome landing in the same tick as the
-/// deadline has happened, and reporting it as a timeout would tell the model
-/// nothing had.
+/// Polled in the order written: an outcome landing in the same tick as a stop
+/// has happened, and dropping it would tell the model nothing had.
 async fn settle_wait(
     outcome: impl Future<Output = Outcome>,
     lost: impl Future<Output = ()>,
     cancel: &mut broadcast::Receiver<()>,
-    stream_deadline: tokio::time::Instant,
 ) -> WaitEnd {
     tokio::select! {
         biased;
         outcome = outcome => WaitEnd::Settled(outcome),
         () = lost => WaitEnd::Lost,
         _ = cancel.recv() => WaitEnd::Cancelled,
-        _ = tokio::time::sleep_until(stream_deadline) => WaitEnd::Expired,
     }
 }
 
@@ -1824,14 +1816,6 @@ async fn resolve_generation_source(
         store,
     )
     .await
-}
-
-fn generation_deadline(
-    timeout: Duration,
-) -> Result<tokio::time::Instant, Box<dyn std::error::Error + Send + Sync>> {
-    tokio::time::Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| "Chat generation deadline is not representable".into())
 }
 
 async fn watch_lease(
@@ -2810,17 +2794,6 @@ async fn handle_send_message(
             return false;
         }
     };
-    if generation_deadline(state.config().chat.timeout).is_err() {
-        let _ = session.close().await;
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: "Chat generation deadline is not representable".into(),
-            },
-        )
-        .await;
-        return false;
-    }
     crate::agent::ApprovalPolicy::register(chat_id, request.approvals.clone());
     let mut jobs: Vec<String> = Vec::new();
     let preparation = tokio::select! {
@@ -3008,9 +2981,33 @@ pub(crate) async fn run_turn(
     content: &str,
     metadata: Option<serde_json::Value>,
 ) -> Uuid {
+    let message_id = Uuid::new_v4();
+    run_turn_as(
+        state,
+        message_id,
+        chat_id,
+        workspace_id,
+        user_id,
+        content,
+        metadata,
+    )
+    .await;
+    message_id
+}
+
+/// [`run_turn`] with its answer's id chosen by the caller, so the caller can
+/// stop this turn and no other through [`cancel_turn`] while it runs.
+pub(crate) async fn run_turn_as(
+    state: &AppState,
+    message_id: Uuid,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+) {
     let stream = ChatStream::of(chat_id);
-    let generation = Generation::new(chat_id);
-    let message_id = generation.message_id;
+    let generation = Generation::registered(chat_id, message_id);
     handle_send_message(
         state,
         &stream,
@@ -3035,7 +3032,16 @@ pub(crate) async fn run_turn(
         Some(None) => announce(&stream, None).await,
         None => {}
     }
-    message_id
+}
+
+/// Stops the one turn answering under `message_id` the way a person's Stop
+/// does: it ends as a cancelled turn and releases the chat's queue on its way
+/// out, where dropping it part way would leave the queue held. A turn already
+/// over has nothing left to stop.
+pub(crate) fn cancel_turn(chat_id: Uuid, message_id: Uuid) {
+    if let Some(cancellation) = CHAT_CANCELLATIONS.get(&(chat_id, message_id)) {
+        let _ = cancellation.send(());
+    }
 }
 
 async fn prepare_message(
@@ -3663,7 +3669,6 @@ async fn handle_chat_generation(
         endpoint,
         stop,
         mut budget,
-        timeout,
         environment: _,
         findings: _,
         memory: _,
@@ -3701,7 +3706,6 @@ async fn handle_chat_generation(
         .flatten();
     let mut token_filter = TokenFilter::new(stop);
     let assistant_message_id = generation.message_id;
-    let stream_deadline = generation_deadline(timeout)?;
     if generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
@@ -3716,7 +3720,7 @@ async fn handle_chat_generation(
         }),
     );
     let observer: Arc<dyn Observer> = Arc::new(Observers::new(
-        Recorder::new(state.clone(), chat_id, workspace_id),
+        Recorder::new(state.clone(), chat_id, workspace_id, user_id),
         tracker,
     ));
     let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
@@ -3783,7 +3787,6 @@ async fn handle_chat_generation(
     let told = full_content.len();
 
     loop {
-        wait::set_ceiling(ToolSession::Chat(chat_id), stream_deadline);
         let written = (full_content.len(), tool_calls.len());
         let round = agent::run_with_context(
             AgentRun {
@@ -3817,12 +3820,6 @@ async fn handle_chat_generation(
                 _ = generation.cancel.recv() => {
                     cancelled = true;
                     tracing::debug!("Stream cancelled for message {}", assistant_message_id);
-                    break;
-                }
-
-                _ = tokio::time::sleep_until(stream_deadline) => {
-                    tracing::warn!("LLM stream timeout for chat {}, message {}", chat_id, assistant_message_id);
-                    failure = Some(GENERATION_TIMED_OUT.to_string());
                     break;
                 }
 
@@ -4172,12 +4169,11 @@ async fn handle_chat_generation(
             continue;
         }
         if let Some(cause) = handing.take() {
-            let remaining = stream_deadline.saturating_duration_since(tokio::time::Instant::now());
             let moved = match handover.as_mut() {
                 Some(handover) if !cancelled => {
                     observed.record(state, handover.login()).await;
                     let session = pinned.as_ref().and_then(|pinned| pinned.id());
-                    handover.next(state, &cause, session, remaining).await
+                    handover.next(state, &cause, session).await
                 }
                 _ => Err(None),
             };
@@ -4260,7 +4256,7 @@ async fn handle_chat_generation(
                 model = repicked;
             }
             llm_client = llm_client.with_backend(crate::services::backend::effort(
-                crate::services::backend::ahead_of(switch.backend.clone(), remaining),
+                switch.backend.clone(),
                 effort,
             ));
             llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
@@ -4308,7 +4304,6 @@ async fn handle_chat_generation(
             ),
             session.guard.lost(),
             &mut generation.cancel,
-            stream_deadline,
         )
         .await
         {
@@ -4319,10 +4314,6 @@ async fn handle_chat_generation(
             }
             WaitEnd::Lost => {
                 failure = Some(OWNERSHIP_LOST.to_string());
-                break;
-            }
-            WaitEnd::Expired => {
-                failure = Some(GENERATION_TIMED_OUT.to_string());
                 break;
             }
         };
@@ -8092,12 +8083,6 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
-    fn generation_deadlines_accept_normal_timeouts_and_reject_overflow() {
-        assert!(generation_deadline(Duration::from_secs(30)).is_ok());
-        assert!(generation_deadline(Duration::MAX).is_err());
-    }
-
-    #[test]
     fn queued_generation_cannot_replace_the_active_approval_gate() {
         let chat = Uuid::new_v4();
         let active = crate::agent::ApprovalPolicy::required(crate::agent::ApprovalGate::new());
@@ -9613,22 +9598,12 @@ cat 'DIR/reply.jsonl'
         broadcast::channel(1)
     }
 
-    fn unreachable_deadline() -> tokio::time::Instant {
-        tokio::time::Instant::now() + Duration::from_secs(3600)
-    }
-
     #[tokio::test]
     async fn a_cancel_during_a_wait_stops_it() {
         let (sender, mut cancel) = cancellation();
         sender.send(()).unwrap();
 
-        let end = settle_wait(
-            std::future::pending(),
-            std::future::pending(),
-            &mut cancel,
-            unreachable_deadline(),
-        )
-        .await;
+        let end = settle_wait(std::future::pending(), std::future::pending(), &mut cancel).await;
         assert_eq!(
             end,
             WaitEnd::Cancelled,
@@ -9637,35 +9612,11 @@ cat 'DIR/reply.jsonl'
     }
 
     #[tokio::test]
-    async fn a_wait_the_turn_has_no_time_left_for_ends_the_turn() {
-        let (_sender, mut cancel) = cancellation();
-
-        let end = settle_wait(
-            std::future::pending(),
-            std::future::pending(),
-            &mut cancel,
-            tokio::time::Instant::now(),
-        )
-        .await;
-        assert_eq!(
-            end,
-            WaitEnd::Expired,
-            "a wait clamped by the turn's deadline times out rather than hanging"
-        );
-    }
-
-    #[tokio::test]
     async fn a_lost_lease_during_a_wait_outranks_a_cancel() {
         let (sender, mut cancel) = cancellation();
         sender.send(()).unwrap();
 
-        let end = settle_wait(
-            std::future::pending(),
-            std::future::ready(()),
-            &mut cancel,
-            tokio::time::Instant::now(),
-        )
-        .await;
+        let end = settle_wait(std::future::pending(), std::future::ready(()), &mut cancel).await;
         assert_eq!(end, WaitEnd::Lost);
     }
 
@@ -9679,13 +9630,12 @@ cat 'DIR/reply.jsonl'
             std::future::ready(outcome.clone()),
             std::future::ready(()),
             &mut cancel,
-            tokio::time::Instant::now(),
         )
         .await;
         assert_eq!(
             end,
             WaitEnd::Settled(outcome),
-            "a settle in the same tick as the deadline is not a timeout"
+            "a settle in the same tick as a stop is still the outcome"
         );
     }
 

@@ -24,9 +24,21 @@ const remove = mock();
 const reconnect = mock();
 const workspace = mock();
 const updateWorkspace = mock();
+const providers = mock();
+const importServers = mock();
 
 mock.module('../../../../api/mcp', () => ({
-  mcpApi: { list, create, update, remove, reconnect, workspace, updateWorkspace },
+  mcpApi: {
+    list,
+    create,
+    update,
+    remove,
+    reconnect,
+    workspace,
+    updateWorkspace,
+    providers,
+    import: importServers,
+  },
 }));
 
 let useMcpServers: typeof import('./useMcpServers').useMcpServers;
@@ -259,6 +271,55 @@ describe('useMcpServers', () => {
     expect(create).toHaveBeenNthCalledWith(1, 'org-1', requests[0]);
     expect(create).toHaveBeenNthCalledWith(2, 'org-1', requests[1]);
     expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it("imports each provider's chosen servers and rereads the list once", async () => {
+    const a = server('a');
+    const b = server('b');
+    importServers.mockResolvedValueOnce({ created: [a], failures: [] }).mockResolvedValueOnce({
+      created: [b],
+      failures: [{ name: 'c', message: 'A server with this name already exists' }],
+    });
+    const { result } = await renderLoaded();
+
+    expect(
+      await result.current.importProviders([
+        { provider: 'claude_code', label: 'Claude Code', servers: ['a'] },
+        { provider: 'codex', label: 'Codex', servers: ['b', 'c'] },
+        { provider: 'openai', label: 'OpenAI', servers: [] },
+      ])
+    ).toEqual({
+      created: [a, b],
+      failures: [{ name: 'c', message: 'A server with this name already exists' }],
+    });
+
+    expect(importServers).toHaveBeenCalledTimes(2);
+    expect(importServers).toHaveBeenNthCalledWith(1, 'org-1', {
+      provider: 'claude_code',
+      servers: ['a'],
+    });
+    expect(importServers).toHaveBeenNthCalledWith(2, 'org-1', {
+      provider: 'codex',
+      servers: ['b', 'c'],
+    });
+    expect(list).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports every server of a provider whose import never answered', async () => {
+    importServers.mockRejectedValueOnce(new Error('Failed to import the MCP servers: 503'));
+    const { result } = await renderLoaded();
+
+    expect(
+      await result.current.importProviders([
+        { provider: 'codex', label: 'Codex', servers: ['a', 'b'] },
+      ])
+    ).toEqual({
+      created: [],
+      failures: [
+        { name: 'Codex: a', message: 'Failed to import the MCP servers: 503' },
+        { name: 'Codex: b', message: 'Failed to import the MCP servers: 503' },
+      ],
+    });
   });
 
   it('polls every interval while a server is connecting and stops once it connects', async () => {

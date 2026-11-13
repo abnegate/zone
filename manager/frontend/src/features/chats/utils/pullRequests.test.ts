@@ -52,6 +52,19 @@ describe('pull request kinds', () => {
     expect(pullRequestKind(pullRequest({ checks: 'none' }))).toBe('open');
   });
 
+  it('marks a conflicted branch as conflicted whatever its checks say', () => {
+    expect(pullRequestKind(pullRequest({ mergeable: 'conflicted', checks: 'passing' }))).toBe(
+      'conflicted'
+    );
+    expect(pullRequestKind(pullRequest({ mergeable: 'conflicted', checks: 'failing' }))).toBe(
+      'conflicted'
+    );
+    expect(pullRequestKind(pullRequest({ mergeable: 'conflicted', draft: true }))).toBe('draft');
+    expect(pullRequestKind(pullRequest({ mergeable: 'conflicted', state: 'merged' }))).toBe(
+      'merged'
+    );
+  });
+
   it('dots only an open, ready pull request whose mergeability is known', () => {
     expect(mergeReading(pullRequest({ mergeable: 'clean' }).status)?.signal).toBe('ready');
     expect(mergeReading(pullRequest({ mergeable: 'behind' }).status)?.signal).toBe('waiting');

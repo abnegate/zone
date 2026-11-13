@@ -481,7 +481,7 @@ mod tests {
         two_hours_pass(&project, task).await;
 
         project.move_to(task, tasks::CREATED).await;
-        let admitted = tasks::create_unattended_task_run(&project.pool, task, project.actor)
+        let admitted = tasks::create_unattended_task_run(&project.pool, task, project.actor, None)
             .await
             .expect("the admission");
         let running = scanned(&project).await;

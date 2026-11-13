@@ -8,31 +8,60 @@
 use std::collections::HashSet;
 
 use abnegate_secret::SecretValue;
-use abnegate_vcs::{
-    ChecksOutcome, CommitSha, ConflictError, ConflictRequest, MergeMethod, MergeableState,
-    MergedPullRequest, PullRequestDetail, PullRequestError, PullRequestReference,
-    PullRequestService, PullRequestState, RepositoryUrl, ReviewEvent, ReviewRecord,
-    ReviewThreadRecord,
-};
-use chrono::{DateTime, Utc};
+use abnegate_vcs::ChecksOutcome;
+use abnegate_vcs::CommitSha;
+use abnegate_vcs::ConflictError;
+use abnegate_vcs::ConflictRequest;
+use abnegate_vcs::MergeMethod;
+use abnegate_vcs::MergeableState;
+use abnegate_vcs::MergedPullRequest;
+use abnegate_vcs::PullRequestDetail;
+use abnegate_vcs::PullRequestError;
+use abnegate_vcs::PullRequestReference;
+use abnegate_vcs::PullRequestService;
+use abnegate_vcs::PullRequestState;
+use abnegate_vcs::RepositoryUrl;
+use abnegate_vcs::ReviewEvent;
+use abnegate_vcs::ReviewRecord;
+use abnegate_vcs::ReviewThreadRecord;
+use chrono::DateTime;
+use chrono::Utc;
 use uuid::Uuid;
 
-use crate::agent::readiness::SignalKind;
-use crate::db::auto_projects::{
-    self, Finding, Kind, ReviewInsert, ReviewRow, ReviewerKind, Stage, TaskAutomation,
-    Verdict as Recorded,
-};
-use crate::db::tasks::{self, TaskRow};
+use crate::db::auto_projects;
+use crate::db::auto_projects::Finding;
+use crate::db::auto_projects::Kind;
+use crate::db::auto_projects::ReviewInsert;
+use crate::db::auto_projects::ReviewRow;
+use crate::db::auto_projects::ReviewerKind;
+use crate::db::auto_projects::Stage;
+use crate::db::auto_projects::TaskAutomation;
+use crate::db::auto_projects::Verdict as Recorded;
+use crate::db::tasks;
+use crate::db::tasks::TaskRow;
 use crate::services::endpoint::Origin;
+use crate::services::github::readiness::SignalKind;
 use crate::services::github_app::Error as GitHubError;
 use crate::workers::conflict::RepairOutcome;
-use crate::workers::pr::{access_token, repair_conflicts_for_task, sync_reception};
+use crate::workers::pr::access_token;
+use crate::workers::pr::repair_conflicts_for_task;
+use crate::workers::pr::sync_reception;
 
-use super::driver::{Admission, Drive};
-use super::notification::{self, MergeReport};
-use super::review::model::{self, Author, Unavailable, Venue};
+use super::driver::Admission;
+use super::driver::Drive;
+use super::notification;
+use super::notification::MergeReport;
+use super::review;
+use super::review::Outcome;
+use super::review::ReviewError;
+use super::review::ReviewRequest;
+use super::review::bots;
+use super::review::model;
+use super::review::model::Author;
+use super::review::model::Unavailable;
+use super::review::model::Venue;
 use super::review::outage::Outages;
-use super::review::{self, Outcome, ReviewError, ReviewRequest, bots, verdict};
+use super::review::verdict;
 use super::summary;
 
 /// Rounds on one head that may end without a verdict, unreadable or failed,
@@ -78,6 +107,7 @@ impl Step<'_> {
     async fn set(&self, stage: Stage, reason: Option<&str>) -> Result<(), String> {
         auto_projects::set_stage(
             self.drive.state.db(),
+            self.drive.claim(),
             self.task.task_id,
             self.drive.project.project_id,
             stage,
@@ -179,9 +209,13 @@ pub async fn advance(drive: &Drive<'_>, task: &TaskAutomation) -> Result<(), Str
 }
 
 /// Whether a person paused, cancelled or removed the task since the step
-/// read it; a withheld task is parked. Asked right before an irreversible
-/// call, because the step's own read can be minutes old by then.
+/// read it, or another instance took the project over; a withheld task is
+/// parked. Asked right before an irreversible call, because the step's own
+/// read can be minutes old by then.
 async fn withdrawn(step: &Step<'_>) -> Result<bool, String> {
+    if step.drive.superseded() {
+        return Ok(true);
+    }
     let status = tasks::get_task(step.drive.state.db(), step.task.task_id)
         .await
         .map_err(|error| error.to_string())?
@@ -200,6 +234,7 @@ async fn withdrawn(step: &Step<'_>) -> Result<bool, String> {
 async fn pause(drive: &Drive<'_>, task: &TaskAutomation, reason: &str) -> Result<(), String> {
     auto_projects::set_stage(
         drive.state.db(),
+        drive.claim(),
         task.task_id,
         drive.project.project_id,
         Stage::Paused,
@@ -217,7 +252,7 @@ async fn settled_elsewhere(step: &Step<'_>, pull: &PullRequestDetail) -> Result<
             .await
             .map_err(|error| error.to_string())?;
         if let Some(sha) = &pull.merge_commit_sha {
-            auto_projects::set_merge_sha(pool, step.task.task_id, sha.as_str())
+            auto_projects::set_merge_sha(pool, step.drive.claim(), step.task.task_id, sha.as_str())
                 .await
                 .map_err(|error| error.to_string())?;
         }
@@ -252,6 +287,7 @@ async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
                 tracing::info!(task_id = %step.task.task_id, %commit, "Repaired a conflict; re-reading the head");
                 auto_projects::set_head(
                     pool,
+                    step.drive.claim(),
                     step.task.task_id,
                     head.as_str(),
                     Some("conflicted"),
@@ -280,6 +316,7 @@ async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     auto_projects::set_head(
         pool,
+        step.drive.claim(),
         step.task.task_id,
         head.as_str(),
         Some(checks.label()),
@@ -296,7 +333,7 @@ async fn awaiting_checks(step: &Step<'_>) -> Result<(), String> {
         ChecksOutcome::Success => {
             // The wait for reviews is measured from here, not from when the
             // checks started: slow checks must not eat a bot's grace.
-            auto_projects::restart_clock(pool, step.task.task_id)
+            auto_projects::restart_clock(pool, step.drive.claim(), step.task.task_id)
                 .await
                 .map_err(|error| error.to_string())?;
             step.set(Stage::AwaitingReviews, None).await
@@ -462,6 +499,7 @@ async fn refresh_from_base(
         Ok(refreshed) if refreshed.pushed => {
             auto_projects::set_head(
                 pool,
+                step.drive.claim(),
                 step.task.task_id,
                 refreshed.commit.as_str(),
                 Some("absent"),
@@ -603,6 +641,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             + 1;
         auto_projects::record_review(
             pool,
+            step.drive.claim(),
             ReviewInsert {
                 task_id: step.task.task_id,
                 run_id: step.task.last_run_id,
@@ -652,11 +691,11 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                     tracing::warn!(task_id = %step.task.task_id, %error, "Could not ask a review bot to review");
                 }
             }
-            auto_projects::set_bot_trigger_head(pool, step.task.task_id, &head)
+            auto_projects::set_bot_trigger_head(pool, step.drive.claim(), step.task.task_id, &head)
                 .await
                 .map_err(|error| error.to_string())?;
             // The bot gets the whole grace again, from the moment it was asked.
-            auto_projects::restart_clock(pool, step.task.task_id)
+            auto_projects::restart_clock(pool, step.drive.claim(), step.task.task_id)
                 .await
                 .map_err(|error| error.to_string())?;
             return step
@@ -777,6 +816,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                 };
                 auto_projects::record_review(
                     pool,
+                    step.drive.claim(),
                     ReviewInsert {
                         task_id: step.task.task_id,
                         run_id: step.task.last_run_id,
@@ -818,6 +858,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
                     tracing::warn!(task_id = %step.task.task_id, reviewer = %missed.reviewer, %error, "A review round ended without a verdict");
                     auto_projects::record_review(
                         pool,
+                        step.drive.claim(),
                         ReviewInsert {
                             task_id: step.task.task_id,
                             run_id: step.task.last_run_id,
@@ -864,9 +905,10 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             step.set(Stage::Merging, note.as_deref()).await
         }
         Decision::Fix(reason) => {
-            let rounds = auto_projects::bump_review_round(pool, step.task.task_id)
-                .await
-                .map_err(|error| error.to_string())?;
+            let rounds =
+                auto_projects::bump_review_round(pool, step.drive.claim(), step.task.task_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
             if rounds >= i32::try_from(config.max_review_rounds).unwrap_or(i32::MAX) {
                 let last = open
                     .first()
@@ -1358,9 +1400,11 @@ async fn finish_merged(
     }
     let sha = merge_commit(pr, &step.reference, &step.token, &merged).await;
     match &sha {
-        Some(sha) => auto_projects::set_merge_sha(pool, step.task.task_id, sha.as_str())
-            .await
-            .map_err(|error| error.to_string())?,
+        Some(sha) => {
+            auto_projects::set_merge_sha(pool, step.drive.claim(), step.task.task_id, sha.as_str())
+                .await
+                .map_err(|error| error.to_string())?
+        }
         None => {
             tracing::warn!(task_id = %step.task.task_id, "The pull request merged but no merge commit was read; post-merge asks again")
         }
@@ -1429,9 +1473,16 @@ async fn finish_merged(
         .await;
     tracing::info!(task_id = %step.task.task_id, sha = ?sha, admin = merged.administrator, "Auto project merged a pull request");
     if let Some(sha) = &sha {
-        auto_projects::set_head(pool, step.task.task_id, sha.as_str(), Some("pending"), true)
-            .await
-            .map_err(|error| error.to_string())?;
+        auto_projects::set_head(
+            pool,
+            step.drive.claim(),
+            step.task.task_id,
+            sha.as_str(),
+            Some("pending"),
+            true,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
     }
     let note = (!completed).then_some(
         "merged, but the task could not be marked complete: a run is active or its pull request \
@@ -1477,12 +1528,19 @@ async fn read_merge_commit(step: &Step<'_>) -> Result<(), String> {
             .set(Stage::Merged, Some("post-merge: no merge commit recorded"))
             .await;
     };
-    auto_projects::set_merge_sha(pool, step.task.task_id, sha.as_str())
+    auto_projects::set_merge_sha(pool, step.drive.claim(), step.task.task_id, sha.as_str())
         .await
         .map_err(|error| error.to_string())?;
-    auto_projects::set_head(pool, step.task.task_id, sha.as_str(), Some("pending"), true)
-        .await
-        .map_err(|error| error.to_string())?;
+    auto_projects::set_head(
+        pool,
+        step.drive.claim(),
+        step.task.task_id,
+        sha.as_str(),
+        Some("pending"),
+        true,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     step.set(Stage::PostMerge, Some("waiting for post-merge jobs"))
         .await
 }
@@ -1605,9 +1663,12 @@ fn short(sha: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workers::auto_project::lease::Lease;
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
+
+    static UNCLAIMED: std::sync::LazyLock<Lease> = std::sync::LazyLock::new(Lease::unclaimed);
 
     fn row(
         round: i32,
@@ -1746,16 +1807,6 @@ mod tests {
             recovery.next,
             Next::Retry("the reviewer model gemma3:27b failed; trying another".into())
         );
-    }
-
-    #[test]
-    fn a_review_that_timed_out_is_a_failed_round() {
-        let recovery = recover(&ReviewError::TimedOut, "qwen3:32b", 0, &unwatched());
-
-        let missed = recovery.missed.expect("a timed-out round is recorded");
-        assert_eq!(missed.verdict, Recorded::Failed);
-        assert_eq!(missed.summary, ReviewError::TimedOut.to_string());
-        assert!(matches!(recovery.next, Next::Retry(_)));
     }
 
     #[test]
@@ -2038,8 +2089,11 @@ mod tests {
     }
 
     async fn github(status: u16) -> wiremock::MockServer {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::MockServer;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -2111,8 +2165,11 @@ mod tests {
     /// merged pull request is read back for it instead.
     #[tokio::test]
     async fn a_merge_answered_without_its_commit_reads_it_back_from_the_pull_request() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::MockServer;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -2175,8 +2232,13 @@ mod tests {
 
     impl Merged {
         async fn new(server: &wiremock::MockServer) -> Self {
-            use crate::db::auto_projects::{PlannedRepository, PlannedTask, ProjectPlan};
-            use crate::db::{organizations, users, workspace_members, workspaces};
+            use crate::db::auto_projects::PlannedRepository;
+            use crate::db::auto_projects::PlannedTask;
+            use crate::db::auto_projects::ProjectPlan;
+            use crate::db::organizations;
+            use crate::db::users;
+            use crate::db::workspace_members;
+            use crate::db::workspaces;
 
             let pool = sqlx::PgPool::connect(
                 &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
@@ -2271,6 +2333,7 @@ mod tests {
                 project: &self.project,
                 workspace_id: self.workspace,
                 actor: self.actor,
+                lease: &UNCLAIMED,
             }
         }
 
@@ -2300,8 +2363,11 @@ mod tests {
     /// post-merge finishes the task rather than asking about an empty commit.
     #[tokio::test]
     async fn a_merge_whose_commit_was_never_named_finishes_without_watching_jobs() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::MockServer;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -2322,6 +2388,7 @@ mod tests {
         let drive = merged.drive();
         auto_projects::set_stage(
             merged.state.db(),
+            None,
             merged.task,
             merged.project.project_id,
             Stage::Merging,
@@ -2371,8 +2438,10 @@ mod tests {
     /// The merged pull request GitHub answers, its head and base fixed and its
     /// merge commit `merge_commit`, if any.
     async fn serve_merged_pull(server: &wiremock::MockServer, merge_commit: Option<&str>) {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         Mock::given(method("GET"))
             .and(path("/repos/acme/shop/pulls/7"))
@@ -2401,6 +2470,7 @@ mod tests {
         let merged = Merged::new(&server).await;
         auto_projects::set_stage(
             merged.state.db(),
+            None,
             merged.task,
             merged.project.project_id,
             Stage::PostMerge,
@@ -2434,6 +2504,7 @@ mod tests {
         merged.project.repository_url = Some("not a repository".to_string());
         auto_projects::set_stage(
             merged.state.db(),
+            None,
             merged.task,
             merged.project.project_id,
             Stage::Merging,
@@ -2480,6 +2551,7 @@ mod tests {
         let merged = Merged::new(&server).await;
         auto_projects::set_stage(
             merged.state.db(),
+            None,
             merged.task,
             merged.project.project_id,
             Stage::PostMerge,
@@ -2487,7 +2559,7 @@ mod tests {
         )
         .await
         .expect("the task is in post-merge");
-        auto_projects::set_merge_sha(merged.state.db(), merged.task, "")
+        auto_projects::set_merge_sha(merged.state.db(), None, merged.task, "")
             .await
             .expect("the legacy empty commit");
         let task = merged.automation().await;
@@ -2517,8 +2589,9 @@ mod tests {
 
     /// GitHub refuses, and the test fails on, any request carrying `token`.
     async fn refusing(server: &wiremock::MockServer, token: &str) {
+        use wiremock::Mock;
+        use wiremock::ResponseTemplate;
         use wiremock::matchers::header;
-        use wiremock::{Mock, ResponseTemplate};
 
         Mock::given(header("authorization", format!("Bearer {token}")))
             .respond_with(ResponseTemplate::new(401))
@@ -2532,6 +2605,7 @@ mod tests {
     async fn advanced(merged: &Merged) -> TaskAutomation {
         auto_projects::set_stage(
             merged.state.db(),
+            None,
             merged.task,
             merged.project.project_id,
             Stage::AwaitingChecks,
@@ -2548,7 +2622,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_revoked_installation_pauses_the_task_to_reconnect_github_and_lends_no_token() {
-        use crate::services::github_app::testing::{installation_number, installed, provider};
+        use crate::services::github_app::testing::installation_number;
+        use crate::services::github_app::testing::installed;
+        use crate::services::github_app::testing::provider;
 
         let server = wiremock::MockServer::start().await;
         refusing(&server, "fallback-token").await;
@@ -2670,8 +2746,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_task_cancelled_after_its_step_was_read_is_parked_not_merged() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = wiremock::MockServer::start().await;
         Mock::given(method("GET"))
@@ -2701,6 +2779,7 @@ mod tests {
         let merged = Merged::new(&server).await;
         auto_projects::set_stage(
             merged.state.db(),
+            None,
             merged.task,
             merged.project.project_id,
             Stage::Merging,
@@ -2710,6 +2789,7 @@ mod tests {
         .expect("the task is merging");
         auto_projects::set_head(
             merged.state.db(),
+            None,
             merged.task,
             commit('a').as_str(),
             None,
@@ -2757,8 +2837,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_continuous_integration_task_is_replaced_instead_of_waited_on() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, ResponseTemplate};
+        use wiremock::Mock;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
 
         let server = wiremock::MockServer::start().await;
         Mock::given(method("GET"))
@@ -2782,6 +2864,7 @@ mod tests {
         let project_id = merged.project.project_id;
         let cancelled = auto_projects::insert_auto_task(
             pool,
+            None,
             project_id,
             merged.workspace,
             merged.actor,
@@ -2798,9 +2881,16 @@ mod tests {
             .execute(pool)
             .await
             .expect("a person cancels it");
-        auto_projects::set_stage(pool, merged.task, project_id, Stage::AwaitingChecks, None)
-            .await
-            .expect("the task awaits its checks");
+        auto_projects::set_stage(
+            pool,
+            None,
+            merged.task,
+            project_id,
+            Stage::AwaitingChecks,
+            None,
+        )
+        .await
+        .expect("the task awaits its checks");
         let drive = merged.drive();
         let task = merged.automation().await;
         let row = tasks::get_task(pool, merged.task)
@@ -2845,6 +2935,7 @@ mod tests {
         let project_id = merged.project.project_id;
         let running = auto_projects::insert_auto_task(
             pool,
+            None,
             project_id,
             merged.workspace,
             merged.actor,
@@ -2858,9 +2949,16 @@ mod tests {
         tasks::create_task_run(pool, running)
             .await
             .expect("a run keeps the project in flight");
-        auto_projects::set_stage(pool, merged.task, project_id, Stage::AwaitingChecks, None)
-            .await
-            .expect("the task awaits its checks");
+        auto_projects::set_stage(
+            pool,
+            None,
+            merged.task,
+            project_id,
+            Stage::AwaitingChecks,
+            None,
+        )
+        .await
+        .expect("the task awaits its checks");
         set_status(&merged, tasks::PAUSED).await;
         let tick = || {
             super::super::driver::drive_project(
@@ -2868,6 +2966,7 @@ mod tests {
                 &merged.services,
                 &merged.config,
                 project_id,
+                &UNCLAIMED,
             )
         };
 

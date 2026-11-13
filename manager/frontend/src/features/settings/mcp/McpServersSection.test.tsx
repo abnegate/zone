@@ -25,6 +25,8 @@ const mcpApi = {
   reconnect: mock(),
   workspace: mock(),
   updateWorkspace: mock(),
+  providers: mock(),
+  import: mock(),
 };
 
 mock.module('../../../api/mcp', () => ({ mcpApi }));
@@ -477,6 +479,60 @@ describe('McpServersSection', () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
+  it('imports what a provider configured and reports the outcome', async () => {
+    const grafana = server('grafana');
+    mcpApi.providers.mockResolvedValue({
+      commands: true,
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          servers: [
+            {
+              name: 'grafana',
+              transport: 'stdio',
+              command: 'grafana-mcp',
+              arguments: [],
+              url: null,
+              tools: null,
+              enabled: true,
+              environment: [{ name: 'GRAFANA_TOKEN', has_value: true }],
+              headers: [],
+              ignored: [],
+              refusal: null,
+            },
+          ],
+          errors: [],
+        },
+      ],
+    });
+    mcpApi.import.mockResolvedValue({
+      created: [grafana],
+      failures: [{ name: 'linear', message: 'A server with this name already exists' }],
+    });
+    renderSection();
+    await findRow('docs');
+    mcpApi.list.mockResolvedValue(listing([docs, grafana]));
+    const trigger = screen.getByRole('button', { name: 'Import from provider' });
+    click(trigger);
+    const dialog = screen.getByRole('dialog', { name: 'Import from a provider' });
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'Import 1 server' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(mcpApi.import).toHaveBeenCalledWith(ORGANIZATION_ID, {
+      provider: 'codex',
+      servers: ['grafana'],
+    });
+    expect(statusTexts()).toContain('Imported 1 server.');
+    const failures = within(screen.getByRole('alert')).getByRole('list', { name: 'Not imported' });
+    expect(
+      within(failures)
+        .getAllByRole('listitem')
+        .map((item) => item.textContent)
+    ).toEqual(['linear: A server with this name already exists']);
+    await findRow('grafana');
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
   it('counts every imported server in the notice', async () => {
     mcpApi.create.mockResolvedValueOnce(server('alpha')).mockResolvedValueOnce(server('beta'));
     renderSection();
@@ -501,6 +557,7 @@ describe('McpServersSection', () => {
     expect(statusTexts()).toContain(READ_ONLY);
     expect(screen.queryByRole('button', { name: 'Add server' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Import JSON' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Import from provider' })).toBeNull();
     expect(within(row).queryByRole('switch')).toBeNull();
     expect(within(row).queryByRole('button', { name: 'Actions for docs' })).toBeNull();
     fireEvent.click(within(row).getByRole('button', { name: 'Tools for docs' }));

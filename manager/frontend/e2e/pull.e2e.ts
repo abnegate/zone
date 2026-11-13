@@ -6,7 +6,7 @@ import { blockServiceWorker, routeApi } from './test-utils';
 test.use({ viewport: { width: 1440, height: 1000 } });
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('manager_theme', 'dark'));
+  await page.emulateMedia({ colorScheme: 'dark' });
 });
 
 test('authenticates model pulls and displays provider errors before allowing a successful retry', async ({

@@ -68,9 +68,11 @@ describe('QuestionPrompt', () => {
 
     expect(screen.getByText(/optional question/)).toHaveTextContent(/thirty seconds/);
     const required = screen.getByText(/required question/);
-    expect(required).toHaveTextContent(/an hour/);
-    expect(required).toHaveTextContent(/not retried/);
-    expect(required).toHaveTextContent(/start a new run/);
+    expect(required).toHaveTextContent(
+      'A required question holds the run until someone answers it.'
+    );
+    expect(required).not.toHaveTextContent(/hour/);
+    expect(required).not.toHaveTextContent(/not retried/);
   });
 
   it('renders nothing when a waiting run carries no readable question', () => {

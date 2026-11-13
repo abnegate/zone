@@ -3,7 +3,10 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { WorkspaceTheme } from '../../types';
 import {
   FONT_MAP,
+  LEGACY_THEME_STORAGE_KEY,
   RADIUS_MAP,
+  SYSTEM_DARK_QUERY,
+  THEME_STORAGE_KEY,
   ThemeProvider,
   useTheme,
   workspaceThemeProperties,
@@ -47,7 +50,7 @@ describe('ThemeContext', () => {
 
   describe('ThemeProvider', () => {
     it('uses stored theme from localStorage', () => {
-      localStorage.setItem('manager_theme', 'dark');
+      localStorage.setItem(THEME_STORAGE_KEY, 'dark');
 
       render(
         <ThemeProvider>
@@ -99,7 +102,7 @@ describe('ThemeContext', () => {
     });
 
     it('toggles theme and persists to localStorage', () => {
-      localStorage.setItem('manager_theme', 'light');
+      localStorage.setItem(THEME_STORAGE_KEY, 'light');
 
       render(
         <ThemeProvider>
@@ -112,11 +115,11 @@ describe('ThemeContext', () => {
       fireEvent.click(screen.getByText('Toggle'));
 
       expect(screen.getByTestId('theme')).toHaveTextContent('dark');
-      expect(localStorage.getItem('manager_theme')).toBe('dark');
+      expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
     });
 
     it('sets data-theme attribute on document', () => {
-      localStorage.setItem('manager_theme', 'dark');
+      localStorage.setItem(THEME_STORAGE_KEY, 'dark');
 
       render(
         <ThemeProvider>
@@ -125,6 +128,145 @@ describe('ThemeContext', () => {
       );
 
       expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    });
+  });
+
+  describe('System appearance', () => {
+    function systemAppearance(dark: boolean) {
+      const listeners = new Set<(event: MediaQueryListEvent) => void>();
+      const query = {
+        matches: dark,
+        media: SYSTEM_DARK_QUERY,
+        addEventListener: (_: string, listener: (event: MediaQueryListEvent) => void) =>
+          listeners.add(listener),
+        removeEventListener: (_: string, listener: (event: MediaQueryListEvent) => void) =>
+          listeners.delete(listener),
+      };
+      const original = window.matchMedia;
+      window.matchMedia = (() => query) as unknown as typeof window.matchMedia;
+      return {
+        change(next: boolean) {
+          query.matches = next;
+          act(() => {
+            for (const listener of listeners) {
+              listener({ matches: next } as MediaQueryListEvent);
+            }
+          });
+        },
+        listeners,
+        restore() {
+          window.matchMedia = original;
+        },
+      };
+    }
+
+    it('follows the system appearance when it changes', () => {
+      const system = systemAppearance(false);
+      try {
+        render(
+          <ThemeProvider>
+            <TestComponent />
+          </ThemeProvider>
+        );
+        expect(screen.getByTestId('theme')).toHaveTextContent('light');
+
+        system.change(true);
+        expect(screen.getByTestId('theme')).toHaveTextContent('dark');
+        expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+
+        system.change(false);
+        expect(screen.getByTestId('theme')).toHaveTextContent('light');
+      } finally {
+        system.restore();
+      }
+    });
+
+    it('drops a manual override when the system appearance changes', () => {
+      const system = systemAppearance(false);
+      try {
+        render(
+          <ThemeProvider>
+            <TestComponent />
+          </ThemeProvider>
+        );
+        fireEvent.click(screen.getByText('Toggle'));
+        expect(screen.getByTestId('theme')).toHaveTextContent('dark');
+        expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('dark');
+
+        system.change(true);
+        system.change(false);
+        expect(screen.getByTestId('theme')).toHaveTextContent('light');
+        expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+      } finally {
+        system.restore();
+      }
+    });
+
+    it('follows the system again once toggled back to match it', () => {
+      const system = systemAppearance(true);
+      try {
+        render(
+          <ThemeProvider>
+            <TestComponent />
+          </ThemeProvider>
+        );
+        fireEvent.click(screen.getByText('Toggle'));
+        expect(localStorage.getItem(THEME_STORAGE_KEY)).toBe('light');
+
+        fireEvent.click(screen.getByText('Toggle'));
+        expect(screen.getByTestId('theme')).toHaveTextContent('dark');
+        expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+      } finally {
+        system.restore();
+      }
+    });
+
+    it('forgets an override the system has since caught up with', () => {
+      const system = systemAppearance(true);
+      try {
+        localStorage.setItem(THEME_STORAGE_KEY, 'dark');
+        render(
+          <ThemeProvider>
+            <TestComponent />
+          </ThemeProvider>
+        );
+        expect(screen.getByTestId('theme')).toHaveTextContent('dark');
+        expect(localStorage.getItem(THEME_STORAGE_KEY)).toBeNull();
+      } finally {
+        system.restore();
+      }
+    });
+
+    it('ignores a theme saved by the old always-on toggle', () => {
+      const system = systemAppearance(true);
+      try {
+        localStorage.setItem(LEGACY_THEME_STORAGE_KEY, 'light');
+        render(
+          <ThemeProvider>
+            <TestComponent />
+          </ThemeProvider>
+        );
+        expect(screen.getByTestId('theme')).toHaveTextContent('dark');
+        expect(localStorage.getItem(LEGACY_THEME_STORAGE_KEY)).toBeNull();
+      } finally {
+        system.restore();
+      }
+    });
+
+    it('stops listening when unmounted', () => {
+      const system = systemAppearance(false);
+      try {
+        const { unmount } = render(
+          <ThemeProvider>
+            <TestComponent />
+          </ThemeProvider>
+        );
+        expect(system.listeners.size).toBe(1);
+        unmount();
+        expect(system.listeners.size).toBe(0);
+      } finally {
+        system.restore();
+      }
     });
   });
 
@@ -139,7 +281,7 @@ describe('ThemeContext', () => {
         font_size_base: '14px',
         border_radius: 'small',
       };
-      localStorage.setItem('manager_theme', 'light');
+      localStorage.setItem(THEME_STORAGE_KEY, 'light');
       localStorage.setItem('manager_workspace_theme', JSON.stringify(storedTheme));
 
       render(
@@ -153,7 +295,7 @@ describe('ThemeContext', () => {
     });
 
     it('handles invalid JSON in localStorage', () => {
-      localStorage.setItem('manager_theme', 'light');
+      localStorage.setItem(THEME_STORAGE_KEY, 'light');
       localStorage.setItem('manager_workspace_theme', 'invalid json');
 
       render(
@@ -166,7 +308,7 @@ describe('ThemeContext', () => {
     });
 
     it('keeps saved workspace themes scoped to the session', () => {
-      localStorage.setItem('manager_theme', 'light');
+      localStorage.setItem(THEME_STORAGE_KEY, 'light');
 
       render(
         <ThemeProvider>
@@ -183,8 +325,7 @@ describe('ThemeContext', () => {
     });
 
     it('clears workspace theme', () => {
-      localStorage.setItem('manager_theme', 'light');
-      // Use a properly structured theme object
+      localStorage.setItem(THEME_STORAGE_KEY, 'light');
       localStorage.setItem(
         'manager_workspace_theme',
         JSON.stringify({
@@ -211,7 +352,7 @@ describe('ThemeContext', () => {
     });
 
     it('applies CSS variables when workspace theme is set', () => {
-      localStorage.setItem('manager_theme', 'light');
+      localStorage.setItem(THEME_STORAGE_KEY, 'light');
 
       render(
         <ThemeProvider>
@@ -227,7 +368,7 @@ describe('ThemeContext', () => {
     });
 
     it('removes CSS variables when workspace theme is cleared', () => {
-      localStorage.setItem('manager_theme', 'light');
+      localStorage.setItem(THEME_STORAGE_KEY, 'light');
 
       render(
         <ThemeProvider>
@@ -243,7 +384,7 @@ describe('ThemeContext', () => {
     });
 
     it('uses dark colors when in dark mode', () => {
-      localStorage.setItem('manager_theme', 'dark');
+      localStorage.setItem(THEME_STORAGE_KEY, 'dark');
 
       render(
         <ThemeProvider>
@@ -299,7 +440,7 @@ describe('Workspace theme overrides', () => {
   }
   beforeEach(() => {
     localStorage.clear();
-    localStorage.setItem('manager_theme', 'light');
+    localStorage.setItem(THEME_STORAGE_KEY, 'light');
     document.documentElement.style.cssText = '';
     render(
       <ThemeProvider>

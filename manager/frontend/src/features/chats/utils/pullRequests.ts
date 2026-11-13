@@ -11,11 +11,16 @@ export const DISCONNECTED_HINT =
 export const UNAVAILABLE_HINT = 'GitHub is temporarily unreachable. Try again in a moment.';
 export const READ_ONLY_HINT = 'Needs write access to this workspace.';
 export const AUTO_MERGE_HINT = 'GitHub merges it once its checks and reviews pass.';
+export const AUTO_FIX_HINT =
+  'Zone starts a run to fix it whenever GitHub reports failing checks or a conflict with its base branch.';
+export const AUTO_FIXING_HINT =
+  'A run is working on its branch now, and pushes what it changes when it finishes.';
 
 export type PullRequestKind =
   | 'merged'
   | 'closed'
   | 'draft'
+  | 'conflicted'
   | 'failing'
   | 'pending'
   | 'passing'
@@ -26,6 +31,7 @@ export const PULL_REQUEST_KIND_LABELS: Record<PullRequestKind, string> = {
   merged: 'Merged',
   closed: 'Closed',
   draft: 'Draft',
+  conflicted: 'Has merge conflicts',
   failing: 'Checks failing',
   pending: 'Checks running',
   passing: 'Checks passing',
@@ -39,6 +45,8 @@ export function pullRequestKind(pullRequest: ChatPullRequest): PullRequestKind {
   if (status.state === 'merged') return 'merged';
   if (status.state === 'closed') return 'closed';
   if (status.draft) return 'draft';
+  // A conflicted branch cannot merge whatever its checks say, so it never takes a check mark.
+  if (status.mergeable === 'conflicted') return 'conflicted';
   if (status.checks === 'failing') return 'failing';
   if (status.checks === 'pending') return 'pending';
   if (status.checks === 'passing') return 'passing';

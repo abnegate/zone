@@ -188,6 +188,7 @@
 
 :root,
 :root[data-theme='light'] {
+  color-scheme: light;
   /* Backgrounds — warm paper, not sterile white */
   --ui-bg-base: #f4f0e8;
   --ui-bg-elevated: #faf7f1;
@@ -220,6 +221,7 @@
 }
 
 :root[data-theme='dark'] {
+  color-scheme: dark;
   /* Backgrounds — warm near-black, not navy-slate */
   --ui-bg-base: #0e0c0a;
   --ui-bg-elevated: #141210;

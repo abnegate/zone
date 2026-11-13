@@ -189,15 +189,114 @@ async fn start(
         head: fix.head.as_str(),
         url: &row.url,
     };
-    let Some((task, run)) = chat_pull_requests::start_auto_fix(state.db(), &claim, &task).await?
+    let Some(started) = chat_pull_requests::start_auto_fix(
+        state.db(),
+        &claim,
+        &task,
+        &starting(row, fix.complaint),
+    )
+    .await?
     else {
         return Ok(None);
     };
+    let chat_pull_requests::Started { task, run, notice } = started;
+    if let Some(notice) = notice {
+        crate::db::actions::publish(row.chat_id, notice);
+    }
     let dispatched = state.clone();
+    let finished = Finished {
+        chat_id: row.chat_id,
+        pull_request_id: row.id,
+        name: name(row),
+        url: row.url.clone(),
+    };
     tokio::spawn(async move {
         crate::workers::task::execute_task_run(&dispatched, run.id, task.id).await;
+        finished.say(&dispatched, run.id).await;
     });
     Ok(Some(run.id))
+}
+
+/// How the chat names the pull request a notice is about.
+fn name(row: &PullRequestRow) -> String {
+    format!("{}/{}#{}", row.owner, row.repo, row.number)
+}
+
+/// What the chat is told as a run starts, so that auto-fix working is
+/// something the person reads rather than something they have to infer.
+fn starting(row: &PullRequestRow, complaint: &str) -> String {
+    format!(
+        "Fixing [{name}]({url}) automatically, because {complaint}. A run is working on its \
+         head branch now, and what it commits is pushed to the pull request when it finishes.",
+        name = name(row),
+        url = row.url,
+    )
+}
+
+/// What one started run needs to say how it ended, kept so the chat can be
+/// told after the run itself is over.
+struct Finished {
+    chat_id: Uuid,
+    pull_request_id: Uuid,
+    name: String,
+    url: String,
+}
+
+impl Finished {
+    /// Says in the chat how the run ended, reading its settled row rather
+    /// than assuming it got that far. A run whose outcome cannot be read is
+    /// left unannounced: the pull request's own status is what answers next.
+    async fn say(&self, state: &AppState, run_id: Uuid) {
+        let run = match crate::db::tasks::get_task_run(state.db(), run_id).await {
+            Ok(Some(run)) => run,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%run_id, %error, "could not read how an auto-fix run ended");
+                return;
+            }
+        };
+        // Completing a run can fail to write at all: it wants the owner's
+        // lease, and a run that lost its heartbeat matches no row. Such a run
+        // is still active whatever its status column says, and the pull
+        // request's next status read is what answers for it.
+        if run.completed_at.is_none() {
+            return;
+        }
+        let content = match run.status.as_str() {
+            "completed" => format!(
+                "The run fixing [{name}]({url}) finished. If GitHub still reports a problem on \
+                 the new head, auto-fix starts another run.",
+                name = self.name,
+                url = self.url,
+            ),
+            status => {
+                let reason = run
+                    .error_message
+                    .as_deref()
+                    .map(|reason| format!(": {reason}"))
+                    .unwrap_or_default();
+                format!(
+                    "The run fixing [{name}]({url}) ended as {status}{reason}. Auto-fix tries \
+                     again when the branch moves, or you can turn it off from the pull request's \
+                     menu.",
+                    name = self.name,
+                    url = self.url,
+                )
+            }
+        };
+        let metadata = serde_json::json!({
+            "source": chat_pull_requests::PULL_REQUEST_FIX,
+            "pull_request_id": self.pull_request_id,
+            "run_id": run_id,
+            "link": self.url,
+        });
+        match chat_pull_requests::announce(state.db(), self.chat_id, &content, metadata).await {
+            Ok(stored) => crate::db::actions::publish(self.chat_id, stored),
+            Err(error) => {
+                tracing::warn!(%run_id, %error, "could not say in the chat how an auto-fix run ended");
+            }
+        }
+    }
 }
 
 const ACCEPTANCE: &str = "The pull request's checks pass, it merges without conflicts, and every \
@@ -292,6 +391,39 @@ mod tests {
         assert_eq!(complaint(&closed), None);
     }
 
+    fn row() -> PullRequestRow {
+        PullRequestRow {
+            id: Uuid::new_v4(),
+            chat_id: Uuid::new_v4(),
+            provider: chat_pull_requests::GITHUB.to_string(),
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            number: 7,
+            url: "https://github.com/acme/widgets/pull/7".to_string(),
+            title: None,
+            source_id: None,
+            dismissed_at: None,
+            created_at: Utc::now(),
+            auto_fix: true,
+            auto_fix_run_id: None,
+            auto_fix_by: None,
+            auto_fix_head: None,
+            auto_fixing: false,
+        }
+    }
+
+    #[test]
+    fn the_chat_is_told_which_pull_request_is_being_fixed_and_why() {
+        let said = starting(&row(), "its checks are failing");
+
+        assert!(said.contains("acme/widgets#7"), "{said}");
+        assert!(
+            said.contains("https://github.com/acme/widgets/pull/7"),
+            "{said}"
+        );
+        assert!(said.contains("its checks are failing"), "{said}");
+    }
+
     async fn watched(pool: &PgPool, repository: Option<&str>) -> (Uuid, PullRequestRow) {
         let organization = Uuid::new_v4();
         sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Auto-fix', $1::text)")
@@ -347,6 +479,7 @@ mod tests {
                 url: "https://github.com/acme/widgets/pull/7",
                 title: None,
                 source_id: None,
+                opened_by: None,
             },
         )
         .await
@@ -430,6 +563,7 @@ mod tests {
                 url: "https://github.com/acme/widgets/pull/7",
                 title: None,
                 source_id: None,
+                opened_by: None,
             },
         )
         .await

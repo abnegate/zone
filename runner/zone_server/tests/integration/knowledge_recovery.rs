@@ -430,6 +430,7 @@ async fn a_vector_of_text_replaced_mid_embedding_is_not_stored_and_the_next_pass
         provenance: Provenance {
             kind: Kind::Lesson,
             source: Source::Run(Uuid::new_v4()),
+            project: None,
             last_confirmed: chrono::NaiveDate::from_ymd_opt(2026, 11, 11).expect("a real date"),
         },
     };

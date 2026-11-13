@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::watch;
 use uuid::Uuid;
 use zone_core::llm::{BuiltinTools, Toolset};
 
@@ -60,10 +61,16 @@ const ALLOWED: &str = "Allowed";
 /// console trace and in the approval gate.
 const CALL_PREFIX: &str = "mcp_";
 
+/// What a call is told when its turn ended while it ran.
+const ENDED: &str = "This turn ended while the call ran, so it was cancelled.";
+
 /// How much of a finished call's output the console shows beside it.
 const DETAIL_CHARS: usize = 200;
 
 static LIVE: Lazy<DashMap<String, Arc<Turn>>> = Lazy::new(DashMap::new);
+
+/// How many calls each chat or task run has running, for [`settle`] to wait on.
+static RUNNING: Lazy<DashMap<Uuid, watch::Sender<usize>>> = Lazy::new(DashMap::new);
 
 /// One CLI-backed turn, and everything a call arriving for it is decided by.
 pub struct Turn {
@@ -79,6 +86,9 @@ pub struct Turn {
     /// Set once a failed call is repeated with nothing changed since. Every
     /// later call is refused, as zone's own loop finalizes the turn.
     stalled: AtomicBool,
+    /// Set when the lease drops. A call still running is cancelled, since
+    /// whatever the turn ran in may be cleaned up from then on.
+    ended: watch::Sender<bool>,
 }
 
 impl Turn {
@@ -90,6 +100,7 @@ impl Turn {
             made: AtomicUsize::new(0),
             progress: Mutex::default(),
             stalled: AtomicBool::new(false),
+            ended: watch::Sender::new(false),
         }
     }
 
@@ -236,7 +247,10 @@ impl Turn {
         let started = Instant::now();
         let refusal = self.allowed(&id, name, arguments).await.refusal();
         let result = match refusal {
-            None => self.tools.execute(name, arguments).await,
+            None => match self.execute(name, arguments).await {
+                Some(result) => result,
+                None => return self.cancel(id, name, started),
+            },
             Some(refusal) => ToolResult::error(refusal.message()),
         };
         let receipt = self
@@ -271,6 +285,34 @@ impl Turn {
             true => CallToolResult::success(content),
             false => CallToolResult::error(content),
         }
+    }
+
+    /// Run a call unless the turn ends first, which cancels it. Counted as
+    /// running from before it may start until it has returned, so [`settle`]
+    /// waits on a cancelled call as well as on a finished one.
+    async fn execute(&self, name: &str, arguments: &str) -> Option<ToolResult> {
+        let mut ended = self.ended.subscribe();
+        let _running = Running::enter(self.scope.chat);
+        tokio::select! {
+            biased;
+            _ = ended.wait_for(|ended| *ended) => None,
+            result = self.tools.execute(name, arguments) => Some(result),
+        }
+    }
+
+    /// Tell the console and the agent that a call was cancelled mid-run.
+    fn cancel(&self, id: String, name: &str, started: Instant) -> CallToolResult {
+        self.publish(AgentEvent::ToolCallCompleted {
+            id,
+            name: name.to_string(),
+            success: false,
+            detail: ENDED.to_string(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            citations: Vec::new(),
+            receipt: None,
+            refusal: None,
+        });
+        CallToolResult::error(vec![ContentBlock::text(ENDED)])
     }
 
     /// Whether this call may run: immediately when the chat auto-approves,
@@ -353,7 +395,8 @@ fn verdict(allowed: Option<&serde_json::Value>, refusal: &str) -> CallToolResult
     CallToolResult::success(vec![ContentBlock::text(body.to_string())])
 }
 
-/// A live turn's registration. Dropping it revokes the token.
+/// A live turn's registration. Dropping it revokes the token and cancels the
+/// calls still running, which [`settle`] waits on.
 pub struct Lease {
     hash: String,
     toolset: Toolset,
@@ -369,7 +412,43 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        LIVE.remove(&self.hash);
+        if let Some((_, turn)) = LIVE.remove(&self.hash) {
+            turn.ended.send_replace(true);
+        }
+    }
+}
+
+/// Wait until no call of `chat`'s turns is running.
+///
+/// A turn cancels its calls when its lease drops, so once every lease of
+/// `chat` is gone this returns as soon as each cancelled call has, and nothing
+/// a call ran outlives it to overlap what is cleaned up afterwards.
+pub async fn settle(chat: Uuid) {
+    let Some(mut running) = RUNNING.get(&chat).map(|count| count.subscribe()) else {
+        return;
+    };
+    let _ = running.wait_for(|count| *count == 0).await;
+}
+
+/// One call counted as running for its chat until it drops.
+struct Running(Uuid);
+
+impl Running {
+    fn enter(chat: Uuid) -> Self {
+        RUNNING
+            .entry(chat)
+            .or_insert_with(|| watch::Sender::new(0))
+            .send_modify(|count| *count += 1);
+        Self(chat)
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(count) = RUNNING.get(&self.0) {
+            count.send_modify(|count| *count -= 1);
+        }
+        RUNNING.remove_if(&self.0, |_, count| *count.borrow() == 0);
     }
 }
 
@@ -561,7 +640,8 @@ mod tests {
     use super::*;
     use crate::agent::approval::refusal::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
     use crate::agent::wait::{self, WAIT_FOR};
-    use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy};
+    use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy, WorkspaceScope};
+    use crate::state::AppState;
     use abnegate_agent::ToolContext;
     use abnegate_agent::tool::job::{JobCommand, Jobs};
     use abnegate_agent::tool::{EnvironmentPolicy, Session};
@@ -569,7 +649,6 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
     use zone_core::application::application;
-    use zone_core::llm::cli::TURN_TIMEOUT;
 
     #[tokio::test]
     async fn what_the_agent_wrote_is_yielded_before_a_call_that_arrived_with_it() {
@@ -680,19 +759,100 @@ mod tests {
         );
     }
 
-    /// A task attempt runs for an hour and a chat for as long as the operator
-    /// sets, so a token that expired on its own clock would cut the agent off
-    /// from zone's tools partway through. The lease is the only thing that
-    /// ends it.
+    /// A stop drops the lease while the agent's connection to zone may still
+    /// be open, so a call still running then is cancelled, and settling waits
+    /// for it to return before what it ran in is cleaned up.
+    #[tokio::test]
+    async fn a_dropped_lease_cancels_a_running_call_and_settling_waits_for_it() {
+        let patience = Duration::from_secs(10);
+        let directory = tempfile::tempdir().expect("tempdir");
+        let chat = Uuid::new_v4();
+        let registry = ChatTools::build(WorkspaceScope {
+            state: AppState::for_tests(),
+            workspace_id: Uuid::new_v4(),
+            chat_id: Some(chat),
+            user_id: Uuid::new_v4(),
+            offline: false,
+            origin: crate::db::tasks::Origin::Member,
+        })
+        .await
+        .starting_in(Some(directory.path().to_path_buf()))
+        .await;
+        let (sender, _events) = unbounded_channel();
+        let lease =
+            Turn::new(scope(chat), Arc::new(registry), sender).open("http://127.0.0.1:8080/mcp");
+        let turn = Turn::find(lease.toolset().token.expose()).expect("the turn");
+        let followed = format!("followed-{}", chat.simple());
+        std::fs::write(directory.path().join(&followed), "").expect("the followed file");
+        let line = format!("tail -f {followed}");
+        let arguments = json!({
+            "command": "tail",
+            "args": ["-f", followed],
+            "reason": "Outlast the turn.",
+        })
+        .to_string();
+        let call = tokio::spawn(async move { turn.run("run_command", &arguments).await });
+        tokio::time::timeout(patience, async {
+            while !running(&line) && !call.is_finished() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the command starts or the call returns");
+        assert!(running(&line), "the command starts: {:?}", call.await);
+
+        drop(lease);
+        tokio::time::timeout(patience, settle(chat))
+            .await
+            .expect("settling waits on the cancelled call alone");
+
+        tokio::time::timeout(patience, async {
+            while running(&line) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a cancelled call's command must not outlive it");
+        let result = tokio::time::timeout(patience, call)
+            .await
+            .expect("a cancelled call returns at once")
+            .expect("the call task");
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert!(
+            format!("{:?}", result.content).contains(ENDED),
+            "{result:?}"
+        );
+    }
+
+    /// Whether a process running `line` is alive. A killed one that is not yet
+    /// reaped keeps no command line, so it does not count.
+    fn running(line: &str) -> bool {
+        std::process::Command::new("pgrep")
+            .args(["-f", line])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+
+    #[tokio::test]
+    async fn settling_a_chat_with_nothing_running_returns_at_once() {
+        tokio::time::timeout(Duration::from_secs(1), settle(Uuid::new_v4()))
+            .await
+            .expect("nothing to wait on");
+    }
+
+    /// An agent runs until it is done, so a token that expired on its own
+    /// clock would cut it off from zone's tools partway through. The token
+    /// ends only with its lease.
     #[tokio::test(start_paused = true)]
     async fn a_token_answers_for_as_long_as_its_lease_is_held() {
+        const DAY: Duration = Duration::from_secs(24 * 60 * 60);
         let opened = open(ApprovalPolicy::auto()).await;
 
-        tokio::time::advance(TURN_TIMEOUT * 4).await;
+        tokio::time::advance(DAY).await;
 
         assert!(
             Turn::find(&opened.token).is_some(),
-            "a turn that outlasts the agent's default timeout lost its tools"
+            "a turn that runs for a day lost its tools"
         );
         drop(opened.lease);
         assert!(Turn::find(&opened.token).is_none());

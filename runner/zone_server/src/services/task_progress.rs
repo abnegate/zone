@@ -12,11 +12,10 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-/// The status a finished run reports as a success; anything else is a failure.
-const COMPLETED: &str = "completed";
+use crate::db::tasks;
 
 /// What a failed run is reported as when it recorded no reason of its own.
-const UNKNOWN_ERROR: &str = "Unknown error";
+pub const UNKNOWN_ERROR: &str = "Unknown error";
 
 /// Progress message sent to clients
 #[derive(Debug, Clone, Serialize)]
@@ -48,8 +47,29 @@ pub enum ProgressMessage {
     Completed { status: String },
     /// Task failed
     Failed { error: String },
+    /// A person stopped the run before it finished
+    Cancelled { message: String },
     /// Error message
     Error { message: String },
+}
+
+impl ProgressMessage {
+    /// The frame that ends a run with this status, or `None` while it is still
+    /// running or waiting.
+    pub fn terminal(status: &str, error: Option<&str>) -> Option<Self> {
+        match status {
+            tasks::COMPLETED => Some(Self::Completed {
+                status: status.to_string(),
+            }),
+            tasks::FAILED => Some(Self::Failed {
+                error: error.unwrap_or(UNKNOWN_ERROR).to_string(),
+            }),
+            tasks::CANCELLED => Some(Self::Cancelled {
+                message: error.unwrap_or(tasks::STOPPED).to_string(),
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Global task progress broadcaster
@@ -122,22 +142,99 @@ pub fn progress() -> Arc<TaskProgressBroadcaster> {
 
 /// Announce that a run reached a terminal status, then drop its channel.
 ///
-/// Called from both writers that can end a run -- the owner completing it and
-/// the sweeper reaping its lease -- because a waiter subscribed to a run the
-/// sweeper reaps would otherwise hang until its own deadline. Removing the
-/// sender right after the send keeps the map from growing one entry per run for
-/// the life of the process; a receiver already holding the frame still reads it.
+/// Called from every writer that can end a run, not only the owner completing
+/// it, because a waiter subscribed to a run the sweeper reaps or a person stops
+/// would otherwise hang until its own deadline. Removing the sender right after
+/// the send keeps the map from growing one entry per run for the life of the
+/// process; a receiver already holding the frame still reads it.
 pub fn publish_terminal(run: Uuid, status: &str, error: Option<&str>) {
-    let message = if status == COMPLETED {
-        ProgressMessage::Completed {
-            status: status.to_string(),
-        }
-    } else {
-        ProgressMessage::Failed {
-            error: error.unwrap_or(UNKNOWN_ERROR).to_string(),
-        }
-    };
     let broadcaster = progress();
-    broadcaster.broadcast(run, message);
+    if let Some(message) = ProgressMessage::terminal(status, error) {
+        broadcaster.broadcast(run, message);
+    }
     broadcaster.remove(run);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RUNNING: &str = "running";
+    const WAITING: &str = "waiting";
+    const FAILURE: &str = "the build broke";
+
+    #[test]
+    fn a_cancelled_run_ends_with_a_cancelled_frame_carrying_its_reason() {
+        match ProgressMessage::terminal(tasks::CANCELLED, Some(tasks::STOPPED)) {
+            Some(ProgressMessage::Cancelled { message }) => assert_eq!(message, tasks::STOPPED),
+            other => panic!("expected a cancelled frame for a cancelled run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cancelled_run_without_a_reason_reads_as_stopped() {
+        match ProgressMessage::terminal(tasks::CANCELLED, None) {
+            Some(ProgressMessage::Cancelled { message }) => assert_eq!(message, tasks::STOPPED),
+            other => panic!("expected a cancelled frame for a cancelled run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cancelled_frame_serializes_with_its_own_type() {
+        let frame = ProgressMessage::terminal(tasks::CANCELLED, Some(tasks::STOPPED))
+            .expect("a cancelled run ends the stream");
+        assert_eq!(
+            serde_json::to_value(frame).unwrap(),
+            serde_json::json!({"type": "cancelled", "message": tasks::STOPPED})
+        );
+    }
+
+    #[test]
+    fn a_failed_run_ends_with_its_error() {
+        match ProgressMessage::terminal(tasks::FAILED, Some(FAILURE)) {
+            Some(ProgressMessage::Failed { error }) => assert_eq!(error, FAILURE),
+            other => panic!("expected a failed frame for a failed run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_run_without_an_error_reports_an_unknown_error() {
+        match ProgressMessage::terminal(tasks::FAILED, None) {
+            Some(ProgressMessage::Failed { error }) => assert_eq!(error, UNKNOWN_ERROR),
+            other => panic!("expected a failed frame for a failed run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_completed_run_ends_as_completed() {
+        match ProgressMessage::terminal(tasks::COMPLETED, None) {
+            Some(ProgressMessage::Completed { status }) => assert_eq!(status, tasks::COMPLETED),
+            other => panic!("expected a completed frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_active_run_has_no_terminal_frame() {
+        for status in [RUNNING, WAITING] {
+            assert!(
+                ProgressMessage::terminal(status, None).is_none(),
+                "a {status} run must not end the stream"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_reaches_a_subscriber_as_cancelled_and_releases_the_channel() {
+        let run = Uuid::new_v4();
+        let mut events = progress().subscribe(run);
+        publish_terminal(run, tasks::CANCELLED, Some(tasks::STOPPED));
+        match events.recv().await {
+            Ok(ProgressMessage::Cancelled { message }) => assert_eq!(message, tasks::STOPPED),
+            other => panic!("expected a cancelled frame, got {other:?}"),
+        }
+        assert!(
+            !progress().tracks(run),
+            "a terminal frame drops the channel"
+        );
+    }
 }

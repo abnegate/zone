@@ -14,6 +14,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
 import { RESPONDING } from '../components/Generation';
+import { LOAD_MORE_CHATS } from '../components/MoreChats';
 import type {
   Chat,
   ChatProviderOffer,
@@ -67,12 +68,18 @@ class FakeSocket {
 let socket: FakeSocket;
 
 // Mock scrollIntoView
-Element.prototype.scrollIntoView = mock();
+const mockScrollIntoView = mock();
+Element.prototype.scrollIntoView = mockScrollIntoView;
 
 // Mock the chatsApi
+mock.module('../hooks/usePreloadChats', () => ({ usePreloadChats: () => {} }));
+
 mock.module('../../../api/chats', () => ({
   chatsApi: {
-    getChats: mockGetChats,
+    getChats: async (...args: unknown[]) => {
+      const listed = await mockGetChats(...args);
+      return Array.isArray(listed) ? { chats: listed, total: listed.length } : listed;
+    },
     getChat: mockGetChat,
     createChat: mockCreateChat,
     sendMessage: mockSendMessage,
@@ -1088,7 +1095,10 @@ describe('ChatsPage', () => {
       fireEvent.click(archivedTab);
 
       await waitFor(() => {
-        expect(mockClient.getChats).toHaveBeenCalledWith('ws-1', true);
+        expect(mockClient.getChats).toHaveBeenCalledWith(
+          'ws-1',
+          expect.objectContaining({ archived: true })
+        );
       });
     });
 
@@ -1103,7 +1113,10 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('tab', { name: 'Active' }));
 
       await waitFor(() => {
-        expect(mockClient.getChats).toHaveBeenLastCalledWith('ws-1', false);
+        expect(mockClient.getChats).toHaveBeenLastCalledWith(
+          'ws-1',
+          expect.objectContaining({ archived: false })
+        );
       });
     });
   });
@@ -1710,10 +1723,13 @@ describe('ChatsPage', () => {
       restoreClock = undefined;
     });
 
-    function controlClock(): (elapsed: number) => Promise<void> {
+    function controlClock(): {
+      advance: (elapsed: number) => Promise<void>;
+      jump: (elapsed: number) => void;
+    } {
       const ticks = new Map<number, () => void>();
       let nextIntervalId = 1;
-      const now = spyOn(performance, 'now').mockReturnValue(0);
+      const now = spyOn(Date, 'now').mockReturnValue(0);
       const interval = spyOn(window, 'setInterval').mockImplementation((callback: TimerHandler) => {
         const id = nextIntervalId++;
         ticks.set(id, () => {
@@ -1729,22 +1745,29 @@ describe('ChatsPage', () => {
         interval.mockRestore();
         clear.mockRestore();
       };
-      return async (elapsed: number): Promise<void> => {
-        // Drain the pending send before touching the clock: `started` and the
-        // interval are captured in an effect, and advancing first makes that
-        // effect read the moved clock, so elapsed never leaves 0. A sync
-        // act() is not enough — the update is still queued in a microtask.
-        // waitFor cannot help here either, since it polls on the setInterval
-        // this test has stubbed out.
-        await act(async () => {});
-        // Advancing a clock nothing is subscribed to reports the timer's
-        // starting text back as if it never moved, which reads as a broken
-        // component rather than a test that measured nothing.
-        expect(ticks.size).toBeGreaterThan(0);
-        now.mockReturnValue(elapsed);
-        act(() => {
-          for (const tick of ticks.values()) tick();
-        });
+      return {
+        advance: async (elapsed: number): Promise<void> => {
+          // Drain the pending send before touching the clock: the turn's start
+          // is read when it begins, and advancing first makes it begin at the
+          // moved reading, so elapsed never leaves 0. A sync act() is not
+          // enough — the update is still queued in a microtask. waitFor cannot
+          // help here either, since it polls on the setInterval this test has
+          // stubbed out.
+          await act(async () => {});
+          // Advancing a clock nothing is subscribed to reports the timer's
+          // starting text back as if it never moved, which reads as a broken
+          // component rather than a test that measured nothing.
+          expect(ticks.size).toBeGreaterThan(0);
+          now.mockReturnValue(elapsed);
+          act(() => {
+            for (const tick of ticks.values()) tick();
+          });
+        },
+        // Moves the clock with nothing subscribed to it, which is where a chat
+        // whose turn runs on while another one is open leaves the counter.
+        jump: (elapsed: number): void => {
+          now.mockReturnValue(elapsed);
+        },
       };
     }
 
@@ -1765,7 +1788,7 @@ describe('ChatsPage', () => {
     }
 
     it('keeps elapsed time through status changes and resets it for the next request', async () => {
-      const advance = controlClock();
+      const { advance } = controlClock();
       const input = await sendPrompt();
       expect(screen.getByRole('timer')).toHaveTextContent('0:00');
       expect(screen.getByRole('status').contains(screen.getByRole('timer'))).toBe(false);
@@ -1784,8 +1807,8 @@ describe('ChatsPage', () => {
       expect(screen.queryByRole('timer')).not.toBeInTheDocument();
     });
 
-    it('removes elapsed feedback when switching chats and starts fresh on return', async () => {
-      const advance = controlClock();
+    it('removes elapsed feedback when switching chats and starts a new request fresh', async () => {
+      const { advance } = controlClock();
       await sendPrompt();
       expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
       await advance(1000);
@@ -1797,6 +1820,32 @@ describe('ChatsPage', () => {
       fireEvent.change(input, { target: { value: 'New image' } });
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
+    });
+
+    it('counts a turn from when it started when its chat is returned to mid-reply', async () => {
+      const { advance, jump } = controlClock();
+      await sendPrompt();
+      act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
+      await advance(1000);
+      expect(screen.getByRole('timer')).toHaveTextContent('0:01');
+
+      fireEvent.click(screen.getByText('Chat 2'));
+      expect(screen.queryByRole('timer')).not.toBeInTheDocument();
+      // The turn goes on being written while the reader is in another chat.
+      jump(96_000);
+
+      fireEvent.click(screen.getByText('Chat 1'));
+      await screen.findByPlaceholderText('Type a message, or drop a file...');
+      await act(async () => {});
+      act(() =>
+        socket.emit({
+          type: 'message_start',
+          message_id: 'reply',
+          role: 'assistant',
+          resumed: true,
+        })
+      );
+      expect(await screen.findByRole('timer')).toHaveTextContent('1:36');
     });
 
     it('keeps pending feedback while the response runs', async () => {
@@ -1848,6 +1897,60 @@ describe('ChatsPage', () => {
         expect(within(item).getByText('and make it blue')).toBeInTheDocument();
         expect(within(item).getByRole('button', { name: 'Interrupt' })).toBeInTheDocument();
         expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
+      });
+
+      it('scrolls to the end when the message joins the queue', async () => {
+        const input = await sendPrompt();
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        // The queued row renders below the running turn, so only the frame
+        // that adds it can bring the transcript down to it.
+        mockScrollIntoView.mockClear();
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+
+        expect(screen.getByTestId('queued-message')).toBeInTheDocument();
+        expect(mockScrollIntoView).toHaveBeenCalled();
+      });
+
+      it('scrolls a queued message into view when it was sent from a linked one', async () => {
+        mockGetChat.mockResolvedValue(mockChatWithMessages);
+        window.history.pushState({}, '', '/chats?id=chat-1&message=msg-2');
+        renderChatsPage();
+        const input = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+          'Type a message, or drop a file...'
+        );
+        fireEvent.change(input, { target: { value: 'Generate an image of a rooster' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+        await waitFor(() => expect(input.value).toBe(''));
+        // Writing into the chat is leaving the message it was parked on, which
+        // is what frees the scroll below.
+        expect(new URLSearchParams(window.location.search).get('message')).toBeNull();
+
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        mockScrollIntoView.mockClear();
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+
+        expect(screen.getByTestId('queued-message')).toBeInTheDocument();
+        expect(mockScrollIntoView).toHaveBeenCalled();
       });
 
       it('offers Queue beside Stop once something is typed', async () => {
@@ -5812,6 +5915,24 @@ describe('ChatsPage', () => {
 
       expect(await screen.findByText('Hi there!')).toBeInTheDocument();
       expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('paging', () => {
+    it('loads the next page of chats from the end of the list', async () => {
+      mockClient.getChats
+        .mockResolvedValueOnce({ chats: [mockChats[0]], total: 2 })
+        .mockResolvedValueOnce({ chats: [mockChats[1]], total: 2 });
+
+      renderChatsPage();
+      fireEvent.click(await screen.findByRole('button', { name: `${LOAD_MORE_CHATS} (1)` }));
+
+      expect(await screen.findByText(mockChats[1].title)).toBeInTheDocument();
+      expect(mockClient.getChats).toHaveBeenLastCalledWith(
+        'ws-1',
+        expect.objectContaining({ offset: 1 })
+      );
+      expect(screen.queryByRole('button', { name: /Load more chats/ })).not.toBeInTheDocument();
     });
   });
 

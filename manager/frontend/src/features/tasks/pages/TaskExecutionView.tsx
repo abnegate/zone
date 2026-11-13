@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { Badge, Button, Modal } from '@zone/ui';
 import { useEffect, useRef, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
@@ -5,6 +6,7 @@ import { ActionReceipts } from '../../chats/components';
 import type { Waiting } from '../../chats/types';
 import { READ_ONLY } from '../access';
 import { QuestionPrompt } from '../components';
+import { TASKS_KEY } from '../hooks';
 import type { RunStatus, Task, TaskRun, TaskRunLog } from '../types';
 
 const WAITING_PHASE = 'waiting';
@@ -14,6 +16,15 @@ const WAITING_STATUS = 'Waiting';
 const WAITING_FOR_YOU_STATUS = 'Waiting for you';
 const UNANSWERABLE = 'This run is waiting for a member to answer its question.';
 const DEADLINE_PASSED_LABEL = 'Deadline passed';
+
+const STOP_LABEL = 'Stop';
+const STOPPING_LABEL = 'Stopping…';
+const STOP_CONFIRMATION =
+  'Stop this run? The agent stops where it is and the task is paused until you run it again.';
+const STOP_FAILED_TITLE = 'Could not stop task';
+const STOP_FAILED_FALLBACK = 'Unable to stop this run';
+const STOPPED_TITLE = 'Task stopped';
+const STOPPED_FALLBACK = 'This run was stopped before it finished.';
 
 const KIND_JOB = 'job';
 const KIND_TASK_RUN = 'task_run';
@@ -142,11 +153,14 @@ export function TaskExecutionView({
   writable?: boolean;
   onClose: () => void;
 }) {
+  const queryClient = useQueryClient();
   const [run, setRun] = useState<TaskRun | null>(null);
   const [logs, setLogs] = useState<TaskRunLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stopError, setStopError] = useState<string | null>(null);
   const [monitoring, setMonitoring] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
@@ -154,6 +168,13 @@ export function TaskExecutionView({
   const busy = useRef(false);
   const submitted = useRef<TaskRun | null>(null);
   const known = useRef(new Set<string>());
+  const lifetime = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    const mounted = new AbortController();
+    lifetime.current = mounted;
+    return () => mounted.abort();
+  }, []);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: revision explicitly refreshes the monitor after a start or user retry
   useEffect(() => {
@@ -173,6 +194,7 @@ export function TaskExecutionView({
         setMonitoring(null);
         failures = 0;
         if (active(snapshot)) timer = setTimeout(() => void refresh(snapshot), 2000);
+        else setStopError(null);
       } catch (failure) {
         if (request.signal.aborted) return;
         setMonitoring(failure instanceof Error ? failure.message : 'Unable to refresh this run');
@@ -218,6 +240,7 @@ export function TaskExecutionView({
     busy.current = true;
     setStarting(true);
     setError(null);
+    setStopError(null);
     try {
       const result = await tasksApi.runTask(task.id, request.signal);
       if (request.signal.aborted) return;
@@ -245,6 +268,32 @@ export function TaskExecutionView({
     } finally {
       busy.current = false;
       if (!request.signal.aborted) setStarting(false);
+    }
+  };
+
+  const stop = async (): Promise<void> => {
+    if (busy.current || !run || !active(run)) return;
+    if (!window.confirm(STOP_CONFIRMATION)) return;
+    const signal = lifetime.current?.signal;
+    if (!signal || signal.aborted) return;
+    busy.current = true;
+    setStopping(true);
+    setStopError(null);
+    try {
+      const result = await tasksApi.stopRun(run.id, signal);
+      if (signal.aborted) return;
+      if (submitted.current?.id === result.id) submitted.current = result;
+      setRun(result);
+      void queryClient.invalidateQueries({ queryKey: TASKS_KEY });
+    } catch (failure) {
+      if (signal.aborted) return;
+      setStopError(failure instanceof Error ? failure.message : STOP_FAILED_FALLBACK);
+    } finally {
+      busy.current = false;
+      if (!signal.aborted) {
+        setStopping(false);
+        setRevision((value) => value + 1);
+      }
     }
   };
 
@@ -314,6 +363,12 @@ export function TaskExecutionView({
           <p>{error}</p>
         </div>
       )}
+      {stopError && (
+        <div className="execution-notice" role="alert">
+          <strong>{STOP_FAILED_TITLE}</strong>
+          <p>{stopError}</p>
+        </div>
+      )}
       {monitoring && (
         <div className="execution-notice" role="alert">
           <strong>Monitoring unavailable</strong>
@@ -328,6 +383,12 @@ export function TaskExecutionView({
         <div className="execution-notice" role="alert">
           <strong>Task failed</strong>
           <p>{run.error_message || 'The worker could not complete this task.'}</p>
+        </div>
+      )}
+      {run?.status === 'cancelled' && (
+        <div className="execution-notice execution-notice--neutral" role="status">
+          <strong>{STOPPED_TITLE}</strong>
+          <p>{run.error_message || STOPPED_FALLBACK}</p>
         </div>
       )}
       {run?.status === 'completed' && (
@@ -391,6 +452,11 @@ export function TaskExecutionView({
               ? 'Runs use this task’s configured model and sources.'
               : READ_ONLY}
         </p>
+        {writable && running && (
+          <Button variant="danger" onClick={() => void stop()} loading={stopping}>
+            {stopping ? STOPPING_LABEL : STOP_LABEL}
+          </Button>
+        )}
         {writable && !running && (
           <Button onClick={() => void start()} disabled={loading || starting || !!monitoring}>
             {starting ? 'Starting…' : error ? 'Try Again' : run ? 'Run Again' : 'Start Execution'}

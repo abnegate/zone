@@ -220,7 +220,7 @@ for (const width of [1280, 375]) {
       await installChatSocketMock(page);
       await mockCommonEndpoints(page);
       await mockAgentChat(page);
-      await page.addInitScript((value) => localStorage.setItem('manager_theme', value), theme);
+      await page.emulateMedia({ colorScheme: theme });
       await setupAuth(page);
 
       const header = page.locator('.chat-header');
