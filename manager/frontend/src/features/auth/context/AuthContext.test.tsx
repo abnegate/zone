@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { RefreshError } from '../../../api/auth';
+import { histories } from '../../chats/utils/history';
 import { AuthProvider, useAuth } from './AuthContext';
 
 let loginImpl: (request: { email: string; password: string }) => Promise<unknown>;
@@ -354,10 +355,22 @@ describe('AuthContext', () => {
       await act(async () => {
         await result.current.login({ email: 'user@test.com', password: 'password123' });
       });
+      histories.remember({
+        id: 'private',
+        title: 'Private',
+        model_name: 'gpt-4',
+        created_at: '2024-01-01T00:00:00Z',
+        updated_at: '2024-01-01T00:00:00Z',
+        archived: false,
+        agent_enabled: false,
+        messages: [],
+      });
 
       await act(async () => {
         await result.current.logout();
       });
+
+      expect(histories.recall('private')).toBeNull();
 
       expect(result.current.isAuthenticated).toBe(false);
       expect(result.current.user).toBeNull();

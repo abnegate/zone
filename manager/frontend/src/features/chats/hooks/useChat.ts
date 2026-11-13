@@ -39,6 +39,7 @@ import { automated } from '../utils/automation';
 import { mergeCitations } from '../utils/citations';
 import { publishFrame } from '../utils/frames';
 import { appendHandover } from '../utils/handover';
+import { histories } from '../utils/history';
 import { requestedModel } from '../utils/providerOptions';
 
 // How many frames to hold while the chat they belong to is still loading.
@@ -241,8 +242,10 @@ export function useChat(
   onTitleUpdated?: (id: string, title: string) => void,
   draft?: SendMessageRequest
 ) {
-  const [chat, setChat] = useState<ChatWithMessages | null>(null);
-  const [loading, setLoading] = useState(Boolean(chatId));
+  const [chat, setChat] = useState<ChatWithMessages | null>(() =>
+    chatId ? histories.recall(chatId) : null
+  );
+  const [loading, setLoading] = useState(Boolean(chatId) && chat === null);
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -257,10 +260,12 @@ export function useChat(
   contextModel.current = chat?.id === chatId ? requestedModel(chat) : null;
   const previewSequence = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
-  // The chat the socket handlers have to write into. Until the fetch lands
-  // there is nowhere to put a frame, so the socket effect holds them.
+  // The chat the socket handlers write into. A remembered history is drawn
+  // before the fetch lands, but frames are held until it does: the fetch
+  // replaces the whole history, and would drop anything applied before it.
+  const [synced, setSynced] = useState<string | null>(null);
   const loadedChat = useRef<string | null>(null);
-  loadedChat.current = chat?.id ?? null;
+  loadedChat.current = chat?.id === synced ? synced : null;
   const drainFrames = useRef<(() => void) | null>(null);
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
@@ -280,6 +285,7 @@ export function useChat(
 
   const applyTitle = useCallback((id: string, title: string): void => {
     titles.current.set(id, { title, revision: ++revision.current });
+    histories.retitle(id, title);
     setChat((previous) => (previous?.id === id ? { ...previous, title } : previous));
   }, []);
 
@@ -313,7 +319,14 @@ export function useChat(
         const title = titles.current.get(data.id);
         const updated =
           title && title.revision > currentRevision ? { ...data, title: title.title } : data;
-        setChat(updated);
+        const pendingId = pendingUserIdRef.current;
+        setChat((previous) => {
+          const pending = previous?.messages.find((message) => message.id === pendingId);
+          return pending && previous?.id === updated.id
+            ? { ...updated, messages: [...updated.messages, pending] }
+            : updated;
+        });
+        setSynced(chatId);
         if (epoch === contextEpoch.current) {
           setContext(
             data.context ? (ContextUsageSchema.safeParse(data.context).data ?? null) : null
@@ -324,6 +337,8 @@ export function useChat(
         titleCallback.current?.(updated.id, updated.title);
       } catch (err) {
         if (requestId !== requestIdRef.current) return;
+        histories.forget(chatId);
+        setSynced(chatId);
         setError(err instanceof Error ? err.message : 'Failed to fetch chat');
       } finally {
         if (requestId === requestIdRef.current) {
@@ -335,15 +350,24 @@ export function useChat(
   );
 
   useEffect(() => {
-    // Drop the previous conversation as soon as the selection changes so the
-    // UI never keeps rendering chat A under chat B's selection.
-    setChat(null);
+    // Swap the previous conversation out as soon as the selection changes so
+    // the UI never keeps rendering chat A under chat B's selection.
+    const remembered = chatId ? histories.recall(chatId) : null;
+    setChat(remembered);
+    setSynced(null);
+    if (remembered) setLoading(false);
     contextEpoch.current += 1;
     previewSequence.current += 1;
-    setContext(null);
+    setContext(
+      remembered?.context ? (ContextUsageSchema.safeParse(remembered.context).data ?? null) : null
+    );
     setContextError(null);
-    fetchChat();
-  }, [fetchChat]);
+    fetchChat({ silent: remembered !== null });
+  }, [chatId, fetchChat]);
+
+  useEffect(() => {
+    if (chat) histories.remember(chat);
+  }, [chat]);
 
   const draftKey = draft === undefined ? null : JSON.stringify(draft);
   const settingsKey = chat
@@ -1246,9 +1270,9 @@ export function useChat(
   // The socket can connect, and the server can replay a turn already in
   // flight, before the chat those frames belong to has finished loading.
   useEffect(() => {
-    if (!chat?.id) return;
+    if (!synced || chat?.id !== synced) return;
     drainFrames.current?.();
-  }, [chat?.id]);
+  }, [chat?.id, synced]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
     // Numeric readyState values stay valid for test doubles that do not
