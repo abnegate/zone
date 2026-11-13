@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { chatsApi } from '../../../api/chats';
 import type { AiProvider } from '../../settings/workspace/types';
 import type { ChatProviders, ChatWithMessages } from '../types';
+import { cached } from '../utils/cached';
 import { withChoice } from '../utils/providerOptions';
 
 const LOAD_FAILED = 'Failed to load AI providers';
@@ -14,7 +15,12 @@ const LOAD_FAILED = 'Failed to load AI providers';
  * never shows another chat's list.
  */
 export function useChatProviders(chatId: string | null) {
-  const [providers, setProviders] = useState<ChatProviders | null>(null);
+  const [listing, setListing] = useState<{
+    chatId: string | null;
+    providers: ChatProviders | null;
+  }>({ chatId: null, providers: null });
+  const remembered = chatId ? cached.providers.peek(chatId) : undefined;
+  const providers = listing.chatId === chatId ? listing.providers : (remembered ?? null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const request = useRef(0);
@@ -23,7 +29,7 @@ export function useChatProviders(chatId: string | null) {
   const load = useCallback(async (id: string | null): Promise<void> => {
     const current = ++request.current;
     if (!id) {
-      setProviders(null);
+      setListing({ chatId: null, providers: null });
       setLoading(false);
       return;
     }
@@ -31,7 +37,8 @@ export function useChatProviders(chatId: string | null) {
     try {
       const loaded = await chatsApi.getChatProviders(id);
       if (current === request.current) {
-        setProviders(loaded);
+        cached.providers.remember(id, loaded);
+        setListing({ chatId: id, providers: loaded });
         setError(null);
       }
     } catch (error) {
@@ -44,7 +51,6 @@ export function useChatProviders(chatId: string | null) {
 
   useEffect(() => {
     latestChatId.current = chatId;
-    setProviders(null);
     setError(null);
     void load(chatId);
   }, [chatId, load]);
@@ -56,7 +62,12 @@ export function useChatProviders(chatId: string | null) {
       if (!chatId) throw new Error('No chat selected');
       const chat = await chatsApi.setChatProvider(chatId, { provider, model });
       if (latestChatId.current === chatId) {
-        setProviders((current) => current && withChoice(current, chat));
+        cached.providers.update(chatId, (current) => withChoice(current, chat));
+        setListing((last) => ({
+          chatId,
+          providers:
+            last.chatId === chatId && last.providers ? withChoice(last.providers, chat) : null,
+        }));
         await load(chatId);
       }
       return chat;

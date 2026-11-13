@@ -24,6 +24,8 @@ import type { SubagentList, SubagentStep } from '../features/chats/subagentTypes
 import type {
   Chat,
   ChatIndicator,
+  ChatPage,
+  ChatPageRequest,
   ChatProviders,
   ChatPullRequest,
   ChatSearchOptions,
@@ -86,10 +88,10 @@ class ChatsApi {
     return parse(ContextResponseSchema, await response.json()).context;
   }
 
-  async getChats(workspaceId: string, archived?: boolean): Promise<Chat[]> {
+  async getChats(workspaceId: string, request: ChatPageRequest = {}): Promise<ChatPage> {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (archived !== undefined) {
-      params.set('archived', String(archived));
+    for (const [name, value] of Object.entries(request)) {
+      if (value !== undefined) params.set(name, String(value));
     }
     const response = await fetch(`${API_BASE}/api/chats?${params}`, {
       headers: this.getHeaders(),
@@ -98,7 +100,7 @@ class ChatsApi {
       throw await ApiError.from(response, 'Failed to fetch chats');
     }
     const data = parse(ChatsResponseSchema, await response.json());
-    return data.chats;
+    return { chats: data.chats, total: data.total ?? (request.offset ?? 0) + data.chats.length };
   }
 
   /**

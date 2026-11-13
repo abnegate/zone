@@ -2,9 +2,11 @@
 
 pub mod activity;
 pub mod occupancy;
+mod page;
 pub mod provider;
 pub mod recent;
 mod session;
+mod sort;
 
 use abnegate_llm::ReasoningEffort;
 use chrono::NaiveDateTime;
@@ -18,7 +20,9 @@ use abnegate_agent_cli::AgentKind;
 
 use super::DbResult;
 
+pub use page::Page;
 pub use session::ChatSession;
+pub use sort::Sort;
 
 fn effort(value: &str) -> ReasoningEffort {
     value.parse().unwrap_or_default()
@@ -85,69 +89,58 @@ macro_rules! map_chat_row {
     };
 }
 
-/// List chats with optional workspace and archived filter
+/// The workspace's chats, only the archived or unarchived ones when `archived`
+/// says which, in `sort` order and cut to `page`.
 pub async fn list_chats(
     pool: &PgPool,
-    workspace_id: Option<Uuid>,
+    workspace_id: Uuid,
     archived: Option<bool>,
+    sort: Sort,
+    page: Page,
 ) -> DbResult<Vec<ChatRow>> {
-    match (workspace_id, archived) {
-        (Some(wid), Some(a)) => {
-            let rows = sqlx::query!(
-                r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
-                FROM chats
-                WHERE workspace_id = $1 AND archived = $2
-                ORDER BY updated_at DESC
-                "#,
-                wid,
-                a
-            )
-            .fetch_all(pool)
-            .await?;
-            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
-        }
-        (Some(wid), None) => {
-            let rows = sqlx::query!(
-                r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
-                FROM chats
-                WHERE workspace_id = $1
-                ORDER BY updated_at DESC
-                "#,
-                wid
-            )
-            .fetch_all(pool)
-            .await?;
-            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
-        }
-        (None, Some(a)) => {
-            let rows = sqlx::query!(
-                r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
-                FROM chats
-                WHERE archived = $1
-                ORDER BY updated_at DESC
-                "#,
-                a
-            )
-            .fetch_all(pool)
-            .await?;
-            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
-        }
-        (None, None) => {
-            let rows = sqlx::query!(
-                r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
-                FROM chats
-                ORDER BY updated_at DESC
-                "#
-            )
-            .fetch_all(pool)
-            .await?;
-            Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
-        }
-    }
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
+        FROM chats
+        WHERE workspace_id = $1 AND ($2::bool IS NULL OR archived = $2)
+        ORDER BY
+            CASE WHEN $3::text = 'updated_desc' THEN updated_at END DESC,
+            CASE WHEN $3::text = 'updated_asc' THEN updated_at END ASC,
+            CASE WHEN $3::text = 'created_desc' THEN created_at END DESC,
+            CASE WHEN $3::text = 'created_asc' THEN created_at END ASC,
+            CASE WHEN $3::text = 'title_asc' THEN lower(title) END ASC,
+            CASE WHEN $3::text = 'title_desc' THEN lower(title) END DESC,
+            id ASC
+        LIMIT $4 OFFSET $5
+        "#,
+        workspace_id,
+        archived,
+        sort.as_str(),
+        page.limit,
+        page.offset
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
+}
+
+/// How many chats `list_chats` would return across every page.
+pub async fn count_chats(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    archived: Option<bool>,
+) -> DbResult<i64> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) AS "total!"
+        FROM chats
+        WHERE workspace_id = $1 AND ($2::bool IS NULL OR archived = $2)
+        "#,
+        workspace_id,
+        archived
+    )
+    .fetch_one(pool)
+    .await
 }
 
 /// The titles of the given chats, for labelling rows that carry only a chat id.

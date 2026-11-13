@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at\n                FROM chats\n                WHERE workspace_id = $1 AND archived = $2\n                ORDER BY updated_at DESC\n                ",
+  "query": "\n        SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at\n        FROM chats\n        WHERE workspace_id = $1 AND ($2::bool IS NULL OR archived = $2)\n        ORDER BY\n            CASE WHEN $3::text = 'updated_desc' THEN updated_at END DESC,\n            CASE WHEN $3::text = 'updated_asc' THEN updated_at END ASC,\n            CASE WHEN $3::text = 'created_desc' THEN created_at END DESC,\n            CASE WHEN $3::text = 'created_asc' THEN created_at END ASC,\n            CASE WHEN $3::text = 'title_asc' THEN lower(title) END ASC,\n            CASE WHEN $3::text = 'title_desc' THEN lower(title) END DESC,\n            id ASC\n        LIMIT $4 OFFSET $5\n        ",
   "describe": {
     "columns": [
       {
@@ -150,7 +150,10 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Bool"
+        "Bool",
+        "Text",
+        "Int8",
+        "Int8"
       ]
     },
     "nullable": [
@@ -169,5 +172,5 @@
       true
     ]
   },
-  "hash": "66203d6f590eb084a9df358239f30495000e19a727cf8a22f1e76ae0cf2be5de"
+  "hash": "bb937699cc0ded72e100207b536a5b627ff7af60a5baeaf629bee4762b15fa92"
 }

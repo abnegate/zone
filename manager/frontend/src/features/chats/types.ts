@@ -1,6 +1,7 @@
 import type { AiProvider } from '../settings/workspace/types';
 import type { TaskStatus } from '../tasks/status';
 import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
+import type { ChatSort } from './utils/arrange';
 
 export * from './provider';
 
@@ -347,6 +348,18 @@ export interface ChatCharacter {
   post_history_instructions?: string | null;
   stop_sequences?: string[];
   source_name?: string | null;
+}
+
+export interface ChatPageRequest {
+  archived?: boolean;
+  sort?: ChatSort;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ChatPage {
+  chats: Chat[];
+  total: number;
 }
 
 export interface Chat {

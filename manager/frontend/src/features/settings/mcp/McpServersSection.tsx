@@ -2,9 +2,10 @@ import { Button, EmptyState } from '@zone/ui';
 import { type ComponentProps, useEffect, useId, useRef, useState } from 'react';
 import { Source } from './constants';
 import { messageOf } from './failure';
-import { type McpImportResult, useMcpServers } from './hooks';
+import { type McpImportResult, type McpProviderSelection, useMcpServers } from './hooks';
 import { keyOf } from './key';
 import { McpImportDialog } from './McpImportDialog';
+import { McpProviderImportDialog } from './McpProviderImportDialog';
 import { McpRemoveDialog } from './McpRemoveDialog';
 import { McpServerForm } from './McpServerForm';
 import { McpServerRow } from './McpServerRow';
@@ -65,11 +66,13 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
     remove,
     reconnect,
     importAll,
+    importProviders,
   } = useMcpServers(organizationId);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<ManagedServer | null>(null);
   const [removing, setRemoving] = useState<ManagedServer | null>(null);
   const [importing, setImporting] = useState(false);
+  const [importingProvider, setImportingProvider] = useState(false);
   const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   const [failure, setFailure] = useState<string | null>(null);
   const [imported, setImported] = useState<McpImportResult | null>(null);
@@ -156,10 +159,22 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
     close(() => setImporting(false));
   };
 
+  const runProviderImport = async (selections: McpProviderSelection[]) => {
+    const result = await importProviders(selections);
+    setImported(result);
+    close(() => setImportingProvider(false));
+  };
+
   const openImport = () =>
     open(() => {
       setImported(null);
       setImporting(true);
+    });
+
+  const openProviderImport = () =>
+    open(() => {
+      setImported(null);
+      setImportingProvider(true);
     });
 
   return (
@@ -175,6 +190,9 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
         </div>
         {canManage && loaded && (
           <div className="section-row-actions">
+            <Button variant="secondary" size="sm" onClick={openProviderImport}>
+              Import from provider
+            </Button>
             <Button variant="secondary" size="sm" onClick={openImport}>
               Import JSON
             </Button>
@@ -272,6 +290,13 @@ export function McpServersSection({ organizationId, canManage }: McpServersSecti
           commands={commands}
           onImport={runImport}
           onClose={() => close(() => setImporting(false))}
+        />
+      )}
+      {importingProvider && (
+        <McpProviderImportDialog
+          organizationId={organizationId}
+          onImport={runProviderImport}
+          onClose={() => close(() => setImportingProvider(false))}
         />
       )}
     </section>
