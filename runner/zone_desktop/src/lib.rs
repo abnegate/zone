@@ -12,6 +12,8 @@ use zone_installer::{MANAGER_DIR, ServeKind, bind, config_path, resolve_manager_
 mod manager_bundle;
 #[cfg(desktop)]
 mod menu;
+#[cfg(desktop)]
+mod zoom;
 
 struct ClientState {
     server: AppState,
@@ -36,6 +38,9 @@ pub fn run() {
 
     #[cfg(desktop)]
     let builder = builder.on_menu_event(|app, event| {
+        if zoom::handle_menu_event(app, event.id().as_ref()) {
+            return;
+        }
         let Some(state) = app.try_state::<ClientState>() else {
             return;
         };
@@ -117,7 +122,10 @@ fn open_window(app: &AppHandle, url: &str) -> Result<(), Box<dyn std::error::Err
     let builder = builder
         .inner_size(1280.0, 840.0)
         .min_inner_size(900.0, 600.0)
-        .resizable(true);
+        .resizable(true)
+        // Zoom combos the View menu's accelerators cannot match, such as a
+        // shifted `+` or the numpad, are caught in the page instead.
+        .initialization_script(zoom::script());
 
     builder.build()?;
     Ok(())
