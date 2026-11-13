@@ -62,7 +62,7 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 
 **Gaps that block the feature (phase 0):**
 
-- No queue consumer. `claim_next_task` (`runner/zone_server/migrations/0001_v1.sql`) is dead; runs are `tokio::spawn` from `routes/tasks.rs:479`, bounded by `MAX_CONCURRENT_TASKS = 5` and `TASK_TIMEOUT_SECS = 3600` (`workers/task.rs:24,27`). A restart orphans `task_runs` rows in `running`.
+- No queue consumer. `claim_next_task` (`runner/zone_server/migrations/0001_v1.sql`) is dead; runs are `tokio::spawn` from `routes/tasks.rs:479`, bounded by `MAX_CONCURRENT_TASKS = 5` (`workers/task.rs`), with no time limit on a run: a run holds its permit until it finishes, is stopped or loses its lease, and gives it back while it is parked on a question or a wait. A restart orphans `task_runs` rows in `running`.
 - The task workspace directory is never created and the repo is never cloned (`workers/task.rs:271-278`). Tasks without a repo run in the server's own cwd.
 - `tasks.status` never advances during a run; `tasks.created_by` (migration 006) is never written.
 - The prod image installs only `curl ca-certificates libssl3t64 libstdc++6` (`manager/Dockerfile:50`): no `git` (the PR worker is broken in prod), no `docker`, `kubectl`, `helm`. No docker socket on `manager`. Helm runs the server with `readOnlyRootFilesystem`.
@@ -624,7 +624,7 @@ The gate is **the deployment row**, not an in-memory oneshot. Policy is per targ
 
 **Blocking flow in `deploy_app`:**
 
-1. Validate manifest + target, upsert `releases`, insert `deployments` as `pending_approval` (or `approved` for `auto`), with `approval_deadline_at = now + min(target.approval_timeout_secs, remaining task budget − 5 min)`.
+1. Validate manifest + target, upsert `releases`, insert `deployments` as `pending_approval` (or `approved` for `auto`), with `approval_deadline_at = now + target.approval_timeout_secs`.
 2. Notify (§7.5). For a chat origin, additionally emit `AgentEvent::ToolApprovalRequired` so the existing inline prompt appears; its `ApproveTool{id, approved}` answer routes to the same `db::deployments::approve()`.
 3. Subscribe to the `deploy::events` broadcast for this id, then re-read the row (closes the race where the decision landed before subscribing).
 4. Await: `approved` → with `wait: true` (the default for tasks) keep awaiting to a terminal status within the deploy budget, then return `{status, verification summary, urls}`; `rejected` → return a tool error the model can act on; deadline → return `{status: pending_approval, timed_out: true}`.
@@ -632,7 +632,7 @@ The gate is **the deployment row**, not an in-memory oneshot. Policy is per targ
 
 `deploy_app` and `rollback_deployment` are `mutating()` but are **not** added to `approval.rs::requires_approval`: the target policy is the single gate, so a chat user is not prompted twice. Agent-requested rollback is always `pending_approval` regardless of policy — rolling back a live app is the riskier direction.
 
-Stated tradeoff: while blocked, a task holds one of `MAX_CONCURRENT_TASKS = 5` permits and its LLM context; `approval_timeout_secs` bounds that, and `TASK_TIMEOUT_SECS = 3600` still applies.
+Stated tradeoff: while blocked, a task holds one of `MAX_CONCURRENT_TASKS = 5` permits and its LLM context; `approval_timeout_secs` bounds that. The run itself has no time limit: it holds the permit until it finishes, is stopped or loses its lease, and gives it back while it is parked on a question or a wait.
 
 ### 7.5 Notifier — `runner/zone_server/src/notify/`
 

@@ -9,6 +9,7 @@
 
 pub mod driver;
 pub mod guidance;
+pub mod lease;
 pub mod notification;
 pub mod pipeline;
 pub mod review;
@@ -33,9 +34,13 @@ use crate::workers::notify::{self, NotifyEnvironment, NotifySettings};
 
 static WAKE: Notify = Notify::const_new();
 
-/// How long one instance may hold a project before another may take it over.
-/// A drive that reviews a change can take minutes; one that died takes this.
-const CLAIM_LEASE: Duration = Duration::from_secs(15 * 60);
+/// How long a claim is left alone without a renewal before its instance is
+/// taken to have died and another may drive the project.
+pub const CLAIM_LEASE: Duration = Duration::from_secs(15 * 60);
+
+/// How often a running drive renews its claim. Fifteen renewals fit in one
+/// lease, so a slow or failed round trip to the database does not cost it.
+const CLAIM_RENEWAL: Duration = Duration::from_secs(60);
 
 /// Projects one tick will claim.
 pub const PROJECTS_PER_TICK: i64 = 10;
@@ -136,14 +141,18 @@ pub async fn tick(
     config: &Arc<AutoProjectConfig>,
     driving: &Arc<DashMap<Uuid, ()>>,
 ) {
-    let due = match auto_projects::claim_due(state.db(), CLAIM_LEASE, PROJECTS_PER_TICK).await {
+    let running: Vec<Uuid> = driving.iter().map(|entry| *entry.key()).collect();
+    let due = match auto_projects::claim_due(state.db(), CLAIM_LEASE, PROJECTS_PER_TICK, &running)
+        .await
+    {
         Ok(due) => due,
         Err(error) => {
             tracing::warn!(%error, "Could not claim auto projects; retrying next tick");
             return;
         }
     };
-    for project_id in due {
+    for claim in due {
+        let project_id = claim.project_id;
         if driving.insert(project_id, ()).is_some() {
             continue;
         }
@@ -152,12 +161,24 @@ pub async fn tick(
         let config = Arc::clone(config);
         let driving = Arc::clone(driving);
         tokio::spawn(async move {
-            if let Err(error) = driver::drive_project(&state, &services, &config, project_id).await
+            let drive = |lease: lease::Lease| {
+                let (state, services, config) = (&state, &services, &config);
+                async move { driver::drive_project(state, services, config, project_id, &lease).await }
+            };
+            if let Err(error) =
+                lease::holding(state.db().clone(), claim, CLAIM_RENEWAL, drive).await
             {
                 tracing::warn!(%project_id, %error, "Auto project drive failed; retrying next tick");
             }
-            if let Err(error) = auto_projects::release(state.db(), project_id).await {
-                tracing::warn!(%project_id, %error, "Could not release an auto project claim");
+            match auto_projects::release(state.db(), claim).await {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    %project_id,
+                    "An auto project claim was taken over before its drive ended"
+                ),
+                Err(error) => {
+                    tracing::warn!(%project_id, %error, "Could not release an auto project claim")
+                }
             }
             driving.remove(&project_id);
         });
@@ -171,5 +192,12 @@ pub async fn drive_once(
     config: &AutoProjectConfig,
     project_id: Uuid,
 ) -> Result<(), String> {
-    driver::drive_project(state, services, config, project_id).await
+    driver::drive_project(
+        state,
+        services,
+        config,
+        project_id,
+        &lease::Lease::unclaimed(),
+    )
+    .await
 }

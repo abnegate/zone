@@ -420,7 +420,7 @@ async fn both_surfaces_read_the_waiting_rules_and_no_surviving_poll_instruction(
         }
     }
 
-    assert!(chat.contains("this turn's own deadline"), "{chat}");
+    assert!(!chat.contains("this turn's own deadline"), "{chat}");
     assert!(
         task.contains("parks this run and hands its slot back"),
         "{task}"

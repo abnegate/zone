@@ -36,9 +36,6 @@ const MAXIMUM_FILE_SIZE: usize = 10 * 1024 * 1024;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Longest a single repair may run.
-pub const REPAIR_TIMEOUT: Duration = Duration::from_secs(600);
-
 /// Everything one repair turn needs, already scoped and isolated.
 pub struct RepairTask<'a> {
     pub conflict: &'a Conflict,

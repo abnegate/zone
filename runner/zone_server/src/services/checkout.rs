@@ -799,6 +799,8 @@ impl Checkout {
 
     /// Remove a run's plain directory.
     fn release(path: &Path) {
+        #[cfg(test)]
+        hold::wait(path);
         if let Err(error) = std::fs::remove_dir_all(path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
@@ -825,6 +827,46 @@ impl Drop for Checkout {
             return;
         }
         Self::release(&self.path);
+    }
+}
+
+/// Removals a test holds open, so a checkout whose removal hangs can be
+/// staged without a filesystem that hangs.
+#[cfg(test)]
+pub(crate) mod hold {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Condvar, LazyLock, Mutex, PoisonError};
+
+    static HELD: LazyLock<(Mutex<HashSet<PathBuf>>, Condvar)> = LazyLock::new(Default::default);
+
+    /// Keeps the removal of its path blocked until it drops.
+    pub(crate) struct Held(PathBuf);
+
+    pub(crate) fn block(path: PathBuf) -> Held {
+        HELD.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(path.clone());
+        Held(path)
+    }
+
+    pub(super) fn wait(path: &Path) {
+        let (held, released) = &*HELD;
+        let mut held = held.lock().unwrap_or_else(PoisonError::into_inner);
+        while held.contains(path) {
+            held = released.wait(held).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let (held, released) = &*HELD;
+            held.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&self.0);
+            released.notify_all();
+        }
     }
 }
 

@@ -28,6 +28,7 @@ use crate::services::route::Route;
 use crate::services::stages;
 use crate::state::AppState;
 use crate::workers::conflict::agent::ModelRepairAgent;
+use crate::workers::conflict::credentials::Credentials;
 use crate::workers::conflict::{self, RepairOutcome, RepairRequest, repair};
 use crate::workers::learning::artifacts::{PULL_REQUEST_KEY, REVIEW_KEY};
 use zone_core::llm::LlmBackend;
@@ -696,20 +697,13 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         Ok(None) => return RepairOutcome::Failed(NO_HOLDER.to_string()),
         Err(error) => return RepairOutcome::Failed(format!("Failed to get project: {error}")),
     };
-    let access_token = match state.github().project(state.db(), &project).await {
-        Ok(Some(credential)) => credential.into_secret(),
-        Ok(None) => return RepairOutcome::Failed(NO_CREDENTIAL.to_string()),
-        Err(GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected) => {
-            return RepairOutcome::Failed(DISCONNECTED.to_string());
-        }
-        Err(GitHubError::Credential) => {
-            return RepairOutcome::Failed(PROJECT_TOKEN_UNOPENABLE.to_string());
-        }
-        Err(error) => {
-            return RepairOutcome::Failed(format!(
-                "Failed to resolve the project's GitHub credential: {error}"
-            ));
-        }
+    let credentials = ProjectCredentials {
+        state,
+        project: &project,
+    };
+    let access_token = match credentials.resolve().await {
+        Ok(token) => token,
+        Err(reason) => return RepairOutcome::Failed(reason),
     };
 
     if !conflicted(&pull_requests, &reference, &access_token).await {
@@ -764,9 +758,9 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
     let outcome = repair(
         &conflict::service(),
         &repairer,
+        &credentials,
         &RepairRequest {
             remote,
-            token: Some(access_token),
             head,
             base,
             expected_head: None,
@@ -778,6 +772,42 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
     match outcome {
         RepairOutcome::Failed(reason) => RepairOutcome::Failed(endpoint.scrub(&reason)),
         outcome => outcome,
+    }
+}
+
+/// The token of the project that holds a repair's pull request, resolved each
+/// time it is asked for so a push after a long repair presents an installation
+/// token minted after the one the checkout was fetched with expired.
+struct ProjectCredentials<'a> {
+    state: &'a AppState,
+    project: &'a projects::ProjectRow,
+}
+
+impl ProjectCredentials<'_> {
+    async fn resolve(&self) -> Result<SecretValue, String> {
+        match self
+            .state
+            .github()
+            .project(self.state.db(), self.project)
+            .await
+        {
+            Ok(Some(credential)) => Ok(credential.into_secret()),
+            Ok(None) => Err(NO_CREDENTIAL.to_string()),
+            Err(GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected) => {
+                Err(DISCONNECTED.to_string())
+            }
+            Err(GitHubError::Credential) => Err(PROJECT_TOKEN_UNOPENABLE.to_string()),
+            Err(error) => Err(format!(
+                "Failed to resolve the project's GitHub credential: {error}"
+            )),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Credentials for ProjectCredentials<'_> {
+    async fn token(&self) -> Result<Option<SecretValue>, String> {
+        self.resolve().await.map(Some)
     }
 }
 
@@ -2068,11 +2098,22 @@ mod publication_tests {
     /// GitHub mints `token` for installation `number` the next time it is
     /// asked, and only then.
     async fn minting_once(server: &MockServer, number: u64, token: &str) {
+        minting_once_for(server, number, token, chrono::Duration::hours(1)).await;
+    }
+
+    /// GitHub mints `token`, valid for `lifetime`, for installation `number`
+    /// the next time it is asked, and only then.
+    async fn minting_once_for(
+        server: &MockServer,
+        number: u64,
+        token: &str,
+        lifetime: chrono::Duration,
+    ) {
         Mock::given(method("POST"))
             .and(path(format!("/app/installations/{number}/access_tokens")))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "token": token,
-                "expires_at": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+                "expires_at": (chrono::Utc::now() + lifetime).to_rfc3339(),
             })))
             .up_to_n_times(1)
             .expect(1)
@@ -2258,6 +2299,44 @@ mod publication_tests {
             token.unwrap().as_ref().map(SecretValue::expose),
             Some("ghs_receptiontoken")
         );
+    }
+
+    /// The push after a repair that outlived its installation token presents
+    /// one minted after the repair, not the one the checkout was fetched with.
+    #[tokio::test]
+    async fn a_repair_asks_for_a_freshly_minted_token_once_its_first_has_expired() {
+        const FETCHED: &str = "ghs_fetchedinstallationtoken";
+        const PUSHED: &str = "ghs_pushedinstallationtoken";
+        let fixture = Fixture::new().await;
+        let server = MockServer::start().await;
+        let number = crate::services::github_app::testing::installation_number();
+        minting_once_for(&server, number, FETCHED, chrono::Duration::minutes(1)).await;
+        minting_once(&server, number, PUSHED).await;
+        moved_onto(&fixture, &server, number).await;
+        let task = task_of(&fixture.state, &fixture).await;
+        let project = projects::get_project(fixture.state.db(), task.project_ids[0])
+            .await
+            .unwrap()
+            .unwrap();
+        let credentials = ProjectCredentials {
+            state: &fixture.state,
+            project: &project,
+        };
+
+        let fetched = credentials.token().await;
+        let pushed = credentials.token().await;
+
+        fixture.cleanup().await;
+        assert_eq!(
+            fetched.unwrap().as_ref().map(SecretValue::expose),
+            Some(FETCHED)
+        );
+        assert_eq!(
+            pushed.unwrap().as_ref().map(SecretValue::expose),
+            Some(PUSHED),
+            "a token asked for after the first expired is minted again"
+        );
+        server.verify().await;
     }
 
     #[tokio::test]

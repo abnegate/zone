@@ -30,17 +30,25 @@ impl Observed {
         self.windows.remove(&login).unwrap_or_default()
     }
 
-    /// Records what the turn observed of `login` over its snapshot, as [`super::observe`] does.
+    /// Records what the turn observed of `login` over its snapshot, as [`super::observe`] does,
+    /// and lets it go only once that write returns, so a record cancelled part way through
+    /// leaves the windows for the next one.
     pub async fn record(&mut self, state: &AppState, login: Uuid) {
-        super::observe(state, login, &self.take(login)).await;
+        let windows = self.windows.get(&login).map_or(&[][..], Vec::as_slice);
+        super::observe(state, login, windows).await;
+        self.windows.remove(&login);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use abnegate_agent_cli::AgentKind;
+    use futures::FutureExt;
+    use sqlx::PgPool;
     use zone_core::llm::window;
 
     use super::*;
+    use crate::db::agent_logins::{self, Insert};
 
     fn measured(name: &str, used_percent: f64) -> Window {
         Window::new(name).with_used_percent(used_percent)
@@ -66,5 +74,67 @@ mod tests {
         );
         assert_eq!(observed.take(first), [], "what was taken is let go of");
         assert_eq!(observed.take(second), [measured(window::FIVE_HOURS, 3.0)]);
+    }
+
+    #[tokio::test]
+    async fn a_record_cancelled_before_it_writes_keeps_the_windows_for_the_next() {
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .expect("the test database");
+        let organization = Uuid::new_v4();
+        sqlx::query("INSERT INTO organizations (id, name, slug) VALUES ($1, 'Observed', $1::text)")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+        let login = agent_logins::insert(
+            &pool,
+            &Insert {
+                organization_id: organization,
+                agent: AgentKind::Claude.as_str(),
+                account: Some("observed"),
+                credential: None,
+                label: Some("observed"),
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("a login")
+        .id;
+        let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+        let mut observed = Observed::default();
+        observed.observe(login, measured(window::FIVE_HOURS, 40.0));
+
+        let held = super::super::credential::hold(login).await;
+        let cancelled = observed.record(&state, login).now_or_never();
+        drop(held);
+        observed.record(&state, login).await;
+        let recorded = agent_logins::get(&pool, login)
+            .await
+            .expect("the login to be readable")
+            .expect("the login")
+            .snapshot();
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("the organization to be removed");
+
+        assert_eq!(
+            cancelled, None,
+            "the first record waits on the held login and is dropped there"
+        );
+        assert_eq!(
+            recorded.map(|snapshot| snapshot.windows),
+            Some(vec![measured(window::FIVE_HOURS, 40.0)]),
+            "the next record writes what the cancelled one left"
+        );
+        assert_eq!(
+            observed.take(login),
+            [],
+            "a finished record lets go of the windows"
+        );
     }
 }

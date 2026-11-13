@@ -2,7 +2,6 @@
 
 use crate::common::context::{Harness, answer, calls, delta, finish, next, send, successful, tool};
 use serde_json::json;
-use std::time::Duration;
 
 #[tokio::test]
 async fn stop_tokens_never_reach_the_live_or_persisted_answer() {
@@ -142,29 +141,6 @@ async fn oversized_provider_output_is_bounded_and_marked_in_history() {
     .await
     .unwrap();
     assert_eq!(stored, "\n\n[Response truncated due to length limit]");
-}
-
-#[tokio::test]
-async fn generation_timeout_interrupts_the_turn_without_saving_a_reply() {
-    let delayed = answer("This response arrives too late").set_delay(Duration::from_secs(2));
-    let mut harness = Harness::new(Some(200_000), false, vec![delayed]).await;
-    harness.config.chat.timeout = Duration::from_millis(50);
-    harness.restart().await;
-
-    let frames = harness.turn("Wait for the slow provider").await;
-    assert_eq!(frames.last().unwrap()["type"], "error");
-    assert_eq!(
-        frames.last().unwrap()["message"],
-        "Response generation timed out"
-    );
-    assert!(
-        harness
-            .history()
-            .await
-            .entries
-            .iter()
-            .all(|entry| entry.message.role != abnegate_llm::Role::Assistant)
-    );
 }
 
 #[tokio::test]

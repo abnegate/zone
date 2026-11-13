@@ -6,6 +6,9 @@ use uuid::Uuid;
 use zone_server::agent::wait::Waiting;
 use zone_server::db::tasks;
 
+const COMPLETED: &str = "completed";
+const FAILED: &str = "failed";
+
 /// Test helper to create a test project and workspace
 /// Returns (workspace_id, project_id)
 async fn create_test_project(pool: &sqlx::PgPool) -> (Uuid, Uuid) {
@@ -121,7 +124,7 @@ async fn test_complete_task_run_success() {
     let completed = tasks::complete_task_run(
         &pool,
         run.id,
-        "completed",
+        COMPLETED,
         None,
         Some(serde_json::json!({
             "iterations": 5,
@@ -133,7 +136,7 @@ async fn test_complete_task_run_success() {
 
     assert!(completed.is_some());
     let completed = completed.unwrap();
-    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.status, COMPLETED);
     assert!(completed.completed_at.is_some());
     assert_eq!(completed.progress_percent, Some(100));
     assert!(completed.error_message.is_none());
@@ -168,7 +171,7 @@ async fn test_complete_task_run_failure() {
     let completed = tasks::complete_task_run(
         &pool,
         run.id,
-        "failed",
+        FAILED,
         Some("Agent error: max iterations exceeded"),
         None,
     )
@@ -177,7 +180,7 @@ async fn test_complete_task_run_failure() {
 
     assert!(completed.is_some());
     let completed = completed.unwrap();
-    assert_eq!(completed.status, "failed");
+    assert_eq!(completed.status, FAILED);
     assert!(completed.completed_at.is_some());
     assert_eq!(
         completed.error_message,
@@ -351,7 +354,7 @@ async fn test_task_run_lifecycle() {
     let completed = tasks::complete_task_run(
         &pool,
         run.id,
-        "completed",
+        COMPLETED,
         None,
         Some(serde_json::json!({
             "iterations": 3,
@@ -364,7 +367,7 @@ async fn test_task_run_lifecycle() {
 
     assert!(completed.is_some());
     let completed = completed.unwrap();
-    assert_eq!(completed.status, "completed");
+    assert_eq!(completed.status, COMPLETED);
     assert_eq!(completed.progress_percent, Some(100));
 
     // Get all logs
@@ -400,7 +403,7 @@ async fn test_list_task_runs() {
         let run = tasks::create_task_run(&pool, task.id)
             .await
             .expect("Failed to create task run");
-        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+        tasks::complete_task_run(&pool, run.id, COMPLETED, None, None)
             .await
             .unwrap();
     }
@@ -497,7 +500,7 @@ async fn test_task_run_with_error() {
     let completed = tasks::complete_task_run(
         &pool,
         run.id,
-        "failed",
+        FAILED,
         Some("Tool execution failed: command not found"),
         None,
     )
@@ -506,7 +509,7 @@ async fn test_task_run_with_error() {
 
     assert!(completed.is_some());
     let completed = completed.unwrap();
-    assert_eq!(completed.status, "failed");
+    assert_eq!(completed.status, FAILED);
     assert!(completed.error_message.is_some());
     assert!(
         completed
@@ -523,31 +526,159 @@ struct Parked {
     token: String,
     organization: Uuid,
     user: Uuid,
+    task: Uuid,
     run: Uuid,
     provider: wiremock::MockServer,
     worker: tokio::task::JoinHandle<()>,
 }
 
+/// How long a stopped worker may take to end before the stop is judged to
+/// have waited on the heartbeat rather than reached the worker directly.
+const ENDS_WITHIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a stopped run is watched for a retry or a late overwrite.
+const AFTER_STOP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long a hanging completion keeps its turn open: past any test's end.
+const HANG: std::time::Duration = std::time::Duration::from_secs(600);
+
+async fn stop_run(client: &common::TestClient, token: &str, run: Uuid) -> common::TestResponse {
+    client
+        .post_json_auth(
+            &format!("/api/tasks/runs/{run}/stop"),
+            &serde_json::json!({}),
+            token,
+        )
+        .await
+}
+
+async fn run_task(client: &common::TestClient, token: &str, task: Uuid) -> common::TestResponse {
+    client
+        .post_json_auth(
+            &format!("/api/tasks/{task}/runs"),
+            &serde_json::json!({}),
+            token,
+        )
+        .await
+}
+
+fn assert_still_stopping(response: &common::TestResponse) {
+    response.assert_status(axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        response.json_value(),
+        serde_json::json!({"error": tasks::STOPPING})
+    );
+}
+
+async fn run_status(pool: &sqlx::PgPool, run: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .expect("the run is still readable")
+}
+
+async fn run_settles_on(pool: &sqlx::PgPool, run: Uuid, status: &str) {
+    for _ in 0..400 {
+        if run_status(pool, run).await == status {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!(
+        "the run never reached {status}; it is {}",
+        run_status(pool, run).await
+    );
+}
+
+async fn run_row(pool: &sqlx::PgPool, run: Uuid) -> tasks::TaskRunRow {
+    tasks::get_task_run(pool, run)
+        .await
+        .expect("the run is readable")
+        .expect("the run still exists")
+}
+
+/// The task's status and the run it holds as active.
+async fn task_state(pool: &sqlx::PgPool, task: Uuid) -> (String, Option<Uuid>) {
+    sqlx::query_as("SELECT status, active_run_id FROM tasks WHERE id = $1")
+        .bind(task)
+        .fetch_one(pool)
+        .await
+        .expect("the task is readable")
+}
+
+/// What a stop leaves behind: the run cancelled and quiet, its task paused
+/// and free for the next run.
+async fn assert_stopped(pool: &sqlx::PgPool, task: Uuid, run: Uuid) {
+    assert_cancelled(pool, run).await;
+    assert_eq!(
+        task_state(pool, task).await,
+        (tasks::PAUSED.to_string(), None),
+        "the task is paused and holds no active run"
+    );
+}
+
+/// What a stop leaves on a run whose owner is still tearing it down: the run
+/// cancelled and quiet, its task paused but still reserved for it.
+async fn assert_draining(pool: &sqlx::PgPool, task: Uuid, run: Uuid) {
+    assert_cancelled(pool, run).await;
+    assert_eq!(
+        task_state(pool, task).await,
+        (tasks::PAUSED.to_string(), Some(run)),
+        "the task is paused and still reserved for the stopped run"
+    );
+}
+
+async fn assert_cancelled(pool: &sqlx::PgPool, run: Uuid) {
+    let row = run_row(pool, run).await;
+    assert_eq!(row.status, tasks::CANCELLED);
+    assert_eq!(row.error_message.as_deref(), Some(tasks::STOPPED));
+    assert!(
+        row.completed_at.is_some(),
+        "a stopped run records when it ended"
+    );
+    assert_eq!(row.pending_question, None, "a stopped run asks nothing");
+    assert_eq!(row.pending_wait, None, "a stopped run waits on nothing");
+}
+
+fn assert_stop_response(response: &common::TestResponse, run: Uuid) {
+    response.assert_status(axum::http::StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["run"]["id"], run.to_string());
+    assert_eq!(body["run"]["status"], tasks::CANCELLED);
+    assert_eq!(body["run"]["error_message"], tasks::STOPPED);
+}
+
 impl Parked {
-    async fn status(&self) -> String {
-        sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
-            .bind(self.run)
-            .fetch_one(&self.pool)
-            .await
-            .expect("the run is still readable")
+    async fn stop(&self) -> common::TestResponse {
+        stop_run(&self.client, &self.token, self.run).await
     }
 
-    async fn settles_on(&self, status: &str) {
+    /// Wait for the worker to end, failing if it outlives [`ENDS_WITHIN`].
+    async fn ended(&mut self) {
+        tokio::time::timeout(ENDS_WITHIN, &mut self.worker)
+            .await
+            .expect("the stopped worker ended without waiting on its heartbeat")
+            .expect("the worker ended without panicking");
+    }
+
+    /// Wait until the provider has received a completion request.
+    async fn requested(&self) {
         for _ in 0..400 {
-            if self.status().await == status {
+            if !self.rounds().await.is_empty() {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        panic!(
-            "the run never reached {status}; it is {}",
-            self.status().await
-        );
+        panic!("the run never asked the provider for a completion");
+    }
+
+    async fn status(&self) -> String {
+        run_status(&self.pool, self.run).await
+    }
+
+    async fn settles_on(&self, status: &str) {
+        run_settles_on(&self.pool, self.run, status).await;
     }
 
     /// Every completion body the provider was sent, in order.
@@ -597,11 +728,13 @@ async fn park(questions: serde_json::Value) -> Parked {
     park_with("ask_user", questions.to_string(), false).await
 }
 
-/// One completion the scripted provider serves: a tool call, or a failure
-/// that faults the attempt so the worker retries it.
+/// One completion the scripted provider serves: a tool call, a failure that
+/// faults the attempt so the worker retries it, or a response that never
+/// arrives, holding the turn open mid-request.
 enum Round {
     Call(String, String),
     Fail(u16),
+    Hang,
 }
 
 fn call(tool: &str, arguments: serde_json::Value) -> Round {
@@ -619,10 +752,17 @@ async fn park_with(tool: &str, arguments: String, plan_approval: bool) -> Parked
     .await
 }
 
-/// Run a task whose completions follow `script`: round `i` serves the `i`th
-/// entry — a tool call as call `call-<i>`, or a failed response — and every
-/// round past the script closes with prose. Stops once the run parks.
+/// Run a task whose completions follow `script` and stop once the run parks.
 async fn park_scripted(script: Vec<Round>, plan_approval: bool) -> Parked {
+    let parked = run_scripted(script, plan_approval).await;
+    parked.settles_on("waiting").await;
+    parked
+}
+
+/// Start a task whose completions follow `script`: round `i` serves the `i`th
+/// entry — a tool call as call `call-<i>`, a failed response, or a hang — and
+/// every round past the script closes with prose.
+async fn run_scripted(script: Vec<Round>, plan_approval: bool) -> Parked {
     use chrono::{Duration, Utc};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -678,6 +818,7 @@ async fn park_scripted(script: Vec<Round>, plan_approval: bool) -> Parked {
             Some(Round::Fail(status)) => {
                 return ResponseTemplate::new(*status).set_body_string("upstream fell over");
             }
+            Some(Round::Hang) => return ResponseTemplate::new(200).set_delay(HANG),
             None => vec![serde_json::json!({"content": AFTER_ANSWERING})],
         };
         let mut body = String::new();
@@ -725,18 +866,17 @@ async fn park_scripted(script: Vec<Round>, plan_approval: bool) -> Parked {
         zone_server::workers::task::execute_task_run(&state, run_id, task_id).await;
     });
 
-    let parked = Parked {
+    Parked {
         pool,
         client,
         token,
         organization,
         user,
+        task: task_id,
         run: run_id,
         provider,
         worker,
-    };
-    parked.settles_on("waiting").await;
-    parked
+    }
 }
 
 fn optional() -> serde_json::Value {
@@ -775,7 +915,7 @@ async fn an_optional_question_parks_the_run_until_a_member_answers_it() {
         .await
         .assert_status(axum::http::StatusCode::ACCEPTED);
 
-    parked.settles_on("completed").await;
+    parked.settles_on(COMPLETED).await;
     let resumed = sqlx::query_scalar::<_, Option<serde_json::Value>>(
         "SELECT pending_question FROM task_runs WHERE id = $1",
     )
@@ -837,7 +977,7 @@ async fn a_task_that_requires_plan_approval_parks_on_its_plan_and_keeps_it() {
         .answer(serde_json::json!({"answers":[{"header":"Plan approval","labels":["Approve"]}]}))
         .await
         .assert_status(axum::http::StatusCode::ACCEPTED);
-    parked.settles_on("completed").await;
+    parked.settles_on(COMPLETED).await;
     let rounds = parked.rounds().await;
     assert_eq!(rounds.len(), 2, "approval bought exactly one more turn");
     let offered: Vec<&str> = rounds[0]["tools"]
@@ -934,7 +1074,7 @@ async fn a_task_holding_for_its_plan_refuses_to_change_anything_until_it_is_appr
         .answer(serde_json::json!({"answers":[{"header":"Plan approval","labels":["Approve"]}]}))
         .await
         .assert_status(axum::http::StatusCode::ACCEPTED);
-    parked.settles_on("completed").await;
+    parked.settles_on(COMPLETED).await;
     let rounds = parked.rounds().await;
     assert_eq!(
         rounds.len(),
@@ -973,7 +1113,7 @@ async fn every_tool_a_run_executes_leaves_a_finished_task_tool_calls_row() {
         .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
         .await
         .assert_status(axum::http::StatusCode::ACCEPTED);
-    parked.settles_on("completed").await;
+    parked.settles_on(COMPLETED).await;
 
     let mut calls = Vec::new();
     for _ in 0..100 {
@@ -1021,7 +1161,7 @@ async fn a_parked_turn_still_counts_towards_the_run_it_belongs_to() {
         .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
         .await
         .assert_status(axum::http::StatusCode::ACCEPTED);
-    parked.settles_on("completed").await;
+    parked.settles_on(COMPLETED).await;
 
     let artifacts: serde_json::Value =
         sqlx::query_scalar("SELECT artifacts FROM task_runs WHERE id = $1")
@@ -1113,7 +1253,7 @@ async fn an_answer_is_refused_unless_it_fits_the_question_that_was_asked() {
         .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Other"],"other":"Only the last quarter"}]}))
         .await
         .assert_status(axum::http::StatusCode::ACCEPTED);
-    parked.settles_on("completed").await;
+    parked.settles_on(COMPLETED).await;
 
     let rounds = parked.rounds().await;
     let messages = rounds[1]["messages"].as_array().unwrap();
@@ -1161,7 +1301,7 @@ async fn a_parked_run_keeps_its_lease_and_its_admission_slot() {
         .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
         .await
         .assert_status(axum::http::StatusCode::ACCEPTED);
-    parked.settles_on("completed").await;
+    parked.settles_on(COMPLETED).await;
     parked.finish().await;
 }
 
@@ -1177,15 +1317,14 @@ fn required() -> serde_json::Value {
     }]})
 }
 
-/// A required question never proceeds on a default, so the only thing that ends
-/// an unanswered one is `TASK_TIMEOUT`, an hour later.
-///
-/// The hour is not waited out here. What the run must survive to reach it is
-/// the parked state itself, and what the timeout must then be able to do is end
-/// a `waiting` row terminally: the classification that decides there is no
-/// retry is asserted beside `Fault::timeout` in the worker's own tests.
+/// How many times the sweeper looks at a parked run before it is answered.
+const SWEEPS: usize = 4;
+
+/// A required question never proceeds on a default: the parked run stays
+/// waiting through every sweep while its worker holds the lease, and completes
+/// once it is answered.
 #[tokio::test]
-async fn a_required_question_waits_and_a_timeout_can_still_end_the_parked_run() {
+async fn a_required_question_keeps_the_run_waiting_until_it_is_answered() {
     let parked = park(required()).await;
 
     let stored: serde_json::Value =
@@ -1196,39 +1335,33 @@ async fn a_required_question_waits_and_a_timeout_can_still_end_the_parked_run() 
             .unwrap();
     assert_eq!(stored["questions"][0]["required"], true);
 
-    let owner: Uuid = sqlx::query_scalar("SELECT owner FROM task_runs WHERE id = $1")
-        .bind(parked.run)
-        .fetch_one(&parked.pool)
+    for _ in 0..SWEEPS {
+        tasks::sweep_task_runs(&parked.pool).await.unwrap();
+        assert_eq!(
+            parked.status().await,
+            "waiting",
+            "an unanswered required question ended the run it parked"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        parked.rounds().await.len(),
+        1,
+        "the run went on without the answer its question requires"
+    );
+
+    parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
         .await
-        .unwrap();
-    let ended = tasks::complete_owned_task_run(
-        &parked.pool,
-        parked.run,
-        Some(owner),
-        "failed",
-        Some("Task execution timed out after 3600 seconds"),
-        Some(serde_json::json!({"attempts": 1, "classification": "terminal"})),
-    )
-    .await
-    .expect("a parked run is still the worker's to end");
-    assert!(
-        ended.is_some(),
-        "a timeout must be able to end a run that is waiting, not only one that is running"
-    );
-    let ended = ended.unwrap();
-    assert_eq!(ended.status, "failed");
-    assert_eq!(
-        ended.error_message.as_deref(),
-        Some("Task execution timed out after 3600 seconds")
-    );
-    assert_eq!(
-        ended.pending_question, None,
-        "a run nobody is waiting on any more must stop offering an answerable card"
-    );
-    assert_eq!(
-        ended.current_phase, None,
-        "a run that ended while parked must not go on reading as waiting for an answer"
-    );
+        .assert_status(axum::http::StatusCode::ACCEPTED);
+    parked.settles_on(COMPLETED).await;
+    let error: Option<String> =
+        sqlx::query_scalar("SELECT error_message FROM task_runs WHERE id = $1")
+            .bind(parked.run)
+            .fetch_one(&parked.pool)
+            .await
+            .unwrap();
+    assert_eq!(error, None, "the answered run completed with a failure");
 
     parked.finish().await;
 }
@@ -1311,6 +1444,23 @@ impl Leased {
             .await
     }
 
+    async fn stop(&self) -> common::TestResponse {
+        stop_run(&self.client, &self.token, self.run).await
+    }
+
+    async fn run_again(&self) -> common::TestResponse {
+        run_task(&self.client, &self.token, self.task).await
+    }
+
+    fn execution(&self) -> tasks::Execution {
+        tasks::Execution {
+            task: self.task,
+            run: self.run,
+            owner: self.owner,
+            actor: Some(self.user),
+        }
+    }
+
     async fn finish(self) {
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(self.organization)
@@ -1327,6 +1477,19 @@ impl Leased {
 
 /// A workspace member's task, one run of it, and the lease a worker would hold.
 async fn lease() -> Leased {
+    let leased = admit().await;
+    assert!(
+        tasks::claim_task_run(&leased.pool, leased.run, leased.owner)
+            .await
+            .expect("the new run is claimable"),
+        "a freshly admitted run takes a lease"
+    );
+    leased
+}
+
+/// A workspace member's task and one run of it, admitted but not yet claimed
+/// by the worker `owner` names.
+async fn admit() -> Leased {
     use chrono::{Duration, Utc};
     use zone_server::auth::jwt::create_session_access_token;
     use zone_server::db::{sessions, workspace_members};
@@ -1359,14 +1522,6 @@ async fn lease() -> Leased {
     let run = tasks::create_task_run_as(&pool, task.id, Some(user))
         .await
         .unwrap();
-
-    let owner = Uuid::new_v4();
-    assert!(
-        tasks::claim_task_run(&pool, run.id, owner)
-            .await
-            .expect("the new run is claimable"),
-        "a freshly admitted run takes a lease"
-    );
 
     let config = common::test_config();
     let client = common::TestClient::new(common::create_test_router(common::create_test_state(
@@ -1404,7 +1559,7 @@ async fn lease() -> Leased {
         user,
         task: task.id,
         run: run.id,
-        owner,
+        owner: Uuid::new_v4(),
     }
 }
 
@@ -1582,7 +1737,7 @@ async fn an_approved_plan_survives_the_attempt_that_restarts_after_it() {
         .answer(serde_json::json!({"answers":[{"header":"Plan approval","labels":["Approve"]}]}))
         .await
         .assert_status(axum::http::StatusCode::ACCEPTED);
-    parked.settles_on("completed").await;
+    parked.settles_on(COMPLETED).await;
     let rounds = parked.rounds().await;
     assert_eq!(
         rounds.len(),
@@ -1618,5 +1773,263 @@ async fn an_approved_plan_survives_the_attempt_that_restarts_after_it() {
         !written.starts_with("Error:"),
         "the retried attempt is not held: {written}"
     );
+    parked.finish().await;
+}
+
+/// A stop reaches the worker in-process: a turn hung on its provider ends well
+/// inside one heartbeat, the run is cancelled rather than failed, and nothing
+/// retries the attempt the stop cut short.
+#[tokio::test]
+async fn a_stop_mid_turn_ends_the_worker_at_once_and_never_retries() {
+    let mut running = run_scripted(vec![Round::Hang], false).await;
+    running.requested().await;
+    assert_eq!(running.status().await, "running");
+
+    assert_stop_response(&running.stop().await, running.run);
+    running.ended().await;
+    assert_stopped(&running.pool, running.task, running.run).await;
+
+    tokio::time::sleep(AFTER_STOP).await;
+    assert_eq!(
+        running.rounds().await.len(),
+        1,
+        "the stopped attempt was retried"
+    );
+    assert_eq!(
+        running.status().await,
+        tasks::CANCELLED,
+        "nothing overwrote the stop once the worker ended"
+    );
+
+    running.finish().await;
+}
+
+#[tokio::test]
+async fn a_stop_ends_a_run_parked_on_a_required_question_and_its_answer_is_refused() {
+    let mut parked = park(required()).await;
+
+    assert_stop_response(&parked.stop().await, parked.run);
+    parked.ended().await;
+    assert_stopped(&parked.pool, parked.task, parked.run).await;
+
+    let refused = parked
+        .answer(serde_json::json!({"answers":[{"header":"Scope","labels":["Backfill"]}]}))
+        .await;
+    refused.assert_status(axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        parked.status().await,
+        tasks::CANCELLED,
+        "an answer does not revive a stopped run"
+    );
+    assert_eq!(
+        parked.rounds().await.len(),
+        1,
+        "the stopped run asked for nothing more"
+    );
+
+    parked.finish().await;
+}
+
+/// A run parked on another replica has no worker here to signal, so the stop
+/// reaches its owner through the row: the lease no longer refreshes and the
+/// execution is no longer authorized to act.
+#[tokio::test]
+async fn a_stop_reaches_a_run_waiting_on_another_replica_through_its_lease() {
+    let leased = lease().await;
+    leased.park_on(&waiting_on_a_job()).await;
+    assert!(
+        leased
+            .execution()
+            .authorized(&leased.pool, false)
+            .await
+            .unwrap(),
+        "the parked execution is authorized before the stop"
+    );
+
+    assert_stop_response(&leased.stop().await, leased.run);
+    assert_draining(&leased.pool, leased.task, leased.run).await;
+    assert!(
+        !tasks::heartbeat_task_run(&leased.pool, leased.run, leased.owner)
+            .await
+            .unwrap(),
+        "the owner's heartbeat fails on a stopped run"
+    );
+    assert!(
+        !leased
+            .execution()
+            .authorized(&leased.pool, false)
+            .await
+            .unwrap(),
+        "the owner's execution is no longer authorized"
+    );
+
+    leased.finish().await;
+}
+
+/// A run stopped on another replica keeps its task until its owner has torn
+/// down, so a Run Again cannot start a second worker on the same branch.
+#[tokio::test]
+async fn a_run_again_waits_for_a_stopped_run_on_another_replica_to_drain() {
+    let leased = lease().await;
+    assert_stop_response(&leased.stop().await, leased.run);
+
+    assert_still_stopping(&leased.run_again().await);
+    zone_server::db::recovery::reconcile(&leased.pool)
+        .await
+        .unwrap();
+    assert_draining(&leased.pool, leased.task, leased.run).await;
+    assert!(
+        tasks::drain_task_run(&leased.pool, leased.run, leased.owner)
+            .await
+            .unwrap(),
+        "the draining owner keeps its reservation"
+    );
+    assert!(
+        !tasks::release_task_run(&leased.pool, leased.run, Uuid::new_v4())
+            .await
+            .unwrap(),
+        "only the run's own owner releases its task"
+    );
+    assert_still_stopping(&leased.run_again().await);
+
+    assert!(
+        tasks::release_task_run(&leased.pool, leased.run, leased.owner)
+            .await
+            .unwrap(),
+        "the owner releases the task once it has torn down"
+    );
+    assert_stopped(&leased.pool, leased.task, leased.run).await;
+    leased
+        .run_again()
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    leased.finish().await;
+}
+
+/// An owner that dies mid-teardown cannot hold its task forever: once its
+/// lease lapses, recovery frees the task and leaves it paused.
+#[tokio::test]
+async fn a_stopped_run_whose_owner_died_frees_its_task_once_the_lease_lapses() {
+    let leased = lease().await;
+    assert_stop_response(&leased.stop().await, leased.run);
+    assert_still_stopping(&leased.run_again().await);
+
+    sqlx::query("UPDATE task_runs SET heartbeat_at = NOW() - INTERVAL '61 seconds' WHERE id = $1")
+        .bind(leased.run)
+        .execute(&leased.pool)
+        .await
+        .unwrap();
+    assert!(
+        !tasks::drain_task_run(&leased.pool, leased.run, Uuid::new_v4())
+            .await
+            .unwrap(),
+        "a stranger cannot renew the dead owner's reservation"
+    );
+    zone_server::db::recovery::reconcile(&leased.pool)
+        .await
+        .unwrap();
+    assert_stopped(&leased.pool, leased.task, leased.run).await;
+    leased
+        .run_again()
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    leased.finish().await;
+}
+
+/// A run no worker had claimed has nobody to drain it, so its task is free
+/// the moment the stop commits.
+#[tokio::test]
+async fn a_run_again_after_stopping_an_unclaimed_run_is_admitted_at_once() {
+    let admitted = admit().await;
+
+    assert_stop_response(&admitted.stop().await, admitted.run);
+    assert_stopped(&admitted.pool, admitted.task, admitted.run).await;
+    admitted
+        .run_again()
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    admitted.finish().await;
+}
+
+#[tokio::test]
+async fn a_stop_cancels_a_run_no_worker_has_claimed_yet() {
+    let admitted = admit().await;
+
+    assert_stop_response(&admitted.stop().await, admitted.run);
+    assert_stopped(&admitted.pool, admitted.task, admitted.run).await;
+    assert!(
+        !tasks::claim_task_run(&admitted.pool, admitted.run, admitted.owner)
+            .await
+            .unwrap(),
+        "a stopped run cannot be claimed afterwards"
+    );
+
+    admitted.finish().await;
+}
+
+#[tokio::test]
+async fn a_stop_is_refused_once_the_run_has_ended() {
+    let leased = lease().await;
+    assert!(
+        tasks::complete_owned_task_run(
+            &leased.pool,
+            leased.run,
+            Some(leased.owner),
+            COMPLETED,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .is_some(),
+        "the leased run completes"
+    );
+
+    let refused = leased.stop().await;
+    refused.assert_status(axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        refused.json_value(),
+        serde_json::json!({"error": "Task run is not active"})
+    );
+    let row = run_row(&leased.pool, leased.run).await;
+    assert_eq!(
+        row.status, COMPLETED,
+        "a refused stop leaves the run as it ended"
+    );
+    assert_eq!(row.error_message, None);
+
+    leased.finish().await;
+}
+
+#[tokio::test]
+async fn a_stopped_task_admits_a_new_run() {
+    let mut parked = park(required()).await;
+    assert_stop_response(&parked.stop().await, parked.run);
+    parked.ended().await;
+
+    let created = parked
+        .client
+        .post_json_auth(
+            &format!("/api/tasks/{}/runs", parked.task),
+            &serde_json::json!({}),
+            &parked.token,
+        )
+        .await;
+    created.assert_status(axum::http::StatusCode::CREATED);
+    let next: Uuid = created.json_value()["run"]["id"]
+        .as_str()
+        .and_then(|id| id.parse().ok())
+        .expect("the new run has an id");
+    assert_ne!(next, parked.run);
+    run_settles_on(&parked.pool, next, COMPLETED).await;
+    assert_eq!(
+        run_status(&parked.pool, parked.run).await,
+        tasks::CANCELLED,
+        "the new run leaves the stopped one as it was"
+    );
+
     parked.finish().await;
 }

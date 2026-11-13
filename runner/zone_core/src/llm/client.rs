@@ -23,8 +23,8 @@ mod turn;
 
 /// The longest a buffered completion may take, from sending the request to
 /// reading the last byte of its answer. A local model on a CPU can spend
-/// many minutes on one long answer, so this matches the time an agent CLI's
-/// turn is given rather than the crate's ten minutes.
+/// many minutes on one long answer, so this allows thirty rather than the
+/// crate's ten.
 pub const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// The longest a streamed completion may go without sending a byte, the wait

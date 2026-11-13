@@ -314,6 +314,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/tasks/runs/{run_id}", get(tasks::get_run))
         .route("/api/tasks/runs/{run_id}/logs", get(tasks::get_run_logs))
         .route("/api/tasks/runs/{run_id}/answers", post(tasks::answer_run))
+        .route("/api/tasks/runs/{run_id}/stop", post(tasks::stop_run))
         // Chats
         .route(
             "/api/artifacts/{workspace_id}/{chat_id}/{owner_id}/{filename}/signature",
