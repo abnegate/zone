@@ -88,6 +88,9 @@ nix = { workspace = true, features = ["fs", "user"] }
 # HTML parsing for web content extraction
 scraper = "=0.27.0"
 
+# Codex keeps the MCP servers configured for it in its home's config.toml
+toml = { workspace = true }
+
 # Metrics
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }

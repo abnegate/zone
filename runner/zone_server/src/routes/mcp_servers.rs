@@ -1,6 +1,7 @@
 //! Organization MCP server endpoints
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use abnegate_agent::mcp::McpServer;
 use abnegate_agent::mcp::McpTransport;
@@ -30,6 +31,8 @@ use crate::db::mcp_servers::NewMcpServer;
 use crate::services::mcp_servers::definition::Definition;
 use crate::services::mcp_servers::load;
 use crate::services::mcp_servers::organization::OrganizationHub;
+use crate::services::mcp_servers::providers;
+use crate::services::mcp_servers::providers::ProviderServer;
 use crate::services::mcp_servers::source::Source;
 use crate::services::mcp_servers::status;
 use crate::services::mcp_servers::status::Connection;
@@ -38,6 +41,7 @@ use crate::services::mcp_servers::status::Status;
 use crate::services::mcp_servers::transport::Transport;
 use crate::services::mcp_servers::validation;
 use crate::services::mcp_servers::validation::ValidationError;
+use crate::services::provider::Provider;
 use crate::state::AppState;
 
 use super::common::AuditEvent;
@@ -141,6 +145,115 @@ fn origin(url: &str) -> Option<String> {
 pub struct McpServerListResponse {
     pub commands: bool,
     pub servers: Vec<McpServerResponse>,
+}
+
+/// One server a connected provider has configured, as the import listing shows it: what an
+/// import would store, the names of its secrets and never their values, and why it could not be
+/// stored as it stands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderMcpServerResponse {
+    pub name: String,
+    pub transport: Transport,
+    pub command: Option<String>,
+    pub arguments: Vec<String>,
+    pub url: Option<String>,
+    pub tools: Option<Vec<String>>,
+    pub enabled: bool,
+    pub environment: Vec<McpSecretField>,
+    pub headers: Vec<McpSecretField>,
+    /// The keys the provider's entry holds that an import does not carry.
+    pub ignored: Vec<String>,
+    /// Why this server cannot be imported as it stands, in the words a create would refuse it
+    /// with, or `null` when it can.
+    pub refusal: Option<String>,
+}
+
+impl ProviderMcpServerResponse {
+    fn of(server: &ProviderServer, commands: bool, taken: &BTreeSet<String>) -> Self {
+        Self {
+            name: server.name.clone(),
+            transport: server.transport,
+            command: server.command.clone(),
+            arguments: server.arguments.clone(),
+            url: server.url.clone(),
+            tools: server.tools.clone(),
+            enabled: server.enabled,
+            environment: fields(&server.environment),
+            headers: fields(&server.headers),
+            ignored: server.ignored.clone(),
+            refusal: refusal(server, commands, taken),
+        }
+    }
+}
+
+/// Why an import would refuse `server`: the create route's own answer, or the name being one the
+/// organization or the instance has already.
+fn refusal(server: &ProviderServer, commands: bool, taken: &BTreeSet<String>) -> Option<String> {
+    if let Err(refused) = requested(server).validated(commands) {
+        return Some(refused.to_string());
+    }
+    taken
+        .contains(&server.name)
+        .then(|| Refusal::Taken.to_string())
+}
+
+/// The create request that would store `server`, with the values the provider configured.
+fn requested(server: &ProviderServer) -> CreateMcpServerRequest {
+    CreateMcpServerRequest {
+        name: server.name.clone(),
+        transport: server.transport.as_str().to_string(),
+        command: server.command.clone(),
+        arguments: server.arguments.clone(),
+        url: server.url.clone(),
+        tools: server.tools.clone(),
+        enabled: Some(server.enabled),
+        environment: server.environment.clone(),
+        headers: server.headers.clone(),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderMcpServersResponse {
+    pub provider: Provider,
+    pub label: &'static str,
+    pub servers: Vec<ProviderMcpServerResponse>,
+    /// One sentence per document or entry of this provider's configuration that could not be
+    /// read, naming the document by its file name and the server by the name it was given.
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderMcpServerListResponse {
+    pub commands: bool,
+    pub providers: Vec<ProviderMcpServersResponse>,
+}
+
+/// Which of a provider's configured servers to store. The values are read from the provider's
+/// configuration, so a body names servers and nothing else.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportMcpServersRequest {
+    pub provider: Provider,
+    pub servers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportedMcpServerFailure {
+    pub name: String,
+    pub message: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ImportedMcpServersResponse {
+    pub created: Vec<McpServerResponse>,
+    pub failures: Vec<ImportedMcpServerFailure>,
+}
+
+/// One server of an import: stored, or refused for a reason the admin can act on. The stored
+/// server is boxed because it is an order of magnitude larger than a refusal's sentence.
+enum Imported {
+    Stored(Box<McpServerResponse>),
+    Refused(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -448,6 +561,8 @@ pub enum Refusal {
     Transport,
     #[error("A server with this name is already configured on this instance")]
     Taken,
+    #[error("{0} is not connected to this organization")]
+    Disconnected(&'static str),
     #[error("`{0}` is not an MCP server id")]
     Identifier(String),
     #[error("{0}")]
@@ -460,9 +575,11 @@ impl Refusal {
     fn status(&self) -> StatusCode {
         match self {
             Self::Caller => StatusCode::UNAUTHORIZED,
-            Self::Invalid(_) | Self::Transport | Self::Identifier(_) | Self::Unreadable(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::Invalid(_)
+            | Self::Transport
+            | Self::Identifier(_)
+            | Self::Unreadable(_)
+            | Self::Disconnected(_) => StatusCode::BAD_REQUEST,
             Self::Commands => StatusCode::FORBIDDEN,
             Self::Taken => StatusCode::CONFLICT,
             Self::Server(error) => match error {
@@ -668,22 +785,164 @@ pub async fn create(
     let record =
         mcp_servers::create_authorized(state.db(), state.master_key(), org_id, user, new).await?;
     let response = server(&state, org_id, &record).await;
+    recorded(&state, &auth, user, org_id, record.id, &response).await;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+/// GET /api/organizations/{org_id}/mcp-servers/providers
+///
+/// What each provider the organization is connected to has configured, for an admin deciding what
+/// to import. A provider Zone holds no sign-in for is not listed at all.
+///
+/// Admins only: it shows the command, arguments and URL of servers the organization has not
+/// stored yet, which an admin is about to store and nobody else can. The values of their
+/// variables and headers are never shown, as a stored server's are not.
+pub async fn list_providers(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(org_id): Path<Uuid>,
+) -> Result<Json<ProviderMcpServerListResponse>, Refusal> {
+    let user = caller(&auth)?;
+    mcp_servers::authorize_admin(state.db(), org_id, user).await?;
+    let stored = mcp_servers::list_authorized(state.db(), state.master_key(), org_id, user).await?;
+    let instance = state.mcp().configured().await;
+    let taken: BTreeSet<String> = stored
+        .iter()
+        .map(|record| record.name.clone())
+        .chain(instance.servers.keys().cloned())
+        .collect();
+    let commands = state.config().mcp_commands;
+    let discovered = providers::discovered(&state, org_id)
+        .await
+        .map_err(McpServerError::from)?;
+    Ok(Json(ProviderMcpServerListResponse {
+        commands,
+        providers: discovered
+            .into_iter()
+            .map(|(provider, found)| ProviderMcpServersResponse {
+                provider,
+                label: provider.label(),
+                servers: found
+                    .servers
+                    .iter()
+                    .map(|server| ProviderMcpServerResponse::of(server, commands, &taken))
+                    .collect(),
+                errors: found.errors,
+            })
+            .collect(),
+    }))
+}
+
+/// POST /api/organizations/{org_id}/mcp-servers/imports
+///
+/// Stores the named servers of one connected provider. Their values are read from that provider's
+/// configuration again rather than taken from the body, so a secret the person configured for
+/// their agent never travels to a browser and back.
+///
+/// Each server is stored on its own: one the route refuses, because its name is taken or because
+/// it holds something Zone will not store, leaves the rest imported and says why, the way the
+/// console's own import of a pasted document does. A name the provider no longer configures,
+/// because the file changed since it was listed, is refused the same way.
+pub async fn import(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(org_id): Path<Uuid>,
+    request: Result<Json<ImportMcpServersRequest>, JsonRejection>,
+) -> Result<Json<ImportedMcpServersResponse>, Refusal> {
+    let user = caller(&auth)?;
+    let Json(request) = request?;
+    mcp_servers::authorize_admin(state.db(), org_id, user).await?;
+    let provider = request.provider;
+    let found = providers::of(&state, org_id, provider)
+        .await
+        .map_err(McpServerError::from)?
+        .ok_or(Refusal::Disconnected(provider.label()))?;
+    let commands = state.config().mcp_commands;
+    let mut imported = ImportedMcpServersResponse::default();
+    let mut asked: BTreeSet<&str> = BTreeSet::new();
+    for name in &request.servers {
+        if !asked.insert(name.as_str()) {
+            continue;
+        }
+        let Some(server) = found.servers.iter().find(|server| &server.name == name) else {
+            imported.failures.push(ImportedMcpServerFailure {
+                name: name.clone(),
+                message: format!("{} no longer configures this server", provider.label()),
+            });
+            continue;
+        };
+        match importing(&state, &auth, user, org_id, server, commands).await? {
+            Imported::Stored(response) => imported.created.push(*response),
+            Imported::Refused(message) => imported.failures.push(ImportedMcpServerFailure {
+                name: name.clone(),
+                message,
+            }),
+        }
+    }
+    Ok(Json(imported))
+}
+
+/// Stores one of a provider's servers, or says why it was refused. A failure of the database or
+/// of sealing is the whole import's failure, not this server's, and stops it.
+async fn importing(
+    state: &AppState,
+    auth: &AuthUser,
+    user: Uuid,
+    organization: Uuid,
+    server: &ProviderServer,
+    commands: bool,
+) -> Result<Imported, Refusal> {
+    let new = match requested(server).validated(commands) {
+        Ok(new) => new,
+        Err(refused) => return Ok(Imported::Refused(refused.to_string())),
+    };
+    if taken(state, &new.name).await {
+        return Ok(Imported::Refused(Refusal::Taken.to_string()));
+    }
+    let record = match mcp_servers::create_authorized(
+        state.db(),
+        state.master_key(),
+        organization,
+        user,
+        new,
+    )
+    .await
+    {
+        Ok(record) => record,
+        Err(refused @ (McpServerError::Conflict(_) | McpServerError::Invalid(_))) => {
+            return Ok(Imported::Refused(refused.to_string()));
+        }
+        Err(error) => return Err(Refusal::Server(error)),
+    };
+    let response = self::server(state, organization, &record).await;
+    recorded(state, auth, user, organization, record.id, &response).await;
+    Ok(Imported::Stored(Box::new(response)))
+}
+
+/// Records that a server was stored, whether an admin added it or imported it.
+async fn recorded(
+    state: &AppState,
+    auth: &AuthUser,
+    user: Uuid,
+    organization: Uuid,
+    server: Uuid,
+    response: &McpServerResponse,
+) {
     audit(
         state.db(),
         AuditEvent {
-            organization_id: Some(org_id),
+            organization_id: Some(organization),
             workspace_id: None,
             actor_id: user,
             actor_email: &auth.0.email,
             action: actions::MCP_SERVER_CREATED,
             resource_type: resources::MCP_SERVER,
-            resource_id: Some(record.id),
+            resource_id: Some(server),
             old_values: None,
-            new_values: serde_json::to_value(&response).ok(),
+            new_values: serde_json::to_value(response).ok(),
         },
     )
     .await;
-    Ok((StatusCode::CREATED, Json(response)))
 }
 
 /// GET /api/organizations/{org_id}/mcp-servers/{server_id}

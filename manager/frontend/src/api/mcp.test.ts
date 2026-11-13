@@ -228,6 +228,78 @@ describe('mcpApi.reconnect', () => {
   });
 });
 
+describe('mcpApi.providers', () => {
+  const configured = {
+    name: 'grafana',
+    transport: 'stdio',
+    command: 'grafana-mcp',
+    arguments: ['--transport', 'stdio'],
+    url: null,
+    tools: null,
+    enabled: true,
+    environment: [{ name: 'GRAFANA_TOKEN', has_value: true }],
+    headers: [],
+    ignored: ['bearer_token_env_var'],
+    refusal: null,
+  };
+
+  it('reads what each connected provider has configured', async () => {
+    const listing = {
+      commands: true,
+      providers: [{ provider: 'codex', label: 'Codex', servers: [configured], errors: [] }],
+    };
+    const request = respond(listing);
+
+    expect(await mcpApi.providers('org-1')).toEqual(listing);
+    expect(sent(request)).toEqual({
+      url: `${base}/providers`,
+      method: 'GET',
+      body: undefined,
+    });
+  });
+
+  it('names the action when the listing fails', async () => {
+    respond({ error: 'forbidden' }, 403);
+
+    await expect(mcpApi.providers('org-1')).rejects.toThrow(
+      'Failed to load the MCP servers your providers have configured: forbidden'
+    );
+  });
+
+  it('rejects a listing that does not match the schema', async () => {
+    respond({ commands: true, providers: [{ provider: 'codex', servers: [] }] });
+
+    await expect(mcpApi.providers('org-1')).rejects.toThrow();
+  });
+});
+
+describe('mcpApi.import', () => {
+  it('posts the provider and the server names it chose', async () => {
+    const imported = {
+      created: [server],
+      failures: [{ name: 'linear', message: 'A server with this name already exists' }],
+    };
+    const request = respond(imported);
+
+    expect(
+      await mcpApi.import('org-1', { provider: 'codex', servers: ['docs', 'linear'] })
+    ).toEqual(imported);
+    expect(sent(request)).toEqual({
+      url: `${base}/imports`,
+      method: 'POST',
+      body: JSON.stringify({ provider: 'codex', servers: ['docs', 'linear'] }),
+    });
+  });
+
+  it('names the action when the import fails', async () => {
+    respond({ error: 'Codex is not connected to this organization' }, 400);
+
+    await expect(mcpApi.import('org-1', { provider: 'codex', servers: ['docs'] })).rejects.toThrow(
+      'Failed to import the MCP servers: Codex is not connected to this organization'
+    );
+  });
+});
+
 describe('mcpApi.workspace', () => {
   it('reads the servers with their workspace overrides', async () => {
     const request = respond({ servers: [workspaceServer] });

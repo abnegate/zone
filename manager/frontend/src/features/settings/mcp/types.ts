@@ -66,3 +66,42 @@ export interface UpdateMcpServerRequest {
 export interface UpdateWorkspaceMcpServersRequest {
   servers: Record<string, boolean | null>;
 }
+
+/** One server a connected provider has configured, which an admin may import. */
+export interface ProviderMcpServer {
+  name: string;
+  transport: McpTransport;
+  command: string | null;
+  arguments: string[];
+  url: string | null;
+  tools: string[] | null;
+  enabled: boolean;
+  environment: McpSecretField[];
+  headers: McpSecretField[];
+  /** Keys the provider's entry holds that an import does not carry. */
+  ignored: string[];
+  /** Why this server cannot be imported as it stands, or null when it can. */
+  refusal: string | null;
+}
+
+export interface ProviderMcpServers {
+  provider: string;
+  label: string;
+  servers: ProviderMcpServer[];
+  errors: string[];
+}
+
+export interface ProviderMcpServerList {
+  commands: boolean;
+  providers: ProviderMcpServers[];
+}
+
+export interface ImportMcpServersRequest {
+  provider: string;
+  servers: string[];
+}
+
+export interface ImportedMcpServers {
+  created: McpServer[];
+  failures: { name: string; message: string }[];
+}
