@@ -53,6 +53,9 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long Stop has to end a turn, far past what a turn at rest takes.
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// What a Zone tool call answers when Stop cancels it mid-run.
+const CANCELLED_CALL: &str = "This turn ended while the call ran, so it was cancelled.";
+
 const ANSWER: &str = "Written.";
 
 /// What a stand-in claude had written of a later turn when it exited.
@@ -896,14 +899,17 @@ async fn stop_reaches_a_cli_turn_while_a_tool_it_called_still_runs() {
         Some(json!("cancelled")),
         "the console must be told the turn stopped: {frames:?}"
     );
+    let (_, answer) = tokio::time::timeout(STOP_TIMEOUT, call)
+        .await
+        .expect("Stop must cancel the call it interrupted")
+        .expect("the call's request completes");
     assert!(
-        !call.is_finished(),
-        "Stop was only read once the call had finished"
+        answer.to_string().contains(CANCELLED_CALL),
+        "Stop must cancel the running call rather than wait for it to finish: {answer}"
     );
     assert!(gone(&leader).await, "the agent outlived Stop");
     assert!(gone(&forked).await, "the agent's child outlived Stop");
     drop(release);
-    let _ = tokio::time::timeout(STOP_TIMEOUT, call).await;
 }
 
 /// A chat whose agent the reader turned off gets no tools, and neither does
