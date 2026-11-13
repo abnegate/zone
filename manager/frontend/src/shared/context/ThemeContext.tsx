@@ -24,7 +24,9 @@ interface ThemeContextType {
 }
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
-export const THEME_STORAGE_KEY = 'manager_theme';
+export const THEME_STORAGE_KEY = 'manager_theme_override';
+export const SYSTEM_DARK_QUERY = '(prefers-color-scheme: dark)';
+const LEGACY_THEME_STORAGE_KEY = 'manager_theme';
 
 export const FONT_SIZE_PROPERTY = 'font-size';
 const WORKSPACE_THEME_STORAGE_KEY = 'manager_workspace_theme';
@@ -167,15 +169,19 @@ function applyWorkspaceTheme(workspace: WorkspaceTheme | null, mode: Theme): () 
   };
 }
 
+function systemTheme(): Theme {
+  return window.matchMedia(SYSTEM_DARK_QUERY).matches ? 'dark' : 'light';
+}
+
+function storedOverride(system: Theme): Theme | null {
+  const stored = localStorage.getItem(THEME_STORAGE_KEY);
+  return (stored === 'light' || stored === 'dark') && stored !== system ? stored : null;
+}
+
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(() => {
-    const stored = localStorage.getItem(THEME_STORAGE_KEY);
-    return stored === 'light' || stored === 'dark'
-      ? stored
-      : window.matchMedia('(prefers-color-scheme: dark)').matches
-        ? 'dark'
-        : 'light';
-  });
+  const [system, setSystem] = useState<Theme>(systemTheme);
+  const [override, setOverride] = useState<Theme | null>(() => storedOverride(system));
+  const theme = override ?? system;
   const [workspaceTheme, setWorkspaceThemeState] = useState<WorkspaceTheme | null>(null);
   const [preview, setPreview] = useState<WorkspaceTheme | null>(null);
   const [workspaceThemeLoading, setLoading] = useState(false);
@@ -183,11 +189,25 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const revision = useRef(0);
 
   const toggleTheme = useCallback(() => {
-    setTheme((previous) => {
-      const next = previous === 'dark' ? 'light' : 'dark';
+    const next = theme === 'dark' ? 'light' : 'dark';
+    if (next === system) {
+      localStorage.removeItem(THEME_STORAGE_KEY);
+      setOverride(null);
+    } else {
       localStorage.setItem(THEME_STORAGE_KEY, next);
-      return next;
-    });
+      setOverride(next);
+    }
+  }, [theme, system]);
+
+  useEffect(() => {
+    const query = window.matchMedia(SYSTEM_DARK_QUERY);
+    const follow = (event: MediaQueryListEvent) => {
+      localStorage.removeItem(THEME_STORAGE_KEY);
+      setOverride(null);
+      setSystem(event.matches ? 'dark' : 'light');
+    };
+    query.addEventListener('change', follow);
+    return () => query.removeEventListener('change', follow);
   }, []);
 
   const setWorkspaceTheme = useCallback((value: WorkspaceTheme | null) => {
@@ -228,6 +248,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     localStorage.removeItem(WORKSPACE_THEME_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_THEME_STORAGE_KEY);
   }, []);
 
   useLayoutEffect(() => {

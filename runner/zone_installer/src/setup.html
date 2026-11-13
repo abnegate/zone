@@ -6,17 +6,33 @@
     <title>Zone</title>
     <style>
       :root {
-        color-scheme: light;
+        color-scheme: light dark;
         --bg: #f4f0e8;
         --ink: #1a1612;
         --muted: #534b42;
         --line: #d9d0c4;
         --card: #fffdf8;
+        --field: #fff;
         --accent: #1a1612;
+        --on-accent: #fff;
+        --error: #9b2c2c;
         --safe-top: env(safe-area-inset-top, 0px);
         --safe-right: env(safe-area-inset-right, 0px);
         --safe-bottom: env(safe-area-inset-bottom, 0px);
         --safe-left: env(safe-area-inset-left, 0px);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0e0c0a;
+          --ink: #f3eee6;
+          --muted: #c4b8a8;
+          --line: #2e2923;
+          --card: #141210;
+          --field: #1c1916;
+          --accent: #f3eee6;
+          --on-accent: #1a1612;
+          --error: #f5a3a3;
+        }
       }
       * { box-sizing: border-box; }
       html, body { height: 100%; margin: 0; }
@@ -57,7 +73,8 @@
         border-radius: 12px;
         padding: 12px 14px;
         font: inherit;
-        background: #fff;
+        color: var(--ink);
+        background: var(--field);
       }
       input:focus { outline: 2px solid var(--ink); outline-offset: 1px; }
       button {
@@ -67,12 +84,12 @@
         padding: 12px 16px;
         font: inherit;
         font-weight: 600;
-        color: #fff;
+        color: var(--on-accent);
         background: var(--accent);
         cursor: pointer;
       }
       button:disabled { opacity: 0.6; cursor: wait; }
-      .error { color: #9b2c2c; min-height: 1.2em; font-size: 14px; }
+      .error { color: var(--error); min-height: 1.2em; font-size: 14px; }
     </style>
   </head>
   <body>
