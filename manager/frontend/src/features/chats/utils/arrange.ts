@@ -4,15 +4,25 @@ import { attentionRank } from './indicators';
 export const CHAT_GROUP_BY = ['none', 'project', 'date'] as const;
 export type ChatGroupBy = (typeof CHAT_GROUP_BY)[number];
 
-export const CHAT_SORT = [
+/**
+ * The orders the server lists chats in. Mirrors `db::chats::Sort`, which the
+ * list query deserialises, so a name that is not here fails that query.
+ */
+export const SERVER_CHAT_SORT = [
   'updated_desc',
   'updated_asc',
   'created_desc',
   'created_asc',
   'title_asc',
   'title_desc',
-  'status',
 ] as const;
+export type ServerChatSort = (typeof SERVER_CHAT_SORT)[number];
+
+/**
+ * What a reader can order the list by. `status` is the console's own: it is
+ * read from each chat's indicator, which the list query knows nothing about.
+ */
+export const CHAT_SORT = [...SERVER_CHAT_SORT, 'status'] as const;
 export type ChatSort = (typeof CHAT_SORT)[number];
 
 export const CHAT_GROUP_OPTIONS: ReadonlyArray<{ value: ChatGroupBy; label: string }> = [
@@ -65,6 +75,19 @@ export function isChatGroupBy(value: string): value is ChatGroupBy {
 
 export function isChatSort(value: string): value is ChatSort {
   return (CHAT_SORT as readonly string[]).includes(value);
+}
+
+/**
+ * The order to ask the server for.
+ *
+ * The list is paged server-side and the server knows nothing of a chat's
+ * status, so "Needs attention" is ordered here out of readings the server
+ * never sees. Asking it for that order would fail the whole list query, so it
+ * sorts by last update — which is also what the attention order breaks its own
+ * ties by, leaving the pages in a consistent order either way.
+ */
+export function listSort(sort: ChatSort): ServerChatSort {
+  return sort === 'status' ? 'updated_desc' : sort;
 }
 
 export function readChatGroupBy(): ChatGroupBy {

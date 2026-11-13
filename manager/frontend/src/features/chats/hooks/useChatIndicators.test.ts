@@ -35,15 +35,41 @@ describe('useChatIndicators', () => {
 
   it('keys the readings by chat so a row can look its own up', async () => {
     mockGetChatIndicators.mockResolvedValue([WRITING]);
-    const { result } = renderHook(() => useChatIndicators('workspace-1', false));
+    const { result } = renderHook(() => useChatIndicators('workspace-1', false, false, 25));
 
     await waitFor(() => expect(result.current.indicators).toEqual({ 'chat-1': WRITING }));
-    expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false);
+    expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 25);
+  });
+
+  it('asks for nothing until the list has rows to read for', async () => {
+    const { result } = renderHook(() => useChatIndicators('workspace-1', false, false, 0));
+
+    await waitFor(() => expect(result.current.indicators).toEqual({}));
+    expect(mockGetChatIndicators).not.toHaveBeenCalled();
+    expect(result.current.loaded).toBe(false);
+  });
+
+  it('asks for readings over the slice of the list the console holds', async () => {
+    mockGetChatIndicators.mockResolvedValue([WRITING]);
+    const { rerender } = renderHook(
+      ({ listed }) => useChatIndicators('workspace-1', false, false, listed),
+      { initialProps: { listed: 25 } }
+    );
+
+    await waitFor(() =>
+      expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 25)
+    );
+
+    rerender({ listed: 50 });
+
+    await waitFor(() =>
+      expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false, 50)
+    );
   });
 
   it('counts an empty answer and a failed read as readings that landed', async () => {
     mockGetChatIndicators.mockResolvedValueOnce([]);
-    const { result } = renderHook(() => useChatIndicators('workspace-1', false));
+    const { result } = renderHook(() => useChatIndicators('workspace-1', false, false, 25));
     await waitFor(() => expect(result.current.loaded).toBe(true));
     expect(result.current.indicators).toEqual({});
 
@@ -61,7 +87,7 @@ describe('useChatIndicators', () => {
 
   it('keeps the last readings when a read fails, and says the statuses are stale', async () => {
     mockGetChatIndicators.mockResolvedValueOnce([WRITING]);
-    const { result } = renderHook(() => useChatIndicators('workspace-1', false));
+    const { result } = renderHook(() => useChatIndicators('workspace-1', false, false, 25));
     await waitFor(() => expect(result.current.indicators).toEqual({ 'chat-1': WRITING }));
 
     mockGetChatIndicators.mockRejectedValueOnce(new Error('GitHub is unreachable'));
@@ -74,7 +100,7 @@ describe('useChatIndicators', () => {
   it('reads again as a turn ends, and once more after the turn has recorded what it opened', async () => {
     mockGetChatIndicators.mockResolvedValue([]);
     const { rerender } = renderHook(
-      ({ streaming }) => useChatIndicators('workspace-1', false, streaming),
+      ({ streaming }) => useChatIndicators('workspace-1', false, streaming, 25),
       { initialProps: { streaming: true } }
     );
     await waitFor(() => expect(mockGetChatIndicators).toHaveBeenCalledTimes(1));

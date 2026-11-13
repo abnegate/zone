@@ -561,8 +561,10 @@ pub async fn indicators(
     Query(query): Query<ListChatsQuery>,
 ) -> Result<Json<ChatIndicatorsResponse>, ServerError> {
     check_workspace_read_access(&state, &auth, query.workspace_id).await?;
+    let page = parse_page(query.limit, query.offset).map_err(ServerError::BadRequest)?;
     Ok(Json(ChatIndicatorsResponse {
-        chats: indicator::list(&state, query.workspace_id, query.archived).await?,
+        chats: indicator::list(&state, query.workspace_id, query.archived, query.sort, page)
+            .await?,
     }))
 }
 

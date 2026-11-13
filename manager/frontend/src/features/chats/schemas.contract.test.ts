@@ -47,6 +47,7 @@ import {
   TOOL_ERROR_PREFIX,
   UNFINISHED_DETAIL,
 } from './types';
+import { CHAT_SORT, listSort, SERVER_CHAT_SORT } from './utils/arrange';
 
 const CITATIONS_RS = join(
   import.meta.dir,
@@ -653,6 +654,24 @@ describe('a chat pull request reads as the server describes it', () => {
   test('the status carries the review threads readiness is read from', () => {
     const source = readFileSync(join(PULL_REQUEST_RS, 'status.rs'), 'utf8');
     expect(Object.keys(rustStructFields(source, 'Status'))).toContain('threads');
+  });
+});
+
+const CHATS_DB_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/db/chats/sort.rs');
+
+describe('the chat list asks for an order the server lists by', () => {
+  /// The list query deserialises this enum, so a name the console sends that
+  /// the server does not know fails the whole list rather than one sort. The
+  /// status order is the console's own and must stay out of it.
+  test('Sort variants match the orders the console sends', () => {
+    const source = readFileSync(CHATS_DB_RS, 'utf8');
+    expect([...SERVER_CHAT_SORT].sort()).toEqual(rustVariants(source, 'Sort').sort());
+  });
+
+  test('every order a reader can pick resolves to one the server serves', () => {
+    for (const sort of CHAT_SORT) {
+      expect(SERVER_CHAT_SORT).toContain(listSort(sort));
+    }
   });
 });
 

@@ -107,10 +107,20 @@ class ChatsApi {
    * What each chat in the workspace is doing, and what became of the pull
    * request its work opened. Read apart from the list so a list stays quick.
    */
-  async getChatIndicators(workspaceId: string, archived?: boolean): Promise<ChatIndicator[]> {
+  async getChatIndicators(
+    workspaceId: string,
+    archived?: boolean,
+    listed?: number
+  ): Promise<ChatIndicator[]> {
     const params = new URLSearchParams({ workspace_id: workspaceId });
     if (archived !== undefined) {
       params.set('archived', String(archived));
+    }
+    // The list is paged, so the rows the console holds are the only ones worth
+    // a reading: anything further is a GitHub request spent on a row nobody
+    // has scrolled to.
+    if (listed !== undefined) {
+      params.set('limit', String(listed));
     }
     const response = await fetch(`${API_BASE}/api/chats/indicators?${params}`, {
       headers: this.getHeaders(),

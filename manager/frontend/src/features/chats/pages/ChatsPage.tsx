@@ -112,6 +112,7 @@ import {
   isStartingImage,
   isWaiting,
   keepEffort,
+  listSort,
   MODEL_NAME_PLACEHOLDER,
   MODEL_PLACEHOLDER,
   matchesFilter,
@@ -238,7 +239,7 @@ export default function ChatsPage() {
     refresh: refreshChats,
     renameChat,
     updateTitle: updateListTitle,
-  } = useChats({ archived: showArchived, sort });
+  } = useChats({ archived: showArchived, sort: listSort(sort) });
   usePreloadChats(chats);
   const { projects } = useProjects('all');
   const projectNames = useMemo(
@@ -280,7 +281,7 @@ export default function ChatsPage() {
     indicators,
     loaded: indicatorsLoaded,
     error: indicatorsError,
-  } = useChatIndicators(currentWorkspace?.id, showArchived, streaming);
+  } = useChatIndicators(currentWorkspace?.id, showArchived, streaming, chats.length);
   // The open chat's own socket knows it is writing before the next poll does,
   // and only ever adds that: a reading the server made stands until it is read
   // again, because this socket cannot see a turn somebody else's can.

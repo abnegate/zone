@@ -41,7 +41,13 @@ function message(error: unknown): string {
 export function useChatIndicators(
   workspaceId: string | null | undefined,
   archived: boolean,
-  streaming = false
+  streaming = false,
+  /**
+   * How many chats the paged list is holding. Readings are asked for over
+   * that slice, asked for again when another page lands, and not asked for at
+   * all until the list has rows.
+   */
+  listed = 0
 ): ChatIndicators {
   const [indicators, setIndicators] = useState<Record<string, ChatIndicator>>({});
   const [loading, setLoading] = useState(false);
@@ -49,6 +55,8 @@ export function useChatIndicators(
   const [error, setError] = useState<string | null>(null);
   const read = useRef(0);
   const wasStreaming = useRef(streaming);
+  /** Which list the readings in hand belong to. */
+  const listing = useRef(`${workspaceId ?? ''}:${archived}`);
 
   const refresh = useCallback(async () => {
     const current = ++read.current;
@@ -57,9 +65,13 @@ export function useChatIndicators(
       setLoaded(true);
       return;
     }
+    // Nothing listed yet is nothing to read for, and asking anyway would ask
+    // for every chat in the workspace — the whole point of following the
+    // list's own page.
+    if (listed === 0) return;
     setLoading(true);
     try {
-      const loaded = await chatsApi.getChatIndicators(workspaceId, archived);
+      const loaded = await chatsApi.getChatIndicators(workspaceId, archived, listed);
       if (current !== read.current) return;
       setIndicators(byChat(loaded));
       setError(null);
@@ -72,12 +84,20 @@ export function useChatIndicators(
         setLoaded(true);
       }
     }
-  }, [workspaceId, archived]);
+  }, [workspaceId, archived, listed]);
 
-  useEffect(() => {
+  // A different workspace or tab is a different list, so its readings start
+  // again. A further page of the same list is not: blanking the map there
+  // would flicker every row that already had a reading back to nothing.
+  const scope = `${workspaceId ?? ''}:${archived}`;
+  if (listing.current !== scope) {
+    listing.current = scope;
     setIndicators({});
     setLoaded(false);
     setError(null);
+  }
+
+  useEffect(() => {
     void refresh();
   }, [refresh]);
 

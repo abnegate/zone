@@ -4,9 +4,11 @@ import {
   arrangeChats,
   CHAT_GROUP_STORAGE_KEY,
   CHAT_SORT_STORAGE_KEY,
+  listSort,
   NO_PROJECT_LABEL,
   readChatGroupBy,
   readChatSort,
+  SERVER_CHAT_SORT,
   UNKNOWN_PROJECT_LABEL,
   writeChatGroupBy,
   writeChatSort,
@@ -256,6 +258,18 @@ describe('chat arrange storage', () => {
     localStorage.setItem(CHAT_SORT_STORAGE_KEY, 'popular');
     expect(readChatGroupBy()).toBe('none');
     expect(readChatSort()).toBe('updated_desc');
+  });
+});
+
+describe('the order asked of the server', () => {
+  it('keeps the console-only status order out of the list query', () => {
+    expect(listSort('status')).toBe('updated_desc');
+  });
+
+  it('passes every other order through as the reader chose it', () => {
+    for (const sort of SERVER_CHAT_SORT) {
+      expect(listSort(sort)).toBe(sort);
+    }
   });
 });
 

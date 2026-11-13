@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::agent::ApprovalPolicy;
 use crate::db::chat_pull_requests::{self, PullRequestRow};
 use crate::db::chats::activity;
+use crate::db::chats::{Page, Sort};
 use crate::db::{DbResult, chats};
 use crate::state::AppState;
 
@@ -147,13 +148,19 @@ pub struct Indicator {
     pub pull_requests: usize,
 }
 
-/// Read every chat in the workspace, in the order the chat list asks for them.
+/// Read the slice of the workspace's chats the list is showing, in the order
+/// it asked for them.
+///
+/// The same page as the list itself: a reading for a row nobody has loaded is
+/// a GitHub request spent on nothing.
 pub async fn list(
     state: &AppState,
     workspace_id: Uuid,
     archived: Option<bool>,
+    sort: Sort,
+    page: Page,
 ) -> DbResult<Vec<Indicator>> {
-    let chats = chats::list_chats(state.db(), Some(workspace_id), archived).await?;
+    let chats = chats::list_chats(state.db(), workspace_id, archived, sort, page).await?;
     let ids: Vec<Uuid> = chats.iter().map(|chat| chat.id).collect();
     let (writing, awaiting_answer, rows) = tokio::try_join!(
         activity::writing(state.db(), workspace_id),
