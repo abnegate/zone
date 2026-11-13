@@ -502,6 +502,29 @@ setting a monthly cap, at claude.ai/settings/usage.
 - **Note**: Must be a whole number of seconds. Anything else, such as `1.5`,
   `-1` or `1m`, is refused at boot; an empty value keeps the default.
 
+### `ZONE_AGENT_NICENESS`
+- **Default**: `19`, the lowest CPU priority. Compose passes it through from
+  `.env`, empty unless `.env` sets it, and the Helm chart leaves it unset; an
+  empty value keeps the default.
+- **Description**: The nice value every claude and codex run starts at. Every
+  build, test and language server the agent starts inherits it. The agents
+  run where the server does, in the manager container under compose, so at the
+  default they get every CPU the server leaves idle. When the CPUs are
+  contended, the server goes first, so its API keeps answering while chats
+  build and test at once. On Linux, a process with no IO priority of its own
+  takes one from its nice value, so the agents also yield the disk, but only
+  under an IO scheduler that honours IO priority, such as BFQ. `0` leaves
+  agents at the usual priority, which is the server's own unless the server
+  was itself started niced.
+- **Note**: Must be a whole number from `0` to `19`. Anything else, `20` and
+  negative values included, is refused at boot: raising a priority needs
+  privilege the server does not have. For the same reason, an agent never
+  starts at a higher priority than the server's own, whatever this says.
+  Nice values order processes only against each other: they bound neither
+  memory nor the CPU a container or pod gets beside other workloads, which
+  its own limits set. Zone's own agent, on an HTTP provider, runs its tool
+  commands at the server's priority.
+
 ### `ZONE_CLAUDE_API_URL`
 - **Default**: `https://api.anthropic.com`. Compose passes it from `.env`
   with that default; the Helm chart leaves it unset.
@@ -1066,6 +1089,9 @@ server runs:
   any directory above it, and with
   `--settings '{"crossSessionInbound":"refuse"}'`, a setting meant to refuse
   messages from other claude sessions of the same OS user;
+- at the nice value `ZONE_AGENT_NICENESS` names, 19 unless set, which every
+  command the agent runs inherits, so its builds and tests yield the CPU to
+  the server;
 - for as long as the turn may take: `ZONE_CHAT_TIMEOUT_SECONDS` for a chat
   turn, 30 minutes by default, what is left of its hour for a task attempt,
   and 30 minutes for any other run, such as a review; the crate's own

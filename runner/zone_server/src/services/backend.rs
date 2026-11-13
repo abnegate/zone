@@ -279,8 +279,10 @@ async fn touch(state: &AppState, login: Uuid) {
     }
 }
 
-/// `settings` running the binary the environment names for `agent`, when it names one.
+/// `settings` running the binary the environment names for `agent`, when it names one, at the
+/// nice value the operator chose.
 fn executed(config: &Config, agent: AgentKind, settings: CliSettings) -> CliSettings {
+    let settings = settings.with_niceness(config.agents.niceness);
     match overridden(config, agent) {
         Some(executable) => settings.with_executable(executable),
         None => settings,
@@ -415,6 +417,7 @@ mod tests {
     use abnegate_agent_cli::{
         CREDITS_REQUIRED, CREDITS_UNCONFIRMED, LONG_CONTEXT_CREDITS_REQUIRED,
     };
+    use abnegate_exec::Niceness;
     use abnegate_secret::{SecretValue, redact};
     use chrono::{TimeDelta, Utc};
     use sqlx::PgPool;
@@ -1548,8 +1551,12 @@ mod tests {
         sandbox: CodexSandbox,
     ) -> Vec<(&'static str, LlmBackend)> {
         let state = TempDir::new().expect("an agent state root");
+        backends_under(&defaulting_to(agent, state.path(), sandbox), agent)
+    }
+
+    /// [`production_backends`] under `config`.
+    fn backends_under(config: &Config, agent: AgentKind) -> Vec<(&'static str, LlmBackend)> {
         let codex_home = TempDir::new().expect("a codex login's home");
-        let config = defaulting_to(agent, state.path(), sandbox);
         let organization = Uuid::new_v4();
         let chosen = picked(
             organization,
@@ -1557,20 +1564,40 @@ mod tests {
             resolved_login(agent, codex_home.path()),
         );
         vec![
-            ("the instance's default", instance(&config)),
+            ("the instance's default", instance(config)),
             (
                 "the host's sign-in",
-                host(&config, organization, agent)
+                host(config, organization, agent)
                     .expect("the host's backend")
                     .backend,
             ),
             (
                 "an organization's login",
-                on_login(&config, organization, &chosen, None)
+                on_login(config, organization, &chosen, None)
                     .expect("the login's backend")
                     .backend,
             ),
         ]
+    }
+
+    /// An agent's builds and tests share the server's CPUs, so every backend Zone runs one on
+    /// starts it at the nice value the operator chose.
+    #[test]
+    fn production_agent_backends_start_at_the_configured_nice_value() {
+        let chosen = Niceness::try_from(7).expect("a nice value");
+        for &agent in AgentKind::ALL {
+            let state = TempDir::new().expect("an agent state root");
+            let mut config = defaulting_to(agent, state.path(), CodexSandbox::WorkspaceWrite);
+            config.agents.niceness = chosen;
+            for (reached, backend) in backends_under(&config, agent) {
+                let (_, settings, _) = cli(Ok(backend));
+                assert_eq!(
+                    settings.niceness,
+                    Some(chosen),
+                    "{agent} on {reached} ignored ZONE_AGENT_NICENESS"
+                );
+            }
+        }
     }
 
     /// Every backend Zone runs an agent on allows thirty minutes, not the crate's default
