@@ -16,6 +16,7 @@ export type PullRequestKind =
   | 'merged'
   | 'closed'
   | 'draft'
+  | 'conflicted'
   | 'failing'
   | 'pending'
   | 'passing'
@@ -26,6 +27,7 @@ export const PULL_REQUEST_KIND_LABELS: Record<PullRequestKind, string> = {
   merged: 'Merged',
   closed: 'Closed',
   draft: 'Draft',
+  conflicted: 'Has merge conflicts',
   failing: 'Checks failing',
   pending: 'Checks running',
   passing: 'Checks passing',
@@ -39,6 +41,8 @@ export function pullRequestKind(pullRequest: ChatPullRequest): PullRequestKind {
   if (status.state === 'merged') return 'merged';
   if (status.state === 'closed') return 'closed';
   if (status.draft) return 'draft';
+  // A conflicted branch cannot merge whatever its checks say, so it never takes a check mark.
+  if (status.mergeable === 'conflicted') return 'conflicted';
   if (status.checks === 'failing') return 'failing';
   if (status.checks === 'pending') return 'pending';
   if (status.checks === 'passing') return 'passing';
