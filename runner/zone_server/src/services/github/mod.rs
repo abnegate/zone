@@ -2,6 +2,7 @@ pub(crate) mod authentication;
 pub(crate) mod client;
 pub(crate) mod configuration;
 pub(crate) mod connection;
+pub mod diff;
 pub mod readiness;
 pub(crate) mod refusal;
 pub mod release;
