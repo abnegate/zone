@@ -18,6 +18,10 @@ use zone_server::db::{sessions, tasks, workspace_members};
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+const STOP_DEADLINE: Duration = Duration::from_secs(5);
+
+const CANCELLED_FRAME: &str = "cancelled";
+
 struct Credentials {
     access: String,
     refresh: String,
@@ -161,6 +165,37 @@ async fn expect_init(socket: &mut Socket) {
     assert_eq!(initial["type"], "init");
 }
 
+async fn stop(fixture: &Fixture) {
+    assert!(
+        matches!(
+            tasks::stop_task_run_authorized(&fixture.pool, fixture.credentials.user, fixture.run)
+                .await
+                .unwrap(),
+            tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+        ),
+        "the running run was live to stop"
+    );
+}
+
+async fn expect_stopped(socket: &mut Socket) {
+    let frame = match tokio::time::timeout(STOP_DEADLINE, socket.next()).await {
+        Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str::<Value>(&text).unwrap(),
+        Ok(other) => panic!("expected a cancelled frame for the stopped run, got {other:?}"),
+        Err(_) => panic!("the stream kept polling a stopped run instead of ending it"),
+    };
+    assert_eq!(
+        frame,
+        json!({ "type": CANCELLED_FRAME, "message": tasks::STOPPED }),
+        "unexpected frame: {frame}"
+    );
+
+    match tokio::time::timeout(STOP_DEADLINE, socket.next()).await {
+        Ok(Some(Ok(Message::Close(_)))) => {}
+        Ok(other) => panic!("expected a Close frame after the stop, got {other:?}"),
+        Err(_) => panic!("the stream did not close after reporting the stop"),
+    }
+}
+
 async fn add_log(pool: &PgPool, run: Uuid) {
     tasks::add_task_run_log(
         pool,
@@ -270,4 +305,30 @@ async fn database_failure_stops_an_established_task_run_stream() {
     fixture.pool.close().await;
 
     assert_denied(&mut socket).await;
+}
+
+#[tokio::test]
+async fn stream_ends_for_a_run_stopped_before_the_client_connects() {
+    let fixture = fixture(900).await;
+    stop(&fixture).await;
+
+    let mut socket = connect(fixture.address, fixture.run, &fixture.credentials.access).await;
+    let initial = message(&mut socket)
+        .await
+        .expect("expected initial task state");
+    assert_eq!(initial["type"], "init");
+    assert_eq!(initial["status"], tasks::CANCELLED);
+
+    expect_stopped(&mut socket).await;
+}
+
+#[tokio::test]
+async fn stream_ends_for_a_run_stopped_while_the_client_watches() {
+    let fixture = fixture(900).await;
+    let mut socket = connect(fixture.address, fixture.run, &fixture.credentials.access).await;
+    expect_init(&mut socket).await;
+
+    stop(&fixture).await;
+
+    expect_stopped(&mut socket).await;
 }

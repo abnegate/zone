@@ -27,7 +27,6 @@ use crate::common::{context_database_url, create_test_state, test_config};
 
 const REMOTE: &str = "git@github.com:owner/repository.git";
 const GITHUB: &str = "https://github.com/owner/repository";
-const TIMEOUT: Duration = Duration::from_secs(120);
 const UNREACHABLE: &str = "http://127.0.0.1:9";
 const TOKEN: &str = "ghp_a-token-nothing-may-repeat";
 
@@ -177,7 +176,6 @@ impl Fixture {
             self.workspace,
             url,
             token.map(SecretValue::new),
-            TIMEOUT,
         )
     }
 }
@@ -589,8 +587,8 @@ async fn one_workspaces_clone_is_not_anothers() {
     let (_holder, url) = remote();
     let root = fixture.clones.path();
 
-    let one = Missing::new(root, fixture.workspace, url.clone(), None, TIMEOUT);
-    let two = Missing::new(root, other.workspace, url, None, TIMEOUT);
+    let one = Missing::new(root, fixture.workspace, url.clone(), None);
+    let two = Missing::new(root, other.workspace, url, None);
     fixture.remove().await;
     other.remove().await;
 

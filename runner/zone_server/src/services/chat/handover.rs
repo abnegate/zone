@@ -15,7 +15,6 @@ pub use switch::Switch;
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
 
 use abnegate_agent::chat::NewEntry;
 use abnegate_agent::context::Entry;
@@ -123,8 +122,7 @@ impl Handover {
     /// among those the turn has not run on, the current agent's first, or only the current
     /// agent's when [`Self::strict`]. Session `session` is
     /// carried along when the new login runs the same agent and that agent resumes a session
-    /// carried in from another home; otherwise the turn starts a fresh session there. Either way
-    /// the new backend is bounded by `timeout`.
+    /// carried in from another home; otherwise the turn starts a fresh session there.
     ///
     /// When no login is left, the error to end the turn with: the organization's limit when
     /// a subscription limit is what left none, and `None` when the turn's own failure says
@@ -134,7 +132,6 @@ impl Handover {
         state: &AppState,
         cause: &Cause,
         session: Option<&str>,
-        timeout: Duration,
     ) -> Result<Switch, Option<backend::Error>> {
         let from = self.current.clone();
         let running = self.model.on(from.agent);
@@ -202,7 +199,7 @@ impl Handover {
         let model = (to.agent != from.agent).then(|| self.model.on(to.agent));
         self.current = to.clone();
         Ok(Switch {
-            backend: backend::bounded(running, timeout),
+            backend: running,
             from,
             to,
             reason: cause.reason,
@@ -447,6 +444,8 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Condvar;
     use std::sync::Mutex;
+    use std::time::Duration;
+    use std::time::Instant;
 
     use abnegate_agent::context::project;
     use abnegate_agent_cli::CliSettings;
@@ -893,7 +892,7 @@ mod tests {
         }
     }
 
-    const TIMEOUT: Duration = Duration::from_secs(90);
+    const GATE: Duration = Duration::from_secs(90);
 
     #[tokio::test]
     async fn a_switch_to_another_agent_replays_and_repicks_the_model() {
@@ -904,7 +903,7 @@ mod tests {
         let mut handover = fixture.handover(&claude);
 
         let switch = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         let exhausted = fixture.exhausted_until(&claude).await;
         let codex_work = fixture.work(AgentKind::Codex);
@@ -934,7 +933,11 @@ mod tests {
             settings.variables.get(CODEX_HOME).map(PathBuf::from),
             Some(codex_home)
         );
-        assert_eq!(settings.timeout, TIMEOUT);
+        assert!(
+            Instant::now().checked_add(settings.timeout).is_none(),
+            "the login a turn moves onto stops it after {:?}",
+            settings.timeout
+        );
         assert_eq!(
             exhausted,
             Some(resets()),
@@ -973,11 +976,10 @@ mod tests {
                 &fixture.state,
                 &Cause::signed_out("Not logged in".into()),
                 Some(SESSION),
-                TIMEOUT,
             )
             .await;
         let spent = limited
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         fixture.remove().await;
 
@@ -1010,7 +1012,7 @@ mod tests {
         let mut handover = fixture.handover(&from);
 
         let switch = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         let landed = fixture.carried(&to, SESSION);
         let home = fixture.home(&to);
@@ -1044,7 +1046,7 @@ mod tests {
             .in_directory(Some(project.path().to_path_buf()));
 
         let switch = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         let landed = fixture
             .home(&to)
@@ -1109,7 +1111,7 @@ mod tests {
     }
 
     /// A current-thread runtime whose blocking threads start their work only once `progress` is
-    /// set, or after [`TIMEOUT`], so work sent off the runtime cannot finish before the runtime's
+    /// set, or after [`GATE`], so work sent off the runtime cannot finish before the runtime's
     /// own thread has moved on.
     fn gated(progress: &Arc<(Mutex<bool>, Condvar)>) -> Runtime {
         let progress = Arc::clone(progress);
@@ -1119,7 +1121,7 @@ mod tests {
                 let made = made.lock().expect("the progress flag");
                 drop(
                     signal
-                        .wait_timeout_while(made, TIMEOUT, |made| !*made)
+                        .wait_timeout_while(made, GATE, |made| !*made)
                         .expect("the progress flag"),
                 );
             })
@@ -1258,7 +1260,7 @@ mod tests {
         let mut handover = fixture.handover(&from);
 
         let switch = handover
-            .next(&fixture.state, &limit(false), Some(ESCAPE), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(ESCAPE))
             .await;
         let escaped = fixture
             .home(&to)
@@ -1291,7 +1293,7 @@ mod tests {
         let mut handover = fixture.handover(&from);
 
         let switch = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         fixture.remove().await;
 
@@ -1316,7 +1318,6 @@ mod tests {
                 &fixture.state,
                 &Cause::signed_out("Not logged in".into()),
                 None,
-                TIMEOUT,
             )
             .await
             .map(|switch| switch.to.id);
@@ -1325,7 +1326,6 @@ mod tests {
                 &fixture.state,
                 &Cause::signed_out("Not logged in".into()),
                 None,
-                TIMEOUT,
             )
             .await
             .map(|switch| switch.to.id);
@@ -1334,7 +1334,6 @@ mod tests {
                 &fixture.state,
                 &Cause::signed_out("Not logged in".into()),
                 None,
-                TIMEOUT,
             )
             .await
             .map(|switch| switch.to.id);
@@ -1361,7 +1360,7 @@ mod tests {
         let mut handover = fixture.handover(&only);
 
         let ended = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         fixture.remove().await;
 
@@ -1384,9 +1383,7 @@ mod tests {
         let only = fixture.claude("a@example.com").await;
         let mut handover = fixture.handover(&only);
 
-        let ended = handover
-            .next(&fixture.state, &limit(true), None, TIMEOUT)
-            .await;
+        let ended = handover.next(&fixture.state, &limit(true), None).await;
         let exhausted = fixture.exhausted_until(&only).await;
         fixture.remove().await;
 
@@ -1607,9 +1604,7 @@ mod tests {
             notice.clone(),
         );
 
-        let switch = handover
-            .next(&fixture.state, &limit(false), None, TIMEOUT)
-            .await;
+        let switch = handover.next(&fixture.state, &limit(false), None).await;
         fixture.remove().await;
 
         assert_eq!(chosen.login.id, configured.id);

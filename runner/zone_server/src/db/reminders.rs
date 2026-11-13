@@ -390,6 +390,9 @@ pub struct PendingTurn {
     pub chat_id: Uuid,
     pub user_id: Uuid,
     pub prompt: String,
+    /// Which claim this is, so a renewal from a worker whose claim has since
+    /// been taken over cannot keep the newer one alive on its behalf.
+    pub attempts: i32,
 }
 
 /// Where a fired automation goes next, or `None` when its rule is spent and
@@ -576,7 +579,7 @@ pub async fn deliver_next(pool: &PgPool, sweep: Sweep) -> DbResult<Delivered> {
 
 /// The key the claim serialises on. Arbitrary and constant; it only has to be
 /// the same number in every process.
-const CLAIM_LOCK: i64 = 0x7A6F_6E65_5455_524E;
+pub(crate) const CLAIM_LOCK: i64 = 0x7A6F_6E65_5455_524E;
 
 /// How many times one firing's turn is offered before it is given up on.
 ///
@@ -588,12 +591,11 @@ const MAX_TURN_ATTEMPTS: i32 = 3;
 
 /// Takes the oldest firing that still owes a turn, or `None` when none does.
 ///
-/// `lease` is how long a claim is honoured: past it the firing is taken to have
-/// died with whatever was running it, and is offered again. The caller sets it
-/// because only the caller knows how long a turn can take — the generation
-/// timeout, plus however long one may sit queued behind the chat's own
-/// semaphore. Too short costs a duplicate turn and too long costs a late one,
-/// and of the two only the duplicate is something a person has to read.
+/// `lease` is how long a claim is honoured without being renewed: past it the
+/// firing is taken to have died with whatever was running it, and is offered
+/// again. A turn has no length limit, so the lease does not measure the turn —
+/// the worker running it renews the claim with `renew_turn` for as long as it
+/// is alive, and the lease only has to outlast a missed renewal or two.
 pub async fn claim_turn(
     pool: &PgPool,
     sweep: Sweep,
@@ -615,9 +617,12 @@ pub async fn claim_turn(
     // Dropped here rather than skipped, so the queue does not silt up with
     // firings nothing will ever run. Named in the log, because a firing nobody
     // receives is worth one line saying which schedule it belonged to.
+    // Timed from each statement, not the transaction: `NOW()` is when this
+    // transaction began, before it waited on the lock, and a claim stamped
+    // with it after a wait longer than the lease would start out lapsed.
     let abandoned: Vec<Uuid> = sqlx::query_scalar(
         "DELETE FROM reminder_turns WHERE attempts >= $1 AND claimed_at IS NOT NULL \
-         AND claimed_at <= NOW() - make_interval(secs => $2) \
+         AND claimed_at <= statement_timestamp() - make_interval(secs => $2) \
          AND ($3::uuid IS NULL OR workspace_id = $3) RETURNING reminder_id",
     )
     .bind(MAX_TURN_ATTEMPTS)
@@ -656,17 +661,20 @@ pub async fn claim_turn(
     // being taken, which is a different question from whether another one is
     // already out.
     let claimed = sqlx::query_as::<_, PendingTurn>(
-        "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = NOW() WHERE id = ( \
+        "UPDATE reminder_turns SET attempts = attempts + 1, claimed_at = statement_timestamp() \
+         WHERE id = ( \
          SELECT owed.id FROM reminder_turns AS owed WHERE owed.attempts < $1 \
-         AND (owed.claimed_at IS NULL OR owed.claimed_at <= NOW() - make_interval(secs => $2)) \
+         AND (owed.claimed_at IS NULL \
+           OR owed.claimed_at <= statement_timestamp() - make_interval(secs => $2)) \
          AND ($3::uuid IS NULL OR owed.workspace_id = $3) \
          AND NOT EXISTS ( \
            SELECT 1 FROM reminder_turns AS ahead \
            WHERE ahead.reminder_id = owed.reminder_id AND ahead.id <> owed.id \
            AND ahead.claimed_at IS NOT NULL \
-           AND ahead.claimed_at > NOW() - make_interval(secs => $2)) \
+           AND ahead.claimed_at > statement_timestamp() - make_interval(secs => $2)) \
          ORDER BY owed.created_at, owed.id LIMIT 1 FOR UPDATE SKIP LOCKED) \
-         RETURNING id, reminder_id, workspace_id, chat_id, created_by AS user_id, prompt",
+         RETURNING id, reminder_id, workspace_id, chat_id, created_by AS user_id, prompt, \
+         attempts",
     )
     .bind(MAX_TURN_ATTEMPTS)
     .bind(seconds)
@@ -677,15 +685,58 @@ pub async fn claim_turn(
     Ok(claimed)
 }
 
+/// Keeps a claim live while its turn is still running, and says whether it
+/// still held.
+///
+/// Fenced on the claim's `attempts`: once the lease lapsed and another worker
+/// took the firing over, the original claim is gone, and renewing would only
+/// extend the newer one's lease from a worker that is not running it.
+///
+/// Bounded by `lease` as well: a claim that lapsed is one `claim_turn` already
+/// treats as gone, and may have let a later firing of the same schedule start
+/// on the strength of it. Reviving it would put two of that schedule's
+/// firings in flight at once.
+pub async fn renew_turn(
+    pool: &PgPool,
+    turn_id: Uuid,
+    attempts: i32,
+    lease: Duration,
+) -> DbResult<bool> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(CLAIM_LOCK)
+        .execute(&mut *transaction)
+        .await?;
+    // Timed from the statement, not the transaction: `NOW()` is when this
+    // transaction began, before it waited on the lock, and a claim that ran in
+    // that wait may have judged this one lapsed at a later moment than that.
+    let renewed = sqlx::query(
+        "UPDATE reminder_turns SET claimed_at = statement_timestamp() \
+         WHERE id = $1 AND attempts = $2 \
+         AND claimed_at > statement_timestamp() - make_interval(secs => $3)",
+    )
+    .bind(turn_id)
+    .bind(attempts)
+    .bind(lease.as_secs_f64())
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(renewed.rows_affected() > 0)
+}
+
 /// Marks one firing's turn as run, whatever the turn made of it.
 ///
 /// A turn that reached the chat and failed there has already said so in the
 /// chat, and offering it again would repeat the failure rather than recover
 /// from it. The retry in `claim_turn` exists for the one case this cannot
 /// reach: a process that did not live to call this.
-pub async fn finish_turn(pool: &PgPool, turn_id: Uuid) -> DbResult<()> {
-    sqlx::query("DELETE FROM reminder_turns WHERE id = $1")
+///
+/// Fenced on the claim's `attempts` like `renew_turn`: a worker whose claim
+/// lapsed and was taken over leaves the newer claim to the worker running it.
+pub async fn finish_turn(pool: &PgPool, turn_id: Uuid, attempts: i32) -> DbResult<()> {
+    sqlx::query("DELETE FROM reminder_turns WHERE id = $1 AND attempts = $2")
         .bind(turn_id)
+        .bind(attempts)
         .execute(pool)
         .await?;
     Ok(())
@@ -709,6 +760,19 @@ pub async fn watch_baseline(pool: &PgPool, reminder_id: Uuid) -> DbResult<Option
     Ok(baseline)
 }
 
+/// Whether a firing's reading became the baseline the next one is compared
+/// with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observation {
+    /// The reading is the new baseline.
+    Kept,
+    /// The firing stored no answer, so the baseline is the last one that worked.
+    Unanswered,
+    /// The turn no longer holds its claim, so the firing that took over owns
+    /// the baseline.
+    Superseded,
+}
+
 /// Keeps what this firing found as the baseline the next one is compared with.
 ///
 /// The answer is read back by the id the turn was given rather than by taking
@@ -719,11 +783,17 @@ pub async fn watch_baseline(pool: &PgPool, reminder_id: Uuid) -> DbResult<Option
 /// cancelled — leaves the baseline as it was. Overwriting it with nothing would
 /// make the next firing compare against an empty reading and report the world
 /// changed when all that happened is that this firing did not run.
+///
+/// Written only while `turn` still holds its claim, judged like `renew_turn`:
+/// once the claim lapsed, `claim_turn` may have started the schedule's next
+/// firing against the baseline as it stood, and a late write from this one
+/// would replace the reading that firing compares with or is about to record.
 pub async fn record_observation(
     pool: &PgPool,
-    reminder_id: Uuid,
+    turn: &PendingTurn,
     message_id: Uuid,
-) -> DbResult<()> {
+    lease: Duration,
+) -> DbResult<Observation> {
     let answer = sqlx::query_scalar::<_, String>(
         "SELECT content FROM messages WHERE id = $1 AND role = 'assistant'",
     )
@@ -733,21 +803,39 @@ pub async fn record_observation(
     .filter(|answer| !answer.trim().is_empty());
     let Some(answer) = answer else {
         tracing::warn!(
-            %reminder_id,
+            reminder_id = %turn.reminder_id,
             "A watch fired but stored no answer; its baseline is left as it was, so the next \
              firing compares against the last reading that worked"
         );
-        return Ok(());
+        return Ok(Observation::Unanswered);
     };
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(CLAIM_LOCK)
+        .execute(&mut *transaction)
+        .await?;
+    let held: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM reminder_turns WHERE id = $1 AND attempts = $2 \
+         AND claimed_at > statement_timestamp() - make_interval(secs => $3))",
+    )
+    .bind(turn.id)
+    .bind(turn.attempts)
+    .bind(lease.as_secs_f64())
+    .fetch_one(&mut *transaction)
+    .await?;
+    if !held {
+        return Ok(Observation::Superseded);
+    }
     sqlx::query(
         "UPDATE reminders SET last_observation = $2 WHERE id = $1 \
          AND timing_mode = 'condition_watch'",
     )
-    .bind(reminder_id)
+    .bind(turn.reminder_id)
     .bind(answer.chars().take(OBSERVATION_CAP).collect::<String>())
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
-    Ok(())
+    transaction.commit().await?;
+    Ok(Observation::Kept)
 }
 
 #[cfg(test)]

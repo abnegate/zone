@@ -176,7 +176,7 @@ pub enum AgentEvent {
     },
     /// The model asked to wait for something outside the loop. The wait itself is
     /// the consumer's: a task run parks and gives up its admission slot, and a chat
-    /// awaits inside the turn's own deadline. `spent` refunds the round, which is
+    /// turn awaits it in place. `spent` refunds the round, which is
     /// what "without consuming an iteration" means.
     WaitRequired {
         tool_call_id: String,

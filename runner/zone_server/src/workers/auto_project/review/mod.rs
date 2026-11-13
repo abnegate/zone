@@ -15,7 +15,6 @@ pub mod tools;
 pub mod verdict;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use abnegate_agent::ToolContext;
 use abnegate_agent::ToolResult;
@@ -40,8 +39,6 @@ pub use verdict::{Outcome, Verdict};
 
 /// Turns a review may take: reads, then the verdict.
 const MAX_TURNS: usize = 12;
-/// How long one review may run.
-const REVIEW_TIMEOUT: Duration = Duration::from_secs(600);
 /// Tokens the verdict turn may spend.
 const REVIEW_TOKENS: u32 = 4_096;
 /// A review is a judgement, not a draft.
@@ -63,8 +60,6 @@ pub enum ReviewError {
     Unreachable(String),
     #[error("the reviewer model {reviewer} cannot run: {reason}")]
     Unfunded { reviewer: String, reason: String },
-    #[error("the review did not finish within {} seconds", REVIEW_TIMEOUT.as_secs())]
-    TimedOut,
 }
 
 impl ReviewError {
@@ -99,7 +94,6 @@ impl ReviewError {
                 reviewer,
                 reason: endpoint.scrub(&reason),
             },
-            Self::TimedOut => Self::TimedOut,
         }
     }
 
@@ -238,10 +232,7 @@ pub async fn run(
             "the review did not reach a verdict within {MAX_TURNS} turns"
         )))
     };
-    match tokio::time::timeout(REVIEW_TIMEOUT, session).await {
-        Ok(outcome) => outcome.map_err(|error| error.scrubbed(endpoint)),
-        Err(_) => Err(ReviewError::TimedOut),
-    }
+    session.await.map_err(|error| error.scrubbed(endpoint))
 }
 
 fn context() -> ToolContext {
@@ -264,6 +255,7 @@ mod tests {
     use abnegate_vcs::{BranchName, CommitSha, Mergeability};
     use serde_json::json;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -591,7 +583,7 @@ mod tests {
         let error = ReviewError::model(
             &LlmBackend::Http,
             "qwen3:32b",
-            abnegate_llm::Error::Timeout(std::time::Duration::from_secs(600)),
+            abnegate_llm::Error::Timeout(Duration::from_secs(600)),
         );
 
         assert!(matches!(error, ReviewError::Unreachable(_)), "{error:?}");
@@ -774,6 +766,94 @@ mod tests {
                 "{status}: {error:?}"
             );
         }
+    }
+
+    /// A completion answered with `message`, after a real delay long enough for the clock to be
+    /// moved while it is outstanding.
+    fn answer(message: Value) -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200)
+            .set_body_json(json!({
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "qwen3:32b",
+                "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            }))
+            .set_delay(Duration::from_millis(500))
+    }
+
+    /// How long, in real time, [`advancing`] waits for a request before the test fails rather
+    /// than hangs on a review that ended early.
+    const REQUESTS_WITHIN: Duration = Duration::from_secs(30);
+
+    /// Once `server` has been sent `count` requests, moves the clock on by `duration`.
+    async fn advancing(server: &wiremock::MockServer, count: usize, duration: Duration) {
+        let started = std::time::Instant::now();
+        loop {
+            let received = server
+                .received_requests()
+                .await
+                .map_or(0, |requests| requests.len());
+            if received >= count {
+                break;
+            }
+            assert!(
+                started.elapsed() < REQUESTS_WITHIN,
+                "expected {count} requests within {REQUESTS_WITHIN:?}, received {received}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::pause();
+        tokio::time::advance(duration).await;
+        tokio::time::resume();
+    }
+
+    /// A review is bounded by its turns, not by the clock: one whose two turns take seven
+    /// minutes each still reaches its verdict.
+    #[tokio::test]
+    async fn a_review_that_takes_fourteen_minutes_still_reaches_its_verdict() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+
+        let turn = Duration::from_secs(7 * 60);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(answer(json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_diff",
+                    "type": "function",
+                    "function": {"name": "read_diff", "arguments": "{}"},
+                }],
+            })))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(answer(json!({"role": "assistant", "content": REPLY})))
+            .mount(&server)
+            .await;
+        let task = task();
+        let pull = pull();
+        let endpoint = endpoint(server.uri());
+
+        let (verdict, (), ()) = tokio::join!(
+            run(
+                &endpoint,
+                LlmBackend::Http,
+                github(),
+                request(&task, &pull, "qwen3:32b"),
+            ),
+            advancing(&server, 1, turn),
+            advancing(&server, 2, turn),
+        );
+
+        let verdict = verdict.expect("a slow review still gives its verdict");
+        assert_eq!(verdict.outcome, Outcome::Approve);
     }
 
     #[tokio::test]

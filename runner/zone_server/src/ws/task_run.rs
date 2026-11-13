@@ -29,6 +29,10 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500)
 
 type LogCursor = (Option<chrono::NaiveDateTime>, Uuid);
 
+fn terminal(run: &tasks::TaskRunRow) -> Option<ProgressMessage> {
+    ProgressMessage::terminal(&run.status, run.error_message.as_deref())
+}
+
 fn log_follows_cursor(
     created_at: Option<chrono::NaiveDateTime>,
     id: Uuid,
@@ -202,6 +206,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                 message: "Task run not found".to_string(),
             };
             let _ = sender.send(msg.to_ws_message()).await;
+            let _ = sender.close().await;
             return;
         }
         Err(error) => {
@@ -263,20 +268,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
         }
     }
 
-    // If task is already complete, send completion and close
-    if task_run.status == "completed" || task_run.status == "failed" {
-        let final_msg = if task_run.status == "completed" {
-            ProgressMessage::Completed {
-                status: task_run.status,
-            }
-        } else {
-            ProgressMessage::Failed {
-                error: task_run
-                    .error_message
-                    .unwrap_or_else(|| "Unknown error".to_string()),
-            }
-        };
-        let _ = sender.send(final_msg.to_ws_message()).await;
+    if let Some(final_message) = terminal(&task_run) {
+        let _ = sender.send(final_message.to_ws_message()).await;
+        let _ = sender.close().await;
         return;
     }
 
@@ -291,27 +285,18 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
             _ = interval.tick() => {
                 // A terminal run still owes the client the logs recorded before
                 // it finished, so the frame waits until they have been drained.
-                let mut terminal: Option<ProgressMessage> = None;
-                // Check for status updates
+                let mut final_message: Option<ProgressMessage> = None;
                 match tasks::get_task_run(state.db(), run_id).await {
                     Ok(Some(run)) => {
                         if !revalidate(&mut sender, &state, authorization, run_id).await {
                             return;
                         }
 
-                        // Send status update if changed
                         if run.status != last_status {
                             last_status = run.status.clone();
 
-                            if run.status == "completed" {
-                                terminal = Some(ProgressMessage::Completed {
-                                    status: run.status,
-                                });
-                            } else if run.status == "failed" {
-                                terminal = Some(ProgressMessage::Failed {
-                                    error: run.error_message.unwrap_or_else(|| "Unknown error".to_string()),
-                                });
-                            } else {
+                            final_message = terminal(&run);
+                            if final_message.is_none() {
                                 let msg = ProgressMessage::StatusUpdate {
                                     status: run.status,
                                     current_phase: run.current_phase,
@@ -328,6 +313,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                             message: "Task run not found".to_string(),
                         };
                         let _ = sender.send(msg.to_ws_message()).await;
+                        let _ = sender.close().await;
                         return;
                     }
                     Err(error) => {
@@ -382,8 +368,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
                     },
                 }
 
-                if let Some(terminal) = terminal {
-                    let _ = sender.send(terminal.to_ws_message()).await;
+                if let Some(final_message) = final_message {
+                    let _ = sender.send(final_message.to_ws_message()).await;
+                    let _ = sender.close().await;
                     return;
                 }
             }
@@ -407,6 +394,78 @@ async fn handle_socket(socket: WebSocket, state: AppState, run_id: Uuid) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::task_progress::UNKNOWN_ERROR;
+
+    const RUNNING: &str = "running";
+    const WAITING: &str = "waiting";
+    const FAILURE: &str = "the build broke";
+
+    fn run(status: &str, error_message: Option<&str>) -> tasks::TaskRunRow {
+        tasks::TaskRunRow {
+            id: Uuid::new_v4(),
+            task_id: Uuid::new_v4(),
+            triggered_by: None,
+            status: status.to_string(),
+            current_phase: None,
+            progress_percent: None,
+            started_at: None,
+            completed_at: None,
+            error_message: error_message.map(str::to_string),
+            artifacts: None,
+            pending_question: None,
+            pending_wait: None,
+            plan: None,
+        }
+    }
+
+    #[test]
+    fn cancelled_run_ends_the_stream_as_cancelled_with_its_reason() {
+        match terminal(&run(tasks::CANCELLED, Some(tasks::STOPPED))) {
+            Some(ProgressMessage::Cancelled { message }) => assert_eq!(message, tasks::STOPPED),
+            other => panic!("expected a cancelled frame for a cancelled run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancelled_run_without_a_reason_reads_as_stopped() {
+        match terminal(&run(tasks::CANCELLED, None)) {
+            Some(ProgressMessage::Cancelled { message }) => assert_eq!(message, tasks::STOPPED),
+            other => panic!("expected a cancelled frame for a cancelled run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_run_ends_the_stream_with_its_error() {
+        match terminal(&run(tasks::FAILED, Some(FAILURE))) {
+            Some(ProgressMessage::Failed { error }) => assert_eq!(error, FAILURE),
+            other => panic!("expected a failed frame for a failed run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn failed_run_without_an_error_reports_an_unknown_error() {
+        match terminal(&run(tasks::FAILED, None)) {
+            Some(ProgressMessage::Failed { error }) => assert_eq!(error, UNKNOWN_ERROR),
+            other => panic!("expected a failed frame for a failed run, got {other:?}"),
+        }
+    }
+    #[test]
+    fn completed_run_ends_the_stream_as_completed() {
+        match terminal(&run(tasks::COMPLETED, None)) {
+            Some(ProgressMessage::Completed { status }) => assert_eq!(status, tasks::COMPLETED),
+            other => panic!("expected a completed frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn active_runs_keep_the_stream_open() {
+        for status in [RUNNING, WAITING] {
+            assert!(
+                terminal(&run(status, None)).is_none(),
+                "a {status} run must not end the stream"
+            );
+        }
+    }
 
     #[test]
     fn later_log_follows_cursor_even_when_its_uuid_is_lower() {

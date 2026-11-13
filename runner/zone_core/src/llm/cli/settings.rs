@@ -1,44 +1,35 @@
+use std::time::Duration;
+
 use abnegate_agent_cli::CliSettings;
 
-use super::TURN_TIMEOUT;
-
 /// The settings every agent run Zone starts begins from: the crate's
-/// defaults, given a chat turn's [`TURN_TIMEOUT`] rather than the crate's
-/// budget for one command, and read until the work Claude left running in
-/// the background has finished.
+/// defaults, with no deadline, and read until the work Claude left running in
+/// the background has finished. A run ends when the agent finishes or the
+/// caller drops it.
 pub fn settings() -> CliSettings {
     CliSettings::default()
-        .with_timeout(TURN_TIMEOUT)
+        .with_timeout(Duration::MAX)
         .await_background()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::Instant;
 
     use abnegate_llm::Credential;
 
     use super::*;
 
+    /// An agent that compiles, lints and tests a large repository can work
+    /// for hours, so a clock that cuts it off throws that work away.
     #[test]
-    fn an_agents_turn_gets_longer_than_a_single_command_does() {
-        let command = abnegate_exec::executor::DEFAULT_TIMEOUT;
-        let turn = settings().timeout;
+    fn an_agent_run_has_no_deadline() {
+        let timeout = settings().timeout;
 
         assert!(
-            turn > command,
-            "an agent runs a loop of commands, so {turn:?} must exceed one command's {command:?}"
+            Instant::now().checked_add(timeout).is_none(),
+            "a run given {timeout:?} is stopped at a deadline"
         );
-    }
-
-    /// The crate gives a run five minutes, which a chat turn that reads,
-    /// edits and tests a repository outlives.
-    #[test]
-    fn zone_settings_allow_thirty_minutes() {
-        const THIRTY_MINUTES: Duration = Duration::from_secs(30 * 60);
-
-        assert_eq!(settings().timeout, THIRTY_MINUTES);
-        assert!(settings().timeout > abnegate_agent_cli::DEFAULT_TIMEOUT);
     }
 
     #[test]
@@ -48,7 +39,6 @@ mod tests {
         assert!(matches!(settings.credential, Credential::Inherited));
         assert!(settings.executable.is_none());
         assert!(settings.working_directory.is_none());
-        assert_eq!(settings.timeout, TURN_TIMEOUT);
     }
 
     #[test]
