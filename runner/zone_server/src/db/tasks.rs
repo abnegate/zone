@@ -486,6 +486,29 @@ pub async fn get_task_project_ids(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<
     Ok(rows.into_iter().map(|r| r.project_id).collect())
 }
 
+/// The one project the run's task belongs to, or `None` when it belongs to
+/// none or to several.
+///
+/// A task may be filed under any number of projects, so a run has one project
+/// only when its task does. What this answers is written down beside what the
+/// run records, and a note tagged with one of three projects would say
+/// something about the other two that nothing verified.
+pub async fn run_project(pool: &PgPool, run_id: Uuid) -> DbResult<Option<Uuid>> {
+    let projects: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT link.project_id FROM task_projects link \
+         JOIN task_runs run ON run.task_id = link.task_id \
+         WHERE run.id = $1 ORDER BY link.project_id LIMIT 2",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(match projects.as_slice() {
+        [project] => Some(*project),
+        _ => None,
+    })
+}
+
 /// List tasks with optional filters (workspace_id is required)
 pub async fn list_tasks(
     pool: &PgPool,

@@ -30,6 +30,11 @@
 //! [`record`] stores what it is given. Deciding what may be recorded belongs
 //! to the caller, which is why this module holds no screen and no size check.
 //!
+//! An entry recorded where there was a project to name tags it, so the
+//! knowledge base can show a project's notes and no others. The tag is for
+//! the reader: the block below is a workspace's, and a project's entries are
+//! neither held back from the rest of it nor preferred inside it.
+//!
 //! No one run or chat takes the block, and none is held to a single line of
 //! it. [`listing`] puts the most recent first, but only [`ALLOWANCE`] of any
 //! one source's entries are ordered that way. Whatever else the source
@@ -95,6 +100,7 @@ const KIND_TAG: &str = "kind";
 const SOURCE_TAG: &str = "source";
 const RUN_SOURCE: &str = "run";
 const CHAT_SOURCE: &str = "chat";
+const PROJECT_TAG: &str = "project";
 
 const HEADING: &str = "Recorded while working here";
 
@@ -165,6 +171,11 @@ impl Source {
 pub struct Provenance {
     pub kind: Kind,
     pub source: Source,
+    /// The project the recording chat or run belonged to, when it belonged to
+    /// one. A workspace's entries all render into every prompt whatever this
+    /// says; it is what the knowledge base filters a project's notes by, and
+    /// what points a reader at the repository the note was verified against.
+    pub project: Option<Uuid>,
     /// The day the entry was recorded. Nothing confirms a discovery, so the
     /// block says "recorded on"; the name and the tag are the ones every
     /// learned family dates its entries by.
@@ -174,20 +185,33 @@ pub struct Provenance {
 impl Provenance {
     /// The same record on the same day produces byte-identical tags, so the
     /// upsert reports no change and writes nothing.
+    ///
+    /// The project comes last, after the tags every entry carries, so an
+    /// entry recorded outside a project tags exactly what it did before this
+    /// one was stored at all.
     pub fn tags(&self, fingerprint: &str) -> Vec<String> {
-        vec![
+        let mut tags = vec![
             CATEGORY.to_string(),
             tag(RECORDED_TAG, fingerprint),
             tag(KIND_TAG, self.kind.as_str()),
             tag(SOURCE_TAG, &self.source.value()),
             tag(CONFIRMED_TAG, &self.last_confirmed.to_string()),
-        ]
+        ];
+        if let Some(project) = self.project {
+            tags.push(tag(PROJECT_TAG, &project.to_string()));
+        }
+        tags
     }
 
+    /// An entry with no project tag, or one whose project tag is not a uuid,
+    /// reads back as belonging to no project. The rest of the provenance is
+    /// what an entry is refused for being without, and a project is not part
+    /// of it: every entry stored before projects were tagged has none.
     pub fn from_tags(tags: &[String]) -> Option<Self> {
         Some(Self {
             kind: Kind::parse(tag_value(tags, KIND_TAG)?)?,
             source: Source::parse(tag_value(tags, SOURCE_TAG)?)?,
+            project: tag_value(tags, PROJECT_TAG).and_then(|value| value.parse().ok()),
             last_confirmed: tag_value(tags, CONFIRMED_TAG)?.parse().ok()?,
         })
     }
@@ -452,12 +476,21 @@ mod tests {
 
     const RUN: Uuid = Uuid::from_u128(0x0d15_c0de);
     const CHAT: Uuid = Uuid::from_u128(0xc4a7);
+    const PROJECT: Uuid = Uuid::from_u128(0x0920_1ec7);
 
     fn provenance(kind: Kind, source: Source) -> Provenance {
         Provenance {
             kind,
             source,
+            project: None,
             last_confirmed: NaiveDate::from_ymd_opt(2026, 11, 11).unwrap(),
+        }
+    }
+
+    fn in_project(kind: Kind, source: Source) -> Provenance {
+        Provenance {
+            project: Some(PROJECT),
+            ..provenance(kind, source)
         }
     }
 
@@ -629,13 +662,52 @@ mod tests {
     fn provenance_round_trips_through_tags() {
         for kind in Kind::ALL {
             for source in [Source::Run(RUN), Source::Chat(CHAT)] {
-                let original = provenance(kind, source);
-                assert_eq!(
-                    Provenance::from_tags(&original.tags("5f2c9a")),
-                    Some(original)
-                );
+                for original in [provenance(kind, source), in_project(kind, source)] {
+                    assert_eq!(
+                        Provenance::from_tags(&original.tags("5f2c9a")),
+                        Some(original)
+                    );
+                }
             }
         }
+    }
+
+    /// The project is tagged behind everything an entry already carried, so
+    /// a note recorded outside a project tags what it did before projects
+    /// were tagged at all, and one recorded inside a project names it where
+    /// the knowledge base can filter on it.
+    #[test]
+    fn a_project_is_tagged_last_and_only_when_there_is_one() {
+        let outside = provenance(Kind::Lesson, Source::Chat(CHAT)).tags("5f2c9a");
+        let inside = in_project(Kind::Lesson, Source::Chat(CHAT)).tags("5f2c9a");
+
+        assert!(
+            !outside.iter().any(|tag| tag.starts_with("project:")),
+            "{outside:?}"
+        );
+        assert_eq!(inside[..outside.len()], outside[..]);
+        assert_eq!(inside[outside.len()], format!("project:{PROJECT}"));
+        assert_eq!(inside.len(), outside.len() + 1);
+    }
+
+    /// Every entry stored before a project was tagged keeps its provenance,
+    /// and so does one whose project tag nothing can read: the project is
+    /// what the knowledge base filters by, not what an entry is refused for
+    /// being without.
+    #[test]
+    fn a_missing_or_unreadable_project_tag_leaves_the_provenance_readable() {
+        let mut tags = in_project(Kind::Convention, Source::Run(RUN)).tags("5f2c9a");
+        let last = tags.len() - 1;
+        tags[last] = "project:the-one-with-the-tests".to_string();
+
+        assert_eq!(
+            Provenance::from_tags(&tags).map(|provenance| provenance.project),
+            Some(None)
+        );
+        assert_eq!(
+            Provenance::from_tags(&tags[..last]).map(|provenance| provenance.project),
+            Some(None)
+        );
     }
 
     #[test]

@@ -26,6 +26,7 @@ use zone_server::db::knowledge;
 use zone_server::db::knowledge::discovery::{
     CATEGORY, Kind, MAX_ENTRY_BYTES, Provenance, Source, fingerprint,
 };
+use zone_server::db::projects::{self, NewProject};
 use zone_server::db::workspace_members::{WorkspaceRole, add_member};
 use zone_server::db::{chats, tasks, users};
 use zone_server::state::AppState;
@@ -128,13 +129,35 @@ impl Fixture {
         .await
     }
 
+    /// A project of this workspace, for the chats and runs that belong to one.
+    async fn project(&self, name: &str) -> Uuid {
+        projects::create(
+            &self.pool,
+            NewProject {
+                name,
+                description: None,
+                workspace_id: Some(self.workspace),
+                source_id: None,
+                status: None,
+            },
+        )
+        .await
+        .expect("a project in the workspace")
+        .id
+    }
+
     /// A claimed run of a task in this workspace, because a leased tool set
     /// refuses every call on a run it does not own.
     async fn leased(&self) -> (ChatTools, Uuid) {
+        self.leased_under(&[]).await
+    }
+
+    /// The same run, of a task filed under `projects`.
+    async fn leased_under(&self, projects: &[Uuid]) -> (ChatTools, Uuid) {
         let task = tasks::create_task_as(
             &self.pool,
             self.workspace,
-            &[],
+            projects,
             "Records what it verifies",
             "Do the work and write down what the next run would rediscover",
             None,
@@ -302,6 +325,97 @@ async fn a_chat_records_what_it_verified_under_the_chat_it_was_in() {
     let provenance = Provenance::from_tags(&row.tags).expect("the tags read back");
     assert_eq!(provenance.kind, Kind::Lesson);
     assert_eq!(provenance.source, Source::Chat(fixture.chat));
+
+    fixture.clean().await;
+}
+
+/// A chat that belongs to a project tags it, so the knowledge base can show
+/// that project's notes and no others.
+#[tokio::test]
+async fn a_chat_in_a_project_records_the_project_it_was_in() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("Zone Server").await;
+    assert!(
+        chats::attach_project(&fixture.pool, fixture.chat, project)
+            .await
+            .expect("the chat is writable"),
+        "the chat had no project before this"
+    );
+
+    let result = record(&fixture.chat().await, Kind::Lesson, SUBJECT, STATEMENT).await;
+
+    assert_eq!(stored(&result)["outcome"], RECORDED);
+    let row = fixture.row().await;
+    assert!(
+        row.tags.contains(&format!("project:{project}")),
+        "{:?}",
+        row.tags
+    );
+    assert_eq!(
+        Provenance::from_tags(&row.tags).map(|provenance| provenance.project),
+        Some(Some(project))
+    );
+
+    fixture.clean().await;
+}
+
+/// A chat with no project records what it verified all the same, and names no
+/// project rather than guessing at one.
+#[tokio::test]
+async fn a_chat_outside_a_project_records_without_one() {
+    let fixture = Fixture::new().await;
+
+    let result = record(&fixture.chat().await, Kind::Lesson, SUBJECT, STATEMENT).await;
+
+    assert_eq!(stored(&result)["outcome"], RECORDED);
+    let row = fixture.row().await;
+    assert!(
+        !row.tags.iter().any(|tag| tag.starts_with("project:")),
+        "{:?}",
+        row.tags
+    );
+    assert_eq!(
+        Provenance::from_tags(&row.tags).map(|provenance| provenance.project),
+        Some(None)
+    );
+
+    fixture.clean().await;
+}
+
+/// A run's project is its task's, and only when its task has one: a note
+/// tagged with one of two projects would say something about the other that
+/// nothing verified.
+#[tokio::test]
+async fn a_run_records_its_task_s_project_only_when_the_task_has_one() {
+    let fixture = Fixture::new().await;
+    let project = fixture.project("Zone Server").await;
+    let other = fixture.project("Manager").await;
+
+    let (one, _) = fixture.leased_under(&[project]).await;
+    assert_eq!(
+        stored(&record(&one, Kind::Convention, SUBJECT, STATEMENT).await)["outcome"],
+        RECORDED
+    );
+    assert_eq!(
+        Provenance::from_tags(&fixture.row().await.tags).map(|provenance| provenance.project),
+        Some(Some(project))
+    );
+
+    let (several, _) = fixture.leased_under(&[project, other]).await;
+    assert_eq!(
+        stored(&record(&several, Kind::Convention, SUBJECT, REVISED).await)["outcome"],
+        REPLACED
+    );
+    let row = fixture.row().await;
+    assert!(
+        !row.tags.iter().any(|tag| tag.starts_with("project:")),
+        "{:?}",
+        row.tags
+    );
+    assert_eq!(
+        Provenance::from_tags(&row.tags).map(|provenance| provenance.project),
+        Some(None)
+    );
 
     fixture.clean().await;
 }
