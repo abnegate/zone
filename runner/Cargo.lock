@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "abnegate-agent"
-version = "0.2.2"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e355ab64e546011103e527d27979ff624153030c4591c57c575221ad85759316"
+checksum = "10e45912e24342273e65601f5cb0bc3a9659132bf9880646be9e13d700506085"
 dependencies = [
  "abnegate-agent-cli",
  "abnegate-config",
@@ -39,9 +39,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-agent-cli"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84393e2c5104d24376a9c29186a023ba14b6b6457fea4fca87ede70488829539"
+checksum = "83bd2ce0124050cca4a033854c62e98662ec7fe7aeb653fca039775e40cfdeec"
 dependencies = [
  "abnegate-exec",
  "abnegate-http",
@@ -114,9 +114,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-exec"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32de31a0569efdb2e37f5a4c94c9105930080a8d674570c4c696d4bf46af20fd"
+checksum = "70ab7a18648a5aa01e5a977b97868476eadd331cf84a5825e3c8e20d75f10cf8"
 dependencies = [
  "abnegate-secret",
  "base64 0.23.1",
