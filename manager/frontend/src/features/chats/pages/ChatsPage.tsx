@@ -248,6 +248,7 @@ export default function ChatsPage() {
     error: chatError,
     streaming,
     status: chatStatus,
+    generationStarted,
     queue,
     held,
     sendMessage: sendMessageFn,
@@ -1778,7 +1779,11 @@ export default function ChatsPage() {
                     </div>
                   ) : null}
                   {streaming || chatStatus ? (
-                    <Generation key={selectedChatId} status={chatStatus} />
+                    <Generation
+                      key={selectedChatId}
+                      status={chatStatus}
+                      started={generationStarted}
+                    />
                   ) : null}
                   {queue.map((message) => (
                     <QueueItem
