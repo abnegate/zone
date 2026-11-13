@@ -210,17 +210,38 @@ async fn signal(
     if let Some(status) = state.pull_request_statuses().within(row.id, LIST_FRESHNESS) {
         return (chat_id, PullIndicator::new(&row, Some(status)));
     }
-    if !deadline.is_some_and(|deadline| Instant::now() < deadline) {
+    // The budget has to bound the read itself, not just whether it starts: the
+    // response waits for every refresh in the batch, so one GitHub request that
+    // began just inside the deadline would otherwise hold the whole list for
+    // however long that request takes to give up.
+    let Some(remaining) = remaining(deadline) else {
         return (chat_id, PullIndicator::new(&row, None));
-    }
-    let status = match pull_request::track(state, workspace_id, row.clone()).await {
-        Ok(tracked) => tracked.status,
-        Err(error) => {
+    };
+    let status = match tokio::time::timeout(
+        remaining,
+        pull_request::track(state, workspace_id, row.clone()),
+    )
+    .await
+    {
+        Ok(Ok(tracked)) => tracked.status,
+        Ok(Err(error)) => {
             tracing::warn!(pull_request = %row.id, %error, "could not read a chat's pull request for its row");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(pull_request = %row.id, "a chat's pull request outlasted the list's refresh budget");
             None
         }
     };
     (chat_id, PullIndicator::new(&row, status))
+}
+
+/// How long this read may still spend on GitHub, or `None` when the budget is
+/// spent or could not be represented.
+fn remaining(deadline: Option<Instant>) -> Option<Duration> {
+    deadline
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        .filter(|remaining| !remaining.is_zero())
 }
 
 #[cfg(test)]

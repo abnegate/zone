@@ -6001,6 +6001,43 @@ describe('ChatsPage', () => {
       expect(localStorage.getItem(CHAT_FILTER_STORAGE_KEY)).toBe('all');
     });
 
+    it('keeps the open chat marked as waiting while its parked turn still streams', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'awaiting_approval' }),
+      ]);
+
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      act(() => {
+        socket.emit({ type: 'message_start', message_id: 'stream', role: 'assistant' });
+        socket.emit({ type: 'chunk', content: 'Working', index: 0 });
+      });
+
+      await waitFor(() =>
+        expect(screen.getByLabelText('Waiting for you to approve a tool call')).toBeInTheDocument()
+      );
+      expect(screen.queryByTestId('chat-status-writing')).toBeNull();
+    });
+
+    it('waits for the first reading before telling a saved filter that nothing matches', async () => {
+      localStorage.setItem(CHAT_FILTER_STORAGE_KEY, 'ready');
+      let answer: (indicators: unknown[]) => void = () => undefined;
+      mockGetChatIndicators.mockImplementationOnce(
+        () => new Promise((resolve) => (answer = resolve))
+      );
+
+      renderChatsPage();
+
+      expect(await screen.findByText('Reading chat statuses...')).toBeInTheDocument();
+      expect(screen.queryByText('No chats match this filter')).toBeNull();
+
+      await act(async () => {
+        answer([]);
+      });
+      expect(await screen.findByText('No chats match this filter')).toBeInTheDocument();
+    });
+
     it('says the statuses are stale when the reading fails, and still lists the chats', async () => {
       mockGetChatIndicators.mockRejectedValue(new Error('GitHub is unreachable'));
 

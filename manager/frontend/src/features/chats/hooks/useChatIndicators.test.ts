@@ -41,6 +41,17 @@ describe('useChatIndicators', () => {
     expect(mockGetChatIndicators).toHaveBeenCalledWith('workspace-1', false);
   });
 
+  it('counts an empty answer and a failed read as readings that landed', async () => {
+    mockGetChatIndicators.mockResolvedValueOnce([]);
+    const { result } = renderHook(() => useChatIndicators('workspace-1', false));
+    await waitFor(() => expect(result.current.loaded).toBe(true));
+    expect(result.current.indicators).toEqual({});
+
+    mockGetChatIndicators.mockRejectedValueOnce(new Error('GitHub is unreachable'));
+    await act(() => result.current.refresh());
+    expect(result.current.loaded).toBe(true);
+  });
+
   it('asks for nothing without a workspace', async () => {
     const { result } = renderHook(() => useChatIndicators(null, false));
 

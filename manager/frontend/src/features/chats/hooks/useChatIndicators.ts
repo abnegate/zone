@@ -17,6 +17,12 @@ export const SETTLE_DELAY = 3_000;
 export interface ChatIndicators {
   indicators: Record<string, ChatIndicator>;
   loading: boolean;
+  /**
+   * Whether a read has settled, however it went. A filter judges chats on
+   * these readings, so it has nothing to say until one has landed — and an
+   * empty answer is a landed one.
+   */
+  loaded: boolean;
   error: string | null;
   refresh: () => Promise<void>;
 }
@@ -39,6 +45,7 @@ export function useChatIndicators(
 ): ChatIndicators {
   const [indicators, setIndicators] = useState<Record<string, ChatIndicator>>({});
   const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const read = useRef(0);
   const wasStreaming = useRef(streaming);
@@ -47,6 +54,7 @@ export function useChatIndicators(
     const current = ++read.current;
     if (!workspaceId) {
       setIndicators({});
+      setLoaded(true);
       return;
     }
     setLoading(true);
@@ -59,12 +67,16 @@ export function useChatIndicators(
       if (current !== read.current) return;
       setError(message(failure));
     } finally {
-      if (current === read.current) setLoading(false);
+      if (current === read.current) {
+        setLoading(false);
+        setLoaded(true);
+      }
     }
   }, [workspaceId, archived]);
 
   useEffect(() => {
     setIndicators({});
+    setLoaded(false);
     setError(null);
     void refresh();
   }, [refresh]);
@@ -95,5 +107,5 @@ export function useChatIndicators(
     };
   }, [workspaceId, refresh]);
 
-  return { indicators, loading, error, refresh };
+  return { indicators, loading, loaded, error, refresh };
 }

@@ -108,6 +108,7 @@ import {
   isChatSort,
   isSendable,
   isStartingImage,
+  isWaiting,
   keepEffort,
   MODEL_NAME_PLACEHOLDER,
   MODEL_PLACEHOLDER,
@@ -268,14 +269,18 @@ export default function ChatsPage() {
     metadata: attachmentMetadata(attachments.filter(isSendable)),
   });
 
-  const { indicators, error: indicatorsError } = useChatIndicators(
-    currentWorkspace?.id,
-    showArchived,
-    streaming
-  );
+  const {
+    indicators,
+    loaded: indicatorsLoaded,
+    error: indicatorsError,
+  } = useChatIndicators(currentWorkspace?.id, showArchived, streaming);
   // The open chat's own socket knows it is writing before the next poll does,
   // and only ever adds that: a reading the server made stands until it is read
   // again, because this socket cannot see a turn somebody else's can.
+  //
+  // A turn parked on an approval is still streaming, so waiting for a person
+  // outlives the socket's reading of it. Overwriting that with "writing" would
+  // drop the one row the feature exists for out of the waiting filter.
   const liveIndicators = useMemo((): Record<string, ChatIndicator> => {
     if (!streaming || !selectedChatId) return indicators;
     const current = indicators[selectedChatId];
@@ -283,7 +288,7 @@ export default function ChatsPage() {
       ...indicators,
       [selectedChatId]: {
         chat_id: selectedChatId,
-        activity: 'writing',
+        activity: current && isWaiting(current.activity) ? current.activity : 'writing',
         pull_request: current?.pull_request ?? null,
         pull_requests: current?.pull_requests ?? 0,
       },
@@ -293,6 +298,10 @@ export default function ChatsPage() {
     () => chats.filter((chat) => matchesFilter(liveIndicators[chat.id], filter)),
     [chats, liveIndicators, filter]
   );
+  // A filter judges chats on readings that have not arrived yet. A read that
+  // failed is not one still coming, so that falls through to the empty state,
+  // which carries the way back out of the filter.
+  const waitingForStatuses = filter !== 'all' && !indicatorsLoaded && indicatorsError === null;
   const arranged = useMemo(
     () => arrangeChats(matching, { groupBy, sort, projectNames, indicators: liveIndicators }),
     [matching, groupBy, sort, projectNames, liveIndicators]
@@ -1331,6 +1340,13 @@ export default function ChatsPage() {
             }
             action={!showArchived ? <Button onClick={openNewChat}>New chat</Button> : undefined}
           />
+        ) : matching.length === 0 && waitingForStatuses ? (
+          // A saved filter starts with no readings, so every chat is filtered
+          // out until the first one lands. Saying nothing matches before then
+          // would be answering a question nobody has read the answer to yet.
+          <div className="chats-loading">
+            <span className="spinner" /> Reading chat statuses...
+          </div>
         ) : matching.length === 0 ? (
           <EmptyState
             icon={

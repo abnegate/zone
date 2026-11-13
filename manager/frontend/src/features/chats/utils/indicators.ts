@@ -1,4 +1,13 @@
-import type { ChatIndicator, ChatPullIndicator } from '../types';
+import type { ChatActivity, ChatIndicator, ChatPullIndicator } from '../types';
+
+/**
+ * Whether the chat has stopped and is waiting for a person, which is the
+ * server's own `Activity::waiting`. Named once because the row, the filter and
+ * the open chat's live overlay all have to agree on it.
+ */
+export function isWaiting(activity: ChatActivity): boolean {
+  return activity === 'awaiting_approval' || activity === 'awaiting_answer';
+}
 
 /**
  * What a chat's row says about its pull request.
@@ -180,7 +189,7 @@ export function matchesFilter(indicator: ChatIndicator | undefined, filter: Chat
     case 'busy':
       return indicator.activity === 'writing';
     case 'waiting':
-      return indicator.activity === 'awaiting_approval' || indicator.activity === 'awaiting_answer';
+      return isWaiting(indicator.activity);
     case 'failing':
       return indicator.pull_request?.status?.checks === 'failing';
     case 'running':
