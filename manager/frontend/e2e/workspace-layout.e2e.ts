@@ -104,10 +104,7 @@ for (const viewport of [
       test.use({ viewport });
       test.beforeEach(async ({ page, context }) => {
         await blockServiceWorker(context);
-        await page.addInitScript(
-          (value) => localStorage.setItem('manager_theme', value),
-          theme
-        );
+        await page.emulateMedia({ colorScheme: theme });
         await setupCommonRoutes(page, true);
         await page.goto('/login', { waitUntil: 'domcontentloaded' });
         await setupAdminAuth(page);

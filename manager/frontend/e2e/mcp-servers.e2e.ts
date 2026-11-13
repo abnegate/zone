@@ -1128,8 +1128,8 @@ test.describe('screenshots', () => {
     await blockServiceWorker(context);
   });
 
-  async function themed(page: Page, theme: string): Promise<void> {
-    await page.addInitScript((value) => localStorage.setItem('manager_theme', value), theme);
+  async function themed(page: Page, theme: 'light' | 'dark'): Promise<void> {
+    await page.emulateMedia({ colorScheme: theme });
   }
 
   async function expectTheme(page: Page, theme: string): Promise<void> {
@@ -1146,7 +1146,7 @@ test.describe('screenshots', () => {
     });
   }
 
-  for (const theme of ['light', 'dark']) {
+  for (const theme of ['light', 'dark'] as const) {
     test(`organization states in ${theme}`, async ({ page }) => {
       await themed(page, theme);
       await openOrganization(page);

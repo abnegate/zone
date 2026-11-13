@@ -37,9 +37,7 @@ async function prepare(
   await blockServiceWorker(page.context());
   await mockCommonEndpoints(page);
   await setupAuth(page);
-  await page.addInitScript(() =>
-    localStorage.setItem('manager_theme', 'light'),
-  );
+  await page.emulateMedia({ colorScheme: 'light' });
   let saved = initial;
   const writes: string[] = [];
   await routeApi(
