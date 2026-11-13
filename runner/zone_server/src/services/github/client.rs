@@ -30,6 +30,9 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use super::configuration::Configuration;
+use super::pull_requests::Assessed;
+use super::pull_requests::CheckDetail;
+use super::pull_requests::Depth;
 use super::readiness;
 use super::readiness::CheckEvidence;
 use super::readiness::CommentEvidence;
@@ -45,7 +48,6 @@ use super::release::RunEvidence;
 use crate::config::Config;
 use crate::services::prioritisation::Configuration as Prioritisation;
 use crate::services::prioritisation::Prioritiser;
-use crate::services::prioritisation::RiskSignal;
 use crate::services::prioritisation::pull_request;
 use crate::utils::text::truncate;
 use review::Review;
@@ -104,7 +106,7 @@ pub(crate) const PARTIAL_WORKFLOW_RUNS: &str = "GitHub's workflow runs could not
 pub(crate) const INVALID_TAG: &str = "tag is invalid.";
 const UNUSABLE_RELEASE: &str = "GitHub returned a release without a usable identity.";
 const RELEASE_EVENT: &str = "release";
-const FOREIGN_JOB: &str =
+pub(crate) const FOREIGN_JOB: &str =
     "That job does not belong to the pull request or commit being asked about.";
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 pub(crate) const UNAUTHORIZED: u16 = 401;
@@ -307,22 +309,36 @@ impl Github {
         Ok((workflows, checks.items, statuses.items, complete))
     }
 
-    async fn check_evidence(&self, sha: &str) -> Result<CheckEvidence, String> {
+    async fn check_evidence(&self, sha: &str) -> Result<(CheckEvidence, Vec<CheckDetail>), String> {
         let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
-        Ok(CheckEvidence {
+        let evidence = CheckEvidence {
             complete,
             ..tally(conclusions(&workflows, &checks, &statuses).into_iter())
-        })
+        };
+        let details = workflows
+            .iter()
+            .map(CheckDetail::workflow)
+            .chain(checks.iter().map(CheckDetail::check_run))
+            .chain(
+                statuses
+                    .iter()
+                    .enumerate()
+                    .map(|(position, status)| CheckDetail::status(status, position + 1)),
+            )
+            .collect();
+        Ok((evidence, details))
     }
 
     /// One pull request's readiness. `detail` is the pull request as read by
     /// number, when it already was; a listed row is read again by number, and
-    /// a head the two reads disagree on is never verified.
+    /// a head the two reads disagree on is never verified. A listing reads no
+    /// changed files, so its blast radius reads as assumed.
     pub(crate) async fn assess(
         &self,
         row: &ListedPullRequest,
         detail: Option<PullRequestDetail>,
-    ) -> Result<(readiness::Assessment, RiskSignal), String> {
+        depth: Depth,
+    ) -> Result<Assessed, String> {
         let detail = match detail {
             Some(detail) => detail,
             None => self.pull(&row.reference).await?,
@@ -333,13 +349,17 @@ impl Github {
             .as_ref()
             .and_then(|listed| CommitSha::parse(listed.as_str()))
             .filter(|listed| review.head.as_ref() == Some(listed));
-        let checks = match &head {
+        let (checks, details) = match &head {
             Some(head) => self.check_evidence(head.as_str()).await?,
-            None => CheckEvidence::default(),
+            None => (CheckEvidence::default(), Vec::new()),
         };
-        let risk = pull_request::risk(&PRIORITISER, &self.changed_paths(&row.reference).await);
-        Ok((
-            readiness::assess(
+        let paths = match depth {
+            Depth::Full => self.changed_paths(&row.reference).await,
+            Depth::Listing => Vec::new(),
+        };
+        let comments = review.comments.comments.clone();
+        Ok(Assessed {
+            assessment: readiness::assess(
                 PullEvidence {
                     number: row.reference.number().get(),
                     title: truncate(&row.title, PULL_TITLE_CHARS),
@@ -353,8 +373,10 @@ impl Github {
                 },
                 &self.signals,
             ),
-            risk,
-        ))
+            risk: pull_request::risk(&PRIORITISER, &paths),
+            checks: details,
+            comments,
+        })
     }
 
     /// The repository-relative paths a pull request touches.

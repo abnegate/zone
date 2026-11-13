@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::github::pull_requests::CheckKind;
 use crate::services::github::testing::BLOB;
 use crate::services::github::testing::COMMIT;
 use crate::services::github::testing::RATE_LIMIT_REMAINING_HEADER;
@@ -10,6 +11,7 @@ use crate::services::github::testing::github_with_token;
 use crate::services::github::testing::mock;
 use crate::services::github::testing::mock_answering;
 use crate::services::github::testing::mock_graphql;
+use crate::services::github::testing::mock_green_ci;
 use crate::services::github::testing::mock_green_ci_answering;
 use crate::services::github::testing::mock_pull;
 use crate::services::github::testing::mock_review;
@@ -41,10 +43,10 @@ const RUN_ID: u64 = 99;
 async fn assessed_pull(github: &Github, number: u64) -> Result<readiness::Assessment, String> {
     let reference = github.reference(number)?;
     let detail = github.pull(&reference).await?;
-    let (assessment, _) = github
-        .assess(&listed(reference, &detail), Some(detail))
+    let assessed = github
+        .assess(&listed(reference, &detail), Some(detail), Depth::Full)
         .await?;
-    Ok(assessment)
+    Ok(assessed.assessment)
 }
 
 #[test]
@@ -939,7 +941,7 @@ async fn check_rows_that_shift_between_pages_never_settle_as_success() {
         "a check read twice may have pushed another past the pages read"
     );
 
-    let evidence = github.check_evidence(COMMIT).await.unwrap();
+    let (evidence, _) = github.check_evidence(COMMIT).await.unwrap();
     assert!(!evidence.complete);
     assert_ne!(evidence.normalize().state, readiness::CheckState::Success);
 }
@@ -1155,5 +1157,137 @@ async fn a_workflow_run_listed_on_two_pages_never_settles() {
         mocked(&server).settled(None).await.unwrap_err(),
         PARTIAL_WORKFLOW_RUNS,
         "a run GitHub listed twice may have pushed another past the pages read"
+    );
+}
+
+async fn files_read(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/repos/owner/repository/pulls/7/files")
+        .count()
+}
+
+#[tokio::test]
+async fn a_listing_assessment_never_walks_the_changed_files_and_a_full_one_does() {
+    let server = MockServer::start().await;
+    mock_pull(&server, COMMIT).await;
+    mock_review(&server, true, &summary(5, COMMIT), false).await;
+    mock_green_ci(&server).await;
+    mock(
+        &server,
+        "pulls/7/files",
+        json!([{"filename": "migrations/0001_init.sql", "status": "modified", "additions": 1, "deletions": 0}]),
+    )
+    .await;
+    let github = mocked(&server);
+    let reference = github.reference(7).unwrap();
+    let detail = github.pull(&reference).await.unwrap();
+    let row = listed(reference, &detail);
+
+    let listing = github
+        .assess(&row, Some(detail.clone()), Depth::Listing)
+        .await
+        .unwrap();
+    assert_eq!(files_read(&server).await, 0);
+    assert!(listing.risk.presumed(), "{}", listing.risk);
+
+    let full = github
+        .assess(&row, Some(detail), Depth::Full)
+        .await
+        .unwrap();
+    assert_eq!(files_read(&server).await, 1);
+    assert_eq!(full.risk.touched, 1, "{}", full.risk);
+    assert_eq!(listing.assessment, full.assessment);
+    assert!(
+        listing.assessment.ready,
+        "{:?}",
+        listing.assessment.blockers
+    );
+}
+
+#[tokio::test]
+async fn an_assessment_names_each_check_it_weighed() {
+    let server = MockServer::start().await;
+    mock_pull(&server, COMMIT).await;
+    mock_review(&server, true, &summary(5, COMMIT), false).await;
+    mock_answering(
+        &server,
+        "actions/runs",
+        json!({"workflow_runs": [{"id": 11, "workflow_id": 1, "name": "CI",
+               "path": ".github/workflows/ci.yml", "event": "pull_request",
+               "head_sha": COMMIT, "status": "completed", "conclusion": "failure",
+               "created_at": "2026-09-05T00:00:00Z", "updated_at": "2026-09-05T00:05:00Z",
+               "html_url": "https://github.com/owner/repository/actions/runs/11",
+               "repository": {"full_name": "owner/repository"}}], "total_count": 1}),
+        Some("Bearer test-secret"),
+    )
+    .await;
+    check_runs(
+        &server,
+        json!([{"id": 21, "name": "test", "head_sha": COMMIT, "status": "in_progress",
+                "html_url": "https://github.com/owner/repository/actions/runs/11/job/21",
+                "started_at": "2026-09-05T00:01:00Z"}]),
+    )
+    .await;
+    mock_statuses(
+        &server,
+        json!([{"context": "deploy", "state": "success", "target_url": "javascript:alert(1)",
+                "created_at": "2026-09-05T00:02:00Z"}]),
+    )
+    .await;
+    let github = mocked(&server);
+    let reference = github.reference(7).unwrap();
+    let detail = github.pull(&reference).await.unwrap();
+
+    let assessed = github
+        .assess(&listed(reference, &detail), Some(detail), Depth::Listing)
+        .await
+        .unwrap();
+
+    let named: Vec<(CheckKind, u64, &str, readiness::CheckState, Option<&str>)> = assessed
+        .checks
+        .iter()
+        .map(|check| {
+            (
+                check.kind,
+                check.id,
+                check.name.as_str(),
+                check.state,
+                check.url.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (
+                CheckKind::Workflow,
+                11,
+                "CI",
+                readiness::CheckState::Failure,
+                Some("https://github.com/owner/repository/actions/runs/11"),
+            ),
+            (
+                CheckKind::CheckRun,
+                21,
+                "test",
+                readiness::CheckState::Pending,
+                Some("https://github.com/owner/repository/actions/runs/11/job/21"),
+            ),
+            (
+                CheckKind::Status,
+                1,
+                "deploy",
+                readiness::CheckState::Success,
+                None
+            ),
+        ]
+    );
+    assert_eq!(
+        assessed.checks[1].updated_at.as_deref(),
+        Some("2026-09-05T00:01:00Z")
     );
 }

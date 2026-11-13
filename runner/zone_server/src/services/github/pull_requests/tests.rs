@@ -342,3 +342,230 @@ fn the_diff_and_log_budgets_are_sixteen_and_one_mebibytes() {
     assert_eq!(DIFF_BUDGET, 16 * 1024 * 1024);
     assert_eq!(LOG_TAIL, 1024 * 1024);
 }
+
+const UPDATED_AT: &str = "2026-11-14T03:00:00Z";
+
+fn settled(number: u64, state: CheckState) -> PullRequest {
+    PullRequest {
+        checks: CheckSummary {
+            state,
+            complete: true,
+            counts: CheckCounts::default(),
+        },
+        comments_complete: true,
+        ..pull_request(number, Readiness::NotReady)
+    }
+}
+
+fn row(number: u64, updated_at: &str, head: &str) -> ListedPullRequest {
+    let repository = abnegate_vcs::Repository::new("owner", "repository").unwrap();
+    ListedPullRequest::new(
+        PullRequestReference::new(repository, NonZeroU64::new(number).unwrap()),
+        format!("PR_{number}"),
+        format!("https://github.com/owner/repository/pull/{number}"),
+        abnegate_vcs::BranchName::parse("feature").unwrap(),
+        abnegate_vcs::BranchName::parse("main").unwrap(),
+    )
+    .with_updated_at(updated_at)
+    .with_head_sha(Revision::parse(head).unwrap())
+}
+
+fn listing(pull_requests: Vec<PullRequest>) -> Listing {
+    Listing {
+        pull_requests,
+        complete: true,
+        warnings: Vec::new(),
+    }
+}
+
+fn kept(plan: &[Option<&PullRequest>]) -> Vec<bool> {
+    plan.iter().map(Option::is_some).collect()
+}
+
+#[test]
+fn a_settled_unchanged_pull_request_is_kept_and_everything_else_is_assessed_again() {
+    let now = moment(ASSESSED_AT);
+    let previous = listing(vec![
+        settled(1, CheckState::Success),
+        settled(2, CheckState::Success),
+        settled(3, CheckState::Success),
+        settled(4, CheckState::Pending),
+        settled(5, CheckState::Unknown),
+        PullRequest {
+            threads_complete: false,
+            ..settled(6, CheckState::Success)
+        },
+        PullRequest {
+            checks: CheckSummary {
+                complete: false,
+                ..settled(7, CheckState::Success).checks
+            },
+            ..settled(7, CheckState::Success)
+        },
+    ]);
+    let listed = [
+        row(1, UPDATED_AT, HEAD),
+        row(2, "2026-11-14T03:30:00Z", HEAD),
+        row(3, UPDATED_AT, BASE),
+        row(4, UPDATED_AT, HEAD),
+        row(5, UPDATED_AT, HEAD),
+        row(6, UPDATED_AT, HEAD),
+        row(7, UPDATED_AT, HEAD),
+        row(8, UPDATED_AT, HEAD),
+    ];
+
+    let plan = refresh_plan(Some(&previous), &listed, now, false);
+
+    assert_eq!(
+        kept(&plan),
+        [true, false, false, false, false, false, false, false]
+    );
+    assert_eq!(plan[0].map(|kept| kept.number), Some(1));
+}
+
+#[test]
+fn a_failed_pull_request_is_assessed_again_once_its_verdict_is_two_minutes_old() {
+    let previous = listing(vec![settled(1, CheckState::Failure)]);
+    let listed = [row(1, UPDATED_AT, HEAD)];
+    let assessed_at = moment(ASSESSED_AT);
+
+    for (elapsed, expected) in [(0, true), (120, true), (121, false)] {
+        let now = assessed_at + TimeDelta::seconds(elapsed);
+        assert_eq!(
+            kept(&refresh_plan(Some(&previous), &listed, now, false)),
+            [expected],
+            "{elapsed} s after it was assessed"
+        );
+    }
+}
+
+#[test]
+fn a_forced_refresh_or_a_first_read_assesses_every_pull_request() {
+    let previous = listing(vec![settled(1, CheckState::Success)]);
+    let listed = [row(1, UPDATED_AT, HEAD)];
+    let now = moment(ASSESSED_AT);
+
+    assert_eq!(
+        kept(&refresh_plan(Some(&previous), &listed, now, true)),
+        [false]
+    );
+    assert_eq!(kept(&refresh_plan(None, &listed, now, false)), [false]);
+}
+
+#[test]
+fn pull_requests_rank_ready_first_then_most_recently_updated() {
+    let at = |number: u64, readiness: Readiness, updated_at: &str| PullRequest {
+        updated_at: updated_at.into(),
+        ..pull_request(number, readiness)
+    };
+
+    let ranked = ranked(vec![
+        at(1, Readiness::NotReady, "2026-11-14T05:00:00Z"),
+        at(2, Readiness::Ready, "2026-11-14T01:00:00Z"),
+        at(3, Readiness::InProgress, "2026-11-14T02:00:00Z"),
+        at(4, Readiness::Ready, "2026-11-14T04:00:00Z"),
+        at(5, Readiness::InProgress, "2026-11-14T03:00:00Z"),
+    ]);
+
+    let order: Vec<(u64, u32)> = ranked
+        .iter()
+        .map(|pull_request| (pull_request.number, pull_request.rank))
+        .collect();
+    assert_eq!(order, [(4, 1), (2, 2), (5, 3), (3, 4), (1, 5)]);
+    assert_eq!(
+        Counts::of(&ranked),
+        Counts {
+            ready: 2,
+            in_progress: 2,
+            not_ready: 1,
+            total: 5
+        }
+    );
+}
+
+#[test]
+fn only_web_addresses_are_links() {
+    for (url, linked) in [
+        ("https://github.com/owner/repository/pull/7", true),
+        ("http://127.0.0.1:8080/owner/repository/pull/7", true),
+        ("javascript:alert(1)", false),
+        ("/owner/repository/pull/7", false),
+        ("mailto:octocat@example.com", false),
+        ("", false),
+    ] {
+        assert_eq!(absolute(url).is_some(), linked, "{url}");
+    }
+}
+
+#[test]
+fn a_log_keeps_its_end_and_never_splits_a_character() {
+    assert_eq!(reading::tail("abc", 3), ("abc", false));
+    assert_eq!(reading::tail("abcdef", 3), ("def", true));
+    assert_eq!(reading::tail("aé", 1), ("", true));
+    assert_eq!(reading::tail("aéb", 2), ("b", true));
+}
+
+#[test]
+fn github_failures_read_as_missing_or_upstream() {
+    for (error, expected) in [
+        (
+            PullRequestError::PullRequestNotFound,
+            Error::Missing(status_error(404)),
+        ),
+        (
+            PullRequestError::RepositoryNotFound,
+            Error::Missing(status_error(404)),
+        ),
+        (
+            PullRequestError::GitHubApi("test-secret".into()),
+            Error::Upstream(super::super::client::UNEXPECTED_RESPONSE.into()),
+        ),
+        (
+            PullRequestError::refused(503, "test-secret"),
+            Error::Upstream(status_error(503)),
+        ),
+        (
+            PullRequestError::AuthenticationFailed,
+            Error::Upstream(status_error(UNAUTHORIZED)),
+        ),
+    ] {
+        let read = Error::from(error);
+        assert_eq!(read, expected);
+        assert!(!format!("{read:?}").contains("test-secret"));
+    }
+    assert_eq!(
+        Error::from(PullRequestError::AuthenticationFailed).unauthenticated(),
+        Some(status_error(UNAUTHORIZED).as_str())
+    );
+    assert_eq!(Error::Upstream(status_error(503)).unauthenticated(), None);
+    assert_eq!(
+        Error::described(status_error(404)),
+        Error::Missing(status_error(404))
+    );
+    assert_eq!(
+        Error::described(super::super::client::FOREIGN_JOB.into()),
+        Error::Missing(super::super::client::FOREIGN_JOB.into())
+    );
+    assert_eq!(
+        Error::described(RATE_LIMIT_EXHAUSTED.into()),
+        Error::Upstream(RATE_LIMIT_EXHAUSTED.into())
+    );
+}
+
+#[test]
+fn every_refusal_carries_the_code_the_console_reads() {
+    for (refusal, code) in [
+        (
+            Refusal::HeadMoved {
+                current_head: HEAD.into(),
+            },
+            "head_moved",
+        ),
+        (Refusal::NotReady { blockers: vec![] }, "not_ready"),
+        (Refusal::Conflict, "conflict"),
+        (Refusal::Protected, "protected"),
+    ] {
+        assert_eq!(refusal.code(), code);
+        assert!(!refusal.message().is_empty());
+    }
+}

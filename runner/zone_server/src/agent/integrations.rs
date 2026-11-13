@@ -72,6 +72,7 @@ use crate::services::github::client::revision;
 use crate::services::github::client::segment;
 use crate::services::github::client::status_error;
 use crate::services::github::connection::connect;
+use crate::services::github::pull_requests::Depth;
 use crate::services::github::readiness;
 use crate::services::github::readiness::CommitSha;
 use crate::services::github::release;
@@ -926,8 +927,8 @@ impl Github {
         };
         let mut assessed = Vec::with_capacity(rows.len());
         for (row, detail) in rows {
-            let (assessment, risk) = self.assess(&row, detail).await?;
-            assessed.push(assessment_record(&assessment, &risk));
+            let pull = self.assess(&row, detail, Depth::Full).await?;
+            assessed.push(assessment_record(&pull.assessment, &pull.risk));
         }
         Ok(bound_readiness(
             json!({
