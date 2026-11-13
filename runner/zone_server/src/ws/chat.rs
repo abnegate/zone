@@ -2981,9 +2981,33 @@ pub(crate) async fn run_turn(
     content: &str,
     metadata: Option<serde_json::Value>,
 ) -> Uuid {
+    let message_id = Uuid::new_v4();
+    run_turn_as(
+        state,
+        message_id,
+        chat_id,
+        workspace_id,
+        user_id,
+        content,
+        metadata,
+    )
+    .await;
+    message_id
+}
+
+/// [`run_turn`] with its answer's id chosen by the caller, so the caller can
+/// stop this turn and no other through [`cancel_turn`] while it runs.
+pub(crate) async fn run_turn_as(
+    state: &AppState,
+    message_id: Uuid,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+) {
     let stream = ChatStream::of(chat_id);
-    let generation = Generation::new(chat_id);
-    let message_id = generation.message_id;
+    let generation = Generation::registered(chat_id, message_id);
     handle_send_message(
         state,
         &stream,
@@ -3008,7 +3032,16 @@ pub(crate) async fn run_turn(
         Some(None) => announce(&stream, None).await,
         None => {}
     }
-    message_id
+}
+
+/// Stops the one turn answering under `message_id` the way a person's Stop
+/// does: it ends as a cancelled turn and releases the chat's queue on its way
+/// out, where dropping it part way would leave the queue held. A turn already
+/// over has nothing left to stop.
+pub(crate) fn cancel_turn(chat_id: Uuid, message_id: Uuid) {
+    if let Some(cancellation) = CHAT_CANCELLATIONS.get(&(chat_id, message_id)) {
+        let _ = cancellation.send(());
+    }
 }
 
 async fn prepare_message(

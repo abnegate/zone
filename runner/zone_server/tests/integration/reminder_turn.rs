@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use uuid::Uuid;
 use zone_server::db::reminders::Sweep;
+use zone_server::workers::reminders::{Lease, run};
 
 /// The production worker, sweeping only the harness's own workspace.
 pub(crate) fn dispatcher(harness: &Harness) -> tokio::task::JoinHandle<()> {
@@ -393,5 +394,186 @@ async fn a_task_a_firing_files_is_recorded_as_the_reminders() {
         origins(&harness).await,
         ["member", "reminder"],
         "the firing's task carries the reminder as its origin"
+    );
+}
+
+/// A watch's turn on its last attempt, still generating when its claim lapsed
+/// and the schedule's next firing took over. It is stopped through the chat as
+/// a cancelled turn, so the chat's queue is free for the firing that took
+/// over, and nothing it might have said becomes the baseline: the firing that
+/// took over is compared with the reading recorded before either of them ran.
+#[tokio::test]
+async fn a_watch_turn_that_lost_its_claim_is_stopped_and_its_successor_keeps_the_baseline() {
+    const PRECEDING: &str = "Three jobs, all green.";
+    const SUCCESSOR: &str = "The lint job is red; it was green last time.";
+    const HANG: Duration = Duration::from_secs(120);
+    const STOPPED_WITHIN: Duration = Duration::from_secs(20);
+    let harness = Harness::new(
+        Some(32_768),
+        false,
+        vec![
+            answer("Never delivered.").set_delay(HANG),
+            answer(SUCCESSOR),
+        ],
+    )
+    .await;
+    let sweep = Sweep::Workspace(harness.workspace);
+    let lease = Lease {
+        duration: Duration::from_secs(60),
+        renewal: Duration::from_secs(1),
+    };
+
+    let user: Uuid = sqlx::query_scalar(
+        "SELECT user_id FROM workspace_members WHERE workspace_id = $1 AND role = 'owner' \
+         AND is_active LIMIT 1",
+    )
+    .bind(harness.workspace)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the harness workspace has an owner");
+    let created = zone_server::db::reminders::create(
+        &harness.pool,
+        harness.workspace,
+        user,
+        harness.chat,
+        zone_server::db::reminders::Reminder {
+            content: "Release branch".into(),
+            due_at: (chrono::Utc::now() + chrono::Duration::hours(1)).fixed_offset(),
+            rrule: Some("FREQ=DAILY".into()),
+            prompt: Some("Check whether the release branch is green.".into()),
+            timing_mode: Some("condition_watch".into()),
+            time_zone: None,
+        },
+    )
+    .await
+    .expect("a watch is storable");
+    let reminder: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+    sqlx::query("UPDATE reminders SET last_observation = $2 WHERE id = $1")
+        .bind(reminder)
+        .bind(PRECEDING)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        make_due(&harness, reminder).await;
+        zone_server::db::reminders::deliver_next(&harness.pool, sweep)
+            .await
+            .expect("the due firing is written down as an owed turn");
+    }
+    assert_eq!(owed(&harness, reminder).await, 2, "two firings are owed");
+
+    let claim = || async {
+        zone_server::db::reminders::claim_turn(&harness.pool, sweep, lease.duration)
+            .await
+            .unwrap()
+            .expect("an owed firing is offered")
+    };
+    let mut first = claim().await;
+    for _ in 1..3 {
+        lapse(&harness, first.id, lease).await;
+        let retaken = claim().await;
+        assert_eq!(
+            retaken.id, first.id,
+            "a lapsed firing is offered again first"
+        );
+        first = retaken;
+    }
+    assert_eq!(
+        first.attempts, 3,
+        "the first firing is out for its last attempt"
+    );
+
+    let state = common::create_test_state(harness.config.clone(), harness.pool.clone());
+    let running = tokio::spawn({
+        let state = state.clone();
+        let first = first.clone();
+        async move { run(&state, first, lease).await }
+    });
+    until_count(&harness, "user", 1).await;
+    lapse(&harness, first.id, lease).await;
+    let successor = claim().await;
+    assert_ne!(successor.id, first.id, "the next firing is the one taken");
+
+    tokio::time::timeout(STOPPED_WITHIN, running)
+        .await
+        .expect("a turn whose claim was taken over is stopped rather than left generating")
+        .expect("the stopped turn ends without panicking");
+    let after_stop = messages(&harness).await;
+    let baseline_after_stop = baseline(&harness, reminder).await;
+
+    tokio::time::timeout(STOPPED_WITHIN, run(&state, successor, lease))
+        .await
+        .expect("the stopped turn released the chat's queue for the firing that took over");
+    let stored = messages(&harness).await;
+    let baseline_after_successor = baseline(&harness, reminder).await;
+
+    assert!(
+        after_stop
+            .iter()
+            .all(|(role, content, _)| role != "assistant" || content.is_empty()),
+        "the stopped turn ended as cancelled, with no answer: {after_stop:?}"
+    );
+    assert_eq!(
+        baseline_after_stop.as_deref(),
+        Some(PRECEDING),
+        "a stopped turn records no reading"
+    );
+    let (role, successor_prompt, _) = stored
+        .iter()
+        .filter(|(role, _, _)| role == "user")
+        .nth(1)
+        .expect("the firing that took over asked its question");
+    assert_eq!(role, "user");
+    assert!(
+        successor_prompt.contains(PRECEDING),
+        "the firing that took over is compared with the reading before it: {successor_prompt}"
+    );
+    assert!(
+        stored
+            .iter()
+            .any(|(role, content, _)| role == "assistant" && content == SUCCESSOR),
+        "the firing that took over answered in the chat: {stored:?}"
+    );
+    assert_eq!(
+        baseline_after_successor.as_deref(),
+        Some(SUCCESSOR),
+        "the firing that took over records its own reading"
+    );
+    assert_eq!(
+        owed(&harness, reminder).await,
+        0,
+        "both firings are settled"
+    );
+}
+
+/// Leaves a turn's claim unrenewed for longer than `lease`.
+async fn lapse(harness: &Harness, turn: Uuid, lease: Lease) {
+    sqlx::query(
+        "UPDATE reminder_turns SET claimed_at = NOW() - make_interval(secs => $2) WHERE id = $1",
+    )
+    .bind(turn)
+    .bind((lease.duration * 2).as_secs_f64())
+    .execute(&harness.pool)
+    .await
+    .unwrap();
+}
+
+/// Waits for the chat to hold `count` messages in `role`.
+async fn until_count(harness: &Harness, role: &str, count: usize) {
+    for _ in 0..300 {
+        let stored = messages(harness).await;
+        if stored
+            .iter()
+            .filter(|(stored, _, _)| stored == role)
+            .count()
+            >= count
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!(
+        "the chat never held {count} {role} messages: {:?}",
+        messages(harness).await
     );
 }
