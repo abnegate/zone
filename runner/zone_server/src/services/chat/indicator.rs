@@ -321,12 +321,52 @@ mod tests {
     #[test]
     fn a_failing_check_wants_attention_before_anything_settled() {
         let mut ranked = [
-            ("merged", indicator(Some(status(State::Merged, Checks::None, Mergeable::Unknown, None)))),
-            ("ready", indicator(Some(status(State::Open, Checks::Passing, Mergeable::Clean, Some(0))))),
+            (
+                "merged",
+                indicator(Some(status(
+                    State::Merged,
+                    Checks::None,
+                    Mergeable::Unknown,
+                    None,
+                ))),
+            ),
+            (
+                "ready",
+                indicator(Some(status(
+                    State::Open,
+                    Checks::Passing,
+                    Mergeable::Clean,
+                    Some(0),
+                ))),
+            ),
             ("unread", indicator(None)),
-            ("failing", indicator(Some(status(State::Open, Checks::Failing, Mergeable::Unstable, Some(0))))),
-            ("running", indicator(Some(status(State::Open, Checks::Pending, Mergeable::Unstable, Some(0))))),
-            ("blocked", indicator(Some(status(State::Open, Checks::Passing, Mergeable::Conflicted, Some(0))))),
+            (
+                "failing",
+                indicator(Some(status(
+                    State::Open,
+                    Checks::Failing,
+                    Mergeable::Unstable,
+                    Some(0),
+                ))),
+            ),
+            (
+                "running",
+                indicator(Some(status(
+                    State::Open,
+                    Checks::Pending,
+                    Mergeable::Unstable,
+                    Some(0),
+                ))),
+            ),
+            (
+                "blocked",
+                indicator(Some(status(
+                    State::Open,
+                    Checks::Passing,
+                    Mergeable::Conflicted,
+                    Some(0),
+                ))),
+            ),
         ];
         ranked.sort_by_key(|(_, pull)| pull.rank());
 

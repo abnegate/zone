@@ -147,9 +147,11 @@ mod tests {
             .acquire(Uuid::new_v4(), Duration::from_secs(30))
             .await
             .expect("a lease");
+        // Releasing a lease expires it where it stands, which is the row a
+        // turn that has already ended leaves behind.
         let dropped = Store::new(pool.clone(), lapsed, Some(workspace_id));
         let expired = dropped
-            .acquire(Uuid::new_v4(), Duration::from_millis(1))
+            .acquire(Uuid::new_v4(), Duration::from_secs(30))
             .await
             .expect("a lease");
         dropped.release(&expired).await.expect("releasing it");
