@@ -36,8 +36,10 @@ function importable(server: ProviderMcpServer): boolean {
   return server.refusal === null;
 }
 
-function target(server: ProviderMcpServer): string {
-  return server.url ?? [server.command, ...server.arguments].filter(Boolean).join(' ');
+/** How the server is reached, as far as the listing says: an origin, or a command line. */
+function target(server: ProviderMcpServer): string | null {
+  const reached = server.url ?? [server.command, ...server.arguments].filter(Boolean).join(' ');
+  return reached === '' ? null : reached;
 }
 
 interface McpProviderImportDialogProps {
@@ -191,7 +193,9 @@ function ProviderGroup({ base, provider, selected, pending, onToggle }: Provider
                 <div className="mcp-provider-import-detail">
                   <Badge variant="outline">{TRANSPORT_LABELS[server.transport]}</Badge>
                   {!server.enabled && <Badge variant={DISABLED.variant}>{DISABLED.label}</Badge>}
-                  <span className="mcp-provider-import-target">{target(server)}</span>
+                  {target(server) !== null && (
+                    <span className="mcp-provider-import-target">{target(server)}</span>
+                  )}
                 </div>
                 {server.ignored.length > 0 && (
                   <span className="mcp-provider-import-note">{ignoredNote(server.ignored)}</span>

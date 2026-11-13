@@ -34,7 +34,7 @@ function configured(name: string, overrides: Partial<ProviderMcpServer> = {}): P
     transport: 'http',
     command: null,
     arguments: [],
-    url: `https://${name}.example.com/mcp`,
+    url: `https://${name}.example.com`,
     tools: null,
     enabled: true,
     environment: [],
@@ -116,7 +116,7 @@ describe('McpProviderImportDialog', () => {
     ).toEqual(['notes', 'docs']);
     expect(within(await row('notes')).getByText('notes-server mcp')).toBeTruthy();
     expect(within(await row('notes')).getByText('Command')).toBeTruthy();
-    expect(within(await row('docs')).getByText('https://docs.example.com/mcp')).toBeTruthy();
+    expect(within(await row('docs')).getByText('https://docs.example.com')).toBeTruthy();
     expect(within(await row('docs')).getByText('HTTP')).toBeTruthy();
   });
 
@@ -164,6 +164,14 @@ describe('McpProviderImportDialog', () => {
       within(refused).getByText('A server with this name is already configured on this instance')
     ).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Import 1 server' })).toBeTruthy();
+  });
+
+  it('shows no target for a remote server whose URL did not resolve to an origin', async () => {
+    mcpApi.providers.mockResolvedValue(listing([claude([configured('odd', { url: null })])]));
+    renderDialog();
+    const odd = await row('odd');
+    expect(within(odd).getByText('HTTP')).toBeTruthy();
+    expect(within(odd).queryByText(/https?:/)).toBeNull();
   });
 
   it('marks a server its provider has turned off', async () => {

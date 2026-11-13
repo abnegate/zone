@@ -49,6 +49,9 @@ use super::common::ErrorResponse;
 use super::common::audit;
 
 const INTERNAL: &str = "Internal server error";
+/// What an import says about a server it never reached, because an earlier one failed on the
+/// database or on sealing and the import stopped there.
+const NOT_ATTEMPTED: &str = "Not imported: the import stopped at an earlier server";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct McpSecretField {
@@ -156,6 +159,10 @@ pub struct ProviderMcpServerResponse {
     pub transport: Transport,
     pub command: Option<String>,
     pub arguments: Vec<String>,
+    /// The origin alone of what the provider configured, as an instance server's URL is shown,
+    /// and `null` when it does not resolve to one. A provider's document is not held to what the
+    /// create route accepts, so its URL may carry a user name and password; the import reads the
+    /// whole URL from that document as it stores it, and nothing needs the rest of it here.
     pub url: Option<String>,
     pub tools: Option<Vec<String>>,
     pub enabled: bool,
@@ -175,7 +182,7 @@ impl ProviderMcpServerResponse {
             transport: server.transport,
             command: server.command.clone(),
             arguments: server.arguments.clone(),
-            url: server.url.clone(),
+            url: server.url.as_deref().and_then(origin),
             tools: server.tools.clone(),
             enabled: server.enabled,
             environment: fields(&server.environment),
@@ -843,6 +850,11 @@ pub async fn list_providers(
 /// it holds something Zone will not store, leaves the rest imported and says why, the way the
 /// console's own import of a pasted document does. A name the provider no longer configures,
 /// because the file changed since it was listed, is refused the same way.
+///
+/// A server that fails on the database or on sealing stops the import, since the next would fail
+/// the same way, and the answer still carries every server stored before it: a server that exists
+/// must never be reported as not imported, or retrying it reads as a name clash. What was not
+/// reached is named as not attempted, and why the one failed is logged rather than returned.
 pub async fn import(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -860,8 +872,16 @@ pub async fn import(
     let commands = state.config().mcp_commands;
     let mut imported = ImportedMcpServersResponse::default();
     let mut asked: BTreeSet<&str> = BTreeSet::new();
+    let mut stopped = false;
     for name in &request.servers {
         if !asked.insert(name.as_str()) {
+            continue;
+        }
+        if stopped {
+            imported.failures.push(ImportedMcpServerFailure {
+                name: name.clone(),
+                message: NOT_ATTEMPTED.to_string(),
+            });
             continue;
         }
         let Some(server) = found.servers.iter().find(|server| &server.name == name) else {
@@ -871,19 +891,33 @@ pub async fn import(
             });
             continue;
         };
-        match importing(&state, &auth, user, org_id, server, commands).await? {
-            Imported::Stored(response) => imported.created.push(*response),
-            Imported::Refused(message) => imported.failures.push(ImportedMcpServerFailure {
+        match importing(&state, &auth, user, org_id, server, commands).await {
+            Ok(Imported::Stored(response)) => imported.created.push(*response),
+            Ok(Imported::Refused(message)) => imported.failures.push(ImportedMcpServerFailure {
                 name: name.clone(),
                 message,
             }),
+            Err(error) => {
+                tracing::error!(
+                    organization = %org_id,
+                    server = %name,
+                    error = %error,
+                    "an MCP server import stopped: the server could not be stored"
+                );
+                imported.failures.push(ImportedMcpServerFailure {
+                    name: name.clone(),
+                    message: INTERNAL.to_string(),
+                });
+                stopped = true;
+            }
         }
     }
     Ok(Json(imported))
 }
 
-/// Stores one of a provider's servers, or says why it was refused. A failure of the database or
-/// of sealing is the whole import's failure, not this server's, and stops it.
+/// Stores one of a provider's servers, or says why it was refused. A failure of the database or of
+/// sealing is this server's to report and the import's reason to stop, and the caller keeps every
+/// server it has already stored.
 async fn importing(
     state: &AppState,
     auth: &AuthUser,
