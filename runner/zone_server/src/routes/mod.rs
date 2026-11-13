@@ -23,6 +23,7 @@ pub mod models;
 pub mod organizations;
 pub mod projects;
 pub mod pull_requests;
+pub mod releases;
 pub mod sessions;
 pub mod sources;
 pub mod sync;
@@ -387,6 +388,22 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/merge",
             post(pull_requests::merge),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases",
+            get(releases::list).post(releases::create),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases/options",
+            get(releases::options),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases/preview",
+            post(releases::preview),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases/{source_id}/{release_id}/pipeline",
+            get(releases::pipeline),
         )
         .route("/api/chats/{id}/tasks", get(chats::tasks::list))
         .route("/api/chats/{id}/subagents", get(chats::subagents::list))

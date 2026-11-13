@@ -102,6 +102,7 @@ mod project_order;
 mod prompt_assembly;
 mod pull_requests;
 mod pull_ws;
+mod releases;
 mod reminder_sweep;
 mod reminder_time_zone;
 mod reminder_turn;
