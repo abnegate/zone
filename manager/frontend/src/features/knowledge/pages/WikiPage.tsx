@@ -364,9 +364,7 @@ export default function WikiPage() {
                     className={`source-pill ${selectedProject === project.id ? 'active' : ''}`}
                     aria-pressed={selectedProject === project.id}
                     onClick={() =>
-                      setSelectedProject((current) =>
-                        current === project.id ? null : project.id
-                      )
+                      setSelectedProject((current) => (current === project.id ? null : project.id))
                     }
                   >
                     {project.name}
