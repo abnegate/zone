@@ -488,13 +488,21 @@ export default function ChatsPage() {
     stickToBottom.current = true;
   }, [selectedChatId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages and generation feedback visible
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages, queued ones and generation feedback visible
   useEffect(() => {
     if (linkedMessageId) {
       return;
     }
     scrollToBottom();
-  }, [activeChat?.messages, chatError, chatStatus, streaming, linkedMessageId, scrollToBottom]);
+  }, [
+    activeChat?.messages,
+    chatError,
+    chatStatus,
+    streaming,
+    queue,
+    linkedMessageId,
+    scrollToBottom,
+  ]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the scroller mounts with the displayed chat
   useEffect(() => {
@@ -536,6 +544,17 @@ export default function ChatsPage() {
   const clearSelectedChat = () => {
     setSelectedChatId(null);
     setSearchParams({}, { replace: true });
+  };
+
+  // Arriving from a search result or a source link parks the transcript on that
+  // message and holds the auto-scroll off it. Writing a new one is leaving it.
+  const clearLinkedMessage = () => {
+    if (!searchParams.get('message')) {
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('message');
+    setSearchParams(next, { replace: true });
   };
 
   const applyNewChat = (settings: NewChatSettings) => {
@@ -961,6 +980,7 @@ export default function ChatsPage() {
     setSending(true);
     setChatOperationError(null);
     stickToBottom.current = true;
+    clearLinkedMessage();
     try {
       await sendMessageFn({
         content: buildMessageWithAttachments(messageInput.trim(), sendable),
@@ -987,6 +1007,7 @@ export default function ChatsPage() {
     setSending(true);
     setChatOperationError(null);
     stickToBottom.current = true;
+    clearLinkedMessage();
     try {
       await sendMessageFn({ content });
     } catch (error) {
