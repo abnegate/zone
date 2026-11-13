@@ -206,12 +206,8 @@ impl Github {
         Ok(IssueReference::new(self.repository.clone(), number))
     }
 
-    /// The `owner/repo` name GitHub reports records under.
     fn full_name(&self) -> String {
-        format!(
-            "{}/{}",
-            self.configuration.owner, self.configuration.repository
-        )
+        self.configuration.full_name()
     }
 
     pub(crate) async fn resolve(

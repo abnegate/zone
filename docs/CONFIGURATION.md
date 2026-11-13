@@ -2310,6 +2310,30 @@ Publication, pull-request sync, conflict repair, auto-project reviews and merges
 - **Default**: `https://github.com` when `GITHUB_API_URL` is `api.github.com`; otherwise `GITHUB_API_URL` with a trailing `/api/v3` removed, e.g. `https://github.example.com`.
 - **Description**: The GitHub web origin that **Connect GitHub** sends you to, to register Zone's GitHub App and install it; GitHub sends you back to `APP_BASE_URL`. Set it only when the web UI does not live where the default puts it. It follows the same rules as `GITHUB_API_URL`: an absolute URL with a host and no credentials, query or fragment, and `http://` only with `GITHUB_API_ALLOW_HTTP=true`. Loopback and LAN hosts are allowed.
 
+### GitHub pages
+
+The console's **Pull Requests** and **Releases** pages read every active GitHub source in the workspace with that source's own credential. What GitHub said about each source is kept in the server's memory and shown again until it expires, so a page left open does not spend the credential's rate limit on every poll. **Refresh** asks GitHub again unless the source was read in the last 10 seconds. When GitHub cannot be reached, the page keeps showing what it last read and says the source is stale; when the credential's rate limit is exhausted, the source is not asked again for 5 minutes. A pipeline is read again after 15 seconds, and a source's tags and default branch after 5 minutes. A merge or a new release forgets what was read about its source. All settings are optional.
+
+### `ZONE_GITHUB_PULL_REQUEST_TTL_SECS`
+- **Default**: `45` (10–3600)
+- **Description**: How long a source's open pull requests are shown before GitHub is asked again.
+
+### `ZONE_GITHUB_RELEASE_TTL_SECS`
+- **Default**: `120` (10–3600)
+- **Description**: How long a source's recent releases are shown before GitHub is asked again.
+
+### `ZONE_GITHUB_RELEASE_WINDOW_DAYS`
+- **Default**: `7` (1–90)
+- **Description**: How many days of published releases the Releases page lists when it does not ask for another window. A window it asks for is held to 1–90 days.
+
+### `ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT`
+- **Default**: `50` (1–200)
+- **Description**: The most open pull requests read from one source. A source with more is listed in part and says so.
+
+### `ZONE_GITHUB_ADMIN_MERGE`
+- **Default**: `true`
+- **Description**: When branch protection refuses a merge from the Pull Requests page, try again through the merge mutation an administrator merges with. Works when the source's credential belongs to a repository administrator the protection does not include, or a ruleset bypass actor.
+
 ---
 
 ## 🤖 Auto projects
@@ -2621,6 +2645,7 @@ Need to find a specific config? Quick lookup:
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
 - **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_CONNECT, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS, ZONE_MCP_COMMANDS
 - **Auto projects**: ZONE_AUTO_ENABLED, ZONE_AUTO_PARALLEL_TASKS, ZONE_AUTO_REVIEW_MODELS, ZONE_AUTO_REVIEW_BOTS, ZONE_AUTO_ADMIN_MERGE, ZONE_AUTO_*
+- **GitHub pages**: ZONE_GITHUB_PULL_REQUEST_TTL_SECS, ZONE_GITHUB_RELEASE_TTL_SECS, ZONE_GITHUB_RELEASE_WINDOW_DAYS, ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT, ZONE_GITHUB_ADMIN_MERGE
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ

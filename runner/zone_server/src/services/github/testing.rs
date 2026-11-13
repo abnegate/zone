@@ -4,6 +4,7 @@ use abnegate_secret::SecretValue;
 use abnegate_vcs::PullRequestService;
 use serde_json::Value;
 use serde_json::json;
+use uuid::Uuid;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -13,6 +14,9 @@ use wiremock::matchers::path;
 
 use super::client::Github;
 use super::configuration::Configuration;
+use super::connection::ConnectedSource;
+use crate::db::sources;
+use crate::db::sources::SourceRow;
 
 pub(crate) const OWNER: &str = "owner";
 pub(crate) const REPOSITORY: &str = "repository";
@@ -41,6 +45,29 @@ pub(crate) fn configured(owner: &str, repository: &str) -> Configuration {
         path: None,
         token: Some("test-secret".into()),
         review_signals: None,
+    }
+}
+
+/// A source named `name`, connected to `owner/repository`, that no database holds.
+pub(crate) fn connected_source(id: Uuid, name: &str) -> ConnectedSource {
+    ConnectedSource {
+        source: SourceRow {
+            id,
+            name: name.into(),
+            source_type: sources::GITHUB.into(),
+            config: json!({"owner": OWNER, "repo": REPOSITORY}),
+            credentials_encrypted: None,
+            description: None,
+            url: None,
+            is_active: Some(true),
+            last_verified_at: None,
+            last_error: None,
+            created_at: None,
+            updated_at: None,
+            workspace_id: None,
+            github_installation_id: None,
+        },
+        configuration: configured(OWNER, REPOSITORY),
     }
 }
 

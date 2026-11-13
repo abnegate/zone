@@ -2,6 +2,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::configuration::Configuration;
+use super::sources::Sources;
 use super::unavailable::Unavailable;
 use super::unconnected::Unconnected;
 use crate::db::sources;
@@ -41,6 +42,36 @@ pub(crate) async fn connect(
         source,
         configuration,
     })
+}
+
+pub(crate) async fn connected_sources(
+    state: &AppState,
+    workspace_id: Uuid,
+) -> Result<Sources, Unavailable> {
+    let rows = sources::list_sources(
+        state.db(),
+        workspace_id,
+        Some(sources::GITHUB),
+        None,
+        i64::MAX,
+        0,
+    )
+    .await
+    .map_err(|_| Unavailable::Unreadable)?;
+    let mut listed = Sources::default();
+    for source in rows
+        .into_iter()
+        .filter(|source| source.is_active.unwrap_or(true))
+    {
+        match Configuration::deserialize(&source.config) {
+            Ok(configuration) => listed.connected.push(ConnectedSource {
+                source,
+                configuration,
+            }),
+            Err(_) => listed.invalid.push(source),
+        }
+    }
+    Ok(listed)
 }
 
 #[cfg(test)]
@@ -148,6 +179,62 @@ mod tests {
                 .await
                 .err(),
             Some(Unconnected::InvalidConfiguration)
+        );
+    }
+
+    #[tokio::test]
+    async fn every_active_github_source_in_the_workspace_is_listed_once() {
+        let connected = Connected::new().await;
+        let first = connected.source(None, None).await;
+        let second = connected
+            .source_of(sources::GITHUB, json!({"owner": OWNER, "repo": "other"}))
+            .await;
+        let invalid = connected.source_of(sources::GITHUB, json!({})).await;
+        let inactive = connected.source(None, None).await;
+        connected.deactivate(&inactive).await;
+        connected
+            .source_of(sources::WEB, json!({"url": "https://example.com"}))
+            .await;
+        let elsewhere = Connected::new().await;
+        elsewhere.source(None, None).await;
+
+        let listed = connected_sources(&connected.state, connected.workspace)
+            .await
+            .expect("the workspace's sources are listed");
+
+        let mut found: Vec<Uuid> = listed
+            .connected
+            .iter()
+            .map(|connection| connection.source.id)
+            .collect();
+        found.sort();
+        let mut expected = vec![first.id, second.id];
+        expected.sort();
+        assert_eq!(found, expected);
+        let named: Vec<String> = listed
+            .connected
+            .iter()
+            .map(|connection| connection.configuration.full_name())
+            .collect();
+        assert!(
+            named.contains(&format!("{OWNER}/{REPOSITORY}")),
+            "{named:?}"
+        );
+        assert!(named.contains(&format!("{OWNER}/other")), "{named:?}");
+        let unusable: Vec<Uuid> = listed.invalid.iter().map(|source| source.id).collect();
+        assert_eq!(unusable, [invalid.id]);
+    }
+
+    #[tokio::test]
+    async fn a_workspace_whose_sources_cannot_be_read_is_unreadable() {
+        let connected = Connected::new().await;
+        connected.pool.close().await;
+
+        assert_eq!(
+            connected_sources(&connected.state, connected.workspace)
+                .await
+                .err(),
+            Some(Unavailable::Unreadable)
         );
     }
 

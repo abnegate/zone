@@ -85,6 +85,7 @@ async fn setup_test_state() -> AppState {
         train_upload_limit_mb: 512,
         endpoint_hosts: Default::default(),
         auto: Default::default(),
+        github: Default::default(),
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),

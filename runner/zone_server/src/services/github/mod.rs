@@ -1,11 +1,20 @@
 pub(crate) mod authentication;
+pub mod cache;
 pub(crate) mod client;
 pub(crate) mod configuration;
 pub(crate) mod connection;
 pub mod diff;
+pub mod freshness;
+pub mod pull_requests;
 pub mod readiness;
 pub(crate) mod refusal;
 pub mod release;
+pub mod releases;
+pub mod releasing_guard;
+pub mod snapshot;
+pub mod snapshots;
+pub mod source_status;
+pub(crate) mod sources;
 #[cfg(test)]
 pub(crate) mod testing;
 pub(crate) mod unavailable;
