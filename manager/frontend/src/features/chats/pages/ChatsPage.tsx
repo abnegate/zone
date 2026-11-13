@@ -539,6 +539,17 @@ export default function ChatsPage() {
     setSearchParams({}, { replace: true });
   };
 
+  // Arriving from a search result or a source link parks the transcript on that
+  // message and holds the auto-scroll off it. Writing a new one is leaving it.
+  const clearLinkedMessage = () => {
+    if (!searchParams.get('message')) {
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('message');
+    setSearchParams(next, { replace: true });
+  };
+
   const applyNewChat = (settings: NewChatSettings) => {
     setNewChatProvider(settings.provider);
     setNewChatModel(settings.model);
@@ -962,6 +973,7 @@ export default function ChatsPage() {
     setSending(true);
     setChatOperationError(null);
     stickToBottom.current = true;
+    clearLinkedMessage();
     try {
       await sendMessageFn({
         content: buildMessageWithAttachments(messageInput.trim(), sendable),
@@ -988,6 +1000,7 @@ export default function ChatsPage() {
     setSending(true);
     setChatOperationError(null);
     stickToBottom.current = true;
+    clearLinkedMessage();
     try {
       await sendMessageFn({ content });
     } catch (error) {

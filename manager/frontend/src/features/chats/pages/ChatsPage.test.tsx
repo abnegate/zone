@@ -1873,6 +1873,38 @@ describe('ChatsPage', () => {
         expect(mockScrollIntoView).toHaveBeenCalled();
       });
 
+      it('scrolls a queued message into view when it was sent from a linked one', async () => {
+        mockGetChat.mockResolvedValue(mockChatWithMessages);
+        window.history.pushState({}, '', '/chats?id=chat-1&message=msg-2');
+        renderChatsPage();
+        const input = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+          'Type a message, or drop a file...'
+        );
+        fireEvent.change(input, { target: { value: 'Generate an image of a rooster' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+        await waitFor(() => expect(input.value).toBe(''));
+        // Writing into the chat is leaving the message it was parked on, which
+        // is what frees the scroll below.
+        expect(new URLSearchParams(window.location.search).get('message')).toBeNull();
+
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        mockScrollIntoView.mockClear();
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+
+        expect(screen.getByTestId('queued-message')).toBeInTheDocument();
+        expect(mockScrollIntoView).toHaveBeenCalled();
+      });
+
       it('offers Queue beside Stop once something is typed', async () => {
         const input = await sendPrompt();
         expect(screen.queryByRole('button', { name: 'Queue' })).not.toBeInTheDocument();
