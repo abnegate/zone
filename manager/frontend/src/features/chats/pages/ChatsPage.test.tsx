@@ -67,7 +67,8 @@ class FakeSocket {
 let socket: FakeSocket;
 
 // Mock scrollIntoView
-Element.prototype.scrollIntoView = mock();
+const mockScrollIntoView = mock();
+Element.prototype.scrollIntoView = mockScrollIntoView;
 
 // Mock the chatsApi
 mock.module('../../../api/chats', () => ({
@@ -1848,6 +1849,28 @@ describe('ChatsPage', () => {
         expect(within(item).getByText('and make it blue')).toBeInTheDocument();
         expect(within(item).getByRole('button', { name: 'Interrupt' })).toBeInTheDocument();
         expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
+      });
+
+      it('scrolls to the end when the message joins the queue', async () => {
+        const input = await sendPrompt();
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        // The queued row renders below the running turn, so only the frame
+        // that adds it can bring the transcript down to it.
+        mockScrollIntoView.mockClear();
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+
+        expect(screen.getByTestId('queued-message')).toBeInTheDocument();
+        expect(mockScrollIntoView).toHaveBeenCalled();
       });
 
       it('offers Queue beside Stop once something is typed', async () => {

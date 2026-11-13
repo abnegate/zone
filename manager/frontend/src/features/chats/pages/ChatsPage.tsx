@@ -481,13 +481,21 @@ export default function ChatsPage() {
     stickToBottom.current = true;
   }, [selectedChatId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages and generation feedback visible
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages, queued ones and generation feedback visible
   useEffect(() => {
     if (linkedMessageId) {
       return;
     }
     scrollToBottom();
-  }, [activeChat?.messages, chatError, chatStatus, streaming, linkedMessageId, scrollToBottom]);
+  }, [
+    activeChat?.messages,
+    chatError,
+    chatStatus,
+    streaming,
+    queue,
+    linkedMessageId,
+    scrollToBottom,
+  ]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the scroller mounts with the displayed chat
   useEffect(() => {
