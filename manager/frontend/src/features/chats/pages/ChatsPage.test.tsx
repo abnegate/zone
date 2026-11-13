@@ -28,6 +28,7 @@ import type {
   UpdateChatRequest,
 } from '../types';
 import { CHAT_GROUP_STORAGE_KEY, CHAT_SORT_STORAGE_KEY } from '../utils/arrange';
+import { CHAT_FILTER_STORAGE_KEY } from '../utils/indicators';
 
 // Create mock functions
 const mockGetChats = mock();
@@ -41,6 +42,7 @@ const mockSearchChatMessages = mock();
 const mockUpdateChat = mock();
 const mockGetChatSources = mock();
 const mockGetChatPullRequests = mock();
+const mockGetChatIndicators = mock();
 const mockGetChatTasks = mock();
 const mockGetChatSubagents = mock();
 const mockSetChatSources = mock();
@@ -89,6 +91,7 @@ mock.module('../../../api/chats', () => ({
     searchChatMessages: mockSearchChatMessages,
     getChatSources: mockGetChatSources,
     getChatPullRequests: mockGetChatPullRequests,
+    getChatIndicators: mockGetChatIndicators,
     getChatTasks: mockGetChatTasks,
     getChatSubagents: mockGetChatSubagents,
     setChatSources: mockSetChatSources,
@@ -479,11 +482,14 @@ describe('ChatsPage', () => {
   beforeEach(() => {
     localStorage.removeItem(CHAT_GROUP_STORAGE_KEY);
     localStorage.removeItem(CHAT_SORT_STORAGE_KEY);
+    localStorage.removeItem(CHAT_FILTER_STORAGE_KEY);
     mockGetChatSources.mockReset();
     mockSetChatSources.mockReset();
     mockGetChatSources.mockResolvedValue([]);
     mockGetChatPullRequests.mockReset();
     mockGetChatPullRequests.mockResolvedValue([]);
+    mockGetChatIndicators.mockReset();
+    mockGetChatIndicators.mockResolvedValue([]);
     mockGetChatTasks.mockReset();
     mockGetChatTasks.mockResolvedValue([]);
     mockGetChatSubagents.mockReset();
@@ -6012,6 +6018,174 @@ describe('ChatsPage', () => {
       renderChatsPage();
       expect(await screen.findByText('No chats yet')).toBeInTheDocument();
       expect(screen.queryByRole('combobox', { name: 'Group chats' })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('combobox', { name: 'Filter chats by status' })
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe('status indicators', () => {
+    const indicator = (
+      chat_id: string,
+      overrides: Partial<import('../types').ChatIndicator> = {}
+    ) => ({
+      chat_id,
+      activity: 'idle' as const,
+      pull_request: null,
+      pull_requests: 0,
+      ...overrides,
+    });
+
+    const openPull = (overrides: Record<string, unknown> = {}) => ({
+      id: 'pr-1',
+      number: 12,
+      url: 'https://github.com/acme/widgets/pull/12',
+      title: 'Add widgets',
+      status: {
+        title: 'Add widgets',
+        state: 'open' as const,
+        draft: false,
+        additions: 1,
+        deletions: 1,
+        changed_files: 1,
+        checks: 'passing' as const,
+        mergeable: 'clean' as const,
+        auto_merge: { enabled: false, unavailable: null },
+        threads: { open: 0, resolved: 0 },
+        draft_unavailable: null,
+        observed_at: '2026-11-13T10:00:00Z',
+        ...(overrides.status as Record<string, unknown> | undefined),
+      },
+      ready: false,
+      ...overrides,
+    });
+
+    it('marks the rows that are busy, waiting, failing or ready', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'writing' }),
+        indicator('chat-2', { activity: 'awaiting_answer' }),
+        indicator('chat-3', {
+          pull_request: openPull({ status: { checks: 'failing' } }),
+          pull_requests: 1,
+        }),
+        indicator('chat-4', { pull_request: openPull({ ready: true }), pull_requests: 1 }),
+      ]);
+
+      renderChatsPage();
+
+      expect(await screen.findByLabelText('Writing a reply')).toBeInTheDocument();
+      expect(screen.getByLabelText('Waiting for your answer')).toBeInTheDocument();
+      expect(screen.getByLabelText('Pull request #12: Checks failing')).toBeInTheDocument();
+      expect(screen.getByLabelText('Pull request #12: Ready to merge')).toBeInTheDocument();
+    });
+
+    it('sorts the chats that want attention to the top', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'idle' }),
+        indicator('chat-3', { activity: 'awaiting_approval' }),
+      ]);
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Sort chats' });
+      await waitFor(() =>
+        expect(screen.getByLabelText('Waiting for you to approve a tool call')).toBeInTheDocument()
+      );
+      chooseSelect('Sort chats', 'Needs attention');
+
+      const titles = [...document.querySelectorAll('.chat-title')].map((node) => node.textContent);
+      expect(titles[0]).toBe('Chat 3');
+      expect(localStorage.getItem(CHAT_SORT_STORAGE_KEY)).toBe('status');
+    });
+
+    it('narrows the list to one facet and offers a way back', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'writing' }),
+        indicator('chat-2', {
+          pull_request: openPull({ status: { checks: 'failing' } }),
+          pull_requests: 1,
+        }),
+      ]);
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Filter chats by status' });
+      await waitFor(() => expect(screen.getByLabelText('Writing a reply')).toBeInTheDocument());
+
+      chooseSelect('Filter chats by status', 'Checks failing');
+      await waitFor(() => expect(screen.queryByText('Chat 1')).not.toBeInTheDocument());
+      expect(screen.getByText('Chat 2')).toBeInTheDocument();
+      expect(localStorage.getItem(CHAT_FILTER_STORAGE_KEY)).toBe('failing');
+
+      chooseSelect('Filter chats by status', 'Ready to merge');
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Show all chats' }));
+      expect(await screen.findByText('Chat 1')).toBeInTheDocument();
+      expect(localStorage.getItem(CHAT_FILTER_STORAGE_KEY)).toBe('all');
+    });
+
+    it('keeps the open chat marked as waiting while its parked turn still streams', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'awaiting_approval' }),
+      ]);
+
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      act(() => {
+        socket.emit({ type: 'message_start', message_id: 'stream', role: 'assistant' });
+        socket.emit({ type: 'chunk', content: 'Working', index: 0 });
+      });
+
+      await waitFor(() =>
+        expect(screen.getByLabelText('Waiting for you to approve a tool call')).toBeInTheDocument()
+      );
+      expect(screen.queryByTestId('chat-status-writing')).toBeNull();
+    });
+
+    it('waits for the first reading before telling a saved filter that nothing matches', async () => {
+      localStorage.setItem(CHAT_FILTER_STORAGE_KEY, 'ready');
+      let answer: (indicators: unknown[]) => void = () => undefined;
+      mockGetChatIndicators.mockImplementationOnce(
+        () => new Promise((resolve) => (answer = resolve))
+      );
+
+      renderChatsPage();
+
+      expect(await screen.findByText('Reading chat statuses...')).toBeInTheDocument();
+      expect(screen.queryByText('No loaded chats match this filter')).toBeNull();
+
+      await act(async () => {
+        answer([]);
+      });
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+    });
+
+    it('still offers the next page when nothing loaded matches the filter', async () => {
+      mockGetChats.mockResolvedValue({ chats: mockChats, total: mockChats.length + 25 });
+      mockGetChatIndicators.mockResolvedValue(
+        mockChats.map((chat) => indicator(chat.id, { activity: 'idle' }))
+      );
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Filter chats by status' });
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /Load more chats/ })).toBeInTheDocument()
+      );
+
+      chooseSelect('Filter chats by status', 'Ready to merge');
+
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Load more chats/ })).toBeInTheDocument();
+    });
+
+    it('says the statuses are stale when the reading fails, and still lists the chats', async () => {
+      mockGetChatIndicators.mockRejectedValue(new Error('GitHub is unreachable'));
+
+      renderChatsPage();
+
+      expect(await screen.findByText(/Statuses are out of date/)).toHaveTextContent(
+        'GitHub is unreachable'
+      );
+      expect(screen.getByText('Chat 1')).toBeInTheDocument();
     });
   });
 });

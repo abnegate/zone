@@ -322,6 +322,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/chats", get(chats::list).post(chats::create))
         .route("/api/chats/search", get(chats::search_messages))
+        .route("/api/chats/indicators", get(chats::indicators))
         .route(
             "/api/chats/{id}",
             get(chats::get).put(chats::update).delete(chats::delete),

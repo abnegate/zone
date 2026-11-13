@@ -574,6 +574,39 @@ export interface PullRequestThreads {
   resolved: number;
 }
 
+export const CHAT_ACTIVITIES = ['writing', 'awaiting_approval', 'awaiting_answer', 'idle'] as const;
+/**
+ * What a chat is doing, as the server reads it: a turn in flight, a turn parked
+ * on an approval, a question with no answer after it, or nothing outstanding.
+ */
+export type ChatActivity = (typeof CHAT_ACTIVITIES)[number];
+
+/** The pull request a chat's row speaks for. */
+export interface ChatPullIndicator {
+  id: string;
+  number: number;
+  url: string;
+  title: string | null;
+  /** Absent when GitHub could not be asked, which is never a passing result. */
+  status: PullRequestStatus | null;
+  /**
+   * Whether it could merge as it stands: open, out of draft, every check
+   * passing, nothing blocking the merge and no open review thread. The server
+   * decides it, so the console never has to guess at a rule that has to match
+   * what a merge would actually do.
+   */
+  ready: boolean;
+}
+
+/** One chat as its row in the list shows it. */
+export interface ChatIndicator {
+  chat_id: string;
+  activity: ChatActivity;
+  pull_request: ChatPullIndicator | null;
+  /** How many undismissed pull requests the chat has. */
+  pull_requests: number;
+}
+
 export interface PullRequestStatus {
   title: string;
   state: PullRequestState;

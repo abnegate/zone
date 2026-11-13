@@ -86,6 +86,11 @@
   padding: 0 var(--ui-space-3) var(--ui-space-2);
 }
 
+/* Its own row: three controls across a sidebar leaves none of them readable. */
+.chats-arrange-status {
+  padding-top: 0;
+}
+
 .chats-arrange .ui-select-trigger {
   flex: 1 1 0;
   width: auto;
@@ -165,6 +170,73 @@
   flex: 1;
 }
 
+.chat-status {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--ui-space-1);
+  margin-right: var(--ui-space-2);
+}
+
+.chat-status-activity {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: var(--ui-radius-full);
+}
+
+.chat-status-activity.is-writing {
+  background: var(--ui-accent);
+  animation: chat-status-pulse 1.4s ease-in-out infinite;
+}
+
+/* Waiting on a person is a ring rather than a dot: it is not going anywhere
+   until somebody answers, so it should not look like work in progress. */
+.chat-status-activity.is-awaiting_approval,
+.chat-status-activity.is-awaiting_answer {
+  background: transparent;
+  box-shadow: inset 0 0 0 2px var(--chat-change-pending, #8f5a00);
+}
+
+@keyframes chat-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-status-activity.is-writing {
+    animation: none;
+  }
+}
+
+.chat-status-pull {
+  width: 0.875rem;
+  height: 0.875rem;
+  color: var(--ui-text-secondary);
+}
+
+.chat-status-pull.is-ready {
+  color: var(--chat-change-added, #11743f);
+}
+
+.chat-status-pull.is-failing,
+.chat-status-pull.is-closed {
+  color: var(--chat-change-removed, #b4231a);
+}
+
+.chat-status-pull.is-running {
+  color: var(--chat-change-pending, #8f5a00);
+}
+
+.chat-status-pull.is-merged {
+  color: var(--chat-change-merged, #7a3fd1);
+}
+
 .chat-title {
   display: block;
   overflow: hidden;
@@ -232,6 +304,13 @@
   .chat-item-content {
     padding-right: calc(var(--chat-item-actions) + var(--ui-space-2));
   }
+}
+
+.chats-notice {
+  flex-shrink: 0;
+  padding: 0 var(--ui-space-3) var(--ui-space-2);
+  color: var(--ui-text-muted);
+  font-size: var(--ui-text-xs);
 }
 
 .chats-loading,
