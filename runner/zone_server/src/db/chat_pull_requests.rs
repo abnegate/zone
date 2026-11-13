@@ -113,6 +113,27 @@ where
     .await
 }
 
+/// The undismissed pull requests of every one of these chats, oldest first.
+/// Reading a list of chats takes one query rather than one each.
+pub async fn for_chats<'e, E>(executor: E, chat_ids: &[Uuid]) -> DbResult<Vec<PullRequestRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    if chat_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(concat!(
+        "SELECT ",
+        columns!(),
+        " FROM chat_pull_requests
+         WHERE chat_id = ANY($1) AND dismissed_at IS NULL
+         ORDER BY created_at, id"
+    ))
+    .bind(chat_ids)
+    .fetch_all(executor)
+    .await
+}
+
 /// One pull request `chat_id` opened, dismissed or not.
 pub async fn get<'e, E>(executor: E, chat_id: Uuid, id: Uuid) -> DbResult<Option<PullRequestRow>>
 where

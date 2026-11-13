@@ -1,4 +1,5 @@
-import type { Chat } from '../types';
+import type { Chat, ChatIndicator } from '../types';
+import { attentionRank } from './indicators';
 
 export const CHAT_GROUP_BY = ['none', 'project', 'date'] as const;
 export type ChatGroupBy = (typeof CHAT_GROUP_BY)[number];
@@ -10,6 +11,7 @@ export const CHAT_SORT = [
   'created_asc',
   'title_asc',
   'title_desc',
+  'status',
 ] as const;
 export type ChatSort = (typeof CHAT_SORT)[number];
 
@@ -20,6 +22,7 @@ export const CHAT_GROUP_OPTIONS: ReadonlyArray<{ value: ChatGroupBy; label: stri
 ];
 
 export const CHAT_SORT_OPTIONS: ReadonlyArray<{ value: ChatSort; label: string }> = [
+  { value: 'status', label: 'Needs attention' },
   { value: 'updated_desc', label: 'Last updated' },
   { value: 'updated_asc', label: 'Oldest updated' },
   { value: 'created_desc', label: 'Newest' },
@@ -47,6 +50,12 @@ export interface ArrangeChatsOptions {
   groupBy: ChatGroupBy;
   sort: ChatSort;
   projectNames?: Record<string, string>;
+  /**
+   * What each chat is doing, by chat id. Only the status sort reads it, and a
+   * chat with no reading yet sorts last rather than jumping to the top as the
+   * readings arrive.
+   */
+  indicators?: Record<string, ChatIndicator>;
   now?: Date;
 }
 
@@ -75,8 +84,8 @@ export function writeChatSort(value: ChatSort): void {
 }
 
 export function arrangeChats(chats: readonly Chat[], options: ArrangeChatsOptions): ChatGroup[] {
-  const { groupBy, sort, projectNames = {}, now = new Date() } = options;
-  const sorted = [...chats].sort((left, right) => compareChats(left, right, sort));
+  const { groupBy, sort, projectNames = {}, indicators = {}, now = new Date() } = options;
+  const sorted = [...chats].sort((left, right) => compareChats(left, right, sort, indicators));
 
   if (groupBy === 'none') {
     return [{ key: 'all', label: null, chats: sorted }];
@@ -101,8 +110,19 @@ function readAllowed<T extends string>(key: string, allowed: readonly T[], fallb
   return value !== null && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
 }
 
-function compareChats(left: Chat, right: Chat, sort: ChatSort): number {
+function compareChats(
+  left: Chat,
+  right: Chat,
+  sort: ChatSort,
+  indicators: Record<string, ChatIndicator>
+): number {
   switch (sort) {
+    case 'status':
+      return (
+        attentionRank(indicators[left.id]) - attentionRank(indicators[right.id]) ||
+        timestamp(right.updated_at) - timestamp(left.updated_at) ||
+        left.id.localeCompare(right.id)
+      );
     case 'updated_desc':
       return (
         timestamp(right.updated_at) - timestamp(left.updated_at) || left.id.localeCompare(right.id)

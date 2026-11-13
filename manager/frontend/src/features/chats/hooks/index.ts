@@ -1,4 +1,6 @@
 export { useChat } from './useChat';
+export type { ChatIndicators } from './useChatIndicators';
+export { useChatIndicators } from './useChatIndicators';
 export { useChatProviders } from './useChatProviders';
 export type { ChatPullRequests } from './useChatPullRequests';
 export { useChatPullRequests } from './useChatPullRequests';

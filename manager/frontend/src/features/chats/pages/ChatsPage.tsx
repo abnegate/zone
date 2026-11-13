@@ -34,6 +34,7 @@ import {
   ChatMenu,
   ChatPanel,
   ChatSources,
+  ChatStatusIndicator,
   Generation,
   HandoverNotice,
   HeaderPopover,
@@ -50,6 +51,7 @@ import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
 import {
   useChat,
+  useChatIndicators,
   useChatProviders,
   useChatPullRequests,
   useChatSearch,
@@ -62,6 +64,7 @@ import {
 import type { SubagentRequest } from '../subagentTypes';
 import {
   type Chat,
+  type ChatIndicator,
   type ChatProviderOffer,
   type ChatSearchResult,
   REASONING_EFFORT_LABELS,
@@ -79,6 +82,7 @@ import {
   audioAttachments,
   automated,
   buildMessageWithAttachments,
+  CHAT_FILTER_OPTIONS,
   CHAT_GROUP_OPTIONS,
   CHAT_SORT_OPTIONS,
   chatModelName,
@@ -99,6 +103,7 @@ import {
   galleryItems,
   imageAttachments,
   isAgentOffer,
+  isChatFilter,
   isChatGroupBy,
   isChatSort,
   isSendable,
@@ -106,6 +111,7 @@ import {
   keepEffort,
   MODEL_NAME_PLACEHOLDER,
   MODEL_PLACEHOLDER,
+  matchesFilter,
   modelLabel,
   modelSelectOptions,
   type NewChatSettings,
@@ -118,6 +124,7 @@ import {
   parseCharacterText,
   providerChoices,
   readAttachment,
+  readChatFilter,
   readChatGroupBy,
   readChatSort,
   reasoningOptions,
@@ -129,6 +136,7 @@ import {
   splitTurn,
   toPlainText,
   videoAttachments,
+  writeChatFilter,
   writeChatGroupBy,
   writeChatSort,
 } from '../utils';
@@ -179,6 +187,7 @@ export default function ChatsPage() {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [groupBy, setGroupBy] = useState(readChatGroupBy);
   const [sort, setSort] = useState(readChatSort);
+  const [filter, setFilter] = useState(readChatFilter);
   const [messageInput, setMessageInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -228,11 +237,6 @@ export default function ChatsPage() {
     () => Object.fromEntries(projects.map((project) => [project.id, project.name])),
     [projects]
   );
-  const arranged = useMemo(
-    () => arrangeChats(chats, { groupBy, sort, projectNames }),
-    [chats, groupBy, sort, projectNames]
-  );
-
   const {
     chat: activeChat,
     context,
@@ -263,6 +267,36 @@ export default function ChatsPage() {
     content: messageInput,
     metadata: attachmentMetadata(attachments.filter(isSendable)),
   });
+
+  const { indicators, error: indicatorsError } = useChatIndicators(
+    currentWorkspace?.id,
+    showArchived,
+    streaming
+  );
+  // The open chat's own socket knows it is writing before the next poll does,
+  // and only ever adds that: a reading the server made stands until it is read
+  // again, because this socket cannot see a turn somebody else's can.
+  const liveIndicators = useMemo((): Record<string, ChatIndicator> => {
+    if (!streaming || !selectedChatId) return indicators;
+    const current = indicators[selectedChatId];
+    return {
+      ...indicators,
+      [selectedChatId]: {
+        chat_id: selectedChatId,
+        activity: 'writing',
+        pull_request: current?.pull_request ?? null,
+        pull_requests: current?.pull_requests ?? 0,
+      },
+    };
+  }, [indicators, selectedChatId, streaming]);
+  const matching = useMemo(
+    () => chats.filter((chat) => matchesFilter(liveIndicators[chat.id], filter)),
+    [chats, liveIndicators, filter]
+  );
+  const arranged = useMemo(
+    () => arrangeChats(matching, { groupBy, sort, projectNames, indicators: liveIndicators }),
+    [matching, groupBy, sort, projectNames, liveIndicators]
+  );
 
   const {
     results: searchResults,
@@ -1067,6 +1101,14 @@ export default function ChatsPage() {
     writeChatSort(value);
   };
 
+  const handleFilter = (value: string) => {
+    if (!isChatFilter(value)) return;
+    setFilter(value);
+    writeChatFilter(value);
+  };
+
+  const clearFilter = () => handleFilter('all');
+
   const openRename = (chat: Chat) => {
     setRenameId(chat.id);
     setTitle(chat.title);
@@ -1082,6 +1124,7 @@ export default function ChatsPage() {
       role="button"
       tabIndex={0}
     >
+      <ChatStatusIndicator indicator={liveIndicators[chat.id]} />
       <div className="chat-item-content">
         <span className="chat-title">{chat.title}</span>
         <span className="chat-meta">
@@ -1199,6 +1242,24 @@ export default function ChatsPage() {
           </div>
         )}
 
+        {!showSearchResults && chats.length > 0 && (
+          <div className="chats-arrange chats-arrange-status">
+            <Select
+              compact
+              value={filter}
+              onValueChange={handleFilter}
+              aria-label="Filter chats by status"
+              options={[...CHAT_FILTER_OPTIONS]}
+            />
+          </div>
+        )}
+
+        {indicatorsError && !showSearchResults && (
+          <div className="chats-notice" role="status">
+            Statuses are out of date: {indicatorsError}
+          </div>
+        )}
+
         {operationError && !showNewChatModal && (
           <div className="chats-error" role="alert">
             {operationError}
@@ -1269,6 +1330,23 @@ export default function ChatsPage() {
                 : 'Start a new conversation to get started'
             }
             action={!showArchived ? <Button onClick={openNewChat}>New chat</Button> : undefined}
+          />
+        ) : matching.length === 0 ? (
+          <EmptyState
+            icon={
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <path d="M4 5h16M7 12h10M10 19h4" />
+              </svg>
+            }
+            title="No chats match this filter"
+            description={
+              CHAT_FILTER_OPTIONS.find((option) => option.value === filter)?.label ?? filter
+            }
+            action={
+              <Button variant="secondary" onClick={clearFilter}>
+                Show all chats
+              </Button>
+            }
           />
         ) : (
           <div className="chats-list">

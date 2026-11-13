@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
-import type { Chat } from '../types';
+import type { Chat, ChatIndicator } from '../types';
 import {
   arrangeChats,
   CHAT_GROUP_STORAGE_KEY,
@@ -256,6 +256,64 @@ describe('chat arrange storage', () => {
     localStorage.setItem(CHAT_SORT_STORAGE_KEY, 'popular');
     expect(readChatGroupBy()).toBe('none');
     expect(readChatSort()).toBe('updated_desc');
+  });
+});
+
+describe('sorting by status', () => {
+  const indicator = (overrides: Partial<ChatIndicator>): ChatIndicator => ({
+    chat_id: 'chat',
+    activity: 'idle',
+    pull_request: null,
+    pull_requests: 0,
+    ...overrides,
+  });
+
+  const chats = [
+    chat({ id: 'quiet', title: 'Quiet', updated_at: iso(2026, 9, 2, 14) }),
+    chat({ id: 'writing', title: 'Writing', updated_at: iso(2026, 9, 2, 13) }),
+    chat({ id: 'asked', title: 'Asked', updated_at: iso(2026, 9, 2, 12) }),
+    chat({ id: 'unread', title: 'Unread', updated_at: iso(2026, 9, 2, 11) }),
+  ];
+
+  const indicators = {
+    writing: indicator({ chat_id: 'writing', activity: 'writing' }),
+    asked: indicator({ chat_id: 'asked', activity: 'awaiting_answer' }),
+    quiet: indicator({ chat_id: 'quiet', activity: 'idle' }),
+  };
+
+  it('puts the chat waiting for a person above the one still writing', () => {
+    expect(ids(arrangeChats(chats, { groupBy: 'none', sort: 'status', indicators }))).toEqual([
+      'asked',
+      'writing',
+      'quiet',
+      'unread',
+    ]);
+  });
+
+  it('falls back to the last update within one rank', () => {
+    const same = {
+      first: indicator({ chat_id: 'writing', activity: 'writing' }),
+      second: indicator({ chat_id: 'asked', activity: 'writing' }),
+    };
+
+    expect(
+      ids(
+        arrangeChats(chats, {
+          groupBy: 'none',
+          sort: 'status',
+          indicators: { writing: same.first, asked: same.second },
+        })
+      )
+    ).toEqual(['writing', 'asked', 'quiet', 'unread']);
+  });
+
+  it('keeps the order stable before any reading arrives', () => {
+    expect(ids(arrangeChats(chats, { groupBy: 'none', sort: 'status' }))).toEqual([
+      'quiet',
+      'writing',
+      'asked',
+      'unread',
+    ]);
   });
 });
 

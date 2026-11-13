@@ -22,6 +22,7 @@ use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
 use crate::services::chat::driver::Driver;
+use crate::services::chat::indicator::{self, Indicator};
 use crate::services::chat::session;
 use crate::services::model::Model;
 use crate::services::provider::Provider;
@@ -391,6 +392,12 @@ pub struct ChatsListResponse {
     chats: Vec<ChatResponse>,
 }
 
+/// What each chat in the workspace is doing, for the list's indicators.
+#[derive(Debug, Serialize)]
+pub struct ChatIndicatorsResponse {
+    chats: Vec<Indicator>,
+}
+
 #[derive(Debug, Serialize)]
 struct SingleMessageResponse {
     message: MessageResponse,
@@ -530,6 +537,21 @@ pub async fn list(
                 .into_response()
         }
     }
+}
+
+/// GET /api/chats/indicators
+///
+/// Separate from the list itself because it is read on a timer and can involve
+/// GitHub, while a list read has to stay quick and local.
+pub async fn indicators(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ListChatsQuery>,
+) -> Result<Json<ChatIndicatorsResponse>, ServerError> {
+    check_workspace_read_access(&state, &auth, query.workspace_id).await?;
+    Ok(Json(ChatIndicatorsResponse {
+        chats: indicator::list(&state, query.workspace_id, query.archived).await?,
+    }))
 }
 
 /// POST /api/chats

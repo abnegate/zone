@@ -37,6 +37,7 @@ import {
   APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_ANSWER_DETAIL,
   AWAITING_APPROVAL_DETAIL,
+  CHAT_ACTIVITIES,
   DENIED_DETAIL,
   PULL_REQUEST_CHECKS,
   PULL_REQUEST_MERGEABILITY,
@@ -644,6 +645,26 @@ describe('a chat pull request reads as the server describes it', () => {
   ] as const)('%s variants match', (file, name, values) => {
     const source = readFileSync(join(PULL_REQUEST_RS, file), 'utf8');
     expect([...values].sort()).toEqual(rustVariants(source, name).sort());
+  });
+
+  /// The reader's only evidence that review comments were addressed. Reading it
+  /// off a field the server stopped sending would leave every chat's row
+  /// claiming a clean review nobody checked, so the name is pinned here.
+  test('the status carries the review threads readiness is read from', () => {
+    const source = readFileSync(join(PULL_REQUEST_RS, 'status.rs'), 'utf8');
+    expect(Object.keys(rustStructFields(source, 'Status'))).toContain('threads');
+  });
+});
+
+const INDICATOR_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/services/chat/indicator.rs'
+);
+
+describe('a chat row reads the activity the server named', () => {
+  test('Activity variants match', () => {
+    const source = readFileSync(INDICATOR_RS, 'utf8');
+    expect([...CHAT_ACTIVITIES].sort()).toEqual(rustVariants(source, 'Activity').sort());
   });
 });
 

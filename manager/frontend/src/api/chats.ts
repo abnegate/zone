@@ -1,4 +1,5 @@
 import {
+  ChatIndicatorsResponseSchema,
   ChatProvidersSchema,
   ChatPullRequestSchema,
   ChatPullRequestsResponseSchema,
@@ -22,6 +23,7 @@ import {
 import type { SubagentList, SubagentStep } from '../features/chats/subagentTypes';
 import type {
   Chat,
+  ChatIndicator,
   ChatProviders,
   ChatPullRequest,
   ChatSearchOptions,
@@ -97,6 +99,24 @@ class ChatsApi {
     }
     const data = parse(ChatsResponseSchema, await response.json());
     return data.chats;
+  }
+
+  /**
+   * What each chat in the workspace is doing, and what became of the pull
+   * request its work opened. Read apart from the list so a list stays quick.
+   */
+  async getChatIndicators(workspaceId: string, archived?: boolean): Promise<ChatIndicator[]> {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (archived !== undefined) {
+      params.set('archived', String(archived));
+    }
+    const response = await fetch(`${API_BASE}/api/chats/indicators?${params}`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load chat indicators');
+    }
+    return parse(ChatIndicatorsResponseSchema, await response.json()).chats;
   }
 
   async getChat(id: string): Promise<ChatWithMessages> {
