@@ -14,6 +14,8 @@ use zone_installer::{MANAGER_DIR, ServeKind, bind, config_path, resolve_manager_
 mod manager_bundle;
 #[cfg(desktop)]
 mod menu;
+#[cfg(desktop)]
+mod zoom;
 
 struct ClientState {
     server: AppState,
@@ -38,6 +40,9 @@ pub fn run() {
 
     #[cfg(desktop)]
     let builder = builder.on_menu_event(|app, event| {
+        if zoom::handle_menu_event(app, event.id().as_ref()) {
+            return;
+        }
         let Some(state) = app.try_state::<ClientState>() else {
             return;
         };
@@ -129,7 +134,10 @@ fn open_window(app: &AppHandle, url: &str) -> Result<(), Box<dyn std::error::Err
         // Tauri's own drag-drop handler consumes the drop before the page sees
         // `dataTransfer`, which is what the composer and the model drop zones
         // read. Disabling it hands drops back to the webview.
-        .disable_drag_drop_handler();
+        .disable_drag_drop_handler()
+        // Zoom combos the View menu's accelerators cannot match, such as a
+        // shifted `+` or the numpad, are caught in the page instead.
+        .initialization_script(zoom::script());
 
     builder.build()?;
     Ok(())
