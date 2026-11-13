@@ -97,12 +97,13 @@ fn append<'m>(
             CHANGE_SERVER_LABEL,
             CHANGE_SERVER_ACCELERATOR,
         )?),
-        Entry::ZoomIn => {
-            submenu.item(&command(app, ZOOM_IN, ZOOM_IN_LABEL, ZOOM_IN_ACCELERATOR)?)
-        }
-        Entry::ZoomOut => {
-            submenu.item(&command(app, ZOOM_OUT, ZOOM_OUT_LABEL, ZOOM_OUT_ACCELERATOR)?)
-        }
+        Entry::ZoomIn => submenu.item(&command(app, ZOOM_IN, ZOOM_IN_LABEL, ZOOM_IN_ACCELERATOR)?),
+        Entry::ZoomOut => submenu.item(&command(
+            app,
+            ZOOM_OUT,
+            ZOOM_OUT_LABEL,
+            ZOOM_OUT_ACCELERATOR,
+        )?),
         Entry::ActualSize => submenu.item(&command(
             app,
             ACTUAL_SIZE,
