@@ -477,6 +477,14 @@ pub fn create_router(state: AppState) -> Router {
             get(mcp_servers::list).post(mcp_servers::create),
         )
         .route(
+            "/api/organizations/{org_id}/mcp-servers/providers",
+            get(mcp_servers::list_providers),
+        )
+        .route(
+            "/api/organizations/{org_id}/mcp-servers/imports",
+            post(mcp_servers::import),
+        )
+        .route(
             "/api/organizations/{org_id}/mcp-servers/{server_id}",
             get(mcp_servers::get)
                 .put(mcp_servers::update)

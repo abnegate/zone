@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ChatSource } from '../types';
+import { cached } from '../utils/cached';
 
 const mockGetChatSources = mock();
 const mockSetChatSources = mock();
@@ -106,5 +107,28 @@ describe('useChatSources', () => {
     });
     expect(mockGetChatSources).not.toHaveBeenCalled();
     expect(mockSetChatSources).not.toHaveBeenCalled();
+  });
+
+  describe('cache', () => {
+    it('draws the attachment of a chat read before at once, without loading', () => {
+      cached.sources.remember('chat-1', [repository]);
+      mockGetChatSources.mockImplementation(() => new Promise(() => {}));
+
+      const { result } = renderHook(() => useChatSources('chat-1'));
+
+      expect(result.current.sources).toEqual([repository]);
+      expect(result.current.loading).toBe(false);
+    });
+
+    it('remembers what it reads and what it attaches', async () => {
+      mockGetChatSources.mockResolvedValue([repository]);
+      mockSetChatSources.mockResolvedValue([repository, notes]);
+      const { result } = renderHook(() => useChatSources('chat-1'));
+      await waitFor(() => expect(cached.sources.peek('chat-1')).toEqual([repository]));
+
+      await act(() => result.current.setAttached([repository.id, notes.id]));
+
+      expect(cached.sources.peek('chat-1')).toEqual([repository, notes]);
+    });
   });
 });

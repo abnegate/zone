@@ -12,7 +12,7 @@ function visibleText(element: Element): string {
 
 describe('Generation', () => {
   it('shows only the spinner and the elapsed time while a turn has no status', () => {
-    const { container } = render(<Generation status={null} />);
+    const { container } = render(<Generation status={null} started={null} />);
 
     const indicator = container.querySelector('.message-status');
     expect(indicator).not.toBeNull();
@@ -22,7 +22,7 @@ describe('Generation', () => {
   });
 
   it('still tells a screen reader the turn is responding', () => {
-    render(<Generation status={null} />);
+    render(<Generation status={null} started={null} />);
 
     const status = screen.getByRole('status');
     expect(status).toHaveTextContent(RESPONDING);
@@ -30,7 +30,7 @@ describe('Generation', () => {
   });
 
   it('shows a status the server reports beside the time', () => {
-    const { container } = render(<Generation status="Generating image…" />);
+    const { container } = render(<Generation status="Generating image…" started={null} />);
 
     const status = screen.getByRole('status');
     expect(status).toHaveTextContent('Generating image…');
@@ -38,5 +38,17 @@ describe('Generation', () => {
     expect(visibleText(container.querySelector('.message-status') as Element)).toBe(
       'Generating image…0:00'
     );
+  });
+
+  it('counts from when the turn started rather than from when it was drawn', () => {
+    render(<Generation status={null} started={Date.now() - 95_000} />);
+
+    expect(screen.getByRole('timer')).toHaveTextContent('1:35');
+  });
+
+  it('reads zero rather than backwards when the start is ahead of this clock', () => {
+    render(<Generation status={null} started={Date.now() + 5_000} />);
+
+    expect(screen.getByRole('timer')).toHaveTextContent('0:00');
   });
 });

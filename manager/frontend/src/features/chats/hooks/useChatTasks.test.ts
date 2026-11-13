@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ChatTask } from '../types';
+import { cached } from '../utils/cached';
 
 const mockGetChatTasks = mock();
 
@@ -173,5 +174,20 @@ describe('useChatTasks', () => {
     await act(() => result.current.refresh());
     await waitFor(() => expect(result.current.error).toBe('Failed to load tasks'));
     expect(result.current.tasks).toEqual([RUNNING]);
+  });
+
+  describe('cache', () => {
+    it('draws the tasks of a chat read before on its first render, then refreshes them', async () => {
+      cached.tasks.remember('chat-1', [RUNNING]);
+      let answer: (tasks: ChatTask[]) => void = () => {};
+      mockGetChatTasks.mockImplementation(() => new Promise((resolve) => (answer = resolve)));
+
+      const { result } = renderHook(() => useChatTasks('chat-1', false));
+      expect(result.current.tasks).toEqual([RUNNING]);
+
+      await act(async () => answer([DONE]));
+      expect(result.current.tasks).toEqual([DONE]);
+      expect(cached.tasks.peek('chat-1')).toEqual([DONE]);
+    });
   });
 });

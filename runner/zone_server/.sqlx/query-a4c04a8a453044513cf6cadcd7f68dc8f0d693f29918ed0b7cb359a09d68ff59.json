@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*) AS \"total!\"\n        FROM chats\n        WHERE workspace_id = $1 AND ($2::bool IS NULL OR archived = $2)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "a4c04a8a453044513cf6cadcd7f68dc8f0d693f29918ed0b7cb359a09d68ff59"
+}

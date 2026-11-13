@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+#[cfg(desktop)]
+use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use zone_installer::client::{ClientPlatform, ManagerDirInputs, WEBVIEW_BIND};
@@ -123,12 +125,36 @@ fn open_window(app: &AppHandle, url: &str) -> Result<(), Box<dyn std::error::Err
         .inner_size(1280.0, 840.0)
         .min_inner_size(900.0, 600.0)
         .resizable(true)
+        // The webview has no tabs, so without this a `target="_blank"` link or a
+        // `window.open` call is dropped and the click does nothing at all.
+        .on_new_window(|url, _| {
+            open_externally(&url);
+            NewWindowResponse::Deny
+        })
+        // Tauri's own drag-drop handler consumes the drop before the page sees
+        // `dataTransfer`, which is what the composer and the model drop zones
+        // read. Disabling it hands drops back to the webview.
+        .disable_drag_drop_handler()
         // Zoom combos the View menu's accelerators cannot match, such as a
         // shifted `+` or the numpad, are caught in the page instead.
         .initialization_script(zoom::script());
 
     builder.build()?;
     Ok(())
+}
+
+/// Hands a link the page asked to open elsewhere to the user's browser. A url
+/// can come from model output or a citation, so only the web schemes travel;
+/// failing to open one is logged rather than surfaced, since nothing waits on it.
+#[cfg(desktop)]
+fn open_externally(url: &tauri::Url) {
+    if !matches!(url.scheme(), "http" | "https" | "mailto") {
+        tracing::warn!(%url, "Refused to open a url outside the web schemes");
+        return;
+    }
+    if let Err(error) = tauri_plugin_opener::open_url(url.as_str(), None::<&str>) {
+        tracing::error!(%error, %url, "Failed to open a url in the browser");
+    }
 }
 
 fn reload_main(app: &AppHandle) {
