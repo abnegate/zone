@@ -2039,3 +2039,9 @@
     flex-wrap: wrap;
   }
 }
+
+.chats-more {
+  display: flex;
+  justify-content: center;
+  padding: var(--ui-space-2) 0;
+}

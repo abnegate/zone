@@ -357,3 +357,55 @@ describe('chatsApi.getChatSubagentSteps', () => {
     );
   });
 });
+
+describe('chatsApi.getChats', () => {
+  const listed = {
+    id: 'chat-1',
+    title: 'First',
+    model_name: 'gpt-4',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    archived: false,
+    agent_enabled: false,
+  };
+
+  it('asks for one page in the chosen order and reads how many there are in all', async () => {
+    const request = mock(async () => Response.json({ chats: [listed], total: 40 }));
+    globalThis.fetch = request as unknown as typeof globalThis.fetch;
+
+    const page = await chatsApi.getChats('ws-1', {
+      archived: false,
+      sort: 'title_asc',
+      limit: 25,
+      offset: 25,
+    });
+
+    const parameters = searchParameters(request);
+    expect(parameters.get('workspace_id')).toBe('ws-1');
+    expect(parameters.get('archived')).toBe('false');
+    expect(parameters.get('sort')).toBe('title_asc');
+    expect(parameters.get('limit')).toBe('25');
+    expect(parameters.get('offset')).toBe('25');
+    expect(page.total).toBe(40);
+    expect(page.chats.map((chat) => chat.id)).toEqual(['chat-1']);
+  });
+
+  it('leaves out what was not asked for', async () => {
+    const request = mock(async () => Response.json({ chats: [] }));
+    globalThis.fetch = request as unknown as typeof globalThis.fetch;
+
+    await chatsApi.getChats('ws-1');
+
+    expect([...searchParameters(request).keys()]).toEqual(['workspace_id']);
+  });
+
+  it('treats a server that sends no total as having nothing past this page', async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ chats: [listed] })
+    ) as unknown as typeof globalThis.fetch;
+
+    const page = await chatsApi.getChats('ws-1', { limit: 25, offset: 50 });
+
+    expect(page.total).toBe(51);
+  });
+});

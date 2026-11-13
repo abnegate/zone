@@ -14,6 +14,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
 import { RESPONDING } from '../components/Generation';
+import { LOAD_MORE_CHATS } from '../components/MoreChats';
 import type {
   Chat,
   ChatProviderOffer,
@@ -70,9 +71,14 @@ let socket: FakeSocket;
 Element.prototype.scrollIntoView = mock();
 
 // Mock the chatsApi
+mock.module('../hooks/usePreloadChats', () => ({ usePreloadChats: () => {} }));
+
 mock.module('../../../api/chats', () => ({
   chatsApi: {
-    getChats: mockGetChats,
+    getChats: async (...args: unknown[]) => {
+      const listed = await mockGetChats(...args);
+      return Array.isArray(listed) ? { chats: listed, total: listed.length } : listed;
+    },
     getChat: mockGetChat,
     createChat: mockCreateChat,
     sendMessage: mockSendMessage,
@@ -1088,7 +1094,10 @@ describe('ChatsPage', () => {
       fireEvent.click(archivedTab);
 
       await waitFor(() => {
-        expect(mockClient.getChats).toHaveBeenCalledWith('ws-1', true);
+        expect(mockClient.getChats).toHaveBeenCalledWith(
+          'ws-1',
+          expect.objectContaining({ archived: true })
+        );
       });
     });
 
@@ -1103,7 +1112,10 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('tab', { name: 'Active' }));
 
       await waitFor(() => {
-        expect(mockClient.getChats).toHaveBeenLastCalledWith('ws-1', false);
+        expect(mockClient.getChats).toHaveBeenLastCalledWith(
+          'ws-1',
+          expect.objectContaining({ archived: false })
+        );
       });
     });
   });
@@ -5812,6 +5824,24 @@ describe('ChatsPage', () => {
 
       expect(await screen.findByText('Hi there!')).toBeInTheDocument();
       expect(screen.queryByRole('note')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('paging', () => {
+    it('loads the next page of chats from the end of the list', async () => {
+      mockClient.getChats
+        .mockResolvedValueOnce({ chats: [mockChats[0]], total: 2 })
+        .mockResolvedValueOnce({ chats: [mockChats[1]], total: 2 });
+
+      renderChatsPage();
+      fireEvent.click(await screen.findByRole('button', { name: `${LOAD_MORE_CHATS} (1)` }));
+
+      expect(await screen.findByText(mockChats[1].title)).toBeInTheDocument();
+      expect(mockClient.getChats).toHaveBeenLastCalledWith(
+        'ws-1',
+        expect.objectContaining({ offset: 1 })
+      );
+      expect(screen.queryByRole('button', { name: /Load more chats/ })).not.toBeInTheDocument();
     });
   });
 

@@ -1,12 +1,22 @@
 import type { ChatWithMessages } from '../types';
 
-export const CACHED_CHATS = 20;
+export const CACHED_CHATS = 100;
 
 /** The last-seen history of recently opened chats, so reopening one draws it at once. */
 class History {
   private readonly chats = new Map<string, ChatWithMessages>();
+  private cleared = 0;
 
   constructor(private readonly capacity: number) {}
+
+  /** Changes whenever the cache is cleared, so a fetch begun before a logout can tell. */
+  get epoch(): number {
+    return this.cleared;
+  }
+
+  has(chatId: string): boolean {
+    return this.chats.has(chatId);
+  }
 
   recall(chatId: string): ChatWithMessages | null {
     const chat = this.chats.get(chatId);
@@ -35,6 +45,7 @@ class History {
   }
 
   clear(): void {
+    this.cleared += 1;
     this.chats.clear();
   }
 }
