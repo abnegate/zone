@@ -280,9 +280,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-vcs"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a07ab705693e2f2961c22de912bda98f1b8ceb485df2f1e9e7effb857e23e14d"
+checksum = "cf872c8081d2d0f6f8bbc7251ef27d46bffe7791e108040bf459e397072bc155"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
