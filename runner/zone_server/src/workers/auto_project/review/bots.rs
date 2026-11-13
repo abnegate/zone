@@ -1,18 +1,25 @@
 //! What the review bots already on a repository said about a change.
 //!
 //! CodeRabbit and Greptile review a pull request on their own schedule and
-//! leave a summary comment naming the head they read; `agent::readiness`
+//! leave a summary comment naming the head they read; `services::github::readiness`
 //! already knows how to read those. Here a bot's summary on the current head
 //! becomes a round of review like any other -- a review by a model that did
 //! not write the change -- and its unresolved threads become findings a
 //! fix-up run has to answer.
 
-use crate::agent::readiness::{
-    CommitSha, Confidence, ReviewComment, ReviewSignal, SignalKind, published_at,
-};
 use crate::config::AutoProjectConfig;
-use crate::db::auto_projects::{Finding, ReviewRow, Verdict};
-use abnegate_vcs::{IssueComment, ReviewRecord, ReviewThreadRecord};
+use crate::db::auto_projects::Finding;
+use crate::db::auto_projects::ReviewRow;
+use crate::db::auto_projects::Verdict;
+use crate::services::github::readiness::CommitSha;
+use crate::services::github::readiness::Confidence;
+use crate::services::github::readiness::ReviewComment;
+use crate::services::github::readiness::ReviewSignal;
+use crate::services::github::readiness::SignalKind;
+use crate::services::github::readiness::published_at;
+use abnegate_vcs::IssueComment;
+use abnegate_vcs::ReviewRecord;
+use abnegate_vcs::ReviewThreadRecord;
 
 /// Characters of a thread's opening comment kept as a finding's title.
 const TITLE_CHARS: usize = 140;

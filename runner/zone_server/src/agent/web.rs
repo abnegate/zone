@@ -8,19 +8,27 @@ use abnegate_agent::ToolContext;
 use abnegate_agent::ToolError;
 use abnegate_agent::ToolRegistry;
 use abnegate_agent::ToolResult;
-use abnegate_http::{public_client_builder, read_capped, validate_public_url};
-use abnegate_search::{
-    SearchHit, SearxngClient, TimeRange, WebSearchConfig, format_search_context, sanitize_query,
-};
+use abnegate_http::public_client_builder;
+use abnegate_http::read_capped;
+use abnegate_http::validate_public_url;
+use abnegate_search::SearchHit;
+use abnegate_search::SearxngClient;
+use abnegate_search::TimeRange;
+use abnegate_search::WebSearchConfig;
+use abnegate_search::format_search_context;
+use abnegate_search::sanitize_query;
 use async_trait::async_trait;
-use serde_json::{Value, json};
+use serde_json::Value;
+use serde_json::json;
 use std::time::Duration;
 use uuid::Uuid;
 use zone_core::vpn;
 
 use super::identifier::Kind;
-use super::tools::{WorkspaceScope, truncate};
-use crate::db::{DbResult, chat_sources};
+use super::tools::WorkspaceScope;
+use crate::db::DbResult;
+use crate::db::chat_sources;
+use crate::utils::text::truncate;
 
 const MAXIMUM_FETCH_BYTES: usize = 1_048_576;
 const MAXIMUM_FETCH_CHARACTERS: usize = 8_000;
@@ -366,13 +374,17 @@ mod tests {
     use sqlx::postgres::PgPoolOptions;
     use tokio::net::TcpListener;
     use tokio::time::timeout;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
     use zone_core::vpn::Offline;
 
     use super::*;
     use crate::agent::identifier;
-    use crate::state::{AppState, test_config};
+    use crate::state::AppState;
+    use crate::state::test_config;
 
     /// Nothing listens here, which is all a test that never reaches the
     /// registry needs of it.
