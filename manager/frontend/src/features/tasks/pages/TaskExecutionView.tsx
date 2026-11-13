@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { Badge, Button, Modal } from '@zone/ui';
 import { useEffect, useRef, useState } from 'react';
 import { tasksApi } from '../../../api/tasks';
@@ -5,6 +6,7 @@ import { ActionReceipts } from '../../chats/components';
 import type { Waiting } from '../../chats/types';
 import { READ_ONLY } from '../access';
 import { QuestionPrompt } from '../components';
+import { TASKS_KEY } from '../hooks';
 import type { RunStatus, Task, TaskRun, TaskRunLog } from '../types';
 
 const WAITING_PHASE = 'waiting';
@@ -151,6 +153,7 @@ export function TaskExecutionView({
   writable?: boolean;
   onClose: () => void;
 }) {
+  const queryClient = useQueryClient();
   const [run, setRun] = useState<TaskRun | null>(null);
   const [logs, setLogs] = useState<TaskRunLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -281,6 +284,7 @@ export function TaskExecutionView({
       if (signal.aborted) return;
       if (submitted.current?.id === result.id) submitted.current = result;
       setRun(result);
+      void queryClient.invalidateQueries({ queryKey: TASKS_KEY });
     } catch (failure) {
       if (signal.aborted) return;
       setStopError(failure instanceof Error ? failure.message : STOP_FAILED_FALLBACK);

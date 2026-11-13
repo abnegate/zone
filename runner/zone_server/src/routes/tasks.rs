@@ -751,6 +751,9 @@ pub async fn create_run(
             ))),
         )
             .into_response(),
+        Ok(tasks::Mutation::Applied(tasks::RunMutation::Stopping)) => {
+            *denied(StatusCode::CONFLICT, tasks::STOPPING)
+        }
         Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(error) => {
             if error

@@ -124,17 +124,30 @@ pub struct Claim {
 /// The projects longest undriven go first, and [`release`] stamps each pass,
 /// so every open project gets its turn however many of them a pass has
 /// nothing to do for.
-pub async fn claim_due(pool: &PgPool, lease: Duration, limit: i64) -> DbResult<Vec<Claim>> {
+///
+/// `driving` names the projects the calling instance is still driving. Those
+/// are never claimed again, even past their lease: a fresh claim would mint a
+/// new owner the running drive can neither renew nor release, and the instance
+/// would not start a second drive for it, so the project would sit claimed by
+/// no one until that lease lapsed too.
+pub async fn claim_due(
+    pool: &PgPool,
+    lease: Duration,
+    limit: i64,
+    driving: &[Uuid],
+) -> DbResult<Vec<Claim>> {
     let seconds = lease.as_secs_f64();
     let mut transaction = pool.begin().await?;
     let due: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM projects WHERE auto AND status = 'active' \
            AND auto_paused_reason IS NULL AND auto_completed_at IS NULL \
            AND (auto_claimed_at IS NULL OR auto_claimed_at < NOW() - make_interval(secs => $1)) \
+           AND id <> ALL($3) \
          ORDER BY auto_driven_at NULLS FIRST, id LIMIT $2 FOR UPDATE SKIP LOCKED",
     )
     .bind(seconds)
     .bind(limit)
+    .bind(driving)
     .fetch_all(&mut *transaction)
     .await?;
     let claims =

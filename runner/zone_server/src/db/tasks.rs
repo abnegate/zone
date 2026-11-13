@@ -52,6 +52,7 @@ impl MutationError {
 pub enum RunMutation {
     Created(TaskRunRow),
     Active(TaskRunRow),
+    Stopping,
 }
 
 /// Result of stopping a task run by hand: the run it stopped, or `Finished`
@@ -100,6 +101,8 @@ pub fn placeholder_title(description: &str) -> String {
 pub const UNTITLED_AND_UNDESCRIBED: &str = "A task needs a title or a description";
 
 pub const ACTIVE_RUN: &str = "Task has an active run";
+
+pub const STOPPING: &str = "The stopped run is still shutting down; try again in a moment";
 
 pub const UNKNOWN_STATUS: &str = "Unknown task status";
 
@@ -290,6 +293,12 @@ pub struct TaskRow {
 /// admission slot. A run parked on a question is idle, not finished: it keeps
 /// heartbeating, keeps blocking a second admission, and stays sweepable.
 const ACTIVE_RUN_STATUSES: &str = "('running','waiting')";
+
+/// A stopped run whose owner is still alive to tear it down, over
+/// `task_runs` aliased `r`. Its task stays reserved for it until the owner
+/// releases it or its lease lapses, so no second worker shares the branch.
+pub(crate) const DRAINING: &str = "r.status = 'cancelled' AND r.owner IS NOT NULL \
+     AND r.heartbeat_at > NOW() - INTERVAL '60 seconds'";
 
 /// Why the sweeper failed a run, both in the row it writes and in the frame it
 /// publishes to whoever was waiting on that run.
@@ -1357,6 +1366,16 @@ pub async fn create_task_run_authorized(
     if let Some(run) = active {
         return Ok(Mutation::Applied(RunMutation::Active(run)));
     }
+    let stopping: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_runs r ON r.id = t.active_run_id \
+         WHERE t.id = $1 AND {DRAINING})"
+    )))
+    .bind(task_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if stopping {
+        return Ok(Mutation::Applied(RunMutation::Stopping));
+    }
 
     let released = hold(&mut transaction, task_id)
         .await?
@@ -1630,6 +1649,38 @@ pub async fn start_owned_task_run(
         .bind(run_id).bind(owner).execute(pool).await?.rows_affected() == 1)
 }
 
+/// Keep a stopped run's reservation of its task alive while its owner tears
+/// down; false once the reservation is gone.
+pub async fn drain_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE task_runs r SET heartbeat_at = NOW() FROM tasks t \
+         WHERE r.id = $1 AND r.owner = $2 AND r.status = 'cancelled' \
+           AND t.id = r.task_id AND t.active_run_id = r.id",
+    )
+    .bind(run_id)
+    .bind(owner)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Hand a stopped run's task back once its owner has torn down, so the next
+/// run can be admitted.
+pub async fn release_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE tasks t SET active_run_id = NULL, updated_at = NOW() FROM task_runs r \
+         WHERE t.active_run_id = $1 AND r.id = $1 AND r.task_id = t.id \
+           AND r.owner = $2 AND r.status = 'cancelled'",
+    )
+    .bind(run_id)
+    .bind(owner)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
 pub async fn owns_task_run(pool: &PgPool, run_id: Uuid, owner: Option<Uuid>) -> DbResult<bool> {
     sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS(SELECT 1 FROM task_runs WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds')")))
         .bind(run_id).bind(owner).fetch_one(pool).await
@@ -1659,6 +1710,10 @@ pub async fn sweep_task_runs(pool: &PgPool) -> DbResult<u64> {
 /// Unfenced on owner and heartbeat: a stuck run is exactly the one whose
 /// lease cannot be trusted. Locks the task before the run, like
 /// [`complete_owned_task_run`], so it never deadlocks against a finishing run.
+/// A run whose owner is alive keeps its task reserved, with its lease renewed
+/// for the teardown, until that owner releases it: the owner may still be
+/// working in the task's branch, on this replica or until its next heartbeat
+/// on another.
 pub async fn stop_task_run_authorized(
     pool: &PgPool,
     user_id: Uuid,
@@ -1678,14 +1733,20 @@ pub async fn stop_task_run_authorized(
     {
         return Ok(Mutation::NotFound);
     }
-    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $2, completed_at = NOW(), error_message = $3, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL WHERE id = $1 AND status IN {ACTIVE_RUN_STATUSES} RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
+    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $2, completed_at = NOW(), error_message = $3, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL, heartbeat_at = CASE WHEN owner IS NOT NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds' THEN NOW() ELSE heartbeat_at END WHERE id = $1 AND status IN {ACTIVE_RUN_STATUSES} RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
         .bind(run_id).bind(CANCELLED).bind(STOPPED).fetch_optional(&mut *transaction).await?;
     let Some(run) = row else {
         transaction.commit().await?;
         return Ok(Mutation::Applied(Stop::Finished));
     };
-    sqlx::query("UPDATE tasks SET status = $3, updated_at = NOW(), active_run_id = NULL WHERE id = $1 AND active_run_id = $2")
-        .bind(run.task_id).bind(run.id).bind(PAUSED).execute(&mut *transaction).await?;
+    let draining: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM task_runs r WHERE r.id = $1 AND {DRAINING})"
+    )))
+    .bind(run.id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE tasks SET status = $3, updated_at = NOW(), active_run_id = CASE WHEN $4 THEN active_run_id END WHERE id = $1 AND active_run_id = $2")
+        .bind(run.task_id).bind(run.id).bind(PAUSED).bind(draining).execute(&mut *transaction).await?;
     transaction.commit().await?;
     task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
     Ok(Mutation::Applied(Stop::Stopped(Box::new(run))))

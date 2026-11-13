@@ -2,6 +2,7 @@
 use crate::db::DbResult;
 use crate::db::reminders;
 use crate::db::reminders::Delivered;
+use crate::db::reminders::Observation;
 use crate::db::reminders::Sweep;
 use crate::state::AppState;
 use serde_json::json;
@@ -221,22 +222,33 @@ pub fn spawn(state: AppState, sweep: Sweep) -> tokio::task::JoinHandle<()> {
                             // asked twice and a watch that cries wolf, the
                             // duplicate is the one worth paying: it is the
                             // failure this whole path was built to avoid.
-                            if baseline.is_some()
-                                && let Err(error) = reminders::record_observation(
+                            if baseline.is_some() {
+                                match reminders::record_observation(
                                     state.db(),
-                                    turn.reminder_id,
+                                    &turn,
                                     message_id,
+                                    LEASE,
                                 )
                                 .await
-                            {
-                                tracing::warn!(
-                                    %error,
-                                    reminder_id = %turn.reminder_id,
-                                    "A watch answered but its reading could not be kept; leaving \
-                                     the turn owed so the reading is taken again rather than \
-                                     reporting the next firing as a change"
-                                );
-                                return;
+                                {
+                                    Ok(Observation::Kept | Observation::Unanswered) => {}
+                                    Ok(Observation::Superseded) => tracing::warn!(
+                                        reminder_id = %turn.reminder_id,
+                                        "A watch answered after its turn lost its claim; its \
+                                         reading is dropped so the firing that took over keeps \
+                                         the baseline"
+                                    ),
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            %error,
+                                            reminder_id = %turn.reminder_id,
+                                            "A watch answered but its reading could not be kept; \
+                                             leaving the turn owed so the reading is taken again \
+                                             rather than reporting the next firing as a change"
+                                        );
+                                        return;
+                                    }
+                                }
                             }
                             // Last, and only after the turn has finished: this
                             // is what stops it being offered again, so it is

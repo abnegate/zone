@@ -140,7 +140,27 @@ impl Fixture {
 
     /// Another instance's claim on whatever is due under `lease`.
     async fn claim(&self, lease: Duration) -> Vec<auto_projects::Claim> {
-        auto_projects::claim_due(&self.database.pool, lease, PROJECTS_PER_TICK)
+        auto_projects::claim_due(&self.database.pool, lease, PROJECTS_PER_TICK, &[])
+            .await
+            .unwrap()
+    }
+
+    /// Leave `project`'s claim unrenewed for longer than the driver's lease.
+    async fn lapse(&self, project: Uuid) {
+        sqlx::query(
+            "UPDATE projects SET auto_claimed_at = NOW() - make_interval(secs => $2) WHERE id = $1",
+        )
+        .bind(project)
+        .bind((auto_project::CLAIM_LEASE * 2).as_secs_f64())
+        .execute(&self.database.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn owner(&self, project: Uuid) -> Option<Uuid> {
+        sqlx::query_scalar("SELECT auto_claim_id FROM projects WHERE id = $1")
+            .bind(project)
+            .fetch_one(&self.database.pool)
             .await
             .unwrap()
     }
@@ -285,4 +305,37 @@ async fn a_stale_drivers_release_leaves_the_claim_that_took_over() {
     );
     assert!(current_released, "the current owner releases its own claim");
     assert_eq!(claimed, 0);
+}
+
+#[tokio::test]
+async fn a_tick_leaves_a_lapsed_claim_to_the_drive_still_running_it() {
+    let fixture = Fixture::new().await;
+    fixture.project("Slow").await;
+    let [claim] = fixture.claim(auto_project::CLAIM_LEASE).await[..] else {
+        panic!("the one open project is claimed");
+    };
+    fixture.driving.insert(claim.project_id, ());
+    fixture.lapse(claim.project_id).await;
+
+    auto_project::tick(
+        &fixture.state,
+        &fixture.services,
+        &fixture.config,
+        &fixture.driving,
+    )
+    .await;
+    let owner = fixture.owner(claim.project_id).await;
+    let pool = &fixture.database.pool;
+    let renewed = auto_projects::renew(pool, claim).await.unwrap();
+    let released = auto_projects::release(pool, claim).await.unwrap();
+    fixture.driving.remove(&claim.project_id);
+    fixture.database.cleanup().await;
+
+    assert_eq!(
+        owner,
+        Some(claim.owner),
+        "a tick does not claim a project this instance is still driving"
+    );
+    assert!(renewed, "the running drive still renews its own claim");
+    assert!(released, "the running drive still releases its own claim");
 }

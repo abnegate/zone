@@ -1,5 +1,7 @@
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { fireEvent, render as renderTree, screen, waitFor } from '@testing-library/react';
+import type { ReactElement, ReactNode } from 'react';
 import type { Question, Waiting } from '../../chats/types';
 import type { Task, TaskRun, TaskRunLog } from '../types';
 
@@ -8,6 +10,7 @@ const LONG_PAST = '2000-01-01T00:00:00Z';
 const WAITING_ON_OUTCOME = 'Task run is waiting on something outside its loop';
 const STOPPED_MESSAGE = 'Task run was stopped';
 const INACTIVE_MESSAGE = 'Task run is not active';
+const SHUTTING_DOWN_MESSAGE = 'The stopped run is still shutting down; try again in a moment';
 
 const question: Question = {
   header: 'Scope',
@@ -98,6 +101,16 @@ mock.module('../../../api/tasks', () => ({
 }));
 
 const { TaskExecutionView } = await import('./TaskExecutionView');
+
+const createClient = (): QueryClient =>
+  new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+const render = (view: ReactElement, client: QueryClient = createClient()) =>
+  renderTree(view, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    ),
+  });
 
 const task: Task = {
   id: 'task-1',
@@ -457,6 +470,43 @@ describe('stopping a task run', () => {
     expect(mockStopRun).toHaveBeenCalledTimes(1);
   });
 
+  it('refreshes the task lists once the stop lands, so the board shows the task paused', async () => {
+    const client = createClient();
+    const invalidate = spyOn(client, 'invalidateQueries');
+    window.confirm = mock(() => true);
+    render(<TaskExecutionView task={task} onClose={() => {}} />, client);
+
+    const button = await screen.findByRole('button', { name: 'Stop' });
+    show(stopped);
+    fireEvent.click(button);
+
+    expect(await screen.findByText('Cancelled')).toBeInTheDocument();
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['tasks'] });
+  });
+
+  it('says why Run Again was refused while the stopped run shuts down, and lets it retry', async () => {
+    show(stopped);
+    mockRunTask.mockImplementation(() => Promise.reject(new Error(SHUTTING_DOWN_MESSAGE)));
+    render(<TaskExecutionView task={task} onClose={() => {}} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Run Again' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Could not start task');
+    expect(alert).toHaveTextContent(SHUTTING_DOWN_MESSAGE);
+    const retry = await screen.findByRole('button', { name: 'Try Again' });
+    expect(retry).toBeEnabled();
+
+    show(running);
+    mockRunTask.mockImplementation(() => Promise.resolve(running));
+    fireEvent.click(retry);
+
+    expect(await screen.findByRole('button', { name: 'Stop' })).toBeEnabled();
+    expect(screen.queryByText(SHUTTING_DOWN_MESSAGE)).not.toBeInTheDocument();
+    expect(mockRunTask).toHaveBeenCalledTimes(2);
+  });
+
   const holdStop = (): {
     settle: (run: TaskRun) => void;
     signal: () => AbortSignal | undefined;
@@ -557,8 +607,10 @@ describe('stopping a task run', () => {
 
   it('says the stop failed and why, then reloads the run', async () => {
     mockStopRun.mockImplementation(() => Promise.reject(new Error(INACTIVE_MESSAGE)));
+    const client = createClient();
+    const invalidate = spyOn(client, 'invalidateQueries');
     window.confirm = mock(() => true);
-    render(<TaskExecutionView task={task} onClose={() => {}} />);
+    render(<TaskExecutionView task={task} onClose={() => {}} />, client);
 
     fireEvent.click(await screen.findByRole('button', { name: 'Stop' }));
 
@@ -567,6 +619,7 @@ describe('stopping a task run', () => {
     expect(alert).toHaveTextContent(INACTIVE_MESSAGE);
     await waitFor(() => expect(mockGetTaskRuns).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole('button', { name: 'Stop' })).toBeEnabled();
+    expect(invalidate).not.toHaveBeenCalled();
   });
 
   it('drops the stop failure once the run is found to have finished', async () => {

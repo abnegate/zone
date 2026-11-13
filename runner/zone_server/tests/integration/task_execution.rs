@@ -552,6 +552,24 @@ async fn stop_run(client: &common::TestClient, token: &str, run: Uuid) -> common
         .await
 }
 
+async fn run_task(client: &common::TestClient, token: &str, task: Uuid) -> common::TestResponse {
+    client
+        .post_json_auth(
+            &format!("/api/tasks/{task}/runs"),
+            &serde_json::json!({}),
+            token,
+        )
+        .await
+}
+
+fn assert_still_stopping(response: &common::TestResponse) {
+    response.assert_status(axum::http::StatusCode::CONFLICT);
+    assert_eq!(
+        response.json_value(),
+        serde_json::json!({"error": tasks::STOPPING})
+    );
+}
+
 async fn run_status(pool: &sqlx::PgPool, run: Uuid) -> String {
     sqlx::query_scalar("SELECT status FROM task_runs WHERE id = $1")
         .bind(run)
@@ -592,6 +610,26 @@ async fn task_state(pool: &sqlx::PgPool, task: Uuid) -> (String, Option<Uuid>) {
 /// What a stop leaves behind: the run cancelled and quiet, its task paused
 /// and free for the next run.
 async fn assert_stopped(pool: &sqlx::PgPool, task: Uuid, run: Uuid) {
+    assert_cancelled(pool, run).await;
+    assert_eq!(
+        task_state(pool, task).await,
+        (tasks::PAUSED.to_string(), None),
+        "the task is paused and holds no active run"
+    );
+}
+
+/// What a stop leaves on a run whose owner is still tearing it down: the run
+/// cancelled and quiet, its task paused but still reserved for it.
+async fn assert_draining(pool: &sqlx::PgPool, task: Uuid, run: Uuid) {
+    assert_cancelled(pool, run).await;
+    assert_eq!(
+        task_state(pool, task).await,
+        (tasks::PAUSED.to_string(), Some(run)),
+        "the task is paused and still reserved for the stopped run"
+    );
+}
+
+async fn assert_cancelled(pool: &sqlx::PgPool, run: Uuid) {
     let row = run_row(pool, run).await;
     assert_eq!(row.status, tasks::CANCELLED);
     assert_eq!(row.error_message.as_deref(), Some(tasks::STOPPED));
@@ -601,11 +639,6 @@ async fn assert_stopped(pool: &sqlx::PgPool, task: Uuid, run: Uuid) {
     );
     assert_eq!(row.pending_question, None, "a stopped run asks nothing");
     assert_eq!(row.pending_wait, None, "a stopped run waits on nothing");
-    assert_eq!(
-        task_state(pool, task).await,
-        (tasks::PAUSED.to_string(), None),
-        "the task is paused and holds no active run"
-    );
 }
 
 fn assert_stop_response(response: &common::TestResponse, run: Uuid) {
@@ -1415,6 +1448,10 @@ impl Leased {
         stop_run(&self.client, &self.token, self.run).await
     }
 
+    async fn run_again(&self) -> common::TestResponse {
+        run_task(&self.client, &self.token, self.task).await
+    }
+
     fn execution(&self) -> tasks::Execution {
         tasks::Execution {
             task: self.task,
@@ -1810,7 +1847,7 @@ async fn a_stop_reaches_a_run_waiting_on_another_replica_through_its_lease() {
     );
 
     assert_stop_response(&leased.stop().await, leased.run);
-    assert_stopped(&leased.pool, leased.task, leased.run).await;
+    assert_draining(&leased.pool, leased.task, leased.run).await;
     assert!(
         !tasks::heartbeat_task_run(&leased.pool, leased.run, leased.owner)
             .await
@@ -1827,6 +1864,94 @@ async fn a_stop_reaches_a_run_waiting_on_another_replica_through_its_lease() {
     );
 
     leased.finish().await;
+}
+
+/// A run stopped on another replica keeps its task until its owner has torn
+/// down, so a Run Again cannot start a second worker on the same branch.
+#[tokio::test]
+async fn a_run_again_waits_for_a_stopped_run_on_another_replica_to_drain() {
+    let leased = lease().await;
+    assert_stop_response(&leased.stop().await, leased.run);
+
+    assert_still_stopping(&leased.run_again().await);
+    zone_server::db::recovery::reconcile(&leased.pool)
+        .await
+        .unwrap();
+    assert_draining(&leased.pool, leased.task, leased.run).await;
+    assert!(
+        tasks::drain_task_run(&leased.pool, leased.run, leased.owner)
+            .await
+            .unwrap(),
+        "the draining owner keeps its reservation"
+    );
+    assert!(
+        !tasks::release_task_run(&leased.pool, leased.run, Uuid::new_v4())
+            .await
+            .unwrap(),
+        "only the run's own owner releases its task"
+    );
+    assert_still_stopping(&leased.run_again().await);
+
+    assert!(
+        tasks::release_task_run(&leased.pool, leased.run, leased.owner)
+            .await
+            .unwrap(),
+        "the owner releases the task once it has torn down"
+    );
+    assert_stopped(&leased.pool, leased.task, leased.run).await;
+    leased
+        .run_again()
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    leased.finish().await;
+}
+
+/// An owner that dies mid-teardown cannot hold its task forever: once its
+/// lease lapses, recovery frees the task and leaves it paused.
+#[tokio::test]
+async fn a_stopped_run_whose_owner_died_frees_its_task_once_the_lease_lapses() {
+    let leased = lease().await;
+    assert_stop_response(&leased.stop().await, leased.run);
+    assert_still_stopping(&leased.run_again().await);
+
+    sqlx::query("UPDATE task_runs SET heartbeat_at = NOW() - INTERVAL '61 seconds' WHERE id = $1")
+        .bind(leased.run)
+        .execute(&leased.pool)
+        .await
+        .unwrap();
+    assert!(
+        !tasks::drain_task_run(&leased.pool, leased.run, Uuid::new_v4())
+            .await
+            .unwrap(),
+        "a stranger cannot renew the dead owner's reservation"
+    );
+    zone_server::db::recovery::reconcile(&leased.pool)
+        .await
+        .unwrap();
+    assert_stopped(&leased.pool, leased.task, leased.run).await;
+    leased
+        .run_again()
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    leased.finish().await;
+}
+
+/// A run no worker had claimed has nobody to drain it, so its task is free
+/// the moment the stop commits.
+#[tokio::test]
+async fn a_run_again_after_stopping_an_unclaimed_run_is_admitted_at_once() {
+    let admitted = admit().await;
+
+    assert_stop_response(&admitted.stop().await, admitted.run);
+    assert_stopped(&admitted.pool, admitted.task, admitted.run).await;
+    admitted
+        .run_again()
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    admitted.finish().await;
 }
 
 #[tokio::test]

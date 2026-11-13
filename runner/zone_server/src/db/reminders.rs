@@ -755,6 +755,19 @@ pub async fn watch_baseline(pool: &PgPool, reminder_id: Uuid) -> DbResult<Option
     Ok(baseline)
 }
 
+/// Whether a firing's reading became the baseline the next one is compared
+/// with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observation {
+    /// The reading is the new baseline.
+    Kept,
+    /// The firing stored no answer, so the baseline is the last one that worked.
+    Unanswered,
+    /// The turn no longer holds its claim, so the firing that took over owns
+    /// the baseline.
+    Superseded,
+}
+
 /// Keeps what this firing found as the baseline the next one is compared with.
 ///
 /// The answer is read back by the id the turn was given rather than by taking
@@ -765,11 +778,17 @@ pub async fn watch_baseline(pool: &PgPool, reminder_id: Uuid) -> DbResult<Option
 /// cancelled — leaves the baseline as it was. Overwriting it with nothing would
 /// make the next firing compare against an empty reading and report the world
 /// changed when all that happened is that this firing did not run.
+///
+/// Written only while `turn` still holds its claim, judged like `renew_turn`:
+/// once the claim lapsed, `claim_turn` may have started the schedule's next
+/// firing against the baseline as it stood, and a late write from this one
+/// would replace the reading that firing compares with or is about to record.
 pub async fn record_observation(
     pool: &PgPool,
-    reminder_id: Uuid,
+    turn: &PendingTurn,
     message_id: Uuid,
-) -> DbResult<()> {
+    lease: Duration,
+) -> DbResult<Observation> {
     let answer = sqlx::query_scalar::<_, String>(
         "SELECT content FROM messages WHERE id = $1 AND role = 'assistant'",
     )
@@ -779,21 +798,39 @@ pub async fn record_observation(
     .filter(|answer| !answer.trim().is_empty());
     let Some(answer) = answer else {
         tracing::warn!(
-            %reminder_id,
+            reminder_id = %turn.reminder_id,
             "A watch fired but stored no answer; its baseline is left as it was, so the next \
              firing compares against the last reading that worked"
         );
-        return Ok(());
+        return Ok(Observation::Unanswered);
     };
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(CLAIM_LOCK)
+        .execute(&mut *transaction)
+        .await?;
+    let held: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM reminder_turns WHERE id = $1 AND attempts = $2 \
+         AND claimed_at > statement_timestamp() - make_interval(secs => $3))",
+    )
+    .bind(turn.id)
+    .bind(turn.attempts)
+    .bind(lease.as_secs_f64())
+    .fetch_one(&mut *transaction)
+    .await?;
+    if !held {
+        return Ok(Observation::Superseded);
+    }
     sqlx::query(
         "UPDATE reminders SET last_observation = $2 WHERE id = $1 \
          AND timing_mode = 'condition_watch'",
     )
-    .bind(reminder_id)
+    .bind(turn.reminder_id)
     .bind(answer.chars().take(OBSERVATION_CAP).collect::<String>())
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
-    Ok(())
+    transaction.commit().await?;
+    Ok(Observation::Kept)
 }
 
 #[cfg(test)]

@@ -1303,9 +1303,24 @@ mod tests {
         // one compares against the last reading that worked. Overwriting it
         // with nothing would report the world changed when all that happened is
         // that this firing did not run.
-        reminders::record_observation(&pool, watch_id, Uuid::new_v4())
+        sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(watch_id)
+            .execute(&pool)
             .await
             .unwrap();
+        reminders::deliver_next(&pool, Sweep::Workspace(workspace))
+            .await
+            .unwrap();
+        let turn = reminders::claim_turn(&pool, Sweep::Workspace(workspace), LEASE)
+            .await
+            .unwrap()
+            .expect("the watch's firing is claimable");
+        assert_eq!(
+            reminders::record_observation(&pool, &turn, Uuid::new_v4(), LEASE)
+                .await
+                .unwrap(),
+            reminders::Observation::Unanswered
+        );
         assert_eq!(
             reminders::watch_baseline(&pool, watch_id).await.unwrap(),
             Some(None),
@@ -1326,9 +1341,12 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        reminders::record_observation(&pool, watch_id, answered)
-            .await
-            .unwrap();
+        assert_eq!(
+            reminders::record_observation(&pool, &turn, answered, LEASE)
+                .await
+                .unwrap(),
+            reminders::Observation::Kept
+        );
         let kept = reminders::watch_baseline(&pool, watch_id)
             .await
             .unwrap()
@@ -1344,6 +1362,11 @@ mod tests {
             "the cap keeps the leading characters, so two readings stay comparable"
         );
 
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(watch_id)
+            .execute(&pool)
+            .await
+            .unwrap();
         cleanup(&pool, organization, user).await;
     }
 
@@ -1901,7 +1924,7 @@ mod tests {
             .unwrap()
             .expect("the lapsed claim is taken over");
         assert_eq!(second.id, first.id);
-        backdate(&pool, second.id).await;
+        age(&pool, second.id, LEASE - std::time::Duration::from_secs(60)).await;
         let before = claimed_at(&pool, first.id).await;
 
         assert!(
@@ -1915,6 +1938,12 @@ mod tests {
             before,
             "a stale renewal leaves the newer claim's lease alone"
         );
+        assert!(
+            reminders::renew_turn(&pool, second.id, second.attempts, LEASE)
+                .await
+                .unwrap(),
+            "the newer claim is still inside its lease, so only the attempt turned the stale renewal away"
+        );
 
         sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
             .bind(reminder)
@@ -1922,6 +1951,86 @@ mod tests {
             .await
             .unwrap();
         cleanup(&pool, organization, user).await;
+    }
+
+    /// A turn still running when its claim lapsed may already have a successor:
+    /// `claim_turn` started the schedule's next firing against the baseline as
+    /// it stood. The late reading must not replace that baseline, or the
+    /// successor's comparison and its own reading are both undone.
+    #[tokio::test]
+    async fn a_superseded_turn_does_not_overwrite_the_baseline_its_successor_reads() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        sqlx::query(
+            "UPDATE reminders SET timing_mode = 'condition_watch', rrule = 'FREQ=DAILY' \
+             WHERE id = $1",
+        )
+        .bind(reminder)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        let sibling = sibling_turn(&pool, reminder).await;
+        backdate(&pool, first.id).await;
+        let mut first_still_running = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM reminder_turns WHERE id = $1 FOR UPDATE")
+            .bind(first.id)
+            .execute(&mut *first_still_running)
+            .await
+            .unwrap();
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the next firing starts once the first one's claim lapsed");
+        first_still_running.rollback().await.unwrap();
+        assert_eq!(second.id, sibling, "the sibling firing is the one taken");
+        let stale = assistant_message(&pool, chat_id, "The build is red.").await;
+        let current = assistant_message(&pool, chat_id, "The build is green.").await;
+
+        let late = reminders::record_observation(&pool, &first, stale, LEASE)
+            .await
+            .unwrap();
+        let baseline_after_late = reminders::watch_baseline(&pool, reminder).await.unwrap();
+        let kept = reminders::record_observation(&pool, &second, current, LEASE)
+            .await
+            .unwrap();
+        let baseline_after_kept = reminders::watch_baseline(&pool, reminder).await.unwrap();
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+
+        assert_eq!(late, reminders::Observation::Superseded);
+        assert_eq!(
+            baseline_after_late,
+            Some(None),
+            "a turn that lost its claim leaves the baseline its successor reads"
+        );
+        assert_eq!(kept, reminders::Observation::Kept);
+        assert_eq!(
+            baseline_after_kept,
+            Some(Some("The build is green.".to_owned())),
+            "the turn holding the claim records its reading"
+        );
+    }
+
+    async fn assistant_message(pool: &PgPool, chat_id: Uuid, content: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO messages (id, chat_id, role, content) \
+             VALUES (gen_random_uuid(), $1, 'assistant', $2) RETURNING id",
+        )
+        .bind(chat_id)
+        .bind(content)
+        .fetch_one(pool)
+        .await
+        .unwrap()
     }
 
     /// A worker whose claim lapsed and was taken over finishes only its own

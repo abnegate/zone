@@ -996,13 +996,57 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
         },
         Ending::Finished => {}
     }
-    crate::mcp::settle(run_id).await;
-    reap(run_id).await;
-    if let Some(checkout) = checkout.take() {
-        checkout.finish().await;
+    let teardown = async {
+        crate::mcp::settle(run_id).await;
+        reap(run_id).await;
+        if let Some(checkout) = checkout.take() {
+            checkout.finish().await;
+        }
+    };
+    tokio::select! {
+        () = teardown => {}
+        () = drain(state, run_id, owner) => {}
     }
+    release(state, run_id, owner).await;
     usage.settle(state).await;
     crate::workers::auto_project::poke_task(state, task_id);
+}
+
+/// Hold a stopped run's reservation of its task for as long as its teardown
+/// lasts. Never ends: once nothing is reserved it waits for the teardown.
+async fn drain(state: &AppState, run_id: Uuid, owner: Uuid) {
+    let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let drained = tokio::time::timeout(
+            HEARTBEAT_TIMEOUT,
+            tasks::drain_task_run(state.db(), run_id, owner),
+        )
+        .await;
+        if matches!(drained, Ok(Ok(false))) {
+            return std::future::pending().await;
+        }
+    }
+}
+
+/// Free a stopped run's task for the next run once nothing of it is left.
+async fn release(state: &AppState, run_id: Uuid, owner: Uuid) {
+    let released = tokio::time::timeout(
+        HEARTBEAT_TIMEOUT,
+        tasks::release_task_run(state.db(), run_id, owner),
+    )
+    .await;
+    match released {
+        Ok(Ok(true)) => tracing::info!(%run_id, "Released the stopped run's task"),
+        Ok(Ok(false)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%run_id, %error, "Could not release the stopped run's task; recovery will")
+        }
+        Err(_) => {
+            tracing::warn!(%run_id, "Releasing the stopped run's task timed out; recovery will")
+        }
+    }
 }
 
 /// Fail a run whose heartbeat lapsed, and say why it lapsed: a stop taken on
@@ -3900,11 +3944,21 @@ mod tests {
             ),
             "the queued run was live to stop"
         );
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            Some(run.id),
+            "the stopped run keeps its task while its worker tears down"
+        );
         assert!(stop::request(run.id), "the stop reached the worker");
         tokio::time::timeout(Duration::from_secs(5), execution)
             .await
             .expect("a stop ends the run long before its next heartbeat")
             .unwrap();
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            None,
+            "the stopped worker frees its task once it has torn down"
+        );
         let stopped = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
         assert_eq!(stopped.status, tasks::CANCELLED);
         assert_eq!(stopped.error_message.as_deref(), Some(tasks::STOPPED));
@@ -4024,10 +4078,20 @@ mod tests {
             ),
             "the queued run was live to stop"
         );
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            Some(run.id),
+            "the run stopped elsewhere keeps its task while its worker is still live"
+        );
         tokio::time::timeout(HEARTBEAT_INTERVAL + Duration::from_secs(5), execution)
             .await
             .expect("the run's next heartbeat finds it stopped and ends it")
             .unwrap();
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            None,
+            "the worker frees its task once it has torn down"
+        );
         let stopped = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
         drop(held);
         organizations::delete_organization(&pool, organization.id)
@@ -4040,6 +4104,15 @@ mod tests {
             [tasks::CANCELLED],
             "a run stopped on another replica is counted as cancelled, not as an error"
         );
+    }
+
+    /// The run a task is held for.
+    async fn reserved(pool: &PgPool, task: Uuid) -> Option<Uuid> {
+        sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(pool)
+            .await
+            .unwrap()
     }
 
     /// The task-run outcomes counted on the thread it is installed on.

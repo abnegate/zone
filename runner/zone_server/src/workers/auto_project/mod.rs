@@ -141,7 +141,10 @@ pub async fn tick(
     config: &Arc<AutoProjectConfig>,
     driving: &Arc<DashMap<Uuid, ()>>,
 ) {
-    let due = match auto_projects::claim_due(state.db(), CLAIM_LEASE, PROJECTS_PER_TICK).await {
+    let running: Vec<Uuid> = driving.iter().map(|entry| *entry.key()).collect();
+    let due = match auto_projects::claim_due(state.db(), CLAIM_LEASE, PROJECTS_PER_TICK, &running)
+        .await
+    {
         Ok(due) => due,
         Err(error) => {
             tracing::warn!(%error, "Could not claim auto projects; retrying next tick");
