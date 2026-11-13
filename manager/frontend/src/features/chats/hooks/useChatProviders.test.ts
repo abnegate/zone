@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ChatProviderOffer, ChatProviders } from '../types';
+import { cached } from '../utils/cached';
 
 const mockGetChatProviders = mock();
 const mockSetChatProvider = mock();
@@ -403,5 +404,25 @@ describe('useChatProviders', () => {
     expect(mockGetChatProviders).not.toHaveBeenCalled();
     expect(mockSetChatProvider).not.toHaveBeenCalled();
     expect(result.current.providers).toBeNull();
+  });
+
+  describe('cache', () => {
+    it('draws the providers of a chat read before on its first render', () => {
+      cached.providers.remember('chat-1', following(codex));
+      mockGetChatProviders.mockImplementation(() => new Promise(() => {}));
+
+      const { result } = renderHook(() => useChatProviders('chat-1'));
+
+      expect(result.current.providers?.default.label).toBe('Codex');
+    });
+
+    it('remembers the providers it reads', async () => {
+      mockGetChatProviders.mockResolvedValue(following(claude));
+      renderHook(() => useChatProviders('chat-1'));
+
+      await waitFor(() =>
+        expect(cached.providers.peek('chat-1')?.default.label).toBe('Claude Code')
+      );
+    });
   });
 });

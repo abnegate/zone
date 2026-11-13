@@ -32,6 +32,7 @@ mod chat_context_tokens;
 mod chat_generation_contract;
 mod chat_handover;
 mod chat_lifecycle;
+mod chat_list;
 mod chat_offline;
 mod chat_project;
 mod chat_project_directory;

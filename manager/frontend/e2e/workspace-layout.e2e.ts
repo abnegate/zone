@@ -421,6 +421,7 @@ for (const viewport of [
           await routeApi(page, '**/api/chats/chat-1', (route) =>
             route.fulfill({ status: 500, json: { error: 'Unavailable' } })
           );
+          await page.reload();
           await page.locator('.chat-item').first().click();
           await expect(page.locator('.chat-back-state')).toBeVisible();
           await page.getByRole('button', { name: 'Back to chats' }).click();

@@ -3511,3 +3511,201 @@ describe('context freshness', () => {
     unmount();
   });
 });
+
+describe('revisiting a chat', () => {
+  const message = (id: string, chatId: string, content: string): Message => ({
+    id,
+    chat_id: chatId,
+    role: id.startsWith('u') ? 'user' : 'assistant',
+    content,
+    created_at: '2024-01-01T00:00:00Z',
+  });
+  const chatOf = (id: string, messages: Message[]): ChatWithMessages => ({
+    id,
+    title: `Chat ${id}`,
+    model_name: 'gpt-4',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    archived: false,
+    agent_enabled: false,
+    messages,
+  });
+  const first = chatOf('first', [message('u1', 'first', 'Hello'), message('a1', 'first', 'Hi')]);
+  const second = chatOf('second', [message('u2', 'second', 'Other')]);
+
+  let pending: ((chat: ChatWithMessages) => void) | null = null;
+  const holdNextFetch = () =>
+    mockGetChat.mockImplementationOnce(
+      () =>
+        new Promise<ChatWithMessages>((resolve) => {
+          pending = resolve;
+        })
+    );
+
+  beforeEach(() => {
+    lastSocket = null;
+    pending = null;
+    mockGetChat.mockReset();
+    mockDeleteMessage.mockReset();
+    mockGetChat.mockImplementation(async (id: string) => (id === 'first' ? first : second));
+  });
+
+  const openFirstThenSecond = async () => {
+    const hook = renderHook(({ id }) => useChat(id), {
+      initialProps: { id: 'first' as string | null },
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(hook.result.current.chat?.id).toBe('first'));
+    hook.rerender({ id: 'second' });
+    await waitFor(() => expect(hook.result.current.chat?.id).toBe('second'));
+    return hook;
+  };
+
+  it('draws the remembered history at once, before the server answers', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    holdNextFetch();
+    rerender({ id: 'first' });
+    expect(result.current.chat?.id).toBe('first');
+    expect(result.current.chat?.messages).toEqual(first.messages);
+    expect(result.current.loading).toBe(false);
+    expect(mockGetChat).toHaveBeenLastCalledWith('first');
+    unmount();
+  });
+
+  it('reconciles the remembered history with what arrived while away', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    holdNextFetch();
+    rerender({ id: 'first' });
+    const finished = message('a2', 'first', 'Finished while you were away');
+    await act(async () => {
+      pending?.({ ...first, messages: [...first.messages, finished] });
+    });
+    expect(result.current.chat?.messages.at(-1)).toEqual(finished);
+    expect(result.current.loading).toBe(false);
+    unmount();
+  });
+
+  it('keeps what streamed in while it was open', async () => {
+    const { result, rerender, unmount } = renderHook(({ id }) => useChat(id), {
+      initialProps: { id: 'first' as string | null },
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current.chat?.id).toBe('first'));
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'a2', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: 'Streamed ', index: 0 });
+      lastSocket?.emit({ type: 'chunk', content: 'reply', index: 1 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'a2',
+        tool_call_id: 'call',
+        name: 'search',
+        arguments: '{}',
+      });
+      lastSocket?.emit({ type: 'message_end', message_id: 'a2', content: 'Streamed reply' });
+    });
+    await waitFor(() =>
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('Streamed reply')
+    );
+    rerender({ id: 'second' });
+    await waitFor(() => expect(result.current.chat?.id).toBe('second'));
+    holdNextFetch();
+    rerender({ id: 'first' });
+    const streamed = result.current.chat?.messages.at(-1);
+    expect(streamed?.content).toBe('Streamed reply');
+    expect(streamed?.metadata?.tool_calls?.map((call) => call.id)).toEqual(['call']);
+    unmount();
+  });
+
+  it('remembers a deleted message as gone', async () => {
+    mockDeleteMessage.mockResolvedValue(undefined);
+    const { result, rerender, unmount } = renderHook(({ id }) => useChat(id), {
+      initialProps: { id: 'first' as string | null },
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current.chat?.id).toBe('first'));
+    await act(async () => {
+      await result.current.deleteMessage('a1');
+    });
+    rerender({ id: 'second' });
+    await waitFor(() => expect(result.current.chat?.id).toBe('second'));
+    holdNextFetch();
+    rerender({ id: 'first' });
+    expect(result.current.chat?.messages.map((item) => item.id)).toEqual(['u1']);
+    unmount();
+  });
+
+  it('holds a turn still running until the reconcile lands, then plays it on top', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    holdNextFetch();
+    rerender({ id: 'first' });
+    act(() => {
+      lastSocket?.emit({ type: 'init', chat_id: 'first', status: 'ok' });
+      lastSocket?.emit({
+        type: 'message_start',
+        message_id: 'a3',
+        role: 'assistant',
+        resumed: true,
+      });
+      lastSocket?.emit({ type: 'chunk', content: 'Still going', index: 0 });
+    });
+    expect(result.current.chat?.messages.map((item) => item.id)).toEqual(['u1', 'a1']);
+    const asked = message('u3', 'first', 'Asked while away');
+    await act(async () => {
+      pending?.({ ...first, messages: [...first.messages, asked] });
+    });
+    await waitFor(() =>
+      expect(result.current.chat?.messages.map((item) => item.id)).toEqual(['u1', 'a1', 'u3', 'a3'])
+    );
+    await waitFor(() => expect(result.current.chat?.messages.at(-1)?.content).toBe('Still going'));
+    expect(result.current.streaming).toBe(true);
+    unmount();
+  });
+
+  it('keeps a message sent before the reconcile lands', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    holdNextFetch();
+    rerender({ id: 'first' });
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Sent early' });
+    });
+    expect(result.current.chat?.messages.at(-1)?.content).toBe('Sent early');
+    await act(async () => {
+      pending?.(first);
+    });
+    expect(result.current.chat?.messages.map((item) => item.content)).toEqual([
+      'Hello',
+      'Hi',
+      'Sent early',
+    ]);
+    unmount();
+  });
+
+  it('opens a remembered chat on a fresh mount without a loading state', async () => {
+    const { unmount } = await openFirstThenSecond();
+    unmount();
+    holdNextFetch();
+    const { result, unmount: unmountAgain } = renderHook(() => useChat('first'), {
+      wrapper: createWrapper(),
+    });
+    expect(result.current.chat?.messages).toEqual(first.messages);
+    expect(result.current.loading).toBe(false);
+    unmountAgain();
+  });
+
+  it('forgets a chat the server no longer returns', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    mockGetChat.mockRejectedValueOnce(new Error('Chat not found'));
+    rerender({ id: 'first' });
+    await waitFor(() => expect(result.current.error).toBe('Chat not found'));
+    rerender({ id: 'second' });
+    holdNextFetch();
+    const { result: fresh, unmount: unmountFresh } = renderHook(() => useChat('first'), {
+      wrapper: createWrapper(),
+    });
+    expect(fresh.current.chat).toBeNull();
+    expect(fresh.current.loading).toBe(true);
+    unmountFresh();
+    unmount();
+  });
+});

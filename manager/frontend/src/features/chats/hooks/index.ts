@@ -10,4 +10,5 @@ export type { UseChatsOptions } from './useChats';
 export { useChats } from './useChats';
 export type { ChatTasks } from './useChatTasks';
 export { useChatTasks } from './useChatTasks';
+export { usePreloadChats } from './usePreloadChats';
 export { useWorkspaceChatProviders } from './useWorkspaceChatProviders';

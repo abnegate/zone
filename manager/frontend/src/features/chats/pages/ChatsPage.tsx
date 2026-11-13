@@ -48,6 +48,7 @@ import {
 } from '../components';
 import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
+import { MoreChats } from '../components/MoreChats';
 import {
   useChat,
   useChatProviders,
@@ -57,6 +58,7 @@ import {
   useChatSubagents,
   useChats,
   useChatTasks,
+  usePreloadChats,
   useWorkspaceChatProviders,
 } from '../hooks';
 import type { SubagentRequest } from '../subagentTypes';
@@ -213,7 +215,11 @@ export default function ChatsPage() {
 
   const {
     chats,
+    total: chatsTotal,
+    hasMore: moreChats,
     loading: chatsLoading,
+    loadingMore: chatsLoadingMore,
+    loadMore: loadMoreChats,
     error: chatsError,
     createChat,
     deleteChat: deleteChatFn,
@@ -222,7 +228,8 @@ export default function ChatsPage() {
     refresh: refreshChats,
     renameChat,
     updateTitle: updateListTitle,
-  } = useChats({ archived: showArchived });
+  } = useChats({ archived: showArchived, sort });
+  usePreloadChats(chats);
   const { projects } = useProjects('all');
   const projectNames = useMemo(
     () => Object.fromEntries(projects.map((project) => [project.id, project.name])),
@@ -1283,6 +1290,13 @@ export default function ChatsPage() {
                 {group.chats.map(renderChatItem)}
               </div>
             ))}
+            {moreChats ? (
+              <MoreChats
+                remaining={chatsTotal - chats.length}
+                loading={chatsLoadingMore}
+                onLoad={loadMoreChats}
+              />
+            ) : null}
           </div>
         )}
       </SubNav>
