@@ -506,10 +506,11 @@ setting a monthly cap, at claude.ai/settings/usage.
 - **Default**: `19`, the lowest CPU priority. Compose passes it through from
   `.env`, empty unless `.env` sets it, and the Helm chart leaves it unset; an
   empty value keeps the default.
-- **Description**: The nice value every claude and codex run starts at. Every
-  build, test and language server the agent starts inherits it. The agents
-  run where the server does, in the manager container under compose, so at the
-  default they get every CPU the server leaves idle. When the CPUs are
+- **Description**: The nice value every claude and codex run starts at, and
+  every command, shell and background job Zone's own agent runs on an HTTP
+  provider. Every build, test and language server the agent starts inherits
+  it. The agents run where the server does, in the manager container under
+  compose, so at the default they get every CPU the server leaves idle. When the CPUs are
   contended, the server goes first, so its API keeps answering while chats
   build and test at once. On Linux, a process with no IO priority of its own
   takes one from its nice value, so the agents also yield the disk, but only
@@ -522,8 +523,7 @@ setting a monthly cap, at claude.ai/settings/usage.
   starts at a higher priority than the server's own, whatever this says.
   Nice values order processes only against each other: they bound neither
   memory nor the CPU a container or pod gets beside other workloads, which
-  its own limits set. Zone's own agent, on an HTTP provider, runs its tool
-  commands at the server's priority.
+  its own limits set.
 
 ### `ZONE_CLAUDE_API_URL`
 - **Default**: `https://api.anthropic.com`. Compose passes it from `.env`
