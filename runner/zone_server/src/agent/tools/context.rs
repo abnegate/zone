@@ -163,12 +163,13 @@ mod tests {
             .await
             .expect("the shell runs");
 
+        let nice = reported
+            .output
+            .as_deref()
+            .and_then(|output| output.strip_prefix("stdout:"))
+            .map(str::trim);
         assert!(reported.success, "{reported:?}");
-        assert_eq!(
-            reported.output.as_deref().map(str::trim),
-            Some("stdout:\n19"),
-            "{reported:?}"
-        );
+        assert_eq!(nice, Some("19"), "{reported:?}");
     }
 
     #[tokio::test]
