@@ -191,10 +191,11 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
         let pull_request = tools.qualified(CREATE_PULL_REQUEST);
         bullets.push(format!(
             "- On a repository connected as a GitHub source, work that changed it ends in a pull \
-             request: as soon as the work is done and checked, commit it on its own branch and \
-             call {pull_request} so Zone can track it. Asking for the work is asking for the pull \
-             request, so open it without asking and report it rather than offering to open one; a \
-             turn that changed nothing opens nothing, and a user who said to hold off is obeyed. \
+             request: as soon as the work is done and checked, open one by committing on its \
+             branch, then calling {pull_request} so Zone can track it. Asking for the work is \
+             asking for the pull request, so open it without asking and report it rather than \
+             offering to open one; a turn that changed nothing opens nothing, and a user who \
+             said to hold off is obeyed. \
              It pushes the branch for you: never git push it or use gh pr create, hub, the \
              GitHub web UI or another server's tool. Only if {pull_request} errors, reuse a pull \
              request gh pr list --head <branch> --base <base> finds; otherwise use gh pr create, say \

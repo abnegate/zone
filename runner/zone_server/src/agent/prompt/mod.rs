@@ -68,13 +68,13 @@ const PLAIN: &[Section] = &[
 /// the server's own zone. It measured 29,803 characters auto-approved in
 /// zone's own loop, and 27,902 offered to a coding agent, which is offered no
 /// tool that ends zone's turn. Telling that chat to open the pull request its
-/// work needs rather than ask for one adds 243 to each, counted over the
+/// work needs rather than ask for one adds 257 to each, counted over the
 /// sentences that changed; `every_prompt_stays_inside_its_budget` is what
 /// measures it again.
 pub const CHAT_MAX_CHARS: usize = 30_100;
 /// Bounds the prompt of a planner chat, which adds the interview section and
 /// its two tools to the chat prompt: 32,163 characters, and 30,170 offered to
-/// a coding agent, each carrying the same 243.
+/// a coding agent, each carrying the same 257.
 pub const PLANNER_MAX_CHARS: usize = 32_500;
 /// Bounds the prompt of a chat that offers no tools: 4,740 characters.
 pub const PLAIN_MAX_CHARS: usize = 4_800;
