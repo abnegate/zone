@@ -326,6 +326,7 @@ services:
       - ZONE_CLAUDE_API_URL=${ZONE_CLAUDE_API_URL:-https://api.anthropic.com}
       - ZONE_CODEX_API_URL=${ZONE_CODEX_API_URL:-https://chatgpt.com}
       - ZONE_AGENT_USAGE_TTL_SECONDS=${ZONE_AGENT_USAGE_TTL_SECONDS:-60}
+      - ZONE_AGENT_NICENESS=${ZONE_AGENT_NICENESS:-}
       - ZONE_ENDPOINT_HOSTS=${ZONE_ENDPOINT_HOSTS:-}
       # claude.com sends a browser on this machine back to
       # http://localhost:${ZONE_AGENT_CALLBACK_PORT}/callback with a sign-in's

@@ -1,6 +1,8 @@
 //! Application state
 
 use abnegate_agent::McpHub;
+#[cfg(test)]
+use abnegate_exec::Niceness;
 use abnegate_http::{RateLimitConfig, RateLimiter};
 use abnegate_secret::MasterKey;
 use dashmap::DashMap;
@@ -68,13 +70,16 @@ pub fn default_adapter_registry() -> AdapterRegistry {
 pub fn llm_backend(config: &Config) -> LlmBackend {
     match config.model_backend() {
         ModelBackend::LiteLlm => LlmBackend::Http,
-        ModelBackend::Cli { agent, executable } => LlmBackend::cli(
-            *agent,
-            match executable {
-                Some(executable) => cli::settings().with_executable(executable),
-                None => cli::settings(),
-            },
-        ),
+        ModelBackend::Cli { agent, executable } => {
+            let settings = cli::settings().with_niceness(config.agents.niceness);
+            LlmBackend::cli(
+                *agent,
+                match executable {
+                    Some(executable) => settings.with_executable(executable),
+                    None => settings,
+                },
+            )
+        }
     }
 }
 
@@ -478,6 +483,7 @@ pub(crate) fn test_agents() -> AgentConfig {
     AgentConfig {
         claude_api_url: UNREACHABLE_USAGE.to_string(),
         codex_api_url: UNREACHABLE_USAGE.to_string(),
+        niceness: Niceness::DEFAULT,
         ..AgentConfig::default()
     }
 }
