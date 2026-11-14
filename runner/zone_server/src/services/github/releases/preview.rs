@@ -12,6 +12,7 @@ pub struct Preview {
     pub body: String,
     pub base_tag: Option<String>,
     pub target: String,
+    pub prerelease: bool,
     pub pulls: Vec<IncludedPull>,
     pub digest: String,
 }

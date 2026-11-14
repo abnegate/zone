@@ -48,10 +48,10 @@ fn succeeded() -> ReleasePipeline {
         created_at: "2026-11-14T00:01:00Z".into(),
         started_at: None,
         updated_at: "2026-11-14T00:04:00Z".into(),
-        url: run_url(REPOSITORY, 501),
+        url: run_url(ORIGIN, REPOSITORY, 501),
         repository: REPOSITORY.into(),
     };
-    ReleasePipeline::observe(identity(), &[run], CHECKED_AT)
+    ReleasePipeline::observe(identity(), &[run], CHECKED_AT, ORIGIN)
 }
 
 fn published() -> abnegate_vcs::Release {
@@ -76,7 +76,7 @@ fn an_observed_release_carries_its_source_and_its_pipelines_verdict() {
         ORIGIN,
         &published(),
         pulls(),
-        ReleasePipeline::observe(identity(), &[], CHECKED_AT),
+        ReleasePipeline::observe(identity(), &[], CHECKED_AT, ORIGIN),
     );
 
     assert_eq!(
@@ -161,6 +161,12 @@ fn source_options_serialise_as_the_console_reads_them() {
         latest_tag: None,
         next_tag: "v0.1.0".into(),
         previous_tags: Vec::new(),
+        lines: vec![TagLine {
+            prefix: Some("pkg".into()),
+            latest_tag: Some("pkg/v1.0.0".into()),
+            next_tag: "pkg/v1.0.1".into(),
+            previous_tags: vec!["pkg/v1.0.0".into()],
+        }],
     };
 
     assert_eq!(
@@ -173,8 +179,48 @@ fn source_options_serialise_as_the_console_reads_them() {
             "latest_tag": null,
             "next_tag": "v0.1.0",
             "previous_tags": [],
+            "lines": [{
+                "prefix": "pkg",
+                "latest_tag": "pkg/v1.0.0",
+                "next_tag": "pkg/v1.0.1",
+                "previous_tags": ["pkg/v1.0.0"],
+            }],
         })
     );
+}
+
+#[test]
+fn a_listing_narrows_to_the_releases_published_since_a_moment() {
+    let at = |published_at: &str| Release {
+        published_at: published_at.into(),
+        ..Release::observed(
+            &source(),
+            ORIGIN,
+            &published(),
+            pulls(),
+            ReleasePipeline::observe(identity(), &[], CHECKED_AT, ORIGIN),
+        )
+    };
+    let listing = Listing {
+        releases: vec![
+            at("2026-11-14T00:00:00Z"),
+            at("2026-11-01T00:00:00Z"),
+            at("unknown"),
+        ],
+        complete: true,
+        warnings: vec!["kept".into()],
+    };
+
+    let narrowed = listing.since("2026-11-07T00:00:00Z".parse().unwrap());
+
+    let kept: Vec<&str> = narrowed
+        .releases
+        .iter()
+        .map(|release| release.published_at.as_str())
+        .collect();
+    assert_eq!(kept, ["2026-11-14T00:00:00Z"]);
+    assert!(narrowed.complete);
+    assert_eq!(narrowed.warnings, ["kept"]);
 }
 
 #[test]
@@ -187,6 +233,7 @@ fn a_preview_serialises_as_the_console_reads_it() {
         body: "## What's Changed".into(),
         base_tag: Some("v1.3.9".into()),
         target: BUILT.into(),
+        prerelease: false,
         pulls: pulls(),
         digest: "d1".into(),
     };
@@ -201,6 +248,7 @@ fn a_preview_serialises_as_the_console_reads_it() {
             "body": "## What's Changed",
             "base_tag": "v1.3.9",
             "target": BUILT,
+            "prerelease": false,
             "pulls": [{
                 "number": 7,
                 "url": "https://github.example.com/owner/repository/pull/7",

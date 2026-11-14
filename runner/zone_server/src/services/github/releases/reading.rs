@@ -14,7 +14,6 @@ use abnegate_vcs::TagRequest;
 use abnegate_vcs::Tagger;
 use chrono::DateTime;
 use chrono::Utc;
-use reqwest::Url;
 
 use super::Listing;
 use super::Release;
@@ -24,18 +23,18 @@ use super::failure::RELEASE_MISSING;
 use super::notes::Notes;
 use crate::services::github::client::Github;
 use crate::services::github::client::PER_PAGE;
-use crate::services::github::client::described;
 use crate::services::github::connection::ConnectedSource;
+use crate::services::github::fault::Fault;
+use crate::services::github::link::linked;
 use crate::services::github::release;
 use crate::services::github::release::Lookup;
 use crate::services::github::release::ReleaseIdentity;
 use crate::services::github::release::ReleasePipeline;
 
 const RELEASE_PAGES: u32 = 10;
-const TAG_PAGES: u32 = 3;
 const TAGGER_NAME: &str = "Zone";
 const TAGGER_EMAIL: &str = "zone@users.noreply.github.com";
-const SCHEMES: [&str; 2] = ["http", "https"];
+const UNLINKED_RELEASE: &str = "GitHub returned the release without a usable link.";
 
 impl Github {
     pub(crate) async fn releases_since(
@@ -75,7 +74,9 @@ impl Github {
         let mut pipelines = Vec::with_capacity(releases.len());
         for identity in releases {
             let observed = match &sweep {
-                Some(records) => ReleasePipeline::observe(identity.clone(), records, checked_at),
+                Some(records) => {
+                    ReleasePipeline::observe(identity.clone(), records, checked_at, self.origin())
+                }
                 None => ReleasePipeline::unavailable(identity.clone(), checked_at),
             };
             let observed = match observed.lookup {
@@ -100,8 +101,8 @@ impl Github {
         since: DateTime<Utc>,
         previous: Option<&Listing>,
         checked_at: &str,
-    ) -> Result<Listing, String> {
-        let (published, complete) = self.releases_since(since).await.map_err(described)?;
+    ) -> Result<Listing, Fault> {
+        let (published, complete) = self.releases_since(since).await?;
         let mut warnings = Vec::new();
         let mut usable = Vec::with_capacity(published.len());
         for published in published {
@@ -145,12 +146,15 @@ impl Github {
         id: u64,
         previous: Option<&ReleasePipeline>,
         checked_at: &str,
-    ) -> Result<ReleasePipeline, String> {
+    ) -> Result<ReleasePipeline, Fault> {
         let published = match self.release_by_id(id).await {
             Ok(published) if !published.draft && published.published_at.is_some() => published,
-            Ok(_) | Err(PullRequestError::NotFound) => return Err(RELEASE_MISSING.to_string()),
-            Err(error) => return Err(described(error)),
+            Ok(_) | Err(PullRequestError::NotFound) => return Err(Fault::missing(RELEASE_MISSING)),
+            Err(error) => return Err(error.into()),
         };
+        if !linked(&published.url) {
+            return Err(Fault::upstream(UNLINKED_RELEASE));
+        }
         let identity = self.release_identity(&published)?;
         let observed = self.exact_pipeline(&identity, checked_at).await;
         let previous = previous
@@ -163,7 +167,7 @@ impl Github {
         &self,
         source: &ConnectedSource,
         origin: &str,
-    ) -> Result<SourceOptions, PullRequestError> {
+    ) -> Result<SourceOptions, Fault> {
         let (names, branch) = tokio::join!(
             self.tag_names(),
             self.service()
@@ -178,6 +182,7 @@ impl Github {
             latest_tag: catalogue.latest_tag(),
             next_tag: catalogue.next_tag(),
             previous_tags: catalogue.previous_tags(),
+            lines: catalogue.lines(),
         })
     }
 
@@ -191,8 +196,25 @@ impl Github {
                 .await?;
             names.extend(listed.items.into_iter().map(|tag| tag.tag));
             match listed.next {
-                Some(next) if next.get() <= TAG_PAGES => page = next,
-                _ => return Ok(names),
+                Some(next) => page = next,
+                None => return Ok(names),
+            }
+        }
+    }
+
+    pub(crate) async fn release_tagged(&self, tag: &str) -> Result<Option<u64>, PullRequestError> {
+        let mut page = NonZeroU32::MIN;
+        loop {
+            let listed = self
+                .service()
+                .list_releases(self.repository(), self.token(), page, PER_PAGE)
+                .await?;
+            if let Some(release) = listed.items.iter().find(|release| release.tag == tag) {
+                return Ok(Some(release.id));
+            }
+            match listed.next {
+                Some(next) => page = next,
+                None => return Ok(None),
             }
         }
     }
@@ -288,8 +310,4 @@ fn moment(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value.trim())
         .ok()
         .map(|moment| moment.with_timezone(&Utc))
-}
-
-fn linked(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|url| SCHEMES.contains(&url.scheme()) && url.has_host())
 }

@@ -3,9 +3,11 @@ mod catalogue;
 mod created;
 mod failure;
 mod included_pull;
+mod line;
 mod listing;
 mod notes;
 mod offered;
+mod placement;
 mod preview;
 mod proposal;
 mod reading;
@@ -15,6 +17,7 @@ mod refusal;
 mod release;
 mod source_options;
 mod tag;
+mod tag_line;
 #[cfg(test)]
 mod tests;
 
@@ -30,6 +33,9 @@ pub(crate) use reconciliation::Reconciliation;
 pub(crate) use refusal::Refusal;
 pub use release::Release;
 pub use source_options::SourceOptions;
+pub use tag_line::TagLine;
+
+use std::sync::Arc;
 
 use abnegate_vcs::CommitSha;
 use abnegate_vcs::MakeLatest;
@@ -37,28 +43,36 @@ use abnegate_vcs::ObjectId;
 use abnegate_vcs::PullRequestError;
 use abnegate_vcs::Release as Published;
 use abnegate_vcs::ReleaseRequest;
+use chrono::DateTime;
 use chrono::TimeDelta;
 use chrono::Utc;
 use futures::future::join_all;
 use uuid::Uuid;
 
-use super::authentication::authenticated;
+use super::authentication::credentialed;
 use super::client::Github;
-use super::client::described;
 use super::connection::ConnectedSource;
 use super::connection::connect;
 use super::connection::connected_sources;
+use super::fault::Fault;
+use super::freshness::Freshness;
 use super::release::ReleasePipeline;
+use super::snapshot::Snapshot;
+use super::throttle::admitted;
+use super::unconnected::NOT_GITHUB;
 use super::unconnected::Unconnected;
+use crate::config::MAXIMUM_RELEASE_WINDOW_DAYS;
 use crate::db::sources::SourceRow;
 use crate::state::AppState;
 use canonical::Canonical;
 use catalogue::Catalogue;
 use failure::INVALID_TAG;
+use failure::PRERELEASE_MISMATCH;
+use failure::RELEASE_MISSING;
 use notes::Notes;
+use placement::Placement;
 use tag::Tag;
 
-const NOT_GITHUB: &str = "Not a GitHub source.";
 const MARKER: &str = "zone-release";
 
 pub(crate) async fn recent(
@@ -71,38 +85,21 @@ pub(crate) async fn recent(
     let listed = connected_sources(state, workspace_id).await?;
     let now = Utc::now();
     let origin = state.config().github_web_url.as_str();
-    let reads = join_all(listed.connected.iter().map(|source| {
-        state.github_snapshots().releases.read(
-            (source.source.id, window_days),
-            refresh,
-            now,
-            move |previous| async move {
-                let since = now - TimeDelta::days(i64::from(window_days));
-                let checked_at = now.to_rfc3339();
-                let previous = previous.as_deref();
-                authenticated(
-                    state,
-                    &source.source,
-                    source.configuration.clone(),
-                    |github| {
-                        let checked_at = checked_at.as_str();
-                        async move {
-                            github
-                                .recent_listing(source, origin, since, previous, checked_at)
-                                .await
-                        }
-                    },
-                )
-                .await
-            },
-        )
-    }))
+    let reads = join_all(
+        listed
+            .connected
+            .iter()
+            .map(|source| listing(state, source, refresh, now)),
+    )
     .await;
+    let since = now - TimeDelta::days(i64::from(window_days));
     let mut recent = Recent::new(window_days, now, unusable(&listed.invalid));
     for (source, read) in listed.connected.iter().zip(reads) {
         match read {
-            Ok((snapshot, freshness)) => recent.read(source, origin, &snapshot, freshness),
-            Err(warning) => recent.failed(source, origin, warning),
+            Ok((snapshot, freshness)) => {
+                recent.read(source, origin, &windowed(&snapshot, since), freshness)
+            }
+            Err(fault) => recent.failed(source, origin, fault.to_string()),
         }
     }
     Ok(recent.sorted())
@@ -117,17 +114,28 @@ pub(crate) async fn pipeline(
 ) -> Result<ReleasePipeline, Failure> {
     let source = &connect(state, workspace_id, source_id).await?;
     let now = Utc::now();
-    let (snapshot, _) = state
-        .github_snapshots()
+    let (listed, _) = listing(state, source, false, now).await?;
+    if !listed
+        .value
+        .releases
+        .iter()
+        .any(|release| release.id == release_id)
+    {
+        return Err(Failure::Missing(RELEASE_MISSING.to_string()));
+    }
+    let snapshots = state.github_snapshots();
+    let permits = snapshots.throttle.credential(&source.source);
+    let (snapshot, _) = snapshots
         .pipelines
         .read(
             (source_id, release_id),
             refresh,
             now,
             move |previous| async move {
+                let _permit = admitted(&permits).await?;
                 let checked_at = now.to_rfc3339();
                 let previous = previous.as_deref();
-                authenticated(
+                credentialed(
                     state,
                     &source.source,
                     source.configuration.clone(),
@@ -143,8 +151,7 @@ pub(crate) async fn pipeline(
                 .await
             },
         )
-        .await
-        .map_err(Failure::read)?;
+        .await?;
     Ok(ReleasePipeline::clone(&snapshot.value))
 }
 
@@ -156,22 +163,20 @@ pub(crate) async fn options(
     let listed = connected_sources(state, workspace_id).await?;
     let now = Utc::now();
     let origin = state.config().github_web_url.as_str();
+    let snapshots = state.github_snapshots();
     let reads = join_all(listed.connected.iter().map(|source| {
-        state
-            .github_snapshots()
+        let permits = snapshots.throttle.credential(&source.source);
+        snapshots
             .options
-            .read(source.source.id, refresh, now, move |_| {
-                authenticated(
+            .read(source.source.id, refresh, now, move |_| async move {
+                let _permit = admitted(&permits).await?;
+                credentialed(
                     state,
                     &source.source,
                     source.configuration.clone(),
-                    move |github| async move {
-                        github
-                            .source_options(source, origin)
-                            .await
-                            .map_err(described)
-                    },
+                    move |github| async move { github.source_options(source, origin).await },
                 )
+                .await
             })
     }))
     .await;
@@ -179,7 +184,7 @@ pub(crate) async fn options(
     for (source, read) in listed.connected.iter().zip(reads) {
         match read {
             Ok((snapshot, _)) => offered.read(source, &snapshot),
-            Err(warning) => offered.failed(source, &warning),
+            Err(fault) => offered.failed(source, &fault.to_string()),
         }
     }
     Ok(offered)
@@ -190,12 +195,18 @@ pub(crate) async fn preview(
     workspace_id: Uuid,
     proposal: &Proposal,
 ) -> Result<Preview, Failure> {
-    let tag = &Tag::parse(&proposal.tag).ok_or(Failure::Invalid(INVALID_TAG))?;
+    let tag = &Tag::parse(&proposal.tag).ok_or_else(|| Failure::invalid(INVALID_TAG))?;
     let source = &connect(state, workspace_id, proposal.source_id).await?;
     let origin = state.config().github_web_url.as_str();
-    attempt(state, source, |github| async move {
-        propose(&github, source, origin, tag, proposal).await
-    })
+    credentialed(
+        state,
+        &source.source,
+        source.configuration.clone(),
+        |github| async move {
+            let (preview, _) = propose(&github, source, origin, tag, proposal).await?;
+            Ok(preview)
+        },
+    )
     .await
 }
 
@@ -206,7 +217,10 @@ pub(crate) async fn create(
     prerelease: bool,
     digest: &str,
 ) -> Result<Created, Failure> {
-    let tag = &Tag::parse(&proposal.tag).ok_or(Failure::Invalid(INVALID_TAG))?;
+    let tag = &Tag::parse(&proposal.tag).ok_or_else(|| Failure::invalid(INVALID_TAG))?;
+    if prerelease == tag.stable() {
+        return Err(Failure::invalid(PRERELEASE_MISMATCH));
+    }
     let source = &connect(state, workspace_id, proposal.source_id).await?;
     let origin = state.config().github_web_url.as_str();
     let snapshots = state.github_snapshots();
@@ -214,51 +228,64 @@ pub(crate) async fn create(
         .try_release(proposal.source_id)
         .ok_or(Failure::Refused(Refusal::InProgress))?;
     let marker = Uuid::new_v4();
-    let created = attempt(state, source, |github| async move {
-        let preview = propose(&github, source, origin, tag, proposal).await?;
-        if preview.digest != digest {
-            return Err(Refusal::PreviewStale.into());
-        }
-        let published = publish(&github, &preview, prerelease, marker).await?;
-        Ok(Created {
-            source_id: source.source.id,
-            id: published.id,
-            tag: published.tag,
-            name: published.name,
-            url: published.url,
-            published_at: published.published_at.unwrap_or_default(),
-        })
-    })
+    let created = credentialed(
+        state,
+        &source.source,
+        source.configuration.clone(),
+        |github| async move {
+            let (preview, latest) = propose(&github, source, origin, tag, proposal).await?;
+            if preview.digest != digest {
+                return Err(Refusal::PreviewStale.into());
+            }
+            let published = publish(&github, &preview, latest, marker).await?;
+            Ok(Created {
+                source_id: source.source.id,
+                id: published.id,
+                tag: published.tag,
+                name: published.name,
+                url: published.url,
+                published_at: published.published_at.unwrap_or_default(),
+            })
+        },
+    )
     .await;
     snapshots.invalidate(proposal.source_id);
     created
 }
 
-async fn attempt<T, Operation, Attempted>(
+async fn listing(
     state: &AppState,
     source: &ConnectedSource,
-    operation: Operation,
-) -> Result<T, Failure>
-where
-    Operation: Fn(Github) -> Attempted,
-    Attempted: Future<Output = Result<T, Failure>>,
-{
-    authenticated(
-        state,
-        &source.source,
-        source.configuration.clone(),
-        |github| {
-            let attempted = operation(github);
-            async move {
-                match attempted.await {
-                    Err(Failure::Unauthenticated(message)) => Err(message),
-                    outcome => Ok(outcome),
-                }
-            }
-        },
-    )
-    .await
-    .map_err(Failure::Upstream)?
+    refresh: bool,
+    now: DateTime<Utc>,
+) -> Result<(Snapshot<Listing>, Freshness), Fault> {
+    let snapshots = state.github_snapshots();
+    let permits = snapshots.throttle.credential(&source.source);
+    let origin = state.config().github_web_url.as_str();
+    snapshots
+        .releases
+        .read(source.source.id, refresh, now, move |previous| async move {
+            let _permit = admitted(&permits).await?;
+            let since = now - TimeDelta::days(MAXIMUM_RELEASE_WINDOW_DAYS as i64);
+            let checked_at = now.to_rfc3339();
+            let previous: Option<Arc<Listing>> = previous;
+            let previous = previous.as_deref();
+            credentialed(
+                state,
+                &source.source,
+                source.configuration.clone(),
+                |github| {
+                    let checked_at = checked_at.as_str();
+                    async move {
+                        github
+                            .recent_listing(source, origin, since, previous, checked_at)
+                            .await
+                    }
+                },
+            )
+            .await
+        })
+        .await
 }
 
 async fn propose(
@@ -267,13 +294,22 @@ async fn propose(
     origin: &str,
     tag: &Tag,
     proposal: &Proposal,
-) -> Result<Preview, Failure> {
+) -> Result<(Preview, MakeLatest), Failure> {
     let names = github.tag_names().await?;
-    let latest = Catalogue::new(names.iter().map(String::as_str)).latest_tag();
-    if latest != proposal.expected_latest_tag {
+    let catalogue = Catalogue::new(names.iter().map(String::as_str));
+    let latest = catalogue.latest(tag.prefix());
+    let latest_name = latest.map(|latest| latest.name().to_string());
+    if latest_name != proposal.expected_latest_tag {
         return Err(Refusal::LatestTagMoved {
             expected: proposal.expected_latest_tag.clone(),
-            latest,
+            latest: latest_name,
+        }
+        .into());
+    }
+    if let Some(latest) = latest.filter(|latest| !tag.newer_than(latest)) {
+        return Err(Refusal::TagNotNewer {
+            tag: tag.name().to_string(),
+            latest: latest.name().to_string(),
         }
         .into());
     }
@@ -284,9 +320,21 @@ async fn propose(
         }
         .into());
     }
+    if let Some(release_id) = github.release_tagged(tag.name()).await? {
+        return Err(Refusal::ReleaseExists {
+            tag: tag.name().to_string(),
+            release_id,
+        }
+        .into());
+    }
+    let make_latest = match catalogue.latest_stable() {
+        _ if !tag.stable() => MakeLatest::False,
+        Some(overall) if !tag.newer_than(overall) => MakeLatest::False,
+        _ => MakeLatest::True,
+    };
     let (_, target) = github.branch_head().await?;
     let notes = github
-        .release_notes(tag.name(), &target, latest.as_deref())
+        .release_notes(tag.name(), &target, latest_name.as_deref())
         .await?;
     let repository = source.configuration.full_name();
     let pulls = Notes::new(&notes.body).pulls(&source.configuration.web_url(origin));
@@ -295,28 +343,30 @@ async fn propose(
         tag.name(),
         &notes.name,
         &notes.body,
-        latest.as_deref(),
+        latest_name.as_deref(),
         target.as_str(),
         &pulls,
     )
     .digest();
-    Ok(Preview {
+    let preview = Preview {
         source_id: source.source.id,
         repository,
         tag: tag.name().to_string(),
         name: notes.name,
         body: notes.body,
-        base_tag: latest,
+        base_tag: latest_name,
         target: target.to_string(),
+        prerelease: !tag.stable(),
         pulls,
         digest,
-    })
+    };
+    Ok((preview, make_latest))
 }
 
 async fn publish(
     github: &Github,
     preview: &Preview,
-    prerelease: bool,
+    latest: MakeLatest,
     marker: Uuid,
 ) -> Result<Published, Failure> {
     let target = CommitSha::parse(&preview.target)
@@ -329,64 +379,73 @@ async fn publish(
             target.clone(),
         )
         .await?;
-    let reconcile = |reference_created: bool, release_id: Option<u64>| {
+    let reconcile = |reference_created: Option<bool>, release_id: Option<u64>, exists: bool| {
         Failure::Refused(Refusal::ReconciliationRequired(Reconciliation {
             tag: preview.tag.clone(),
             tag_object: object.to_string(),
             reference_created,
             release_id,
+            release_exists: exists,
+            marker,
         }))
     };
-    reference(github, &preview.tag, &object)
-        .await
-        .map_err(|refused| refused.unwrap_or_else(|| reconcile(false, None)))?;
+    match placed(github, &preview.tag, &object).await {
+        Placement::Ours => {}
+        Placement::Taken => {
+            return Err(Refusal::TagExists {
+                tag: preview.tag.clone(),
+                tag_object: Some(object.to_string()),
+            }
+            .into());
+        }
+        Placement::Absent => return Err(reconcile(Some(false), None, false)),
+        Placement::Unknown => return Err(reconcile(None, None, false)),
+    }
     let request = ReleaseRequest::new(preview.tag.as_str())
         .with_target(target.as_str())
         .with_name(preview.name.as_str())
         .with_body(format!("{}\n\n{marked}", preview.body))
         .with_draft(true)
-        .with_prerelease(prerelease)
-        .with_make_latest(if prerelease {
-            MakeLatest::False
-        } else {
-            MakeLatest::True
-        });
-    let draft = github
-        .write_draft_release(&request)
-        .await
-        .map_err(|_| reconcile(true, None))?;
-    github
-        .publish_draft(draft.id)
-        .await
-        .map_err(|_| reconcile(true, Some(draft.id)))?;
+        .with_prerelease(preview.prerelease)
+        .with_make_latest(latest);
+    let draft = match github.write_draft_release(&request).await {
+        Ok(draft) => draft,
+        Err(PullRequestError::ReleaseExists(_)) => return Err(reconcile(Some(true), None, true)),
+        Err(_) => return Err(reconcile(Some(true), None, false)),
+    };
+    if github.publish_draft(draft.id).await.is_err() {
+        return match github.release_by_id(draft.id).await {
+            Ok(published) if live(&published, preview) => Ok(published),
+            _ => Err(reconcile(Some(true), Some(draft.id), false)),
+        };
+    }
     match github.release_by_id(draft.id).await {
-        Ok(published)
-            if !published.draft
-                && published.tag == preview.tag
-                && published.published_at.is_some() =>
-        {
-            Ok(published)
-        }
-        _ => Err(reconcile(true, Some(draft.id))),
+        Ok(published) if live(&published, preview) => Ok(published),
+        _ => Err(reconcile(Some(true), Some(draft.id), false)),
     }
 }
 
-async fn reference(github: &Github, tag: &str, object: &ObjectId) -> Result<(), Option<Failure>> {
-    let existed = match github.write_reference(tag, object).await {
-        Ok(()) => return Ok(()),
-        Err(error) => matches!(error, PullRequestError::ReferenceExists(_)),
-    };
-    let taken = || {
-        Some(Failure::from(Refusal::TagExists {
-            tag: tag.to_string(),
-            tag_object: Some(object.to_string()),
-        }))
-    };
+async fn placed(github: &Github, tag: &str, object: &ObjectId) -> Placement {
+    if github.write_reference(tag, object).await.is_ok() {
+        return Placement::Ours;
+    }
     match github.tag_reference(tag).await {
-        Ok(Some(reference)) if reference.object == *object => Ok(()),
-        Ok(Some(_)) => Err(taken()),
-        _ if existed => Err(taken()),
-        Ok(None) | Err(_) => Err(None),
+        Ok(Some(found)) if found.object == *object => Placement::Ours,
+        Ok(Some(_)) => Placement::Taken,
+        Ok(None) => Placement::Absent,
+        Err(_) => Placement::Unknown,
+    }
+}
+
+fn live(published: &Published, preview: &Preview) -> bool {
+    !published.draft && published.tag == preview.tag && published.published_at.is_some()
+}
+
+fn windowed(snapshot: &Snapshot<Listing>, since: DateTime<Utc>) -> Snapshot<Listing> {
+    Snapshot {
+        value: Arc::new(snapshot.value.since(since)),
+        generated_at: snapshot.generated_at,
+        warning: snapshot.warning.clone(),
     }
 }
 

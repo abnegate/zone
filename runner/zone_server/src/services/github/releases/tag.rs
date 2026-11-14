@@ -1,7 +1,10 @@
 use std::cmp::Ordering;
 
-const PREFIX: &str = "v";
-const UNPREFIXED: &str = "";
+use abnegate_vcs::BranchName;
+
+const MARKER: &str = "v";
+const UNMARKED: &str = "";
+const PREFIX_SEPARATOR: char = '/';
 const SEPARATOR: char = '.';
 const PRERELEASE: char = '-';
 const ZERO: &str = "0";
@@ -9,7 +12,8 @@ const ZERO: &str = "0";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Tag {
     name: String,
-    prefix: &'static str,
+    prefix: Option<String>,
+    marker: &'static str,
     major: u64,
     minor: u64,
     patch: u64,
@@ -18,9 +22,17 @@ pub(crate) struct Tag {
 
 impl Tag {
     pub(crate) fn parse(name: &str) -> Option<Self> {
-        let (prefix, version) = match name.strip_prefix(PREFIX) {
-            Some(version) => (PREFIX, version),
-            None => (UNPREFIXED, name),
+        if BranchName::parse(name).is_err() {
+            return None;
+        }
+        let (prefix, versioned) = match name.rsplit_once(PREFIX_SEPARATOR) {
+            Some((prefix, versioned)) if !prefix.is_empty() => (Some(prefix), versioned),
+            Some(_) => return None,
+            None => (None, name),
+        };
+        let (marker, version) = match versioned.strip_prefix(MARKER) {
+            Some(version) => (MARKER, version),
+            None => (UNMARKED, versioned),
         };
         let (core, prerelease) = match version.split_once(PRERELEASE) {
             Some((core, prerelease)) => (core, Some(prerelease)),
@@ -40,7 +52,8 @@ impl Tag {
         };
         Some(Self {
             name: name.to_string(),
-            prefix,
+            prefix: prefix.map(str::to_string),
+            marker,
             major,
             minor,
             patch,
@@ -52,23 +65,30 @@ impl Tag {
         &self.name
     }
 
+    pub(crate) fn prefix(&self) -> Option<&str> {
+        self.prefix.as_deref()
+    }
+
     pub(crate) fn stable(&self) -> bool {
         self.prerelease.is_none()
     }
 
+    pub(crate) fn newer_than(&self, other: &Self) -> bool {
+        self.version(other) == Ordering::Greater
+    }
+
     pub(crate) fn next_patch(&self) -> String {
         format!(
-            "{}{}.{}.{}",
-            self.prefix,
+            "{}{}{}.{}.{}",
+            lead(self.prefix()),
+            self.marker,
             self.major,
             self.minor,
             self.patch.saturating_add(1)
         )
     }
-}
 
-impl Ord for Tag {
-    fn cmp(&self, other: &Self) -> Ordering {
+    pub(crate) fn version(&self, other: &Self) -> Ordering {
         (self.major, self.minor, self.patch)
             .cmp(&(other.major, other.minor, other.patch))
             .then_with(
@@ -79,7 +99,12 @@ impl Ord for Tag {
                     (Some(left), Some(right)) => precedence(left, right),
                 },
             )
-            .then_with(|| self.name.cmp(&other.name))
+    }
+}
+
+impl Ord for Tag {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.version(other).then_with(|| self.name.cmp(&other.name))
     }
 }
 
@@ -87,6 +112,10 @@ impl PartialOrd for Tag {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+pub(crate) fn lead(prefix: Option<&str>) -> String {
+    prefix.map_or_else(String::new, |prefix| format!("{prefix}{PREFIX_SEPARATOR}"))
 }
 
 fn number(part: &str) -> Option<u64> {
@@ -139,15 +168,22 @@ mod tests {
     }
 
     #[test]
-    fn a_version_with_or_without_its_prefix_is_a_tag() {
-        for name in [
-            "v1.2.3",
-            "1.2.3",
-            "v0.0.0",
-            "v1.2.3-rc.1",
-            "v10.20.30-beta-2",
+    fn a_version_with_or_without_its_marker_or_a_prefix_is_a_tag() {
+        for (name, prefix) in [
+            ("v1.2.3", None),
+            ("1.2.3", None),
+            ("v0.0.0", None),
+            ("v1.2.3-rc.1", None),
+            ("v10.20.30-beta-2", None),
+            ("abnegate-vcs/v0.2.1", Some("abnegate-vcs")),
+            (
+                "crates/abnegate-vcs/0.2.1-rc.1",
+                Some("crates/abnegate-vcs"),
+            ),
         ] {
-            assert_eq!(tag(name).name(), name);
+            let parsed = tag(name);
+            assert_eq!(parsed.name(), name);
+            assert_eq!(parsed.prefix(), prefix, "{name}");
         }
     }
 
@@ -167,7 +203,12 @@ mod tests {
             "v1.2.3-rc..1",
             "v1.2.3+build",
             " v1.2.3",
-            "pkg/v1.2.3",
+            "/v1.2.3",
+            "pkg//v1.2.3",
+            "pkg/",
+            "pkg/v1.2",
+            "pkg..x/v1.2.3",
+            "pkg name/v1.2.3",
         ] {
             assert!(Tag::parse(name).is_none(), "{name:?}");
         }
@@ -177,13 +218,27 @@ mod tests {
     fn a_prerelease_is_not_stable() {
         assert!(tag("v1.2.3").stable());
         assert!(!tag("v1.2.3-rc.1").stable());
+        assert!(!tag("pkg/v1.2.3-rc.1").stable());
     }
 
     #[test]
-    fn the_next_patch_keeps_the_prefix() {
+    fn the_next_patch_keeps_the_prefix_and_marker() {
         assert_eq!(tag("v1.2.3").next_patch(), "v1.2.4");
         assert_eq!(tag("1.9.9").next_patch(), "1.9.10");
         assert_eq!(tag("v2.0.0-rc.1").next_patch(), "v2.0.1");
+        assert_eq!(
+            tag("abnegate-vcs/v0.2.1").next_patch(),
+            "abnegate-vcs/v0.2.2"
+        );
+    }
+
+    #[test]
+    fn newer_compares_versions_alone() {
+        assert!(tag("v1.2.4").newer_than(&tag("v1.2.3")));
+        assert!(!tag("v1.2.3").newer_than(&tag("v1.2.3")));
+        assert!(!tag("v1.2.3-rc.1").newer_than(&tag("v1.2.3")));
+        assert!(tag("pkg/v1.0.0").newer_than(&tag("v0.9.0")));
+        assert!(!tag("1.2.3").newer_than(&tag("v1.2.3")));
     }
 
     #[test]

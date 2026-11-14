@@ -1,40 +1,63 @@
 use abnegate_vcs::PullRequestError;
 
 use super::refusal::Refusal;
-use crate::services::github::client::described;
+use crate::services::github::fault::Fault;
 use crate::services::github::unavailable::Unavailable;
 use crate::services::github::unconnected::Unconnected;
+use crate::services::github_app::Error as GitHubError;
+use crate::services::github_app::Unauthenticated;
 
 pub(crate) const RELEASE_MISSING: &str = "No published release with that id on this source.";
-pub(crate) const INVALID_TAG: &str = "tag must be a version such as v1.2.3.";
+pub(crate) const INVALID_TAG: &str = "tag must be a version such as v1.2.3 or pkg/v1.2.3.";
+pub(crate) const PRERELEASE_MISMATCH: &str =
+    "prerelease must be true exactly when the tag is a prerelease such as v1.2.3-rc.1.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Failure {
     Unconnected(Unconnected),
-    Invalid(&'static str),
-    Missing(&'static str),
+    Invalid(String),
+    Missing(String),
     Refused(Refusal),
-    Unauthenticated(String),
-    Upstream(String),
+    Upstream(Fault),
+    Internal(String),
 }
 
 impl Failure {
-    pub(crate) fn read(message: String) -> Self {
-        match message.as_str() {
-            RELEASE_MISSING => Self::Missing(RELEASE_MISSING),
-            _ => Self::Upstream(message),
+    pub(crate) fn invalid(message: &str) -> Self {
+        Self::Invalid(message.to_string())
+    }
+}
+
+impl From<Fault> for Failure {
+    fn from(fault: Fault) -> Self {
+        match fault {
+            Fault::Missing(message) => Self::Missing(message),
+            fault => Self::Upstream(fault),
         }
     }
 }
 
 impl From<PullRequestError> for Failure {
     fn from(error: PullRequestError) -> Self {
-        match error {
-            PullRequestError::AuthenticationFailed | PullRequestError::AuthenticationRequired => {
-                Self::Unauthenticated(described(error))
-            }
-            error => Self::Upstream(described(error)),
-        }
+        Self::Upstream(Fault::from(error))
+    }
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self::Upstream(Fault::Upstream(message))
+    }
+}
+
+impl From<GitHubError> for Failure {
+    fn from(error: GitHubError) -> Self {
+        Self::Upstream(Fault::from(error))
+    }
+}
+
+impl Unauthenticated for Failure {
+    fn unauthenticated(&self) -> bool {
+        matches!(self, Self::Upstream(Fault::Unauthenticated))
     }
 }
 
@@ -59,16 +82,15 @@ impl From<Unavailable> for Failure {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::github::client::REQUEST_FAILED;
     use crate::services::github::client::UNEXPECTED_RESPONSE;
     use crate::services::github::client::status_error;
 
     #[test]
     fn a_refused_credential_is_told_apart_so_it_can_be_minted_again() {
-        assert_eq!(
-            Failure::from(PullRequestError::AuthenticationFailed),
-            Failure::Unauthenticated(status_error(401))
-        );
+        let failure = Failure::from(PullRequestError::AuthenticationFailed);
+
+        assert_eq!(failure, Failure::Upstream(Fault::Unauthenticated));
+        assert!(failure.unauthenticated());
     }
 
     #[test]
@@ -79,21 +101,18 @@ mod tests {
                 UNEXPECTED_RESPONSE.to_string(),
             ),
             (PullRequestError::Forbidden, status_error(403)),
-            (PullRequestError::NotFound, status_error(404)),
         ] {
-            assert_eq!(Failure::from(error), Failure::Upstream(message));
+            let failure = Failure::from(error);
+            assert_eq!(failure, Failure::Upstream(Fault::Upstream(message)));
+            assert!(!failure.unauthenticated());
         }
-        assert_eq!(
-            Failure::read(REQUEST_FAILED.to_string()),
-            Failure::Upstream(REQUEST_FAILED.to_string())
-        );
     }
 
     #[test]
     fn a_release_that_is_not_published_is_missing() {
         assert_eq!(
-            Failure::read(RELEASE_MISSING.to_string()),
-            Failure::Missing(RELEASE_MISSING)
+            Failure::from(Fault::missing(RELEASE_MISSING)),
+            Failure::Missing(RELEASE_MISSING.to_string())
         );
     }
 }

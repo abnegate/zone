@@ -1,6 +1,8 @@
 use serde::Serialize;
 use uuid::Uuid;
 
+use super::TagLine;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceOptions {
     pub source_id: Uuid,
@@ -10,4 +12,5 @@ pub struct SourceOptions {
     pub latest_tag: Option<String>,
     pub next_tag: String,
     pub previous_tags: Vec<String>,
+    pub lines: Vec<TagLine>,
 }

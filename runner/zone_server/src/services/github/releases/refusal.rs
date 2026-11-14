@@ -1,7 +1,9 @@
 use super::reconciliation::Reconciliation;
 
 pub const LATEST_TAG_MOVED: &str = "latest_tag_moved";
+pub const TAG_NOT_NEWER: &str = "tag_not_newer";
 pub const TAG_EXISTS: &str = "tag_exists";
+pub const RELEASE_EXISTS: &str = "release_exists";
 pub const PREVIEW_STALE: &str = "preview_stale";
 pub const RELEASE_IN_PROGRESS: &str = "release_in_progress";
 pub const RECONCILIATION_REQUIRED: &str = "release_manual_reconciliation_required";
@@ -13,9 +15,17 @@ pub(crate) enum Refusal {
         expected: Option<String>,
         latest: Option<String>,
     },
+    TagNotNewer {
+        tag: String,
+        latest: String,
+    },
     TagExists {
         tag: String,
         tag_object: Option<String>,
+    },
+    ReleaseExists {
+        tag: String,
+        release_id: u64,
     },
     PreviewStale,
     InProgress,
@@ -26,7 +36,9 @@ impl Refusal {
     pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::LatestTagMoved { .. } => LATEST_TAG_MOVED,
+            Self::TagNotNewer { .. } => TAG_NOT_NEWER,
             Self::TagExists { .. } => TAG_EXISTS,
+            Self::ReleaseExists { .. } => RELEASE_EXISTS,
             Self::PreviewStale => PREVIEW_STALE,
             Self::InProgress => RELEASE_IN_PROGRESS,
             Self::ReconciliationRequired(_) => RECONCILIATION_REQUIRED,
@@ -40,8 +52,14 @@ impl Refusal {
                 expected.as_deref().unwrap_or(NO_TAG),
                 latest.as_deref().unwrap_or(NO_TAG)
             ),
+            Self::TagNotNewer { tag, latest } => {
+                format!("{tag} is not newer than the latest tag, {latest}. Choose a newer tag.")
+            }
             Self::TagExists { tag, .. } => {
                 format!("The tag {tag} already exists. Choose another tag.")
+            }
+            Self::ReleaseExists { tag, release_id } => {
+                format!("Release {release_id} already uses the tag {tag}. Choose another tag.")
             }
             Self::PreviewStale => {
                 "What would be released changed since it was previewed. Review the release again."
@@ -58,6 +76,8 @@ impl Refusal {
 
 #[cfg(test)]
 mod tests {
+    use uuid::Uuid;
+
     use super::*;
 
     #[test]
@@ -65,8 +85,10 @@ mod tests {
         let reconciliation = Reconciliation {
             tag: "v1.4.1".into(),
             tag_object: "c".repeat(40),
-            reference_created: false,
+            reference_created: Some(false),
             release_id: None,
+            release_exists: false,
+            marker: Uuid::nil(),
         };
         for (refusal, code) in [
             (
@@ -77,11 +99,25 @@ mod tests {
                 "latest_tag_moved",
             ),
             (
+                Refusal::TagNotNewer {
+                    tag: "v1.3.9".into(),
+                    latest: "v1.4.0".into(),
+                },
+                "tag_not_newer",
+            ),
+            (
                 Refusal::TagExists {
                     tag: "v1.4.1".into(),
                     tag_object: None,
                 },
                 "tag_exists",
+            ),
+            (
+                Refusal::ReleaseExists {
+                    tag: "v1.4.1".into(),
+                    release_id: 91,
+                },
+                "release_exists",
             ),
             (Refusal::PreviewStale, "preview_stale"),
             (Refusal::InProgress, "release_in_progress"),
