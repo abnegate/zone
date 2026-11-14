@@ -14,12 +14,14 @@ use abnegate_vcs::TagRequest;
 use abnegate_vcs::Tagger;
 use chrono::DateTime;
 use chrono::Utc;
+use tokio::sync::Semaphore;
 
 use super::Listing;
 use super::Release;
 use super::SourceOptions;
 use super::catalogue::Catalogue;
 use super::failure::RELEASE_MISSING;
+use super::lookups::Lookups;
 use super::notes::Notes;
 use crate::services::github::client::Github;
 use crate::services::github::client::PER_PAGE;
@@ -30,6 +32,8 @@ use crate::services::github::release;
 use crate::services::github::release::Lookup;
 use crate::services::github::release::ReleaseIdentity;
 use crate::services::github::release::ReleasePipeline;
+use crate::services::github::release::RunEvidence;
+use crate::services::github::throttle::admitted;
 
 const RELEASE_PAGES: u32 = 10;
 const TAGGER_NAME: &str = "Zone";
@@ -68,30 +72,69 @@ impl Github {
         &self,
         releases: &[ReleaseIdentity],
         previous: &HashMap<String, ReleasePipeline>,
-        checked_at: &str,
+        lookups: &Lookups<'_>,
     ) -> Vec<ReleasePipeline> {
-        let sweep = self.pipeline_sweep(releases).await;
+        let checked_at = lookups.checked_at;
+        let horizon = lookups.horizon.timestamp_millis();
+        let watched: Vec<ReleaseIdentity> = releases
+            .iter()
+            .filter(|identity| identity.published() >= horizon)
+            .cloned()
+            .collect();
+        let sweep = if watched.is_empty() {
+            None
+        } else {
+            self.swept(&watched, lookups.permits).await
+        };
         let mut pipelines = Vec::with_capacity(releases.len());
         for identity in releases {
+            let earlier = previous
+                .get(&identity.key())
+                .cloned()
+                .map(ReleasePipeline::concluded);
+            if identity.published() < horizon {
+                pipelines.push(
+                    earlier.unwrap_or_else(|| {
+                        ReleasePipeline::unavailable(identity.clone(), checked_at)
+                    }),
+                );
+                continue;
+            }
             let observed = match &sweep {
                 Some(records) => {
                     ReleasePipeline::observe(identity.clone(), records, checked_at, self.origin())
                 }
                 None => ReleasePipeline::unavailable(identity.clone(), checked_at),
             };
-            let observed = match observed.lookup {
-                Lookup::Complete => observed,
-                _ => release::merge(
-                    Some(observed),
-                    self.exact_pipeline(identity, checked_at).await,
-                ),
+            let settled = observed.lookup == Lookup::Complete
+                || earlier.as_ref().is_some_and(ReleasePipeline::settled);
+            let observed = if settled {
+                observed
+            } else {
+                release::merge(Some(observed), self.looked_up(identity, lookups).await)
             };
-            pipelines.push(release::merge(
-                previous.get(&identity.key()).cloned(),
-                observed,
-            ));
+            pipelines.push(release::merge(earlier, observed));
         }
         pipelines
+    }
+
+    async fn swept(
+        &self,
+        releases: &[ReleaseIdentity],
+        permits: &Semaphore,
+    ) -> Option<Vec<RunEvidence>> {
+        let _permit = admitted(permits).await.ok()?;
+        self.pipeline_sweep(releases).await
+    }
+
+    async fn looked_up(&self, release: &ReleaseIdentity, lookups: &Lookups<'_>) -> ReleasePipeline {
+        match admitted(lookups.permits).await {
+            Ok(_permit) => self
+                .exact_pipeline(release, lookups.checked_at)
+                .await
+                .concluded(),
+            Err(_) => ReleasePipeline::unavailable(release.clone(), lookups.checked_at),
+        }
     }
 
     pub(crate) async fn recent_listing(
@@ -100,9 +143,12 @@ impl Github {
         origin: &str,
         since: DateTime<Utc>,
         previous: Option<&Listing>,
-        checked_at: &str,
+        lookups: &Lookups<'_>,
     ) -> Result<Listing, Fault> {
-        let (published, complete) = self.releases_since(since).await?;
+        let (published, complete) = {
+            let _permit = admitted(lookups.permits).await?;
+            self.releases_since(since).await?
+        };
         let mut warnings = Vec::new();
         let mut usable = Vec::with_capacity(published.len());
         for published in published {
@@ -122,7 +168,7 @@ impl Github {
             .map(|release| (release.pipeline.release.key(), release.pipeline.clone()))
             .collect();
         let pipelines = self
-            .release_pipelines_for(&identities, &earlier, checked_at)
+            .release_pipelines_for(&identities, &earlier, lookups)
             .await;
         let repository_url = source.configuration.web_url(origin);
         let releases = usable
@@ -156,7 +202,7 @@ impl Github {
             return Err(Fault::upstream(UNLINKED_RELEASE));
         }
         let identity = self.release_identity(&published)?;
-        let observed = self.exact_pipeline(&identity, checked_at).await;
+        let observed = self.exact_pipeline(&identity, checked_at).await.concluded();
         let previous = previous
             .filter(|previous| previous.release.key() == identity.key())
             .cloned();

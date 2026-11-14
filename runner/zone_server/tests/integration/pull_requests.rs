@@ -17,9 +17,13 @@ use axum::http::header::ACCEPT_RANGES;
 use axum::http::header::CONTENT_RANGE;
 use axum::http::header::LOCATION;
 use axum::http::header::RANGE;
+use chrono::SecondsFormat;
+use chrono::Utc;
 use serde_json::Value;
 use serde_json::json;
 use sqlx::PgPool;
+use std::time::Duration;
+use tokio::time::Instant;
 use uuid::Uuid;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -35,6 +39,7 @@ use zone_server::db::workspace_members;
 use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::services::github::diff::PER_FILE_DIFF;
 use zone_server::services::github::pull_requests::LOG_TAIL;
+use zone_server::services::github::throttle::CREDENTIAL_PERMITS;
 use zone_server::state::AppState;
 
 const TOKEN: &str = "ghp_pull_requests_page_test";
@@ -57,6 +62,8 @@ const STORED_LOG: &str = "/store/job-logs/71.txt";
 const LOG_LINE: &str = "2026-11-14T00:10:00Z running the suite\n";
 const FAILURE: &str = "error: the build failed\n";
 const LONG_LOG_BYTES: usize = 17 * 1024 * 1024;
+const SLOW_RELEASES: u64 = 6;
+const RELEASE_LOOKUP_DELAY: Duration = Duration::from_millis(300);
 const DIFF: &str = "diff --git a/src/lib.rs b/src/lib.rs\nindex 1..2 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,2 @@\n fn main() {}\n+fn added() {}\n";
 
 /// One open pull request GitHub knows about, and how its checks stand.
@@ -556,6 +563,88 @@ async fn a_source_never_read_is_partial_and_names_why() {
     assert_eq!(listing["sources"][0]["freshness"], json!("stale"));
     assert_eq!(listing["sources"][0]["generated_at"], json!(null));
     assert!(listing["sources"][0]["warning"].is_string(), "{listing}");
+}
+
+#[tokio::test]
+async fn a_pull_request_list_is_not_held_behind_a_slow_release_listing_on_its_credential() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.list(&[Pull::ready()]).await;
+    let published = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    let releases: Vec<Value> = (1..=SLOW_RELEASES)
+        .map(|id| {
+            let tag = format!("v1.0.{id}");
+            json!({
+                "id": id,
+                "tag_name": tag,
+                "name": tag,
+                "html_url": board.hub.web(&format!("releases/tag/{tag}")),
+                "published_at": published,
+                "draft": false,
+                "prerelease": false,
+                "body": "",
+                "target_commitish": "main",
+            })
+        })
+        .collect();
+    board.hub.answer("releases", json!(releases)).await;
+    Mock::given(method("GET"))
+        .and(path(board.hub.endpoint("actions/runs")))
+        .and(query_param("event", "release"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"workflow_runs": [], "total_count": 0}))
+                .set_delay(RELEASE_LOOKUP_DELAY),
+        )
+        .mount(&board.hub.server)
+        .await;
+    let source = sources::get_source(board.state.db(), board.source, board.workspace)
+        .await
+        .expect("the source reads")
+        .expect("the source exists");
+    let permits = board.state.github_snapshots().throttle.credential(&source);
+    let _elsewhere = permits
+        .acquire_many(u32::try_from(CREDENTIAL_PERMITS - 1).expect("a permit count"))
+        .await
+        .expect("every permit but one is taken elsewhere");
+    let releases_uri = format!("/api/workspaces/{}/releases", board.workspace);
+
+    let (released_at, listed_at) = tokio::join!(
+        async {
+            let (status, body) = board.get(&releases_uri).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            Instant::now()
+        },
+        async {
+            tokio::time::sleep(RELEASE_LOOKUP_DELAY / 2).await;
+            let listing = board.listed("").await;
+            assert_eq!(numbers(&listing).len(), 1, "{listing}");
+            Instant::now()
+        },
+    );
+
+    assert!(
+        listed_at < released_at,
+        "the pull request list waited out the whole release listing"
+    );
+    let release_reads = board
+        .hub
+        .server
+        .received_requests()
+        .await
+        .expect("requests are recorded")
+        .iter()
+        .filter(|request| {
+            request
+                .url
+                .query_pairs()
+                .any(|(key, value)| key == "event" && value == "release")
+        })
+        .count();
+    assert_eq!(
+        release_reads,
+        usize::try_from(SLOW_RELEASES).expect("a release count") + 1,
+        "one sweep and one exact read per release"
+    );
 }
 
 #[tokio::test]

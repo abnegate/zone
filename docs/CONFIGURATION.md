@@ -2324,7 +2324,7 @@ The console's **Pull Requests** and **Releases** pages read every active GitHub 
 
 ### `ZONE_GITHUB_RELEASE_WINDOW_DAYS`
 - **Default**: `7` (1–90)
-- **Description**: How many days of published releases the Releases page lists when it does not ask for another window. A window it asks for is held to 1–90 days.
+- **Description**: How many days of published releases the Releases page lists when it does not ask for another window. A window it asks for is held to 1–90 days. It also bounds release pipeline lookups: only releases published inside this many days, and never less than one, are checked against GitHub Actions; an older release shown in a wider window keeps the pipeline already known for it.
 
 ### `ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT`
 - **Default**: `50` (1–200)

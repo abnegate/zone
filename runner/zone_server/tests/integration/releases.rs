@@ -31,6 +31,10 @@ const NEXT: &str = "v1.4.1";
 const PUBLISHED_ID: u64 = 90;
 const DRAFT_ID: u64 = 91;
 const MARKER: &str = "<!-- zone-release:";
+const BRANCH_FILTER: &str = "branch";
+const CREATED_FILTER: &str = "created";
+const FRESH: &str = "v1.5.0";
+const FRESH_ID: u64 = 92;
 const NOTES: &str = "## What's Changed\n\
     * Add widgets by @octo in https://github.com/acme/widgets/pull/12\n\
     * Fix gadgets by @cat in https://github.com/acme/widgets/pull/13\n\
@@ -349,6 +353,37 @@ impl Releases {
         .await;
     }
 
+    async fn run_reads(&self, filter: &str, value: Option<&str>) -> usize {
+        self.sent("GET", &format!("{REPOSITORY}/actions/runs"))
+            .await
+            .iter()
+            .filter(|request| {
+                request
+                    .url
+                    .query_pairs()
+                    .any(|(key, read)| key == filter && value.is_none_or(|value| read == value))
+            })
+            .count()
+    }
+
+    async fn exact_reads(&self, tag: &str) -> usize {
+        self.run_reads(BRANCH_FILTER, Some(tag)).await
+    }
+
+    async fn sweeps(&self) -> usize {
+        self.run_reads(CREATED_FILTER, None).await
+    }
+
+    async fn relisted(&self, query: &str) -> Value {
+        self.state
+            .github_snapshots()
+            .releases
+            .invalidate(&self.source);
+        let (status, body) = self.get(&format!("{}{query}", self.releases())).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
     async fn never_deleted(&self) {
         assert!(
             self.requests()
@@ -399,7 +434,24 @@ async fn member(client: &TestClient) -> (String, Uuid) {
 }
 
 fn ago(days: i64) -> String {
-    (Utc::now() - Interval::days(days)).to_rfc3339_opts(SecondsFormat::Secs, true)
+    before(Interval::days(days))
+}
+
+fn hours_ago(hours: i64) -> String {
+    before(Interval::hours(hours))
+}
+
+fn before(interval: Interval) -> String {
+    (Utc::now() - interval).to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn pipeline_of<'a>(listing: &'a Value, tag: &str) -> &'a Value {
+    &listing["releases"]
+        .as_array()
+        .expect("releases")
+        .iter()
+        .find(|release| release["tag"] == tag)
+        .unwrap_or_else(|| panic!("{tag} is listed: {listing}"))["pipeline"]
 }
 
 fn tag_row(name: &str) -> Value {
@@ -535,7 +587,10 @@ async fn releases_published_inside_the_window_are_listed_with_their_pulls_and_pi
         .collect();
     assert_eq!(tags, [LATEST, "v1.3.0"], "newest first: {wider}");
     assert_eq!(wider["releases"][1]["state"], "unknown");
-    assert_eq!(wider["releases"][1]["pipeline"]["lookup"], "pending");
+    assert_eq!(
+        wider["releases"][1]["pipeline"]["lookup"], "unavailable",
+        "a release past the lookup horizon is never looked up"
+    );
     assert_eq!(wider["releases"][1]["pulls"], json!([]));
 
     let (_, again) = releases
@@ -556,6 +611,85 @@ async fn releases_published_inside_the_window_are_listed_with_their_pulls_and_pi
         .get(&format!("{}?days=500", releases.releases()))
         .await;
     assert_eq!(clamped["window_days"], 90);
+}
+
+#[tokio::test]
+async fn a_release_still_without_a_run_an_hour_after_publishing_is_not_looked_up_again() {
+    let releases = Releases::new().await;
+    releases
+        .answer_json(
+            "GET",
+            "/releases",
+            200,
+            json!([
+                release(FRESH_ID, FRESH, Some(&hours_ago(0)), false, NOTES),
+                release(PUBLISHED_ID, LATEST, Some(&hours_ago(2)), false, NOTES),
+            ]),
+        )
+        .await;
+    releases.runs(Vec::new()).await;
+
+    let first = releases.relisted("").await;
+    assert_eq!(
+        pipeline_of(&first, LATEST)["lookup"],
+        "complete",
+        "an hour without a run is no release pipeline: {first}"
+    );
+    assert_eq!(pipeline_of(&first, LATEST)["runs"], json!([]));
+    assert_eq!(pipeline_of(&first, FRESH)["lookup"], "pending");
+    assert_eq!(releases.exact_reads(LATEST).await, 1);
+    assert_eq!(releases.exact_reads(FRESH).await, 1);
+
+    let second = releases.relisted("").await;
+    assert_eq!(pipeline_of(&second, LATEST)["lookup"], "complete");
+    assert_eq!(pipeline_of(&second, FRESH)["lookup"], "pending");
+    assert_eq!(
+        releases.exact_reads(LATEST).await,
+        1,
+        "a settled release is not looked up again"
+    );
+    assert_eq!(
+        releases.exact_reads(FRESH).await,
+        2,
+        "a release GitHub may still start a run for is"
+    );
+    assert_eq!(releases.sweeps().await, 2);
+}
+
+#[tokio::test]
+async fn a_release_older_than_the_lookup_horizon_makes_no_pipeline_call() {
+    let releases = Releases::new().await;
+    releases
+        .answer_json(
+            "GET",
+            "/releases",
+            200,
+            json!([release(80, "v1.3.0", Some(&ago(30)), false, "")]),
+        )
+        .await;
+    releases.runs(vec![run(501, "v1.3.0", "success")]).await;
+
+    for _ in 0..2 {
+        let listing = releases.relisted("?days=60").await;
+        assert_eq!(pipeline_of(&listing, "v1.3.0")["lookup"], "unavailable");
+        assert_eq!(listing["releases"][0]["state"], "unknown");
+    }
+
+    assert_eq!(
+        releases
+            .sent("GET", &format!("{REPOSITORY}/actions/runs"))
+            .await
+            .len(),
+        0,
+        "neither a sweep nor an exact read reaches GitHub"
+    );
+    assert_eq!(
+        releases
+            .sent("GET", &format!("{REPOSITORY}/releases"))
+            .await
+            .len(),
+        2
+    );
 }
 
 #[tokio::test]

@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+
 use serde_json::json;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
+use wiremock::MockServer;
 
 use super::*;
 use crate::services::github::connection::ConnectedSource;
@@ -9,6 +13,7 @@ use crate::services::github::release::ReleasePipeline;
 use crate::services::github::release::RunEvidence;
 use crate::services::github::release::run_url;
 use crate::services::github::testing::connected_source;
+use crate::services::github::testing::mocked;
 
 const SOURCE: &str = "6f2c1f8e-0d55-4a3c-9a43-2f1d4c1e7b10";
 const ORIGIN: &str = "https://github.example.com";
@@ -120,6 +125,46 @@ fn an_observed_release_carries_its_source_and_its_pipelines_verdict() {
         .map(|blocker| serde_json::to_value(blocker.code).unwrap())
         .collect();
     assert_eq!(codes, [json!("lookup_pending"), json!("runs_absent")]);
+}
+
+#[tokio::test]
+async fn a_release_past_the_lookup_horizon_carries_what_was_known_without_reaching_github() {
+    let server = MockServer::start().await;
+    let github = mocked(&server);
+    let permits = Semaphore::new(1);
+    let carried = ReleaseIdentity {
+        id: 89,
+        tag: "v1.3.0".into(),
+        published_at: "2026-11-01T00:00:00Z".into(),
+        ..identity()
+    };
+    let unknown = ReleaseIdentity {
+        id: 88,
+        tag: "v1.2.0".into(),
+        published_at: "2026-10-01T00:00:00Z".into(),
+        ..identity()
+    };
+    let known = ReleasePipeline {
+        release: carried.clone(),
+        ..succeeded()
+    };
+    let previous = HashMap::from([(carried.key(), known.clone())]);
+    let lookups = Lookups {
+        permits: &permits,
+        horizon: "2026-11-07T00:00:00Z".parse().unwrap(),
+        checked_at: CHECKED_AT,
+    };
+
+    let pipelines = github
+        .release_pipelines_for(&[carried, unknown.clone()], &previous, &lookups)
+        .await;
+
+    assert_eq!(
+        pipelines,
+        [known, ReleasePipeline::unavailable(unknown, CHECKED_AT)]
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(permits.available_permits(), 1);
 }
 
 #[test]

@@ -18,9 +18,11 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use super::readiness::CommitSha;
 
+pub const RUN_GRACE: Duration = Duration::from_secs(60 * 60);
 const RELEASE_EVENT: &str = "release";
 const SEPARATOR: char = '/';
 
@@ -473,6 +475,27 @@ impl ReleasePipeline {
 
     pub fn succeeded(&self) -> bool {
         self.state() == PipelineState::Succeeded
+    }
+
+    pub fn settled(&self) -> bool {
+        self.lookup == Lookup::Complete || self.lapsed()
+    }
+
+    pub fn concluded(self) -> Self {
+        if self.lapsed() {
+            Self {
+                lookup: Lookup::Complete,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
+    fn lapsed(&self) -> bool {
+        let waited = observed_at(&self.checked_at).saturating_sub(self.release.published());
+        self.lookup == Lookup::Pending
+            && waited >= i64::try_from(RUN_GRACE.as_millis()).unwrap_or(i64::MAX)
     }
 }
 
@@ -1111,6 +1134,33 @@ mod tests {
             assert_eq!(merged.lookup, Lookup::Complete);
         }
         assert_eq!(merge(None, newer.clone()), newer);
+    }
+
+    #[test]
+    fn a_release_still_without_runs_after_the_grace_has_no_pipeline() {
+        let early = ReleasePipeline::observe(release(), &[], "2026-09-05T00:59:59Z", ORIGIN);
+        assert!(!early.settled(), "GitHub may still start a run");
+        assert_eq!(early.clone().concluded(), early);
+
+        let late = ReleasePipeline::observe(release(), &[], "2026-09-05T01:00:00Z", ORIGIN);
+        assert!(late.settled());
+        let concluded = late.concluded();
+        assert_eq!(concluded.lookup, Lookup::Complete);
+        assert!(concluded.runs.is_empty());
+        assert_eq!(concluded.state(), PipelineState::Unknown);
+        assert_eq!(concluded.blockers(), vec![PipelineBlocker::RunsAbsent]);
+    }
+
+    #[test]
+    fn only_a_reached_lookup_settles() {
+        assert!(observed(&[succeeded(1, 1)]).settled());
+        for checked_at in ["2026-09-06T00:00:00Z", "yesterday"] {
+            let unavailable = ReleasePipeline::unavailable(release(), checked_at);
+            assert!(!unavailable.settled(), "{checked_at}");
+            assert_eq!(unavailable.clone().concluded(), unavailable);
+        }
+        let unreadable = ReleasePipeline::observe(release(), &[], "yesterday", ORIGIN);
+        assert!(!unreadable.settled());
     }
 
     #[test]

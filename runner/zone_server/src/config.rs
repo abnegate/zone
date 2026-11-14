@@ -886,6 +886,8 @@ const MAXIMUM_GITHUB_TTL_SECS: u64 = 3600;
 const DEFAULT_RELEASE_WINDOW_DAYS: u64 = 7;
 const MINIMUM_RELEASE_WINDOW_DAYS: u64 = 1;
 pub const MAXIMUM_RELEASE_WINDOW_DAYS: u64 = 90;
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+const MINIMUM_PIPELINE_HORIZON: Duration = DAY;
 const DEFAULT_OPEN_PULL_REQUEST_LIMIT: u64 = 50;
 const MINIMUM_OPEN_PULL_REQUEST_LIMIT: u64 = 1;
 const MAXIMUM_OPEN_PULL_REQUEST_LIMIT: u64 = 200;
@@ -947,6 +949,11 @@ impl GithubConfig {
             MINIMUM_RELEASE_WINDOW_DAYS as u32,
             MAXIMUM_RELEASE_WINDOW_DAYS as u32,
         )
+    }
+
+    pub fn pipeline_horizon(&self) -> Duration {
+        DAY.saturating_mul(self.release_window_days)
+            .max(MINIMUM_PIPELINE_HORIZON)
     }
 }
 
@@ -2331,6 +2338,18 @@ mod tests {
         assert_eq!(github.release_window(Some(30)), 30);
         assert_eq!(github.release_window(Some(0)), 1);
         assert_eq!(github.release_window(Some(365)), 90);
+    }
+
+    #[test]
+    fn release_pipelines_are_looked_up_across_the_default_window_and_never_less_than_a_day() {
+        let window = |release_window_days| GithubConfig {
+            release_window_days,
+            ..GithubConfig::default()
+        };
+
+        assert_eq!(GithubConfig::default().pipeline_horizon(), DAY * 7);
+        assert_eq!(window(30).pipeline_horizon(), DAY * 30);
+        assert_eq!(window(0).pipeline_horizon(), DAY);
     }
 
     #[test]

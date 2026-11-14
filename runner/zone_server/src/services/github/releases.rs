@@ -5,6 +5,7 @@ mod failure;
 mod included_pull;
 mod line;
 mod listing;
+mod lookups;
 mod notes;
 mod offered;
 mod placement;
@@ -50,6 +51,7 @@ use futures::future::join_all;
 use uuid::Uuid;
 
 use super::authentication::credentialed;
+use super::cache::delta;
 use super::client::Github;
 use super::connection::ConnectedSource;
 use super::connection::connect;
@@ -69,6 +71,7 @@ use catalogue::Catalogue;
 use failure::INVALID_TAG;
 use failure::PRERELEASE_MISMATCH;
 use failure::RELEASE_MISSING;
+use lookups::Lookups;
 use notes::Notes;
 use placement::Placement;
 use tag::Tag;
@@ -265,8 +268,10 @@ async fn listing(
     snapshots
         .releases
         .read(source.source.id, refresh, now, move |previous| async move {
-            let _permit = admitted(&permits).await?;
             let since = now - TimeDelta::days(MAXIMUM_RELEASE_WINDOW_DAYS as i64);
+            let horizon = now
+                .checked_sub_signed(delta(state.config().github.pipeline_horizon()))
+                .unwrap_or(DateTime::<Utc>::MIN_UTC);
             let checked_at = now.to_rfc3339();
             let previous: Option<Arc<Listing>> = previous;
             let previous = previous.as_deref();
@@ -275,10 +280,14 @@ async fn listing(
                 &source.source,
                 source.configuration.clone(),
                 |github| {
-                    let checked_at = checked_at.as_str();
+                    let lookups = Lookups {
+                        permits: &permits,
+                        horizon,
+                        checked_at: checked_at.as_str(),
+                    };
                     async move {
                         github
-                            .recent_listing(source, origin, since, previous, checked_at)
+                            .recent_listing(source, origin, since, previous, &lookups)
                             .await
                     }
                 },
