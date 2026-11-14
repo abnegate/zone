@@ -148,6 +148,59 @@ pub struct Indicator {
     pub pull_requests: usize,
 }
 
+/// One chat's activity on its own, with the title a notification would name it
+/// by.
+///
+/// Separate from [`Indicator`] because a client watching for the moment a chat
+/// stops and starts waiting reads this on a timer in the background, where
+/// refreshing pull request statuses would spend the workspace's GitHub budget
+/// on rows nobody is looking at. It says nothing about a pull request rather
+/// than reporting one it did not read.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatActivity {
+    pub chat_id: Uuid,
+    pub title: String,
+    pub activity: Activity,
+}
+
+/// What every chat in the workspace is doing, without asking GitHub anything.
+///
+/// Every chat rather than a page of them: the reader is told when any of their
+/// chats stops, and one they have not scrolled to is exactly the one they
+/// cannot see stop. It costs the two readings below however many chats there
+/// are.
+pub async fn activities(
+    state: &AppState,
+    workspace_id: Uuid,
+    archived: Option<bool>,
+) -> DbResult<Vec<ChatActivity>> {
+    let chats = chats::list_chats(
+        state.db(),
+        workspace_id,
+        archived,
+        Sort::default(),
+        Page::default(),
+    )
+    .await?;
+    let (writing, awaiting_answer) = tokio::try_join!(
+        activity::writing(state.db(), workspace_id),
+        activity::awaiting_answer(state.db(), workspace_id),
+    )?;
+
+    Ok(chats
+        .into_iter()
+        .map(|chat| ChatActivity {
+            chat_id: chat.id,
+            title: chat.title,
+            activity: Activity::read(
+                writing.contains(&chat.id),
+                ApprovalPolicy::chat_waiting(chat.id),
+                awaiting_answer.contains(&chat.id),
+            ),
+        })
+        .collect())
+}
+
 /// Read the slice of the workspace's chats the list is showing, in the order
 /// it asked for them.
 ///

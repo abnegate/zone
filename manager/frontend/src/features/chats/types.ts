@@ -598,6 +598,19 @@ export interface ChatPullIndicator {
   ready: boolean;
 }
 
+/**
+ * What one chat is doing, on its own.
+ *
+ * What the watcher that notifies about a chat gets: an indicator's pull request
+ * readings would cost a GitHub read per chat on every poll, and a watcher polls
+ * whether or not anybody is looking at the list.
+ */
+export interface ChatActivityReading {
+  chat_id: string;
+  title: string;
+  activity: ChatActivity;
+}
+
 /** One chat as its row in the list shows it. */
 export interface ChatIndicator {
   chat_id: string;
