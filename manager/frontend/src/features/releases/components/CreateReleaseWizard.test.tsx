@@ -429,6 +429,38 @@ describe('CreateReleaseWizard', () => {
     expect(within(alert).getByRole('button', { name: wizard.RELOAD_OPTIONS })).toBeInTheDocument();
   });
 
+  it('stops a second publish once the tag needs reconciling, since it can only find the tag taken', async () => {
+    mockPreview.mockResolvedValue(preview);
+    mockCreate.mockRejectedValue(
+      new ReleaseRefusal({
+        error: 'The release was only partly created and needs reconciling on GitHub',
+        code: 'release_manual_reconciliation_required',
+        tag: 'v1.2.4',
+        tag_object: 'e'.repeat(40),
+        reference_created: true,
+        release_id: null,
+        release_exists: false,
+        marker: '0b9f1c52-6d4e-4a8b-9f2e-1c3d5e7f9a0b',
+      })
+    );
+    renderWizard();
+    await reviewStep();
+
+    fireEvent.click(screen.getByRole('button', { name: wizard.PUBLISH }));
+    const alert = await screen.findByRole('alert');
+
+    expect(screen.getByRole('button', { name: wizard.PUBLISH })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: wizard.PUBLISH }));
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(within(alert).getByRole('button', { name: wizard.RELOAD_OPTIONS })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
+    await waitFor(() => expect(tagInput()).toBeInTheDocument());
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('asks for GitHub to be checked when a publish stopped without an answer', async () => {
     mockPreview.mockResolvedValue(preview);
     mockCreate.mockRejectedValue(

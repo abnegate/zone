@@ -159,8 +159,11 @@ export function CreateReleaseWizard({
   const parsed = parseTag(tag);
   const problem = source ? tagProblem(tag, lineOfTag(source, tag)?.previous_tags ?? []) : null;
   const busy = previewing || creating || reloading;
+  const reconciling = failure?.reconciliation != null;
   const canProceed =
-    step === TARGET ? !!source && problem === null && !optionsLoading : previewed !== null;
+    step === TARGET
+      ? !!source && problem === null && !optionsLoading
+      : previewed !== null && !reconciling;
   const tagShown = isOpen && step === TARGET && !optionsLoading && !!source;
 
   useEffect(() => {
@@ -211,7 +214,7 @@ export function CreateReleaseWizard({
   };
 
   const publish = async () => {
-    if (!previewed || publishing.current) return;
+    if (!previewed || reconciling || publishing.current) return;
     publishing.current = true;
     const { request, preview: notes } = previewed;
     setFailure(null);
