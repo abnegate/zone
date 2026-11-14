@@ -5,7 +5,7 @@ mod listing_response;
 mod log_response;
 mod merge_request;
 mod merged_response;
-mod refresh_query;
+mod merging;
 mod refusal_response;
 
 use std::num::NonZeroU64;
@@ -14,24 +14,22 @@ use axum::Json;
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::PathRejection;
+use axum::extract::rejection::QueryRejection;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
-use serde_json::json;
 use uuid::Uuid;
 
+use crate::auth::PullRequestMerger;
 use crate::auth::WorkspaceMember;
-use crate::auth::WorkspaceWriter;
-use crate::db::audit::actions;
-use crate::db::audit::resources;
 use crate::error::ServerError;
-use crate::routes::common::AuditEvent;
-use crate::routes::common::audit;
+use crate::routes::refresh_query::RefreshQuery;
 use crate::services::github::pull_requests;
 use crate::services::github::pull_requests::Detail;
 use crate::services::github::pull_requests::Error;
 use crate::services::github::readiness::CommitSha;
-use crate::services::github::snapshots::REFRESH_FLOOR;
 use crate::state::AppState;
 use commits_response::CommitsResponse;
 use diff_response::DiffResponse;
@@ -41,73 +39,77 @@ use listing_response::ListingResponse;
 use log_response::LogResponse;
 use merge_request::MergeRequest;
 use merged_response::MergedResponse;
-use refresh_query::RefreshQuery;
+use merging::Merging;
 use refusal_response::RefusalResponse;
 
 const INVALID_COMMIT: &str = "sha must be a 40 character commit.";
 const INVALID_JOB: &str = "job_id must be positive.";
 const INVALID_EXPECTED_HEAD: &str =
     "expected_head must be the pull request's 40 character head commit.";
+const OUTCOME_UNKNOWN: &str = "The merge stopped before it reported back, so whether it happened is unknown. Reload the pull request before trying again.";
 
 type Answer<T> = Result<Json<T>, Error>;
+type PullPath = Result<Path<(Uuid, Uuid, u64)>, PathRejection>;
+type Headed = Result<Query<HeadQuery>, QueryRejection>;
 
-/// GET /api/workspaces/{workspace_id}/pull-requests
 pub async fn list(
     State(state): State<AppState>,
     member: WorkspaceMember,
-    Query(query): Query<RefreshQuery>,
+    query: Result<Query<RefreshQuery>, QueryRejection>,
 ) -> Answer<ListingResponse> {
+    let Query(query) = query?;
     let overview = pull_requests::list(&state, member.workspace_id, query.requested()).await?;
+    let snapshots = state.github_snapshots();
     Ok(Json(ListingResponse::new(
         overview,
-        state.github_snapshots().pulls.ttl(),
-        REFRESH_FLOOR,
+        snapshots.pull_requests.ttl(),
+        snapshots.pull_requests.floor(),
     )))
 }
 
-/// GET /api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}
 pub async fn detail(
     State(state): State<AppState>,
     member: WorkspaceMember,
-    Path((_, source_id, number)): Path<(Uuid, Uuid, u64)>,
+    path: PullPath,
 ) -> Answer<Detail> {
+    let Path((_, source_id, number)) = path?;
     let detail = pull_requests::detail(&state, member.workspace_id, source_id, number).await?;
     Ok(Json(detail))
 }
 
-/// GET /api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/diff
 pub async fn diff(
     State(state): State<AppState>,
     member: WorkspaceMember,
-    Path((_, source_id, number)): Path<(Uuid, Uuid, u64)>,
-    Query(query): Query<HeadQuery>,
+    path: PullPath,
+    query: Headed,
 ) -> Answer<DiffResponse> {
-    let head = head(&query)?;
+    let Path((_, source_id, number)) = path?;
+    let head = head(query)?;
     let diff = pull_requests::diff(&state, member.workspace_id, source_id, number, &head).await?;
     Ok(Json(DiffResponse { diff }))
 }
 
-/// GET /api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/commits
 pub async fn commits(
     State(state): State<AppState>,
     member: WorkspaceMember,
-    Path((_, source_id, number)): Path<(Uuid, Uuid, u64)>,
-    Query(query): Query<HeadQuery>,
+    path: PullPath,
+    query: Headed,
 ) -> Answer<CommitsResponse> {
-    let head = head(&query)?;
+    let Path((_, source_id, number)) = path?;
+    let head = head(query)?;
     let commits =
         pull_requests::commits(&state, member.workspace_id, source_id, number, &head).await?;
     Ok(Json(CommitsResponse { commits }))
 }
 
-/// GET /api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/commits/{sha}
 pub async fn commit_diff(
     State(state): State<AppState>,
     member: WorkspaceMember,
-    Path((_, source_id, number, sha)): Path<(Uuid, Uuid, u64, String)>,
-    Query(query): Query<HeadQuery>,
+    path: Result<Path<(Uuid, Uuid, u64, String)>, PathRejection>,
+    query: Headed,
 ) -> Answer<DiffResponse> {
-    let head = head(&query)?;
+    let Path((_, source_id, number, sha)) = path?;
+    let head = head(query)?;
     let sha = CommitSha::parse(&sha).ok_or_else(|| invalid(INVALID_COMMIT))?;
     let diff =
         pull_requests::commit_diff(&state, member.workspace_id, source_id, number, &sha, &head)
@@ -115,14 +117,14 @@ pub async fn commit_diff(
     Ok(Json(DiffResponse { diff }))
 }
 
-/// GET /api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/jobs/{job_id}/log
 pub async fn job_log(
     State(state): State<AppState>,
     member: WorkspaceMember,
-    Path((_, source_id, number, job_id)): Path<(Uuid, Uuid, u64, u64)>,
-    Query(query): Query<HeadQuery>,
+    path: Result<Path<(Uuid, Uuid, u64, u64)>, PathRejection>,
+    query: Headed,
 ) -> Answer<LogResponse> {
-    let head = head(&query)?;
+    let Path((_, source_id, number, job_id)) = path?;
+    let head = head(query)?;
     let job_id = NonZeroU64::new(job_id).ok_or_else(|| invalid(INVALID_JOB))?;
     let log = pull_requests::job_log(
         &state,
@@ -136,55 +138,55 @@ pub async fn job_log(
     Ok(Json(LogResponse { log }))
 }
 
-/// POST /api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/merge
 pub async fn merge(
     State(state): State<AppState>,
-    writer: WorkspaceWriter,
-    Path((_, source_id, number)): Path<(Uuid, Uuid, u64)>,
-    Json(request): Json<MergeRequest>,
+    PullRequestMerger(writer): PullRequestMerger,
+    path: PullPath,
+    request: Result<Json<MergeRequest>, JsonRejection>,
 ) -> Answer<MergedResponse> {
+    let Path((_, source_id, number)) = path?;
+    let Json(request) = request?;
     let expected =
         CommitSha::parse(&request.expected_head).ok_or_else(|| invalid(INVALID_EXPECTED_HEAD))?;
-    let merged = pull_requests::merge(
-        &state,
-        writer.workspace_id,
+    let merging = Merging {
+        writer,
         source_id,
         number,
-        &expected,
-        request.method,
-    )
-    .await?;
-    audit(
-        state.db(),
-        AuditEvent {
-            organization_id: None,
-            workspace_id: Some(writer.workspace_id),
-            actor_id: writer.user_id,
-            actor_email: &writer.email,
-            action: actions::PULL_REQUEST_MERGED,
-            resource_type: resources::PULL_REQUEST,
-            resource_id: Some(source_id),
-            old_values: None,
-            new_values: Some(json!({
-                "source_id": source_id,
-                "number": merged.number,
-                "head": expected.as_str(),
-                "sha": merged.sha,
-                "admin": merged.admin,
-                "url": merged.url,
-            })),
-        },
-    )
-    .await;
+        expected,
+        method: request.method,
+    };
+    let merged = tokio::spawn(merging.run(state)).await.map_err(|error| {
+        tracing::error!(%error, source = %source_id, number, "A merge did not report back");
+        Error::Internal(OUTCOME_UNKNOWN.to_string())
+    })??;
     Ok(Json(MergedResponse { merged }))
 }
 
-fn head(query: &HeadQuery) -> Result<CommitSha, Error> {
+fn head(query: Headed) -> Result<CommitSha, Error> {
+    let Query(query) = query?;
     query.head().ok_or_else(|| invalid(INVALID_HEAD))
 }
 
 fn invalid(message: &str) -> Error {
     Error::Invalid(message.to_string())
+}
+
+impl From<PathRejection> for Error {
+    fn from(rejection: PathRejection) -> Self {
+        Self::Invalid(rejection.body_text())
+    }
+}
+
+impl From<QueryRejection> for Error {
+    fn from(rejection: QueryRejection) -> Self {
+        Self::Invalid(rejection.body_text())
+    }
+}
+
+impl From<JsonRejection> for Error {
+    fn from(rejection: JsonRejection) -> Self {
+        Self::Invalid(rejection.body_text())
+    }
 }
 
 impl IntoResponse for Error {
@@ -196,8 +198,8 @@ impl IntoResponse for Error {
             Error::Missing(message) => ServerError::NotFound(message).into_response(),
             Error::Invalid(message) => ServerError::BadRequest(message).into_response(),
             Error::Disconnected(message) => ServerError::Conflict(message).into_response(),
-            Error::Unreadable(message) => ServerError::Internal(message).into_response(),
-            Error::Upstream(message) => ServerError::BadGateway(message).into_response(),
+            Error::Internal(message) => ServerError::Internal(message).into_response(),
+            Error::Upstream(fault) => ServerError::BadGateway(fault.to_string()).into_response(),
         }
     }
 }

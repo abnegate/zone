@@ -1,4 +1,7 @@
 use axum::Json;
+use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::PathRejection;
+use axum::extract::rejection::QueryRejection;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
@@ -7,9 +10,8 @@ use super::refusal_response::RefusalResponse;
 use crate::error::ServerError;
 use crate::services::github::releases::Failure;
 use crate::services::github::unavailable::Unavailable;
+use crate::services::github::unconnected::NOT_GITHUB;
 use crate::services::github::unconnected::Unconnected;
-
-const NOT_GITHUB: &str = "Not a GitHub source.";
 
 #[derive(Debug)]
 pub struct Rejection(Failure);
@@ -17,6 +19,24 @@ pub struct Rejection(Failure);
 impl From<Failure> for Rejection {
     fn from(failure: Failure) -> Self {
         Self(failure)
+    }
+}
+
+impl From<PathRejection> for Rejection {
+    fn from(rejection: PathRejection) -> Self {
+        Self(Failure::Invalid(rejection.body_text()))
+    }
+}
+
+impl From<QueryRejection> for Rejection {
+    fn from(rejection: QueryRejection) -> Self {
+        Self(Failure::Invalid(rejection.body_text()))
+    }
+}
+
+impl From<JsonRejection> for Rejection {
+    fn from(rejection: JsonRejection) -> Self {
+        Self(Failure::Invalid(rejection.body_text()))
     }
 }
 
@@ -42,11 +62,10 @@ impl IntoResponse for Rejection {
                     Unconnected::InvalidConfiguration => ServerError::Conflict(message),
                 }
             }
-            Failure::Invalid(message) => ServerError::BadRequest(message.to_string()),
-            Failure::Missing(message) => ServerError::NotFound(message.to_string()),
-            Failure::Unauthenticated(message) | Failure::Upstream(message) => {
-                ServerError::BadGateway(message)
-            }
+            Failure::Invalid(message) => ServerError::BadRequest(message),
+            Failure::Missing(message) => ServerError::NotFound(message),
+            Failure::Upstream(fault) => ServerError::BadGateway(fault.to_string()),
+            Failure::Internal(message) => ServerError::Internal(message),
         };
         error.into_response()
     }

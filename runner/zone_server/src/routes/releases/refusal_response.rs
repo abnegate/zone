@@ -1,5 +1,8 @@
 use serde::Serialize;
 
+use super::reconciliation_detail::ReconciliationDetail;
+use super::refusal_detail::RefusalDetail;
+use super::tag_detail::TagDetail;
 use crate::services::github::releases::Refusal;
 
 #[derive(Debug, Serialize)]
@@ -7,41 +10,39 @@ pub struct RefusalResponse {
     pub success: bool,
     pub error: String,
     pub code: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tag: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tag_object: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reference_created: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub release_id: Option<Option<u64>>,
+    #[serde(flatten)]
+    pub detail: Option<RefusalDetail>,
 }
 
 impl From<Refusal> for RefusalResponse {
     fn from(refusal: Refusal) -> Self {
-        let refused = Self {
-            success: false,
-            error: refusal.message(),
-            code: refusal.code(),
-            tag: None,
-            tag_object: None,
-            reference_created: None,
-            release_id: None,
-        };
-        match refusal {
-            Refusal::TagExists { tag, tag_object } => Self {
-                tag: Some(tag),
+        let (error, code) = (refusal.message(), refusal.code());
+        let detail = match refusal {
+            Refusal::TagExists { tag, tag_object } => Some(RefusalDetail::Tag(TagDetail {
+                tag,
                 tag_object,
-                ..refused
-            },
-            Refusal::ReconciliationRequired(reconciliation) => Self {
-                tag: Some(reconciliation.tag),
-                tag_object: Some(reconciliation.tag_object),
-                reference_created: Some(reconciliation.reference_created),
-                release_id: Some(reconciliation.release_id),
-                ..refused
-            },
-            Refusal::LatestTagMoved { .. } | Refusal::PreviewStale | Refusal::InProgress => refused,
+                ..TagDetail::default()
+            })),
+            Refusal::TagNotNewer { tag, latest } => Some(RefusalDetail::Tag(TagDetail {
+                tag,
+                latest_tag: Some(latest),
+                ..TagDetail::default()
+            })),
+            Refusal::ReleaseExists { tag, release_id } => Some(RefusalDetail::Tag(TagDetail {
+                tag,
+                release_id: Some(release_id),
+                ..TagDetail::default()
+            })),
+            Refusal::ReconciliationRequired(reconciliation) => Some(RefusalDetail::Reconciliation(
+                ReconciliationDetail::from(reconciliation),
+            )),
+            Refusal::LatestTagMoved { .. } | Refusal::PreviewStale | Refusal::InProgress => None,
+        };
+        Self {
+            success: false,
+            error,
+            code,
+            detail,
         }
     }
 }

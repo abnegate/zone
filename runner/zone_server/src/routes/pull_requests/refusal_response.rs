@@ -20,7 +20,9 @@ impl From<Refusal> for RefusalResponse {
         let (current_head, blockers) = match refusal {
             Refusal::HeadMoved { current_head } => (Some(current_head), None),
             Refusal::NotReady { blockers } => (None, Some(blockers)),
-            Refusal::Conflict | Refusal::Protected => (None, None),
+            Refusal::Conflict | Refusal::Protected | Refusal::Merged | Refusal::Closed => {
+                (None, None)
+            }
         };
         Self {
             success: false,

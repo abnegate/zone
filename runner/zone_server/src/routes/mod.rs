@@ -23,6 +23,7 @@ pub mod models;
 pub mod organizations;
 pub mod projects;
 pub mod pull_requests;
+pub mod refresh_query;
 pub mod releases;
 pub mod sessions;
 pub mod sources;

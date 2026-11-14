@@ -1,47 +1,53 @@
 mod create_request;
 mod created_response;
+mod creating;
 mod listing_response;
 mod options_response;
 mod pipeline_response;
 mod preview_request;
 mod preview_response;
-mod refresh_query;
+mod reconciliation_detail;
+mod refusal_detail;
 mod refusal_response;
 mod rejection;
+mod tag_detail;
 mod window_query;
 
 use axum::Json;
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
+use axum::extract::rejection::PathRejection;
+use axum::extract::rejection::QueryRejection;
 use axum::http::StatusCode;
-use serde_json::json;
 use uuid::Uuid;
 
+use crate::auth::ReleaseCreator;
 use crate::auth::WorkspaceMember;
-use crate::auth::WorkspaceWriter;
-use crate::db::audit::actions;
-use crate::db::audit::resources;
-use crate::routes::common::AuditEvent;
-use crate::routes::common::audit;
+use crate::routes::refresh_query::RefreshQuery;
 use crate::services::github::releases;
+use crate::services::github::releases::Failure;
 use crate::state::AppState;
 use create_request::CreateRequest;
 use created_response::CreatedResponse;
+use creating::Creating;
 use listing_response::ListingResponse;
 use options_response::OptionsResponse;
 use pipeline_response::PipelineResponse;
 use preview_request::PreviewRequest;
 use preview_response::PreviewResponse;
-use refresh_query::RefreshQuery;
 use rejection::Rejection;
 use window_query::WindowQuery;
+
+const OUTCOME_UNKNOWN: &str = "The release stopped before it reported back, so what was written is unknown. Reload the releases before trying again.";
 
 pub async fn list(
     State(state): State<AppState>,
     member: WorkspaceMember,
-    Query(query): Query<WindowQuery>,
+    query: Result<Query<WindowQuery>, QueryRejection>,
 ) -> Result<Json<ListingResponse>, Rejection> {
+    let Query(query) = query?;
     let recent = releases::recent(&state, member.workspace_id, query.days, query.refresh()).await?;
     Ok(Json(ListingResponse::new(
         recent,
@@ -52,24 +58,27 @@ pub async fn list(
 pub async fn options(
     State(state): State<AppState>,
     member: WorkspaceMember,
-    Query(query): Query<RefreshQuery>,
+    query: Result<Query<RefreshQuery>, QueryRejection>,
 ) -> Result<Json<OptionsResponse>, Rejection> {
-    let offered = releases::options(&state, member.workspace_id, query.refresh()).await?;
+    let Query(query) = query?;
+    let offered = releases::options(&state, member.workspace_id, query.requested()).await?;
     Ok(Json(OptionsResponse::from(offered)))
 }
 
 pub async fn pipeline(
     State(state): State<AppState>,
     member: WorkspaceMember,
-    Path((_, source_id, release_id)): Path<(Uuid, Uuid, u64)>,
-    Query(query): Query<RefreshQuery>,
+    path: Result<Path<(Uuid, Uuid, u64)>, PathRejection>,
+    query: Result<Query<RefreshQuery>, QueryRejection>,
 ) -> Result<Json<PipelineResponse>, Rejection> {
+    let Path((_, source_id, release_id)) = path?;
+    let Query(query) = query?;
     let pipeline = releases::pipeline(
         &state,
         member.workspace_id,
         source_id,
         release_id,
-        query.refresh(),
+        query.requested(),
     )
     .await?;
     Ok(Json(PipelineResponse::from(pipeline)))
@@ -77,47 +86,27 @@ pub async fn pipeline(
 
 pub async fn preview(
     State(state): State<AppState>,
-    writer: WorkspaceWriter,
-    Json(request): Json<PreviewRequest>,
+    ReleaseCreator(writer): ReleaseCreator,
+    request: Result<Json<PreviewRequest>, JsonRejection>,
 ) -> Result<Json<PreviewResponse>, Rejection> {
+    let Json(request) = request?;
     let preview = releases::preview(&state, writer.workspace_id, &request.into()).await?;
     Ok(Json(PreviewResponse { preview }))
 }
 
 pub async fn create(
     State(state): State<AppState>,
-    writer: WorkspaceWriter,
-    Json(request): Json<CreateRequest>,
+    ReleaseCreator(writer): ReleaseCreator,
+    request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<CreatedResponse>), Rejection> {
-    let release = releases::create(
-        &state,
-        writer.workspace_id,
-        &request.proposal(),
-        request.prerelease,
-        &request.digest,
-    )
-    .await?;
-    audit(
-        state.db(),
-        AuditEvent {
-            organization_id: None,
-            workspace_id: Some(writer.workspace_id),
-            actor_id: writer.user_id,
-            actor_email: &writer.email,
-            action: actions::RELEASE_CREATED,
-            resource_type: resources::RELEASE,
-            resource_id: None,
-            old_values: None,
-            new_values: Some(json!({
-                "source_id": release.source_id,
-                "release_id": release.id,
-                "tag": release.tag,
-                "url": release.url,
-                "prerelease": request.prerelease,
-            })),
-        },
-    )
-    .await;
+    let Json(request) = request?;
+    let source_id = request.source_id;
+    let release = tokio::spawn(Creating { writer, request }.run(state))
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, source = %source_id, "A release did not report back");
+            Failure::Internal(OUTCOME_UNKNOWN.to_string())
+        })??;
     Ok((StatusCode::CREATED, Json(CreatedResponse { release })))
 }
 
@@ -128,7 +117,7 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::services::github::releases::Failure;
+    use crate::services::github::fault::Fault;
     use crate::services::github::releases::Reconciliation;
     use crate::services::github::releases::Refusal;
     use crate::services::github::unavailable::Unavailable;
@@ -145,14 +134,28 @@ mod tests {
         (status, serde_json::from_slice(&body).expect("a JSON body"))
     }
 
+    fn keys(body: &Value) -> Vec<&str> {
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
+    }
+
     #[tokio::test]
     async fn a_partly_created_release_names_exactly_what_was_written() {
+        let marker = Uuid::new_v4();
         let (status, body) = answered(Failure::Refused(Refusal::ReconciliationRequired(
             Reconciliation {
                 tag: "v1.4.1".into(),
                 tag_object: OBJECT.into(),
-                reference_created: true,
+                reference_created: None,
                 release_id: None,
+                release_exists: false,
+                marker,
             },
         )))
         .await;
@@ -161,9 +164,24 @@ mod tests {
         assert_eq!(body["code"], "release_manual_reconciliation_required");
         assert_eq!(body["tag"], "v1.4.1");
         assert_eq!(body["tag_object"], OBJECT);
-        assert_eq!(body["reference_created"], true);
+        assert_eq!(body["reference_created"], Value::Null);
         assert_eq!(body["release_id"], Value::Null);
-        assert!(body.get("release_id").is_some(), "{body}");
+        assert_eq!(body["release_exists"], false);
+        assert_eq!(body["marker"], marker.to_string());
+        assert_eq!(
+            keys(&body),
+            [
+                "code",
+                "error",
+                "marker",
+                "reference_created",
+                "release_exists",
+                "release_id",
+                "success",
+                "tag",
+                "tag_object",
+            ]
+        );
         assert!(
             body["error"]
                 .as_str()
@@ -187,23 +205,43 @@ mod tests {
             let (status, body) = answered(Failure::Refused(refusal)).await;
             assert_eq!(status, StatusCode::CONFLICT);
             assert_eq!(body["code"], code);
-            let mut keys: Vec<&str> = body
-                .as_object()
-                .expect("an object")
-                .keys()
-                .map(String::as_str)
-                .collect();
-            keys.sort_unstable();
-            assert_eq!(keys, ["code", "error", "success"], "{code}");
+            assert_eq!(keys(&body), ["code", "error", "success"], "{code}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_about_a_tag_names_the_tag_and_what_holds_it() {
         let (_, body) = answered(Failure::Refused(Refusal::TagExists {
             tag: "v1.4.1".into(),
             tag_object: None,
         }))
         .await;
         assert_eq!(body["code"], "tag_exists");
-        assert_eq!(body["tag"], "v1.4.1");
-        assert!(body.get("tag_object").is_none(), "{body}");
+        assert_eq!(keys(&body), ["code", "error", "success", "tag"]);
+
+        let (_, body) = answered(Failure::Refused(Refusal::TagNotNewer {
+            tag: "v1.3.9".into(),
+            latest: "v1.4.0".into(),
+        }))
+        .await;
+        assert_eq!(body["code"], "tag_not_newer");
+        assert_eq!(body["latest_tag"], "v1.4.0");
+        assert_eq!(
+            keys(&body),
+            ["code", "error", "latest_tag", "success", "tag"]
+        );
+
+        let (_, body) = answered(Failure::Refused(Refusal::ReleaseExists {
+            tag: "v1.4.1".into(),
+            release_id: 91,
+        }))
+        .await;
+        assert_eq!(body["code"], "release_exists");
+        assert_eq!(body["release_id"], 91);
+        assert_eq!(
+            keys(&body),
+            ["code", "error", "release_id", "success", "tag"]
+        );
     }
 
     #[tokio::test]
@@ -225,34 +263,28 @@ mod tests {
                 Failure::Unconnected(Unconnected::InvalidConfiguration),
                 StatusCode::CONFLICT,
             ),
-            (Failure::Invalid("tag is invalid."), StatusCode::BAD_REQUEST),
-            (Failure::Missing("gone"), StatusCode::NOT_FOUND),
             (
-                Failure::Upstream("GitHub request failed or timed out.".into()),
+                Failure::Invalid("tag is invalid.".into()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (Failure::Missing("gone".into()), StatusCode::NOT_FOUND),
+            (
+                Failure::Upstream(Fault::upstream("GitHub request failed or timed out.")),
                 StatusCode::BAD_GATEWAY,
             ),
             (
-                Failure::Unauthenticated("GitHub returned HTTP 401.".into()),
+                Failure::Upstream(Fault::Unauthenticated),
                 StatusCode::BAD_GATEWAY,
+            ),
+            (
+                Failure::Internal(OUTCOME_UNKNOWN.into()),
+                StatusCode::INTERNAL_SERVER_ERROR,
             ),
         ] {
             let (status, body) = answered(failure).await;
             assert_eq!(status, expected);
             assert_eq!(body["success"], false);
             assert!(body.get("code").is_none(), "{body}");
-        }
-    }
-
-    #[test]
-    fn only_an_explicit_refresh_skips_the_cache() {
-        for (refresh, expected) in [
-            (None, false),
-            (Some("1"), true),
-            (Some("true"), true),
-            (Some("0"), false),
-            (Some("yes"), false),
-        ] {
-            assert_eq!(RefreshQuery::requested(refresh), expected, "{refresh:?}");
         }
     }
 }

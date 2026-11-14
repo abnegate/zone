@@ -2331,8 +2331,8 @@ The console's **Pull Requests** and **Releases** pages read every active GitHub 
 - **Description**: The most open pull requests read from one source. A source with more is listed in part and says so.
 
 ### `ZONE_GITHUB_ADMIN_MERGE`
-- **Default**: `true`
-- **Description**: When branch protection refuses a merge from the Pull Requests page, try again through the merge mutation an administrator merges with. Works when the source's credential belongs to a repository administrator the protection does not include, or a ruleset bypass actor.
+- **Default**: `false`
+- **Description**: When branch protection refuses a merge from the Pull Requests page, try again through the merge mutation an administrator merges with. Only a workspace admin or owner's merge is retried; a member's merge stops at the protection. Works when the source's credential belongs to a repository administrator the protection does not include, or a ruleset bypass actor.
 
 ---
 

@@ -3,6 +3,7 @@ use serde_json::Value;
 use serde_json::json;
 
 use super::*;
+use crate::services::github::fault::Fault;
 use crate::services::github::pull_requests::Refusal;
 use crate::services::github::readiness::BlockerCode;
 use crate::services::github::readiness::BlockerReport;
@@ -58,6 +59,8 @@ async fn conflicts_and_protection_are_refused_by_code_alone() {
     for (refusal, code) in [
         (Refusal::Conflict, "conflict"),
         (Refusal::Protected, "protected"),
+        (Refusal::Merged, "merged"),
+        (Refusal::Closed, "closed"),
     ] {
         let (status, body) = answered(Error::Refused(refusal)).await;
 
@@ -78,34 +81,30 @@ async fn every_other_failure_answers_with_its_status_and_no_code() {
             StatusCode::CONFLICT,
         ),
         (
-            Error::Unreadable("database".into()),
+            Error::Internal("database".into()),
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
-        (Error::Upstream("GitHub".into()), StatusCode::BAD_GATEWAY),
+        (
+            Error::Upstream(Fault::upstream("GitHub")),
+            StatusCode::BAD_GATEWAY,
+        ),
+        (
+            Error::Upstream(Fault::Unauthenticated),
+            StatusCode::BAD_GATEWAY,
+        ),
+        (
+            Error::Upstream(Fault::RateLimited {
+                retry_after: None,
+                exhausted: true,
+            }),
+            StatusCode::BAD_GATEWAY,
+        ),
     ] {
         let (status, body) = answered(error).await;
 
         assert_eq!(status, expected);
         assert_eq!(body["success"], json!(false));
         assert!(body.get("code").is_none(), "{body}");
-    }
-}
-
-#[test]
-fn only_a_refresh_asked_for_refreshes() {
-    for (refresh, requested) in [
-        (None, false),
-        (Some("1"), true),
-        (Some("true"), true),
-        (Some("TRUE"), true),
-        (Some("0"), false),
-        (Some("false"), false),
-        (Some(""), false),
-    ] {
-        let query = RefreshQuery {
-            refresh: refresh.map(str::to_string),
-        };
-        assert_eq!(query.requested(), requested, "{refresh:?}");
     }
 }
 

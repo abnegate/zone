@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use super::refresh_query::RefreshQuery;
+use crate::routes::refresh_query::RefreshQuery;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct WindowQuery {
@@ -10,6 +10,6 @@ pub struct WindowQuery {
 
 impl WindowQuery {
     pub fn refresh(&self) -> bool {
-        RefreshQuery::requested(self.refresh.as_deref())
+        RefreshQuery::asked(self.refresh.as_deref())
     }
 }
