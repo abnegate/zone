@@ -1,5 +1,6 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { chooseSelect } from './helpers/select';
 import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
 
 // Mock data generators
@@ -360,6 +361,54 @@ test.describe('Projects Page', () => {
       await page.click('a[href="/projects"]');
 
       await expect(page.locator('.projects-page .project-card').first()).toContainText('No source');
+    });
+  });
+
+  test.describe('Most recently used', () => {
+    test.use({ timezoneId: 'UTC' });
+
+    test('dates each card by when the project was last used', async ({ page }, testInfo) => {
+      const touched = '2026-01-02T12:00:00.000Z';
+      const mockProjects = [
+        {
+          ...generateMockProject('proj-1', 'Used Project', 'active'),
+          last_used_at: '2026-11-05T12:00:00.000Z',
+          created_at: touched,
+          updated_at: touched,
+        },
+        {
+          ...generateMockProject('proj-2', 'Idle Project', 'active'),
+          created_at: touched,
+          updated_at: touched,
+        },
+      ];
+
+      await page.unroute(projectsListRoutePattern);
+      await routeApi(page, projectsListRoutePattern, (route) => {
+        if (route.request().method() === 'GET') {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ success: true, projects: mockProjects }),
+          });
+        }
+      });
+
+      await page.reload();
+      await page.click('a[href="/projects"]');
+      await chooseSelect(
+        page.getByRole('combobox', { name: 'Sort projects' }),
+        'Most recently used'
+      );
+
+      const cards = page.locator('.projects-page .project-card');
+      await expect(cards).toHaveCount(2);
+      await page
+        .locator('.projects-list')
+        .screenshot({ path: testInfo.outputPath('projects-most-recently-used.png') });
+      await expect(cards.nth(0).locator('.project-card-footer')).toContainText('Nov 5, 2026');
+      await expect(cards.nth(1).locator('.project-card-footer')).toContainText('Never used');
+      await expect(page.locator('.projects-list')).not.toContainText('Jan 2, 2026');
     });
   });
 

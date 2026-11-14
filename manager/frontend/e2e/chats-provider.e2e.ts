@@ -254,7 +254,7 @@ for (const width of [1280, 1024, 900, 390]) {
       await installChatSocketMock(page);
       await mockCommonEndpoints(page);
       const captured = await mockChats(page);
-      await page.addInitScript((value) => localStorage.setItem('manager_theme', value), theme);
+      await page.emulateMedia({ colorScheme: theme });
       await setupAuth(page);
 
       const shoot = async (name: string) => {
@@ -295,9 +295,18 @@ for (const width of [1280, 1024, 900, 390]) {
       await page.getByTestId('chat-settings').click();
       await expect(providerSelect).toHaveText('ProviderDefault');
       await expect(providerSelect).toHaveAttribute('title', /\(Self-Hosted\)/);
-      await expect(modelSelect).toHaveCount(0);
+      await expect(modelSelect).toContainText('Automatic');
       await expect(page.getByTestId('chat-provider-error')).toHaveCount(0);
       await shoot('default');
+
+      await modelSelect.click();
+      expect(await optionLabels(page)).toEqual(['Automatic', 'llama3.2:3b', 'qwen3:8b']);
+      await shoot('default-models');
+      await page.getByRole('option', { name: 'qwen3:8b', exact: true }).click();
+      await expect.poll(() => captured.updates).toEqual([{ model_name: 'qwen3:8b' }]);
+      await expect(modelSelect).toContainText('qwen3:8b');
+      await expect(page.locator('.chat-model')).toHaveText('qwen3:8b');
+      await expect(page.getByTestId('chat-operation-error')).toHaveCount(0);
 
       await providerSelect.click();
       expect(await optionLabels(page)).toEqual([

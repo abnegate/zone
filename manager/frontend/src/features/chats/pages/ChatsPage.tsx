@@ -16,7 +16,9 @@ import { useAuth } from '../../../features/auth';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import SubNav from '../../../shared/components/SubNav/SubNav';
+import TransferChip from '../../../shared/components/TransferChip/TransferChip';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import { useTransfers } from '../../../shared/hooks/useTransfers';
 import { useModels } from '../../models';
 import { useProjects } from '../../projects/hooks';
 import type { AiProvider } from '../../settings/workspace/types';
@@ -32,6 +34,7 @@ import {
   ChatMenu,
   ChatPanel,
   ChatSources,
+  ChatStatusIndicator,
   Generation,
   HandoverNotice,
   HeaderPopover,
@@ -40,22 +43,30 @@ import {
   MessageContent,
   ProviderError,
   ProviderPicker,
+  QueueItem,
   SourcesButton,
+  SubagentChips,
 } from '../components';
 import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
+import { MoreChats } from '../components/MoreChats';
 import {
   useChat,
+  useChatIndicators,
   useChatProviders,
   useChatPullRequests,
   useChatSearch,
   useChatSources,
+  useChatSubagents,
   useChats,
   useChatTasks,
+  usePreloadChats,
   useWorkspaceChatProviders,
 } from '../hooks';
+import type { SubagentRequest } from '../subagentTypes';
 import {
   type Chat,
+  type ChatIndicator,
   type ChatProviderOffer,
   type ChatSearchResult,
   REASONING_EFFORT_LABELS,
@@ -68,10 +79,12 @@ import {
   AUTO_MODEL,
   arrangeChats,
   asksModelName,
+  attachmentId,
   attachmentMetadata,
   audioAttachments,
   automated,
   buildMessageWithAttachments,
+  CHAT_FILTER_OPTIONS,
   CHAT_GROUP_OPTIONS,
   CHAT_SORT_OPTIONS,
   chatModelName,
@@ -81,6 +94,7 @@ import {
   chatShowsReasoning,
   chatSources,
   contextTokenOptions,
+  DEFAULT_NEW_CHAT,
   DEFAULT_PROVIDER,
   defaultContextTokens,
   effectiveOffer,
@@ -91,15 +105,21 @@ import {
   galleryItems,
   imageAttachments,
   isAgentOffer,
+  isChatFilter,
   isChatGroupBy,
   isChatSort,
   isSendable,
   isStartingImage,
+  isWaiting,
   keepEffort,
+  listSort,
   MODEL_NAME_PLACEHOLDER,
   MODEL_PLACEHOLDER,
+  matchesFilter,
   modelLabel,
   modelSelectOptions,
+  type NewChatSettings,
+  newChatSettings,
   observationKey,
   offersAgent,
   offersAgentOn,
@@ -108,6 +128,7 @@ import {
   parseCharacterText,
   providerChoices,
   readAttachment,
+  readChatFilter,
   readChatGroupBy,
   readChatSort,
   reasoningOptions,
@@ -116,9 +137,10 @@ import {
   selectedContextTokens,
   shortModelName,
   sourceAttachment,
-  splitAtHandovers,
+  splitTurn,
   toPlainText,
   videoAttachments,
+  writeChatFilter,
   writeChatGroupBy,
   writeChatSort,
 } from '../utils';
@@ -130,6 +152,7 @@ const NEW_CHAT_MODEL_REQUIRED = 'Choose a model for this provider.';
 const PROVIDER_EFFORT_RESET_FAILED =
   'AI provider changed, but its reasoning effort could not be reset';
 const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
+const MODEL_CONTEXT_RESET_FAILED = 'Model changed, but its context size could not be fitted to it';
 
 const failure = (prefix: string, error: unknown): string =>
   error instanceof Error ? `${prefix}: ${error.message}` : prefix;
@@ -157,6 +180,7 @@ export default function ChatsPage() {
   const [newChatProject, setNewChatProject] = useState(NO_PROJECT);
   const [newChatOffline, setNewChatOffline] = useState(false);
   const [newChatContext, setNewChatContext] = useState(String(defaultContextTokens()));
+  const [newChatEdited, setNewChatEdited] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [renameId, setRenameId] = useState<string | null>(null);
   const [title, setTitle] = useState('');
@@ -167,6 +191,7 @@ export default function ChatsPage() {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [groupBy, setGroupBy] = useState(readChatGroupBy);
   const [sort, setSort] = useState(readChatSort);
+  const [filter, setFilter] = useState(readChatFilter);
   const [messageInput, setMessageInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -181,6 +206,16 @@ export default function ChatsPage() {
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
 
+  const attaching = useTransfers<Attachment>({
+    run: (file, { signal, onProgress }) => readAttachment(file, { signal, onProgress }),
+    identify: attachmentId,
+    onDone: (attachment) => {
+      setAttachments((prev) =>
+        prev.some((item) => item.id === attachment.id) ? prev : [...prev, attachment]
+      );
+    },
+  });
+
   const addStartingImage = (image: { name: string; mime: string; url: string }) => {
     const next = sourceAttachment(image);
     setAttachments((prev) => (prev.some((item) => item.id === next.id) ? prev : [...prev, next]));
@@ -191,7 +226,11 @@ export default function ChatsPage() {
 
   const {
     chats,
+    total: chatsTotal,
+    hasMore: moreChats,
     loading: chatsLoading,
+    loadingMore: chatsLoadingMore,
+    loadMore: loadMoreChats,
     error: chatsError,
     createChat,
     deleteChat: deleteChatFn,
@@ -200,17 +239,13 @@ export default function ChatsPage() {
     refresh: refreshChats,
     renameChat,
     updateTitle: updateListTitle,
-  } = useChats({ archived: showArchived });
+  } = useChats({ archived: showArchived, sort: listSort(sort) });
+  usePreloadChats(chats);
   const { projects } = useProjects('all');
   const projectNames = useMemo(
     () => Object.fromEntries(projects.map((project) => [project.id, project.name])),
     [projects]
   );
-  const arranged = useMemo(
-    () => arrangeChats(chats, { groupBy, sort, projectNames }),
-    [chats, groupBy, sort, projectNames]
-  );
-
   const {
     chat: activeChat,
     context,
@@ -219,8 +254,14 @@ export default function ChatsPage() {
     error: chatError,
     streaming,
     status: chatStatus,
+    generationStarted,
+    queue,
+    held,
     sendMessage: sendMessageFn,
     cancelGeneration,
+    interruptQueued,
+    editQueued,
+    removeQueued,
     approveTool,
     setAgentEnabled: setAgentEnabledFn,
     setAutoApprove: setAutoApproveFn,
@@ -236,6 +277,50 @@ export default function ChatsPage() {
     content: messageInput,
     metadata: attachmentMetadata(attachments.filter(isSendable)),
   });
+
+  const {
+    indicators,
+    loaded: indicatorsLoaded,
+    error: indicatorsError,
+  } = useChatIndicators(
+    currentWorkspace?.id,
+    showArchived,
+    streaming,
+    chats.length,
+    listSort(sort)
+  );
+  // The open chat's own socket knows it is writing before the next poll does,
+  // and only ever adds that: a reading the server made stands until it is read
+  // again, because this socket cannot see a turn somebody else's can.
+  //
+  // A turn parked on an approval is still streaming, so waiting for a person
+  // outlives the socket's reading of it. Overwriting that with "writing" would
+  // drop the one row the feature exists for out of the waiting filter.
+  const liveIndicators = useMemo((): Record<string, ChatIndicator> => {
+    if (!streaming || !selectedChatId) return indicators;
+    const current = indicators[selectedChatId];
+    return {
+      ...indicators,
+      [selectedChatId]: {
+        chat_id: selectedChatId,
+        activity: current && isWaiting(current.activity) ? current.activity : 'writing',
+        pull_request: current?.pull_request ?? null,
+        pull_requests: current?.pull_requests ?? 0,
+      },
+    };
+  }, [indicators, selectedChatId, streaming]);
+  const matching = useMemo(
+    () => chats.filter((chat) => matchesFilter(liveIndicators[chat.id], filter)),
+    [chats, liveIndicators, filter]
+  );
+  // A filter judges chats on readings that have not arrived yet. A read that
+  // failed is not one still coming, so that falls through to the empty state,
+  // which carries the way back out of the filter.
+  const waitingForStatuses = filter !== 'all' && !indicatorsLoaded && indicatorsError === null;
+  const arranged = useMemo(
+    () => arrangeChats(matching, { groupBy, sort, projectNames, indicators: liveIndicators }),
+    [matching, groupBy, sort, projectNames, liveIndicators]
+  );
 
   const {
     results: searchResults,
@@ -279,11 +364,19 @@ export default function ChatsPage() {
   const chatOpen = displayedChat !== null;
   const changes = useChatPullRequests(chatOpen ? selectedChatId : null, streaming);
   const tasks = useChatTasks(chatOpen ? selectedChatId : null, streaming);
+  const subagents = useChatSubagents(chatOpen ? selectedChatId : null, streaming);
   const displayedMessages = displayedChat?.messages;
   const media = useMemo(() => galleryItems(displayedMessages ?? []), [displayedMessages]);
   const sources = useMemo(() => chatSources(displayedMessages ?? []), [displayedMessages]);
   const [shownSources, setShownSources] = useState<SourceRequest | null>(null);
   const clearShownSources = useCallback(() => setShownSources(null), []);
+  const [shownSubagent, setShownSubagent] = useState<SubagentRequest | null>(null);
+  const subagentNonce = useRef(0);
+  const showSubagent = useCallback((id: string) => {
+    subagentNonce.current += 1;
+    setShownSubagent({ id, nonce: subagentNonce.current });
+  }, []);
+  const clearShownSubagent = useCallback(() => setShownSubagent(null), []);
   const wasStreaming = useRef(streaming);
   const latestSelectedChatId = useRef(selectedChatId);
 
@@ -297,6 +390,7 @@ export default function ChatsPage() {
   useEffect(() => {
     latestSelectedChatId.current = selectedChatId;
     setShownSources(null);
+    setShownSubagent(null);
     setChatOperationError(null);
     setOperationError(null);
   }, [selectedChatId]);
@@ -445,13 +539,21 @@ export default function ChatsPage() {
     stickToBottom.current = true;
   }, [selectedChatId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages and generation feedback visible
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages, queued ones and generation feedback visible
   useEffect(() => {
     if (linkedMessageId) {
       return;
     }
     scrollToBottom();
-  }, [activeChat?.messages, chatError, chatStatus, streaming, linkedMessageId, scrollToBottom]);
+  }, [
+    activeChat?.messages,
+    chatError,
+    chatStatus,
+    streaming,
+    queue,
+    linkedMessageId,
+    scrollToBottom,
+  ]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the scroller mounts with the displayed chat
   useEffect(() => {
@@ -495,16 +597,42 @@ export default function ChatsPage() {
     setSearchParams({}, { replace: true });
   };
 
-  const resetNewChat = () => {
-    setNewChatProvider(DEFAULT_PROVIDER);
-    setNewChatModel(AUTO_MODEL);
-    setNewChatAgent(false);
-    setNewChatAutoApprove(false);
-    setNewChatReasoning(AUTO_EFFORT);
-    setNewChatProject(NO_PROJECT);
-    setNewChatOffline(false);
-    setNewChatContext(String(defaultContextTokens()));
+  // Arriving from a search result or a source link parks the transcript on that
+  // message and holds the auto-scroll off it. Writing a new one is leaving it.
+  const clearLinkedMessage = () => {
+    if (!searchParams.get('message')) {
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('message');
+    setSearchParams(next, { replace: true });
   };
+
+  const applyNewChat = (settings: NewChatSettings) => {
+    setNewChatProvider(settings.provider);
+    setNewChatModel(settings.model);
+    setNewChatAgent(settings.agent);
+    setNewChatAutoApprove(false);
+    setNewChatReasoning(settings.reasoning);
+    setNewChatOffline(settings.offline);
+    setNewChatContext(settings.context);
+  };
+
+  const resetNewChat = () => {
+    setNewChatEdited(false);
+    applyNewChat(DEFAULT_NEW_CHAT);
+    setNewChatProject(NO_PROJECT);
+  };
+
+  const editNewChat = () => {
+    setNewChatEdited(true);
+  };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: an open, untouched new chat follows the workspace's recent chat as it loads
+  useEffect(() => {
+    if (!showNewChatModal || newChatEdited) return;
+    applyNewChat(newChatSettings(workspaceProviders, models));
+  }, [showNewChatModal, newChatEdited, workspaceProviders, models]);
 
   const workspaceId = currentWorkspace?.id ?? null;
   const [newChatWorkspace, setNewChatWorkspace] = useState(workspaceId);
@@ -527,6 +655,7 @@ export default function ChatsPage() {
   };
 
   const handleNewChatProvider = (provider: string) => {
+    editNewChat();
     const offer = newChatOfferFor(provider);
     const model = offer?.requires_model ? '' : AUTO_MODEL;
     keepNewChatAgent(offer, model);
@@ -542,6 +671,7 @@ export default function ChatsPage() {
   };
 
   const handleNewChatModel = (name: string) => {
+    editNewChat();
     setNewChatModel(name);
     keepNewChatAgent(newChatOffer, name);
     const installed = findInstalledModel(models, name);
@@ -603,6 +733,10 @@ export default function ChatsPage() {
 
   const reportForChat = (chatId: string, message: string) => {
     if (latestSelectedChatId.current === chatId) setChatOperationError(message);
+  };
+
+  const reportAll = (chatId: string, problems: string[]) => {
+    if (problems.length > 0) reportForChat(chatId, problems.join('. '));
   };
 
   const handleToggleAgent = async () => {
@@ -679,6 +813,7 @@ export default function ChatsPage() {
     if (!isAuthenticated || !displayedChat) return false;
     const chatId = displayedChat.id;
     const modelName = displayedChat.model_name;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -691,21 +826,46 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return false;
     }
+    const runs = provider === null ? modelName : model;
+    const problems: string[] = [];
     try {
       const offer = offerFor(provider);
-      if (offer) await settleEffort(effortsFor(offer, provider === null ? modelName : model));
+      if (offer) await settleEffort(effortsFor(offer, runs));
     } catch (error) {
-      reportForChat(chatId, failure(PROVIDER_EFFORT_RESET_FAILED, error));
+      problems.push(failure(PROVIDER_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      await fitContext(provider ?? chatDefaultProvider, contextTokens, runs ?? AUTO_MODEL);
+    } catch (error) {
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
-      if (latestSelectedChatId.current === chatId) await refreshChat();
-      markChanging(chatId, false);
+      reportAll(chatId, problems);
+      try {
+        await Promise.all([
+          refreshChats(),
+          latestSelectedChatId.current === chatId ? refreshChat() : undefined,
+        ]);
+      } finally {
+        markChanging(chatId, false);
+      }
     }
     return true;
+  };
+
+  const fitContext = async (
+    provider: AiProvider | null,
+    tokens: number | null | undefined,
+    model: string
+  ) => {
+    if (!offersContextOn(provider, chatDefaultProvider, models, model)) return;
+    const native = findInstalledModel(models, model)?.details?.context_length;
+    if (tokens && native && tokens > native) await setContextTokensFn(native);
   };
 
   const handleProviderModel = async (name: string) => {
     if (!isAuthenticated || !displayedChat || !chatProviders) return;
     const chatId = displayedChat.id;
+    const contextTokens = displayedChat.context_tokens;
     setChatOperationError(null);
     markChanging(chatId, true);
     try {
@@ -715,15 +875,25 @@ export default function ChatsPage() {
       markChanging(chatId, false);
       return;
     }
+    const problems: string[] = [];
     try {
       await settleEffort(effortsFor(chatProviders.default, name));
     } catch (error) {
-      reportForChat(chatId, failure(MODEL_EFFORT_RESET_FAILED, error));
+      problems.push(failure(MODEL_EFFORT_RESET_FAILED, error));
+    }
+    try {
+      await fitContext(chatDefaultProvider, contextTokens, name);
+    } catch (error) {
+      problems.push(failure(MODEL_CONTEXT_RESET_FAILED, error));
     } finally {
+      reportAll(chatId, problems);
       try {
-        if (latestSelectedChatId.current === chatId) {
-          await Promise.all([refreshProviders(), refreshChat()]);
-        }
+        await Promise.all([
+          refreshChats(),
+          latestSelectedChatId.current === chatId
+            ? Promise.all([refreshProviders(), refreshChat()])
+            : undefined,
+        ]);
       } finally {
         markChanging(chatId, false);
       }
@@ -767,12 +937,8 @@ export default function ChatsPage() {
       }
       leftover.push(file);
     }
-    if (leftover.length === 0) return;
-    const read = await Promise.all(leftover.map(readAttachment));
-    setAttachments((prev) => {
-      const seen = new Set(prev.map((a) => a.id));
-      return [...prev, ...read.filter((a) => !seen.has(a.id))];
-    });
+    const attached = new Set(attachments.map((attachment) => attachment.id));
+    attaching.start(leftover.filter((file) => !attached.has(attachmentId(file))));
   };
 
   const handleSaveCharacter = async (event: FormEvent) => {
@@ -857,13 +1023,15 @@ export default function ChatsPage() {
   const handleSendMessage = async (e: FormEvent) => {
     e.preventDefault();
     const sendable = attachments.filter(isSendable);
-    if (!isAuthenticated || !displayedChat || sending || streaming) return;
+    if (!isAuthenticated || !displayedChat || sending) return;
+    if (attaching.pending > 0) return;
     if (!messageInput.trim() && sendable.length === 0) return;
 
     const chatId = displayedChat.id;
     setSending(true);
     setChatOperationError(null);
     stickToBottom.current = true;
+    clearLinkedMessage();
     try {
       await sendMessageFn({
         content: buildMessageWithAttachments(messageInput.trim(), sendable),
@@ -890,6 +1058,7 @@ export default function ChatsPage() {
     setSending(true);
     setChatOperationError(null);
     stickToBottom.current = true;
+    clearLinkedMessage();
     try {
       await sendMessageFn({ content });
     } catch (error) {
@@ -977,6 +1146,14 @@ export default function ChatsPage() {
     writeChatSort(value);
   };
 
+  const handleFilter = (value: string) => {
+    if (!isChatFilter(value)) return;
+    setFilter(value);
+    writeChatFilter(value);
+  };
+
+  const clearFilter = () => handleFilter('all');
+
   const openRename = (chat: Chat) => {
     setRenameId(chat.id);
     setTitle(chat.title);
@@ -992,10 +1169,11 @@ export default function ChatsPage() {
       role="button"
       tabIndex={0}
     >
+      <ChatStatusIndicator indicator={liveIndicators[chat.id]} />
       <div className="chat-item-content">
         <span className="chat-title">{chat.title}</span>
         <span className="chat-meta">
-          <span className="chat-meta-model">{modelLabel(chat.model_name)}</span>
+          <span className="chat-meta-model">{modelLabel(requestedModel(chat))}</span>
           <span className="chat-meta-time">· {formatDate(chat.updated_at)}</span>
         </span>
       </div>
@@ -1109,6 +1287,24 @@ export default function ChatsPage() {
           </div>
         )}
 
+        {!showSearchResults && chats.length > 0 && (
+          <div className="chats-arrange chats-arrange-status">
+            <Select
+              compact
+              value={filter}
+              onValueChange={handleFilter}
+              aria-label="Filter chats by status"
+              options={[...CHAT_FILTER_OPTIONS]}
+            />
+          </div>
+        )}
+
+        {indicatorsError && !showSearchResults && (
+          <div className="chats-notice" role="status">
+            Statuses are out of date: {indicatorsError}
+          </div>
+        )}
+
         {operationError && !showNewChatModal && (
           <div className="chats-error" role="alert">
             {operationError}
@@ -1182,17 +1378,53 @@ export default function ChatsPage() {
           />
         ) : (
           <div className="chats-list">
-            {arranged.map((group) => (
-              <div
-                key={group.key}
-                className="chat-group"
-                role="group"
-                aria-label={group.label ?? undefined}
-              >
-                {group.label ? <h2 className="chat-group-header">{group.label}</h2> : null}
-                {group.chats.map(renderChatItem)}
+            {matching.length === 0 && waitingForStatuses ? (
+              // A saved filter starts with no readings, so every chat is
+              // filtered out until the first one lands. Saying nothing matches
+              // before then would answer a question nobody has read yet.
+              <div className="chats-loading">
+                <span className="spinner" /> Reading chat statuses...
               </div>
-            ))}
+            ) : matching.length === 0 ? (
+              // Nothing loaded matches, which is not the same as nothing
+              // matching: the pagination below stays, so the next page can be
+              // loaded without clearing the filter first.
+              <EmptyState
+                icon={
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M4 5h16M7 12h10M10 19h4" />
+                  </svg>
+                }
+                title="No loaded chats match this filter"
+                description={
+                  CHAT_FILTER_OPTIONS.find((option) => option.value === filter)?.label ?? filter
+                }
+                action={
+                  <Button variant="secondary" onClick={clearFilter}>
+                    Show all chats
+                  </Button>
+                }
+              />
+            ) : (
+              arranged.map((group) => (
+                <div
+                  key={group.key}
+                  className="chat-group"
+                  role="group"
+                  aria-label={group.label ?? undefined}
+                >
+                  {group.label ? <h2 className="chat-group-header">{group.label}</h2> : null}
+                  {group.chats.map(renderChatItem)}
+                </div>
+              ))
+            )}
+            {moreChats ? (
+              <MoreChats
+                remaining={chatsTotal - chats.length}
+                loading={chatsLoadingMore}
+                onLoad={loadMoreChats}
+              />
+            ) : null}
           </div>
         )}
       </SubNav>
@@ -1203,7 +1435,7 @@ export default function ChatsPage() {
             variant="ghost"
             size="sm"
             className="chat-back chat-back-state"
-            onClick={() => setSelectedChatId(null)}
+            onClick={clearSelectedChat}
           >
             Back to chats
           </Button>
@@ -1211,12 +1443,7 @@ export default function ChatsPage() {
         {displayedChat ? (
           <>
             <div className="chat-header">
-              <Button
-                variant="ghost"
-                size="sm"
-                className="chat-back"
-                onClick={() => setSelectedChatId(null)}
-              >
+              <Button variant="ghost" size="sm" className="chat-back" onClick={clearSelectedChat}>
                 Back to chats
               </Button>
               <div className="chat-header-info">
@@ -1505,6 +1732,17 @@ export default function ChatsPage() {
                       const live = streaming && message.id === displayedChat.messages.at(-1)?.id;
                       const body = message.content.trim();
                       const awaitingAnswer = /^\[waiting for your answer\]$/i.test(body);
+                      const parts = splitTurn(
+                        awaitingAnswer ? '' : message.content,
+                        toolCalls,
+                        handovers,
+                        message.metadata?.reasoning
+                          ? {
+                              text: message.metadata.reasoning,
+                              at: message.metadata.reasoning_at,
+                            }
+                          : undefined
+                      );
                       return (
                         <div
                           key={message.id}
@@ -1579,19 +1817,36 @@ export default function ChatsPage() {
                               ))}
                             </div>
                           )}
-                          <Activity
-                            reasoning={message.metadata?.reasoning}
-                            calls={toolCalls}
-                            live={live}
-                            answered={index < lastUserIndex}
-                            onDecide={approveTool}
-                            onAnswer={handleAnswerQuestions}
-                          />
-                          {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
-                          {(body || handovers.length > 0) && !awaitingAnswer ? (
+                          {parts.length > 0 ? (
                             <div className="message-content">
-                              {splitAtHandovers(message.content, handovers).map((part) =>
-                                part.kind === 'text' ? (
+                              {parts.map((part, position) => {
+                                if (part.kind === 'calls') {
+                                  return (
+                                    <Activity
+                                      key={
+                                        part.calls[0]
+                                          ? `calls-${part.calls[0].id}`
+                                          : `thinking-${position}`
+                                      }
+                                      reasoning={part.reasoning}
+                                      calls={part.calls}
+                                      live={live}
+                                      answered={index < lastUserIndex}
+                                      onDecide={approveTool}
+                                      onAnswer={handleAnswerQuestions}
+                                    />
+                                  );
+                                }
+                                if (part.kind === 'handover') {
+                                  return (
+                                    <HandoverNotice
+                                      key={`handover-${part.handover.at}-${part.handover.to}`}
+                                      handover={part.handover}
+                                      agentChanged={part.agentChanged}
+                                    />
+                                  );
+                                }
+                                return (
                                   <MessageContent
                                     key={`text-${part.offset}`}
                                     content={part.text}
@@ -1605,16 +1860,15 @@ export default function ChatsPage() {
                                       })
                                     }
                                   />
-                                ) : (
-                                  <HandoverNotice
-                                    key={`handover-${part.handover.at}-${part.handover.to}`}
-                                    handover={part.handover}
-                                    agentChanged={part.agentChanged}
-                                  />
-                                )
-                              )}
+                                );
+                              })}
                             </div>
                           ) : null}
+                          <SubagentChips
+                            subagents={subagents.byMessage.get(message.id) ?? []}
+                            onShow={showSubagent}
+                          />
+                          {receipts.length > 0 && <ActionReceipts receipts={receipts} />}
                           {cited && (
                             <SourcesButton
                               count={cited.length}
@@ -1633,9 +1887,20 @@ export default function ChatsPage() {
                   {streaming || chatStatus ? (
                     <Generation
                       key={selectedChatId}
-                      status={chatStatus || 'Generating response…'}
+                      status={chatStatus}
+                      started={generationStarted}
                     />
                   ) : null}
+                  {queue.map((message) => (
+                    <QueueItem
+                      key={message.id}
+                      message={message}
+                      held={held}
+                      onInterrupt={interruptQueued}
+                      onEdit={editQueued}
+                      onRemove={removeQueued}
+                    />
+                  ))}
                   <div ref={messagesEndRef} />
                 </div>
 
@@ -1657,8 +1922,16 @@ export default function ChatsPage() {
                       void handleIncomingFiles(e.dataTransfer.files);
                     }}
                   >
-                    {attachments.length > 0 && (
+                    {attachments.length + attaching.transfers.length > 0 && (
                       <div className="message-attachments">
+                        {attaching.transfers.map((transfer) => (
+                          <TransferChip
+                            key={transfer.id}
+                            transfer={transfer}
+                            onCancel={attaching.cancel}
+                            onRetry={attaching.retry}
+                          />
+                        ))}
                         {attachments.map((attachment) => (
                           <span
                             key={attachment.id}
@@ -1703,6 +1976,13 @@ export default function ChatsPage() {
                         ))}
                       </div>
                     )}
+                    {attaching.pending > 0 ? (
+                      <p className="message-form-hint" role="status">
+                        {attaching.pending === 1
+                          ? 'Send is ready once the file finishes attaching.'
+                          : `Send is ready once ${attaching.pending} files finish attaching.`}
+                      </p>
+                    ) : null}
                     {attachments.some((attachment) => attachment.url && !attachment.rejected) ? (
                       <p className="message-form-hint">
                         Ask to generate, edit, remove an object, change the setting, or animate and
@@ -1761,21 +2041,47 @@ export default function ChatsPage() {
                         rows={1}
                       />
                       {streaming ? (
-                        <Button
-                          type="button"
-                          variant="secondary"
-                          size="sm"
-                          onClick={cancelGeneration}
-                        >
-                          Stop
-                        </Button>
+                        <>
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            onClick={cancelGeneration}
+                          >
+                            Stop
+                          </Button>
+                          {messageInput.trim() || attachments.some(isSendable) ? (
+                            <Button
+                              type="submit"
+                              variant="primary"
+                              size="sm"
+                              loading={sending}
+                              disabled={attaching.pending > 0}
+                              title={
+                                attaching.pending > 0
+                                  ? 'Wait for attachments to finish before queueing'
+                                  : undefined
+                              }
+                            >
+                              Queue
+                            </Button>
+                          ) : null}
+                        </>
                       ) : (
                         <Button
                           type="submit"
                           variant="primary"
                           size="sm"
                           loading={sending}
-                          disabled={!messageInput.trim() && !attachments.some(isSendable)}
+                          disabled={
+                            attaching.pending > 0 ||
+                            (!messageInput.trim() && !attachments.some(isSendable))
+                          }
+                          title={
+                            attaching.pending > 0
+                              ? 'Wait for attachments to finish before sending'
+                              : undefined
+                          }
                         >
                           Send
                         </Button>
@@ -1808,6 +2114,9 @@ export default function ChatsPage() {
                 sources={sources}
                 shownSources={shownSources}
                 onSourcesShown={clearShownSources}
+                subagents={subagents}
+                shownSubagent={shownSubagent}
+                onSubagentShown={clearShownSubagent}
                 onShowMessage={(messageId) => selectChat(displayedChat.id, messageId)}
               />
             </div>
@@ -1923,6 +2232,7 @@ export default function ChatsPage() {
               label="Context"
               value={newChatContext}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                editNewChat();
                 setNewChatContext(event.target.value);
               }}
               helpText={
@@ -1937,7 +2247,10 @@ export default function ChatsPage() {
             label="Offline"
             helpText="Never use web search, page fetch, or curl/wget. Connected sources still work."
             checked={newChatOffline}
-            onCheckedChange={setNewChatOffline}
+            onCheckedChange={(checked) => {
+              editNewChat();
+              setNewChatOffline(checked);
+            }}
           />
           {showNewChatAgent && (
             <Checkbox
@@ -1945,6 +2258,7 @@ export default function ChatsPage() {
               helpText="Search workspace content, use connected GitHub data and run tools when asked. Needs a tool-calling model."
               checked={newChatAgent}
               onCheckedChange={(checked) => {
+                editNewChat();
                 setNewChatAgent(checked);
                 if (!checked) setNewChatAutoApprove(false);
               }}
@@ -1955,7 +2269,10 @@ export default function ChatsPage() {
               label="Auto-approve writes and commands"
               helpText="Skip the confirmation prompt for write_file, apply_patch, run_command and run_shell. You can change this later on the chat."
               checked={newChatAutoApprove}
-              onCheckedChange={setNewChatAutoApprove}
+              onCheckedChange={(checked) => {
+                editNewChat();
+                setNewChatAutoApprove(checked);
+              }}
             />
           )}
           {showNewChatReasoning && (
@@ -1963,6 +2280,7 @@ export default function ChatsPage() {
               label="Reasoning"
               value={newChatEffort}
               onChange={(event: React.ChangeEvent<HTMLSelectElement>) => {
+                editNewChat();
                 setNewChatReasoning(event.target.value as ReasoningEffort);
               }}
               helpText={

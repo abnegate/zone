@@ -1,7 +1,7 @@
 //! Catalog, install, and train as ordinary chat tools.
 
-use super::PREVIEW_TITLE_CHARS;
 use super::tools::{WorkspaceScope, optional_string_arg, string_arg};
+use crate::auth::permission::{self, Permission};
 use crate::db::workspace_members::{self, WorkspaceRole};
 use crate::pull::Pull;
 use crate::routes::models::{
@@ -20,7 +20,14 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, excerpt};
+
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Rendering;
+use abnegate_agent::tool::Tier;
 
 const LIST_CAP: usize = 25;
 const START_TIMEOUT_SECS: u64 = 600;
@@ -53,6 +60,18 @@ enum Operation {
     GetTrain,
     StartTrain,
     DismissTrain,
+}
+
+impl Operation {
+    fn permission(self) -> Option<Permission> {
+        match self {
+            Self::Install | Self::CancelInstall | Self::StartTrain | Self::DismissTrain => {
+                Some(Permission::ModelsCreate)
+            }
+            Self::Delete => Some(Permission::ModelsDelete),
+            Self::List | Self::Get | Self::InstallStatus | Self::ListBases | Self::GetTrain => None,
+        }
+    }
 }
 
 struct ModelTool {
@@ -251,31 +270,23 @@ impl Tool for ModelTool {
         }
     }
 
-    fn preview(&self, params: &Value) -> Option<String> {
-        match self.operation {
-            Operation::Install => Some(format!(
-                "Install model {}.",
-                excerpt(params["name"].as_str()?, PREVIEW_TITLE_CHARS)
-            )),
-            Operation::CancelInstall => Some(format!(
-                "Cancel install of {}.",
-                excerpt(params["name"].as_str()?, PREVIEW_TITLE_CHARS)
-            )),
-            Operation::Delete => Some(format!(
-                "Delete model {}.",
-                excerpt(params["name"].as_str()?, PREVIEW_TITLE_CHARS)
-            )),
-            Operation::StartTrain => {
-                let name = excerpt(params["name"].as_str()?, PREVIEW_TITLE_CHARS);
-                let base = excerpt(params["base"].as_str()?, PREVIEW_TITLE_CHARS);
-                let count = params["paths"].as_array().map(Vec::len).unwrap_or(0);
-                Some(format!(
-                    "Start training {name} on {base} from {count} path(s)."
-                ))
+    fn preview(&self, params: &Value) -> Option<Rendering> {
+        let text = match self.operation {
+            Operation::Install => format!("Install model {}.", params["name"].as_str()?),
+            Operation::CancelInstall => {
+                format!("Cancel install of {}.", params["name"].as_str()?)
             }
-            Operation::DismissTrain => Some("Dismiss the finished training job.".to_string()),
-            _ => None,
-        }
+            Operation::Delete => format!("Delete model {}.", params["name"].as_str()?),
+            Operation::StartTrain => {
+                let name = params["name"].as_str()?;
+                let base = params["base"].as_str()?;
+                let count = params["paths"].as_array().map(Vec::len).unwrap_or(0);
+                format!("Start training {name} on {base} from {count} path(s).")
+            }
+            Operation::DismissTrain => "Dismiss the finished training job.".to_string(),
+            _ => return None,
+        };
+        Some(Rendering::from(text))
     }
 
     fn timeout(&self, _: &ToolContext) -> Duration {
@@ -315,6 +326,18 @@ impl ModelTool {
                 }
             }
         }
+        if let Some(permission) = self.operation.permission() {
+            match permission::holds(self.scope.state.db(), self.scope.user_id, permission).await {
+                Ok(true) => {}
+                Ok(false) => return ToolResult::error(permission.refusal()),
+                Err(error) => {
+                    tracing::warn!(tool = self.name(), %error, "Model permission check failed");
+                    return ToolResult::error(
+                        "The model operation failed. Check current state before retrying a write.",
+                    );
+                }
+            }
+        }
         match self.operation {
             Operation::List => list(&self.scope, params).await,
             Operation::Get => get(&self.scope.state, params).await,
@@ -324,7 +347,9 @@ impl ModelTool {
             Operation::Delete => delete(&self.scope.state, params).await,
             Operation::ListBases => list_bases(&self.scope.state).await,
             Operation::GetTrain => get_train(&self.scope.state),
-            Operation::StartTrain => start_train(&self.scope, params, &context.cwd).await,
+            Operation::StartTrain => {
+                start_train(&self.scope, params, &context.working_directory).await
+            }
             Operation::DismissTrain => dismiss_train(&self.scope.state),
         }
     }
@@ -368,10 +393,14 @@ async fn list(scope: &WorkspaceScope, params: &Value) -> ToolResult {
             if let Some(query) = query {
                 let needle = query.to_ascii_lowercase();
                 models.retain(|model| {
-                    model.name.to_ascii_lowercase().contains(&needle)
-                        || model.description.as_deref().is_some_and(|description| {
-                            description.to_ascii_lowercase().contains(&needle)
-                        })
+                    model.entry.name.to_ascii_lowercase().contains(&needle)
+                        || model
+                            .entry
+                            .description
+                            .as_deref()
+                            .is_some_and(|description| {
+                                description.to_ascii_lowercase().contains(&needle)
+                            })
                 });
             }
             let omitted = trim_models(&mut models, limit);
@@ -502,7 +531,11 @@ fn dismiss_train(state: &AppState) -> ToolResult {
     }
 }
 
-async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> ToolResult {
+async fn start_train(
+    scope: &WorkspaceScope,
+    params: &Value,
+    working_directory: &Path,
+) -> ToolResult {
     let name = match string_arg(params, "name") {
         Ok(name) => name.to_string(),
         Err(error) => return error,
@@ -539,7 +572,7 @@ async fn start_train(scope: &WorkspaceScope, params: &Value, cwd: &Path) -> Tool
     if paths.is_empty() {
         return ToolResult::error(empty_paths_message(subject));
     }
-    let images = match load_training_paths(&scope.state, cwd, &paths, subject).await {
+    let images = match load_training_paths(&scope.state, working_directory, &paths, subject).await {
         Ok(images) => images,
         Err(error) => return ToolResult::error(error),
     };
@@ -634,7 +667,7 @@ fn string_list(params: &Value, key: &str) -> Result<Vec<String>, ToolResult> {
 
 async fn load_training_paths(
     state: &AppState,
-    cwd: &Path,
+    working_directory: &Path,
     paths: &[String],
     subject: Subject,
 ) -> Result<Vec<TrainImage>, String> {
@@ -642,7 +675,10 @@ async fn load_training_paths(
         .config()
         .train_upload_limit_mb
         .saturating_mul(1024 * 1024);
-    let resolved: Vec<PathBuf> = paths.iter().map(|path| resolve_path(cwd, path)).collect();
+    let resolved: Vec<PathBuf> = paths
+        .iter()
+        .map(|path| resolve_path(working_directory, path))
+        .collect();
     let mut used = 0u64;
     for path in &resolved {
         let meta =
@@ -706,12 +742,12 @@ fn is_clip(filename: &str) -> bool {
         })
 }
 
-fn resolve_path(cwd: &Path, given: &str) -> PathBuf {
+fn resolve_path(working_directory: &Path, given: &str) -> PathBuf {
     let path = Path::new(given);
     if path.is_absolute() {
         path.to_path_buf()
     } else {
-        cwd.join(path)
+        working_directory.join(path)
     }
 }
 
@@ -771,8 +807,8 @@ mod tests {
     use crate::services::comfy::policy;
     use crate::state::test_config;
     use crate::train_jobs::TrainJobStatus;
+    use abnegate_agent::tool::MAXIMUM_PREVIEW_CHARACTERS;
     use uuid::Uuid;
-    use zone_core::tools::ToolRegistry;
 
     const PIXEL: &[u8] = &[
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
@@ -789,6 +825,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         }
     }
 
@@ -866,6 +903,177 @@ mod tests {
             Some("Install model llama3.2:3b.".into())
         );
         assert!(!install.description().contains("wait_for"));
+    }
+
+    #[tokio::test]
+    async fn a_long_card_is_cut_in_the_middle_keeping_whitespace() {
+        let mut registry = ToolRegistry::new();
+        register(&mut registry, &scope());
+        let name = format!(
+            "first   word{}last  word",
+            "x".repeat(MAXIMUM_PREVIEW_CHARACTERS)
+        );
+
+        let preview = registry
+            .preview("install_model", &json!({ "name": name }).to_string())
+            .expect("install_model has a card");
+
+        assert!(preview.truncated, "{preview:?}");
+        assert!(
+            preview.text.starts_with("Install model first   word"),
+            "{preview:?}"
+        );
+        assert!(preview.text.ends_with("last  word."), "{preview:?}");
+        assert!(preview.text.contains(" characters hidden"), "{preview:?}");
+        assert!(
+            preview.text.chars().count() <= MAXIMUM_PREVIEW_CHARACTERS,
+            "{preview:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn every_write_needs_a_model_permission_and_no_read_does() {
+        let operations = [
+            Operation::List,
+            Operation::Get,
+            Operation::Install,
+            Operation::InstallStatus,
+            Operation::CancelInstall,
+            Operation::Delete,
+            Operation::ListBases,
+            Operation::GetTrain,
+            Operation::StartTrain,
+            Operation::DismissTrain,
+        ];
+        for operation in operations {
+            let tool = ModelTool {
+                scope: scope(),
+                operation,
+            };
+            assert_eq!(
+                operation.permission().is_some(),
+                tool.tier() == Tier::Write,
+                "{} must need a permission exactly when it writes",
+                tool.name()
+            );
+        }
+        assert_eq!(
+            Operation::Delete.permission(),
+            Some(Permission::ModelsDelete)
+        );
+        assert_eq!(
+            Operation::Install.permission(),
+            Some(Permission::ModelsCreate)
+        );
+    }
+
+    async fn member_with_role(role: &str, ollama_host: &str) -> WorkspaceScope {
+        use crate::db::{organizations, users, workspaces};
+        let pool =
+            sqlx::PgPool::connect(&std::env::var("DATABASE_URL").expect("a migrated DATABASE_URL"))
+                .await
+                .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "hash",
+            Some("Model tool member"),
+            false,
+        )
+        .await
+        .unwrap();
+        users::assign_user_role(&pool, user.id, role).await.unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Model tool tests",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Models",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(&pool, workspace.id, user.id, WorkspaceRole::Member, None)
+            .await
+            .unwrap();
+        let mut config = test_config();
+        config.ollama_host = ollama_host.to_string();
+        WorkspaceScope {
+            state: AppState::new(config, pool, None),
+            workspace_id: workspace.id,
+            chat_id: Some(Uuid::new_v4()),
+            user_id: user.id,
+            offline: false,
+            origin: crate::db::tasks::Origin::Member,
+        }
+    }
+
+    async fn run(scope: &WorkspaceScope, name: &str, params: Value) -> ToolResult {
+        let mut registry = ToolRegistry::new();
+        register(&mut registry, scope);
+        registry
+            .get(name)
+            .unwrap()
+            .execute(params, &ToolContext::default())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_workspace_member_without_model_permissions_cannot_change_server_models() {
+        let scope = member_with_role("user", "http://127.0.0.1:1").await;
+        for (name, params, permission) in [
+            (
+                "install_model",
+                json!({"name": "llama3.2:3b"}),
+                Permission::ModelsCreate,
+            ),
+            (
+                "cancel_model_install",
+                json!({"name": "llama3.2:3b"}),
+                Permission::ModelsCreate,
+            ),
+            ("dismiss_train", json!({}), Permission::ModelsCreate),
+            (
+                "delete_model",
+                json!({"name": "llama3.2:3b"}),
+                Permission::ModelsDelete,
+            ),
+        ] {
+            let result = run(&scope, name, params).await;
+            assert!(!result.success, "{name} must be refused");
+            assert_eq!(
+                result.error.as_deref(),
+                Some(permission.refusal().as_str()),
+                "{name}"
+            );
+        }
+        assert!(scope.state.pull_registry().status("llama3.2:3b").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_workspace_member_with_the_admin_role_reaches_the_model_backend() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let ollama = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/delete"))
+            .and(body_json(json!({"name": "llama3.2:3b"})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&ollama)
+            .await;
+        let scope = member_with_role("admin", &ollama.uri()).await;
+        let result = run(&scope, "delete_model", json!({"name": "llama3.2:3b"})).await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.output.as_deref(), Some("Deleted llama3.2:3b."));
     }
 
     #[test]
@@ -1015,10 +1223,7 @@ mod tests {
         let error = start_job(&state, request, None)
             .await
             .expect_err("Runpod needs a saved key");
-        assert_eq!(
-            error.message(),
-            "Save a Runpod API key in Workspace Settings."
-        );
+        assert_eq!(error.message(), "Save a Runpod API key in Settings → AI.");
         assert!(state.train_jobs().current().is_none());
     }
 

@@ -1,4 +1,4 @@
-import { api, expect, signIn, state, test, tokenFor } from './harness';
+import { api, chooseTaskAction, expect, signIn, state, test, tokenFor } from './harness';
 
 /**
  * PR #47's task execution, in the console: a run started from the task list
@@ -41,7 +41,7 @@ test('a task appears in the list and its run view opens', async ({ page, console
 
   const card = page.locator('.task-card', { hasText: title });
   await expect(card).toBeVisible();
-  await card.getByRole('button', { name: 'Execute' }).click();
+  await chooseTaskAction(page, title, 'Run');
 
   await expect(page.getByRole('dialog')).toContainText(title);
   await expect(page.getByRole('button', { name: /start execution/i })).toBeVisible();
@@ -58,10 +58,7 @@ test('a run started in the console finishes and shows its activity', async ({
 
   await signIn(page);
   await page.goto('/tasks');
-  await page
-    .locator('.task-card', { hasText: title })
-    .getByRole('button', { name: 'Execute' })
-    .click();
+  await chooseTaskAction(page, title, 'Run');
   await page.getByRole('button', { name: /start execution/i }).click();
 
   // Every run logs its phases whatever the agent decides to do.
@@ -90,10 +87,7 @@ test('a run that changed something shows the receipt it recorded', async ({ page
 
   await signIn(page);
   await page.goto('/tasks');
-  await page
-    .locator('.task-card', { hasText: title })
-    .getByRole('button', { name: 'Execute' })
-    .click();
+  await chooseTaskAction(page, title, 'Run');
   await page.getByRole('button', { name: /start execution/i }).click();
 
   await expect

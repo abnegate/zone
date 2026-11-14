@@ -1,9 +1,12 @@
 //! Retrieve immutable tool evidence without allowing arguments to widen tenant scope.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolResult;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolResult};
 
 use crate::agent::tools::WorkspaceScope;
 use crate::db::context::Store;
@@ -45,7 +48,7 @@ impl Tool for EvidenceTool {
         _context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let request: Request = serde_json::from_value(parameters)
-            .map_err(|error| ToolError::InvalidParams(error.to_string()))?;
+            .map_err(|error| ToolError::InvalidParameters(error.to_string()))?;
         // Revalidate membership for each evidence read, including long-running turns.
         let permitted: bool = sqlx::query_scalar("SELECT check_workspace_membership($1,$2)")
             .bind(self.0.user_id)

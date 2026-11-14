@@ -13,6 +13,8 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { BrowserRouter } from 'react-router-dom';
 import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
+import { RESPONDING } from '../components/Generation';
+import { LOAD_MORE_CHATS } from '../components/MoreChats';
 import type {
   Chat,
   ChatProviderOffer,
@@ -26,6 +28,7 @@ import type {
   UpdateChatRequest,
 } from '../types';
 import { CHAT_GROUP_STORAGE_KEY, CHAT_SORT_STORAGE_KEY } from '../utils/arrange';
+import { CHAT_FILTER_STORAGE_KEY } from '../utils/indicators';
 
 // Create mock functions
 const mockGetChats = mock();
@@ -39,7 +42,9 @@ const mockSearchChatMessages = mock();
 const mockUpdateChat = mock();
 const mockGetChatSources = mock();
 const mockGetChatPullRequests = mock();
+const mockGetChatIndicators = mock();
 const mockGetChatTasks = mock();
+const mockGetChatSubagents = mock();
 const mockSetChatSources = mock();
 const mockGetChatProviders = mock();
 const mockSetChatProvider = mock();
@@ -65,12 +70,18 @@ class FakeSocket {
 let socket: FakeSocket;
 
 // Mock scrollIntoView
-Element.prototype.scrollIntoView = mock();
+const mockScrollIntoView = mock();
+Element.prototype.scrollIntoView = mockScrollIntoView;
 
 // Mock the chatsApi
+mock.module('../hooks/usePreloadChats', () => ({ usePreloadChats: () => {} }));
+
 mock.module('../../../api/chats', () => ({
   chatsApi: {
-    getChats: mockGetChats,
+    getChats: async (...args: unknown[]) => {
+      const listed = await mockGetChats(...args);
+      return Array.isArray(listed) ? { chats: listed, total: listed.length } : listed;
+    },
     getChat: mockGetChat,
     createChat: mockCreateChat,
     sendMessage: mockSendMessage,
@@ -80,7 +91,9 @@ mock.module('../../../api/chats', () => ({
     searchChatMessages: mockSearchChatMessages,
     getChatSources: mockGetChatSources,
     getChatPullRequests: mockGetChatPullRequests,
+    getChatIndicators: mockGetChatIndicators,
     getChatTasks: mockGetChatTasks,
+    getChatSubagents: mockGetChatSubagents,
     setChatSources: mockSetChatSources,
     getChatProviders: mockGetChatProviders,
     setChatProvider: mockSetChatProvider,
@@ -469,13 +482,18 @@ describe('ChatsPage', () => {
   beforeEach(() => {
     localStorage.removeItem(CHAT_GROUP_STORAGE_KEY);
     localStorage.removeItem(CHAT_SORT_STORAGE_KEY);
+    localStorage.removeItem(CHAT_FILTER_STORAGE_KEY);
     mockGetChatSources.mockReset();
     mockSetChatSources.mockReset();
     mockGetChatSources.mockResolvedValue([]);
     mockGetChatPullRequests.mockReset();
     mockGetChatPullRequests.mockResolvedValue([]);
+    mockGetChatIndicators.mockReset();
+    mockGetChatIndicators.mockResolvedValue([]);
     mockGetChatTasks.mockReset();
     mockGetChatTasks.mockResolvedValue([]);
+    mockGetChatSubagents.mockReset();
+    mockGetChatSubagents.mockResolvedValue({ subagents: [], complete: true });
     mockGetChatProviders.mockReset();
     mockSetChatProvider.mockReset();
     mockGetChatProviders.mockResolvedValue(chatProviders());
@@ -754,6 +772,30 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(mockClient.getChat).toHaveBeenCalledWith('chat-1');
       });
+    });
+
+    it('drops the chat from the address when going back from it', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      await waitFor(() => expect(selectedChatParam()).toBe('chat-1'));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Back to chats' }));
+
+      await waitFor(() => expect(selectedChatParam()).toBeNull());
+      expect(screen.queryByText('Hi there!')).not.toBeInTheDocument();
+    });
+
+    it('drops a chat that is still loading from the address when going back from it', async () => {
+      mockClient.getChat.mockReturnValueOnce(new Promise(() => {}));
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await waitFor(() => expect(selectedChatParam()).toBe('chat-1'));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Back to chats' }));
+
+      await waitFor(() => expect(selectedChatParam()).toBeNull());
+      expect(screen.queryByRole('button', { name: 'Back to chats' })).not.toBeInTheDocument();
     });
 
     it('displays chat messages when selected', async () => {
@@ -1059,7 +1101,10 @@ describe('ChatsPage', () => {
       fireEvent.click(archivedTab);
 
       await waitFor(() => {
-        expect(mockClient.getChats).toHaveBeenCalledWith('ws-1', true);
+        expect(mockClient.getChats).toHaveBeenCalledWith(
+          'ws-1',
+          expect.objectContaining({ archived: true })
+        );
       });
     });
 
@@ -1074,7 +1119,10 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('tab', { name: 'Active' }));
 
       await waitFor(() => {
-        expect(mockClient.getChats).toHaveBeenLastCalledWith('ws-1', false);
+        expect(mockClient.getChats).toHaveBeenLastCalledWith(
+          'ws-1',
+          expect.objectContaining({ archived: false })
+        );
       });
     });
   });
@@ -1504,7 +1552,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       expect(await within(panel).findByRole('link', { name: 'Add widgets' })).toBeInTheDocument();
       expect(within(panel).getByRole('button', { name: 'Open sunset.png' })).toBeInTheDocument();
@@ -1538,7 +1586,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       expect(within(panel).getByRole('button', { name: 'Tasks, 1' })).toBeInTheDocument();
       expect(within(panel).getByRole('link', { name: 'Fix the build' })).toHaveAttribute(
@@ -1556,7 +1604,7 @@ describe('ChatsPage', () => {
       await waitFor(() => expect(mockGetChatPullRequests).toHaveBeenCalled());
       await waitFor(() => expect(mockGetChatTasks).toHaveBeenCalled());
       expect(
-        screen.queryByRole('complementary', { name: 'Changes, tasks, media and sources' })
+        screen.queryByRole('complementary', { name: 'Changes, agents, tasks, media and sources' })
       ).toBeNull();
     });
 
@@ -1681,10 +1729,13 @@ describe('ChatsPage', () => {
       restoreClock = undefined;
     });
 
-    function controlClock(): (elapsed: number) => Promise<void> {
+    function controlClock(): {
+      advance: (elapsed: number) => Promise<void>;
+      jump: (elapsed: number) => void;
+    } {
       const ticks = new Map<number, () => void>();
       let nextIntervalId = 1;
-      const now = spyOn(performance, 'now').mockReturnValue(0);
+      const now = spyOn(Date, 'now').mockReturnValue(0);
       const interval = spyOn(window, 'setInterval').mockImplementation((callback: TimerHandler) => {
         const id = nextIntervalId++;
         ticks.set(id, () => {
@@ -1700,22 +1751,29 @@ describe('ChatsPage', () => {
         interval.mockRestore();
         clear.mockRestore();
       };
-      return async (elapsed: number): Promise<void> => {
-        // Drain the pending send before touching the clock: `started` and the
-        // interval are captured in an effect, and advancing first makes that
-        // effect read the moved clock, so elapsed never leaves 0. A sync
-        // act() is not enough — the update is still queued in a microtask.
-        // waitFor cannot help here either, since it polls on the setInterval
-        // this test has stubbed out.
-        await act(async () => {});
-        // Advancing a clock nothing is subscribed to reports the timer's
-        // starting text back as if it never moved, which reads as a broken
-        // component rather than a test that measured nothing.
-        expect(ticks.size).toBeGreaterThan(0);
-        now.mockReturnValue(elapsed);
-        act(() => {
-          for (const tick of ticks.values()) tick();
-        });
+      return {
+        advance: async (elapsed: number): Promise<void> => {
+          // Drain the pending send before touching the clock: the turn's start
+          // is read when it begins, and advancing first makes it begin at the
+          // moved reading, so elapsed never leaves 0. A sync act() is not
+          // enough — the update is still queued in a microtask. waitFor cannot
+          // help here either, since it polls on the setInterval this test has
+          // stubbed out.
+          await act(async () => {});
+          // Advancing a clock nothing is subscribed to reports the timer's
+          // starting text back as if it never moved, which reads as a broken
+          // component rather than a test that measured nothing.
+          expect(ticks.size).toBeGreaterThan(0);
+          now.mockReturnValue(elapsed);
+          act(() => {
+            for (const tick of ticks.values()) tick();
+          });
+        },
+        // Moves the clock with nothing subscribed to it, which is where a chat
+        // whose turn runs on while another one is open leaves the counter.
+        jump: (elapsed: number): void => {
+          now.mockReturnValue(elapsed);
+        },
       };
     }
 
@@ -1736,7 +1794,7 @@ describe('ChatsPage', () => {
     }
 
     it('keeps elapsed time through status changes and resets it for the next request', async () => {
-      const advance = controlClock();
+      const { advance } = controlClock();
       const input = await sendPrompt();
       expect(screen.getByRole('timer')).toHaveTextContent('0:00');
       expect(screen.getByRole('status').contains(screen.getByRole('timer'))).toBe(false);
@@ -1755,8 +1813,8 @@ describe('ChatsPage', () => {
       expect(screen.queryByRole('timer')).not.toBeInTheDocument();
     });
 
-    it('removes elapsed feedback when switching chats and starts fresh on return', async () => {
-      const advance = controlClock();
+    it('removes elapsed feedback when switching chats and starts a new request fresh', async () => {
+      const { advance } = controlClock();
       await sendPrompt();
       expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
       await advance(1000);
@@ -1770,24 +1828,238 @@ describe('ChatsPage', () => {
       expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
     });
 
-    it('keeps pending feedback and blocks another send until the response ends', async () => {
-      const input = await sendPrompt();
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+    it('counts a turn from when it started when its chat is returned to mid-reply', async () => {
+      const { advance, jump } = controlClock();
+      await sendPrompt();
+      act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
+      await advance(1000);
+      expect(screen.getByRole('timer')).toHaveTextContent('0:01');
+
+      fireEvent.click(screen.getByText('Chat 2'));
+      expect(screen.queryByRole('timer')).not.toBeInTheDocument();
+      // The turn goes on being written while the reader is in another chat.
+      jump(96_000);
+
+      fireEvent.click(screen.getByText('Chat 1'));
+      await screen.findByPlaceholderText('Type a message, or drop a file...');
+      await act(async () => {});
+      act(() =>
+        socket.emit({
+          type: 'message_start',
+          message_id: 'reply',
+          role: 'assistant',
+          resumed: true,
+        })
+      );
+      expect(await screen.findByRole('timer')).toHaveTextContent('1:36');
+    });
+
+    it('keeps pending feedback while the response runs', async () => {
+      await sendPrompt();
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument();
-      fireEvent.change(input, { target: { value: 'another prompt' } });
-      fireEvent.keyDown(input, { key: 'Enter' });
-      expect(mockWsSend).toHaveBeenCalledTimes(1);
-      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 
       act(() => socket.emit({ type: 'status', message: 'Generating image…' }));
       expect(screen.getByRole('status')).toHaveTextContent('Generating image…');
       act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       act(() => socket.emit({ type: 'message_end', message_id: 'reply', content: 'Done' }));
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument();
       expect(screen.getByText('Done')).toBeInTheDocument();
+    });
+
+    describe('queue', () => {
+      const frames = () => mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)));
+
+      const queueBehindTheTurn = async (): Promise<HTMLTextAreaElement> => {
+        const input = await sendPrompt();
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        expect(queued).toEqual({
+          type: 'send',
+          id: expect.any(String),
+          content: 'and make it blue',
+        });
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+        return input;
+      };
+
+      it('queues a message typed while the response runs and shows it as queued', async () => {
+        await queueBehindTheTurn();
+
+        const item = screen.getByTestId('queued-message');
+        expect(within(item).queryByText(/queued/i)).not.toBeInTheDocument();
+        expect(within(item).getByText('and make it blue')).toBeInTheDocument();
+        expect(within(item).getByRole('button', { name: 'Interrupt' })).toBeInTheDocument();
+        expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
+      });
+
+      it('scrolls to the end when the message joins the queue', async () => {
+        const input = await sendPrompt();
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        // The queued row renders below the running turn, so only the frame
+        // that adds it can bring the transcript down to it.
+        mockScrollIntoView.mockClear();
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+
+        expect(screen.getByTestId('queued-message')).toBeInTheDocument();
+        expect(mockScrollIntoView).toHaveBeenCalled();
+      });
+
+      it('scrolls a queued message into view when it was sent from a linked one', async () => {
+        mockGetChat.mockResolvedValue(mockChatWithMessages);
+        window.history.pushState({}, '', '/chats?id=chat-1&message=msg-2');
+        renderChatsPage();
+        const input = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+          'Type a message, or drop a file...'
+        );
+        fireEvent.change(input, { target: { value: 'Generate an image of a rooster' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+        await waitFor(() => expect(input.value).toBe(''));
+        // Writing into the chat is leaving the message it was parked on, which
+        // is what frees the scroll below.
+        expect(new URLSearchParams(window.location.search).get('message')).toBeNull();
+
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        mockScrollIntoView.mockClear();
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+
+        expect(screen.getByTestId('queued-message')).toBeInTheDocument();
+        expect(mockScrollIntoView).toHaveBeenCalled();
+      });
+
+      it('offers Queue beside Stop once something is typed', async () => {
+        const input = await sendPrompt();
+        expect(screen.queryByRole('button', { name: 'Queue' })).not.toBeInTheDocument();
+        fireEvent.change(input, { target: { value: 'next' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+        await waitFor(() =>
+          expect(frames().at(-1)).toEqual({ type: 'send', id: expect.any(String), content: 'next' })
+        );
+      });
+
+      it('sends the queued message as the next turn when the response ends', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        act(() => {
+          socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' });
+          socket.emit({ type: 'message_end', message_id: 'reply', content: 'A red rooster' });
+          socket.emit({
+            type: 'queue',
+            messages: [],
+            held: false,
+            started: { id, content: 'and make it blue' },
+          });
+        });
+
+        expect(screen.queryByTestId('queued-message')).not.toBeInTheDocument();
+        expect(screen.getByText('and make it blue').closest('.message-user')).not.toBeNull();
+        expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
+      });
+
+      it('interrupts the running turn for the queued message', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Interrupt' }));
+        expect(frames().at(-1)).toEqual({ type: 'interrupt', id });
+
+        act(() => {
+          socket.emit({ type: 'cancelled', message_id: null });
+          socket.emit({
+            type: 'queue',
+            messages: [],
+            held: false,
+            started: { id, content: 'and make it blue' },
+          });
+        });
+        expect(screen.queryByTestId('queued-message')).not.toBeInTheDocument();
+        expect(screen.getByText('and make it blue')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument();
+      });
+
+      it('removes a queued message', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Remove queued message' }));
+        expect(frames().at(-1)).toEqual({ type: 'remove_queued', id });
+
+        act(() => socket.emit({ type: 'queue', messages: [], held: false }));
+        expect(screen.queryByTestId('queued-message')).not.toBeInTheDocument();
+      });
+
+      it('edits a queued message before it goes', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
+        const editor = screen.getByRole('textbox', { name: 'Edit queued message' });
+        expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+        fireEvent.change(editor, { target: { value: 'and make it green' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+        expect(frames().at(-1)).toEqual({ type: 'edit_queued', id, content: 'and make it green' });
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id, content: 'and make it green' }],
+            held: false,
+          })
+        );
+        expect(screen.getByText('and make it green')).toBeInTheDocument();
+      });
+
+      it('holds the queue after Stop and offers to send it now', async () => {
+        await queueBehindTheTurn();
+        const { id } = frames().at(-1);
+
+        act(() => {
+          socket.emit({ type: 'cancelled', message_id: null });
+          socket.emit({
+            type: 'queue',
+            messages: [{ id, content: 'and make it blue' }],
+            held: true,
+          });
+        });
+
+        const item = screen.getByTestId('queued-message');
+        expect(within(item).queryByRole('button', { name: 'Interrupt' })).not.toBeInTheDocument();
+        fireEvent.click(within(item).getByRole('button', { name: 'Send now' }));
+        expect(frames().at(-1)).toEqual({ type: 'interrupt', id });
+      });
     });
 
     it('shows image generation errors in the active conversation and permits retry', async () => {
@@ -1803,7 +2075,7 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       await waitFor(() => expect(mockWsSend).toHaveBeenCalledTimes(2));
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
     });
 
     it('shows a terminal stream failure and keeps the interrupted reply visible after retry', async () => {
@@ -1875,13 +2147,12 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
       await waitFor(() => {
-        expect(mockWsSend).toHaveBeenCalledWith(
-          JSON.stringify({
-            type: 'send',
-            content: 'Test message',
-            metadata: undefined,
-          })
-        );
+        expect(mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toContainEqual({
+          type: 'send',
+          id: expect.any(String),
+          content: 'Test message',
+          metadata: undefined,
+        });
       });
     });
 
@@ -1914,13 +2185,12 @@ describe('ChatsPage', () => {
       fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
 
       await waitFor(() => {
-        expect(mockWsSend).toHaveBeenCalledWith(
-          JSON.stringify({
-            type: 'send',
-            content: 'Enter test',
-            metadata: undefined,
-          })
-        );
+        expect(mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toContainEqual({
+          type: 'send',
+          id: expect.any(String),
+          content: 'Enter test',
+          metadata: undefined,
+        });
       });
     });
 
@@ -1987,6 +2257,125 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Send failed')).toBeInTheDocument();
       });
+    });
+  });
+
+  describe('attaching files', () => {
+    class HeldReader {
+      static readers: HeldReader[] = [];
+      onprogress:
+        | ((event: { lengthComputable: boolean; loaded: number; total: number }) => void)
+        | null = null;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      result: string | null = null;
+      error: Error | null = null;
+
+      readAsText() {
+        HeldReader.readers.push(this);
+      }
+
+      readAsDataURL() {
+        HeldReader.readers.push(this);
+      }
+
+      abort() {
+        this.onabort?.();
+      }
+
+      progress(loaded: number, total: number) {
+        this.onprogress?.({ lengthComputable: true, loaded, total });
+      }
+
+      finish(result: string) {
+        this.result = result;
+        this.onload?.();
+      }
+    }
+
+    const original = globalThis.FileReader;
+
+    beforeEach(() => {
+      HeldReader.readers = [];
+      globalThis.FileReader = HeldReader as unknown as typeof FileReader;
+    });
+
+    afterEach(() => {
+      globalThis.FileReader = original;
+    });
+
+    async function openComposer() {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      return screen.findByPlaceholderText('Type a message, or drop a file...');
+    }
+
+    function drop(...files: File[]) {
+      fireEvent.drop(document.querySelector('.message-form') as Element, {
+        dataTransfer: { files, types: ['Files'] },
+      });
+    }
+
+    it('shows a dropped file at once with its progress and holds Send until it is read', async () => {
+      const composer = await openComposer();
+      fireEvent.change(composer, { target: { value: 'Look at this' } });
+
+      drop(new File(['# notes'], 'notes.md', { type: 'text/markdown' }));
+
+      expect(await screen.findByRole('group', { name: 'notes.md: 0%' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+      expect(
+        screen.getByText('Send is ready once the file finishes attaching.')
+      ).toBeInTheDocument();
+      expect(composer).toBeEnabled();
+
+      act(() => HeldReader.readers[0].progress(3, 4));
+      expect(screen.getByRole('progressbar', { name: 'notes.md progress' })).toHaveAttribute(
+        'aria-valuenow',
+        '75'
+      );
+
+      fireEvent.keyDown(composer, { key: 'Enter' });
+      expect(mockWsSend).not.toHaveBeenCalledWith(expect.stringContaining('Look at this'));
+
+      act(() => HeldReader.readers[0].finish('# notes'));
+
+      await waitFor(() => expect(screen.queryByTestId('transfer-chip')).toBeNull());
+      expect(screen.getByRole('button', { name: 'Remove notes.md' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
+      expect(screen.queryByText(/Send is ready once/)).toBeNull();
+    });
+
+    it('tracks each of several dropped files on its own', async () => {
+      await openComposer();
+
+      drop(
+        new File(['a'], 'one.txt', { type: 'text/plain' }),
+        new File(['b'], 'two.txt', { type: 'text/plain' })
+      );
+
+      expect(await screen.findAllByTestId('transfer-chip')).toHaveLength(2);
+      expect(screen.getByText('Send is ready once 2 files finish attaching.')).toBeInTheDocument();
+
+      act(() => HeldReader.readers[1].finish('b'));
+
+      await waitFor(() => expect(screen.getAllByTestId('transfer-chip')).toHaveLength(1));
+      expect(screen.getByRole('group', { name: 'one.txt: 0%' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Remove two.txt' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    });
+
+    it('cancels a file that is still being read and frees Send', async () => {
+      const composer = await openComposer();
+      fireEvent.change(composer, { target: { value: 'Never mind the file' } });
+
+      drop(new File(['big'], 'big.log', { type: 'text/plain' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel big.log' }));
+
+      expect(screen.queryByTestId('transfer-chip')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Remove big.log' })).toBeNull();
+      expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled();
     });
   });
 
@@ -2350,6 +2739,25 @@ describe('ChatsPage', () => {
         expect(screen.getByText('System')).toBeInTheDocument();
         expect(screen.getByText('System message')).toBeInTheDocument();
       });
+    });
+
+    it('lists each chat with the model its chosen provider runs', async () => {
+      mockClient.getChats.mockResolvedValueOnce([
+        { ...mockChats[0], provider: 'codex', provider_model: 'gpt-6-sol' },
+        { ...mockChats[1], provider: 'openai', provider_model: null },
+        { ...mockChats[2], provider: null, provider_model: null },
+      ]);
+
+      renderChatsPage();
+
+      await waitFor(() => {
+        expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      });
+      const listed = (title: string) =>
+        screen.getByText(title).closest('.chat-item')?.querySelector('.chat-meta-model');
+      expect(listed('Chat 1')).toHaveTextContent(/^gpt-6-sol$/);
+      expect(listed('Chat 2')).toHaveTextContent(/^Automatic$/);
+      expect(listed('Chat 3')).toHaveTextContent(/^llama2$/);
     });
 
     it('labels the model badge with the full model id and splits the list meta', async () => {
@@ -2736,21 +3144,20 @@ describe('ChatsPage', () => {
       });
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       await waitFor(() => {
-        expect(mockWsSend).toHaveBeenCalledWith(
-          JSON.stringify({
-            type: 'send',
-            content: 'Make this a watercolor',
-            metadata: {
-              attachments: [
-                {
-                  name: 'generated-image-1.webp',
-                  mime: 'image/webp',
-                  url: 'data:image/webp;base64,generated',
-                },
-              ],
-            },
-          })
-        );
+        expect(mockWsSend.mock.calls.map(([frame]) => JSON.parse(String(frame)))).toContainEqual({
+          type: 'send',
+          id: expect.any(String),
+          content: 'Make this a watercolor',
+          metadata: {
+            attachments: [
+              {
+                name: 'generated-image-1.webp',
+                mime: 'image/webp',
+                url: 'data:image/webp;base64,generated',
+              },
+            ],
+          },
+        });
       });
     });
 
@@ -3139,7 +3546,7 @@ describe('ChatsPage', () => {
       sendTurn();
 
       await waitFor(() => expect(mockWsSend).toHaveBeenCalled());
-      expect(await screen.findByRole('status')).toHaveTextContent('Generating response…');
+      expect(await screen.findByRole('status')).toHaveTextContent(RESPONDING);
       await waitFor(() => expect(mockGetChatProviders).toHaveBeenCalledTimes(2));
     });
 
@@ -3201,7 +3608,7 @@ describe('ChatsPage', () => {
 
       await screen.findByTestId('chat-providers-error');
       expect(mockWsSend).toHaveBeenCalled();
-      expect(screen.getByRole('status')).toHaveTextContent('Generating response…');
+      expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
       expect(screen.getByTestId('agent-sandbox-toggle')).toHaveAttribute('aria-pressed', 'false');
     });
 
@@ -3513,6 +3920,42 @@ describe('ChatsPage', () => {
       });
       await waitFor(() => expect(badge()).toHaveTextContent('Claude Code·Automatic'));
       expect(mockClient.updateChat).not.toHaveBeenCalled();
+    });
+
+    const listedModel = () => document.querySelector('.chat-item.active .chat-meta-model');
+
+    it('lists the chosen model as soon as a provider is chosen mid-chat', async () => {
+      await openChat();
+      await screen.findByTestId('chat-provider');
+      expect(listedModel()).toHaveTextContent(/^llama2$/);
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        provider: 'codex',
+        provider_model: 'gpt-6-sol',
+      });
+      mockClient.getChats.mockResolvedValue([
+        { ...mockChats[0], provider: 'codex', provider_model: 'gpt-6-sol' },
+        ...mockChats.slice(1),
+      ]);
+
+      chooseSelectOption('chat-provider', 'Codex');
+
+      await waitFor(() => expect(listedModel()).toHaveTextContent(/^gpt-6-sol$/));
+    });
+
+    it('lists a model changed mid-chat without waiting for the next message', async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: codexOffer }));
+      await openChat({ model_name: 'gpt-6-sol' });
+      await screen.findByTestId('chat-provider-model');
+      mockClient.updateChat.mockResolvedValue({ ...mockChatWithMessages, model_name: 'gpt-5.5' });
+      mockClient.getChats.mockResolvedValue([
+        { ...mockChats[0], model_name: 'gpt-5.5' },
+        ...mockChats.slice(1),
+      ]);
+
+      chooseSelectOption('chat-provider-model', 'gpt-5.5');
+
+      await waitFor(() => expect(listedModel()).toHaveTextContent(/^gpt-5\.5$/));
     });
 
     const openChatById = async () => {
@@ -3998,8 +4441,11 @@ describe('ChatsPage', () => {
     });
 
     it('offers agent models and efforts on an agent default and saves a model change', async () => {
+      listedModels = [
+        { name: 'sonnet', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
       mockGetChatProviders.mockResolvedValue(chatProviders({ default: claudeOffer }));
-      await openChat({ model_name: 'auto', reasoning_effort: 'auto' });
+      await openChat({ model_name: 'auto', reasoning_effort: 'auto', context_tokens: 32768 });
       await screen.findByTestId('chat-provider-model');
       expect(optionNames('chat-provider-model')).toEqual(['Automatic', 'Sonnet', 'Haiku']);
       expect(optionNames('reasoning-effort')).toEqual([
@@ -4023,6 +4469,252 @@ describe('ChatsPage', () => {
         expect(mockGetChatProviders.mock.calls.length).toBeGreaterThan(providerLoads);
         expect(mockClient.getChat.mock.calls.length).toBeGreaterThan(chatLoads);
       });
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('fits the context to a smaller model chosen on a self-hosted default', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const served = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+      await openChat({ model_name: 'llama2', context_tokens: 32768, reasoning_effort: 'high' });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockClient.updateChat.mockImplementation(async (_id: string, update: UpdateChatRequest) => ({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        reasoning_effort: 'high',
+        context_tokens: update.context_tokens ?? 32768,
+      }));
+
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        reasoning_effort: 'high',
+        context_tokens: 4096,
+      });
+
+      chooseSelectOption('chat-provider-model', 'tinyllama');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 4096 })
+      );
+      expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { model_name: 'tinyllama' });
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(2);
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('4K'));
+      expect(screen.queryByTestId('chat-operation-error')).not.toBeInTheDocument();
+    });
+
+    it('shows a saved context larger than the model window as the window', async () => {
+      listedModels = [
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const served = providerOffer({
+        models: [{ name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS }],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+
+      await openChat({ model_name: 'tinyllama', context_tokens: 32768 });
+
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('4K'));
+    });
+
+    it('fits a context larger than the default to the full window of the model it moves to', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 262144 } },
+        { name: 'qwen3', size: 1, modified_at: '', details: { context_length: 131072 } },
+      ];
+      const local = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'qwen3', label: 'qwen3', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ default: local, selected: selection(local, 'llama2') })
+      );
+      await openChat({
+        model_name: 'qwen3',
+        provider: 'self_hosted',
+        provider_model: 'llama2',
+        context_tokens: 262144,
+      });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toBeInTheDocument());
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen3',
+        context_tokens: 262144,
+      });
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen3',
+        context_tokens: 131072,
+      });
+
+      chooseSelectOption('chat-provider', 'Default (Self-Hosted)');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 131072 })
+      );
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('fits the context to the model a chat returns to on its self-hosted default', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const local = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ default: local, selected: selection(local, 'llama2') })
+      );
+      await openChat({
+        model_name: 'tinyllama',
+        provider: 'self_hosted',
+        provider_model: 'llama2',
+        context_tokens: 32768,
+      });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        context_tokens: 32768,
+      });
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'tinyllama',
+        context_tokens: 4096,
+      });
+
+      chooseSelectOption('chat-provider', 'Default (Self-Hosted)');
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', { provider: null, model: null })
+      );
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 4096 })
+      );
+    });
+
+    it('fits the context to a smaller model chosen on a Self-Hosted provider', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const local = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: HTTP_EFFORTS },
+        ],
+      });
+      const chosen = { provider: 'self_hosted' as const, provider_model: 'llama2' };
+      mockGetChatProviders.mockResolvedValue(
+        chatProviders({ selected: selection(local, 'llama2') })
+      );
+      await openChat({ ...chosen, context_tokens: 32768, reasoning_effort: 'high' });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockSetChatProvider.mockResolvedValue({
+        ...mockChatWithMessages,
+        ...chosen,
+        provider_model: 'tinyllama',
+        context_tokens: 32768,
+      });
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        ...chosen,
+        provider_model: 'tinyllama',
+        context_tokens: 4096,
+      });
+
+      chooseSelectOption('chat-provider-model', 'tinyllama');
+
+      await waitFor(() =>
+        expect(mockSetChatProvider).toHaveBeenCalledWith('chat-1', {
+          provider: 'self_hosted',
+          model: 'tinyllama',
+        })
+      );
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', { context_tokens: 4096 })
+      );
+      expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports every fix-up that fails after a model change', async () => {
+      listedModels = [
+        { name: 'llama2', size: 1, modified_at: '', details: { context_length: 131072 } },
+        { name: 'tinyllama', size: 1, modified_at: '', details: { context_length: 4096 } },
+      ];
+      const served = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'tinyllama', label: 'tinyllama', efforts: ['off', 'low'] },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+      await openChat({ model_name: 'llama2', context_tokens: 32768, reasoning_effort: 'high' });
+      await waitFor(() => expect(screen.getByTestId('context-tokens')).toHaveTextContent('32K'));
+      mockClient.updateChat.mockImplementation(async (_id: string, update: UpdateChatRequest) => {
+        if (update.reasoning_effort) throw new Error('Effort refused');
+        if (update.context_tokens) throw new Error('Context refused');
+        return { ...mockChatWithMessages, model_name: 'tinyllama' };
+      });
+
+      chooseSelectOption('chat-provider-model', 'tinyllama');
+
+      const error = await screen.findByTestId('chat-operation-error');
+      expect(error).toHaveTextContent(
+        'Model changed, but its reasoning effort could not be reset: Effort refused'
+      );
+      expect(error).toHaveTextContent(
+        'Model changed, but its context size could not be fitted to it: Context refused'
+      );
+    });
+
+    it('changes the model of a chat on a self-hosted default mid-chat', async () => {
+      const served = providerOffer({
+        models: [
+          { name: 'llama2', label: 'llama2', efforts: HTTP_EFFORTS },
+          { name: 'qwen2.5:7b-instruct', label: 'qwen2.5:7b-instruct', efforts: HTTP_EFFORTS },
+        ],
+      });
+      mockGetChatProviders.mockResolvedValue(chatProviders({ default: served }));
+      await openChat({ model_name: 'llama2', reasoning_effort: 'high' });
+      await screen.findByTestId('chat-provider-model');
+      expect(optionNames('chat-provider-model')).toEqual([
+        'Automatic',
+        'llama2',
+        'qwen2.5:7b-instruct',
+      ]);
+      mockClient.updateChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen2.5:7b-instruct',
+      });
+      mockClient.getChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        model_name: 'qwen2.5:7b-instruct',
+      });
+
+      chooseSelectOption('chat-provider-model', 'qwen2.5:7b-instruct');
+
+      await waitFor(() =>
+        expect(mockClient.updateChat).toHaveBeenCalledWith('chat-1', {
+          model_name: 'qwen2.5:7b-instruct',
+        })
+      );
+      await waitFor(() => expect(badge()).toHaveTextContent('qwen2.5:7b-instruct'));
+      expect(mockSetChatProvider).not.toHaveBeenCalled();
       expect(mockClient.updateChat).toHaveBeenCalledTimes(1);
     });
 
@@ -4727,7 +5419,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       expect(within(panel).getByRole('button', { name: 'Sources, 1' })).toBeInTheDocument();
       expect(within(panel).getByText('an unrelated source')).toBeInTheDocument();
@@ -4744,7 +5436,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       const toggle = within(panel).getByRole('button', { name: 'Sources, 1' });
       expect(toggle).toHaveAttribute('aria-expanded', 'false');
@@ -4770,7 +5462,7 @@ describe('ChatsPage', () => {
         fireEvent.click(within(reply).getByRole('button', { name: '1 source' }));
 
         const sheet = await screen.findByRole('dialog', {
-          name: 'Changes, tasks, media and sources',
+          name: 'Changes, agents, tasks, media and sources',
         });
         expect(within(sheet).getByText('Cited in this reply')).toBeInTheDocument();
         expect(within(sheet).getByText('an unrelated source')).toBeInTheDocument();
@@ -4830,7 +5522,7 @@ describe('ChatsPage', () => {
       fireEvent.click(await screen.findByText('Chat 1'));
 
       const panel = await screen.findByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       expect(within(panel).getByTestId('citation')).toHaveTextContent('Passing');
 
@@ -4881,7 +5573,7 @@ describe('ChatsPage', () => {
       );
 
       const panel = screen.getByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       const highlighted = within(panel)
         .getAllByTestId('citation')
@@ -4938,7 +5630,7 @@ describe('ChatsPage', () => {
       );
 
       const panel = screen.getByRole('complementary', {
-        name: 'Changes, tasks, media and sources',
+        name: 'Changes, agents, tasks, media and sources',
       });
       const rows = within(panel).getAllByTestId('citation');
       expect(rows).toHaveLength(2);
@@ -4996,6 +5688,101 @@ describe('ChatsPage', () => {
 
       expect(await screen.findByText('Hi there!')).toBeInTheDocument();
       expect(mockGetChat).toHaveBeenCalledWith('chat-1');
+    });
+  });
+
+  describe('turn order', () => {
+    const traceOf = (answer: Element | null | undefined): string[] =>
+      Array.from(answer?.children ?? []).map((part) =>
+        part.matches('[data-testid="activity"]')
+          ? `tools:${/Read(?:ing)? a file/.test(part.textContent ?? '') ? 'read' : 'listed'}`
+          : `text:${part.textContent?.trim()}`
+      );
+
+    const call = (id: string, name: string, at: number) => ({
+      id,
+      name,
+      arguments: '{}',
+      success: true,
+      detail: 'ok',
+      duration_ms: 1,
+      at,
+    });
+
+    it('streams each tool call after the text written before it', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      const input = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+        'Type a message, or drop a file...'
+      );
+      fireEvent.change(input, { target: { value: 'Look into it' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+      await waitFor(() => expect(input.value).toBe(''));
+
+      act(() => {
+        socket.emit({
+          type: 'message_start',
+          message_id: 'ordered',
+          role: 'assistant',
+        });
+        socket.emit({ type: 'chunk', content: 'Let me look. ', index: 0 });
+        socket.emit({
+          type: 'tool_call',
+          message_id: 'ordered',
+          tool_call_id: 'call-1',
+          name: 'read_file',
+          arguments: '{}',
+          at: Array.from('Let me look. ').length,
+        });
+        socket.emit({ type: 'chunk', content: 'Found it. ', index: 1 });
+        socket.emit({
+          type: 'tool_call',
+          message_id: 'ordered',
+          tool_call_id: 'call-2',
+          name: 'list_files',
+          arguments: '{}',
+          at: Array.from('Let me look. Found it. ').length,
+        });
+        socket.emit({ type: 'chunk', content: 'All done.', index: 2 });
+      });
+
+      await waitFor(() => expect(screen.getByText('All done.')).toBeInTheDocument());
+      const answer = screen.getByText('All done.').closest('.message-content');
+      expect(traceOf(answer)).toEqual([
+        'text:Let me look.',
+        'tools:read',
+        'text:Found it.',
+        'tools:listed',
+        'text:All done.',
+      ]);
+    });
+
+    it('rebuilds the same order from the stored reply on reload', async () => {
+      mockGetChat.mockResolvedValue({
+        ...mockChatWithMessages,
+        messages: [
+          mockChatWithMessages.messages[0],
+          {
+            ...mockChatWithMessages.messages[1],
+            content: 'Let me look. Found it. All done.',
+            metadata: {
+              tool_calls: [call('call-1', 'read_file', 13), call('call-2', 'list_files', 23)],
+            },
+          },
+        ],
+      });
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+
+      await waitFor(() => expect(screen.getByText('All done.')).toBeInTheDocument());
+      const answer = screen.getByText('All done.').closest('.message-content');
+      expect(traceOf(answer)).toEqual([
+        'text:Let me look.',
+        'tools:read',
+        'text:Found it.',
+        'tools:listed',
+        'text:All done.',
+      ]);
     });
   });
 
@@ -5137,6 +5924,24 @@ describe('ChatsPage', () => {
     });
   });
 
+  describe('paging', () => {
+    it('loads the next page of chats from the end of the list', async () => {
+      mockClient.getChats
+        .mockResolvedValueOnce({ chats: [mockChats[0]], total: 2 })
+        .mockResolvedValueOnce({ chats: [mockChats[1]], total: 2 });
+
+      renderChatsPage();
+      fireEvent.click(await screen.findByRole('button', { name: `${LOAD_MORE_CHATS} (1)` }));
+
+      expect(await screen.findByText(mockChats[1].title)).toBeInTheDocument();
+      expect(mockClient.getChats).toHaveBeenLastCalledWith(
+        'ws-1',
+        expect.objectContaining({ offset: 1 })
+      );
+      expect(screen.queryByRole('button', { name: /Load more chats/ })).not.toBeInTheDocument();
+    });
+  });
+
   describe('grouping and sorting', () => {
     it('groups chats by project and sorts titles inside each group', async () => {
       mockClient.getChats.mockResolvedValue([
@@ -5213,6 +6018,174 @@ describe('ChatsPage', () => {
       renderChatsPage();
       expect(await screen.findByText('No chats yet')).toBeInTheDocument();
       expect(screen.queryByRole('combobox', { name: 'Group chats' })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('combobox', { name: 'Filter chats by status' })
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe('status indicators', () => {
+    const indicator = (
+      chat_id: string,
+      overrides: Partial<import('../types').ChatIndicator> = {}
+    ) => ({
+      chat_id,
+      activity: 'idle' as const,
+      pull_request: null,
+      pull_requests: 0,
+      ...overrides,
+    });
+
+    const openPull = (overrides: Record<string, unknown> = {}) => ({
+      id: 'pr-1',
+      number: 12,
+      url: 'https://github.com/acme/widgets/pull/12',
+      title: 'Add widgets',
+      status: {
+        title: 'Add widgets',
+        state: 'open' as const,
+        draft: false,
+        additions: 1,
+        deletions: 1,
+        changed_files: 1,
+        checks: 'passing' as const,
+        mergeable: 'clean' as const,
+        auto_merge: { enabled: false, unavailable: null },
+        threads: { open: 0, resolved: 0 },
+        draft_unavailable: null,
+        observed_at: '2026-11-13T10:00:00Z',
+        ...(overrides.status as Record<string, unknown> | undefined),
+      },
+      ready: false,
+      ...overrides,
+    });
+
+    it('marks the rows that are busy, waiting, failing or ready', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'writing' }),
+        indicator('chat-2', { activity: 'awaiting_answer' }),
+        indicator('chat-3', {
+          pull_request: openPull({ status: { checks: 'failing' } }),
+          pull_requests: 1,
+        }),
+        indicator('chat-4', { pull_request: openPull({ ready: true }), pull_requests: 1 }),
+      ]);
+
+      renderChatsPage();
+
+      expect(await screen.findByLabelText('Writing a reply')).toBeInTheDocument();
+      expect(screen.getByLabelText('Waiting for your answer')).toBeInTheDocument();
+      expect(screen.getByLabelText('Pull request #12: Checks failing')).toBeInTheDocument();
+      expect(screen.getByLabelText('Pull request #12: Ready to merge')).toBeInTheDocument();
+    });
+
+    it('sorts the chats that want attention to the top', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'idle' }),
+        indicator('chat-3', { activity: 'awaiting_approval' }),
+      ]);
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Sort chats' });
+      await waitFor(() =>
+        expect(screen.getByLabelText('Waiting for you to approve a tool call')).toBeInTheDocument()
+      );
+      chooseSelect('Sort chats', 'Needs attention');
+
+      const titles = [...document.querySelectorAll('.chat-title')].map((node) => node.textContent);
+      expect(titles[0]).toBe('Chat 3');
+      expect(localStorage.getItem(CHAT_SORT_STORAGE_KEY)).toBe('status');
+    });
+
+    it('narrows the list to one facet and offers a way back', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'writing' }),
+        indicator('chat-2', {
+          pull_request: openPull({ status: { checks: 'failing' } }),
+          pull_requests: 1,
+        }),
+      ]);
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Filter chats by status' });
+      await waitFor(() => expect(screen.getByLabelText('Writing a reply')).toBeInTheDocument());
+
+      chooseSelect('Filter chats by status', 'Checks failing');
+      await waitFor(() => expect(screen.queryByText('Chat 1')).not.toBeInTheDocument());
+      expect(screen.getByText('Chat 2')).toBeInTheDocument();
+      expect(localStorage.getItem(CHAT_FILTER_STORAGE_KEY)).toBe('failing');
+
+      chooseSelect('Filter chats by status', 'Ready to merge');
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Show all chats' }));
+      expect(await screen.findByText('Chat 1')).toBeInTheDocument();
+      expect(localStorage.getItem(CHAT_FILTER_STORAGE_KEY)).toBe('all');
+    });
+
+    it('keeps the open chat marked as waiting while its parked turn still streams', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'awaiting_approval' }),
+      ]);
+
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      act(() => {
+        socket.emit({ type: 'message_start', message_id: 'stream', role: 'assistant' });
+        socket.emit({ type: 'chunk', content: 'Working', index: 0 });
+      });
+
+      await waitFor(() =>
+        expect(screen.getByLabelText('Waiting for you to approve a tool call')).toBeInTheDocument()
+      );
+      expect(screen.queryByTestId('chat-status-writing')).toBeNull();
+    });
+
+    it('waits for the first reading before telling a saved filter that nothing matches', async () => {
+      localStorage.setItem(CHAT_FILTER_STORAGE_KEY, 'ready');
+      let answer: (indicators: unknown[]) => void = () => undefined;
+      mockGetChatIndicators.mockImplementationOnce(
+        () => new Promise((resolve) => (answer = resolve))
+      );
+
+      renderChatsPage();
+
+      expect(await screen.findByText('Reading chat statuses...')).toBeInTheDocument();
+      expect(screen.queryByText('No loaded chats match this filter')).toBeNull();
+
+      await act(async () => {
+        answer([]);
+      });
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+    });
+
+    it('still offers the next page when nothing loaded matches the filter', async () => {
+      mockGetChats.mockResolvedValue({ chats: mockChats, total: mockChats.length + 25 });
+      mockGetChatIndicators.mockResolvedValue(
+        mockChats.map((chat) => indicator(chat.id, { activity: 'idle' }))
+      );
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Filter chats by status' });
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /Load more chats/ })).toBeInTheDocument()
+      );
+
+      chooseSelect('Filter chats by status', 'Ready to merge');
+
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Load more chats/ })).toBeInTheDocument();
+    });
+
+    it('says the statuses are stale when the reading fails, and still lists the chats', async () => {
+      mockGetChatIndicators.mockRejectedValue(new Error('GitHub is unreachable'));
+
+      renderChatsPage();
+
+      expect(await screen.findByText(/Statuses are out of date/)).toHaveTextContent(
+        'GitHub is unreachable'
+      );
+      expect(screen.getByText('Chat 1')).toBeInTheDocument();
     });
   });
 });

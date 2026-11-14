@@ -5,7 +5,9 @@ import {
   setupAdminAuth,
   setupCommonRoutes,
 } from './layout-fixtures';
-import { blockServiceWorker, routeApi } from './test-utils';
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
+
+const TIGHTEST_DESKTOP = { width: 1024, height: 768 };
 
 const screens = [
   {
@@ -25,15 +27,8 @@ const screens = [
   {
     path: 'tasks',
     heading: 'Tasks',
-    content: '.task-card:not(.skeleton-card)',
-    title: '.task-card-title h3',
-    titleLeading: '20px',
-  },
-  {
-    path: 'sources',
-    heading: 'Sources',
-    content: '.source-card',
-    title: '.source-name',
+    content: '.task-card:not(.board-skeleton-card)',
+    title: '.task-card-open',
     titleLeading: '20px',
   },
   {
@@ -65,6 +60,16 @@ async function fitsViewport(page: Page): Promise<void> {
   expect(main.scroll).toBeLessThanOrEqual(main.client);
 }
 
+async function tableFits(page: Page): Promise<void> {
+  const table = await page
+    .locator('.sources-table-wrapper')
+    .evaluate((element) => ({
+      scroll: element.scrollWidth,
+      client: element.clientWidth,
+    }));
+  expect(table.scroll).toBeLessThanOrEqual(table.client);
+}
+
 async function capture(
   page: Page,
   name: string,
@@ -84,7 +89,7 @@ async function ready(
   path: string,
   theme: 'light' | 'dark'
 ): Promise<void> {
-  await page.goto(`/${path}`, { waitUntil: 'domcontentloaded' });
+  await page.goto(path, { waitUntil: 'domcontentloaded' });
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   await page.evaluate(() => document.fonts.ready);
 }
@@ -99,10 +104,7 @@ for (const viewport of [
       test.use({ viewport });
       test.beforeEach(async ({ page, context }) => {
         await blockServiceWorker(context);
-        await page.addInitScript(
-          (value) => localStorage.setItem('manager_theme', value),
-          theme
-        );
+        await page.emulateMedia({ colorScheme: theme });
         await setupCommonRoutes(page, true);
         await page.goto('/login', { waitUntil: 'domcontentloaded' });
         await setupAdminAuth(page);
@@ -115,14 +117,16 @@ for (const viewport of [
         page,
       }) => {
         for (const screen of screens) {
-          await ready(page, screen.path, theme);
+          await ready(page, `/${screen.path}`, theme);
           const heading = page.getByRole('heading', {
             name: screen.heading,
             exact: true,
           });
           await expect(heading).toBeVisible();
           await expect(page.locator(screen.content).first()).toBeVisible();
-          await expect(page.locator('.skeleton-card')).toHaveCount(0);
+          await expect(
+            page.locator('.skeleton-card, .board-skeleton-card'),
+          ).toHaveCount(0);
           await expect(heading).toHaveCSS('font-size', '18px');
           await expect(heading).toHaveCSS('line-height', '22.5px');
           if (viewport.width > 768)
@@ -142,20 +146,70 @@ for (const viewport of [
         }
       });
 
-      // One test per wizard: each walkthrough gets the whole per-test budget
-      // and its own retries, and a failure names the wizard. Four of them in
-      // one test ran out of the 60-second budget on a slow WebKit runner.
+      test('the sources section keeps its table inside the viewport', async ({
+        page,
+      }) => {
+        await ready(page, SOURCES_PATH, theme);
+        await expect(
+          page
+            .getByRole('region', { name: 'Sources', exact: true })
+            .getByRole('heading', { level: 2, name: 'Sources', exact: true })
+        ).toBeVisible();
+        await expect(page.locator('.source-card').first()).toBeVisible();
+        await expect(page.locator('.skeleton-card')).toHaveCount(0);
+        await expect(page.locator('.source-name').first()).toHaveCSS(
+          'font-size',
+          '13px'
+        );
+        await expect(page.locator('.source-name').first()).toHaveCSS(
+          'line-height',
+          '20px'
+        );
+        await fitsViewport(page);
+        if (viewport.width > 768) await tableFits(page);
+        await capture(page, `${profile}-sources`, theme);
+      });
+
+      if (viewport.width > 768)
+        test('the sources table fits the tightest desktop width without scrolling sideways', async ({
+          page,
+        }) => {
+          await page.setViewportSize(TIGHTEST_DESKTOP);
+          await ready(page, SOURCES_PATH, theme);
+          await expect(page.locator('.source-card').first()).toBeVisible();
+          await expect(page.locator('.skeleton-card')).toHaveCount(0);
+          await fitsViewport(page);
+          await tableFits(page);
+          await expect(
+            page
+              .locator('.source-card')
+              .first()
+              .getByRole('button', { name: 'Delete', exact: true })
+          ).toBeInViewport();
+        });
+
       for (const wizard of [
-        { path: 'projects', button: 'New project', title: 'New Project' },
-        { path: 'tasks', button: 'New task', title: 'New Task' },
-        { path: 'sources', button: 'Add source', title: 'Add Source' },
         {
-          path: 'wiki',
+          name: 'projects',
+          path: '/projects',
+          button: 'New project',
+          title: 'New Project',
+        },
+        { name: 'tasks', path: '/tasks', button: 'New task', title: 'New Task' },
+        {
+          name: 'sources',
+          path: SOURCES_PATH,
+          button: 'Add source',
+          title: 'Add Source',
+        },
+        {
+          name: 'wiki',
+          path: '/wiki',
           button: 'Add knowledge',
           title: 'Add Knowledge Entry',
         },
       ]) {
-        test(`the ${wizard.path} creation wizard keeps its title, steps, content and footer visible`, async ({
+        test(`the ${wizard.name} creation wizard keeps its title, steps, content and footer visible`, async ({
           page,
         }) => {
           await ready(page, wizard.path, theme);
@@ -185,12 +239,12 @@ for (const viewport of [
           expect(bounds!.width).toBeLessThanOrEqual(viewport.width - 32);
           expect(bounds!.height).toBeLessThanOrEqual(viewport.height - 32);
           await fitsViewport(page);
-          await capture(page, `${profile}-${wizard.path}-wizard`, theme);
-          if (wizard.path === 'projects') {
+          await capture(page, `${profile}-${wizard.name}-wizard`, theme);
+          if (wizard.name === 'projects') {
             await dialog.getByLabel('Project Name').fill('Layout review');
-          } else if (wizard.path === 'tasks') {
+          } else if (wizard.name === 'tasks') {
             await dialog.locator('.project-selection-option').first().click();
-          } else if (wizard.path === 'sources') {
+          } else if (wizard.name === 'sources') {
             await dialog
               .locator('.source-type-option')
               .filter({ hasText: 'Raw text' })
@@ -204,14 +258,14 @@ for (const viewport of [
           );
           await capture(
             page,
-            `${profile}-${wizard.path}-wizard-content`,
+            `${profile}-${wizard.name}-wizard-content`,
             theme
           );
-          if (wizard.path === 'tasks') {
+          if (wizard.name === 'tasks') {
             await dialog
               .getByLabel('Description', { exact: true })
               .fill('Keep typography and spacing consistent.');
-          } else if (wizard.path === 'sources' || wizard.path === 'wiki') {
+          } else if (wizard.name === 'sources' || wizard.name === 'wiki') {
             await dialog
               .locator('textarea')
               .first()
@@ -226,7 +280,7 @@ for (const viewport of [
           await expect(
             dialog.getByRole('button', { name: 'Previous', exact: true })
           ).toBeVisible();
-          if (wizard.path === 'wiki') {
+          if (wizard.name === 'wiki') {
             await dialog
               .getByLabel('Title', { exact: true })
               .fill('Design notes');
@@ -234,7 +288,7 @@ for (const viewport of [
             await dialog.locator('#knowledge-tags').press('Enter');
             await expect(dialog.locator('.tag-item')).toBeVisible();
           }
-          if (wizard.path === 'tasks') {
+          if (wizard.name === 'tasks') {
             const priorities = await dialog
               .locator('.priority-selector')
               .evaluate((element) => ({
@@ -276,7 +330,7 @@ for (const viewport of [
           );
           await capture(
             page,
-            `${profile}-${wizard.path}-wizard-details`,
+            `${profile}-${wizard.name}-wizard-details`,
             theme
           );
         });
@@ -329,7 +383,7 @@ for (const viewport of [
             socket.send(JSON.stringify({ type: 'authenticated' }))
           );
         });
-        await ready(page, 'chats', theme);
+        await ready(page, '/chats', theme);
         await page.locator('.chat-item').first().click();
         await expect(page.locator('.message-assistant')).toBeVisible();
         await expect(page.locator('.message')).toHaveCount(2);
@@ -367,6 +421,7 @@ for (const viewport of [
           await routeApi(page, '**/api/chats/chat-1', (route) =>
             route.fulfill({ status: 500, json: { error: 'Unavailable' } })
           );
+          await page.reload();
           await page.locator('.chat-item').first().click();
           await expect(page.locator('.chat-back-state')).toBeVisible();
           await page.getByRole('button', { name: 'Back to chats' }).click();
@@ -377,7 +432,7 @@ for (const viewport of [
       test('detail panes and search results share the same content rhythm', async ({
         page,
       }) => {
-        await ready(page, 'projects', theme);
+        await ready(page, '/projects', theme);
         await page.locator('.project-card').first().click();
         await expect(page.locator('.project-details')).toBeVisible();
         await expect(page.locator('.details-content')).toHaveCSS(
@@ -387,7 +442,7 @@ for (const viewport of [
         await expect(page.locator('.sync-config-section')).toBeVisible();
         await capture(page, `${profile}-project-details`, theme);
         await fitsViewport(page);
-        await ready(page, 'wiki', theme);
+        await ready(page, '/wiki', theme);
         await page.locator('.knowledge-card').first().click();
         await expect(
           page.getByRole('dialog', { name: 'Getting Started Guide' })
@@ -398,11 +453,14 @@ for (const viewport of [
         );
         await capture(page, `${profile}-wiki-details`, theme);
         await fitsViewport(page);
-        await ready(page, 'tasks', theme);
+        await ready(page, '/tasks', theme);
         await page
-          .getByRole('button', { name: 'Execute', exact: true })
-          .first()
+          .getByRole('button', {
+            name: 'Actions for Implement authentication',
+            exact: true,
+          })
           .click();
+        await page.getByRole('menuitem', { name: 'Run', exact: true }).click();
         await expect(
           page.getByText('Ready to run', { exact: true })
         ).toBeVisible();
@@ -430,7 +488,7 @@ for (const viewport of [
             },
           })
         );
-        await ready(page, 'wiki', theme);
+        await ready(page, '/wiki', theme);
         await page
           .getByPlaceholder('Search knowledge and sources...')
           .fill('design');
@@ -466,7 +524,7 @@ for (const viewport of [
             },
           })
         );
-        await ready(page, 'models', theme);
+        await ready(page, '/models', theme);
         await page.getByRole('tab', { name: /Browse/ }).click();
         await expect(page.locator('.browse-item').first()).toBeVisible();
         await expect(page.locator('.browse-description').first()).toBeVisible();

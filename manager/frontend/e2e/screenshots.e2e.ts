@@ -1,12 +1,43 @@
 import { test, expect } from './fixtures';
 import type { Page } from '@playwright/test';
-import { blockServiceWorker, routeApi } from './test-utils';
-import { mockTasks, setupAdminAuth, setupCommonRoutes } from './layout-fixtures';
+import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
+import { mockTasks, setupAdminAuth, setupCommonRoutes, tasksNow } from './layout-fixtures';
 
 const runScreenshots = process.env.RUN_SCREENSHOTS === 'true';
 const describeScreenshots = runScreenshots ? test.describe : test.describe.skip;
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+const TASK_CARD = '.task-card:not(.board-skeleton-card)';
+const SKELETON_CARD = '.skeleton-card, .board-skeleton-card';
+const PHONE = { width: 375, height: 812 };
+// document.getAnimations() omits ::file-selector-button, so animations: 'disabled' cannot settle it.
+const SETTLED_FILE_BUTTONS = '::file-selector-button { transition: none !important; }';
+
+const CardAction = {
+  rename: 'Rename',
+  remove: 'Delete',
+} as const;
+
+type CardAction = (typeof CardAction)[keyof typeof CardAction];
+
+async function openTasks(page: Page, populated: boolean): Promise<void> {
+  await page.clock.setFixedTime(tasksNow);
+  await setupCommonRoutes(page, populated);
+  await page.goto('/login');
+  await page.evaluate(() => localStorage.clear());
+  await setupAdminAuth(page);
+
+  await page.goto('/tasks');
+  await page.waitForLoadState('domcontentloaded');
+  await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+}
+
+async function chooseCardAction(page: Page, title: string, action: CardAction): Promise<void> {
+  const trigger = page.getByRole('button', { name: `Actions for ${title}`, exact: true });
+  await trigger.hover();
+  await trigger.click();
+  await page.getByRole('menuitem', { name: action, exact: true }).click();
+}
 
 async function fontsLoaded(page: Page): Promise<void> {
   await page.waitForFunction(() =>
@@ -29,19 +60,22 @@ async function capturePage(
     'screenshots/models-populated.png': '.model-item',
     'screenshots/chats-populated.png': '.chat-item',
     'screenshots/projects-populated.png': '.project-card',
-    'screenshots/tasks-populated.png': '.task-card:not(.skeleton-card)',
+    'screenshots/tasks-populated.png': TASK_CARD,
+    'screenshots/tasks-populated-end.png': TASK_CARD,
+    'screenshots/tasks-populated-375.png': TASK_CARD,
+    'screenshots/dark-tasks.png': TASK_CARD,
     'screenshots/sources-populated.png': '.source-card',
     'screenshots/wiki-populated.png': '.knowledge-card',
   };
   const content = populated[options?.path ?? ''];
   if (content) {
     await expect(page.locator(content).first()).toBeVisible();
-    await expect(page.locator('.skeleton-card')).toHaveCount(0);
+    await expect(page.locator(SKELETON_CARD)).toHaveCount(0);
   }
   if (options?.path?.includes('modal-'))
     await expect(page.getByRole('dialog')).toBeVisible();
   await fontsLoaded(page);
-  await page.screenshot({ ...options, animations: 'disabled' });
+  await page.screenshot({ ...options, animations: 'disabled', style: SETTLED_FILE_BUTTONS });
 }
 
 // Helper to verify no errors on page
@@ -192,14 +226,8 @@ describeScreenshots('Screenshots - Empty States', () => {
   });
 
   test('Tasks page (empty)', async ({ page }) => {
-    await setupCommonRoutes(page, false);
-    await page.goto('/login');
-    await page.evaluate(() => localStorage.clear());
-    await setupAdminAuth(page);
-
-    await page.goto('/tasks');
-    await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await openTasks(page, false);
+    await expect(page.locator(SKELETON_CARD)).toHaveCount(0);
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -208,15 +236,15 @@ describeScreenshots('Screenshots - Empty States', () => {
     });
   });
 
-  test('Sources page (empty)', async ({ page }) => {
+  test('Sources section (empty)', async ({ page }) => {
     await setupCommonRoutes(page, false);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -242,15 +270,18 @@ describeScreenshots('Screenshots - Empty States', () => {
     });
   });
 
-  test('Sessions page (empty)', async ({ page }) => {
+  test('Settings sessions (empty)', async ({ page }) => {
     await setupCommonRoutes(page, false);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sessions');
+    await page.goto('/settings/you/sessions');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'Sessions', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -259,15 +290,18 @@ describeScreenshots('Screenshots - Empty States', () => {
     });
   });
 
-  test('Organization settings (empty)', async ({ page }) => {
+  test('Settings organization AI defaults (empty)', async ({ page }) => {
     await setupCommonRoutes(page, false);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/org-settings');
+    await page.goto('/settings/organization/ai');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'AI defaults', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -276,15 +310,18 @@ describeScreenshots('Screenshots - Empty States', () => {
     });
   });
 
-  test('Workspace settings (empty)', async ({ page }) => {
+  test('Settings workspace general (empty)', async ({ page }) => {
     await setupCommonRoutes(page, false);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/settings');
+    await page.goto('/settings/workspace/general');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'General', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -517,18 +554,31 @@ describeScreenshots('Screenshots - Populated States', () => {
   });
 
   test('Tasks page (populated)', async ({ page }) => {
-    await setupCommonRoutes(page, true);
-    await page.goto('/login');
-    await page.evaluate(() => localStorage.clear());
-    await setupAdminAuth(page);
-
-    await page.goto('/tasks');
-    await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await openTasks(page, true);
     await verifyNoErrors(page);
-    await page.waitForTimeout(300);
     await capturePage(page, {
       path: 'screenshots/tasks-populated.png',
+      fullPage: true,
+    });
+
+    const board = page.getByRole('region', { name: 'Tasks' });
+    await board.evaluate((element) => element.scrollTo({ left: element.scrollWidth }));
+    await expect(board.locator('[data-stage="cancelled"]')).toBeInViewport();
+    await capturePage(page, {
+      path: 'screenshots/tasks-populated-end.png',
+      fullPage: true,
+    });
+  });
+
+  test('Tasks page (populated, 375)', async ({ page }) => {
+    await page.setViewportSize(PHONE);
+    await openTasks(page, true);
+    await verifyNoErrors(page);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
+    await capturePage(page, {
+      path: 'screenshots/tasks-populated-375.png',
       fullPage: true,
     });
   });
@@ -543,21 +593,15 @@ describeScreenshots('Screenshots - Populated States', () => {
     test(`Task title, optional in the wizard and renamed inline (${view.name})`, async ({
       page,
     }) => {
-      await setupCommonRoutes(page, true);
       await routeApi(page, '**/api/tasks/task-1', (route) =>
         route.fulfill({ status: 200, json: { task: mockTasks[0] } })
       );
       await page.setViewportSize({ width: view.width, height: view.height });
-      await page.goto('/login');
-      await page.evaluate(() => localStorage.clear());
-      await setupAdminAuth(page);
-
-      await page.goto('/tasks');
-      await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+      await openTasks(page, true);
       await page.evaluate((theme) => {
         document.documentElement.setAttribute('data-theme', theme);
       }, view.theme);
-      await expect(page.locator('.task-card:not(.skeleton-card)').first()).toBeVisible();
+      await expect(page.locator(TASK_CARD).first()).toBeVisible();
 
       await page.getByRole('button', { name: /New task/ }).click();
       const wizard = page.getByRole('dialog', { name: 'New Task' });
@@ -588,22 +632,22 @@ describeScreenshots('Screenshots - Populated States', () => {
       await title.press('Escape');
 
       await page.getByRole('button', { name: 'Close' }).click();
-      await expect(page.getByRole('table', { name: 'Tasks' })).toBeVisible();
-      await page.getByRole('button', { name: `Rename ${mockTasks[0].title}` }).click();
+      await expect(page.getByRole('region', { name: 'Tasks' })).toBeVisible();
+      await chooseCardAction(page, mockTasks[0].title, CardAction.rename);
       await expect(page.getByRole('textbox', { name: 'Task title' })).toBeFocused();
       await capturePage(page, { path: `screenshots/task-title-rename-list-${view.name}.png` });
     });
   }
 
-  test('Sources page (populated)', async ({ page }) => {
+  test('Sources section (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -629,15 +673,18 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   });
 
-  test('Sessions page (populated)', async ({ page }) => {
+  test('Settings sessions (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sessions');
+    await page.goto('/settings/you/sessions');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'Sessions', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -646,15 +693,18 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   });
 
-  test('Organization settings (populated)', async ({ page }) => {
+  test('Settings organization AI defaults (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/org-settings');
+    await page.goto('/settings/organization/ai');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'AI defaults', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -663,15 +713,18 @@ describeScreenshots('Screenshots - Populated States', () => {
     });
   });
 
-  test('Workspace settings (populated)', async ({ page }) => {
+  test('Settings workspace general (populated)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/settings');
+    await page.goto('/settings/workspace/general');
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('navigation', { name: 'Settings', exact: true })).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(page.getByRole('region', { name: 'General', exact: true })).toBeVisible();
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
     await capturePage(page, {
@@ -761,14 +814,7 @@ describeScreenshots('Screenshots - Dark Mode', () => {
   });
 
   test('Tasks page (dark)', async ({ page }) => {
-    await setupCommonRoutes(page, true);
-    await page.goto('/login');
-    await page.evaluate(() => localStorage.clear());
-    await setupAdminAuth(page);
-
-    await page.goto('/tasks');
-    await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await openTasks(page, true);
     await enableDarkMode(page);
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -778,15 +824,15 @@ describeScreenshots('Screenshots - Dark Mode', () => {
     });
   });
 
-  test('Sources page (dark)', async ({ page }) => {
+  test('Sources section (dark)', async ({ page }) => {
     await setupCommonRoutes(page, true);
     await page.goto('/login');
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
     await enableDarkMode(page);
     await verifyNoErrors(page);
     await page.waitForTimeout(300);
@@ -862,22 +908,28 @@ describeScreenshots('Screenshots - Modals', () => {
   });
 
   test('New Task modal', async ({ page }) => {
-    await setupCommonRoutes(page, true);
-    await page.goto('/login');
-    await page.evaluate(() => localStorage.clear());
-    await setupAdminAuth(page);
+    await openTasks(page, true);
+    await expect(page.locator(TASK_CARD).first()).toBeVisible();
 
-    await page.goto('/tasks');
-    await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
-
-    // Click new task button
-    const newTaskBtn = page.locator('button').filter({ hasText: /New Task/i });
-    await expect(newTaskBtn).toBeVisible();
-    await newTaskBtn.click();
+    const newTask = page.locator('button').filter({ hasText: /New Task/i });
+    await expect(newTask).toBeVisible();
+    await newTask.click();
     await page.waitForTimeout(300);
     await capturePage(page, {
       path: 'screenshots/modal-new-task.png',
+      fullPage: true,
+    });
+  });
+
+  test('Delete Task modal', async ({ page }) => {
+    await openTasks(page, true);
+    const [task] = mockTasks;
+    await chooseCardAction(page, task.title, CardAction.remove);
+    const dialog = page.getByRole('dialog', { name: `Delete "${task.title}"?` });
+    await expect(dialog.getByRole('button', { name: 'Delete task' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeVisible();
+    await capturePage(page, {
+      path: 'screenshots/modal-delete-task.png',
       fullPage: true,
     });
   });
@@ -888,16 +940,15 @@ describeScreenshots('Screenshots - Modals', () => {
     await page.evaluate(() => localStorage.clear());
     await setupAdminAuth(page);
 
-    await page.goto('/sources');
+    await page.goto(SOURCES_PATH);
     await page.waitForLoadState('domcontentloaded');
-    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('.sources-section')).toBeVisible({ timeout: 10000 });
 
-    // Click add source button
-    const addSourceBtn = page
-      .locator('button')
-      .filter({ hasText: /Add Source/i });
-    await expect(addSourceBtn).toBeVisible();
-    await addSourceBtn.click();
+    const addSource = page
+      .locator('.sources-section .section-row-actions')
+      .getByRole('button', { name: 'Add source' });
+    await expect(addSource).toBeVisible();
+    await addSource.click();
     await page.waitForTimeout(300);
     await capturePage(page, {
       path: 'screenshots/modal-add-source.png',

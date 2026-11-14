@@ -1,63 +1,136 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Badge, Button, EmptyState, Select } from '@zone/ui';
-import { useEffect, useState } from 'react';
+import { Button, EmptyState, Select } from '@zone/ui';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { toast } from 'sonner';
 import { client } from '../../../api/client';
 import PageBar from '../../../shared/components/PageBar/PageBar';
-import PencilIcon from '../../../shared/components/PencilIcon/PencilIcon';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
-import { useWorkspace } from '../../../shared/context';
+import { permitsWrites, useWorkspace } from '../../../shared/context';
 import { useProjects } from '../../projects/hooks';
-import { CreateTaskWizard, TaskDetail, TaskTitleInput } from '../components';
-import { useTask, useTasks } from '../hooks';
-import { awaitsTitle } from '../title';
-import type { Task, UpdateTaskRequest } from '../types';
+import { ActiveRunError } from '../ActiveRunError';
+import { READ_ONLY } from '../access';
+import {
+  CreateTaskWizard,
+  DeleteTaskDialog,
+  EditTasksDialog,
+  SelectionBar,
+  TaskDetail,
+} from '../components';
+import { Board, Skeleton, Unfolded, View } from '../components/board';
+import { RANGE } from '../gesture';
+import { TASKS_KEY, useTask, useTasks, useWorkspaceTasks } from '../hooks';
+import { Selection } from '../Selection';
+import { groupByStage, stageOf } from '../status';
+import { TitleDraft } from '../TitleDraft';
+import type { BoardActions, Renaming, Task, TaskChanges, UpdateTaskRequest } from '../types';
 import { TaskExecutionView } from './TaskExecutionView';
 import './TasksPage.css';
 
-type Tint = 'neutral' | 'info' | 'warning' | 'destructive' | 'accent' | 'success';
+const ALL_PROJECTS = '';
 
-const STATUS_TINTS: Record<string, Tint> = {
-  created: 'neutral',
-  queued: 'info',
-  in_progress: 'info',
-  blocked: 'destructive',
-  review: 'warning',
-  complete: 'success',
-};
+const MOVE_FAILED = 'The task could not be moved';
 
-const PR_TINTS: Record<string, Tint> = {
-  pending: 'neutral',
-  open: 'success',
-  merged: 'accent',
-  closed: 'destructive',
-};
+const UPDATE_FAILED = 'The tasks could not be updated';
 
-const SKELETON_CARDS = [1, 2, 3, 4];
+const RELATIONS_FAILED =
+  'Tasks in other projects could not be loaded, so related tasks outside this project are missing';
 
-function stopRowAction(event: { stopPropagation: () => void }) {
-  event.stopPropagation();
+const CLEARED = 'Selection cleared';
+
+const ESCAPE = 'Escape';
+
+const SHIELDED =
+  'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="dialog"], [role="menu"], [role="listbox"], [role="combobox"]';
+
+const DRAGGING = '.board[data-dragging]';
+
+const CARD = '.board li[data-task-id]';
+
+const TITLE = '.task-card-open';
+
+const CHECKBOX = '.task-card-select';
+
+const COLUMN = '.board section[data-stage]';
+
+function idsOf(tasks: readonly Task[]): string[] {
+  return tasks.map((task) => task.id);
 }
 
-function TaskStatusBadge({ status }: { status: string }) {
-  return (
-    <Badge className="task-status" variant={STATUS_TINTS[status] ?? 'neutral'}>
-      {status.replace('_', ' ')}
-    </Badge>
+function columnOf(task: Task, tasks: readonly Task[]): string[] {
+  return idsOf(groupByStage(tasks).get(stageOf(task.status).id) ?? []);
+}
+
+function quantity(count: number): string {
+  return `${count} ${count === 1 ? 'task' : 'tasks'}`;
+}
+
+function selected(count: number): string {
+  return `${quantity(count)} selected`;
+}
+
+function refusal(failure: unknown, tasks: readonly Task[]): string {
+  if (!(failure instanceof Error)) return UPDATE_FAILED;
+  if (!(failure instanceof ActiveRunError)) return failure.message;
+  const titles = new Map(tasks.map((task) => [task.id, task.title]));
+  const running = failure.ids.flatMap((id) => titles.get(id) ?? []);
+  if (running.length === 0) return failure.message;
+  if (running.length === 1) return `${running[0]} is running, so its status can't change`;
+  return `${running.length} tasks are running, so their status can't change: ${running.join(', ')}`;
+}
+
+function lost(): boolean {
+  const active = document.activeElement;
+  return active === null || active === document.body;
+}
+
+function stranded(): boolean {
+  return lost() || document.activeElement?.matches(CHECKBOX) === true;
+}
+
+function returnFocus(id: string | null): void {
+  if (!stranded()) return;
+  const card = Array.from(document.querySelectorAll<HTMLElement>(CARD)).find(
+    (candidate) => candidate.dataset.taskId === id
   );
+  (card?.querySelector<HTMLElement>(TITLE) ?? document.querySelector<HTMLElement>(COLUMN))?.focus();
 }
 
-function PrStatusBadge({ status }: { status: 'pending' | 'open' | 'merged' | 'closed' }) {
-  return <Badge variant={PR_TINTS[status] ?? 'neutral'}>PR: {status}</Badge>;
+function keepsSelection(event: KeyboardEvent): boolean {
+  if (event.key !== ESCAPE || event.defaultPrevented) return true;
+  if (document.querySelector(DRAGGING)) return true;
+  return event.target instanceof Element && event.target.closest(SHIELDED) !== null;
 }
 
 export default function TasksPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
-  const [filterProject, setFilterProject] = useState<string>('');
-  const [filterStatus, setFilterStatus] = useState<string>('');
+  const { currentWorkspace, workspaces, writable } = useWorkspace();
+  const workspaceId = currentWorkspace?.id;
+  const [scope, setScope] = useState(workspaceId);
+  const [filterProject, setFilterProject] = useState(ALL_PROJECTS);
+  const [renaming, setRenaming] = useState<Renaming | null>(null);
+  const [view, setView] = useState(() => new View());
+  const [selection, setSelection] = useState(Selection.EMPTY);
+  const [editing, setEditing] = useState(false);
+  const [announcement, setAnnouncement] = useState('');
+  const toggled = useRef<string | null>(null);
   const linkedTaskId = searchParams.get('id');
   const taskParam = searchParams.get('task');
+
+  if (scope !== workspaceId) {
+    setScope(workspaceId);
+    setFilterProject(ALL_PROJECTS);
+    setRenaming(null);
+    setView(new View());
+    setSelection(Selection.EMPTY);
+    setEditing(false);
+  }
+
+  const filter = (project: string) => {
+    setFilterProject(project);
+    setSelection(Selection.EMPTY);
+  };
 
   const {
     tasks,
@@ -65,12 +138,39 @@ export default function TasksPage() {
     error: tasksError,
     createTask,
     updateTask: updateListedTask,
-    deleteTask: deleteTaskMutation,
-  } = useTasks(filterProject || undefined, filterStatus || undefined);
+    updateTasks,
+    moveTask,
+    deleteTask,
+  } = useTasks(filterProject || undefined);
+  const latest = useRef(tasks);
+  const listed = useMemo(() => idsOf(tasks), [tasks]);
+  const visible = useMemo(
+    () => (writable ? selection.retain(listed) : Selection.EMPTY),
+    [writable, selection, listed]
+  );
+  const chosen = useMemo(() => tasks.filter((task) => visible.has(task.id)), [tasks, visible]);
+
+  if (visible !== selection) {
+    setSelection(visible);
+  }
+
+  const spoken = visible.size > 0 ? selected(visible.size) : announcement && CLEARED;
+  if (spoken !== announcement) {
+    setAnnouncement(spoken);
+  }
+
+  useLayoutEffect(() => {
+    latest.current = tasks;
+  }, [tasks]);
+
+  if (editing && visible.size === 0) {
+    setEditing(false);
+  }
+  const filtered = filterProject !== ALL_PROJECTS;
+  const workspace = useWorkspaceTasks(filtered);
+  const known = workspace.tasks ?? tasks;
 
   const { projects, loading: projectsLoading } = useProjects('all');
-  const { currentWorkspace } = useWorkspace();
-  const workspaceId = currentWorkspace?.id;
   const { data: sources = [] } = useQuery({
     queryKey: ['sources', workspaceId],
     queryFn: () => client.getSources(workspaceId as string),
@@ -84,9 +184,25 @@ export default function TasksPage() {
   } = useTask(taskParam);
 
   const [executionTask, setExecutionTask] = useState<Task | null>(null);
-  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState<Task | null>(null);
+  const [removed, setRemoved] = useState<string | null>(null);
+  const [followed, setFollowed] = useState<string | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+
+  if (!writable && (renaming !== null || deleting !== null)) {
+    setRenaming(null);
+    setDeleting(null);
+  }
+
+  const writableFor = (task: Task) =>
+    task.workspace_id === workspaceId
+      ? writable
+      : permitsWrites(workspaces.find((workspace) => workspace.id === task.workspace_id));
+
+  const projectNames = useMemo(
+    () => new Map(projects.map((project) => [project.id, project.name])),
+    [projects]
+  );
 
   const editorReady = Boolean(taskParam) && editorTask?.id === taskParam;
   const editorFailed = Boolean(taskParam) && !editorLoading && !editorReady && Boolean(editorError);
@@ -108,15 +224,33 @@ export default function TasksPage() {
     }
   }, [linkedTaskId, tasks, taskParam, searchParams, setSearchParams]);
 
-  const openEditor = (id: string) => {
-    const next = new URLSearchParams(searchParams);
-    next.set('task', id);
-    next.delete('id');
-    setSearchParams(next);
-    setExecutionTask(null);
+  const openEditor = useCallback(
+    (id: string) => {
+      const next = new URLSearchParams(searchParams);
+      next.set('task', id);
+      next.delete('id');
+      setSearchParams(next);
+      setExecutionTask(null);
+    },
+    [searchParams, setSearchParams]
+  );
+
+  const open = useCallback(
+    (task: Task, host?: Task) => {
+      if (host) view.trail.push(host.id);
+      view.trail.push(task.id);
+      openEditor(task.id);
+    },
+    [view, openEditor]
+  );
+
+  const follow = (task: Task) => {
+    setFollowed(task.id);
+    open(task);
   };
 
   const closeEditor = () => {
+    setFollowed(null);
     setExecutionTask(null);
     const next = new URLSearchParams(searchParams);
     next.delete('task');
@@ -134,32 +268,88 @@ export default function TasksPage() {
 
   const handleSave = async (request: UpdateTaskRequest) => {
     await updateTask(request);
-    await queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    await queryClient.invalidateQueries({ queryKey: TASKS_KEY });
   };
 
-  const handleDeleteTask = async (taskId: string) => {
-    if (!window.confirm('Are you sure you want to delete this task?')) return;
+  const confirmDelete = async (task: Task) => {
+    await deleteTask(task.id);
+    setRemoved(task.id);
+    setDeleting(null);
+  };
 
+  const actions = useMemo<BoardActions>(
+    () => ({
+      open,
+      run: setExecutionTask,
+      rename: (task) => setRenaming({ id: task.id, draft: new TitleDraft(task.title) }),
+      retitle: async (task, title) => {
+        await updateListedTask(task.id, { title });
+      },
+      finish: (task) => setRenaming((current) => (current?.id === task.id ? null : current)),
+      remove: setDeleting,
+      move: async (task, status) => {
+        try {
+          await moveTask(task.id, status);
+          return true;
+        } catch (failure) {
+          toast.error(`Couldn't move ${task.title}`, {
+            description: failure instanceof Error ? failure.message : MOVE_FAILED,
+          });
+          return false;
+        }
+      },
+      select: (task, gesture) => {
+        const column = gesture === RANGE ? columnOf(task, latest.current) : null;
+        toggled.current = task.id;
+        setSelection((current) =>
+          column ? current.extend(task.id, column) : current.toggle(task.id)
+        );
+      },
+    }),
+    [open, updateListedTask, moveTask]
+  );
+
+  const clearSelection = useCallback(() => {
+    setSelection(Selection.EMPTY);
+  }, []);
+
+  const saveSelection = async (changes: TaskChanges) => {
+    const ids = [...visible.ids];
     try {
-      await deleteTaskMutation(taskId);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete task');
+      await updateTasks(ids, changes);
+    } catch (failure) {
+      const description = refusal(failure, chosen);
+      toast.error(`Couldn't update ${quantity(ids.length)}`, { description });
+      throw new Error(description, { cause: failure });
     }
+    toast.success(`Updated ${quantity(ids.length)}`);
+    setEditing(false);
+    clearSelection();
   };
 
   const loading = tasksLoading || projectsLoading;
-  const displayError = tasksError || error || (editorFailed ? editorError : null);
-  const filtered = filterProject !== '' || filterStatus !== '';
+  const selecting = listing && !loading && visible.size > 0;
+  const escapable = selecting && !editing;
 
-  const clearFilters = () => {
-    setFilterProject('');
-    setFilterStatus('');
-  };
+  useEffect(() => {
+    if (!escapable) return undefined;
+    const clear = (event: KeyboardEvent) => {
+      if (keepsSelection(event)) return;
+      clearSelection();
+    };
+    window.addEventListener('keydown', clear);
+    return () => window.removeEventListener('keydown', clear);
+  }, [escapable, clearSelection]);
 
-  const getProjectNames = (projectIds: string[]) => {
-    if (!projectIds || projectIds.length === 0) return 'No projects';
-    return projectIds.map((id) => projects.find((p) => p.id === id)?.name || 'Unknown').join(', ');
-  };
+  const emptied = visible.size === 0;
+  useEffect(() => {
+    if (emptied && toggled.current !== null) returnFocus(toggled.current);
+  }, [emptied]);
+
+  const displayError =
+    tasksError ||
+    (editorFailed ? editorError : null) ||
+    (workspace.error ? RELATIONS_FAILED : null);
 
   return (
     <div className="page page--workspace tasks-page">
@@ -170,43 +360,31 @@ export default function TasksPage() {
               <Select
                 compact
                 value={filterProject}
-                onValueChange={setFilterProject}
+                onValueChange={filter}
                 aria-label="Filter by project"
                 disabled={loading}
                 options={[
-                  { value: '', label: 'All Projects' },
+                  { value: ALL_PROJECTS, label: 'All Projects' },
                   ...projects.map((project) => ({ value: project.id, label: project.name })),
                 ]}
               />
-              <Select
-                compact
-                value={filterStatus}
-                onValueChange={setFilterStatus}
-                aria-label="Filter by status"
-                disabled={loading}
-                options={[
-                  { value: '', label: 'All Statuses' },
-                  { value: 'created', label: 'Created' },
-                  { value: 'queued', label: 'Queued' },
-                  { value: 'in_progress', label: 'In Progress' },
-                  { value: 'blocked', label: 'Blocked' },
-                  { value: 'review', label: 'Review' },
-                  { value: 'complete', label: 'Complete' },
-                ]}
-              />
             </div>
-            <Button
-              onClick={() => setShowCreateModal(true)}
-              disabled={loading || projects.length === 0}
-            >
-              <PlusIcon />
-              New task
-            </Button>
+            {writable ? (
+              <Button
+                onClick={() => setShowCreateModal(true)}
+                disabled={loading || projects.length === 0}
+              >
+                <PlusIcon />
+                New task
+              </Button>
+            ) : (
+              <p className="tasks-access">{READ_ONLY}</p>
+            )}
           </>
         ) : null}
       </PageBar>
 
-      <div className="page-body tasks-body">
+      <div className="page-body tasks-body" data-selecting={selecting || undefined}>
         {displayError && (
           <div className="error-banner" role="alert">
             {displayError}
@@ -220,57 +398,33 @@ export default function TasksPage() {
         ) : editorReady && editorTask ? (
           <TaskDetail
             task={editorTask}
+            tasks={known}
             projects={projects}
             sources={sources}
+            focusTitle={followed === editorTask.id}
+            onOpen={follow}
             onClose={closeEditor}
             onExecute={() => setExecutionTask(editorTask)}
             onSave={handleSave}
+            writable={writableFor(editorTask)}
           />
         ) : loading ? (
-          <div className="tasks-table-wrapper" aria-hidden="true">
-            <table className="tasks-table">
-              <thead>
-                <tr>
-                  <th>Task</th>
-                  <th>Project</th>
-                  <th>Status</th>
-                  <th>Priority</th>
-                  <th>Model</th>
-                  <th>Pull request</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {SKELETON_CARDS.map((i) => (
-                  <tr key={i} className="task-card skeleton-card">
-                    <td>
-                      <div className="skeleton skeleton-title" />
-                      <div className="skeleton skeleton-text short" />
-                    </td>
-                    <td>
-                      <div className="skeleton skeleton-text short" />
-                    </td>
-                    <td>
-                      <div className="skeleton skeleton-badge" />
-                    </td>
-                    <td>
-                      <div className="skeleton skeleton-tag" />
-                    </td>
-                    <td>
-                      <div className="skeleton skeleton-tag" />
-                    </td>
-                    <td>
-                      <div className="skeleton skeleton-text short" />
-                    </td>
-                    <td>
-                      <div className="skeleton skeleton-btn" />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : tasks.length === 0 ? (
+          <Skeleton />
+        ) : tasks.length > 0 ? (
+          <Unfolded value={view.unfolded}>
+            <Board
+              tasks={tasks}
+              known={known}
+              projects={projectNames}
+              renaming={renaming}
+              removed={removed}
+              view={view}
+              selected={visible.ids}
+              writable={writable}
+              actions={actions}
+            />
+          </Unfolded>
+        ) : tasksError ? null : (
           <EmptyState
             className="tasks-empty"
             icon={
@@ -282,174 +436,28 @@ export default function TasksPage() {
             title={filtered ? 'No tasks match' : 'No tasks yet'}
             description={
               filtered
-                ? 'Try adjusting your filters'
-                : 'Create your first task to automate your workflow'
+                ? 'No tasks belong to this project yet'
+                : writable
+                  ? 'Create your first task to automate your workflow'
+                  : READ_ONLY
             }
             action={
               filtered ? (
-                <Button variant="secondary" onClick={clearFilters}>
+                <Button variant="secondary" onClick={() => filter(ALL_PROJECTS)}>
                   Show all tasks
                 </Button>
-              ) : (
-                <Button onClick={() => setShowCreateModal(true)}>Create Task</Button>
-              )
+              ) : writable ? (
+                <Button onClick={() => setShowCreateModal(true)} disabled={projects.length === 0}>
+                  Create Task
+                </Button>
+              ) : undefined
             }
           />
-        ) : (
-          <div className="tasks-table-wrapper">
-            <table className="tasks-table" aria-label="Tasks">
-              <thead>
-                <tr>
-                  <th>Task</th>
-                  <th>Project</th>
-                  <th>Status</th>
-                  <th>Priority</th>
-                  <th>Model</th>
-                  <th>Pull request</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tasks.map((task) => (
-                  <tr
-                    key={task.id}
-                    className={`task-card ${task.is_agentic ? 'task-card-agentic' : ''}`}
-                    tabIndex={0}
-                    onClick={() => openEditor(task.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter' || event.key === ' ') {
-                        if (event.key === ' ') event.preventDefault();
-                        openEditor(task.id);
-                      }
-                    }}
-                  >
-                    <td>
-                      <div className="task-card-title">
-                        {renamingId === task.id ? (
-                          <TaskTitleInput
-                            title={task.title}
-                            onSave={async (title) => {
-                              await updateListedTask(task.id, { title });
-                            }}
-                            onDone={() =>
-                              setRenamingId((current) => (current === task.id ? null : current))
-                            }
-                          />
-                        ) : (
-                          <>
-                            <h3
-                              title={task.title}
-                              className={awaitsTitle(task) ? 'task-title-pending' : undefined}
-                              aria-busy={awaitsTitle(task) || undefined}
-                            >
-                              {task.title}
-                            </h3>
-                            <button
-                              type="button"
-                              className="task-rename"
-                              aria-label={`Rename ${task.title}`}
-                              title="Rename"
-                              onClick={(event) => {
-                                stopRowAction(event);
-                                setRenamingId(task.id);
-                              }}
-                              onKeyDown={stopRowAction}
-                            >
-                              <PencilIcon />
-                            </button>
-                          </>
-                        )}
-                        <div className="task-badges">
-                          {task.is_agentic && <Badge variant="accent">Agentic</Badge>}
-                        </div>
-                      </div>
-                      <p className="task-description">{task.description}</p>
-                    </td>
-                    <td>
-                      <p className="task-project">{getProjectNames(task.project_ids)}</p>
-                      {task.is_agentic && task.source_id && (
-                        <span className="task-source">
-                          {sources.find((s) => s.id === task.source_id)?.name || 'Source'}
-                        </span>
-                      )}
-                    </td>
-                    <td>
-                      <TaskStatusBadge status={task.status} />
-                    </td>
-                    <td>
-                      <span className="task-priority">Priority: {task.priority ?? 'N/A'}</span>
-                    </td>
-                    <td>
-                      {task.model_name && (
-                        <span className="task-model">Model: {task.model_name}</span>
-                      )}
-                    </td>
-                    <td>
-                      {(task.pr_status || task.pr_url || task.branch_name) && (
-                        <div className="task-pr">
-                          {task.pr_status && <PrStatusBadge status={task.pr_status} />}
-                          {task.pr_url && (
-                            <a
-                              href={task.pr_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="task-pr-link"
-                              onClick={stopRowAction}
-                              onKeyDown={stopRowAction}
-                            >
-                              View PR
-                            </a>
-                          )}
-                          {task.branch_name && (task.pr_status || task.pr_url) && (
-                            <span className="task-branch-slot">
-                              <code className="task-branch" title={task.branch_name}>
-                                {task.branch_name}
-                              </code>
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      <div
-                        className="task-actions"
-                        role="group"
-                        onClick={stopRowAction}
-                        onKeyDown={stopRowAction}
-                      >
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          onClick={(event) => {
-                            stopRowAction(event);
-                            setExecutionTask(task);
-                          }}
-                        >
-                          Execute
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="task-delete"
-                          onClick={(event) => {
-                            stopRowAction(event);
-                            handleDeleteTask(task.id);
-                          }}
-                        >
-                          Delete
-                        </Button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         )}
       </div>
 
       <CreateTaskWizard
-        isOpen={showCreateModal && projects.length > 0}
+        isOpen={writable && showCreateModal && projects.length > 0}
         onClose={() => setShowCreateModal(false)}
         onCreated={() => {}}
         createTask={createTask}
@@ -458,7 +466,41 @@ export default function TasksPage() {
       />
 
       {executionTask && (
-        <TaskExecutionView key={executionTask.id} task={executionTask} onClose={closeExecution} />
+        <TaskExecutionView
+          key={executionTask.id}
+          task={executionTask}
+          writable={writableFor(executionTask)}
+          onClose={closeExecution}
+        />
+      )}
+
+      {selecting && (
+        <SelectionBar
+          count={visible.size}
+          onEdit={() => setEditing(true)}
+          onClear={clearSelection}
+        />
+      )}
+
+      {editing && writable && (
+        <EditTasksDialog
+          tasks={chosen}
+          projects={projects}
+          onSave={saveSelection}
+          onClose={() => setEditing(false)}
+        />
+      )}
+
+      <div className="sr-only tasks-announcement" aria-live="polite" aria-atomic="true">
+        {announcement}
+      </div>
+
+      {writable && deleting && (
+        <DeleteTaskDialog
+          task={deleting}
+          onConfirm={() => confirmDelete(deleting)}
+          onClose={() => setDeleting(null)}
+        />
       )}
     </div>
   );

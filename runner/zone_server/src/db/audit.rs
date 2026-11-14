@@ -95,6 +95,18 @@ pub mod actions {
     pub const SYNC_DELETED: &str = "sync.deleted";
     pub const SYNC_WEBHOOK_SECRET_ROTATED: &str = "sync.webhook_secret_rotated";
     pub const SYNC_WEBHOOK_SECRET_SET: &str = "sync.webhook_secret_set";
+
+    pub const GITHUB_APP_REGISTERED: &str = "github_app.registered";
+    pub const GITHUB_APP_REMOVED: &str = "github_app.removed";
+    pub const GITHUB_INSTALLATION_CONNECTED: &str = "github_installation.connected";
+    pub const GITHUB_INSTALLATION_REMOVED: &str = "github_installation.removed";
+    pub const GITHUB_INSTALLATIONS_SYNCED: &str = "github_installation.synced";
+
+    pub const MCP_SERVER_CREATED: &str = "mcp_server.created";
+    pub const MCP_SERVER_UPDATED: &str = "mcp_server.updated";
+    pub const MCP_SERVER_DELETED: &str = "mcp_server.deleted";
+    pub const MCP_SERVER_RECONNECTED: &str = "mcp_server.reconnected";
+    pub const WORKSPACE_MCP_SERVERS_UPDATED: &str = "workspace_mcp_servers.updated";
 }
 
 pub mod resources {
@@ -107,6 +119,10 @@ pub mod resources {
     pub const SYNC_CONFIG: &str = "sync_config";
     pub const DEVICE: &str = "device";
     pub const DEVICE_POLICY: &str = "device_policy";
+    pub const GITHUB_APP: &str = "github_app";
+    pub const GITHUB_INSTALLATION: &str = "github_installation";
+    pub const MCP_SERVER: &str = "mcp_server";
+    pub const WORKSPACE_MCP_SERVERS: &str = "workspace_mcp_servers";
 }
 
 /// Log an action to the audit trail

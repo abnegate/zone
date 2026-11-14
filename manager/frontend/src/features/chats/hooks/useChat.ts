@@ -7,12 +7,14 @@ import {
   JobExitedSchema,
   JobStartedSchema,
   QuestionsSchema,
+  RefusalSchema,
   WaitingSchema,
   WaitSettledSchema,
 } from '../schemas';
 import {
   type ActionReceipt,
   AWAITING_ANSWER_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
   type ChatCharacter,
   type ChatWithMessages,
   type Citation,
@@ -23,15 +25,26 @@ import {
   type MessageMetadata,
   type MessageRole,
   type Question,
+  type QueuedMessage,
   type ReasoningEffort,
+  type Refusal,
   type SendMessageRequest,
   type ToolCallRecord,
+  UNFINISHED_DETAIL,
   type UpdateChatRequest,
   type Waiting,
   type WaitSettled,
 } from '../types';
 import { automated } from '../utils/automation';
+import { cached } from '../utils/cached';
 import { mergeCitations } from '../utils/citations';
+import { publishFrame } from '../utils/frames';
+import {
+  beginGeneration,
+  rememberedGeneration,
+  resumeGeneration,
+  settleGeneration,
+} from '../utils/generation';
 import { appendHandover } from '../utils/handover';
 import { requestedModel } from '../utils/providerOptions';
 
@@ -149,7 +162,9 @@ type ServerMessage =
       tool_call_id: string;
       name: string;
       arguments: string;
+      at?: number;
       reasoning?: string;
+      reasoning_at?: number;
       reason?: string;
     }
   | {
@@ -182,6 +197,8 @@ type ServerMessage =
       resets_at: string | null;
       carried: boolean;
       at: number;
+      calls?: number;
+      reasoning?: string;
     }
   | {
       type: 'tool_result';
@@ -192,6 +209,7 @@ type ServerMessage =
       detail: string;
       duration_ms: number;
       citations?: Citation[];
+      refusal?: Refusal | null;
     }
   | {
       type: 'action_receipt';
@@ -221,6 +239,7 @@ type ServerMessage =
       error?: string;
     }
   | { type: 'cancelled'; message_id: string | null }
+  | { type: 'queue'; messages: QueuedMessage[]; held: boolean; started?: QueuedMessage }
   | { type: 'error'; message: string }
   | { type: 'status'; message: string };
 
@@ -229,11 +248,21 @@ export function useChat(
   onTitleUpdated?: (id: string, title: string) => void,
   draft?: SendMessageRequest
 ) {
-  const [chat, setChat] = useState<ChatWithMessages | null>(null);
-  const [loading, setLoading] = useState(Boolean(chatId));
+  const [chat, setChat] = useState<ChatWithMessages | null>(() =>
+    chatId ? (cached.histories.recall(chatId) ?? null) : null
+  );
+  const [loading, setLoading] = useState(Boolean(chatId) && chat === null);
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  // When the turn being written started, read back from the cache on every
+  // selection: a chat swapped away from and returned to is still running the
+  // turn it was running, and its counter must say so.
+  const [generationStarted, setGenerationStarted] = useState<number | null>(() =>
+    chatId ? rememberedGeneration(chatId) : null
+  );
   const [status, setStatus] = useState<string | null>(null);
+  const [queue, setQueue] = useState<QueuedMessage[]>([]);
+  const [held, setHeld] = useState(false);
   const [context, setContext] = useState<ContextUsage | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -243,13 +272,18 @@ export function useChat(
   contextModel.current = chat?.id === chatId ? requestedModel(chat) : null;
   const previewSequence = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
-  // The chat the socket handlers have to write into. Until the fetch lands
-  // there is nowhere to put a frame, so the socket effect holds them.
+  // The chat the socket handlers write into. A remembered history is drawn
+  // before the fetch lands, but frames are held until it does: the fetch
+  // replaces the whole history, and would drop anything applied before it.
+  const [synced, setSynced] = useState<string | null>(null);
   const loadedChat = useRef<string | null>(null);
-  loadedChat.current = chat?.id ?? null;
+  loadedChat.current = chat?.id === synced ? synced : null;
   const drainFrames = useRef<(() => void) | null>(null);
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
+  // The id the pending row was sent under, which the server echoes if it
+  // queues the message instead of starting it.
+  const pendingSendIdRef = useRef<string | null>(null);
   const supersededPendingIdsRef = useRef<Set<string>>(new Set());
   const activeGenerationRef = useRef(false);
   const sendInFlightRef = useRef(false);
@@ -263,6 +297,7 @@ export function useChat(
 
   const applyTitle = useCallback((id: string, title: string): void => {
     titles.current.set(id, { title, revision: ++revision.current });
+    cached.histories.update(id, (remembered) => ({ ...remembered, title }));
     setChat((previous) => (previous?.id === id ? { ...previous, title } : previous));
   }, []);
 
@@ -296,7 +331,14 @@ export function useChat(
         const title = titles.current.get(data.id);
         const updated =
           title && title.revision > currentRevision ? { ...data, title: title.title } : data;
-        setChat(updated);
+        const pendingId = pendingUserIdRef.current;
+        setChat((previous) => {
+          const pending = previous?.messages.find((message) => message.id === pendingId);
+          return pending && previous?.id === updated.id
+            ? { ...updated, messages: [...updated.messages, pending] }
+            : updated;
+        });
+        setSynced(chatId);
         if (epoch === contextEpoch.current) {
           setContext(
             data.context ? (ContextUsageSchema.safeParse(data.context).data ?? null) : null
@@ -307,6 +349,8 @@ export function useChat(
         titleCallback.current?.(updated.id, updated.title);
       } catch (err) {
         if (requestId !== requestIdRef.current) return;
+        cached.histories.forget(chatId);
+        setSynced(chatId);
         setError(err instanceof Error ? err.message : 'Failed to fetch chat');
       } finally {
         if (requestId === requestIdRef.current) {
@@ -318,15 +362,24 @@ export function useChat(
   );
 
   useEffect(() => {
-    // Drop the previous conversation as soon as the selection changes so the
-    // UI never keeps rendering chat A under chat B's selection.
-    setChat(null);
+    // Swap the previous conversation out as soon as the selection changes so
+    // the UI never keeps rendering chat A under chat B's selection.
+    const remembered = chatId ? (cached.histories.recall(chatId) ?? null) : null;
+    setChat(remembered);
+    setSynced(null);
+    if (remembered) setLoading(false);
     contextEpoch.current += 1;
     previewSequence.current += 1;
-    setContext(null);
+    setContext(
+      remembered?.context ? (ContextUsageSchema.safeParse(remembered.context).data ?? null) : null
+    );
     setContextError(null);
-    fetchChat();
-  }, [fetchChat]);
+    fetchChat({ silent: remembered !== null });
+  }, [chatId, fetchChat]);
+
+  useEffect(() => {
+    if (chat) cached.histories.remember(chat.id, chat);
+  }, [chat]);
 
   const draftKey = draft === undefined ? null : JSON.stringify(draft);
   const settingsKey = chat
@@ -552,6 +605,7 @@ export function useChat(
       // ref inside the updater left the pending row and appended the saved one.
       const pendingId = pendingUserIdRef.current;
       pendingUserIdRef.current = null;
+      pendingSendIdRef.current = null;
       sendInFlightRef.current = false;
       if (pendingId) {
         supersededPendingIdsRef.current.add(pendingId);
@@ -596,9 +650,26 @@ export function useChat(
     supersededPendingIdsRef.current.clear();
     setStreaming(false);
     setStatus(null);
+    setQueue([]);
+    setHeld(false);
+    setGenerationStarted(chatId ? rememberedGeneration(chatId) : null);
     if (!chatId) {
       return;
     }
+
+    // The selection these handlers belong to, narrowed once: they run long
+    // after the guard above, and a parameter widens again inside a closure.
+    const selected: string = chatId;
+    /** A turn starting here, which never inherits an earlier turn's reading. */
+    const begun = (): void => setGenerationStarted(beginGeneration(selected));
+    /** A turn a frame says is running, counted from when it started. */
+    const running = (messageId: string | null): void =>
+      setGenerationStarted(resumeGeneration(selected, messageId));
+    /** A turn that ended. A dropped socket does not come through here. */
+    const ended = (): void => {
+      settleGeneration(selected);
+      setGenerationStarted(null);
+    };
 
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -681,27 +752,77 @@ export function useChat(
                     pending: false,
                     success: false,
                     approval: call.approval === 'pending' ? ('denied' as const) : call.approval,
-                    detail: 'Did not finish',
+                    detail: UNFINISHED_DETAIL,
                   }
                 : call
             );
             const hasMedia = Boolean(message.metadata?.attachments?.length);
-            const content =
-              message.content.trim() ||
-              (stopped?.length || hasMedia ? '[Stopped before answering]' : message.content);
+            const replaced = !message.content.trim() && Boolean(stopped?.length || hasMedia);
+            const content = replaced ? '[Stopped before answering]' : message.content;
+            const calls = replaced
+              ? stopped?.map((call) => ({
+                  ...call,
+                  at: call.at === undefined ? undefined : 0,
+                  reasoning_at: call.reasoning_at === undefined ? undefined : 0,
+                }))
+              : stopped;
+            const handovers = replaced
+              ? message.metadata?.handovers?.map((handover) => ({ ...handover, at: 0 }))
+              : message.metadata?.handovers;
+            const reasoningAt =
+              replaced && message.metadata?.reasoning_at !== undefined
+                ? 0
+                : message.metadata?.reasoning_at;
             return {
               ...message,
               content,
-              metadata: stopped ? { ...message.metadata, tool_calls: stopped } : message.metadata,
+              metadata:
+                calls || handovers || reasoningAt !== undefined
+                  ? {
+                      ...message.metadata,
+                      tool_calls: calls,
+                      handovers,
+                      reasoning_at: reasoningAt,
+                    }
+                  : message.metadata,
             };
           }),
         };
       });
     };
 
+    const withdrawPending = (): void => {
+      const pendingId = pendingUserIdRef.current;
+      pendingUserIdRef.current = null;
+      pendingSendIdRef.current = null;
+      if (!pendingId) return;
+      supersededPendingIdsRef.current.add(pendingId);
+      setChat((prev) =>
+        prev
+          ? { ...prev, messages: prev.messages.filter((message) => message.id !== pendingId) }
+          : prev
+      );
+    };
+
+    // A queued message leaving the queue is this window's send as much as one
+    // typed while idle, so it shows the same pending row until it is saved. A
+    // row a failed turn left unsaved is reused, as a typed send reuses it.
+    const beginQueued = (message: QueuedMessage): void => {
+      if (pendingSendIdRef.current === message.id) return;
+      const pendingId = pendingUserIdRef.current ?? `pending-${message.id}`;
+      pendingUserIdRef.current = pendingId;
+      pendingSendIdRef.current = message.id;
+      activeGenerationRef.current = true;
+      sendInFlightRef.current = true;
+      contextEpoch.current += 1;
+      upsertMessage(pendingId, 'user', message.content, message.metadata);
+      setStreaming(true);
+      begun();
+    };
+
     // Frames can beat the chat they belong to onto the wire, and every
     // case below writes to a chat that is not there yet, so hold them.
-    const held: ServerMessage[] = [];
+    const buffered: ServerMessage[] = [];
     let overflowed = false;
     const loaded = () => loadedChat.current === chatId;
 
@@ -743,6 +864,9 @@ export function useChat(
           break;
         case 'status':
           setStatus(payload.message);
+          // Feedback can arrive before any message_start, and is drawn with the
+          // same counter, so it anchors the clock when nothing else has.
+          running(assistantId);
           break;
         case 'message_start': {
           // A dropped socket settles the turn locally, because from here it
@@ -753,6 +877,7 @@ export function useChat(
           else if (settled || assistantId === payload.message_id) break;
           activeGenerationRef.current = true;
           setStreaming(true);
+          running(payload.message_id);
           generationSeen = true;
           contextEpoch.current += 1;
           setStatus(null);
@@ -777,21 +902,31 @@ export function useChat(
             assistantMetadata = {
               ...assistantMetadata,
               reasoning: `${assistantMetadata?.reasoning ?? ''}${payload.content}`,
+              reasoning_at: assistantMetadata?.reasoning
+                ? assistantMetadata.reasoning_at
+                : Array.from(assistantContent).length,
             };
             upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
           }
           break;
         case 'tool_call': {
           const preceding = payload.reasoning ?? assistantMetadata?.reasoning;
+          const precedingAt = payload.reasoning_at ?? assistantMetadata?.reasoning_at;
           if (preceding) {
-            assistantMetadata = { ...assistantMetadata, reasoning: undefined };
+            assistantMetadata = {
+              ...assistantMetadata,
+              reasoning: undefined,
+              reasoning_at: undefined,
+            };
           }
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
             arguments: payload.arguments,
+            at: payload.at ?? Array.from(assistantContent).length,
             detail: 'Running…',
             pending: true,
             reasoning: preceding,
+            reasoning_at: preceding ? precedingAt : undefined,
             reason: payload.reason,
           });
           if (assistantId === payload.message_id) {
@@ -803,7 +938,7 @@ export function useChat(
           patchToolCall(payload.message_id, payload.tool_call_id, {
             name: payload.name,
             arguments: payload.arguments,
-            detail: 'Waiting for approval…',
+            detail: AWAITING_APPROVAL_DETAIL,
             pending: true,
             approval: 'pending',
             reason: payload.reason,
@@ -841,6 +976,7 @@ export function useChat(
             success: payload.success,
             detail: payload.detail,
             duration_ms: payload.duration_ms,
+            refusal: RefusalSchema.parse(payload.refusal),
             pending: false,
             approval: undefined,
           });
@@ -884,6 +1020,8 @@ export function useChat(
           if (!handover.success) break;
           assistantMetadata = {
             ...assistantMetadata,
+            reasoning: handover.data.reasoning ? undefined : assistantMetadata?.reasoning,
+            reasoning_at: handover.data.reasoning ? undefined : assistantMetadata?.reasoning_at,
             handovers: appendHandover(assistantMetadata?.handovers ?? [], handover.data),
           };
           upsertMessage(assistantId, 'assistant', assistantContent, assistantMetadata);
@@ -931,6 +1069,7 @@ export function useChat(
           activeGenerationRef.current = false;
           sendInFlightRef.current = false;
           setStreaming(false);
+          ended();
           break;
         case 'cancelled': {
           if (
@@ -945,23 +1084,30 @@ export function useChat(
           assistantId = null;
           automatedTurn = false;
           contextEpoch.current += 1;
-          const pendingId = pendingUserIdRef.current;
-          pendingUserIdRef.current = null;
-          if (pendingId) {
-            supersededPendingIdsRef.current.add(pendingId);
-            setChat((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    messages: prev.messages.filter((message) => message.id !== pendingId),
-                  }
-                : prev
-            );
-          }
+          withdrawPending();
           setStatus(null);
           activeGenerationRef.current = false;
           sendInFlightRef.current = false;
           setStreaming(false);
+          ended();
+          break;
+        }
+        case 'queue': {
+          setQueue(payload.messages);
+          setHeld(payload.held);
+          // Sent while this window thought the chat idle, but the server was
+          // busy and queued it, so the pending row would show it twice. The
+          // window goes back to idle: a turn that really is running says so
+          // with its own message_start.
+          const sent = pendingSendIdRef.current;
+          if (sent && payload.messages.some((message) => message.id === sent)) {
+            withdrawPending();
+            sendInFlightRef.current = false;
+            activeGenerationRef.current = false;
+            setStreaming(false);
+            ended();
+          }
+          if (payload.started) beginQueued(payload.started);
           break;
         }
         case 'error':
@@ -975,6 +1121,7 @@ export function useChat(
           activeGenerationRef.current = false;
           sendInFlightRef.current = false;
           setStreaming(false);
+          ended();
           break;
         default:
           break;
@@ -987,20 +1134,20 @@ export function useChat(
         return;
       }
       if (overflowed) return;
-      if (held.length >= MAX_HELD_FRAMES) {
+      if (buffered.length >= MAX_HELD_FRAMES) {
         // A reply this long with no chat to put it in cannot be
         // reassembled; message_end still carries the finished turn.
         overflowed = true;
-        held.length = 0;
+        buffered.length = 0;
         return;
       }
-      held.push(payload);
+      buffered.push(payload);
     };
 
     drainFrames.current = () => {
       if (!loaded()) return;
       overflowed = false;
-      for (const payload of held.splice(0)) apply(payload);
+      for (const payload of buffered.splice(0)) apply(payload);
     };
 
     const openSocket = () => {
@@ -1016,8 +1163,12 @@ export function useChat(
 
     const bindSocket = (socket: WebSocket) => {
       socketRef.current = socket;
-      held.length = 0;
+      buffered.length = 0;
       overflowed = false;
+      // Joining replays the queue if it has anything in it, so whatever this
+      // window last saw of it may be stale.
+      setQueue([]);
+      setHeld(false);
       // An open socket is not yet a working one: the server accepts every
       // connection and only then decides, so init is the first word that this
       // one carries a chat, and an error before it refuses the connection
@@ -1046,6 +1197,7 @@ export function useChat(
         } catch {
           return;
         }
+        if (publishFrame(chatId, payload)) return;
         if (payload.type === 'init') {
           announced = true;
           reconnectAttempt = 0;
@@ -1154,9 +1306,9 @@ export function useChat(
   // The socket can connect, and the server can replay a turn already in
   // flight, before the chat those frames belong to has finished loading.
   useEffect(() => {
-    if (!chat?.id) return;
+    if (!synced || chat?.id !== synced) return;
     drainFrames.current?.();
-  }, [chat?.id]);
+  }, [chat?.id, synced]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
     // Numeric readyState values stay valid for test doubles that do not
@@ -1194,43 +1346,60 @@ export function useChat(
     if (socket !== socketRef.current) {
       throw new Error('Chat selection changed before the message was sent');
     }
-    if (activeGenerationRef.current) {
-      throw new Error('Wait for the current response to finish');
-    }
+    const id = crypto.randomUUID();
+    const frame = JSON.stringify({
+      type: 'send',
+      id,
+      content: request.content,
+      metadata: request.metadata,
+    });
     setError(null);
-    const pendingId = pendingUserIdRef.current ?? `pending-${crypto.randomUUID()}`;
+    // The server queues it behind the turn and says so in a queue frame.
+    if (activeGenerationRef.current) {
+      socket.send(frame);
+      return;
+    }
+    const pendingId = pendingUserIdRef.current ?? `pending-${id}`;
     pendingUserIdRef.current = pendingId;
+    pendingSendIdRef.current = id;
     activeGenerationRef.current = true;
     sendInFlightRef.current = true;
     contextEpoch.current += 1;
     upsertMessage(pendingId, 'user', request.content, request.metadata);
     setStreaming(true);
+    setGenerationStarted(beginGeneration(chatId));
     try {
-      socket.send(
-        JSON.stringify({
-          type: 'send',
-          content: request.content,
-          metadata: request.metadata,
-        })
-      );
+      socket.send(frame);
     } catch (err) {
       pendingUserIdRef.current = null;
+      pendingSendIdRef.current = null;
       activeGenerationRef.current = false;
       sendInFlightRef.current = false;
       setChat((prev) =>
         prev ? { ...prev, messages: prev.messages.filter((m) => m.id !== pendingId) } : prev
       );
       setStreaming(false);
+      settleGeneration(chatId);
+      setGenerationStarted(null);
       throw err;
     }
   };
 
-  const cancelGeneration = () => {
+  const command = (frame: Record<string, string>): void => {
     const socket = socketRef.current;
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ type: 'cancel' }));
+      socket.send(JSON.stringify(frame));
     }
   };
+
+  const cancelGeneration = () => command({ type: 'cancel' });
+
+  // Stops the running turn, if there is one, and sends this message next.
+  const interruptQueued = (id: string) => command({ type: 'interrupt', id });
+
+  const editQueued = (id: string, content: string) => command({ type: 'edit_queued', id, content });
+
+  const removeQueued = (id: string) => command({ type: 'remove_queued', id });
 
   const approveTool = (toolCallId: string, approved: boolean): void => {
     const socket = socketRef.current;
@@ -1369,8 +1538,14 @@ export function useChat(
     error,
     streaming,
     status,
+    generationStarted,
+    queue,
+    held,
     sendMessage,
     cancelGeneration,
+    interruptQueued,
+    editQueued,
+    removeQueued,
     approveTool,
     setAgentEnabled,
     setAutoApprove,

@@ -1,19 +1,22 @@
 //! Application state
 
+use abnegate_agent::McpHub;
+#[cfg(test)]
+use abnegate_exec::Niceness;
 use abnegate_http::{RateLimitConfig, RateLimiter};
+use abnegate_secret::MasterKey;
 use dashmap::DashMap;
 use sqlx::PgPool;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zone_context::adapters::{
     AdapterRegistry, FilesystemAdapter, GitHubAdapter, GitLabAdapter, TextAdapter, WebAdapter,
 };
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
-use zone_core::llm::{CliSettings, LlmBackend};
-use zone_core::mcp::McpHub;
+use zone_core::llm::{LlmBackend, cli};
 
 use crate::cache::Cache;
 #[cfg(test)]
@@ -21,7 +24,10 @@ use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
+use crate::services::github_app::Provider;
 use crate::services::mail::AccountMail;
+use crate::services::mcp_servers::hubs::Hubs;
+use crate::services::mcp_servers::status::Policy;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
 use crate::train_jobs::TrainRegistry;
@@ -64,13 +70,16 @@ pub fn default_adapter_registry() -> AdapterRegistry {
 pub fn llm_backend(config: &Config) -> LlmBackend {
     match config.model_backend() {
         ModelBackend::LiteLlm => LlmBackend::Http,
-        ModelBackend::Cli { agent, executable } => LlmBackend::cli(
-            *agent,
-            match executable {
-                Some(executable) => CliSettings::default().with_executable(executable),
-                None => CliSettings::default(),
-            },
-        ),
+        ModelBackend::Cli { agent, executable } => {
+            let settings = cli::settings().with_niceness(config.agents.niceness);
+            LlmBackend::cli(
+                *agent,
+                match executable {
+                    Some(executable) => settings.with_executable(executable),
+                    None => settings,
+                },
+            )
+        }
     }
 }
 
@@ -96,8 +105,8 @@ struct AppStateInner {
     pub pull_registry: PullRegistry,
     /// The one LoRA training run. Survives the HTTP request that started it.
     pub train_jobs: TrainRegistry,
-    /// Derived encryption key (32 bytes) for AES-256-GCM
-    pub encryption_key: [u8; 32],
+    /// The key stored credentials are sealed with
+    pub master_key: Arc<MasterKey>,
     /// Semaphore for limiting concurrent indexing operations
     pub index_semaphore: Arc<Semaphore>,
     /// Training uploads carry a whole dataset in one body, so a handler holds
@@ -108,8 +117,10 @@ struct AppStateInner {
     /// Clip extracts queue here instead of 429ing, so a dump of hundreds of
     /// videos can run a few ffmpeg jobs at a time.
     pub frame_semaphore: Arc<Semaphore>,
-    /// Process-wide MCP hub. Connected once, shared across chat turns.
-    pub mcp: OnceCell<McpHub>,
+    /// The process's MCP hubs: the instance layer, connected once, and one
+    /// per organization, each shared across chat turns.
+    pub mcp: Hubs,
+    pub github: OnceLock<Provider>,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
     /// publish to, so a state built per test observes the same runs.
@@ -194,7 +205,7 @@ impl AppState {
         context_service: Option<Arc<ContextService>>,
         mail: Option<Arc<AccountMail>>,
     ) -> Self {
-        let encryption_key = crate::crypto::derive_key(config.encryption_key())
+        let master_key = crate::secret::derive(config.encryption_key())
             .expect("Encryption key should be valid (validated in Config::from_env)");
 
         let rate_limiter = Arc::new(RateLimiter::new(RateLimitConfig::default()));
@@ -208,6 +219,14 @@ impl AppState {
             }
         });
 
+        let mcp = Hubs::new(
+            zone_routing::proxy(),
+            Policy {
+                enabled: config.mcp_enabled,
+                commands: config.mcp_commands,
+            },
+        );
+
         Self {
             inner: Arc::new(AppStateInner {
                 config,
@@ -218,14 +237,15 @@ impl AppState {
                 context_service,
                 mail,
                 rate_limiter,
-                sync_registry: SyncRegistry::new(),
+                sync_registry: SyncRegistry::new(Arc::clone(&master_key)),
                 pull_registry: PullRegistry::new(),
                 train_jobs: TrainRegistry::new(),
-                encryption_key,
+                master_key,
                 index_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_INDEX)),
                 train_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_TRAIN)),
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
-                mcp: OnceCell::new(),
+                mcp,
+                github: OnceLock::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
                 pull_request_statuses: StatusCache::default(),
@@ -268,9 +288,9 @@ impl AppState {
         self.inner.context_service.as_ref()
     }
 
-    /// Get the encryption key for source credentials
-    pub fn encryption_key(&self) -> &[u8; 32] {
-        &self.inner.encryption_key
+    /// The key stored credentials are sealed with
+    pub fn master_key(&self) -> &Arc<MasterKey> {
+        &self.inner.master_key
     }
 
     /// The account mail sender, when an SMTP relay is configured.
@@ -313,9 +333,9 @@ impl AppState {
         &self.inner.train_jobs
     }
 
-    /// MCP servers for this process. Connected once on first chat or task use.
-    pub async fn mcp_hub(&self) -> &McpHub {
-        self.inner.mcp.get_or_init(McpHub::connect_from_env).await
+    /// MCP servers for this process, by layer. Each connects on first use.
+    pub fn mcp(&self) -> &Hubs {
+        &self.inner.mcp
     }
 
     /// Terminal frames for task runs. A waiter subscribes here; the writers
@@ -367,10 +387,6 @@ impl AppState {
         self.hold_device(device_id)
     }
 
-    pub fn existing_mcp(&self) -> Option<&McpHub> {
-        self.inner.mcp.get()
-    }
-
     /// Install an empty hub so tests never spawn MCP children.
     pub fn disable_mcp(&self) {
         self.install_mcp(McpHub::new());
@@ -380,7 +396,22 @@ impl AppState {
     /// server instead of whatever the process environment names. A hub that
     /// is already installed stays.
     pub fn install_mcp(&self, hub: McpHub) {
-        let _ = self.inner.mcp.set(hub);
+        self.inner.mcp.install_instance(hub);
+    }
+
+    pub fn github(&self) -> &Provider {
+        self.inner
+            .github
+            .get_or_init(|| Provider::new(&self.inner.config, Arc::clone(&self.inner.master_key)))
+    }
+
+    /// Panics if a provider is already in place.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn install_github(&self, provider: Provider) {
+        assert!(
+            self.inner.github.set(provider).is_ok(),
+            "install_github must run before the first github() call"
+        );
     }
 }
 
@@ -404,12 +435,42 @@ impl AppState {
     ///
     /// The pool is lazy, so nothing connects unless a test actually queries.
     pub fn for_tests() -> Self {
-        let db =
-            PgPool::connect_lazy("postgres://localhost/test").expect("a lazy pool needs no server");
-        let state = Self::new(test_config(), db, None);
+        let state = Self::new(test_config(), lazy_pool(), None);
         state.disable_mcp();
         state
     }
+}
+
+#[cfg(test)]
+const LAZY_DATABASE: &str = "postgres://localhost/test";
+
+#[cfg(test)]
+const UNREACHABLE_DATABASE: &str = "postgres://127.0.0.1:1/unreachable";
+
+#[cfg(test)]
+const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// A pool that dials nothing until a test queries it, and gives up on a server
+/// that is not there within [`ACQUIRE_TIMEOUT`]: sqlx retries a refused
+/// connection until the acquire timeout, which is thirty seconds by default.
+#[cfg(test)]
+pub(crate) fn lazy_pool() -> PgPool {
+    lazy(LAZY_DATABASE)
+}
+
+/// A [`lazy_pool`] for a test that has to fail every query: nothing listens
+/// on its port, whatever database the machine or its `PG*` variables offer.
+#[cfg(test)]
+pub(crate) fn unreachable_pool() -> PgPool {
+    lazy(UNREACHABLE_DATABASE)
+}
+
+#[cfg(test)]
+fn lazy(database: &str) -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(ACQUIRE_TIMEOUT)
+        .connect_lazy(database)
+        .expect("a lazy pool needs no server")
 }
 
 /// A loopback port nothing listens on, where a test's agent logins read usage unless the test
@@ -422,6 +483,7 @@ pub(crate) fn test_agents() -> AgentConfig {
     AgentConfig {
         claude_api_url: UNREACHABLE_USAGE.to_string(),
         codex_api_url: UNREACHABLE_USAGE.to_string(),
+        niceness: Niceness::DEFAULT,
         ..AgentConfig::default()
     }
 }
@@ -431,7 +493,7 @@ pub(crate) fn test_config() -> Config {
     Config {
         host: "localhost".to_string(),
         port: 8000,
-        database_url: "postgres://localhost/test".to_string(),
+        database_url: LAZY_DATABASE.to_string(),
         redis_url: "redis://localhost:6379".to_string(),
         jwt_secret: "test-secret-key-with-at-least-32-chars".to_string(),
         jwt_access_lifetime: 900,
@@ -450,6 +512,7 @@ pub(crate) fn test_config() -> Config {
         app_base_url: "http://localhost:3000".to_string(),
         github_api_url: crate::config::DEFAULT_GITHUB_API_URL.to_string(),
         github_api_allows_http: false,
+        github_web_url: crate::config::DEFAULT_GITHUB_WEB_URL.to_string(),
         web_search: crate::services::search::defaults(),
         comfyui: crate::services::comfy::settings::development(),
         source_index: Default::default(),
@@ -461,19 +524,30 @@ pub(crate) fn test_config() -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
+        mcp_commands: false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::secret::Unseal;
+    use crate::secret::fixture;
+    use crate::services::github_app::testing::{TEST_PRIVATE_KEY, provider};
+    use abnegate_agent_cli::AgentKind;
     use abnegate_notify::MockMailer;
+    use abnegate_secret::SecretValue;
+    use abnegate_vcs::pull_request::ApplicationId;
+    use std::num::{NonZeroU8, NonZeroU32};
     use std::path::PathBuf;
     use zone_context::embeddings::providers::MockEmbeddingService;
-    use zone_core::llm::AgentKind;
+    use zone_core::servers::recording;
     use zone_core::variables::Variables;
 
     const REDIS_URL: &str = "REDIS_URL";
+    const MCP_ENABLED: &str = "ZONE_MCP_ENABLED";
+    const MCP_SERVERS: &str = "ZONE_MCP_SERVERS";
     const REFUSED_REDIS_URL: &str = "redis://127.0.0.1:1";
 
     fn test_cache_url() -> Option<String> {
@@ -485,6 +559,85 @@ mod tests {
             .await
             .expect("REDIS_URL must point to a reachable cache");
         Some(cache)
+    }
+
+    #[tokio::test]
+    async fn a_test_pool_gives_up_quickly_on_a_server_that_is_not_there() {
+        for pool in [
+            lazy_pool(),
+            unreachable_pool(),
+            AppState::for_tests().db().clone(),
+        ] {
+            assert_eq!(
+                pool.options().get_acquire_timeout(),
+                Duration::from_millis(250)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_clone_shares_one_github_provider() {
+        let state = AppState::for_tests();
+        let clone = state.clone();
+
+        assert!(std::ptr::eq(state.github(), clone.github()));
+        assert!(std::ptr::eq(state.github(), state.github()));
+    }
+
+    #[tokio::test]
+    async fn an_installed_github_provider_replaces_the_configured_one() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/app/installations"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(Vec::<()>::new()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let state = AppState::for_tests();
+
+        state.install_github(provider(&server, Arc::clone(state.master_key())));
+
+        let github = state.github();
+        let sealed = github
+            .seal(&SecretValue::new(TEST_PRIVATE_KEY))
+            .expect("seal");
+        let jwt = github
+            .application_jwt(ApplicationId::new(1), &sealed)
+            .expect("sign");
+        let listed = github
+            .applications()
+            .expect("the installed provider has a usable origin")
+            .list_installations(&jwt, NonZeroU32::MIN, NonZeroU8::MIN)
+            .await
+            .expect("the installed provider asks the stand-in");
+        assert!(listed.items.is_empty());
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "install_github must run before the first github() call")]
+    async fn installing_a_github_provider_after_one_is_in_use_panics() {
+        let state = AppState::for_tests();
+        let _ = state.github();
+
+        state.install_github(Provider::new(
+            &test_config(),
+            Arc::clone(state.master_key()),
+        ));
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "install_github must run before the first github() call")]
+    async fn installing_a_second_github_provider_panics() {
+        let state = AppState::for_tests();
+        state.install_github(Provider::new(
+            &test_config(),
+            Arc::clone(state.master_key()),
+        ));
+
+        state.install_github(Provider::new(
+            &test_config(),
+            Arc::clone(state.master_key()),
+        ));
     }
 
     #[tokio::test]
@@ -537,6 +690,7 @@ mod tests {
             app_base_url: "http://localhost:3000".to_string(),
             github_api_url: crate::config::DEFAULT_GITHUB_API_URL.to_string(),
             github_api_allows_http: false,
+            github_web_url: crate::config::DEFAULT_GITHUB_WEB_URL.to_string(),
             web_search: crate::services::search::defaults(),
             comfyui: crate::services::comfy::settings::development(),
             source_index: Default::default(),
@@ -548,6 +702,8 @@ mod tests {
             host_mounts: Default::default(),
             clones: std::env::temp_dir().join("zone-clones"),
             connect_urls: Vec::new(),
+            mcp_enabled: true,
+            mcp_commands: false,
         }
     }
 
@@ -568,7 +724,7 @@ mod tests {
 
     #[test]
     fn every_configured_agent_reaches_the_client_as_its_own_backend() {
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let config = backed_by(ModelBackend::Cli {
                 agent,
                 executable: None,
@@ -577,6 +733,7 @@ mod tests {
             let LlmBackend::Cli {
                 agent: chosen,
                 settings,
+                ..
             } = llm_backend(&config)
             else {
                 panic!("{agent} was configured and the client was still built on HTTP");
@@ -692,17 +849,27 @@ mod tests {
             state.frame_semaphore().available_permits(),
             MAX_CONCURRENT_FRAME_EXTRACT
         );
-        assert_eq!(state.encryption_key().len(), 32);
+        assert_eq!(
+            state
+                .master_key()
+                .open_strict(&fixture::seal(
+                    "ghp_sealed_by_the_state",
+                    state.master_key()
+                ))
+                .unwrap()
+                .expose(),
+            "ghp_sealed_by_the_state"
+        );
         let _ = state.rate_limiter();
         let _ = state.sync_registry();
         let _ = state.pull_registry();
         assert!(state.train_jobs().current().is_none());
-        assert!(state.existing_mcp().is_none());
+        assert!(state.mcp().existing_instance().is_none());
         state.disable_mcp();
-        assert!(state.existing_mcp().is_some());
-        assert!(std::ptr::eq(
-            state.mcp_hub().await,
-            state.existing_mcp().unwrap()
+        assert!(state.mcp().existing_instance().is_some());
+        assert!(Arc::ptr_eq(
+            &state.mcp().instance().await,
+            &state.mcp().existing_instance().unwrap()
         ));
 
         let mail = Arc::new(AccountMail::new(Arc::new(MockMailer::new())));
@@ -718,6 +885,39 @@ mod tests {
         assert!(Arc::ptr_eq(with_mail.mail().unwrap(), &mail));
         assert_eq!(with_mail.train_semaphore().available_permits(), 1);
         assert_eq!(with_mail.frame_semaphore().available_permits(), 4);
+    }
+
+    #[tokio::test]
+    async fn the_mcp_hub_routes_its_servers_through_zones_proxy_over_their_own() {
+        let directory = tempfile::tempdir().expect("a directory for the recording");
+        let recorded = directory.path().join("environment");
+        let mut environment = Variables::isolated(&[MCP_ENABLED]);
+        environment.set(MCP_SERVERS, recording::document(&recorded));
+        environment.set(zone_routing::PROXY_URL_VARIABLE, recording::PROXY);
+        let pool = PgPool::connect_lazy("postgres://localhost/state-mcp")
+            .expect("a lazy pool needs no server");
+        let state = AppState::new(test_config(), pool, None);
+
+        let connected = state.mcp().instance().await.server_count();
+        drop(environment);
+
+        assert_eq!(connected, 0, "the recorder exits without answering");
+        recording::assert_routed(&recorded);
+    }
+
+    #[tokio::test]
+    async fn the_mcp_policy_is_the_configurations() {
+        for (enabled, commands) in [(true, false), (false, true)] {
+            let config = Config {
+                mcp_enabled: enabled,
+                mcp_commands: commands,
+                ..test_config()
+            };
+
+            let state = AppState::new(config, lazy_pool(), None);
+
+            assert_eq!(state.mcp().policy(), Policy { enabled, commands });
+        }
     }
 
     #[tokio::test]

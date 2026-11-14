@@ -6,3 +6,4 @@ export { default as PlusIcon } from './PlusIcon/PlusIcon';
 export { default as ProtectedRoute } from './ProtectedRoute';
 export { default as Sidebar } from './Sidebar/Sidebar';
 export { default as SubNav } from './SubNav/SubNav';
+export { default as TransferChip } from './TransferChip/TransferChip';

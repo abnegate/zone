@@ -61,12 +61,20 @@ The following table lists the configurable parameters and their default values.
 | `server.autoscaling.minReplicas` | Minimum number of replicas | `2` |
 | `server.autoscaling.maxReplicas` | Maximum number of replicas | `10` |
 | `server.autoscaling.targetCPUUtilization` | Target CPU utilization percentage | `70` |
+| `server.baseUrl` | Origin a browser reaches Zone at, `scheme://host[:port]` with no path, passed to zone-server as `APP_BASE_URL`; see [Public Origin](#public-origin) | `""` (the first ingress host) |
 | `server.agentState.persistence.enabled` | Keep agent state (each sign-in's CLI home under `<state>/<org>/<agent>/logins/<id>`, with codex's login and the CLI's session files, and each agent's shared `work` directory) on a claim; applies only with one replica and autoscaling off. Claude tokens are in the database either way | `true` |
 | `server.agentState.persistence.size` | Size of the agent-state claim, which grows with every CLI turn; see [Coding Agent Sign-ins](#coding-agent-sign-ins) | `1Gi` |
 | `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default | `""` |
 | `server.env.ZONE_AGENT_USAGE_TTL_SECONDS` | Whole seconds a sign-in's usage reading stays fresh before zone-server reads it again to pick the account a chat or task starts on; anything else is refused at boot | `"60"` |
+| `server.env.ZONE_AGENT_NICENESS` | Nice value, `0` to `19`, the claude and codex CLIs and every build and test they run start at, so zone-server keeps its share of the pod's CPU; anything else is refused at boot | unset (`19`) |
 | `server.env.ZONE_CLAUDE_API_URL` | Where zone-server reads Claude sign-ins' usage and profile, for example through a proxy | unset (`https://api.anthropic.com`) |
 | `server.env.ZONE_CODEX_API_URL` | Where zone-server reads codex sign-ins' usage, for example through a proxy | unset (`https://chatgpt.com`) |
+| `server.env.ZONE_MCP_ENABLED` | Master switch for every MCP server, instance and organization alike; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) | `"true"` |
+| `server.env.ZONE_MCP_AUTO_CONNECT` | Attach `magents mcp` when no enabled instance server is configured and `magents` is on `PATH`; the image does not ship it | `"true"` |
+| `server.env.ZONE_MCP_AUTO_MAGENTS` | The older name for `ZONE_MCP_AUTO_CONNECT`; either one off keeps the fallback off | `"true"` |
+| `server.env.ZONE_MCP_COMMANDS` | Let organization admins add stdio (command) servers, which run as zone-server's user in the pod and can read any running child's environment from `/proc`. On, it gives every organization admin every other organization's stdio MCP secrets and, while an instance stdio server that inherits the environment runs (a `command` entry or the `magents` fallback), zone-server's own keys. Single-tenant installs only; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) | `"false"` |
+| `server.env.ZONE_MCP_CONFIG` | Path inside the pod to a JSON file of instance MCP servers | `""` |
+| `server.env.ZONE_MCP_SERVERS` | Inline JSON of instance MCP servers; takes precedence over `ZONE_MCP_CONFIG` | `""` |
 
 ### Manager Configuration
 
@@ -231,6 +239,26 @@ migration:
   enabled: true
 ```
 
+## Public Origin
+
+zone-server builds every outward link from `APP_BASE_URL`: the callbacks of the GitHub App that **Connect GitHub** registers and the page a browser lands on afterwards, the address GitHub delivers repository webhooks to, and the links in sign-up verification and password reset mail. The chart sets it on the server container, from the first of these that has a value:
+
+1. `server.env.APP_BASE_URL`
+2. `server.baseUrl`
+3. `commonEnv.APP_BASE_URL`
+4. the first `ingress.hosts` entry, while `ingress.enabled` is true: `https://<host>` when an `ingress.tls` entry lists that host, lists a wildcard one label up from it (`*.example.com` for `zone.example.com`) or lists no hosts at all, and `http://<host>` otherwise. The shipped values give `http://zone.local`.
+
+With none of the first three set and no ingress host to go by (the ingress disabled, or its first host empty or a wildcard), the chart leaves `APP_BASE_URL` unset and zone-server falls back to `http://localhost:3000`. A named value that is not an origin, such as one with a path or no scheme, fails the render.
+
+Set `server.baseUrl` when the derived origin is not the one browsers use: TLS that ends at a load balancer or proxy in front of the ingress, a port other than 80 or 443, or an install reached without the ingress, such as through `kubectl port-forward`:
+
+```yaml
+server:
+  baseUrl: https://zone.example.com
+```
+
+GitHub keeps the addresses an App was registered with, so settle the origin before connecting GitHub. After changing it, correct the addresses in the App's settings on GitHub, or delete the App and connect again.
+
 ## Upgrading
 
 ```bash
@@ -279,6 +307,8 @@ The chart is configured for high availability by default:
 - **Health Checks**: Liveness and readiness probes ensure traffic only goes to healthy pods
 
 Organizations on the Claude Code or Codex provider need a single server replica instead; see [Coding Agent Sign-ins](#coding-agent-sign-ins).
+
+Each server replica runs its own copy of an organization's MCP servers. A change made through one replica reaches the others the next time they list that organization's servers or run a turn for it, and within about a minute without either. Deleting an organization stops its servers on every replica within the same minute.
 
 ## Coding Agent Sign-ins
 

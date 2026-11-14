@@ -17,11 +17,10 @@ interface Calls {
   archived: string[];
   unarchived: string[];
   deleted: string[];
-  opened: string[];
 }
 
 async function openChats(page: Page): Promise<Calls> {
-  const calls: Calls = { archived: [], unarchived: [], deleted: [], opened: [] };
+  const calls: Calls = { archived: [], unarchived: [], deleted: [] };
   const active = [chat('chat-1', 'Garden plans'), chat('chat-2', 'Trip notes')];
   const archived = [chat('chat-3', 'Old recipes', true)];
   await mockCommonEndpoints(page);
@@ -41,7 +40,6 @@ async function openChats(page: Page): Promise<Calls> {
       return route.fulfill({ status: 204, body: '' });
     }
     if (single) {
-      calls.opened.push(single[1]!);
       const found = [...active, ...archived].find((item) => item.id === single[1]);
       return route.fulfill({ json: { chat: found } });
     }
@@ -53,6 +51,7 @@ async function openChats(page: Page): Promise<Calls> {
   return calls;
 }
 
+const selected = (page: Page): string | null => new URL(page.url()).searchParams.get('id');
 const row = (page: Page, title: string) => page.locator('.chat-item', { hasText: title });
 const trigger = (page: Page, title: string) =>
   page.getByRole('button', { name: `Actions for ${title}`, exact: true });
@@ -107,14 +106,14 @@ test.describe('chat row menu', () => {
     await menu.getByRole('menuitem', { name: 'Archive' }).click();
     await expect(menu).toHaveCount(0);
     await expect.poll(() => calls.archived).toEqual(['chat-1']);
-    expect(calls.opened).toEqual([]);
+    expect(selected(page)).toBeNull();
     await expect(page.locator('.chat-item.active')).toHaveCount(0);
     await expect(row(page, 'Garden plans')).toHaveCount(0);
     await expect(row(page, 'Changed')).toHaveCount(0);
 
     await row(page, 'Trip notes').locator('.chat-title').click();
     await expect(page.locator('.chat-item.active')).toHaveCount(1);
-    await expect.poll(() => calls.opened).toEqual(['chat-2']);
+    await expect.poll(() => selected(page)).toBe('chat-2');
   });
 
   test('works from the keyboard and returns focus to the trigger', async ({
@@ -148,7 +147,7 @@ test.describe('chat row menu', () => {
     await expect(name).toHaveValue('Garden plans');
     await page.keyboard.press('Escape');
     await expect(name).toHaveCount(0);
-    expect(calls.opened).toEqual([]);
+    expect(selected(page)).toBeNull();
   });
 
   test('closes on an outside click and keeps a single menu open', async ({ page }) => {
@@ -172,7 +171,7 @@ test.describe('chat row menu', () => {
     await expect(page.getByRole('menu')).toHaveCount(1);
     await expect(triggerElement(page, 'Trip notes')).toHaveAttribute('aria-expanded', 'true');
     await expect(triggerElement(page, 'Garden plans')).toHaveAttribute('aria-expanded', 'false');
-    expect(calls.opened).toEqual([]);
+    expect(selected(page)).toBeNull();
   });
 
   test('keeps the delete confirmation and leaves the row clickable after the dialog', async ({
@@ -190,7 +189,7 @@ test.describe('chat row menu', () => {
     await expect(confirm).toHaveCount(0);
 
     await row(page, 'Trip notes').locator('.chat-title').click();
-    await expect.poll(() => calls.opened).toEqual(['chat-2']);
+    await expect.poll(() => selected(page)).toBe('chat-2');
   });
 
   test('offers Unarchive in the archived view', async ({ page }) => {
@@ -204,7 +203,7 @@ test.describe('chat row menu', () => {
     await shoot(page, 'archived-menu');
     await menu.getByRole('menuitem', { name: 'Unarchive' }).click();
     await expect.poll(() => calls.unarchived).toEqual(['chat-3']);
-    expect(calls.opened).toEqual([]);
+    expect(selected(page)).toBeNull();
   });
 
   test('shows the open menu in dark mode', async ({ page }) => {
@@ -256,6 +255,6 @@ test.describe('chat row menu on a phone', () => {
     await shoot(page, 'phone-open');
     await menu.getByRole('menuitem', { name: 'Rename' }).click();
     await expect(page.getByLabel('Chat name')).toBeFocused();
-    expect(calls.opened).toEqual([]);
+    expect(selected(page)).toBeNull();
   });
 });

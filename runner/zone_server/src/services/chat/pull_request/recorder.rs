@@ -2,8 +2,9 @@
 
 use std::fmt;
 
+use abnegate_agent_cli::Output;
 use uuid::Uuid;
-use zone_core::llm::{Observer, Output};
+use zone_core::llm::Observer;
 
 use super::credential;
 use super::detection;
@@ -17,14 +18,18 @@ pub struct Recorder {
     state: AppState,
     chat_id: Uuid,
     workspace_id: Uuid,
+    /// The member whose turn this is, whom the pull requests it opens are
+    /// recorded as watched by.
+    user_id: Uuid,
 }
 
 impl Recorder {
-    pub fn new(state: AppState, chat_id: Uuid, workspace_id: Uuid) -> Self {
+    pub fn new(state: AppState, chat_id: Uuid, workspace_id: Uuid, user_id: Uuid) -> Self {
         Self {
             state,
             chat_id,
             workspace_id,
+            user_id,
         }
     }
 }
@@ -50,6 +55,7 @@ impl Observer for Recorder {
             url,
             title: None,
             source_id: None,
+            opened_by: Some(self.user_id),
         };
         tokio::spawn(async move {
             if let Err(error) = record(&state, &opened).await {
@@ -100,6 +106,7 @@ pub async fn record(
             url: &opened.url,
             title: opened.title.as_deref(),
             source_id,
+            opened_by: opened.opened_by,
         },
     )
     .await

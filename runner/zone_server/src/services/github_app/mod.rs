@@ -1,44 +1,36 @@
-//! GitHub App authentication.
-//!
-//! A personal access token carries one human's whole account into every
-//! request a workspace makes. An App install carries only what the install was
-//! granted, on its own rate limit, and survives that human leaving. This module
-//! is the second half of that: the credential path, not the setup flow.
-//!
-//! Authenticating is two steps. A JWT signed with the App's private key proves
-//! we are the App; GitHub trades that JWT for an access token scoped to one
-//! installation, good for an hour. The JWT and the token are both bearer
-//! credentials, so both are [`SecretValue`]s from the moment they exist —
-//! neither can reach a log line, an error string or a `Debug` output.
-//!
-//! [`Provider`] is the entry point. It answers "what credential should this
-//! source's requests carry", minting and caching installation tokens for
-//! sources configured with an App and decrypting the stored personal access
-//! token for those that are not. Which of the two a caller received is not
-//! visible to it.
-//!
-//! [`SecretValue`]: abnegate_secret::SecretValue
+//! GitHub App authentication. No [`Error`] carries a JWT, an installation
+//! token, a private key, or a URL.
 
-pub mod cache;
-pub mod claims;
-pub mod configuration;
+pub mod access;
+pub mod address;
+pub mod catalog;
 pub mod credential;
 pub mod error;
-pub mod identifier;
-pub mod issuer;
-pub mod jwt;
+pub mod failure;
+mod flight;
+mod flights;
+pub mod installations;
+pub mod login;
+pub mod manifest;
+mod mint;
+pub mod permissions;
 pub mod provider;
-pub mod token;
+mod scope;
+mod tenant;
+pub mod unauthenticated;
+pub mod unrecorded;
 
-#[cfg(test)]
-mod testing;
+use std::num::NonZeroU8;
 
-pub use cache::TokenCache;
-pub use claims::{CLOCK_SKEW, Claims, LIFETIME};
-pub use configuration::{AppConfiguration, CONFIGURATION_KEY, StoredConfiguration};
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 pub use credential::Credential;
-pub use error::GithubAppError;
-pub use identifier::{ApplicationId, InstallationId};
-pub use issuer::{GITHUB_API_ORIGIN, Issuer};
+pub use error::Error;
+pub use failure::Failure;
 pub use provider::Provider;
-pub use token::{InstallationToken, SAFETY_MARGIN};
+pub use unauthenticated::Unauthenticated;
+pub use unrecorded::Unrecorded;
+
+pub const PAGE_SIZE: NonZeroU8 =
+    NonZeroU8::new(100).expect("a GitHub page holds at least one item");

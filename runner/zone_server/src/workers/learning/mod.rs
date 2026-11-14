@@ -12,9 +12,9 @@
 //! each threshold can be exercised without either.
 //!
 //! The failure mode that matters is a wrong lesson, which silently steers every later
-//! run. So each fact has to clear a high bar before it is believed, records what it was
-//! derived from and how many separate runs confirmed it, and can be retired with
-//! [`crate::db::knowledge::retire_learned_fact`].
+//! run. So no fact is believed on the word of one run: each needs a second to confirm
+//! it, records what it was derived from and how many separate runs confirmed it, and
+//! can be retired with [`crate::db::knowledge::retire_learned_fact`].
 
 pub mod artifacts;
 pub mod attempt;

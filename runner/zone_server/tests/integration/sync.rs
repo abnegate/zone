@@ -2,6 +2,8 @@
 
 use crate::common;
 
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -17,7 +19,6 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use zone_server::{
     config::Config,
-    crypto,
     db::{
         DbPool, projects,
         sync_config::{self, SyncDirection, SyncEventDirection, SyncEventType},
@@ -34,6 +35,9 @@ const GITHUB_SIGNATURE_HEADER: &str = "X-Hub-Signature-256";
 const GITHUB_EVENT_HEADER: &str = "X-GitHub-Event";
 const GITHUB_ISSUES_EVENT: &str = "issues";
 const GITHUB_DELIVERY_HEADER: &str = "X-GitHub-Delivery";
+const GITHUB_PING_EVENT: &str = "ping";
+const V1_ENVELOPE_OPENING: &str = "ENC[v1:";
+const ENVELOPE_CLOSING: &str = "]";
 const LINEAR_SIGNATURE_HEADER: &str = "Linear-Signature";
 const LINEAR_DELIVERY_HEADER: &str = "Linear-Delivery";
 
@@ -72,6 +76,7 @@ async fn setup_test_state() -> AppState {
         app_base_url: "http://localhost:3000".to_string(),
         github_api_url: zone_server::config::DEFAULT_GITHUB_API_URL.to_string(),
         github_api_allows_http: false,
+        github_web_url: zone_server::config::DEFAULT_GITHUB_WEB_URL.to_string(),
         web_search: zone_server::services::search::defaults(),
         comfyui: Default::default(),
         source_index: Default::default(),
@@ -83,6 +88,8 @@ async fn setup_test_state() -> AppState {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
+        mcp_commands: false,
     };
 
     AppState::new(config, pool.inner().clone(), None)
@@ -135,10 +142,8 @@ async fn test_sync_config_lifecycle() {
         "token": "ghp_test123"
     });
 
-    let encryption_key =
-        crypto::derive_key(state.config().encryption_key()).expect("Failed to derive key");
-    let encrypted_secret =
-        crypto::encrypt(&encryption_key, "webhook-secret").expect("Failed to encrypt");
+    let encrypted_secret = encrypt_value(&SecretValue::new("webhook-secret"), state.master_key())
+        .expect("Failed to encrypt");
 
     let sync_config_row = sync_config::create_sync_config(
         state.db(),
@@ -509,10 +514,11 @@ async fn test_github_webhook_signature_verification() {
     });
 
     let webhook_secret = Uuid::new_v4().to_string();
-    let encryption_key =
-        crypto::derive_key(state.config().encryption_key()).expect("Failed to derive key");
-    let encrypted_secret =
-        crypto::encrypt(&encryption_key, &webhook_secret).expect("Failed to encrypt");
+    let encrypted_secret = encrypt_value(
+        &SecretValue::new(webhook_secret.as_str()),
+        state.master_key(),
+    )
+    .expect("Failed to encrypt");
 
     let sync_config_row = sync_config::create_sync_config(
         state.db(),
@@ -604,10 +610,11 @@ async fn test_linear_webhook_signature_verification() {
     });
 
     let webhook_secret = Uuid::new_v4().to_string();
-    let encryption_key =
-        crypto::derive_key(state.config().encryption_key()).expect("Failed to derive key");
-    let encrypted_secret =
-        crypto::encrypt(&encryption_key, &webhook_secret).expect("Failed to encrypt");
+    let encrypted_secret = encrypt_value(
+        &SecretValue::new(webhook_secret.as_str()),
+        state.master_key(),
+    )
+    .expect("Failed to encrypt");
 
     let sync_config_row = sync_config::create_sync_config(
         state.db(),
@@ -705,6 +712,69 @@ async fn deliver_to(
     (status, serde_json::from_slice(&bytes).unwrap_or_default())
 }
 
+/// `sealed` as Zone stored it before envelopes existed: the bare body the envelope wraps.
+fn legacy_body(sealed: &str) -> String {
+    sealed
+        .strip_prefix(V1_ENVELOPE_OPENING)
+        .and_then(|body| body.strip_suffix(ENVELOPE_CLOSING))
+        .expect("a v1 envelope")
+        .to_string()
+}
+
+#[tokio::test]
+async fn a_github_webhook_verifies_only_against_a_sealed_secret() {
+    let state = setup_test_state().await;
+    let webhook_secret = generate_token();
+    let sealed = encrypt_value(
+        &SecretValue::new(webhook_secret.as_str()),
+        state.master_key(),
+    )
+    .expect("Failed to encrypt");
+    let body = serde_json::to_vec(&json!({ "zen": "Keep it logically awesome.", "hook_id": 1 }))
+        .expect("Failed to serialize payload");
+    let signature = format!("sha256={}", signature_for(&webhook_secret, &body));
+
+    for (shape, stored, expected) in [
+        ("an envelope", sealed.clone(), StatusCode::OK),
+        ("a pre-envelope body", legacy_body(&sealed), StatusCode::OK),
+        (
+            "plaintext",
+            webhook_secret.clone(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+    ] {
+        let project =
+            projects::create_project(state.db(), "Sealed Webhook Secret Project", None, None)
+                .await
+                .expect("Failed to create project");
+        let row = sync_config::create_sync_config(
+            state.db(),
+            project.id,
+            "github",
+            true,
+            json!({ "owner": "test-owner", "repo": "test-repo", "token": "ghp_test123" }),
+            Some(&stored),
+        )
+        .await
+        .expect("Failed to create sync config");
+
+        let (status, _) = deliver_to(
+            &state,
+            row.id,
+            "github",
+            &[
+                (GITHUB_SIGNATURE_HEADER, &signature),
+                (GITHUB_EVENT_HEADER, GITHUB_PING_EVENT),
+            ],
+            &body,
+        )
+        .await;
+
+        cleanup_project(state.db(), project.id).await;
+        assert_eq!(status, expected, "a secret stored as {shape}");
+    }
+}
+
 struct SyncedTask {
     state: AppState,
     project_id: Uuid,
@@ -741,10 +811,11 @@ impl SyncedTask {
         .expect("Failed to create task");
 
         let webhook_secret = Uuid::new_v4().to_string();
-        let encryption_key =
-            crypto::derive_key(state.config().encryption_key()).expect("Failed to derive key");
-        let encrypted_secret =
-            crypto::encrypt(&encryption_key, &webhook_secret).expect("Failed to encrypt");
+        let encrypted_secret = encrypt_value(
+            &SecretValue::new(webhook_secret.as_str()),
+            state.master_key(),
+        )
+        .expect("Failed to encrypt");
         let sync_config_row = sync_config::create_sync_config(
             state.db(),
             project.id,
@@ -1110,6 +1181,57 @@ async fn a_github_close_completes_the_task_and_a_reopen_brings_it_back() {
     let reopened = github_issue_at("reopened", "Original", "open", "2026-01-01T00:00:20Z");
     assert_eq!(synced.post_github(&reopened).await, StatusCode::OK);
     assert_eq!(synced.task().await.status, "created");
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_github_close_leaves_a_cancelled_task_cancelled_and_a_reopen_brings_it_back() {
+    let synced = SyncedTask::create("github", github_config(), SyncDirection::Bidirectional).await;
+    synced.set_task("Original", tasks::CANCELLED).await;
+
+    let closed = github_issue_at("closed", "Renamed", "closed", "2026-01-01T00:00:10Z");
+    let (status, response) = synced.send_github(&closed, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let task = synced.task().await;
+    assert_eq!(
+        task.status,
+        tasks::CANCELLED,
+        "the tracker closing the issue does not complete it"
+    );
+    assert_eq!(
+        task.title, "Renamed",
+        "the rest of the delivery still applies"
+    );
+    assert_eq!(
+        synced.stored_state().await,
+        Some(json!("closed")),
+        "the close is stored as followed"
+    );
+    assert_eq!(
+        synced.item_event_types().await,
+        vec![SyncEventType::Update],
+        "a close the task did not follow is logged as an update"
+    );
+
+    let reopened = github_issue_at("reopened", "Renamed", "open", "2026-01-01T00:00:20Z");
+    assert_eq!(synced.post_github(&reopened).await, StatusCode::OK);
+    assert_eq!(synced.task().await.status, tasks::CREATED);
+
+    synced.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_linear_cancel_leaves_a_cancelled_task_cancelled() {
+    let synced = SyncedTask::create("linear", linear_config(), SyncDirection::Bidirectional).await;
+    let started = linear_issue_at("Original", "started", "2026-01-01T00:00:01.000Z");
+    assert_eq!(synced.post_linear(&started).await, StatusCode::OK);
+    synced.set_task("Original", tasks::CANCELLED).await;
+
+    let canceled = linear_issue_at("Original", "canceled", "2026-01-01T00:00:02.000Z");
+    let (status, response) = synced.send_linear(&canceled, None).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(synced.task().await.status, tasks::CANCELLED);
 
     synced.cleanup().await;
 }
@@ -3237,8 +3359,11 @@ async fn a_rotation_that_read_a_secret_replaced_meanwhile_answers_conflict_and_s
     let created = configure(&client, &token, &project, &github_sync()).await;
     let config = created["config"]["id"].as_str().unwrap().to_string();
     let pool = client.state().db().clone();
-    let intervening = crypto::encrypt(client.state().encryption_key(), &intervening_secret)
-        .expect("the secret encrypts");
+    let intervening = encrypt_value(
+        &SecretValue::new(intervening_secret.as_str()),
+        client.state().master_key(),
+    )
+    .expect("the secret encrypts");
 
     let mut transaction = pool.begin().await.expect("a transaction begins");
     sqlx::query("UPDATE sync_configs SET webhook_secret_encrypted = $2 WHERE id = $1")
@@ -3445,12 +3570,14 @@ async fn connected(github: &MockServer) -> (common::TestClient, String, String) 
     let client = common::TestClient::with_config(config).await;
     let token = signed_in(&client).await;
     let (_workspace, project) = workspace_project(&client, &token).await;
-    let encrypted = crypto::encrypt(client.state().encryption_key(), "ghp_hooks").unwrap();
+    let encrypted =
+        encrypt_value(&SecretValue::new("ghp_hooks"), client.state().master_key()).unwrap();
     projects::link_github(
         client.state().db(),
         Uuid::parse_str(&project).unwrap(),
         "http://127.0.0.1/acme/project",
         Some(&encrypted),
+        None,
     )
     .await
     .unwrap();

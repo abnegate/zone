@@ -1,0 +1,43 @@
+name: Helm Charts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'helm/**'
+      - 'k8s/values-tilt-*.yaml'
+      - 'Makefile'
+      - 'scripts/test-helm-base-url.sh'
+      - '.github/workflows/helm.yml'
+  pull_request:
+    paths:
+      - 'helm/**'
+      - 'k8s/values-tilt-*.yaml'
+      - 'Makefile'
+      - 'scripts/test-helm-base-url.sh'
+      - '.github/workflows/helm.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Chart lint and rendered values
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Lint and render the charts
+        run: |
+          helm version --short
+          make helm-lint
+
+      - name: Verify the server is handed its public origin
+        run: sh scripts/test-helm-base-url.sh

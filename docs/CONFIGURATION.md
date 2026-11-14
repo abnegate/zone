@@ -27,6 +27,39 @@ For production, regenerate secrets for security.
 - **Usage**: Configure DNS A record or add to /etc/hosts
 - **Note**: Retained variable name for compatibility; Zone chat is at `https://manager.<domain>/chats`
 
+### `APP_BASE_URL`
+- **Default**: `http://localhost:3000`. Compose sets
+  `http://manager.${DOMAIN_HOST_WEBUI}`, the host Traefik routes to the
+  console and the API, and the `dev` profile sets the Vite server,
+  `http://localhost:3001`. A value in `.env` replaces either; an empty one
+  counts as unset. The `zone-apps` Helm chart sets the first ingress host,
+  `http://zone.local` as shipped, over `https` when an `ingress.tls` entry
+  covers that host; `server.baseUrl` or `server.env.APP_BASE_URL` replaces
+  it. With neither set and no ingress host to go by (the ingress disabled,
+  or its first host empty or a wildcard), the chart leaves it unset. The
+  Tilt install sets the console dev server, `http://localhost:3001`.
+- **Description**: The origin a browser uses to reach Zone, written
+  `scheme://host[:port]` with no path. Zone builds every outward link from it:
+  - the GitHub App that **Connect GitHub** registers: its homepage, its
+    manifest callback `/api/github/callbacks/manifest` and its setup callback
+    `/api/github/callbacks/setup`;
+  - the settings page those callbacks send the browser on to with the
+    outcome, `/settings/organization/github`;
+  - the address GitHub delivers a synced repository's webhooks to,
+    `/api/webhooks/sync/…`, which GitHub itself has to reach;
+  - the links in sign-up verification and password reset mail.
+- **Why http in compose**: Traefik answers `http` on that host with no
+  certificate, and upgrades it itself when `SECURITY_HTTP_REDIRECT=true`;
+  `https` works only once a certificate is in place. Set
+  `APP_BASE_URL=https://manager.<domain>` when you serve TLS.
+- **Note**: It must be an origin the browser can open, or GitHub's callback
+  lands on a page that does not load and the App is left registered with
+  addresses that go nowhere. A console open at a different origin than this
+  one, such as `https://manager.localhost`, is sent here after GitHub and has
+  to sign in again, so name the origin you actually use. GitHub keeps the
+  addresses an App was registered with: after changing `APP_BASE_URL`, correct
+  them in the App's settings on GitHub, or delete the App and connect again.
+
 ---
 
 ## 🔐 Security & Authentication
@@ -121,10 +154,12 @@ With no model pinned, a chat with an attached image goes to the smallest install
 - **Default**: `ollama`
 - **Description**: How the manager computes embeddings for search and RAG. The model is always `OLLAMA_MODEL_EMBED`; this only chooses where it runs.
 - **Options**:
-  - `ollama` — call Ollama over HTTP. Uses the GPU when Ollama has one.
+  - `ollama` — call Ollama's native `/api/embeddings` at `OLLAMA_BASE_URL`. Uses the GPU when Ollama has one.
   - `local` — run the model in-process via ONNX Runtime on CPU. No network hop and no contention with the chat model for Ollama's loaded-model slots.
+  - `openai_compatible` — call `LITELLM_HOST/v1/embeddings`, sending `LITELLM_KEY` as a bearer token, so any OpenAI-compatible server (LiteLLM, vLLM, Ollama's `/v1`) can embed. The model must be one that server routes. The width is learned from the first answer, and a model that returns more than 1,024 values is refused rather than truncated. Documents are split into chunks sized to the model's input limit, 1.5 characters per token between 512 and 3,000 characters: 3,000 for the models Ollama's table knows at 8,192 tokens (`qwen3-embedding`, `nomic-embed-text`), 768 for any model it does not know (512 tokens). Texts are sent 64 to a request, 10 requests at a time.
 - **When `local` wins**: short texts (chat messages, search queries) and any host where Ollama has no GPU. On a GPU-backed Ollama, long document chunks are still faster over HTTP.
-- **First boot**: downloads ~520MB of weights into the `zone_manager_embed_cache` volume before the server binds. `ZONE_EMBED_CACHE_DIR` overrides the location.
+- **First boot**: downloads ~520MB of weights into the `zone_manager_embed_cache` volume before the server binds. `ZONE_EMBED_CACHE_DIR` overrides the location. When `HF_HOME` is set, the lock that stops two processes downloading the same model at once is taken under `$HF_HOME/.locks`; the weights stay in the cache directory.
+- **Snowflake size tags**: `snowflake-arctic-embed:22m`, `:33m`, `:110m` and `:137m` run their own sized model (384 values for 22m and 33m, 768 for 110m and 137m) on both `ollama` and `local`. Earlier releases ran the 1,024-value large model for every tag on `local`, so a `local` deployment configured with one of these tags must re-embed what it indexed.
 - **Build requirement**: needs a `zone-server` built with the `local-embeddings` Cargo feature, which is on by default. ONNX Runtime publishes no musl builds, so the manager image is Debian-based rather than Alpine.
 
 ---
@@ -143,15 +178,14 @@ manager image ships both CLIs: claude 2.1.278 and codex 0.156.1.
 
 ### Choosing a provider
 
-Organization admins and owners choose the provider under **Organization
-Settings > AI Settings**, where *Claude Code (Claude subscription)* and *Codex
-(ChatGPT subscription)* sit beside Self-Hosted, OpenAI, Anthropic and AWS
+Organization admins and owners choose the provider under **Settings →
+Organization → AI defaults**, where *Claude Code (Claude subscription)* and
+*Codex (ChatGPT subscription)* sit beside Self-Hosted, OpenAI, Anthropic and AWS
 Bedrock (`claude_code` and `codex` in the API). A workspace admin can choose
-one for a single workspace under **Workspace Settings > AI Settings**, with
-**Override organization AI settings** on; the workspace then runs on its
-organization's sign-ins for that agent. Organizations and workspaces that choose
-neither a CLI nor a saved endpoint follow `ZONE_LLM_BACKEND`, the instance-wide
-default.
+one for a single workspace under **Settings → Workspace → AI** by overriding
+the provider; the workspace then runs on its organization's sign-ins for that
+agent. Organizations and workspaces that choose neither a CLI nor a saved
+endpoint follow `ZONE_LLM_BACKEND`, the instance-wide default.
 
 No instance-wide setting turns these providers off: any organization admin can
 select them. Read *Security* below before using them on an instance shared by
@@ -337,7 +371,19 @@ account that pays:
 `directory` names the organization under `Organization` and `Host`, and is
 `None` under `Instance`. The line comes from `zone_core`, so a `RUST_LOG` that
 keeps only `zone_server`, such as `warn,zone_server=info`, hides it; add
-`zone_core=info`.
+`zone_core=info`. `abnegate-agent-cli` logs the same turn once more, at info:
+"the turn runs on usage credits past the plan's window", with `agent`,
+`window` and `directory` but not `sign_in`, and with the server's own working
+directory as `directory` when the turn names none; `abnegate_agent_cli=info`
+keeps it.
+
+The agent loop, its tools, its MCP servers and context compaction log under
+`abnegate_agent`, not `zone_core`, so a `RUST_LOG` that names `zone_core` but
+not `abnegate_agent` drops their lines, warnings included, such as "Connected
+MCP server" and "MCP server unavailable"; add `abnegate_agent=info`. A
+directive covers every target whose name starts with it, so `abnegate_agent`
+also keeps `abnegate_agent_cli`. Without `RUST_LOG`, `zone-server` and
+`zone run -v` log `abnegate_agent` at debug.
 
 The account's owner stops this by turning usage credits off, or bounds it by
 setting a monthly cap, at claude.ai/settings/usage.
@@ -392,7 +438,7 @@ setting a monthly cap, at claude.ai/settings/usage.
   |------|------------|
   | `logins/<login id>` | One sign-in's home: its `CLAUDE_CONFIG_DIR` or `CODEX_HOME` |
   | `work` | Where every turn of that agent for that organization runs, whichever sign-in it runs on |
-  | `.login/<attempt>` (codex only) | Where a codex sign-in in progress runs, until it succeeds and moves into a home |
+  | `.login/attempt-*` (codex only) | Where a codex sign-in in progress runs, until it succeeds and moves into a home |
 
   Every sign-in of an agent shares its `work` directory, so a chat that moves to
   another account finds the same files there, and its session file keeps the
@@ -403,9 +449,9 @@ setting a monthly cap, at claude.ai/settings/usage.
   `projects/`, codex's under `sessions/`. Zone keeps the Claude tokens in the
   database and hands a turn its sign-in's token in `CLAUDE_CODE_OAUTH_TOKEN`;
   it does not write them here. Zone does not prune the session files. A codex
-  login made before migration 003 sits at `codex/auth.json` until Zone first
+  login made before sign-ins were kept per account sits at `codex/auth.json` until Zone first
   needs it, and then moves into its sign-in's home; see
-  [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-003). Deleting an
+  [OPERATIONS.md](OPERATIONS.md#several-sign-ins-per-agent). Deleting an
   organization stops any codex sign-in it has in progress, runs `codex logout`
   in each of its codex homes, and removes `<dir>/<organization id>` with
   everything in it. The delete request waits for any change to the
@@ -436,7 +482,11 @@ setting a monthly cap, at claude.ai/settings/usage.
   and renews them. Tests point it at a local mock. Compose passes it from
   `.env`, where an empty value keeps the default.
 - **Note**: Must be an absolute `http` or `https` URL with a host, carrying no
-  credentials, query or fragment. Anything else is refused at boot.
+  credentials, query or fragment. Anything else is refused at boot. A
+  link-local or cloud metadata address passes that check but fails every
+  sign-in as it starts, and every renewal; so does a name that resolves only
+  to such addresses, once Zone sends it a request. Zone reaches it through the
+  proxy described under *Signing in*.
 
 ### `ZONE_AGENT_USAGE_TTL_SECONDS`
 - **Default**: `60`. Compose passes `60` unless `.env` says otherwise, and the
@@ -451,6 +501,29 @@ setting a monthly cap, at claude.ai/settings/usage.
   while still sharing a reading already under way.
 - **Note**: Must be a whole number of seconds. Anything else, such as `1.5`,
   `-1` or `1m`, is refused at boot; an empty value keeps the default.
+
+### `ZONE_AGENT_NICENESS`
+- **Default**: `19`, the lowest CPU priority. Compose passes it through from
+  `.env`, empty unless `.env` sets it, and the Helm chart leaves it unset; an
+  empty value keeps the default.
+- **Description**: The nice value every claude and codex run starts at, and
+  every command, shell and background job Zone's own agent runs on an HTTP
+  provider. Every build, test and language server the agent starts inherits
+  it. The agents run where the server does, in the manager container under
+  compose, so at the default they get every CPU the server leaves idle. When the CPUs are
+  contended, the server goes first, so its API keeps answering while chats
+  build and test at once. On Linux, a process with no IO priority of its own
+  takes one from its nice value, so the agents also yield the disk, but only
+  under an IO scheduler that honours IO priority, such as BFQ. `0` leaves
+  agents at the usual priority, which is the server's own unless the server
+  was itself started niced.
+- **Note**: Must be a whole number from `0` to `19`. Anything else, `20` and
+  negative values included, is refused at boot: raising a priority needs
+  privilege the server does not have. For the same reason, an agent never
+  starts at a higher priority than the server's own, whatever this says.
+  Nice values order processes only against each other: they bound neither
+  memory nor the CPU a container or pod gets beside other workloads, which
+  its own limits set.
 
 ### `ZONE_CLAUDE_API_URL`
 - **Default**: `https://api.anthropic.com`. Compose passes it from `.env`
@@ -575,34 +648,71 @@ setting a monthly cap, at claude.ai/settings/usage.
   profile blocks them, so in a container every sandboxed command fails with
   `bwrap: No permissions to create a new namespace`. Set `workspace-write`
   where your container runtime allows user namespaces. Any other value is
-  refused at boot.
+  refused at boot, `read-only` included: a turn that withholds codex's tools
+  already runs read-only.
 
 ### `ZONE_AGENT_ENV_PASSTHROUGH`
 - **Default**: empty
 - **Description**: Extra variables, comma separated, that the claude and codex
   CLIs, and Zone's own chat and task tools, may inherit from the server's
   environment
-- **Note**: A CLI starts from an empty environment and inherits only `HOME`,
-  `PATH`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `LC_*`, `TZ`, `TMPDIR`,
-  `XDG_RUNTIME_DIR`, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`,
-  `NO_PROXY` and `ALL_PROXY`, in upper or lower case), `SSL_CERT_FILE`,
-  `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS` and the names listed here. Unless named
-  here, the database URL, the JWT and encryption keys, `LITELLM_KEY`,
-  `CLAUDE_CONFIG_DIR` and `CODEX_HOME` stay behind. `CLAUDE_CODE_OAUTH_TOKEN`,
-  `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`,
-  `CODEX_API_KEY` and `ZONE_MCP_TOKEN` stay behind even when named here: each
-  would decide whose account a CLI's turn is billed to or whose tools it
-  reaches. Zone then adds what the turn needs; see *How a turn runs*. The
-  `rg` that `search_code` runs, the `git` a background job runs to find its
-  checkout, and `ffmpeg` and `ffprobe` also start from an allowlist rather
-  than the server's environment.
+- **Note**: Zone runs both CLIs through the `abnegate-agent-cli` crate, and
+  this is its allowlist. A CLI starts from an empty environment and inherits
+  only `HOME`, `PATH`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `TZ`,
+  `TMPDIR`, `XDG_RUNTIME_DIR`, the proxy variables (`HTTP_PROXY`,
+  `HTTPS_PROXY`, `NO_PROXY` and `ALL_PROXY`, in upper or lower case),
+  `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, the thirteen POSIX
+  locale categories (`LC_ALL`, `LC_CTYPE`, `LC_COLLATE`, `LC_MESSAGES`,
+  `LC_MONETARY`, `LC_NUMERIC`, `LC_TIME`, `LC_ADDRESS`, `LC_IDENTIFICATION`,
+  `LC_MEASUREMENT`, `LC_NAME`, `LC_PAPER` and `LC_TELEPHONE`) and the names
+  listed here. Any other `LC_` name stays behind unless it is listed. Unless
+  named here, the database URL, the JWT and encryption keys, `LITELLM_KEY`,
+  `CLAUDE_CONFIG_DIR` and `CODEX_HOME` stay behind. Zone then adds what the
+  turn needs; see *How a turn runs*.
+- **Never passed**: these stay behind even when named here, since each would
+  decide whose account a CLI's turn is billed to, where its requests go, or
+  whose tools it reaches:
+  - what either CLI signs in with: `CLAUDE_CODE_OAUTH_TOKEN`,
+    `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
+    `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `CODEX_API_KEY` and
+    `CODEX_ACCESS_TOKEN`;
+  - the cloud sign-ins the crate lists as `CLOUD_CREDENTIALS`, for Amazon
+    Bedrock, Google Vertex AI and Microsoft Foundry, such as
+    `CLAUDE_CODE_USE_BEDROCK`, `AWS_ACCESS_KEY_ID`, `AWS_PROFILE`,
+    `AWS_REGION`, `GOOGLE_APPLICATION_CREDENTIALS` and `AZURE_CLIENT_SECRET`;
+  - `ZONE_MCP_TOKEN`, and claude's refresh token,
+    `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`.
+- **Base URLs**: `ANTHROPIC_BASE_URL` or `OPENAI_BASE_URL` named here still
+  reaches the CLI of every turn, claude's and codex's alike, when the server
+  has it set. Zone reads it from the server's environment and sets it on each
+  turn itself, as a setting rather than an inherited value, so it is not
+  scrubbed.
+- **Scrubbed**: every value a CLI inherits through this list, and every proxy
+  URL, is treated as a secret. The crate removes it, as written, JSON-escaped
+  or percent-encoded, from the failure a turn ends with, the tool output and
+  subagent progress the turn reports, and the run's logs, so a variable that
+  holds ordinary text, such as a URL, is hidden there too. The bypass list,
+  `NO_PROXY` and `no_proxy`, is not scrubbed, and a value the agent re-encodes
+  another way, such as in base64, is not recognised.
+- **Other processes**: the `rg` that `search_code` runs, the `git` a
+  background job runs to find its checkout, and the `claude auth status`,
+  `codex login`, `codex login status` and `codex logout` Zone runs start from
+  the same allowlist, the proxy variables and the names listed here, less
+  everything under *Never passed*; a base URL named here does not reach them,
+  and what they print is not scrubbed of the values named here. claude also
+  gets `DISABLE_AUTOUPDATER=1` there, and none of the other variables a turn
+  sets. `ffmpeg` and `ffprobe` also start from an allowlist rather than the
+  server's environment.
 - **Behaviour change**: A CLI used to inherit the server's whole environment
   apart from the provider API keys. A setup that relied on that, such as an
   `ANTHROPIC_BASE_URL` in the server's environment, now has to name the
   variable here. What is named reaches every organization's CLI and the tools
   of every chat and task, so name nothing secret. In compose the manager
   container receives only the variables `docker-compose.yml` lists, so add the
-  variable to the manager service's `environment` as well.
+  variable to the manager service's `environment` as well. Since Zone runs the
+  CLIs through `abnegate-agent-cli`, naming a variable no longer passes an
+  `LC_` name outside the thirteen, `CODEX_ACCESS_TOKEN` or a cloud sign-in, a
+  base URL arrives as a setting Zone makes, and what is named is scrubbed.
 
 ### `ZONE_CHAT_AGENT_CWD`
 - **Default**: the server's working directory. Compose defaults it to
@@ -702,7 +812,7 @@ their absolute paths as before.
 - **Default**: empty. Compose then bind-mounts `./.zone/host-empty` at
   `/host` so the container always has that path.
 - **Description**: Absolute host directory mounted at `/host` in the manager.
-  Setup and **Workspace Settings → Folders** store host paths under this
+  Setup and **Settings → Workspace → Folders** store host paths under this
   root; the server maps them to `/host/...` when `ZONE_IN_CONTAINER` is set
   (compose always sets it). Recreate the manager after changing this value.
   A typical value is `$HOME` or a parent such as `~/Local`.
@@ -719,8 +829,8 @@ their absolute paths as before.
 ### Signing in
 
 An organization signs in to each agent in the panel that appears under the
-provider on **Organization Settings > AI Settings**; a workspace's AI override
-shows the same panel. It can sign in to several accounts per agent: once one
+provider on **Settings → Organization → AI defaults**; overriding a workspace's
+provider shows the same panel. It can sign in to several accounts per agent: once one
 is signed in, the panel lists each account with its plan, its state, and
 meters for its five-hour and weekly windows saying when each resets, and
 offers **Add another Claude account** or **Add another ChatGPT account** to
@@ -788,6 +898,26 @@ stores the tokens in the database, sealed with a key derived from
 the token response names one. It shows an expiry date only for a sign-in Zone
 cannot renew, one whose token came without a refresh token.
 
+Zone reaches `ZONE_CLAUDE_TOKEN_URL`, to exchange a code and to renew a token,
+through the proxy the server's environment names for it, chosen as the
+server's other HTTP clients choose one. An `https` token URL goes through
+`HTTPS_PROXY` (or `https_proxy`), an `http` one through `HTTP_PROXY` (or
+`http_proxy`), and either falls back to `ALL_PROXY` (or `all_proxy`). A token
+host that `NO_PROXY` (or `no_proxy`) lists goes direct: a comma-separated list
+of `*`, domains, which also cover their subdomains with or without a leading
+dot, and IP addresses or ranges such as `10.0.0.0/8`. Zone builds the token
+client once, and again only when the token URL or its proxy changes.
+
+The chosen proxy must be an `http` or `https` URL, and must not name a
+link-local or cloud metadata address. A username and password written in it
+are sent to the proxy, and only to it, as HTTP Basic, exactly as the server's
+other HTTP clients send them. Otherwise the sign-in fails, and so does every
+renewal, with *Claude's sign-in cannot go through the server's proxy:
+HTTPS_PROXY, HTTP_PROXY and ALL_PROXY must be http or https URLs, or NO_PROXY
+must list Claude's token host*. The message never repeats the proxy's
+credentials. Zone follows no redirect from the endpoint, and its requests name
+`abnegate-agent-cli/<version>` as their user agent.
+
 The callback request carries no Zone session, so the listener never exchanges
 a code itself. It takes a state only once, within its ten minutes, when Zone
 issued it for this flow, and only at the `localhost:<port>` address the link
@@ -832,19 +962,24 @@ A paste Zone cannot read, such as a code with its `#state` cut off, leaves the
 sign-in open, so you can paste again. So does a pasted callback saying
 claude.com did not approve: open the link, approve, and paste the new code. A
 code claude.com rejects, or a sign-in that expired or was already used, ends
-it. The panel then drops the link and offers **Start again**, which starts
+it, and Zone says why in its own words, chosen by the OAuth error claude.com
+answers with, such as "Claude did not approve the sign-in. Start again.", or by
+the HTTP status when it names none; claude.com's own text is not shown. The
+panel then drops the link and offers **Start again**, which starts
 over with the same access, beside **Try again with full access**. A sign-in in
 progress survives switching to another settings tab and back.
 
 When a refresh token came with it, Zone renews a Claude token before handing
-it to a turn if the token would expire within the longest turn it may be
-handed to: an hour, the longest a task attempt runs, or
-`ZONE_CHAT_TIMEOUT_SECONDS` when that is longer. A renewal lasts no longer
-than the lifetime Claude grants a token, so Zone never renews a token while
-more than half that lifetime is left. A chat allowed to run longer than half a
-token's lifetime can therefore outlive its token. A task run takes the token
-afresh for each attempt. Concurrent turns renew it once, and a renewal that
-fails before the token expires leaves the current token in use.
+it to a turn once less than half the lifetime Claude granted it is left, or
+within an hour of its expiry when that lifetime is unknown. Halfway is the
+earliest point that never counts a token renewed a moment ago as expiring.
+A turn is handed only the access token, as `CLAUDE_CODE_OAUTH_TOKEN`, so
+claude cannot renew it partway through: a turn that runs longer than what is
+left of its token, which can be as little as half its lifetime, about four
+hours for an eight-hour token, fails signed out once the token expires, and
+the turn moves to another login as any signed-out turn does, or ends when
+none is left. A task run takes the token afresh for each attempt. Concurrent turns renew it once, and a renewal that fails before the
+token expires leaves the current token in use.
 
 **Codex** uses codex's own device-code sign-in:
 
@@ -863,10 +998,12 @@ each other's; and it opens a browser on the server itself.
 
 The one-time code is shown only to organization admins and owners and to whoever
 started the sign-in. One codex sign-in runs per organization at a time. codex
-signs in inside a staging directory, `codex/.login/<attempt>`, and its new
+signs in inside a staging directory, `codex/.login/attempt-*`, and its new
 `auth.json` moves into a sign-in's home only when the sign-in succeeds: the home
 of the sign-in it replaces, or a new one beside the others. So a refused or
-expired attempt leaves every existing login as it was. **Cancel** stops the
+expired attempt leaves every existing login as it was. A code nobody enters in
+time ends the sign-in with "The sign-in code expired before anyone entered it.
+Start again." **Cancel** stops the
 sign-in in progress and keeps every login the organization already holds; a
 login codex saved just before is logged out again, so it never outlives the
 attempt. If OpenAI refuses to issue a code, the panel shows codex's error, such
@@ -935,7 +1072,8 @@ started, or after its code began to be exchanged.
 ### How a turn runs
 
 For an organization on Claude Code or Codex, each chat turn, task run, title,
-review or summary starts the CLI where the server runs:
+review or summary starts the CLI, through `abnegate-agent-cli`, where the
+server runs:
 
 - in the organization's `work` directory for the agent under
   `ZONE_AGENT_STATE_DIR`, which every account of the agent shares;
@@ -946,15 +1084,44 @@ review or summary starts the CLI where the server runs:
 - for claude, with `DISABLE_AUTOUPDATER=1` and
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no updates, telemetry or error
   reports), `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (Zone keeps its own memory),
-  and `MCP_TOOL_TIMEOUT` and `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` at 30 minutes;
+  and, on a turn Zone serves tools to, `MCP_TOOL_TIMEOUT` and
+  `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` at 30 minutes;
 - for claude, with `--setting-sources ""`, so it loads no settings file, hook,
   `CLAUDE.md`, skill, agent or command from its home, its working directory or
   any directory above it, and with
   `--settings '{"crossSessionInbound":"refuse"}'`, a setting meant to refuse
   messages from other claude sessions of the same OS user;
-- for as long as the turn may take: `ZONE_CHAT_TIMEOUT_SECONDS` for a chat
-  turn, 30 minutes by default, and what is left of its hour for a task
-  attempt. A task attempt whose CLI runs out of time fails without a retry.
+- at the nice value `ZONE_AGENT_NICENESS` names, 19 unless set, which every
+  command the agent runs inherits, so its builds and tests yield the CPU to
+  the server;
+- with no time limit of the CLI's own, neither on the whole run nor on a
+  stretch with no output: a chat turn, a task attempt, an automated review or
+  a conflict repair lasts until the agent finishes, and the crate's own
+  five-minute default never applies. A chat turn also ends when you press
+  Stop, when its server loses the chat, or when `ZONE_CHAT_ROUNDS` or
+  `ZONE_CHAT_CALLS` runs out; a task attempt when someone stops the run or
+  its worker loses the run; a review or a repair after its twelfth turn. What
+  still bounds a run is
+  per call: the 30 minutes an agent waits on one call to Zone's tools, the
+  cap on a foreground shell command, an approval's own wait, and the agent's
+  own limits on its commands;
+- for claude, until the work it sent to the background has ended: a
+  background command, a monitor, a subagent or a wakeup it scheduled holds the
+  turn, and the later answer it leads to is part of the reply. Work that never
+  ends, such as a server left running, holds the turn until it is stopped.
+
+A chat whose claude was stopped before it finished, by Stop or by exiting
+partway through a later answer, keeps everything it showed, the unfinished
+part included, followed by *[Cut short: the agent was stopped before it
+finished]*, and reports no error. A task attempt whose claude exits partway
+through a later answer fails with *The coding agent ended before it finished
+the task* and is tried again.
+
+A turn fails once its answer passes 4 MiB, with a failure that begins "the
+agent's prose exceeded"; what the agent's tools print does not count toward
+that, and Zone receives at most 64 KiB of each tool's output, its start and its
+end. A line of the CLI's output longer than 1 MiB fails the turn when the
+answer needs it, and is otherwise dropped.
 
 An organization that chose Claude Code or Codex without signing in to either
 agent, where the host-login fallback is off, gets "The claude CLI is not
@@ -1016,7 +1183,10 @@ An account is exhausted once a turn on it hits a usage limit: until the
 limit's own reset, else until its spent window resets by its last reading,
 else until its spent window resets by a read made there and then (a codex
 limit names no reset of its own), else for five minutes. One whose last
-reading has no headroom left is exhausted until that window resets. A turn
+reading has no headroom left is exhausted until that window resets. A window
+scoped to one model, such as `7d Fable`, counts only for chats and task runs
+on that model: a spent `7d Fable` leaves the account to Opus and Sonnet
+sessions, ranked by the headroom of its other windows. A turn
 refused for want of usage credits does not exhaust its account: the refusal
 says nothing about the subscription and refuses only the model the turn ran,
 so chats and task runs on other models still start there. For an hour after
@@ -1092,9 +1262,9 @@ already wrote as an assistant entry of its own, and then:
   home, on a model picked again from that agent's models.
 
 The turn keeps its Zone tools, its approval cards and its `ZONE_MCP_TOKEN`
-across the switch, and every switch counts against the turn's own
-`ZONE_CHAT_TIMEOUT_SECONDS`. The chat receives a `status` frame,
-"Switching to <account>…", then a `handover` frame:
+across the switch, and a switch sets no time limit of its own: the turn runs
+on the new account until it ends as any turn does. The chat receives a
+`status` frame, "Switching to <account>…", then a `handover` frame:
 
 ```json
 {"type":"handover","message_id":"…","from":"jake@example.com","to":"team@example.com","from_agent":"claude","agent":"claude","reason":"limit","resets_at":"2026-10-02T18:00:00Z","carried":true,"at":1834}
@@ -1135,7 +1305,8 @@ that is never recorded cannot pass a run back and forth for ever.
 Zone's own tools are offered to the agent over MCP, to claude and codex alike:
 Zone serves them at `/mcp` on its own port for the life of one turn, behind a
 bearer token minted for that turn and revoked when it ends. The token reaches
-the CLI in the `ZONE_MCP_TOKEN` variable, never on its command line. The agent
+the CLI in a variable whose name is drawn at random for the turn, never on its
+command line or in a file. The agent
 calls the tools as `mcp__zone__<name>`, Zone executes them, and every call goes
 through the approval policy a chat tool call goes through: a chat with
 Auto-approve off raises the usual card and waits for you, and a denial refuses
@@ -1216,13 +1387,18 @@ agent:
   usage credits if the account has them on, which claude spends without
   asking (see *Usage credits*). Whether a Fable turn inside the allowance runs
   with usage credits off is not verified. When claude refuses a Fable turn it
-  cannot fund, Zone reports claude's own words after "The signed-in Claude
-  account cannot spend usage credits on this model: ", as in "…: Fable 5.1
-  requires usage credits. Switch to another model to continue." or "…: You've
-  hit your monthly spend limit. Switch to another model to continue.", and a
-  task run does not retry it. When claude could not look the account's usage
-  credits up, the failure begins "The signed-in Claude account's usage
-  credits could not be confirmed" instead, and a task run retries it. The
+  cannot fund, Zone reports claude's own words after "usage credits required
+  for this model: ", as in "…: Fable 5.1 requires usage credits. Switch to
+  another model to continue." or "…: You've hit your monthly spend limit.
+  Switch to another model to continue.", and a task run does not retry it.
+  Zone knows the refusal by the error kind claude gives it,
+  `model_requires_usage_credits`, not by its words, so a Fable refusal
+  without that kind is a rate limit or an ordinary failure, as its status and
+  words say. When claude could not look the account's usage credits up, the
+  failure begins "usage credits could not be confirmed", with claude's reason
+  in brackets, instead, and a task run retries it. A task run that failed
+  before Zone ran claude through `abnegate-agent-cli` keeps its earlier
+  wording, which began "The signed-in Claude account". The
   account's owner turns usage credits on, or raises their cap, at
   claude.ai/settings/usage; on Team and Enterprise plans an admin does, at
   claude.ai/admin-settings/usage. claude 2.1.278 answers a request Fable
@@ -1256,8 +1432,8 @@ one such as `opus[1m]`, can need usage credits too. claude 2.1.278 names the
 context as the reason it refuses one only when the 429 carries neither the
 `anthropic-ratelimit-unified-representative-claim` nor the
 `anthropic-ratelimit-unified-overage-status` header. Zone then reports claude's
-own words after "The signed-in Claude account cannot spend usage credits on a
-context this long: ", and a task run does not retry it. When the 429 carries
+own words after "usage credits required for this context length: ", and a
+task run does not retry it. When the 429 carries
 either header, claude words the refusal as the plan's limit instead, and Zone
 reports claude's words as a rate limit: a task run backs off before it tries
 again.
@@ -1302,7 +1478,10 @@ happens when the agent gives no usable answer within
   without a verdict pauses the task with the error. When claude says it
   refuses the reviewer model, or the review's context, because the signed-in
   account cannot spend usage credits on it, every tick would be refused the
-  same way, so the task pauses at once with claude's words. *Naming a model* says when claude names a context as the reason.
+  same way, so the task pauses at once with that failure, "usage credits
+  required for this model: " or "usage credits required for this context
+  length: " and claude's words. *Naming a model* says when claude names a
+  context as the reason.
   The reviewer's model is one the agent knows, taken from
   `ZONE_AUTO_REVIEW_MODELS` and AI settings, or else one of the agent's own
   models, never an installed Ollama model. Zone does not pick `fable` on its
@@ -1344,17 +1523,18 @@ own shares that login, which is why a server with several organizations
 should turn the fallback off.
 
 The fallback runs the CLI without `CLAUDE_CONFIG_DIR` or `CODEX_HOME`, which
-the environment allowlist drops, so each CLI uses its default home under the
-server user's `HOME`: `~/.claude` and `~/.codex`. The turn still runs in the
-organization's `work` directory, but the CLI writes its session transcripts
-into those default homes, beside the user's own.
+Zone withholds unless `ZONE_AGENT_ENV_PASSTHROUGH` names them, so each CLI uses
+its default home under the server user's `HOME`: `~/.claude` and `~/.codex`.
+The turn still runs in the organization's `work` directory, but the CLI writes
+its session transcripts into those default homes, beside the user's own.
 
 - **A login made with `CLAUDE_CONFIG_DIR` set is not found.** On macOS claude
   keeps such a login in a separate Keychain item keyed to that directory, so a
   shell whose `claude auth status` reports a login can still leave the
   fallback with none. Sign in without the variable
   (`env -u CLAUDE_CONFIG_DIR claude auth login`), or name `CLAUDE_CONFIG_DIR`
-  in `ZONE_AGENT_ENV_PASSTHROUGH` so the fallback uses that directory.
+  in `ZONE_AGENT_ENV_PASSTHROUGH` so the fallback uses that directory. Its
+  path is then scrubbed from the run's logs, like every value named there.
 - **The host's settings are not used.** Every claude turn runs with
   `--setting-sources ""`, so the fallback takes the host's login but not its
   `~/.claude/settings.json` (its `env` block, `apiKeyHelper` or model), hooks,
@@ -1383,8 +1563,9 @@ another's, so any process running as that user can:
   every account's home;
 - read the `/proc/<pid>/environ` of any CLI running at the time, which holds
   that turn's `CLAUDE_CODE_OAUTH_TOKEN` and, when Zone serves it tools, its
-  `ZONE_MCP_TOKEN`. The second lets its holder call that turn's Zone tools, as
-  that turn's user and under its approval policy, until the turn ends. A task
+  token for them, under a name drawn at random. The second lets its holder
+  call that turn's Zone tools, as that turn's user and under its approval
+  policy, until the turn ends. A task
   run approves every call, so whoever holds a task run's token can use its
   write tools without anyone approving, and what they write lands in that
   run's pull request;
@@ -1410,9 +1591,10 @@ The processes that run as that user are:
   without an approval card. `write_file` and `apply_patch` do the same once
   approved or with Auto-approve on, and `run_shell` and `run_command` then
   reach everything above;
-- configured stdio MCP servers, which also inherit the server's full
-  environment, and `COMFYUI_TRAIN_COMMAND`, which gets the allowlist described
-  under it.
+- instance-layer stdio MCP servers (`ZONE_MCP_SERVERS`, `ZONE_MCP_CONFIG`),
+  which also inherit the server's full environment, organization stdio MCP
+  servers, which get the allowlist, and `COMFYUI_TRAIN_COMMAND`, which gets
+  the allowlist described under it.
 
 What stands in the way:
 
@@ -1422,8 +1604,15 @@ What stands in the way:
   process only: any process of the same user can read a child's environment
   while the child runs. The CLIs, Zone's shell tools, `COMFYUI_TRAIN_COMMAND`,
   and the `rg`, `git`, `ffmpeg` and `ffprobe` it runs start from an
-  allowlisted environment, without those secrets. Configured stdio MCP servers
-  start from the server's full environment, so they carry them.
+  allowlisted environment, without those secrets, and so do organization
+  stdio MCP servers, plus their own `environment`. Instance-layer stdio MCP
+  servers start from the server's full environment, so they carry them. With
+  `ZONE_MCP_COMMANDS` on, an organization admin's stdio server is a process of
+  that user too, so it can read those secrets from a running instance stdio
+  server, and every other organization's stdio server `environment`. An
+  instance-layer URL server is not a process and inherits nothing, but its
+  `url` and `headers` may refer to any variable of the server's environment,
+  and what a reference resolves to is sent to that server.
 - Zone's file tools, `read_file`, `list_files`, `search_code`, `write_file`
   and `apply_patch`, refuse any path under the agent state directory and any
   process's `/proc/<pid>` entry, `/proc/self` included, whatever the chat's
@@ -1526,18 +1715,16 @@ once approved, and its file tools read whatever else the server's user can.
 - **Backups.** `make backup` and `make restore` include
   `zone_manager_agent_state`, and with it every organization's codex login; see
   [OPERATIONS.md](OPERATIONS.md).
-- **Upgrading.** Several accounts per agent add migrations 003 and 004 on
-  top of the squashed initial schema and 002, after which an older image
-  stops with `VersionMissing(3)`. A database migrated before the squash
-  cannot be upgraded in place. Back up first; see
-  [OPERATIONS.md](OPERATIONS.md#upgrading-to-migration-003).
+- **Upgrading.** What an existing install's sign-ins and session files do
+  on upgrade is in
+  [OPERATIONS.md](OPERATIONS.md#several-sign-ins-per-agent).
 - **Refused at boot**: a relative `ZONE_AGENT_STATE_DIR`, or none when neither
   `XDG_STATE_HOME` nor `HOME` is absolute; a `ZONE_AGENT_HOST_LOGIN` that is not
   one of the spellings above; a `ZONE_CLAUDE_TOKEN_URL` that is not an absolute
   `http` or `https` URL with a host, or that carries credentials, a query or a
   fragment; a `ZONE_CODEX_SANDBOX` other than `workspace-write` or
-  `danger-full-access`; a `ZONE_AGENT_CALLBACK` that is not
-  `http://localhost:<port>` or a port, or whose port the server cannot listen
+  `danger-full-access`, `read-only` included; a `ZONE_AGENT_CALLBACK` that is
+  not `http://localhost:<port>` or a port, or whose port the server cannot listen
   on; a `ZONE_AGENT_CALLBACK_BIND` that is not an IP address, or an IP address
   and port; a `ZONE_CONSOLE_ORIGINS` entry that is not an `http` or `https`
   origin, or that carries credentials, a path, a query or a fragment; a
@@ -1865,7 +2052,7 @@ that still sets an old name gets the default instead:
 
 ### `TOOL_RUNNER_PROXY_URL`
 - **Default**: empty (existing subprocess environment)
-- **Description**: Optional HTTP proxy for proxy-aware command tools, MCP subprocesses, evaluation tool runs and `zone-runner` jobs. Loopback and the stack's own services stay direct. A routed process also receives `ABNEGATE_EXEC_PROXY_URL` and `ABNEGATE_EXEC_PROXY_BYPASS`, so what it starts is routed the same way.
+- **Description**: Optional HTTP proxy for proxy-aware command tools, MCP subprocesses, evaluation tool runs and `zone-runner` jobs. Loopback and the stack's own services stay direct. A routed process also receives `ABNEGATE_EXEC_PROXY_URL` and `ABNEGATE_EXEC_PROXY_BYPASS`, so what it starts is routed the same way. HTTP MCP servers, instance and organization alike, are not subprocesses: Zone connects to them from its own process, through this proxy, with loopback and the stack's own services still direct. It never reaches one through `HTTP_PROXY`, `HTTPS_PROXY` or the system's proxy settings, and with no proxy configured it connects directly. Behind the proxy the proxy resolves host names, so Zone refuses only a cloud metadata or link-local address, or a metadata host name, written in the URL itself; see [Organization-managed servers](#organization-managed-servers).
 - **VPN value**: `http://gluetun:8888` in `.env` (Traefik). Manager's VPN overlay uses `http://127.0.0.1:8888` for the same shared-namespace reason.
 
 ### `ABNEGATE_EXEC_PROXY_URL` and `ABNEGATE_EXEC_PROXY_BYPASS`
@@ -1931,20 +2118,52 @@ Compose and zone-server read the `SEARCH_*` names (not the older `RAG_*` aliases
 
 Zone's agent loop can attach [Model Context Protocol](https://modelcontextprotocol.io) servers as extra tools. That is how tasks and the CLI run [magents](https://github.com/abnegate/magents) — spawn or message Claude, Codex, Copilot, Cursor, Gemini, Grok, and OpenCode sessions from an agentic run.
 
-Config uses the same JSON shape as Cursor (`mcpServers`). Tool names are prefixed with the server name, so magents' `spawn_session` becomes `magents_spawn_session`.
+Config uses the same JSON shape as Cursor (`mcpServers`). Tool names are `server__tool`: the server name, two underscores, then the tool's own name, so magents' `spawn_session` becomes `magents__spawn_session`. A name is at most 64 characters.
 
-Stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat configured servers as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
+Servers come from two layers:
+
+- The **instance layer** is what the variables below configure: `ZONE_MCP_SERVERS`, else `ZONE_MCP_CONFIG`, else `~/.zone/mcp.json`, plus the magents fallback. Settings lists it read-only, and it can't be overridden per workspace.
+- The **organization layer** is managed by organization admins in Settings, as described under [Organization-managed servers](#organization-managed-servers).
+
+Chats and tasks attach both layers, whichever provider runs them, because Zone serves every MCP tool itself. A task attaches them only while the member who started it can still write to the workspace. `zone run` attaches only the instance layer.
+
+Instance stdio servers inherit the Zone process environment, then overlay any `env` map on the server spec. Treat them as trusted local processes: they can see `PATH`, `HOME`, and whatever credentials the runner already has. Do not point Zone at an untrusted executable.
+
+An instance entry with a `url` and no `command` is reached over streamable HTTP, with its `headers` sent on every request:
+
+```json
+{
+  "mcpServers": {
+    "docs": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_MCP_TOKEN}" }
+    }
+  }
+}
+```
+
+`${VAR}` and `${VAR:-default}` in a `url` and in `headers` values are filled from the server's environment when the configuration is read. The default stands in only for a variable that is unset, not for one that is set and empty. An entry that refers to an unset variable with no default stays listed and shows `failed` with "The URL or a header refers to a variable that is not set". An entry whose `type` is `sse` shows `failed` with "SSE servers are not supported; use streamable HTTP (`http`)". An instance URL server connects, fails and is reported the way an organization's `http` server is, as described under [Organization-managed servers](#organization-managed-servers); the rules there for what the API accepts are the API's alone and are not applied to an instance entry. Its tools reach every organization on the instance. An entry with `"disabled": true` is neither contacted nor listed.
+
+Zone reads the instance configuration once per process, the first time Settings or a turn needs it, and connects its servers once. After changing `ZONE_MCP_SERVERS`, `ZONE_MCP_CONFIG` or `~/.zone/mcp.json`, restart the server: until then neither Settings nor a turn sees the change. An instance server that failed to connect stays `failed` until that restart too.
+
+Every member of every organization sees the instance servers in Settings: each server's name, its `command`, and the names of its `env` variables and headers. The arguments and header values are never shown. A URL is shown as the origin, scheme, host and port, of what it resolves to, and not at all when it does not resolve. Pass credentials through `env` or `headers` all the same, not in `args` or a URL.
+
+Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
 
 ### `ZONE_MCP_ENABLED`
-- **Default**: `true`
-- **Description**: Master switch. `false` / `0` / `off` skips every MCP server.
+- **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
+- **Description**: Master switch for both layers, which read it the same way: the value is trimmed and read in any case, `0` / `false` / `no` / `off` turns it off, and anything else, an empty or unrecognised value included, leaves it on. Off skips every instance server, and starts or connects no organization server: each one then shows `failed` with "MCP servers are turned off on this instance (ZONE_MCP_ENABLED)".
+
+### `ZONE_MCP_AUTO_CONNECT`
+- **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
+- **Description**: When no enabled server is configured and `magents` is on `PATH`, attach `magents mcp` automatically. Disabled servers do not count as configured. Every other server does, whatever its transport and whether or not it connects, so a document whose only enabled server has a `url`, an `sse` one included, keeps the fallback off. A server with a `command` is launched over stdio even when it also names a `url` or a `type`. A document in which any server's `command` is blank is ignored whole, so only this fallback can attach. A server keyed `magents` that the document disables keeps the fallback off, even in a document that is otherwise ignored; a disabled server under another key that runs `magents` does not.
 
 ### `ZONE_MCP_AUTO_MAGENTS`
-- **Default**: `true`
-- **Description**: When no servers are configured and `magents` is on `PATH`, attach `magents mcp` automatically.
+- **Default**: `true`. Compose passes `true` unless `.env` says otherwise, and the Helm chart sets `"true"` in `server.env`.
+- **Description**: The older name for `ZONE_MCP_AUTO_CONNECT`, still honoured. It can only turn the `magents mcp` fallback off: when either variable is off, the fallback is not attached, and neither turns it back on while `ZONE_MCP_ENABLED` is off.
 
 ### `ZONE_MCP_CONFIG`
-- **Default**: *empty* (falls back to `~/.zone/mcp.json` if that file exists)
+- **Default**: *empty* (falls back to `~/.zone/mcp.json` if that file exists). Compose passes it from `.env`, empty unless set there, and the Helm chart sets `""` in `server.env`.
 - **Description**: Path to a JSON file of MCP servers.
 - **Example**:
 
@@ -1960,12 +2179,144 @@ Stdio servers inherit the Zone process environment, then overlay any `env` map o
 ```
 
 ### `ZONE_MCP_SERVERS`
-- **Default**: *empty*
-- **Description**: Inline JSON of the same shape as `ZONE_MCP_CONFIG`. Useful in Compose. Takes precedence over the config file.
+- **Default**: *empty*. Compose passes it from `.env`, empty unless set there, and the Helm chart sets `""` in `server.env`.
+- **Description**: Inline JSON of the same shape as `ZONE_MCP_CONFIG`. Useful in Compose and Helm. Takes precedence over the config file.
 
-A server entry with only a `url` (HTTP transport) is skipped — Zone speaks stdio today.
+In Compose, who fills a `${VAR}` reference depends on how the value is written. Compose hands `ZONE_MCP_SERVERS` to the `manager` service from the shell or from `.env`:
 
-Inside Docker the manager image does not include magents. Install it on the host and either run `zone-server` there, or mount the binary and a config file into the container.
+- A value exported from the shell, or wrapped in single quotes in `.env`, reaches Zone with its references intact, and Zone fills them from the container's environment. `docker-compose.yml` passes the container only the variables it lists, so add each variable a reference names to `manager`'s `environment:` in `docker-compose.override.yml`, which `make up` and `./scripts/compose.sh` include when it exists.
+- An unquoted or double-quoted `.env` value has its references filled by Compose itself, from `.env` and the shell, before Zone starts. Zone then receives the value as literal text. A variable Compose does not find becomes an empty string, with only the warning `The "DOCS_MCP_TOKEN" variable is not set. Defaulting to a blank string.`, so the server is sent an empty credential instead of showing "The URL or a header refers to a variable that is not set".
+
+```bash
+# .env: single quotes leave ${DOCS_MCP_TOKEN} for Zone to fill
+ZONE_MCP_SERVERS='{"mcpServers":{"docs":{"url":"https://mcp.example.com/mcp","headers":{"Authorization":"Bearer ${DOCS_MCP_TOKEN}"}}}}'
+DOCS_MCP_TOKEN=change-me
+```
+
+```yaml
+# docker-compose.override.yml
+services:
+  manager:
+    environment:
+      - DOCS_MCP_TOKEN=${DOCS_MCP_TOKEN:-}
+```
+
+`docker compose config` shows what the container will receive: a reference left for Zone prints as `$${DOCS_MCP_TOKEN}`. This is how Docker Compose v5.7.0 behaves.
+
+The Helm chart passes each value under `server.env` to zone-server as written, so a `${VAR}` reference in `server.env.ZONE_MCP_SERVERS` reaches Zone intact, and Zone fills it from the pod's environment. Set the variable it names under `server.env` too; its value then sits in the Deployment in plain text.
+
+### `ZONE_MCP_COMMANDS`
+- **Default**: `false`. Compose passes `false` unless `.env` says otherwise, and the Helm chart sets `"false"` in `server.env`.
+- **Description**: Lets organization admins add stdio (command) servers. `1` / `true` / `yes` / `on`, trimmed and in any case, turns it on; anything else leaves it off. While it is off, creating, updating or reconnecting an organization stdio server returns 403, and a stored one shows `failed` with "Command servers are turned off on this instance (ZONE_MCP_COMMANDS)". An organization stdio server starts from the allowlisted environment plus its own `environment`, never the server's full environment, but that does not isolate it: it runs as the server's user, and any process of that user can read the environment of every other process of that user while it runs, from `/proc/<pid>/environ` (see [Security: every organization is the same OS user](#security-every-organization-is-the-same-os-user)). A command as plain as `sh -c 'cat /proc/*/environ'` is enough. **Turning this on gives every organization admin every other organization's MCP secrets, the `environment` of each of their running stdio servers, and the instance's own keys, the database URL, the JWT and encryption keys and the LiteLLM key, whenever an instance stdio server that inherits the server's environment is running**: any `command` entry in `ZONE_MCP_SERVERS` or `ZONE_MCP_CONFIG`, and the `magents mcp` fallback that `ZONE_MCP_AUTO_CONNECT` attaches. Turn it on for single-tenant installs only. While it is on and such an instance server is configured, Zone logs a warning at startup that begins "ZONE_MCP_COMMANDS is on while an instance stdio MCP server inherits the server's environment". Instance-layer servers are not affected.
+
+### Organization-managed servers
+
+Organization admins and owners add, edit, reconnect and delete servers in **Settings → Organization → MCP servers**; members see the list read-only. A server is `stdio`, a `command` with `arguments` that needs `ZONE_MCP_COMMANDS`, or `http`, streamable HTTP at a `url`, which needs no flag. `sse` is refused; use streamable HTTP. A name is at most 32 letters, digits, `-` and `_`, with no `__` and no trailing `_`. 32 is the half of a 64-character tool name that abnegate-agent keeps for the server in `server__tool`: it cuts a longer server name, so two servers sharing their first 32 characters would offer their tools under one prefix. It must be unique in the organization and must not match an instance server: a clash returns 409. `tools` limits which of the server's tools are offered; `null` offers them all.
+
+The API's field names are its own, not the `mcpServers` ones: a server's variables are `environment` and its arguments are `arguments`, where an instance document says `env` and `args`. A create, update or workspace body that names a key the route does not read, `env` and `args` included, is refused with 400 and nothing is stored; `error` is axum's account of the body, which names the key: ``Failed to deserialize the JSON body into the target type: unknown field `env`, …``. Any other body the route cannot read, malformed JSON or a value of the wrong type, is a 400 the same way.
+
+In **Settings → Workspace → MCP servers**, a workspace admin or owner sets each organization server to Inherit, On or Off. A workspace can only turn a server off: On does not enable a server the organization has turned off. `effective` is the outcome: the server is enabled and the workspace has not turned it off. Instance servers can't be overridden per workspace.
+
+Each server shows one status:
+
+- `connected`: `available_tools` lists the tools it advertised.
+- `connecting`: Zone is starting it, after a create, a change that needs a reconnect, or a reconnect request.
+- `failed`: `error` says why, in one of the sentences listed below.
+- `disabled`: the server is turned off.
+
+A status is the result of the last connect, not a live check. Zone tries a failed server again when an admin reconnects it, when an edit changes anything but `tools`, or when Zone restarts; it does not retry one on its own. An `http` server that connected and has since gone away still shows `connected` until it is reconnected.
+
+For a server reached by URL, in either layer, `error` is chosen by the kind of failure abnegate-agent records for the connect (`McpFailure`, named in the table below) and, for an HTTP status no other kind names, that status. Both are typed values the client takes from what failed; Zone never reads the failure's text to choose the sentence and never copies any of it in: a response body, a redirect's target and a JSON-RPC error's message all stay out of the API, the console and the audit log. The full text is in the server log, in the "MCP server unavailable" warning logged under `abnegate_agent`. There, everything Zone sends the server is replaced by `[REDACTED]`: each header value, the credential of a two-part value such as `Bearer <token>`, the URL's path and query, each path segment and query value, and a user name or password in an instance URL. Only values of 6 bytes or more are replaced.
+
+| `error` | What happened |
+|---|---|
+| `MCP servers are turned off on this instance (ZONE_MCP_ENABLED)` | `ZONE_MCP_ENABLED` is off. |
+| `Command servers are turned off on this instance (ZONE_MCP_COMMANDS)` | An organization `stdio` server while `ZONE_MCP_COMMANDS` is off. |
+| ``SSE servers are not supported; use streamable HTTP (`http`)`` | `Unsupported`: the server's `type` is `sse`. |
+| `did not connect; see the server log` | A `stdio` server did not start or did not finish its handshake. For a server reached by URL: `Other`, a failure abnegate-agent names no kind for, `Status` without a status, or a kind newer than this build of Zone. |
+| `The server's definition is not valid` | `Invalid`: an instance entry has a `url` and a `type` that does not go with one. Also a stored organization `stdio` server whose command, arguments or environment values hold `${`, in a row that reached the database some other way, such as a restore or a hand edit: it is never started. |
+| `The URL or a header refers to a variable that is not set` | `Unresolved`: an instance entry refers to an unset variable with no default. |
+| `The URL is not valid` | `Address`: the URL does not parse, or is not `http` or `https`. |
+| `The URL points at a link-local or cloud metadata address` | `Metadata`: the URL names one of those addresses or a metadata host, or its host name resolved only to such addresses or to none at all. Nothing was sent to it. |
+| `A header is not valid` | `Header`: a header's name or value is not one HTTP accepts, the connection sets that header itself, or two headers share a name. |
+| `Zone could not build an HTTP client for the server` | `Client`: the proxy URL is not valid, or the client could not be set up. |
+| `The server did not answer in time` | `Timeout`: the handshake and the tool list took longer than 30 seconds, or a request to the server timed out. |
+| `The server answered with a redirect Zone does not follow` | `Redirect`: any redirect but a 307 or 308 to the same origin, or more than 10 of those in a row. |
+| `The server refused the credentials (HTTP 401)` | `Unauthorized` with any status but 403: a 401 with a `WWW-Authenticate` challenge the client could read. |
+| `The server refused the credentials (HTTP 403)` | `Unauthorized` with 403: a 403 with a `WWW-Authenticate` challenge the client could read. |
+| `The server answered HTTP <status>` | `Status`: any other status that is not a success, a 401 or 403 with no challenge, or with one that is not valid text, included. |
+| `The server's answer is not MCP over streamable HTTP` | `Protocol`: the server answered, but not with what the protocol expects: a web page, malformed JSON, an answer to another request, a protocol version Zone does not speak. |
+| `The server answered the handshake with an error` | `Rejected`: a JSON-RPC error in answer to `initialize` or to listing the tools. |
+| `Zone could not reach the server` | `Unreachable`: no connection could be made: it was refused, the name did not resolve, or TLS failed. |
+| `The server did not complete the handshake` | `Closed` or `Oversized`: the connection closed before the handshake and the tool list completed, or the server's answer was larger than the client reads. |
+
+The kind is what the client could observe, so a few failures read as another:
+
+- A request is tried a third time only after an HTTP/2 server refused the first two, and the client does not observe the answer to that third attempt. A 401 or 403 there shows as "The server's answer is not MCP over streamable HTTP", with no status.
+- Behind `TOOL_RUNNER_PROXY_URL`, an `https` server is reached through a tunnel, and the proxy's refusal of that tunnel, a 407 included, shows as "Zone could not reach the server".
+- A proxy that answers a plain `http` request in the server's place is reported as the server would be for that answer: a 502 from the proxy shows as "The server answered HTTP 502".
+- An event-stream answer that brings a malformed event, or one that is not JSON-RPC, in place of the message awaited shows as "The server did not complete the handshake", not as an answer that is not MCP.
+- A host name that resolves to no address at all shows as "The URL points at a link-local or cloud metadata address".
+
+Each server process runs its own copy of an organization's servers. It checks that copy against the database whenever it lists them or runs a turn for that organization, and every 60 seconds whether or not anything asks. With several replicas, a server edited, disabled or deleted through one replica changes on another at that replica's next list or turn for the organization, and within about a minute without one. Deleting an organization stops its servers at once on the replica that served the request, and on every other replica within about a minute.
+
+A turn that starts while one of its organization's servers is still connecting, after a create, an edit or a reconnect, waits for it rather than running without its tools. Each connect is given at most 30 seconds.
+
+Rules for every organization server:
+
+- Authentication is static headers only, a bearer token in `Authorization` included. OAuth is not supported.
+- Put credentials in headers, never in the URL: query strings are stored, returned and audited as entered.
+- Put a `stdio` server's secrets in `environment`, never in `arguments`: arguments are stored, returned to every organization member and audited as entered.
+- A URL is `http` or `https` with a host. Private and loopback addresses are allowed, so a server on the host or the LAN works. Cloud metadata and link-local addresses, credentials embedded in the URL, fragments and other schemes are refused. The URL is stored as the parser normalises it.
+- A cloud metadata or link-local address is refused again at every connect, and so is every such address a host name resolves to: a name that resolves to nothing else is not reached. Behind `TOOL_RUNNER_PROXY_URL` the proxy resolves host names, so there only an address or metadata host written in the URL is refused.
+- Only a 307 or 308 redirect to the same origin is followed, at most 10 in a row. Any other redirect fails the connect.
+- A `command` has no whitespace before or after it.
+- A `stdio` server takes `environment` and refuses `url` and `headers`. An `http` server takes `headers` and refuses `command`, `arguments` and `environment`.
+- Header names are unique whatever their case, and a header value holds no line break or other control character. The headers the connection sets itself are refused: `Accept`, `Content-Type`, `Content-Length`, `Host`, `Connection`, `Keep-Alive`, `Proxy-Authorization`, `Proxy-Connection`, `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Last-Event-Id`, `Mcp-Session-Id`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and any `Mcp-Param-` header. So are the headers a cloud metadata service requires before it answers, so that no request Zone sends can pass for one wherever it ends up: `Metadata`, `Metadata-Flavor`, `X-Google-Metadata-Request`, `X-aws-ec2-metadata-token`, `X-aws-ec2-metadata-token-ttl-seconds`, `X-aliyun-ecs-metadata-token` and `X-aliyun-ecs-metadata-token-ttl-seconds`.
+- `${` is refused in every field, because Zone would expand it from its own environment. A NUL character is refused too. A stored `stdio` server whose command, arguments or environment values hold `${` all the same, in a row that reached the database some other way, such as a restore or a hand edit, shows `failed` with "The server's definition is not valid" and is never started.
+- `environment` and `headers` values are sealed under `ENCRYPTION_KEY`. They are never returned, logged or audited: the API lists each name with `has_value` only. If a server's stored values do not open under the key, listing the servers fails and the server log names that server's id: delete it by id and add it again. Until then chats and tasks run with the organization's other servers.
+
+| Method | Path | Who |
+|---|---|---|
+| GET | `/api/organizations/{org_id}/mcp-servers` | org member |
+| POST | `/api/organizations/{org_id}/mcp-servers` | org admin/owner |
+| GET | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org member |
+| PUT | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org admin/owner |
+| DELETE | `/api/organizations/{org_id}/mcp-servers/{server_id}` | org admin/owner |
+| POST | `/api/organizations/{org_id}/mcp-servers/{server_id}/connection` | org admin/owner |
+| GET | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace member |
+| PUT | `/api/organizations/{org_id}/workspaces/{ws_id}/mcp-servers` | workspace admin/owner |
+
+Every route checks that the caller belongs to the organization before it looks up the server or workspace in its path, so a caller outside the organization gets 404 "Organization not found" whether or not either exists.
+
+PUT is sparse and can't change `transport`. A field that already holds the value sent is not written, and a PUT that changes nothing leaves `updated_at` as it was. A change to `tools` alone leaves a running server as it is; any other change stops it and, while it is enabled, starts it again. In `environment` and `headers` on PUT, a `null` value keeps the stored value and an omitted name is removed. A PUT that moves `url` to another origin, a different scheme, host or port, must send every stored header again with its value, or leave it out to remove it: a `null` header value, or no `headers` at all while the server stores any, answers 400 `{"error": "Re-enter the header values when the URL's origin changes"}` and stores nothing, so a saved credential is never sent to a host it was not entered for. A new path on the same origin keeps the stored headers. On the workspace PUT, `null` clears the override.
+
+An update is audited as `mcp_server.updated`, with the server as the API showed it just before the write in `old_values` and as it shows it after in `new_values`: `environment` and `headers` by name and `has_value`, never a value.
+
+POST `/connection` answers 202 with the server as it is then: `connecting` when Zone can start it, which covers every enabled `http` server while `ZONE_MCP_ENABLED` is on, `disabled` when it is turned off, and `failed` with the reason otherwise. While a connect of the server is still under way and the server has not changed since it began, a reconnect starts no other: it answers 202 `connecting` and leaves that connect to finish.
+
+### Importing what a provider configured
+
+**Import from provider** in **Settings → Organization → MCP servers** lists, for each coding agent provider the organization is connected to, the MCP servers that provider already has configured, and stores the ones an admin picks as organization servers. It is worth doing because a turn never attaches them itself: claude runs with `--strict-mcp-config` and codex is given its servers as `-c` overrides, so a server configured for the agent alone reaches no chat or task until it is imported.
+
+Zone reads the documents the agent itself would read, in the home Zone points it at for this organization: claude's `.claude.json` and `settings.json`, under `mcpServers` or `servers`, and codex's `config.toml`, under `mcp_servers`. That is one home per login the organization holds of the agent and, holding none, the host's own configuration when `ZONE_AGENT_HOST_LOGIN` is on: the directory `CLAUDE_CONFIG_DIR` or `CODEX_HOME` names, else `~/.claude` with `~/.claude.json` beside it, and `~/.codex`. A provider Zone holds no sign-in for is not listed at all, a document that is not there configures nothing, and a name configured in more than one document is read from the first.
+
+An import carries a server's `command`, `args` and `env`, or its `url` and `headers`, with its `type`, its `tools`, and whether the provider turned it off — codex's `enabled = false` and Claude Code's `"disabled": true` alike, which import as a server that is off. Every other key of an entry is listed as **Not imported**, so an admin can see what they will have to set up themselves: a `cwd`, a timeout, codex's `bearer_token_env_var`, which names a variable of the agent's environment and not a value Zone could store.
+
+The listing shows each server's command and arguments, the origin of its URL — scheme, host and port, as an instance server's URL is shown — and the names of its variables and headers, never their values; it is admin-only for that reason. A provider's own document is held to none of the rules the API applies, so its URL may carry a user name and password, and publishing the origin alone keeps those out of the console; an import reads the whole URL from the document as it stores it, and nothing in the preview needs the rest of it. An import names servers rather than carrying them, and Zone reads their values from the provider's configuration again as it stores them, so a secret the person configured for their agent never travels to a browser and back.
+
+A server the organization could not store is listed with the reason the create route gives and cannot be picked: a name that is too long or holds the wrong characters, a name the organization or an instance server has already, an `sse` entry, a value holding `${`, an entry naming both a command and a URL or neither, or a command while `ZONE_MCP_COMMANDS` is off. An entry that could not be read at all, and a document in the wrong format, are listed under **Skipped** by the name the document gave and the file's own name; no value out of a document is quoted, since one in the wrong place may be a secret. Each server is stored on its own, so one refused leaves the rest imported, and each is audited as a create. A server that fails on the database or on sealing stops the import there, and the answer still lists every server stored before it, so a server that exists is never reported as not imported; what the import did not reach is listed as not attempted, and why the one failed is in the server log rather than the answer.
+
+An imported server is a copy. Editing it in Settings does not change the provider's own configuration, and a later change there does not reach the imported server.
+
+### Upgrading with `url` entries in the instance configuration
+
+Zone used to skip an instance entry that had a `url` and no `command`. It now connects to each one, in the server and in `zone run` alike. Before upgrading an install whose `ZONE_MCP_SERVERS`, `ZONE_MCP_CONFIG` file or `~/.zone/mcp.json` holds such an entry, check each:
+
+- Zone contacts the URL, with every `${VAR}` in it and in its headers filled from the server's environment, and offers the tools it advertises to every organization on the instance.
+- The entry counts as configured, so `magents mcp` is no longer attached beside it automatically. To keep magents, add it to the document as its own entry.
+- The entry holds its name. Creating an organization server under that name, or renaming one to it, returns 409. An organization server that already has the name stays listed beside the instance entry and stays editable, and both connect, but a tool the two both advertise is then named twice: the instance's is offered as `<name>__<tool>` and the organization's as `<name>__<tool>_2`, on every provider. The organization server's `tools` names a tool as that server does, `<tool>`, never by its suffixed name: a tool it lists is offered as `<name>__<tool>_2`, and a tool it leaves out is not offered and takes no name. The suffix is easy to miss, so rename one of the two servers.
+- To keep an entry off, add `"disabled": true` to it.
 
 ---
 
@@ -1979,7 +2330,11 @@ Publication, pull-request sync, conflict repair, auto-project reviews and merges
 
 ### `GITHUB_API_ALLOW_HTTP`
 - **Default**: `false`
-- **Description**: Accept a plain `http://` `GITHUB_API_URL`, such as a loopback or LAN host you run. The repository token then crosses the network unencrypted, so an `http://` origin is refused at startup unless this is `true`. Once it is, repository and pull request links on that origin's host may use `http://` too.
+- **Description**: Accept a plain `http://` `GITHUB_API_URL` or `GITHUB_WEB_URL`, such as a loopback or LAN host you run. The repository token then crosses the network unencrypted, so an `http://` origin is refused at startup unless this is `true`. Once it is, repository and pull request links on that origin's host may use `http://` too.
+
+### `GITHUB_WEB_URL`
+- **Default**: `https://github.com` when `GITHUB_API_URL` is `api.github.com`; otherwise `GITHUB_API_URL` with a trailing `/api/v3` removed, e.g. `https://github.example.com`.
+- **Description**: The GitHub web origin that **Connect GitHub** sends you to, to register Zone's GitHub App and install it; GitHub sends you back to `APP_BASE_URL`. Set it only when the web UI does not live where the default puts it. It follows the same rules as `GITHUB_API_URL`: an absolute URL with a host and no credentials, query or fragment, and `http://` only with `GITHUB_API_ALLOW_HTTP=true`. Loopback and LAN hosts are allowed.
 
 ---
 
@@ -2269,7 +2624,7 @@ Need to find a specific config? Quick lookup:
 - **Compose**: COMPOSE_PROFILES, ZONE_VPN, ZONE_VPN_REQUIRED
 - **Authentication**: BASICAUTH_REALM, BASIC_AUTH_USERS_FILE
 - **Docker Versions**: DOCKER_VERSION_TRAEFIK, DOCKER_VERSION_OLLAMA, DOCKER_VERSION_POSTGRES, DOCKER_VERSION_LITELLM, DOCKER_VERSION_GLUETUN, DOCKER_VERSION_SEARXNG, COMFYUI_COMMIT
-- **Domains**: DOMAIN_HOST_WEBUI
+- **Domains**: DOMAIN_HOST_WEBUI, APP_BASE_URL
 - **Email**: ACME_EMAIL
 - **Models**: OLLAMA_MODEL_FAST, OLLAMA_MODEL_REASON, OLLAMA_MODEL_EMBED, OLLAMA_MODEL_VISION
 - **Model backend and coding agents**: ZONE_LLM_BACKEND,
@@ -2290,7 +2645,7 @@ Need to find a specific config? Quick lookup:
   COMFYUI_COMMIT
 - **Performance**: LITELLM_WORKERS, LITELLM_REQUEST_TIMEOUT, LITELLM_ROUTER_TIMEOUT
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
-- **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS
+- **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_CONNECT, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS, ZONE_MCP_COMMANDS
 - **Auto projects**: ZONE_AUTO_ENABLED, ZONE_AUTO_PARALLEL_TASKS, ZONE_AUTO_REVIEW_MODELS, ZONE_AUTO_REVIEW_BOTS, ZONE_AUTO_ADMIN_MERGE, ZONE_AUTO_*
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY

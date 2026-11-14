@@ -14,11 +14,10 @@
 
 use std::fmt;
 
+use abnegate_learn::Category;
 use serde::{Deserialize, Serialize};
 use zone_context::embeddings::EmbeddingService;
 use zone_context::error::{ContextError, Result as ContextResult};
-
-use abnegate_index::cosine_similarity;
 
 const MINIMUM_SIMILARITY: f32 = 0.45;
 const MINIMUM_MARGIN: f32 = 0.05;
@@ -170,19 +169,29 @@ pub struct CategoryReference {
     pub exemplars: Vec<Vec<f32>>,
 }
 
-/// The embedded exemplars every error is scored against.
+/// The embedded exemplars every error is scored against, one entry per exemplar.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ReferenceEmbeddings {
-    references: Vec<CategoryReference>,
+    categories: Vec<Category>,
 }
 
 impl ReferenceEmbeddings {
     pub fn new(references: Vec<CategoryReference>) -> Self {
-        Self { references }
+        let categories = references
+            .into_iter()
+            .flat_map(|reference| {
+                let name = reference.category.as_str();
+                reference
+                    .exemplars
+                    .into_iter()
+                    .map(move |exemplar| Category::new(name, exemplar))
+            })
+            .collect();
+        Self { categories }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.references.is_empty()
+        self.categories.is_empty()
     }
 
     /// Embed every category's exemplars in one batch.
@@ -201,18 +210,15 @@ impl ReferenceEmbeddings {
             )));
         }
 
-        let mut cursor = 0;
-        let mut references = Vec::with_capacity(ErrorCategory::CLASSIFIED.len());
-        for category in ErrorCategory::CLASSIFIED {
-            let count = category.exemplars().len();
-            references.push(CategoryReference {
-                category,
-                exemplars: vectors[cursor..cursor + count].to_vec(),
-            });
-            cursor += count;
-        }
+        let names = ErrorCategory::CLASSIFIED
+            .into_iter()
+            .flat_map(|category| category.exemplars().iter().map(move |_| category.as_str()));
+        let categories = names
+            .zip(vectors)
+            .map(|(name, exemplar)| Category::new(name, exemplar))
+            .collect();
 
-        Ok(Self::new(references))
+        Ok(Self { categories })
     }
 }
 
@@ -245,48 +251,20 @@ pub fn categorize(
     references: &ReferenceEmbeddings,
     policy: &CategorizationPolicy,
 ) -> Categorization {
-    if embedding.is_empty() || references.is_empty() {
-        return Categorization::unknown();
-    }
-
-    let mut scored: Vec<(ErrorCategory, f32)> = references
-        .references
-        .iter()
-        .map(|reference| {
-            let best = reference
-                .exemplars
-                .iter()
-                .map(|exemplar| cosine_similarity(exemplar, embedding) as f32)
-                .fold(f32::NEG_INFINITY, f32::max);
-            (reference.category, best)
+    Category::nearest_with_margin(
+        embedding,
+        &references.categories,
+        f64::from(policy.minimum_similarity),
+        f64::from(policy.minimum_margin),
+    )
+    .and_then(|found| {
+        Some(Categorization {
+            category: ErrorCategory::parse(&found.category.name)?,
+            confidence: found.score as f32,
+            margin: found.margin as f32,
         })
-        .filter(|(_, similarity)| similarity.is_finite())
-        .collect();
-
-    scored.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then(left.0.as_str().cmp(right.0.as_str()))
-    });
-
-    let Some(&(category, confidence)) = scored.first() else {
-        return Categorization::unknown();
-    };
-
-    let margin = scored
-        .get(1)
-        .map_or(confidence, |&(_, runner_up)| confidence - runner_up);
-
-    if confidence < policy.minimum_similarity || margin < policy.minimum_margin {
-        return Categorization::unknown();
-    }
-
-    Categorization {
-        category,
-        confidence,
-        margin,
-    }
+    })
+    .unwrap_or_else(Categorization::unknown)
 }
 
 #[cfg(test)]
@@ -448,6 +426,81 @@ mod tests {
             assigned.category,
             ErrorCategory::Unknown,
             "a vector from a different model must not be scored against these references"
+        );
+    }
+
+    #[test]
+    fn a_nan_bar_rejects_every_match() {
+        let references = references();
+        let exact = basis(direction(ErrorCategory::Build));
+        for policy in [
+            CategorizationPolicy {
+                minimum_similarity: f32::NAN,
+                ..CategorizationPolicy::default()
+            },
+            CategorizationPolicy {
+                minimum_margin: f32::NAN,
+                ..CategorizationPolicy::default()
+            },
+        ] {
+            assert_eq!(
+                categorize(&exact, &references, &policy).category,
+                ErrorCategory::Unknown,
+                "a bar that cannot be compared must refuse, not wave everything through"
+            );
+        }
+    }
+
+    #[test]
+    fn an_exemplar_of_another_dimension_is_not_a_runner_up() {
+        let references = ReferenceEmbeddings::new(vec![
+            CategoryReference {
+                category: ErrorCategory::Build,
+                exemplars: vec![vec![1.0, 0.0]],
+            },
+            CategoryReference {
+                category: ErrorCategory::TestFailure,
+                exemplars: vec![vec![-1.0, 0.0]],
+            },
+            CategoryReference {
+                category: ErrorCategory::Network,
+                exemplars: vec![vec![0.0, 1.0, 0.0]],
+            },
+        ]);
+
+        let assigned = categorize(&[1.0, 0.0], &references, &CategorizationPolicy::default());
+        assert_eq!(assigned.category, ErrorCategory::Build);
+        assert!(
+            (assigned.margin - 2.0).abs() < 1e-6,
+            "the margin is measured against test_failure at -1, not an unscorable exemplar at 0, got {}",
+            assigned.margin
+        );
+    }
+
+    #[test]
+    fn exemplars_of_one_category_do_not_compete_with_each_other() {
+        let build = direction(ErrorCategory::Build);
+        let references = ReferenceEmbeddings::new(vec![
+            CategoryReference {
+                category: ErrorCategory::Build,
+                exemplars: vec![basis(build), basis(build)],
+            },
+            CategoryReference {
+                category: ErrorCategory::TestFailure,
+                exemplars: vec![basis(direction(ErrorCategory::TestFailure))],
+            },
+        ]);
+
+        let assigned = categorize(&basis(build), &references, &CategorizationPolicy::default());
+        assert_eq!(
+            assigned.category,
+            ErrorCategory::Build,
+            "two exemplars of one category are not a tie between categories"
+        );
+        assert!(
+            (assigned.margin - 1.0).abs() < 1e-6,
+            "the margin is measured against test_failure, not a second build exemplar, got {}",
+            assigned.margin
         );
     }
 

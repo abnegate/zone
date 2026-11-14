@@ -7,14 +7,17 @@ use std::sync::Arc;
 use std::time::Instant;
 use zone_context::embeddings::{
     EmbeddingService,
-    providers::{AiSettings, DEFAULT_OLLAMA_EMBEDDING_MODEL, EmbeddingProviderFactory},
+    providers::{
+        AiSettings, DEFAULT_OLLAMA_EMBEDDING_MODEL, EMBEDDING_ENGINE_OLLAMA,
+        EmbeddingProviderFactory,
+    },
 };
 use zone_context::error::Result as ContextResult;
 
 use crate::db::ai_settings::EffectiveAiSettings;
 
 /// Environment variable selecting the self-hosted embedding engine
-/// (`ollama` or `local`).
+/// (`ollama`, `local` or `openai_compatible`).
 pub const EMBEDDING_ENGINE_ENV: &str = "EMBEDDING_ENGINE";
 
 /// Environment variable naming the self-hosted embedding model.
@@ -39,6 +42,21 @@ fn embedding_model_or_default(configured: Option<&str>) -> String {
         )
 }
 
+/// The host a self-hosted embedding `engine` reaches: Ollama's own for the
+/// native engine, since LiteLLM serves only the OpenAI-compatible
+/// `/v1/embeddings` and every native `/api/embeddings` call would 404
+/// there, and LiteLLM's for every other engine.
+pub fn embedding_host<'a>(
+    engine: Option<&str>,
+    ollama_host: &'a str,
+    litellm_host: &'a str,
+) -> &'a str {
+    match engine {
+        None | Some(EMBEDDING_ENGINE_OLLAMA) => ollama_host,
+        Some(_) => litellm_host,
+    }
+}
+
 /// Create an embedding service from effective AI settings.
 ///
 /// `engine` selects how `self_hosted` embeddings are computed; `None` keeps
@@ -48,7 +66,6 @@ pub fn create_embedding_service(
     settings: &EffectiveAiSettings,
     engine: Option<&str>,
 ) -> ContextResult<Arc<dyn EmbeddingService>> {
-    // Convert EffectiveAiSettings to zone_context AiSettings
     let ai_settings = AiSettings {
         provider: settings.provider.clone(),
         litellm_host: settings.litellm_host.clone(),
@@ -64,7 +81,7 @@ pub fn create_embedding_service(
     };
 
     EmbeddingProviderFactory::create(&ai_settings)
-        .map(|inner| instrument_embeddings(inner, engine.unwrap_or("ollama")))
+        .map(|inner| instrument_embeddings(inner, engine.unwrap_or(EMBEDDING_ENGINE_OLLAMA)))
 }
 
 struct InstrumentedEmbedding {
@@ -137,7 +154,28 @@ pub fn embedding_engine_from_env() -> Option<String> {
 mod tests {
     use super::*;
     use abnegate_secret::SecretValue;
-    use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
+    use zone_context::embeddings::providers::{
+        EMBEDDING_ENGINE_LOCAL, EMBEDDING_ENGINE_OPENAI_COMPATIBLE, PROVIDER_SELF_HOSTED,
+    };
+
+    const OLLAMA_HOST: &str = "http://host.docker.internal:11434";
+    const LITELLM_HOST: &str = "http://litellm:4000";
+
+    #[test]
+    fn the_native_ollama_engine_reaches_ollama_and_the_others_reach_litellm() {
+        for (engine, expected) in [
+            (None, OLLAMA_HOST),
+            (Some(EMBEDDING_ENGINE_OLLAMA), OLLAMA_HOST),
+            (Some(EMBEDDING_ENGINE_LOCAL), LITELLM_HOST),
+            (Some(EMBEDDING_ENGINE_OPENAI_COMPATIBLE), LITELLM_HOST),
+        ] {
+            assert_eq!(
+                embedding_host(engine, OLLAMA_HOST, LITELLM_HOST),
+                expected,
+                "{engine:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_create_embedding_service_ollama() {

@@ -2,6 +2,8 @@
 
 pub(super) mod provider;
 pub(super) mod pull_requests;
+mod snippet;
+pub(super) mod subagents;
 pub(super) mod tasks;
 
 use axum::{
@@ -20,18 +22,21 @@ use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
 use crate::services::chat::driver::Driver;
+use crate::services::chat::indicator::{self, Indicator};
 use crate::services::chat::session;
 use crate::services::model::Model;
 use crate::services::provider::Provider;
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
-use zone_core::context::ContextUsage;
+use abnegate_agent::context::ContextUsage;
 
 use super::common::{ErrorResponse, Timestamps};
 
 /// Maximum search limit
 const MAX_SEARCH_LIMIT: usize = 100;
+
+const MAX_LIST_LIMIT: i64 = 100;
 
 /// Maximum query length
 const MAX_QUERY_LENGTH: usize = 10_000;
@@ -148,8 +153,8 @@ pub struct ChatResponse {
     purpose: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     project_id: Option<Uuid>,
-    /// The provider the chat chose, null while it follows its workspace's. Only a single chat
-    /// whose choice could be read carries it.
+    /// The provider the chat chose, null while it follows its workspace's. A chat whose choice
+    /// couldn't be read leaves it out.
     #[serde(skip_serializing_if = "Option::is_none")]
     provider: Option<Option<Provider>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -383,10 +388,20 @@ async fn apply_character(
     Ok(chat)
 }
 
-/// Chats list response
+/// One page of a workspace's chats. `total` counts every chat the filter
+/// matches; `limit` is null when the page holds all of them from `offset` on.
 #[derive(Debug, Serialize)]
 pub struct ChatsListResponse {
     chats: Vec<ChatResponse>,
+    total: i64,
+    limit: Option<i64>,
+    offset: i64,
+}
+
+/// What each chat in the workspace is doing, for the list's indicators.
+#[derive(Debug, Serialize)]
+pub struct ChatIndicatorsResponse {
+    chats: Vec<Indicator>,
 }
 
 #[derive(Debug, Serialize)]
@@ -400,11 +415,27 @@ pub struct MessagesListResponse {
     messages: Vec<MessageResponse>,
 }
 
-/// Query parameters for listing chats
+/// Query parameters for listing chats. Without `limit` the list holds every
+/// chat from `offset` on.
 #[derive(Debug, Deserialize)]
 pub struct ListChatsQuery {
     workspace_id: Uuid,
     archived: Option<bool>,
+    #[serde(default)]
+    sort: chats::Sort,
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: i64,
+}
+
+fn parse_page(limit: Option<i64>, offset: i64) -> Result<chats::Page, String> {
+    if limit.is_some_and(|limit| !(1..=MAX_LIST_LIMIT).contains(&limit)) {
+        return Err(format!("Limit must be between 1 and {MAX_LIST_LIMIT}"));
+    }
+    if offset < 0 {
+        return Err("Offset must not be negative".to_string());
+    }
+    Ok(chats::Page { limit, offset })
 }
 
 /// Create chat request
@@ -479,45 +510,62 @@ pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(query): Query<ListChatsQuery>,
-) -> impl IntoResponse {
-    // Check workspace access
-    if let Err(e) = check_workspace_read_access(&state, &auth, query.workspace_id).await {
-        return e.into_response();
-    }
+) -> Result<Json<ChatsListResponse>, ServerError> {
+    check_workspace_read_access(&state, &auth, query.workspace_id).await?;
+    let page = parse_page(query.limit, query.offset).map_err(ServerError::BadRequest)?;
 
-    match chats::list_chats(state.db(), Some(query.workspace_id), query.archived).await {
-        Ok(items) => {
-            let ids: Vec<_> = items.iter().map(|chat| chat.id).collect();
-            match chats::links_for(state.db(), &ids).await {
-                Ok(links) => Json(ChatsListResponse {
-                    chats: items
-                        .into_iter()
-                        .map(|chat| {
-                            let id = chat.id;
-                            ChatResponse::from(chat).with_link(links.get(&id).cloned())
-                        })
-                        .collect(),
-                })
-                .into_response(),
-                Err(e) => {
-                    tracing::error!("Database error: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse::new("Internal server error")),
-                    )
-                        .into_response()
-                }
-            }
+    let (items, total) = tokio::try_join!(
+        chats::list_chats(
+            state.db(),
+            query.workspace_id,
+            query.archived,
+            query.sort,
+            page
+        ),
+        chats::count_chats(state.db(), query.workspace_id, query.archived),
+    )?;
+    let ids: Vec<_> = items.iter().map(|chat| chat.id).collect();
+    let choices = match chats::provider::of(state.db(), &ids).await {
+        Ok(choices) => Some(choices),
+        Err(error) => {
+            tracing::warn!(%error, "Could not read the listed chats' providers");
+            None
         }
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
-    }
+    };
+    let links = chats::links_for(state.db(), &ids).await?;
+
+    Ok(Json(ChatsListResponse {
+        chats: items
+            .into_iter()
+            .map(|chat| {
+                let id = chat.id;
+                let choice = choices.as_ref().map(|choices| choices.get(&id));
+                ChatResponse::from(chat)
+                    .with_link(links.get(&id).cloned())
+                    .with_choice(choice)
+            })
+            .collect(),
+        total,
+        limit: page.limit,
+        offset: page.offset,
+    }))
+}
+
+/// GET /api/chats/indicators
+///
+/// Separate from the list itself because it is read on a timer and can involve
+/// GitHub, while a list read has to stay quick and local.
+pub async fn indicators(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ListChatsQuery>,
+) -> Result<Json<ChatIndicatorsResponse>, ServerError> {
+    check_workspace_read_access(&state, &auth, query.workspace_id).await?;
+    let page = parse_page(query.limit, query.offset).map_err(ServerError::BadRequest)?;
+    Ok(Json(ChatIndicatorsResponse {
+        chats: indicator::list(&state, query.workspace_id, query.archived, query.sort, page)
+            .await?,
+    }))
 }
 
 /// POST /api/chats
@@ -1039,12 +1087,14 @@ pub async fn delete_message(
         .store
         .delete_message(&session.lease, message_id)
         .await;
+    if let Ok(Some(subagents)) = &result {
+        crate::ws::chat::announce_removed_subagents(chat_id, subagents.clone()).await;
+    }
     if let Err(error) = session.close().await {
         return ServerError::Conflict(error.to_string()).into_response();
     }
     match result {
-        Ok(true) => {
-            // Clean up embedding
+        Ok(Some(_)) => {
             if let Err(e) =
                 message_embeddings::delete_message_embedding(state.db(), message_id).await
             {
@@ -1064,7 +1114,7 @@ pub async fn delete_message(
             }
             StatusCode::NO_CONTENT.into_response()
         }
-        Ok(false) => (
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse::new("Message not found")),
         )
@@ -1126,7 +1176,7 @@ impl MessageSearchResponse {
             chat_title,
             similarity: result.similarity,
             relevance_score: result.similarity.clamp(0.0, 1.0),
-            snippet: zone_core::tools::excerpt(&result.content, SEARCH_SNIPPET_CHARS),
+            snippet: snippet::excerpt(&result.content, SEARCH_SNIPPET_CHARS),
             role: result.role,
             content: result.content,
             timestamps: Timestamps::from_naive(Some(result.created_at), Some(result.created_at)),
@@ -1215,7 +1265,7 @@ pub async fn search_messages(
     match state.embedding_service() {
         Some(embedding_service) => {
             match embedding_service
-                .embed(&zone_context::embed_query_text(
+                .embed(&abnegate_index::embed_query_text(
                     embedding_service.model(),
                     &params.query,
                 ))
@@ -1487,5 +1537,25 @@ mod tests {
             unread.get("provider").is_none() && unread.get("provider_model").is_none(),
             "an unread choice is not reported as following the workspace: {unread}"
         );
+    }
+
+    #[test]
+    fn a_page_takes_limits_from_one_to_a_hundred_or_none() {
+        for limit in [None, Some(1), Some(MAX_LIST_LIMIT)] {
+            assert_eq!(
+                parse_page(limit, 7),
+                Ok(chats::Page { limit, offset: 7 }),
+                "limit {limit:?}"
+            );
+        }
+        for limit in [0, -1, MAX_LIST_LIMIT + 1] {
+            assert!(parse_page(Some(limit), 0).is_err(), "limit {limit}");
+        }
+    }
+
+    #[test]
+    fn a_page_refuses_a_negative_offset() {
+        assert!(parse_page(None, -1).is_err());
+        assert!(parse_page(Some(10), -1).is_err());
     }
 }

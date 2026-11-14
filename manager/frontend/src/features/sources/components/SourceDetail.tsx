@@ -1,10 +1,13 @@
 import { Button } from '@zone/ui';
 import { useCallback, useMemo, useState } from 'react';
+import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import { getErrors } from '../../../validation';
-import { formStateFromConfig, getSourceById, getSourceLabel } from '../config';
-import { type SourceVerifyResponse, UpdateSourceRequestSchema } from '../schemas';
+import { formStateFromConfig, GITHUB_SOURCE_TYPE, getSourceById, getSourceLabel } from '../config';
+import { type SourceVerifyResponse, updateSourceRequestSchema } from '../schemas';
 import type { Source, UpdateSourceRequest } from '../types';
+import { isAppBacked } from '../utils';
 import { FormFieldRenderer, FormFieldsRenderer } from './FormFields';
+import { GitHubSourceConnection } from './GitHubSourceConnection';
 
 interface SourceDetailProps {
   source: Source;
@@ -12,6 +15,7 @@ interface SourceDetailProps {
   onSaved: () => Promise<void> | void;
   updateSource: (request: UpdateSourceRequest) => Promise<Source>;
   verifySource: () => Promise<SourceVerifyResponse>;
+  readOnly: boolean;
 }
 
 function configChanged(
@@ -28,8 +32,11 @@ export function SourceDetail({
   onSaved,
   updateSource,
   verifySource,
+  readOnly,
 }: SourceDetailProps) {
   const definition = getSourceById(source.source_type);
+  const { currentOrganization } = useWorkspace();
+  const organizationId = currentOrganization?.id ?? null;
   const baseline = useMemo(
     () => formStateFromConfig(source.source_type, source.config),
     [source.source_type, source.config]
@@ -57,7 +64,7 @@ export function SourceDetail({
     credentials !== '';
 
   const handleFieldChange = useCallback((id: string, value: unknown) => {
-    setFormState((prev) => ({ ...prev, [id]: value }));
+    setFormState((previous) => ({ ...previous, [id]: value }));
   }, []);
 
   const handleSave = async () => {
@@ -67,14 +74,14 @@ export function SourceDetail({
     if (name !== source.name) request.name = name;
     if (description !== descriptionBaseline) request.description = description;
     if (isActive !== source.is_active) request.is_active = isActive;
-    if (dirtyConfig && definition) {
-      request.config = definition.buildConfig(formState);
-      const url = definition.getUrl?.(formState);
-      if (url !== undefined) request.url = url;
+    if (dirtyConfig && definition) request.config = definition.buildConfig(formState);
+    if (credentials !== '') {
+      request.credentials = credentials;
+      const instance = definition?.getInstance?.(baseline);
+      if (instance !== undefined) request.instance = instance;
     }
-    if (credentials !== '') request.credentials = credentials;
 
-    const errors = getErrors(UpdateSourceRequestSchema, request);
+    const errors = getErrors(updateSourceRequestSchema(source.source_type), request);
     if (Object.keys(errors).length > 0) {
       setFieldErrors(errors);
       return;
@@ -87,8 +94,8 @@ export function SourceDetail({
       await updateSource(request);
       setCredentials('');
       await onSaved();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update source');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to update source');
     } finally {
       setSaving(false);
     }
@@ -102,8 +109,8 @@ export function SourceDetail({
       if (!result.verified) {
         setError(result.message || 'Verification failed');
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to verify source');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to verify source');
     } finally {
       setVerifying(false);
     }
@@ -112,7 +119,7 @@ export function SourceDetail({
   return (
     <section className="source-details">
       <header className="source-details-header">
-        <h2>{source.name}</h2>
+        <h3>{source.name}</h3>
         <Button variant="ghost" size="icon" onClick={onClose} aria-label="Close">
           <svg
             viewBox="0 0 24 24"
@@ -144,15 +151,44 @@ export function SourceDetail({
 
         <div className="form-group">
           <label htmlFor="source-type">Type</label>
-          <input id="source-type" value={getSourceLabel(source.source_type)} readOnly disabled />
+          <input
+            type="text"
+            id="source-type"
+            value={getSourceLabel(source.source_type)}
+            readOnly
+            disabled
+          />
         </div>
         <div className="form-group">
           <label htmlFor="source-url">URL</label>
-          <input id="source-url" className="input-mono" value={source.url} readOnly disabled />
+          <input
+            type="text"
+            id="source-url"
+            className="input-mono"
+            value={source.url}
+            readOnly
+            disabled
+          />
         </div>
+        {source.source_type === GITHUB_SOURCE_TYPE && (
+          <GitHubSourceConnection
+            source={source}
+            organizationId={organizationId}
+            updateSource={updateSource}
+            onSaved={onSaved}
+            onError={setError}
+            readOnly={readOnly}
+          />
+        )}
         <div className="form-group">
           <label htmlFor="source-name">Name</label>
-          <input id="source-name" value={name} onChange={(event) => setName(event.target.value)} />
+          <input
+            type="text"
+            id="source-name"
+            value={name}
+            disabled={readOnly}
+            onChange={(event) => setName(event.target.value)}
+          />
         </div>
         <div className="form-group">
           <label htmlFor="source-description">
@@ -162,6 +198,7 @@ export function SourceDetail({
           <textarea
             id="source-description"
             value={description}
+            disabled={readOnly}
             onChange={(event) => setDescription(event.target.value)}
             rows={3}
           />
@@ -175,15 +212,17 @@ export function SourceDetail({
           }}
           value={isActive}
           onChange={(_, value) => setIsActive(value as boolean)}
+          disabled={readOnly}
         />
         {definition && definition.formFields.length > 0 && (
           <FormFieldsRenderer
             fields={definition.formFields}
             state={formState}
             onChange={handleFieldChange}
+            disabled={readOnly}
           />
         )}
-        {definition?.credentialField && (
+        {definition?.credentialField && !isAppBacked(source) && !readOnly && (
           <FormFieldRenderer
             field={{ ...definition.credentialField, required: false }}
             value={credentials}
@@ -192,17 +231,19 @@ export function SourceDetail({
         )}
       </div>
 
-      <footer className="source-details-actions">
-        <Button variant="ghost" size="sm" onClick={handleVerify} loading={verifying}>
-          {verifying ? 'Verifying...' : 'Verify'}
-        </Button>
-        <Button variant="ghost" size="sm" onClick={onClose}>
-          Cancel
-        </Button>
-        <Button onClick={handleSave} disabled={!dirty || saving} loading={saving}>
-          Save
-        </Button>
-      </footer>
+      {!readOnly && (
+        <footer className="source-details-actions">
+          <Button variant="ghost" size="sm" onClick={handleVerify} loading={verifying}>
+            {verifying ? 'Verifying...' : 'Verify'}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button onClick={handleSave} disabled={!dirty || saving} loading={saving}>
+            Save
+          </Button>
+        </footer>
+      )}
     </section>
   );
 }

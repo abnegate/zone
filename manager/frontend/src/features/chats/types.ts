@@ -1,5 +1,7 @@
 import type { AiProvider } from '../settings/workspace/types';
+import type { TaskStatus } from '../tasks/status';
 import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
+import type { ChatSort } from './utils/arrange';
 
 export * from './provider';
 
@@ -57,8 +59,11 @@ export interface ToolCallRecord {
   success: boolean;
   detail: string;
   duration_ms: number;
+  /** Absent on calls stored before offsets were kept; those are drawn first. */
+  at?: number;
   /** Model thinking that immediately preceded this call. */
   reasoning?: string;
+  reasoning_at?: number;
   /**
    * Why the model said it was making this call. Side-effecting tools are asked
    * for one. Model-authored prose, so it is shown as stated, never as observed.
@@ -83,6 +88,12 @@ export interface ToolCallRecord {
   job?: JobStarted;
   /** What this call is waiting for, and until when. Server-authored and persisted. */
   waiting?: Waiting;
+  /**
+   * Why the call did not run, when the reader was asked and it was refused. Server-authored
+   * and persisted: `null` on a call that was not refused, and absent only on one stored
+   * before refusals were kept.
+   */
+  refusal?: Refusal | null;
   /**
    * Client-only: how the job ended, from the live exit frame. A job dies with
    * the turn that started it, so nothing durable records the exit and a reload
@@ -189,6 +200,38 @@ export const PREVIEW_LABEL = 'Effect, read from the call by the server';
 /// compares rather than letting a reload relabel the same call.
 export const AWAITING_ANSWER_DETAIL = 'Waiting for your answer…';
 
+/// What a call waiting for the reader to allow it is stored with. A record a
+/// stopped server left like that can no longer be allowed. Held to the
+/// server's `AWAITING_APPROVAL_DETAIL` by `schemas.contract.test.ts`.
+export const AWAITING_APPROVAL_DETAIL = 'Waiting for approval…';
+
+/// Why a call put to the reader did not run, as the server names it.
+export const REFUSALS = ['denied', 'timed_out', 'cancelled'] as const;
+export type Refusal = (typeof REFUSALS)[number];
+
+/// What a denied call is told. A record stored before refusals were kept says
+/// it was denied only in these words. Held to the server's `DENIED` by
+/// `schemas.contract.test.ts`.
+export const DENIED_DETAIL = 'The user denied this tool call.';
+
+/// Told to a call nobody approved in time, which is not the reader's answer.
+/// Held to the server's `APPROVAL_TIMED_OUT` by `schemas.contract.test.ts`.
+export const APPROVAL_TIMED_OUT_DETAIL =
+  'Nobody answered the approval request in time, so this tool call did not run.';
+
+/// Told to a call whose turn stopped while it waited for approval. Held to the
+/// server's `APPROVAL_CANCELLED` by `schemas.contract.test.ts`.
+export const APPROVAL_CANCELLED_DETAIL =
+  'The turn stopped before this tool call was approved, so it did not run.';
+
+/// Held to the server's `ERROR_PREFIX` by `schemas.contract.test.ts`.
+export const TOOL_ERROR_PREFIX = 'Error: ';
+
+/// What a call a turn never finished shows, written by the console on a turn it
+/// stopped and by the server on the record it stores. Held to the server's
+/// `UNFINISHED_DETAIL` by `schemas.contract.test.ts`.
+export const UNFINISHED_DETAIL = 'Did not finish';
+
 /// Tools that change something outside the conversation and are therefore
 /// asked to say why. The trace row is where a reader sees that answer, whether
 /// the call is still waiting on them or already done, so an absent reason is
@@ -264,6 +307,8 @@ export interface Handover {
   resets_at?: string;
   carried: boolean;
   at: number;
+  calls?: number;
+  reasoning?: string;
 }
 
 export interface MessageMetadata {
@@ -277,6 +322,7 @@ export interface MessageMetadata {
   memory_used?: boolean;
   /** Model thinking text, when the deployment advertised reasoning. */
   reasoning?: string;
+  reasoning_at?: number;
   handovers?: Handover[];
   source?: string;
   reminder_id?: string;
@@ -302,6 +348,18 @@ export interface ChatCharacter {
   post_history_instructions?: string | null;
   stop_sequences?: string[];
   source_name?: string | null;
+}
+
+export interface ChatPageRequest {
+  archived?: boolean;
+  sort?: ChatSort;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ChatPage {
+  chats: Chat[];
+  total: number;
 }
 
 export interface Chat {
@@ -414,6 +472,13 @@ export interface SendMessageRequest {
   metadata?: MessageMetadata;
 }
 
+/** A message sent while a turn was running, waiting on the server for its turn. */
+export interface QueuedMessage {
+  id: string;
+  content: string;
+  metadata?: MessageMetadata | null;
+}
+
 export interface ChatSearchResult {
   message_id: string;
   chat_id: string;
@@ -491,9 +556,55 @@ export const PULL_REQUEST_MERGEABILITY = [
 ] as const;
 export type PullRequestMergeability = (typeof PULL_REQUEST_MERGEABILITY)[number];
 
+export const PULL_REQUEST_CONNECTIONS = [
+  'credentialed',
+  'uncredentialed',
+  'disconnected',
+  'unavailable',
+] as const;
+export type PullRequestConnection = (typeof PULL_REQUEST_CONNECTIONS)[number];
+
 export interface PullRequestAutoMerge {
   enabled: boolean;
   unavailable: string | null;
+}
+
+export interface PullRequestThreads {
+  open: number;
+  resolved: number;
+}
+
+export const CHAT_ACTIVITIES = ['writing', 'awaiting_approval', 'awaiting_answer', 'idle'] as const;
+/**
+ * What a chat is doing, as the server reads it: a turn in flight, a turn parked
+ * on an approval, a question with no answer after it, or nothing outstanding.
+ */
+export type ChatActivity = (typeof CHAT_ACTIVITIES)[number];
+
+/** The pull request a chat's row speaks for. */
+export interface ChatPullIndicator {
+  id: string;
+  number: number;
+  url: string;
+  title: string | null;
+  /** Absent when GitHub could not be asked, which is never a passing result. */
+  status: PullRequestStatus | null;
+  /**
+   * Whether it could merge as it stands: open, out of draft, every check
+   * passing, nothing blocking the merge and no open review thread. The server
+   * decides it, so the console never has to guess at a rule that has to match
+   * what a merge would actually do.
+   */
+  ready: boolean;
+}
+
+/** One chat as its row in the list shows it. */
+export interface ChatIndicator {
+  chat_id: string;
+  activity: ChatActivity;
+  pull_request: ChatPullIndicator | null;
+  /** How many undismissed pull requests the chat has. */
+  pull_requests: number;
 }
 
 export interface PullRequestStatus {
@@ -507,6 +618,7 @@ export interface PullRequestStatus {
   mergeable: PullRequestMergeability;
   auto_merge: PullRequestAutoMerge;
   draft_unavailable: string | null;
+  threads: PullRequestThreads | null;
   observed_at: string;
 }
 
@@ -523,28 +635,25 @@ export interface ChatPullRequest {
   status: PullRequestStatus | null;
   writable: boolean;
   credentialed: boolean;
+  /** How the workspace reaches GitHub for it, and so why it cannot when it cannot. */
+  connection: PullRequestConnection;
+  /** Whether a failing or conflicted state starts a run that fixes it. */
+  auto_fix: boolean;
+  /** Whether such a run is already answering for its current state. */
+  auto_fixing: boolean;
 }
 
 export interface PullRequestChange {
   dismissed?: boolean;
   draft?: boolean;
   auto_merge?: boolean;
+  auto_fix?: boolean;
 }
 
 export interface PullRequestDiff {
   diff: string;
   truncated: boolean;
 }
-
-export const CHAT_TASK_STATUSES = [
-  'created',
-  'queued',
-  'in_progress',
-  'review',
-  'complete',
-  'blocked',
-] as const;
-export type ChatTaskStatus = (typeof CHAT_TASK_STATUSES)[number];
 
 export const CHAT_TASK_RUN_STATUSES = [
   'running',
@@ -573,7 +682,7 @@ export interface ChatTask {
   id: string;
   title: string;
   title_pending: boolean;
-  status: ChatTaskStatus;
+  status: TaskStatus;
   is_agentic: boolean;
   href: string;
   created_at: string | null;

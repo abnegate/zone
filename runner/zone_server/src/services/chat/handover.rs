@@ -13,22 +13,27 @@ pub use notice::Notice;
 pub use reason::Reason;
 pub use switch::Switch;
 
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
+use std::path::PathBuf;
 
+use abnegate_agent::chat::NewEntry;
+use abnegate_agent::context::Entry;
+use abnegate_agent_cli::AgentKind;
+use abnegate_agent_cli::Session;
 use abnegate_llm::Message;
 use chrono::Utc;
 use uuid::Uuid;
-use zone_chat::history::NewEntry;
-use zone_core::context::Entry;
-use zone_core::llm::{AgentKind, LlmBackend, Session};
+use zone_core::llm::LlmBackend;
 
 use super::session::RunContext;
 use crate::config::Config;
-use crate::db::agent_logins::{self, AgentLoginRow};
+use crate::db::agent_logins;
+use crate::db::agent_logins::AgentLoginRow;
 use crate::db::chats::ChatSession;
 use crate::services::agent::sessions;
-use crate::services::backend::{self, Continuation, Resolved};
+use crate::services::backend;
+use crate::services::backend::Continuation;
+use crate::services::backend::Resolved;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
 use crate::services::login::usage::Availability;
@@ -117,8 +122,7 @@ impl Handover {
     /// among those the turn has not run on, the current agent's first, or only the current
     /// agent's when [`Self::strict`]. Session `session` is
     /// carried along when the new login runs the same agent and that agent resumes a session
-    /// carried in from another home; otherwise the turn starts a fresh session there. Either way
-    /// the new backend is bounded by `timeout`.
+    /// carried in from another home; otherwise the turn starts a fresh session there.
     ///
     /// When no login is left, the error to end the turn with: the organization's limit when
     /// a subscription limit is what left none, and `None` when the turn's own failure says
@@ -128,7 +132,6 @@ impl Handover {
         state: &AppState,
         cause: &Cause,
         session: Option<&str>,
-        timeout: Duration,
     ) -> Result<Switch, Option<backend::Error>> {
         let from = self.current.clone();
         let running = self.model.on(from.agent);
@@ -163,9 +166,8 @@ impl Handover {
             }
         };
         let config = state.config();
-        let carried = chosen.agent == from.agent
-            && sessions::portable(chosen.agent)
-            && session.is_some_and(|id| {
+        let carried = match session {
+            Some(id) if chosen.agent == from.agent && sessions::portable(chosen.agent) => {
                 carry(
                     config,
                     self.organization,
@@ -174,12 +176,12 @@ impl Handover {
                     self.directory.as_deref(),
                     id,
                 )
-            });
+                .await
+            }
+            _ => false,
+        };
         let session = match session.filter(|_| carried) {
-            Some(id) => Some(Session {
-                id: id.to_string(),
-                resume: true,
-            }),
+            Some(id) => Some(Session::resumed(id.to_string())),
             None => Continuation::fresh(chosen.agent),
         };
         let resolved =
@@ -197,7 +199,7 @@ impl Handover {
         let model = (to.agent != from.agent).then(|| self.model.on(to.agent));
         self.current = to.clone();
         Ok(Switch {
-            backend: backend::bounded(running, timeout),
+            backend: running,
             from,
             to,
             reason: cause.reason,
@@ -239,7 +241,7 @@ pub async fn opening(
     let unfunded = model.is_some_and(|model| router::unfunded::cooling(model, now).contains(&left));
     let (reason, resets_at) = match from.agent != configured && to.agent == configured {
         true => (Reason::Configured, None),
-        false => standing(&row, unfunded, now),
+        false => standing(&row, model, unfunded, now),
     };
     let carried = previous.agent == to.agent
         && from.agent == to.agent
@@ -251,14 +253,12 @@ pub async fn opening(
             (left, to.id),
             directory,
             &previous.id,
-        );
+        )
+        .await;
     if carried {
         resolved.backend = resumed(
             std::mem::replace(&mut resolved.backend, LlmBackend::Http),
-            Session {
-                id: previous.id.clone(),
-                resume: true,
-            },
+            Session::resumed(previous.id.clone()),
         );
     }
     Some(Notice {
@@ -270,16 +270,19 @@ pub async fn opening(
         resets_at,
         carried,
         at: 0,
+        calls: 0,
+        reasoning: None,
     })
 }
 
 /// The text a turn wrote on a login before it left, as the assistant entry the chat keeps of it.
 /// Nothing when it wrote none.
 pub fn partial(text: &str) -> Option<NewEntry> {
-    (!text.trim().is_empty()).then(|| NewEntry {
-        id: Uuid::new_v4().to_string(),
-        message: (&Message::assistant(text)).into(),
-        mutations: Vec::new(),
+    (!text.trim().is_empty()).then(|| {
+        NewEntry::new(
+            Uuid::new_v4().to_string(),
+            (&Message::assistant(text)).into(),
+        )
     })
 }
 
@@ -308,19 +311,22 @@ pub fn carried(whole: &RunContext) -> RunContext {
 /// [`CONTINUE`], from the user so it follows the answer rather than opening the transcript with
 /// the instructions, and consumed already so it is never written to the chat.
 fn instruction() -> Entry {
-    Entry {
-        id: INSTRUCTION.into(),
-        message: Message::user(CONTINUE),
-        preserve: true,
-        consumed: true,
-    }
+    Entry::new(INSTRUCTION, Message::user(CONTINUE))
+        .with_preserve(true)
+        .with_consumed(true)
 }
 
 /// Moves the session `resolved` is about to resume to where its agent will look for it from the
 /// directory it runs in, since the chat may have started somewhere else before. One that cannot
-/// be moved is left for the agent to refuse, and the turn then replays the chat.
-pub fn settle(config: &Config, organization: Uuid, resolved: &Resolved) {
-    let (Some(login), LlmBackend::Cli { agent, settings }) = (&resolved.login, &resolved.backend)
+/// be moved is left for the agent to refuse, and the turn then replays the chat. The move runs on
+/// a blocking thread, off the runtime.
+pub async fn settle(config: &Config, organization: Uuid, resolved: &Resolved) {
+    let (
+        Some(login),
+        LlmBackend::Cli {
+            agent, settings, ..
+        },
+    ) = (&resolved.login, &resolved.backend)
     else {
         return;
     };
@@ -330,17 +336,26 @@ pub fn settle(config: &Config, organization: Uuid, resolved: &Resolved) {
     if !session.resume {
         return;
     }
-    let home = config.agents.login_home(organization, *agent, login.id);
-    if let Err(error) = sessions::relocate(&home, *agent, work, &session.id) {
-        tracing::info!(%error, "The agent session cannot be moved to the chat's directory");
+    let agent = *agent;
+    let home = config.agents.login_home(organization, agent, login.id);
+    let work = work.clone();
+    let session = session.clone();
+    match tokio::task::spawn_blocking(move || session.relocate(agent, &home, &work)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::info!(%error, "The agent session cannot be moved to the chat's directory");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Moving the agent session to the chat's directory did not finish");
+        }
     }
 }
 
 /// Copies session `id`'s file from login `from`'s home into login `to`'s, both `agent`'s logins
 /// of `organization`, to where `agent` looks for it from `directory`, or from the organization's
-/// working directory when the chat has none of its own. False when it cannot, and the turn
-/// replays instead.
-fn carry(
+/// working directory when the chat has none of its own. False when it cannot, whatever the
+/// reason, and the turn replays instead. The copy runs on a blocking thread, off the runtime.
+async fn carry(
     config: &Config,
     organization: Uuid,
     agent: AgentKind,
@@ -348,29 +363,31 @@ fn carry(
     directory: Option<&Path>,
     id: &str,
 ) -> bool {
-    let home = match config.agents.create_login_home(organization, agent, to) {
-        Ok(home) => home,
-        Err(error) => {
-            tracing::warn!(login = %to, %error, "Could not prepare the login's home for a carried session");
-            return false;
-        }
-    };
-    match sessions::carry(
-        &config.agents.login_home(organization, agent, from),
-        &home,
-        agent,
-        &directory.map_or_else(
-            || config.agents.work(organization, agent),
-            Path::to_path_buf,
-        ),
-        id,
-    ) {
-        Ok(carried) => {
+    let agents = config.agents.clone();
+    let work = directory.map_or_else(|| agents.work(organization, agent), Path::to_path_buf);
+    let left = agents.login_home(organization, agent, from);
+    let session = Session::resumed(id);
+    let copied = tokio::task::spawn_blocking(move || {
+        agents
+            .create_login_home(organization, agent, to)
+            .map(|home| session.carry(agent, &left, &home, &work))
+    })
+    .await;
+    match copied {
+        Ok(Ok(Ok(carried))) => {
             tracing::debug!(path = %carried.path.display(), bytes = carried.bytes, "Carried the agent session to the next login");
             true
         }
-        Err(error) => {
+        Ok(Ok(Err(error))) => {
             tracing::info!(%error, "The agent session cannot be carried; replaying the chat instead");
+            false
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(login = %to, %error, "Could not prepare the login's home for a carried session");
+            false
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Carrying the agent session did not finish; replaying the chat instead");
             false
         }
     }
@@ -378,12 +395,7 @@ fn carry(
 
 /// `backend` resuming `session` in place of the one it was given.
 fn resumed(backend: LlmBackend, session: Session) -> LlmBackend {
-    match backend {
-        LlmBackend::Cli { agent, settings } => {
-            LlmBackend::cli(agent, settings.with_session(session))
-        }
-        LlmBackend::Http => LlmBackend::Http,
-    }
+    backend.configured(|settings| settings.with_session(session))
 }
 
 /// `row` as the chat names it.
@@ -400,18 +412,19 @@ fn identity(row: &AgentLoginRow) -> Option<LoginIdentity> {
     })
 }
 
-/// Why the router passed over `row`, which it keeps a chat on while it can run: a limit it
-/// reached, and when that resets, else the chat's model it refused lately for want of usage
-/// credits, when it is `unfunded`, else a sign-in that can no longer be used.
+/// Why the router passed over `row`, which it keeps a chat on `model` on while it can run: a limit
+/// on `model` it reached, and when that resets, else the chat's model it refused lately for want
+/// of usage credits, when it is `unfunded`, else a sign-in that can no longer be used.
 fn standing(
     row: &AgentLoginRow,
+    model: Option<&str>,
     unfunded: bool,
     now: chrono::DateTime<Utc>,
 ) -> (Reason, Option<chrono::DateTime<Utc>>) {
     if let Some(until) = row.exhausted_until.filter(|until| *until > now) {
         return (Reason::Limit, Some(until));
     }
-    match row.snapshot() {
+    match row.snapshot().map(|snapshot| snapshot.on(model)) {
         Some(snapshot) if snapshot.headroom.is_some_and(|headroom| headroom <= 0.0) => {
             let resets_at = match snapshot.availability() {
                 Availability::At(until) if until > now => Some(until),
@@ -428,22 +441,35 @@ fn standing(
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::Condvar;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use std::time::Instant;
 
+    use abnegate_agent::context::project;
+    use abnegate_agent_cli::CliSettings;
+    use abnegate_agent_cli::SessionError;
+    use abnegate_agent_cli::login::claude::Tokens;
+    use abnegate_agent_cli::transcript::render;
     use abnegate_llm::Limit;
     use abnegate_secret::SecretValue;
-    use chrono::{DateTime, SecondsFormat, TimeDelta, TimeZone};
+    use chrono::DateTime;
+    use chrono::SecondsFormat;
+    use chrono::TimeDelta;
+    use chrono::TimeZone;
     use sqlx::PgPool;
     use tempfile::TempDir;
-    use zone_core::context::project;
-    use zone_core::llm::CliSettings;
-    use zone_core::llm::provider::render;
+    use tokio::runtime::Builder;
+    use tokio::runtime::Runtime;
 
     use super::*;
     use crate::config::AgentConfig;
     use crate::db::agent_logins::Insert;
     use crate::db::organizations;
-    use crate::services::chat::session::{Generation, Pinned};
-    use crate::services::login::claude::Tokens;
+    use crate::services::chat::session::Generation;
+    use crate::services::chat::session::Pinned;
+    use crate::services::login::claude::Sealed;
     use crate::services::login::router::Chosen;
     use crate::services::stages::Preferences;
 
@@ -454,6 +480,8 @@ mod tests {
     const TRANSCRIPT: &[u8] = b"{\"type\":\"user\",\"message\":\"Name three rivers.\"}\n";
     const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
     const CODEX_HOME: &str = "CODEX_HOME";
+    const ESCAPE: &str = "../escape";
+    const STAGING: &str = ".carrying-";
 
     fn whole() -> RunContext {
         RunContext::from_messages(vec![
@@ -486,9 +514,51 @@ mod tests {
         }
     }
 
+    /// A config whose agent homes live under `state`, for tests that need no database.
+    fn configured(state: &Path) -> Config {
+        Config {
+            agents: AgentConfig {
+                state: state.to_path_buf(),
+                ..crate::state::test_agents()
+            },
+            ..crate::state::test_config()
+        }
+    }
+
+    /// Writes claude session `id`'s file into `home`, in the folder claude keeps for turns run in
+    /// `work`.
+    fn transcript(home: &Path, work: &Path, id: &str) -> PathBuf {
+        let path = home
+            .join("projects")
+            .join(Session::project(work))
+            .join(format!("{id}.jsonl"));
+        fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
+        fs::write(&path, TRANSCRIPT).expect("the session file");
+        path
+    }
+
+    /// Every file under `root` a carry stages a session in before it takes its place.
+    fn staged(root: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(root) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .flat_map(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => staged(&entry.path()),
+                _ if entry.file_name().to_string_lossy().starts_with(STAGING) => {
+                    vec![entry.path()]
+                }
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
     fn cli(backend: &LlmBackend) -> (AgentKind, &CliSettings) {
         match backend {
-            LlmBackend::Cli { agent, settings } => (*agent, settings),
+            LlmBackend::Cli {
+                agent, settings, ..
+            } => (*agent, settings),
             LlmBackend::Http => panic!("a handover runs on a coding agent"),
         }
     }
@@ -546,10 +616,7 @@ mod tests {
     fn a_carried_session_the_cli_refuses_falls_back_to_a_replay_with_the_partial() {
         let from = identity(AgentKind::Claude, "a@example.com");
         let to = identity(AgentKind::Claude, "b@example.com");
-        let resumed = Session {
-            id: SESSION.into(),
-            resume: true,
-        };
+        let resumed = Session::resumed(SESSION);
         let generation = Generation {
             resolved: Resolved {
                 backend: LlmBackend::cli(
@@ -566,6 +633,7 @@ mod tests {
                 prompt: Some("a".repeat(64)),
             }),
             directory: None,
+            origin: crate::db::tasks::Origin::Member,
         };
         let mut pinned = Pinned::of(&generation).expect("a session on a login");
         pinned.sees("b".repeat(64), 6);
@@ -628,6 +696,7 @@ mod tests {
             },
             session: None,
             directory: None,
+            origin: crate::db::tasks::Origin::Member,
         };
         let mut pinned = Pinned::of(&generation).expect("a session on a login");
         pinned.keep(whole());
@@ -690,16 +759,16 @@ mod tests {
         }
 
         async fn claude(&self, label: &str) -> LoginIdentity {
-            let tokens = Tokens {
-                access: SecretValue::new(format!("fake-claude-access-token-{label}")),
-                refresh: None,
-                expires_at: Utc::now() + TimeDelta::days(30),
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            };
+            let tokens = Tokens::new(
+                SecretValue::new(format!("fake-claude-access-token-{label}")),
+                None,
+                Utc::now() + TimeDelta::days(30),
+                None,
+                "user:inference",
+                None,
+            );
             let sealed = tokens
-                .seal(self.state.encryption_key())
+                .seal(self.state.master_key())
                 .expect("tokens to seal");
             self.store(AgentKind::Claude, Some(&sealed), label).await
         }
@@ -776,7 +845,7 @@ mod tests {
             let directory = fs::canonicalize(directory).expect("the directory");
             let path = home
                 .join("projects")
-                .join(sessions::sanitized(&directory))
+                .join(Session::project(&directory))
                 .join(format!("{id}.jsonl"));
             fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
             fs::write(&path, b"{}\n").expect("the session file");
@@ -793,14 +862,16 @@ mod tests {
             let work = fs::canonicalize(self.work(login.agent)).expect("the working directory");
             let path = home
                 .join("projects")
-                .join(sessions::sanitized(&work))
+                .join(Session::project(&work))
                 .join(format!("{id}.jsonl"));
             fs::create_dir_all(path.parent().expect("a project folder")).expect("the folder");
             fs::write(path, TRANSCRIPT).expect("the session file");
         }
 
         fn carried(&self, login: &LoginIdentity, id: &str) -> bool {
-            sessions::locate(&self.home(login), login.agent, &self.work(login.agent), id).is_some()
+            Session::resumed(id)
+                .locate(login.agent, &self.home(login), &self.work(login.agent))
+                .is_some()
         }
 
         async fn exhausted_until(&self, login: &LoginIdentity) -> Option<DateTime<Utc>> {
@@ -821,7 +892,7 @@ mod tests {
         }
     }
 
-    const TIMEOUT: Duration = Duration::from_secs(90);
+    const GATE: Duration = Duration::from_secs(90);
 
     #[tokio::test]
     async fn a_switch_to_another_agent_replays_and_repicks_the_model() {
@@ -832,7 +903,7 @@ mod tests {
         let mut handover = fixture.handover(&claude);
 
         let switch = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         let exhausted = fixture.exhausted_until(&claude).await;
         let codex_work = fixture.work(AgentKind::Codex);
@@ -862,7 +933,11 @@ mod tests {
             settings.variables.get(CODEX_HOME).map(PathBuf::from),
             Some(codex_home)
         );
-        assert_eq!(settings.timeout, TIMEOUT);
+        assert!(
+            Instant::now().checked_add(settings.timeout).is_none(),
+            "the login a turn moves onto stops it after {:?}",
+            settings.timeout
+        );
         assert_eq!(
             exhausted,
             Some(resets()),
@@ -870,7 +945,8 @@ mod tests {
         );
         assert_eq!(handover.login(), codex.id);
         assert_eq!(
-            serde_json::to_value(switch.notice(12)).expect("a notice"),
+            serde_json::to_value(switch.notice(12, 3, Some("Out of room.".to_string())))
+                .expect("a notice"),
             serde_json::json!({
                 "from": "a@example.com",
                 "to": "c@example.com",
@@ -880,6 +956,8 @@ mod tests {
                 "resets_at": "2027-09-23T06:10:00Z",
                 "carried": false,
                 "at": 12,
+                "calls": 3,
+                "reasoning": "Out of room.",
             })
         );
     }
@@ -898,11 +976,10 @@ mod tests {
                 &fixture.state,
                 &Cause::signed_out("Not logged in".into()),
                 Some(SESSION),
-                TIMEOUT,
             )
             .await;
         let spent = limited
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         fixture.remove().await;
 
@@ -935,7 +1012,7 @@ mod tests {
         let mut handover = fixture.handover(&from);
 
         let switch = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         let landed = fixture.carried(&to, SESSION);
         let home = fixture.home(&to);
@@ -948,13 +1025,7 @@ mod tests {
         assert_eq!(switch.to, to);
         assert!(switch.carried);
         assert!(landed, "the session file is in the next login's home");
-        assert_eq!(
-            switch.session(),
-            Some(Session {
-                id: SESSION.into(),
-                resume: true
-            })
-        );
+        assert_eq!(switch.session(), Some(Session::resumed(SESSION)));
         assert_eq!(switch.model, None, "the same agent keeps the turn's model");
         assert_eq!(
             settings.variables.get(CLAUDE_CONFIG_DIR).map(PathBuf::from),
@@ -975,7 +1046,7 @@ mod tests {
             .in_directory(Some(project.path().to_path_buf()));
 
         let switch = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         let landed = fixture
             .home(&to)
@@ -1005,9 +1076,7 @@ mod tests {
         let left = fixture
             .home(&login)
             .join("projects")
-            .join(sessions::sanitized(
-                &fs::canonicalize(fixture.work(AgentKind::Claude)).expect("the working directory"),
-            ));
+            .join(Session::project(&fixture.work(AgentKind::Claude)));
         let project = TempDir::new().expect("a project folder");
         let chosen: Chosen = router::pick(
             &fixture.state,
@@ -1024,25 +1093,196 @@ mod tests {
             fixture.state.config(),
             fixture.organization,
             &chosen,
-            Some(Session {
-                id: SESSION.into(),
-                resume: true,
-            }),
+            Some(Session::resumed(SESSION)),
         )
         .expect("a backend");
         resolved.backend = backend::in_directory(resolved.backend, project.path());
 
-        settle(fixture.state.config(), fixture.organization, &resolved);
-        let found = sessions::locate(
-            &fixture.home(&login),
+        settle(fixture.state.config(), fixture.organization, &resolved).await;
+        let found = Session::resumed(SESSION).locate(
             AgentKind::Claude,
+            &fixture.home(&login),
             project.path(),
-            SESSION,
         );
         fixture.remove().await;
 
         assert!(found.is_some(), "the agent would not find its session");
         assert!(!left.join(format!("{SESSION}.jsonl")).exists());
+    }
+
+    /// A current-thread runtime whose blocking threads start their work only once `progress` is
+    /// set, or after [`GATE`], so work sent off the runtime cannot finish before the runtime's
+    /// own thread has moved on.
+    fn gated(progress: &Arc<(Mutex<bool>, Condvar)>) -> Runtime {
+        let progress = Arc::clone(progress);
+        Builder::new_current_thread()
+            .on_thread_start(move || {
+                let (made, signal) = &*progress;
+                let made = made.lock().expect("the progress flag");
+                drop(
+                    signal
+                        .wait_timeout_while(made, GATE, |made| !*made)
+                        .expect("the progress flag"),
+                );
+            })
+            .build()
+            .expect("a current-thread runtime")
+    }
+
+    #[test]
+    fn settling_a_handover_relocates_off_the_runtime() {
+        let agents = TempDir::new().expect("an agent state root");
+        let config = configured(agents.path());
+        let organization = Uuid::new_v4();
+        let login = identity(AgentKind::Claude, "a@example.com");
+        let home = config
+            .agents
+            .create_login_home(organization, AgentKind::Claude, login.id)
+            .expect("the login's home");
+        let left = transcript(
+            &home,
+            &config.agents.work(organization, AgentKind::Claude),
+            SESSION,
+        );
+        let project = TempDir::new().expect("a project folder");
+        let resolved = Resolved {
+            backend: LlmBackend::cli(
+                AgentKind::Claude,
+                CliSettings::default()
+                    .with_working_directory(project.path())
+                    .with_session(Session::resumed(SESSION)),
+            ),
+            login: Some(login),
+        };
+        let progress = Arc::new((Mutex::new(false), Condvar::new()));
+
+        let overlapped = gated(&progress).block_on(async {
+            let (made, signal) = &*progress;
+            let (overlapped, ()) = tokio::join!(
+                async {
+                    settle(&config, organization, &resolved).await;
+                    *made.lock().expect("the progress flag")
+                },
+                async {
+                    *made.lock().expect("the progress flag") = true;
+                    signal.notify_all();
+                },
+            );
+            overlapped
+        });
+
+        assert!(
+            overlapped,
+            "the runtime's only thread was held while the session moved"
+        );
+        assert!(
+            Session::resumed(SESSION)
+                .locate(AgentKind::Claude, &home, project.path())
+                .is_some(),
+            "the agent would not find its session"
+        );
+        assert!(!left.exists(), "one session stays in one place");
+    }
+
+    #[tokio::test]
+    async fn a_carry_leaves_no_staging_file_behind() {
+        let agents = TempDir::new().expect("an agent state root");
+        let config = configured(agents.path());
+        let organization = Uuid::new_v4();
+        let from = Uuid::new_v4();
+        let work = config.agents.work(organization, AgentKind::Claude);
+        let home = config
+            .agents
+            .create_login_home(organization, AgentKind::Claude, from)
+            .expect("the login's home");
+        transcript(&home, &work, SESSION);
+        let folder = |login: Uuid| {
+            config
+                .agents
+                .create_login_home(organization, AgentKind::Claude, login)
+                .expect("the login's home")
+                .join("projects")
+                .join(Session::project(&work))
+        };
+        let (landed, filed, occupied) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let file = folder(filed);
+        fs::create_dir_all(file.parent().expect("the projects folder"))
+            .expect("the projects folder");
+        fs::write(&file, TRANSCRIPT).expect("a file where the session's folder goes");
+        fs::create_dir_all(
+            folder(occupied)
+                .join(format!("{SESSION}.jsonl"))
+                .join("held"),
+        )
+        .expect("a directory where the session goes");
+        let into = |to: Uuid| {
+            carry(
+                &config,
+                organization,
+                AgentKind::Claude,
+                (from, to),
+                None,
+                SESSION,
+            )
+        };
+
+        let carried = into(landed).await;
+        let refused = into(filed).await;
+        let blocked = into(occupied).await;
+
+        assert!(carried, "the session was not carried");
+        assert!(
+            !refused,
+            "a session was carried into a folder that is a file"
+        );
+        assert!(!blocked, "a session replaced a directory");
+        assert_eq!(
+            staged(agents.path()),
+            Vec::<PathBuf>::new(),
+            "a carry left its staging file behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalid_session_id_starts_the_chat_fresh() {
+        let fixture = Fixture::new().await;
+        let from = fixture.claude("a@example.com").await;
+        let to = fixture.claude("b@example.com").await;
+        fixture.session(&from, SESSION);
+        let projects = fixture.home(&from).join("projects");
+        fs::write(projects.join("escape.jsonl"), TRANSCRIPT).expect("a file the id names");
+        let refused = Session::resumed(ESCAPE).carry(
+            AgentKind::Claude,
+            &fixture.home(&from),
+            &fixture.home(&to),
+            &fixture.work(AgentKind::Claude),
+        );
+        let mut handover = fixture.handover(&from);
+
+        let switch = handover
+            .next(&fixture.state, &limit(false), Some(ESCAPE))
+            .await;
+        let escaped = fixture
+            .home(&to)
+            .join("projects")
+            .join("escape.jsonl")
+            .exists();
+        fixture.remove().await;
+
+        assert!(
+            matches!(&refused, Err(SessionError::Invalid { id, .. }) if id == ESCAPE),
+            "{refused:?}"
+        );
+        let switch = switch.expect("the other claude login takes the turn over");
+        assert_eq!(switch.to, to);
+        assert!(!switch.carried);
+        assert!(
+            !escaped,
+            "the id carried a file outside the session folders"
+        );
+        let fresh = switch.session().expect("claude is pinned to a fresh id");
+        assert!(!fresh.resume);
+        assert_ne!(fresh.id, ESCAPE);
     }
 
     #[tokio::test]
@@ -1053,7 +1293,7 @@ mod tests {
         let mut handover = fixture.handover(&from);
 
         let switch = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         fixture.remove().await;
 
@@ -1078,7 +1318,6 @@ mod tests {
                 &fixture.state,
                 &Cause::signed_out("Not logged in".into()),
                 None,
-                TIMEOUT,
             )
             .await
             .map(|switch| switch.to.id);
@@ -1087,7 +1326,6 @@ mod tests {
                 &fixture.state,
                 &Cause::signed_out("Not logged in".into()),
                 None,
-                TIMEOUT,
             )
             .await
             .map(|switch| switch.to.id);
@@ -1096,7 +1334,6 @@ mod tests {
                 &fixture.state,
                 &Cause::signed_out("Not logged in".into()),
                 None,
-                TIMEOUT,
             )
             .await
             .map(|switch| switch.to.id);
@@ -1123,7 +1360,7 @@ mod tests {
         let mut handover = fixture.handover(&only);
 
         let ended = handover
-            .next(&fixture.state, &limit(false), Some(SESSION), TIMEOUT)
+            .next(&fixture.state, &limit(false), Some(SESSION))
             .await;
         fixture.remove().await;
 
@@ -1146,9 +1383,7 @@ mod tests {
         let only = fixture.claude("a@example.com").await;
         let mut handover = fixture.handover(&only);
 
-        let ended = handover
-            .next(&fixture.state, &limit(true), None, TIMEOUT)
-            .await;
+        let ended = handover.next(&fixture.state, &limit(true), None).await;
         let exhausted = fixture.exhausted_until(&only).await;
         fixture.remove().await;
 
@@ -1241,15 +1476,14 @@ mod tests {
                 resets_at: Some(resets()),
                 carried: true,
                 at: 0,
+                calls: 0,
+                reasoning: None,
             })
         );
         assert!(landed, "the session file moved with the chat");
         assert_eq!(
             cli(&resolved.backend).1.session,
-            Some(Session {
-                id: SESSION.into(),
-                resume: true
-            }),
+            Some(Session::resumed(SESSION)),
             "the turn resumes the carried session"
         );
         assert_eq!(unmoved, None, "a chat kept on its login is told nothing");
@@ -1315,6 +1549,8 @@ mod tests {
                 resets_at: None,
                 carried: false,
                 at: 0,
+                calls: 0,
+                reasoning: None,
             })
         );
     }
@@ -1368,9 +1604,7 @@ mod tests {
             notice.clone(),
         );
 
-        let switch = handover
-            .next(&fixture.state, &limit(false), None, TIMEOUT)
-            .await;
+        let switch = handover.next(&fixture.state, &limit(false), None).await;
         fixture.remove().await;
 
         assert_eq!(chosen.login.id, configured.id);

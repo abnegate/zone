@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 
-import { structFields } from './rust';
+import { rustVariants, structFields } from './rust';
 
 const PLAIN = `
 #[derive(Debug, Serialize)]
@@ -59,6 +59,17 @@ pub struct Receipt {
 }
 `;
 
+const STATUS = `
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStatus {
+    // Still working.
+    Running,
+    InReview,
+    Stopped,
+}
+`;
+
 describe('the reader reports what travels, not what the field is called', () => {
   test('a plain field is read under its own name, private or public', () => {
     expect(structFields(PLAIN, 'Receipt')).toEqual([
@@ -97,5 +108,15 @@ describe('a shape the console cannot mirror fails rather than passes', () => {
 
   test('a struct with no fields is refused', () => {
     expect(() => structFields(EMPTY, 'Receipt')).toThrow(/no fields/);
+  });
+});
+
+describe('an enum is read as the names serde sends its variants under', () => {
+  test('each variant is read in snake_case, skipping comments', () => {
+    expect(rustVariants(STATUS, 'SubagentStatus')).toEqual(['running', 'in_review', 'stopped']);
+  });
+
+  test('an enum that has been renamed or moved away is refused', () => {
+    expect(() => rustVariants(STATUS, 'StepStatus')).toThrow(/StepStatus/);
   });
 });

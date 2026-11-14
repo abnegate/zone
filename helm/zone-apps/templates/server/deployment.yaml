@@ -102,9 +102,15 @@ spec:
             - name: ZONE_IN_CONTAINER
               value: "true"
             {{- end }}
+            {{- with include "zone-apps.server.baseUrl" . }}
+            - name: APP_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
             {{- range $key, $value := .Values.server.env }}
+            {{- if ne $key "APP_BASE_URL" }}
             - name: {{ $key }}
               value: {{ $value | quote }}
+            {{- end }}
             {{- end }}
             - name: DATABASE_URL
               valueFrom:

@@ -1,52 +1,64 @@
 //! Shared preparation, projection, and durable generation boundaries for both chat modes.
 
+pub mod allowance;
+pub mod blocks;
+pub mod fitted;
 mod generation;
 mod pinned;
 pub mod prompt;
 pub mod tail;
 
+pub use allowance::Allowance;
+pub use blocks::Blocks;
+pub use fitted::Fitted;
 pub use generation::Generation;
 pub use pinned::Pinned;
 
+use abnegate_agent::chat::{self, Capacity, History, NewEntry, ReplayMessage};
+use abnegate_agent::context::{
+    self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary,
+};
 use abnegate_llm::{Message, ReasoningEffort, Role};
 use abnegate_search::SearchContext;
 use base64::Engine;
 use serde_json::Value;
+use std::env::VarError;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
-use zone_core::context::{self, ContextSource, ContextUsage, Coverage, Entry, Policy, Summary};
 use zone_core::llm::LlmClient;
 
+use crate::agent::learned;
 use crate::agent::prompt::Environment;
 use crate::agent::{ChatTools, LoopBudget, WorkspaceScope};
 use crate::db::chats::ChatRow;
 use crate::db::context::{Error, Guard, Lease, Store};
 use crate::db::knowledge::not_memory;
+use crate::db::mcp_servers;
+use crate::db::tasks::Origin;
 use crate::services::artifacts::ArtifactStore;
 use crate::services::backend;
 use crate::services::chat::driver::Driver;
 use crate::services::chat::handover::Handover;
 use crate::services::completion_tokens::merge_stops;
 use crate::services::endpoint::Endpoint;
+use crate::services::mcp_servers::load;
+use crate::services::mcp_servers::status::Status;
 use crate::services::project_directory::{self, Start};
 use crate::state::AppState;
-use zone_chat::{capacity, history};
 
 pub const LEASE_LIFETIME: Duration = Duration::from_secs(30);
 /// The id of the system entry a turn's context opens with.
 pub const INSTRUCTIONS: &str = "instructions";
 const TEMPERATURE: f32 = 0.7;
 const SEARCH: &str = "supplement:search";
+const MCP_PENDING: &str =
+    "Configured MCP tool definitions will be counted when their servers connect.";
 pub const WITHHELD_IMAGE: &str = "[An image is omitted here because this model can't view images.]";
 
-fn parse_timeout(seconds: u64) -> Result<Duration, String> {
-    let timeout = Duration::from_secs(seconds);
-    Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| "ZONE_CHAT_TIMEOUT_SECONDS exceeds a representable deadline".to_string())?;
-    Ok(timeout)
-}
+/// Not read: a chat turn runs until it finishes or is stopped, so a server
+/// that finds it set warns that it is ignored.
+const IGNORED_TIMEOUT: &str = "ZONE_CHAT_TIMEOUT_SECONDS";
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -54,7 +66,6 @@ pub struct Settings {
     pub calls: usize,
     pub output: u32,
     pub context: u64,
-    pub timeout: Duration,
 }
 
 impl Default for Settings {
@@ -64,27 +75,37 @@ impl Default for Settings {
             calls: 256,
             output: 4096,
             context: 32768,
-            timeout: Duration::from_secs(1800),
         }
     }
 }
 
 impl Settings {
     pub fn from_env() -> Result<Self, String> {
-        fn value(name: &str, default: u64) -> Result<u64, String> {
-            match std::env::var(name) {
+        Self::read(|name| std::env::var(name))
+    }
+
+    /// The settings `lookup` gives, which answers for a variable the way
+    /// [`std::env::var`] does.
+    fn read(lookup: impl Fn(&str) -> Result<String, VarError>) -> Result<Self, String> {
+        let value = |name: &str, default: u64| -> Result<u64, String> {
+            match lookup(name) {
                 Ok(value) => value
                     .parse::<u64>()
                     .ok()
                     .filter(|value| *value > 0)
                     .ok_or_else(|| format!("{name} must be a positive integer")),
-                Err(std::env::VarError::NotPresent) => Ok(default),
+                Err(VarError::NotPresent) => Ok(default),
                 Err(_) => Err(format!("{name} must contain valid text")),
             }
+        };
+        if !matches!(lookup(IGNORED_TIMEOUT), Err(VarError::NotPresent)) {
+            tracing::warn!(
+                "{IGNORED_TIMEOUT} is set but not read: a chat turn runs until it finishes or is \
+                 stopped"
+            );
         }
         Ok(Self {
             context: value("ZONE_CHAT_CONTEXT_TOKENS", 32768)?,
-            timeout: parse_timeout(value("ZONE_CHAT_TIMEOUT_SECONDS", 1800)?)?,
             rounds: usize::try_from(value("ZONE_CHAT_ROUNDS", 64)?)
                 .map_err(|_| "ZONE_CHAT_ROUNDS exceeds platform range")?,
             calls: usize::try_from(value("ZONE_CHAT_CALLS", 256)?)
@@ -135,19 +156,15 @@ impl RunContext {
             entries: messages
                 .into_iter()
                 .enumerate()
-                .map(|(index, message)| Entry {
-                    id: Uuid::new_v4().to_string(),
-                    preserve: message.role == Role::System || Some(index) == latest,
-                    message,
-                    consumed: true,
+                .map(|(index, message)| {
+                    let preserve = message.role == Role::System || Some(index) == latest;
+                    Entry::new(Uuid::new_v4().to_string(), message)
+                        .with_preserve(preserve)
+                        .with_consumed(true)
                 })
                 .collect(),
             summary: None,
-            policy: Policy {
-                limit: None,
-                reserved: 4096,
-                source: ContextSource::Unknown,
-            },
+            policy: Policy::new(None, 4096, ContextSource::Unknown),
             reason: None,
             incomplete: false,
             artifacts: None,
@@ -188,24 +205,19 @@ impl RunContext {
         }
     }
 
-    pub fn append(&mut self, entry: &history::NewEntry) {
-        self.entries.push(Entry {
-            id: entry.id.clone(),
-            message: entry.message.clone().into_message(),
-            preserve: false,
-            consumed: false,
-        });
+    pub fn append(&mut self, entry: &NewEntry) {
+        self.entries.push(Entry::new(
+            entry.id.clone(),
+            entry.message.clone().into_message(),
+        ));
     }
 
     /// Request-local search data stays below trusted instructions and outside durable
     /// coverage. Replacing it cannot change which canonical user entry is protected.
     pub fn search(&mut self, search: &SearchContext) {
-        let supplement = Entry {
-            id: SEARCH.into(),
-            message: Message::user(search.prompt()),
-            preserve: true,
-            consumed: true,
-        };
+        let supplement = Entry::new(SEARCH, Message::user(search.prompt()))
+            .with_preserve(true)
+            .with_consumed(true);
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == SEARCH) {
             *entry = supplement;
         } else {
@@ -309,16 +321,22 @@ pub struct Preparation {
     pub endpoint: Endpoint,
     pub stop: Vec<String>,
     pub budget: LoopBudget,
-    pub timeout: Duration,
     /// Built once here so a preview and the generation that follows it, and
     /// the retrieval-augmented reassembly in `ws::chat`, all read one clock.
     pub environment: Environment,
-    /// What this user's memory adds to the system prompt, read once here so
-    /// the reassembly in `ws::chat` composes the same bytes rather than a
-    /// second read of a table that may have moved between the two.
+    /// What the workspace has learned, bounded for a chat on this model's
+    /// window and read once here so the reassembly in `ws::chat` composes the
+    /// same bytes and retrieves none of the entries it already shows. Empty
+    /// for a character card with its agent off.
+    pub findings: learned::Block,
+    /// What this user's memory adds to the system prompt, bounded the same
+    /// way and read once here so the reassembly in `ws::chat` composes the
+    /// same bytes rather than a second read of a table that may have moved
+    /// between the two.
     pub memory: String,
-    /// The workspace's skills index, read once here for the same reason. Empty
-    /// for a chat with no `read_document`, which could open none of them.
+    /// The workspace's skills index, bounded and read once here for the same
+    /// reasons. Empty for a chat with no `read_document`, which could open
+    /// none of them.
     pub skills: String,
     /// The coding agent session the turn runs in, on a login of the organization's.
     pub session: Option<Pinned>,
@@ -358,6 +376,10 @@ pub async fn build(
         chat_id: Some(chat.id),
         user_id: user,
         offline: chat.offline,
+        origin: match &mode {
+            Mode::Generation(generation) => generation.origin,
+            Mode::Preview => Origin::Member,
+        },
     };
     let directory = match &mode {
         Mode::Generation(generation) => generation.directory.clone(),
@@ -409,10 +431,9 @@ pub async fn build(
     };
     let backend = match &mode {
         Mode::Preview => backend::instance(state.config()),
-        Mode::Generation(generation) => backend::effort(
-            backend::bounded(generation.resolved.backend.clone(), settings.timeout),
-            chat.reasoning_effort,
-        ),
+        Mode::Generation(generation) => {
+            backend::effort(generation.resolved.backend.clone(), chat.reasoning_effort)
+        }
     };
     let session = match &mode {
         Mode::Preview => None,
@@ -456,93 +477,48 @@ pub async fn build(
             ),
         }
     }
-    // Every chat reads what is remembered about the person it is talking to:
-    // a profile and a set of preferences describe them and how they want to be
-    // worked with, and a chat with its agent off is still a chat with them.
-    // Only a chat holding the memory tools is given the fact index, which
-    // names `memory_read` and is nothing without it.
-    let recall = if agentic {
-        crate::agent::memory::render::Recall::Indexed
-    } else {
-        crate::agent::memory::render::Recall::Passive
+    let blocks = read_blocks(state, chat, agentic, &tools, workspace, user).await;
+    let capability = SearchContext::new(&state.config().web_search).capability();
+    let instructions = |fitted: &Fitted| {
+        Entry::new(
+            INSTRUCTIONS,
+            Message::system(system_prompt(
+                chat,
+                &tools,
+                agentic,
+                &capability,
+                &environment,
+                &fitted.findings.text,
+                &fitted.memory,
+                &fitted.skills,
+            )),
+        )
+        .with_preserve(true)
+        .with_consumed(true)
     };
-    let memory =
-        match crate::agent::memory::render::prompt(state.db(), recall, workspace, user).await {
-            Ok(memory) => memory,
-            Err(error) => {
-                tracing::warn!(
-                    chat_id = %chat.id,
-                    %error,
-                    "Failed to load remembered entries; continuing without them"
-                );
-                String::new()
-            }
-        };
-    // A skill is opened with read_document, so only a chat that can call it
-    // is shown the index: a plain chat, or one with its agent off, has no
-    // loader in front of the model and is told of nothing.
-    let skills = if agentic && tools.has("read_document") {
-        match crate::agent::skills::prompt(state.db(), workspace).await {
-            Ok(skills) => skills,
-            Err(error) => {
-                tracing::warn!(
-                    chat_id = %chat.id,
-                    %error,
-                    "Failed to load the skills index; continuing without it"
-                );
-                String::new()
-            }
-        }
-    } else {
-        String::new()
-    };
-    let mut entries = vec![Entry {
-        id: INSTRUCTIONS.into(),
-        message: Message::system(system_prompt(
-            chat,
-            &tools,
-            agentic,
-            &SearchContext::new(&state.config().web_search).capability(),
-            &environment,
-            &memory,
-            &skills,
-        )),
-        preserve: true,
-        consumed: true,
-    }];
-    entries.extend(history.entries.into_iter().map(|entry| Entry {
-        preserve: pending.is_none() && history.latest_user.as_ref() == Some(&entry.id)
-            || entry.message.role == Role::System,
-        id: entry.id,
-        message: entry.message.into_message(),
-        consumed: entry.consumed,
+    let mut entries = vec![instructions(&Fitted::default())];
+    entries.extend(history.entries.into_iter().map(|entry| {
+        let preserve = pending.is_none() && history.latest_user.as_ref() == Some(&entry.id)
+            || entry.message.role == Role::System;
+        Entry::new(entry.id, entry.message.into_message())
+            .with_preserve(preserve)
+            .with_consumed(entry.consumed)
     }));
     let mut incomplete = history.incomplete;
     let mut reason = capacity.reason;
     if let Some((content, metadata)) = pending {
         let mut message = Message::user(content);
         message.images = images(metadata);
-        entries.push(Entry {
-            id: "draft".into(),
-            message,
-            preserve: true,
-            consumed: false,
-        });
+        entries.push(Entry::new("draft", message).with_preserve(true));
         if state.config().web_search.requested_for(content, metadata) {
             incomplete = true;
             reason =
                 Some("Requested search results will be counted when retrieval completes.".into());
         }
     }
-    if matches!(mode, Mode::Preview)
-        && agentic
-        && state.existing_mcp().is_none()
-        && !zone_core::mcp::McpConfig::from_env().servers.is_empty()
-    {
+    if matches!(mode, Mode::Preview) && agentic && mcp_pending(state, workspace).await {
         incomplete = true;
-        reason = Some(
-            "Configured MCP tool definitions will be counted when their servers connect.".into(),
-        );
+        reason = Some(MCP_PENDING.into());
     }
     if matches!(mode, Mode::Preview) && !agentic && chat.character.is_none() {
         let knowledge: bool = sqlx::query_scalar(concat!("SELECT EXISTS(SELECT 1 FROM knowledge_entries WHERE workspace_id=$1 AND is_active=TRUE ", not_memory!(), ")"))
@@ -603,6 +579,19 @@ pub async fn build(
         reported,
     };
     context.search(&SearchContext::new(&state.config().web_search));
+    let sent = agentic.then(|| tools.definitions());
+    let fitted = blocks.fit(Allowance::room(
+        &chat.model_name,
+        &context.entries,
+        sent.as_deref(),
+        &context.policy,
+    ));
+    context.entries[0] = instructions(&fitted);
+    let Fitted {
+        findings,
+        memory,
+        skills,
+    } = fitted;
     Ok(Preparation {
         model: chat.model_name.clone(),
         agentic,
@@ -614,8 +603,8 @@ pub async fn build(
         endpoint,
         stop,
         budget: settings.budget(),
-        timeout: settings.timeout,
         environment,
+        findings,
         memory,
         skills,
         session,
@@ -626,9 +615,116 @@ pub async fn build(
     })
 }
 
+/// Whether an MCP server the chat's turns are offered has yet to connect: the
+/// instance's, or one its organization has switched on, its workspace has not
+/// switched off and this instance can connect. A preview starts neither, so it
+/// cannot count their tools.
+async fn mcp_pending(state: &AppState, workspace: Uuid) -> bool {
+    if state.mcp().existing_instance().is_none() && !state.mcp().configured().await.is_empty() {
+        return true;
+    }
+    let organization = match mcp_servers::organization_for_workspace(state.db(), workspace).await {
+        Ok(Some(organization)) => organization,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::debug!(
+                %workspace,
+                %error,
+                "Could not read the workspace's organization; counting no MCP servers of its own"
+            );
+            return false;
+        }
+    };
+    let hub = state.mcp().existing_organization(organization);
+    if hub.as_ref().is_some_and(|hub| !hub.connecting()) {
+        return false;
+    }
+    let policy = state.mcp().policy();
+    match mcp_servers::offered(state.db(), organization, workspace).await {
+        Ok(records) => records.iter().any(|record| match &hub {
+            Some(hub) => hub.connection(record.id).status == Status::Connecting,
+            None => load::definition(record).known(policy).is_none(),
+        }),
+        Err(error) => {
+            tracing::debug!(
+                %organization,
+                %error,
+                "Could not read the organization's MCP servers; counting none"
+            );
+            false
+        }
+    }
+}
+
+/// What a chat's optional blocks are rendered from, read together. A store
+/// that cannot be read costs the turn its block and a logged warning, never
+/// the reply.
+async fn read_blocks(
+    state: &AppState,
+    chat: &ChatRow,
+    agentic: bool,
+    tools: &ChatTools,
+    workspace: Uuid,
+    user: Uuid,
+) -> Blocks {
+    let learned = async {
+        if reads_learned(chat, agentic) {
+            learned::load(state.db(), workspace).await
+        } else {
+            learned::Learned::default()
+        }
+    };
+    // Every chat reads what is remembered about the person it is talking to:
+    // a profile and a set of preferences describe them and how they want to be
+    // worked with, and a chat with its agent off is still a chat with them.
+    // Only a chat holding the memory tools is given the fact index, which
+    // names `memory_read` and is nothing without it.
+    let recall = if agentic {
+        crate::agent::memory::render::Recall::Indexed
+    } else {
+        crate::agent::memory::render::Recall::Passive
+    };
+    let memory = async {
+        crate::agent::memory::render::load(state.db(), recall, workspace, user)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    chat_id = %chat.id,
+                    %error,
+                    "Failed to load remembered entries; continuing without them"
+                );
+                Default::default()
+            })
+    };
+    // A skill is opened with read_document, so only a chat that can call it
+    // is shown the index: a plain chat, or one with its agent off, has no
+    // loader in front of the model and is told of nothing.
+    let skills = async {
+        if !(agentic && tools.has("read_document")) {
+            return Default::default();
+        }
+        crate::agent::skills::load(state.db(), workspace)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    chat_id = %chat.id,
+                    %error,
+                    "Failed to load the skills index; continuing without it"
+                );
+                Default::default()
+            })
+    };
+    let (learned, memory, skills) = tokio::join!(learned, memory, skills);
+    Blocks {
+        learned,
+        memory,
+        skills,
+    }
+}
+
 /// The content of the newest canonical user turn, read before `history.entries`
 /// is moved into the projection.
-fn latest_user(history: &history::History) -> Option<String> {
+fn latest_user(history: &History) -> Option<String> {
     let id = history.latest_user.as_ref()?;
     history
         .entries
@@ -637,33 +733,41 @@ fn latest_user(history: &history::History) -> Option<String> {
         .and_then(|entry| entry.message.content.clone())
 }
 
-pub fn policy(settings: &Settings, capacity: &capacity::Capacity) -> Policy {
-    Policy {
-        limit: capacity.limit,
-        reserved: settings.reserved(capacity.limit),
-        source: match capacity.source {
-            capacity::Source::Runtime => ContextSource::Runtime,
-            capacity::Source::Configured => ContextSource::Configured,
-            capacity::Source::Provider => ContextSource::Provider,
-            capacity::Source::Unknown => ContextSource::Unknown,
-        },
-    }
+pub fn policy(settings: &Settings, capacity: &Capacity) -> Policy {
+    Policy::new(
+        capacity.limit,
+        settings.reserved(capacity.limit),
+        capacity.source,
+    )
+}
+
+/// Whether a chat is shown what its workspace has learned. A character card
+/// with its agent off is the card and the boundary alone: it is playing a
+/// part, not working in the repository those entries describe.
+fn reads_learned(chat: &ChatRow, agentic: bool) -> bool {
+    agentic || chat.character.is_none()
 }
 
 /// The whole system entry: a character card if there is one, the built prompt
-/// for this surface, the web-search capability tail, then whatever this user
-/// asked to have remembered, then the workspace's skills index.
+/// for this surface, the web-search capability tail, then what the workspace
+/// has learned, then what is remembered about this user, then the workspace's
+/// skills index. The same order a run reads them in.
 ///
-/// `memory` and `skills` are required rather than optional so the compiler
-/// enumerates every caller: a turn that quietly lost the block would answer a
-/// person the server knows about as if it had never met them, or start work
-/// the workspace has a written procedure for as if it had none.
+/// `findings`, `memory` and `skills` are required rather than optional so the
+/// compiler enumerates every caller: a turn that quietly lost a block would
+/// ask again what the workspace has already answered, answer a person the
+/// server knows about as if it had never met them, or start work the
+/// workspace has a written procedure for as if it had none.
+///
+/// A character card with its agent off reads no learned block whatever it is
+/// handed, so no caller can give it one.
 pub fn system_prompt(
     chat: &ChatRow,
     tools: &ChatTools,
     agentic: bool,
     capability: &str,
     environment: &Environment,
+    findings: &str,
     memory: &str,
     skills: &str,
 ) -> String {
@@ -680,7 +784,12 @@ pub fn system_prompt(
         (None, true) => crate::agent::prompt::chat(tools, chat.auto_approve, environment),
         (None, false) => crate::agent::prompt::plain(environment),
     };
-    format!("{prompt}\n\n{capability}{memory}{skills}")
+    let findings = if reads_learned(chat, agentic) {
+        findings
+    } else {
+        ""
+    };
+    format!("{prompt}\n\n{capability}{findings}{memory}{skills}")
 }
 
 /// A minimal chat row, so prompt tests do not need a database.
@@ -715,6 +824,12 @@ pub(crate) fn chat_row(
 /// compare prompts a clock apart.
 #[cfg(test)]
 pub(crate) fn composed(at: &str, memory: &str) -> String {
+    informed(at, "", memory)
+}
+
+/// The same prompt in a workspace that has learned `findings`.
+#[cfg(test)]
+pub(crate) fn informed(at: &str, findings: &str, memory: &str) -> String {
     system_prompt(
         &chat_row(None, true, false),
         &ChatTools::with_names(crate::agent::ToolProfile::Chat, &["read_file"], None),
@@ -725,6 +840,7 @@ pub(crate) fn composed(at: &str, memory: &str) -> String {
             "Pacific/Auckland",
             PathBuf::from("/srv/zone"),
         ),
+        findings,
         memory,
         "",
     )
@@ -747,23 +863,20 @@ pub fn images(metadata: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
-pub fn core_summary(summary: history::Summary) -> Summary {
-    Summary {
-        content: summary.content,
-        coverage: Coverage {
-            entries: summary.entries,
-            fingerprint: summary.fingerprint,
-        },
-        revision: summary.revision,
-    }
+pub fn core_summary(summary: chat::Summary) -> Summary {
+    Summary::new(
+        summary.content,
+        Coverage::new(summary.entries, summary.fingerprint),
+        summary.revision,
+    )
 }
-pub fn stored_summary(summary: &Summary) -> history::Summary {
-    history::Summary {
-        content: summary.content.clone(),
-        entries: summary.coverage.entries.clone(),
-        fingerprint: summary.coverage.fingerprint.clone(),
-        revision: summary.revision,
-    }
+pub fn stored_summary(summary: &Summary) -> chat::Summary {
+    chat::Summary::new(
+        summary.content.clone(),
+        summary.coverage.entries.clone(),
+        summary.coverage.fingerprint.clone(),
+        summary.revision,
+    )
 }
 
 pub struct Session {
@@ -801,7 +914,7 @@ impl Session {
         &self,
         content: Option<&str>,
         metadata: Option<Value>,
-        partial: Option<&history::ReplayMessage>,
+        partial: Option<&ReplayMessage>,
     ) -> Result<bool, Error> {
         self.store
             .settle(self.turn, content, metadata, partial)
@@ -848,6 +961,7 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
     use zone_core::llm::LlmBackend;
 
     /// What `SearchContext::capability()` returns on its quieter arm. Non-empty
@@ -868,7 +982,48 @@ mod tests {
             )),
             None,
             &[],
+            crate::agent::memory::render::MAX_RENDERED_BYTES,
         )
+    }
+
+    const INSTRUCTION: &str = "Run cargo nextest from the runner directory.";
+
+    const CONVENTION: &str = "Migrations are timestamped and named in snake_case.";
+
+    const DISCOVERY: &str = "The disposable test database listens on 55471.";
+
+    /// One entry of each learned family, rendered the way a chat turn receives
+    /// them.
+    fn learned_block() -> String {
+        use crate::db::knowledge::{LearnedCategory, LearnedEntryRow};
+
+        fn entry(title: &str, content: &str) -> LearnedEntryRow {
+            LearnedEntryRow {
+                id: Uuid::new_v4(),
+                workspace_id: Uuid::nil(),
+                title: title.to_string(),
+                content: content.to_string(),
+                tags: Vec::new(),
+                updated_at: None,
+            }
+        }
+
+        learned::render(
+            &learned::Learned {
+                instructions: vec![entry("How do I run the tests", INSTRUCTION)],
+                facts: vec![learned::Facts {
+                    category: LearnedCategory::RepositoryConvention,
+                    entries: vec![entry("Migration names", CONVENTION)],
+                }],
+                discoveries: crate::db::knowledge::discovery::Listing {
+                    rows: vec![entry("Test database port", DISCOVERY)],
+                    recorded: 1,
+                },
+                unread: 0,
+            },
+            learned::MAX_RENDERED_BYTES,
+        )
+        .text
     }
 
     /// A fixed clock, so every prompt these tests compose is comparable with
@@ -895,11 +1050,11 @@ mod tests {
         assert_eq!(settings.reserved(Some(4096)), 1024);
         assert_eq!(settings.reserved(Some(32768)), 4096);
         assert_eq!(settings.reserved(None), 4096);
-        let policy = Policy {
-            limit: Some(4096),
-            reserved: settings.reserved(Some(4096)),
-            source: ContextSource::Runtime,
-        };
+        let policy = Policy::new(
+            Some(4096),
+            settings.reserved(Some(4096)),
+            ContextSource::Runtime,
+        );
         assert_eq!(policy.limit.unwrap() - u64::from(policy.reserved), 3072);
     }
 
@@ -911,6 +1066,443 @@ mod tests {
         };
         assert_eq!(settings.reserved(Some(4096)), 512);
         assert_eq!(settings.budget(), LoopBudget::chat());
+    }
+
+    /// A workspace that has learned far more than any chat block shows.
+    fn full_store() -> learned::Learned {
+        use crate::db::knowledge::{LearnedCategory, LearnedEntryRow};
+
+        fn entries(family: &str, count: usize) -> Vec<LearnedEntryRow> {
+            (0..count)
+                .map(|index| LearnedEntryRow {
+                    id: Uuid::new_v4(),
+                    workspace_id: Uuid::nil(),
+                    title: format!("{family} {index:02}"),
+                    content: format!("{family}-{index:02} {}", "x".repeat(300)),
+                    tags: Vec::new(),
+                    updated_at: None,
+                })
+                .collect()
+        }
+
+        let discoveries = entries("discovery", 20);
+        learned::Learned {
+            instructions: entries("instruction", 20),
+            facts: LearnedCategory::ALL
+                .into_iter()
+                .map(|category| learned::Facts {
+                    category,
+                    entries: entries(category.as_str(), 20),
+                })
+                .collect(),
+            discoveries: crate::db::knowledge::discovery::Listing {
+                recorded: discoveries.len(),
+                rows: discoveries,
+            },
+            unread: 0,
+        }
+    }
+
+    /// The windows a chat is tested on: the smallest a model ships with, the
+    /// one a plain chat's blocks first fit part of, the one an agentic chat's
+    /// do, and the default.
+    const WINDOWS: [u64; 4] = [4_096, 8_192, 24_576, 32_768];
+
+    /// The question every turn these tests prepare asks.
+    const QUESTION: &str = "Which branch do deploys go out from?";
+
+    /// The catalog a chat with its agent on is offered, built the way a
+    /// preview builds it: every registered tool, the deferred ones listed by
+    /// name and their schemas held back.
+    async fn catalog() -> ChatTools {
+        ChatTools::preview(WorkspaceScope {
+            state: crate::state::AppState::for_tests(),
+            user_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            chat_id: Some(Uuid::new_v4()),
+            offline: false,
+            origin: crate::db::tasks::Origin::Member,
+        })
+        .await
+    }
+
+    /// The search context a turn is built with when nobody asked for a
+    /// lookup, whose capability tail and supplement every turn carries.
+    fn search() -> SearchContext {
+        SearchContext::new(&crate::state::AppState::for_tests().config().web_search)
+    }
+
+    /// Everything one person can have remembered, each entry at its storage
+    /// limit and the index at its row limit.
+    fn full_memory() -> (
+        crate::db::memory::MemoryRow,
+        crate::db::memory::MemoryRow,
+        Vec<crate::db::memory::MemoryIndexRow>,
+    ) {
+        use crate::agent::memory::render::memory_row;
+        use crate::db::memory::{
+            MAX_ENTRY_CHARS, MAX_FACTS, MemoryCategory, MemoryIndexRow, PREFERENCES_TITLE,
+            PROFILE_TITLE,
+        };
+
+        let facts = (0..MAX_FACTS)
+            .map(|index| MemoryIndexRow {
+                title: format!("Fact {index:02}"),
+                description: Some(format!("What fact {index:02} is for")),
+                category: MemoryCategory::Fact.as_str().to_string(),
+                version: 1,
+            })
+            .collect();
+        (
+            memory_row(
+                MemoryCategory::Profile,
+                PROFILE_TITLE,
+                &"p".repeat(MAX_ENTRY_CHARS),
+            ),
+            memory_row(
+                MemoryCategory::Preference,
+                PREFERENCES_TITLE,
+                &"q".repeat(MAX_ENTRY_CHARS),
+            ),
+            facts,
+        )
+    }
+
+    /// As many skills as the index lists, each with a trigger at its limit.
+    fn full_skills() -> Vec<crate::db::knowledge::SkillRow> {
+        (0..crate::agent::skills::MAX_SKILLS)
+            .map(|index| crate::db::knowledge::SkillRow {
+                id: Uuid::new_v4(),
+                title: format!("Skill {index:02}"),
+                head: format!(
+                    "---\ndescription: {}\n---\n",
+                    "w".repeat(crate::agent::skills::MAX_TRIGGER_CHARS)
+                ),
+            })
+            .collect()
+    }
+
+    /// A summarizer that writes the largest checkpoint `context::prepare`
+    /// accepts on `policy`, so a turn that compacts lands as high as any
+    /// compaction can leave it.
+    fn largest_checkpoint(policy: &Policy) -> abnegate_llm::provider::testing::StubProvider {
+        let empty = r#"{"objective":"","constraints":[],"corrections":[],"decisions":[],"completed":[],"evidence":[],"failed":[],"pending":[],"questions":[]}"#;
+        let bytes = usize::try_from(policy.reserved).expect("a reservation fits a usize") * 4;
+        let objective = "o".repeat(bytes - empty.len());
+        abnegate_llm::provider::testing::StubProvider::answering(
+            "summarizer",
+            empty.replacen(
+                r#""objective":"""#,
+                &format!(r#""objective":"{objective}""#),
+                1,
+            ),
+        )
+    }
+
+    /// A conversation already shown to the model that alone outweighs
+    /// `policy`'s input, so the turn has to compact it to be sent at all.
+    fn long_history(policy: &Policy) -> Vec<Message> {
+        let input = usize::try_from(policy.input_limit().expect("a known window"))
+            .expect("a window fits a usize");
+        (0..4)
+            .flat_map(|index| {
+                [
+                    Message::user(format!("Question {index}: {}", "u".repeat(input / 2))),
+                    Message::assistant(format!("Answer {index}: {}", "a".repeat(input / 2))),
+                ]
+            })
+            .collect()
+    }
+
+    /// One turn: the system entry, `history`, the question, and the search
+    /// supplement every turn is sent.
+    fn turn(system: &str, history: &[Message]) -> Vec<Entry> {
+        let mut messages = vec![Message::system(system)];
+        messages.extend(history.iter().cloned());
+        messages.push(Message::user(QUESTION));
+        let mut context = RunContext::from_messages(messages);
+        context.search(&search());
+        context.entries
+    }
+
+    /// What a chat's blocks are rendered from in a workspace that has learned
+    /// more than any block shows, for a person with everything remembered
+    /// that memory holds, and with skills enough to fill the index: each as
+    /// `build` reads it for a chat of this shape.
+    fn full_blocks(agentic: bool, tools: &ChatTools) -> Blocks {
+        let (profile, preferences, facts) = full_memory();
+        let recall = if agentic {
+            crate::agent::memory::render::Recall::Indexed
+        } else {
+            crate::agent::memory::render::Recall::Passive
+        };
+        let skills = if agentic && tools.has("read_document") {
+            crate::agent::skills::Listing {
+                skills: full_skills(),
+                filed: crate::agent::skills::MAX_SKILLS,
+            }
+        } else {
+            crate::agent::skills::Listing::default()
+        };
+        Blocks {
+            learned: full_store(),
+            memory: crate::agent::memory::render::Remembered::new(
+                recall,
+                Some(profile),
+                Some(preferences),
+                facts,
+            ),
+            skills,
+        }
+    }
+
+    /// One shape of chat on one window: its catalog, what it sends, and the
+    /// system entry with and without its blocks.
+    struct Shape {
+        policy: Policy,
+        agentic: bool,
+        sent: Option<Vec<abnegate_llm::ToolDefinition>>,
+        blocks: Blocks,
+        bare: String,
+        room: Option<usize>,
+        fitted: Fitted,
+        full: String,
+    }
+
+    impl Shape {
+        /// The blocks fitted the way `build` fits them: to what the turn the
+        /// chat would send with every block empty leaves.
+        fn of(window: Option<u64>, agentic: bool, tools: &ChatTools) -> Self {
+            let policy = Policy::new(
+                window,
+                Settings::default().reserved(window),
+                ContextSource::Runtime,
+            );
+            let chat = chat_row(None, agentic, false);
+            let capability = search().capability();
+            let compose = |fitted: &Fitted| {
+                system_prompt(
+                    &chat,
+                    tools,
+                    agentic,
+                    &capability,
+                    &environment(),
+                    &fitted.findings.text,
+                    &fitted.memory,
+                    &fitted.skills,
+                )
+            };
+            let sent = agentic.then(|| tools.definitions());
+            let bare = compose(&Fitted::default());
+            let room =
+                Allowance::room("fixture-model", &turn(&bare, &[]), sent.as_deref(), &policy);
+            let blocks = full_blocks(agentic, tools);
+            let fitted = blocks.fit(room);
+            let full = compose(&fitted);
+            Self {
+                policy,
+                agentic,
+                sent,
+                blocks,
+                bare,
+                room,
+                fitted,
+                full,
+            }
+        }
+
+        async fn prepare(
+            &self,
+            system: &str,
+            history: &[Message],
+            summarizer: &abnegate_llm::provider::testing::StubProvider,
+        ) -> Result<context::Prepared, context::ContextError> {
+            context::prepare(
+                summarizer,
+                "fixture-model",
+                &turn(system, history),
+                self.sent.as_deref(),
+                &self.policy,
+                None,
+            )
+            .await
+        }
+
+        fn kind(&self) -> &'static str {
+            if self.agentic { "agentic" } else { "plain" }
+        }
+    }
+
+    /// Whatever window a chat runs on and whatever its history, a turn that
+    /// prepares with nothing learned, remembered or indexed still prepares
+    /// with all three full: the summarizer writes the largest checkpoint it
+    /// may, and the agentic turn is sent the schemas a turn is handed.
+    #[tokio::test]
+    async fn the_optional_blocks_never_make_a_turn_unpreparable() {
+        let tools = catalog().await;
+        let mut proven = Vec::new();
+        for window in WINDOWS {
+            for agentic in [false, true] {
+                let shape = Shape::of(Some(window), agentic, &tools);
+                let room = shape.room.expect("a known window");
+                let fitted = &shape.fitted;
+                assert!(
+                    fitted.findings.text.len() + fitted.memory.len() + fitted.skills.len() <= room,
+                    "a {window}-token {} chat's blocks overrun the {room} bytes it has: {fitted:?}",
+                    shape.kind()
+                );
+                let summarizer = largest_checkpoint(&shape.policy);
+                for history in [Vec::new(), long_history(&shape.policy)] {
+                    if shape
+                        .prepare(&shape.bare, &history, &summarizer)
+                        .await
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let prepared = shape.prepare(&shape.full, &history, &summarizer).await;
+                    assert!(
+                        prepared.is_ok(),
+                        "a {window}-token {} chat with {} messages of history prepares bare and \
+                         fails once the blocks are added: {:?}",
+                        shape.kind(),
+                        history.len(),
+                        prepared.err()
+                    );
+                    proven.push((window, agentic, history.is_empty()));
+                }
+            }
+        }
+        assert!(
+            proven.contains(&(4_096, false, true)),
+            "the smallest window's plain turn has to prepare bare for this to prove anything \
+             there: {proven:?}"
+        );
+        assert!(
+            proven.contains(&(8_192, false, false)),
+            "a plain turn that compacts has to prepare bare somewhere: {proven:?}"
+        );
+        assert!(
+            proven.contains(&(24_576, true, false)),
+            "an agentic turn that compacts has to prepare bare somewhere: {proven:?}"
+        );
+    }
+
+    /// A window that leaves room for every whole block, and one of unknown
+    /// size, render each exactly as its renderer does at its ceiling.
+    #[tokio::test]
+    async fn a_large_window_renders_every_block_exactly_as_its_ceiling_does() {
+        let tools = catalog().await;
+        for window in [Some(32_768), None] {
+            for agentic in [false, true] {
+                let shape = Shape::of(window, agentic, &tools);
+                let blocks = &shape.blocks;
+                assert_eq!(
+                    shape.fitted,
+                    Fitted {
+                        findings: learned::render(&blocks.learned, learned::MAX_RENDERED_BYTES),
+                        memory: blocks
+                            .memory
+                            .render(crate::agent::memory::render::MAX_RENDERED_BYTES),
+                        skills: blocks
+                            .skills
+                            .render(crate::agent::skills::MAX_RENDERED_BYTES),
+                    },
+                    "{window:?} {}",
+                    shape.kind()
+                );
+                assert!(!shape.fitted.findings.text.is_empty());
+                assert!(!shape.fitted.memory.is_empty());
+                assert_eq!(shape.fitted.skills.is_empty(), !agentic);
+            }
+        }
+    }
+
+    /// A window that holds part of each block renders each against its share:
+    /// fewer whole entries, the omission stated, and the learned block naming
+    /// as shown exactly the entries its text carries.
+    #[tokio::test]
+    async fn a_middling_window_shows_part_of_every_block_it_reads() {
+        let tools = catalog().await;
+        for (window, agentic) in [(8_192, false), (24_576, true)] {
+            let shape = Shape::of(Some(window), agentic, &tools);
+            let blocks = &shape.blocks;
+            let fitted = &shape.fitted;
+            let ceiling = learned::render(&blocks.learned, learned::MAX_RENDERED_BYTES);
+            assert!(
+                !fitted.findings.text.is_empty() && fitted.findings.text.len() < ceiling.text.len(),
+                "{window}: {}",
+                fitted.findings.text
+            );
+            assert!(
+                fitted.findings.text.contains("not shown here."),
+                "{}",
+                fitted.findings.text
+            );
+            let every = blocks
+                .learned
+                .instructions
+                .iter()
+                .chain(blocks.learned.facts.iter().flat_map(|facts| &facts.entries))
+                .chain(&blocks.learned.discoveries.rows);
+            for entry in every {
+                assert_eq!(
+                    fitted.findings.shown.contains(&entry.id),
+                    fitted.findings.text.contains(&entry.content),
+                    "{} is named as shown exactly when its text is",
+                    entry.title
+                );
+            }
+            let memory = blocks
+                .memory
+                .render(crate::agent::memory::render::MAX_RENDERED_BYTES);
+            assert!(
+                !fitted.memory.is_empty() && fitted.memory.len() < memory.len(),
+                "{window}: {}",
+                fitted.memory
+            );
+            if agentic {
+                let skills = blocks
+                    .skills
+                    .render(crate::agent::skills::MAX_RENDERED_BYTES);
+                assert!(
+                    !fitted.skills.is_empty() && fitted.skills.len() < skills.len(),
+                    "{window}: {}",
+                    fitted.skills
+                );
+                assert!(
+                    fitted.skills.contains("more skills are filed"),
+                    "{}",
+                    fitted.skills
+                );
+            }
+        }
+    }
+
+    /// On a 4,096-token window an agentic chat's own prompt and the schemas
+    /// it is sent outweigh the input before any block is added, so it is
+    /// given none: that turn's overflow is the catalog's, not the blocks'. A
+    /// plain chat's prompt and the room a checkpoint keeps leave nothing
+    /// either.
+    #[tokio::test]
+    async fn the_smallest_window_carries_no_block_at_all() {
+        let tools = catalog().await;
+        for agentic in [false, true] {
+            let shape = Shape::of(Some(4_096), agentic, &tools);
+            assert_eq!(shape.room, Some(0), "{}", shape.kind());
+            assert_eq!(shape.fitted, Fitted::default(), "{}", shape.kind());
+            assert_eq!(shape.full, shape.bare, "{}", shape.kind());
+        }
+        let input = Shape::of(Some(4_096), true, &tools)
+            .policy
+            .input_limit()
+            .expect("a known window");
+        let schemas = serde_json::to_string(&tools.definitions()).expect("schemas serialize");
+        assert!(
+            context::tokens(&schemas) > input,
+            "{} tokens of schemas against {input} of input",
+            context::tokens(&schemas)
+        );
     }
 
     const PIXEL: &str = "data:image/png;base64,iVBORw0KGgo=";
@@ -1033,6 +1625,7 @@ mod tests {
             &environment,
             "",
             "",
+            "",
         );
         let agentic = system_prompt(
             &chat_row(None, true, false),
@@ -1040,6 +1633,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             "",
             "",
         );
@@ -1051,6 +1645,7 @@ mod tests {
             &environment,
             "",
             "",
+            "",
         );
         let persona_agentic = system_prompt(
             &chat_row(Some(card), true, false),
@@ -1058,6 +1653,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             "",
             "",
         );
@@ -1088,9 +1684,10 @@ mod tests {
         );
     }
 
-    /// A chat with nothing remembered must read byte for byte as it did before
-    /// memory existed, on every arm: the whole feature is then invisible to a
-    /// user who has never asked for anything to be remembered.
+    /// A chat with nothing learned and nothing remembered must read byte for
+    /// byte as it did before either block existed, on every arm: both features
+    /// are then invisible in a workspace that has learned nothing, to a user
+    /// nothing is remembered about.
     #[test]
     fn an_empty_memory_block_leaves_every_arm_exactly_as_it_was() {
         let environment = environment();
@@ -1137,7 +1734,7 @@ mod tests {
 
         for (chat, agentic, expected) in arms {
             assert_eq!(
-                system_prompt(&chat, &tools, agentic, CAPABILITY, &environment, "", ""),
+                system_prompt(&chat, &tools, agentic, CAPABILITY, &environment, "", "", ""),
                 expected
             );
         }
@@ -1153,8 +1750,17 @@ mod tests {
         let memory = memory();
         assert!(!memory.is_empty());
 
-        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "");
-        let with = system_prompt(&chat, &tools, true, CAPABILITY, &environment, &memory, "");
+        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "", "");
+        let with = system_prompt(
+            &chat,
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            "",
+            &memory,
+            "",
+        );
 
         assert_eq!(with, format!("{without}{memory}"));
         assert!(
@@ -1171,8 +1777,8 @@ mod tests {
         );
     }
 
-    /// The index is the last thing in the entry: after memory, so what the
-    /// person asked to have remembered is read before what the workspace wrote
+    /// The index is the last thing in the entry: after memory, so what is
+    /// remembered about the person is read before what the workspace wrote
     /// about how to work, and carrying its own blank line like memory does.
     #[test]
     fn the_skills_index_follows_the_memory_block() {
@@ -1187,15 +1793,26 @@ mod tests {
                 head: "---\ndescription: Use when shipping to production.\n---\n".into(),
             }],
             1,
+            crate::agent::skills::MAX_RENDERED_BYTES,
         );
         assert!(skills.starts_with("\n\n# Skills"));
-        let without = system_prompt(&chat, &tools, true, CAPABILITY, &environment, &memory, "");
+        let without = system_prompt(
+            &chat,
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            "",
+            &memory,
+            "",
+        );
         let with = system_prompt(
             &chat,
             &tools,
             true,
             CAPABILITY,
             &environment,
+            "",
             &memory,
             &skills,
         );
@@ -1206,6 +1823,165 @@ mod tests {
         );
         assert!(!with.contains("\n\n\n"), "{with}");
         assert!(with.ends_with("Use when shipping to production."), "{with}");
+    }
+
+    /// What the workspace has learned is the first block after the tail and
+    /// the remembered block the next, the order a run reads them in: how the
+    /// workspace wants its work done, then who the work is for.
+    #[test]
+    fn the_learned_block_sits_between_the_capability_tail_and_the_memory_block() {
+        let environment = environment();
+        let tools = tools();
+        let chat = chat_row(None, true, false);
+        let findings = learned_block();
+        let memory = memory();
+        assert!(
+            findings.starts_with("\n\n# Standing instructions\n"),
+            "{findings}"
+        );
+
+        let bare = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "", "");
+        let with = system_prompt(
+            &chat,
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            &findings,
+            &memory,
+            "",
+        );
+
+        assert_eq!(with, format!("{bare}{findings}{memory}"));
+        assert!(
+            with.contains(&format!("{CAPABILITY}{findings}{memory}")),
+            "each block carries its own blank line, so nothing separates the three: {with}"
+        );
+        let positions = [
+            CAPABILITY,
+            "# Standing instructions",
+            INSTRUCTION,
+            "# Repository conventions",
+            CONVENTION,
+            "# Recorded while working here",
+            DISCOVERY,
+            "Ada, an electrical engineer",
+        ]
+        .map(|text| {
+            with.find(text)
+                .unwrap_or_else(|| panic!("{text:?} is missing from {with}"))
+        });
+        assert!(positions.is_sorted(), "{positions:?}: {with}");
+        assert!(
+            with.ends_with("Ada, an electrical engineer in Wellington."),
+            "{with}"
+        );
+    }
+
+    #[test]
+    fn a_prompt_carrying_every_block_keeps_them_one_blank_line_apart() {
+        let environment = environment();
+        let tools = tools();
+        let chat = chat_row(None, true, false);
+        let findings = learned_block();
+        let memory = memory();
+        let skills = crate::agent::skills::render(
+            &[crate::db::knowledge::SkillRow {
+                id: Uuid::new_v4(),
+                title: "Deploy checklist".into(),
+                head: "---\ndescription: Use when shipping to production.\n---\n".into(),
+            }],
+            1,
+            crate::agent::skills::MAX_RENDERED_BYTES,
+        );
+
+        let bare = system_prompt(&chat, &tools, true, CAPABILITY, &environment, "", "", "");
+        let composed = system_prompt(
+            &chat,
+            &tools,
+            true,
+            CAPABILITY,
+            &environment,
+            &findings,
+            &memory,
+            &skills,
+        );
+
+        assert_eq!(composed, format!("{bare}{findings}{memory}{skills}"));
+        for block in [&findings, &memory, &skills] {
+            assert!(block.starts_with("\n\n"), "{block}");
+            assert!(!block.ends_with('\n'), "{block}");
+        }
+        assert!(!composed.contains("\n\n\n"), "{composed}");
+        assert!(
+            composed.ends_with("Use when shipping to production."),
+            "{composed}"
+        );
+    }
+
+    /// The agent being off does not take the block from an assistant chat,
+    /// which answers questions about the same workspace. It does take it from
+    /// a character, which is the card and the boundary and nothing learned:
+    /// whatever the caller hands over, that arm reads none of it.
+    #[test]
+    fn a_character_with_its_agent_off_reads_no_learned_block() {
+        let environment = environment();
+        let tools = tools();
+        let card = crate::services::character::ChatCharacter {
+            name: "Ada".into(),
+            system_prompt: Some(CARD.into()),
+            ..Default::default()
+        };
+        let findings = learned_block();
+        let memory = memory();
+        let boundary = crate::agent::prompt::boundary();
+
+        assert!(!reads_learned(
+            &chat_row(Some(card.clone()), false, false),
+            false
+        ));
+        assert!(reads_learned(
+            &chat_row(Some(card.clone()), true, false),
+            true
+        ));
+        assert!(reads_learned(&chat_row(None, false, false), false));
+        assert!(reads_learned(&chat_row(None, true, false), true));
+
+        let persona = system_prompt(
+            &chat_row(Some(card.clone()), false, false),
+            &tools,
+            false,
+            CAPABILITY,
+            &environment,
+            &findings,
+            &memory,
+            "",
+        );
+        assert_eq!(
+            persona,
+            format!("{CARD}\n\n{boundary}\n\n{CAPABILITY}{memory}")
+        );
+
+        for (chat, agentic) in [
+            (chat_row(None, false, false), false),
+            (chat_row(None, true, false), true),
+            (chat_row(Some(card), true, false), true),
+        ] {
+            let composed = system_prompt(
+                &chat,
+                &tools,
+                agentic,
+                CAPABILITY,
+                &environment,
+                &findings,
+                &memory,
+                "",
+            );
+            assert!(
+                composed.ends_with(&format!("{CAPABILITY}{findings}{memory}")),
+                "{composed}"
+            );
+        }
     }
 
     /// The capability is non-empty on both `SearchContext` arms, and it has to
@@ -1222,6 +1998,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             &memory,
             "",
         );
@@ -1236,19 +2013,57 @@ mod tests {
     }
 
     #[test]
-    fn unrepresentable_timeout_is_rejected() {
-        assert_eq!(parse_timeout(1).unwrap(), Duration::from_secs(1));
-        assert_eq!(
-            parse_timeout(31_536_000).unwrap(),
-            Duration::from_secs(31_536_000)
-        );
-        if Instant::now()
-            .checked_add(Duration::from_secs(u64::MAX))
-            .is_none()
-        {
-            let error = parse_timeout(u64::MAX).expect_err("overflowing deadline");
-            assert!(error.contains("ZONE_CHAT_TIMEOUT_SECONDS"), "{error}");
+    fn a_chat_timeout_left_in_the_environment_is_ignored_with_a_warning() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for Captured {
+            fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("the captured log")
+                    .extend_from_slice(buffer);
+                Ok(buffer.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
+
+        let read = |timeout: Option<&str>| {
+            let captured = Captured::default();
+            let writer = captured.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish();
+            let settings = tracing::subscriber::with_default(subscriber, || {
+                Settings::read(|name| match (name, timeout) {
+                    (IGNORED_TIMEOUT, Some(seconds)) => Ok(seconds.to_string()),
+                    _ => Err(VarError::NotPresent),
+                })
+            });
+            let log =
+                String::from_utf8_lossy(&captured.0.lock().expect("the captured log")).into_owned();
+            (settings, log)
+        };
+
+        let (settings, log) = read(Some("1800"));
+        let settings = settings.expect("a leftover timeout does not stop the server");
+        assert_eq!(settings.rounds, Settings::default().rounds);
+        assert_eq!(
+            log.matches(IGNORED_TIMEOUT).count(),
+            1,
+            "the operator is told once that the variable is ignored: {log}"
+        );
+
+        let (settings, log) = read(None);
+        assert!(settings.is_ok());
+        assert!(!log.contains(IGNORED_TIMEOUT), "{log}");
     }
 
     #[tokio::test]
@@ -1322,11 +2137,11 @@ mod tests {
     #[tokio::test]
     async fn a_chats_effort_reaches_an_agent_on_its_backend_and_an_endpoint_in_its_body() {
         use crate::db::{chats, organizations, workspaces};
+        use abnegate_agent_cli::AgentKind;
         use serde_json::json;
         use sqlx::PgPool;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
-        use zone_core::llm::{AgentKind, CliSettings};
 
         const MODEL: &str = "reasoner";
         let server = MockServer::start().await;
@@ -1403,7 +2218,7 @@ mod tests {
             None,
             Mode::Generation(Generation::unrouted(LlmBackend::cli(
                 AgentKind::Claude,
-                CliSettings::default(),
+                zone_core::llm::cli::settings(),
             ))),
             endpoint.clone(),
             None,
@@ -1435,6 +2250,7 @@ mod tests {
         let LlmBackend::Cli {
             agent: kind,
             settings,
+            ..
         } = agent.llm.backend()
         else {
             panic!("an agent turn runs on its CLI");
@@ -1445,10 +2261,10 @@ mod tests {
             Some(ReasoningEffort::Max),
             "the agent is told the chat's effort"
         );
-        assert_eq!(
-            settings.timeout,
-            state.config().chat.timeout,
-            "the effort leaves the chat's budget in place"
+        assert!(
+            Instant::now().checked_add(settings.timeout).is_none(),
+            "a chat's agent runs until it is done, not for {:?}",
+            settings.timeout
         );
 
         let http = http.unwrap_or_else(|error| panic!("an endpoint turn prepares: {error}"));
@@ -1465,6 +2281,151 @@ mod tests {
             body["reasoning_effort"],
             json!("high"),
             "an endpoint is sent the chat's effort at the highest level it takes: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preview_is_incomplete_until_the_organizations_mcp_servers_connect() {
+        use crate::db::chats;
+        use crate::db::mcp_servers::NewMcpServer;
+        use crate::services::mcp_servers::testing::Tenant;
+        use crate::services::mcp_servers::testing::remote;
+        use crate::services::mcp_servers::testing::stub;
+
+        const UNREACHABLE: &str = "http://127.0.0.1:1";
+        let tenant = Tenant::new().await;
+        let chat = chats::create_chat(
+            &tenant.pool,
+            Some(tenant.workspace),
+            "Servers",
+            "test",
+            true,
+            false,
+        )
+        .await
+        .expect("an agent chat");
+        let configured = |commands: bool| {
+            let mut config = crate::state::test_config();
+            config.litellm_host = UNREACHABLE.into();
+            config.ollama_host = UNREACHABLE.into();
+            config.mcp_commands = commands;
+            tenant.configured(config)
+        };
+        let state = configured(true).await;
+        let remote_only = configured(false).await;
+        let endpoint = crate::services::route::Route::for_workspace(&state, tenant.workspace)
+            .await
+            .into_endpoint()
+            .expect("a usable route");
+        let preview = |state: &AppState| {
+            let state = state.clone();
+            let chat = chat.clone();
+            let endpoint = endpoint.clone();
+            async move {
+                let preparation = build(
+                    &state,
+                    &chat,
+                    Uuid::new_v4(),
+                    None,
+                    Mode::Preview,
+                    endpoint,
+                    None,
+                )
+                .await
+                .expect("a preview");
+                let pending = preparation.context.reason.as_deref() == Some(MCP_PENDING);
+                (preparation.context.incomplete, pending)
+            }
+        };
+
+        let bare = preview(&state).await;
+        let off = NewMcpServer {
+            enabled: false,
+            ..stub("off")
+        };
+        tenant.store(&state, off).await;
+        let disabled = preview(&state).await;
+        let on = tenant.store(&state, stub("on")).await;
+        let commands_off = preview(&remote_only).await;
+        let unconnected = preview(&state).await;
+        tenant.overriding(on.id, false).await;
+        let overridden = preview(&state).await;
+        tenant.overriding(on.id, true).await;
+        let restored = preview(&state).await;
+        tenant.overriding(on.id, false).await;
+        tenant.store(&state, remote("remote")).await;
+        let awaited = [preview(&state).await, preview(&remote_only).await];
+        tenant.overriding(on.id, true).await;
+        let unbuilt = [&state, &remote_only].map(|state| {
+            state
+                .mcp()
+                .existing_organization(tenant.organization)
+                .is_none()
+        });
+        load::organization(&state, tenant.organization).await;
+        let connected = preview(&state).await;
+        tenant.remove().await;
+
+        assert_eq!(bare, (false, false), "no server is stored");
+        assert_eq!(disabled, (false, false), "the only server is disabled");
+        assert_eq!(
+            commands_off,
+            (false, false),
+            "a command server never connects while commands are off"
+        );
+        assert_eq!(unconnected, (true, true), "an enabled server awaits a turn");
+        assert_eq!(
+            overridden,
+            (false, false),
+            "the workspace switched the only connectable server off"
+        );
+        assert_eq!(restored, (true, true), "the workspace switched it back on");
+        assert_eq!(
+            awaited,
+            [(true, true), (true, true)],
+            "an http server awaits a turn, with commands on or off"
+        );
+        assert_eq!(
+            unbuilt,
+            [true, true],
+            "a preview built the organization's hub"
+        );
+        assert_eq!(
+            connected,
+            (false, false),
+            "the organization's hub is built, and its http server has settled as failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_preview_is_incomplete_while_a_built_hub_is_still_connecting() {
+        use crate::db::mcp_servers::NewMcpServer;
+        use crate::services::mcp_servers::testing::Tenant;
+        use crate::services::mcp_servers::testing::stub;
+
+        let tenant = Tenant::new().await;
+        let state = tenant.replica().await;
+        load::organization(&state, tenant.organization).await;
+        let settled = mcp_pending(&state, tenant.workspace).await;
+        let silent = NewMcpServer {
+            command: Some("sleep".to_string()),
+            arguments: vec!["30".to_string()],
+            ..stub("silent")
+        };
+        let stored = tenant.store(&state, silent).await;
+
+        load::sync(&state, tenant.organization).await;
+        let connecting = mcp_pending(&state, tenant.workspace).await;
+        tenant.overriding(stored.id, false).await;
+        let overridden = mcp_pending(&state, tenant.workspace).await;
+        state.mcp().forget(tenant.organization);
+        tenant.remove().await;
+
+        assert!(!settled, "an empty hub has nothing left to connect");
+        assert!(connecting, "the server has not answered yet");
+        assert!(
+            !overridden,
+            "the workspace switched the connecting server off"
         );
     }
 }

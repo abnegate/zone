@@ -1,7 +1,7 @@
 //! The console's contract with the organization endpoints, pinned from the
 //! live pass of 2026-09-20: an invitation names its workspace and inviter, a
 //! removed member can be invited again, members are listed by email, every
-//! organization carries the caller's role, organization AI settings are read
+//! organization and workspace carries the caller's role, organization AI settings are read
 //! by administrators only, changes are audited, and every organization has a
 //! subscription to show.
 
@@ -206,6 +206,94 @@ async fn every_organization_carries_the_callers_role() {
         .await;
     single.assert_status(StatusCode::OK);
     assert_eq!(single.json_value()["organization"]["role"], json!("owner"));
+}
+
+async fn seat_in_workspace(
+    client: &TestClient,
+    owner: &Account,
+    workspace: Uuid,
+    member: &Account,
+    role: &str,
+) {
+    let response = client
+        .post_json_auth(
+            &format!("/api/workspaces/{workspace}/members"),
+            &json!({ "user_id": member.user, "role": role }),
+            &owner.token,
+        )
+        .await;
+    assert!(
+        response.status.is_success(),
+        "the {role} was not seated: {}",
+        response.text()
+    );
+}
+
+fn listed_role(body: &Value, workspace: Uuid) -> Value {
+    body["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listed| listed["id"] == json!(workspace.to_string()))
+        .unwrap_or_else(|| panic!("the workspace is missing: {body}"))["role"]
+        .clone()
+}
+
+#[tokio::test]
+async fn every_workspace_carries_the_callers_role() {
+    let client = TestClient::with_db().await;
+    let owner = register(&client).await;
+    let reader = register(&client).await;
+    let writer = register(&client).await;
+    let org = organization(&client, &owner).await;
+    let (ws, _) = workspace(&client, &owner, org).await;
+    seat(&client, &owner, org, &reader, "member").await;
+    seat(&client, &owner, org, &writer, "member").await;
+    seat_in_workspace(&client, &owner, ws, &reader, "viewer").await;
+    seat_in_workspace(&client, &owner, ws, &writer, "member").await;
+
+    for (account, role) in [(&owner, "owner"), (&reader, "viewer"), (&writer, "member")] {
+        let listed = client
+            .get_auth(
+                &format!("/api/organizations/{org}/workspaces"),
+                &account.token,
+            )
+            .await;
+        listed.assert_status(StatusCode::OK);
+        assert_eq!(listed_role(&listed.json_value(), ws), json!(role));
+
+        let single = client
+            .get_auth(&format!("/api/workspaces/{ws}"), &account.token)
+            .await;
+        single.assert_status(StatusCode::OK);
+        assert_eq!(single.json_value()["workspace"]["role"], json!(role));
+    }
+}
+
+#[tokio::test]
+async fn a_changed_workspace_role_is_listed_at_once() {
+    let client = TestClient::with_db().await;
+    let owner = register(&client).await;
+    let hand = register(&client).await;
+    let org = organization(&client, &owner).await;
+    let (ws, _) = workspace(&client, &owner, org).await;
+    seat(&client, &owner, org, &hand, "member").await;
+    seat_in_workspace(&client, &owner, ws, &hand, "member").await;
+
+    client
+        .patch_json_auth(
+            &format!("/api/workspaces/{ws}/members/{}", hand.user),
+            &json!({ "role": "viewer" }),
+            &owner.token,
+        )
+        .await
+        .assert_status(StatusCode::OK);
+
+    let listed = client
+        .get_auth(&format!("/api/organizations/{org}/workspaces"), &hand.token)
+        .await;
+    listed.assert_status(StatusCode::OK);
+    assert_eq!(listed_role(&listed.json_value(), ws), json!("viewer"));
 }
 
 #[tokio::test]

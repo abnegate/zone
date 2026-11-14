@@ -1,6 +1,7 @@
+use abnegate_agent_cli::AgentKind;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, LlmBackend};
+use zone_core::llm::LlmBackend;
 
 use super::unprepared::Unprepared;
 use super::{Failure, Fault, Prepared, resolve_model, routed};

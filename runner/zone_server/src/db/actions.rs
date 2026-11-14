@@ -6,6 +6,10 @@ use sqlx::{PgConnection, PgPool};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use super::DbResult;
+use super::tasks::{self, Origin};
+use super::workspace_members::{self, WorkspaceRole};
+
 /// The last thing a model reads before it decides what to do while a runner
 /// runs, which is why the waiting section pins this one too.
 pub(crate) const RUNNER_STARTED: &str = "Runner started. Wait for it with wait_for, then read get_task_run and tail_task_log; do not claim the work finished.";
@@ -21,12 +25,7 @@ pub fn publish(chat_id: Uuid, message: Value) {
     let _ = UPDATES.send((chat_id, message));
 }
 
-use super::{
-    DbResult,
-    workspace_members::{self, WorkspaceRole},
-};
-
-fn patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -55,7 +54,8 @@ pub struct Update {
     pub assignee_id: Option<Option<Uuid>>,
 }
 
-#[derive(Debug, Deserialize)]
+/// `queued` stays out: only a run queues a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Created,
@@ -63,16 +63,30 @@ pub enum Status {
     Review,
     Complete,
     Blocked,
+    Paused,
+    Cancelled,
 }
 
 impl Status {
-    fn as_str(&self) -> &'static str {
+    pub const ALL: [Self; 7] = [
+        Self::Created,
+        Self::InProgress,
+        Self::Review,
+        Self::Complete,
+        Self::Blocked,
+        Self::Paused,
+        Self::Cancelled,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Created => "created",
-            Self::InProgress => "in_progress",
-            Self::Review => "review",
-            Self::Complete => "complete",
-            Self::Blocked => "blocked",
+            Self::Created => tasks::CREATED,
+            Self::InProgress => tasks::IN_PROGRESS,
+            Self::Review => tasks::REVIEW,
+            Self::Complete => tasks::COMPLETE,
+            Self::Blocked => tasks::BLOCKED,
+            Self::Paused => tasks::PAUSED,
+            Self::Cancelled => tasks::CANCELLED,
         }
     }
 }
@@ -117,6 +131,7 @@ pub async fn create_task(
     workspace_id: Uuid,
     user_id: Uuid,
     chat_id: Option<Uuid>,
+    origin: Origin,
     input: Task,
 ) -> DbResult<Value> {
     let (title, title_pending) = super::tasks::stored_title(
@@ -131,8 +146,8 @@ pub async fn create_task(
     if let Some(assignee) = input.assignee_id {
         authorize(&mut transaction, workspace_id, assignee, false).await?;
     }
-    let result = sqlx::query_scalar("INSERT INTO tasks (workspace_id, title, description, assignee_id, created_by, title_pending, chat_id) VALUES ($1, $2, $3, $4, $5, $6, (SELECT id FROM chats WHERE id = $7 AND workspace_id = $1)) RETURNING to_jsonb(tasks.*)")
-        .bind(workspace_id).bind(title).bind(input.description).bind(input.assignee_id).bind(user_id).bind(title_pending).bind(chat_id).fetch_one(&mut *transaction).await?;
+    let result = sqlx::query_scalar("INSERT INTO tasks (workspace_id, title, description, assignee_id, created_by, title_pending, chat_id, origin) VALUES ($1, $2, $3, $4, $5, $6, (SELECT id FROM chats WHERE id = $7 AND workspace_id = $1), $8) RETURNING to_jsonb(tasks.*)")
+        .bind(workspace_id).bind(title).bind(input.description).bind(input.assignee_id).bind(user_id).bind(title_pending).bind(chat_id).bind(origin.as_str()).fetch_one(&mut *transaction).await?;
     transaction.commit().await?;
     Ok(result)
 }
@@ -152,20 +167,47 @@ pub async fn update_task(
     }
     if input
         .priority
-        .is_some_and(|priority| !(1..=5).contains(&priority))
+        .is_some_and(|priority| !tasks::PRIORITIES.contains(&priority))
     {
-        return Err(invalid("priority must be between 1 and 5"));
+        return Err(invalid(tasks::PRIORITY_OUT_OF_RANGE));
     }
     let mut transaction = pool.begin().await?;
     authorize(&mut transaction, workspace_id, user_id, true).await?;
     if let Some(Some(assignee)) = input.assignee_id {
         authorize(&mut transaction, workspace_id, assignee, false).await?;
     }
-    let status = input.status.as_ref().map(Status::as_str);
-    let result = sqlx::query_scalar("UPDATE tasks SET title = COALESCE($3, title), title_pending = title_pending AND $3::text IS NULL, description = COALESCE($4, description), status = COALESCE($5, status), assignee_id = CASE WHEN $6 THEN $7 ELSE assignee_id END, priority = COALESCE($8, priority), started_at = CASE WHEN $5 = 'in_progress' THEN COALESCE(started_at, NOW()) ELSE started_at END, completed_at = CASE WHEN $5 = 'complete' THEN COALESCE(completed_at, NOW()) WHEN $5 IS NOT NULL THEN NULL ELSE completed_at END, updated_at = NOW() WHERE id = $1 AND workspace_id = $2 AND NOT is_agentic RETURNING to_jsonb(tasks.*)")
+    let status = input.status.map(Status::as_str);
+    if let Some(status) = status
+        && run_owns_status(&mut transaction, workspace_id, input.task_id, status).await?
+    {
+        return Err(invalid(tasks::ACTIVE_RUN));
+    }
+    let result = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "UPDATE tasks SET title = COALESCE($3, title), title_pending = title_pending AND $3::text IS NULL, description = COALESCE($4, description), status = COALESCE($5, status), assignee_id = CASE WHEN $6 THEN $7 ELSE assignee_id END, priority = COALESCE($8, priority), started_at = CASE WHEN $5 = 'in_progress' THEN COALESCE(started_at, NOW()) ELSE started_at END, {}, updated_at = NOW() WHERE id = $1 AND workspace_id = $2 AND NOT is_agentic RETURNING to_jsonb(tasks.*)",
+        tasks::completion_stamps("$5")
+    )))
         .bind(input.task_id).bind(workspace_id).bind(input.title).bind(input.description).bind(status).bind(input.assignee_id.is_some()).bind(input.assignee_id.flatten()).bind(input.priority).fetch_optional(&mut *transaction).await?;
     transaction.commit().await?;
     result.ok_or_else(|| invalid("Task not found or is managed by the task runner"))
+}
+
+/// Whether a live run owns the status that `status` would change. Locks the
+/// task row so a run that ends after this check writes its status after this
+/// transaction, not underneath it.
+async fn run_owns_status(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    task_id: Uuid,
+    status: &str,
+) -> DbResult<bool> {
+    let held: Option<(String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT status, active_run_id FROM tasks WHERE id = $1 AND workspace_id = $2 FOR UPDATE",
+    )
+    .bind(task_id)
+    .bind(workspace_id)
+    .fetch_optional(connection)
+    .await?;
+    Ok(held.is_some_and(|(current, run)| run.is_some() && current != status))
 }
 
 #[derive(Deserialize)]
@@ -250,13 +292,8 @@ pub async fn list_tasks(
     user_id: Uuid,
     status: Option<&str>,
 ) -> DbResult<Value> {
-    if status.is_some_and(|status| {
-        !matches!(
-            status,
-            "created" | "queued" | "in_progress" | "review" | "complete" | "blocked"
-        )
-    }) {
-        return Err(invalid("Unknown task status"));
+    if status.is_some_and(|status| tasks::Status::parse(status).is_none()) {
+        return Err(invalid(tasks::UNKNOWN_STATUS));
     }
     let mut transaction = pool.begin().await?;
     authorize(&mut transaction, workspace_id, user_id, false).await?;
@@ -297,6 +334,7 @@ pub async fn start_task(
     workspace_id: Uuid,
     user_id: Uuid,
     chat_id: Option<Uuid>,
+    origin: Origin,
     input: StartTask,
 ) -> DbResult<Value> {
     if input.description.trim().is_empty() {
@@ -304,9 +342,9 @@ pub async fn start_task(
     }
     if input
         .priority
-        .is_some_and(|priority| !(1..=5).contains(&priority))
+        .is_some_and(|priority| !tasks::PRIORITIES.contains(&priority))
     {
-        return Err(invalid("priority must be between 1 and 5"));
+        return Err(invalid(tasks::PRIORITY_OUT_OF_RANGE));
     }
     let (task, run) = match super::tasks::start_task_authorized(
         pool,
@@ -323,6 +361,7 @@ pub async fn start_task(
             source_id: input.source_id,
             created_by: Some(user_id),
             chat_id,
+            origin,
         },
     )
     .await
@@ -337,7 +376,7 @@ pub async fn start_task(
         }
         // A task created here has no prior run to conflict with.
         Err(super::tasks::MutationError::ActiveRun) => {
-            return Err(invalid("Task has an active run"));
+            return Err(invalid(tasks::ACTIVE_RUN));
         }
         Err(super::tasks::MutationError::Database(error)) => return Err(error),
     };
@@ -442,44 +481,10 @@ mod tests {
     use super::*;
     use crate::db::reminders;
     use crate::db::reminders::Delivered;
-    use chrono::{Duration, Utc};
-
-    /// The key every test that dispatches a reminder takes first.
-    ///
-    /// `deliver_next` claims the oldest due reminder in the whole database
-    /// rather than the oldest in one workspace — it is a dispatcher, and every
-    /// server instance shares it — and `claim_turn` takes the oldest firing
-    /// that still owes a turn the same way. Two tests that both have one
-    /// therefore steal each other's.
-    ///
-    /// In the database rather than in this process, because CI runs these
-    /// under `cargo nextest`, which gives every test a process of its own: a
-    /// `Mutex` here would serialise nothing there, and the tests would pass
-    /// locally and race in CI. Postgres releases a session lock when the
-    /// connection holding it goes, which covers a test that panics as well as
-    /// one that returns.
-    ///
-    /// Not a fixture concern: the rows are already isolated by workspace. It is
-    /// the claim that is global, which is the behaviour under test.
-    const DISPATCH: i64 = 0x7A6F_6E65_5245_4D44;
-
-    /// Held for the length of a dispatching test. Its connection is its own
-    /// rather than the pool's, because a pooled connection is returned to the
-    /// pool still holding the lock.
-    async fn dispatching() -> sqlx::PgConnection {
-        use sqlx::Connection;
-        let mut connection = sqlx::PgConnection::connect(
-            &std::env::var("DATABASE_URL").expect("DATABASE_URL required"),
-        )
-        .await
-        .expect("a connection of its own to hold the dispatch lock");
-        sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(DISPATCH)
-            .execute(&mut connection)
-            .await
-            .expect("the dispatch lock is takeable");
-        connection
-    }
+    use crate::db::reminders::Sweep;
+    use chrono::Duration;
+    use chrono::Utc;
+    use std::collections::BTreeSet;
 
     /// Long enough that a claimed turn stays claimed for the length of a test,
     /// which is what a real lease is for.
@@ -489,10 +494,12 @@ mod tests {
     /// and never came back — without a test that has to wait out a real one.
     const ABANDONED: std::time::Duration = std::time::Duration::ZERO;
 
+    fn database() -> String {
+        std::env::var("TEST_DATABASE_URL").expect("a disposable, migrated TEST_DATABASE_URL")
+    }
+
     async fn fixture() -> (PgPool, Uuid, Uuid, Uuid, Uuid) {
-        let pool = PgPool::connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
-            .await
-            .unwrap();
+        let pool = PgPool::connect(&database()).await.unwrap();
         let organization = Uuid::new_v4();
         let workspace = Uuid::new_v4();
         let user = Uuid::new_v4();
@@ -522,7 +529,7 @@ mod tests {
     async fn named_pool(application: &str) -> PgPool {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
-            .connect(&std::env::var("DATABASE_URL").expect("DATABASE_URL required"))
+            .connect(&database())
             .await
             .unwrap();
         sqlx::query_scalar::<_, String>("SELECT set_config('application_name', $1, false)")
@@ -581,6 +588,158 @@ mod tests {
         );
     }
 
+    const UNKNOWN: &str = "archived";
+
+    #[test]
+    fn an_agent_may_pause_or_cancel_a_task() {
+        let id = Uuid::new_v4();
+        for (value, expected) in [
+            (tasks::PAUSED, Status::Paused),
+            (tasks::CANCELLED, Status::Cancelled),
+        ] {
+            let update: Update =
+                serde_json::from_value(json!({"task_id":id,"status":value})).unwrap();
+            assert_eq!(update.status, Some(expected), "{value}");
+            assert_eq!(expected.as_str(), value);
+        }
+        assert!(serde_json::from_value::<Update>(json!({"task_id":id,"status":UNKNOWN})).is_err());
+    }
+
+    #[test]
+    fn an_agent_may_set_every_status_but_queued() {
+        let mut settable: BTreeSet<&str> = Status::ALL.map(Status::as_str).into();
+        assert!(
+            settable.insert(tasks::QUEUED),
+            "an agent must not queue a task"
+        );
+        assert_eq!(settable, BTreeSet::from(tasks::STATUSES));
+    }
+
+    /// serde names every variant when it refuses one, and that is the only
+    /// list of them the compiler keeps: a variant added without a place in
+    /// `ALL` is one the tool schema never offers.
+    #[test]
+    fn all_lists_every_status_an_agent_can_send() {
+        let refusal = serde_json::from_value::<Status>(json!(UNKNOWN))
+            .unwrap_err()
+            .to_string();
+        let (_, variants) = refusal
+            .split_once("expected one of ")
+            .unwrap_or_else(|| panic!("serde lists the variants: {refusal}"));
+        let named: BTreeSet<&str> = variants
+            .split(", ")
+            .map(|name| name.trim_matches('`'))
+            .collect();
+
+        assert_eq!(
+            named,
+            BTreeSet::from(Status::ALL.map(Status::as_str)),
+            "{refusal}"
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_filters_on_paused_and_cancelled_and_refuses_an_unknown_status() {
+        let (pool, organization, workspace, user, _chat) = fixture().await;
+        let mut seeded = Vec::new();
+        for status in [tasks::PAUSED, tasks::CANCELLED, tasks::CREATED] {
+            let created = create_task(
+                &pool,
+                workspace,
+                user,
+                None,
+                Origin::Member,
+                Task {
+                    title: Some(status.into()),
+                    description: "Listed by status".into(),
+                    assignee_id: None,
+                },
+            )
+            .await
+            .unwrap();
+            let id = created["id"].clone();
+            let moved: Update =
+                serde_json::from_value(json!({"task_id":id,"status":status})).unwrap();
+            update_task(&pool, workspace, user, moved).await.unwrap();
+            seeded.push((status, id));
+        }
+
+        for (status, id) in &seeded {
+            let listed = list_tasks(&pool, workspace, user, Some(*status))
+                .await
+                .unwrap();
+            let listed: Vec<&Value> = listed
+                .as_array()
+                .expect("a list of tasks")
+                .iter()
+                .map(|task| &task["id"])
+                .collect();
+            assert_eq!(listed, vec![id], "only the {status} task is listed");
+        }
+        let everything = list_tasks(&pool, workspace, user, None).await.unwrap();
+        assert_eq!(everything.as_array().map(Vec::len), Some(seeded.len()));
+        let unknown = list_tasks(&pool, workspace, user, Some(UNKNOWN)).await;
+        assert!(
+            matches!(&unknown, Err(sqlx::Error::Protocol(message)) if message == tasks::UNKNOWN_STATUS),
+            "{unknown:?}"
+        );
+        cleanup(&pool, organization, user).await;
+    }
+
+    #[tokio::test]
+    async fn an_agent_cannot_change_the_status_of_a_task_with_a_live_run() {
+        let (pool, organization, workspace, user, _chat) = fixture().await;
+        let created = create_task(
+            &pool,
+            workspace,
+            user,
+            None,
+            Origin::Member,
+            Task {
+                title: Some("Manual".into()),
+                description: "Run by hand".into(),
+                assignee_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let task_id = serde_json::from_value::<Uuid>(created["id"].clone()).unwrap();
+        let run = tasks::create_task_run(&pool, task_id).await.unwrap();
+        let pause: Update =
+            serde_json::from_value(json!({"task_id":task_id,"status":tasks::PAUSED})).unwrap();
+        let refused = update_task(&pool, workspace, user, pause).await;
+        assert!(
+            matches!(&refused, Err(sqlx::Error::Protocol(message)) if message == tasks::ACTIVE_RUN),
+            "{refused:?}"
+        );
+        let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1")
+            .bind(task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(status, tasks::PAUSED, "the run still owns the status");
+        let rename: Update =
+            serde_json::from_value(json!({"task_id":task_id,"title":"Renamed"})).unwrap();
+        let renamed = update_task(&pool, workspace, user, rename).await.unwrap();
+        assert_eq!(
+            renamed["title"], "Renamed",
+            "an update that leaves status alone lands"
+        );
+        assert_eq!(renamed["status"], json!(status));
+
+        assert!(tasks::start_task_run(&pool, run.id).await.unwrap());
+        let restated: Update = serde_json::from_value(
+            json!({"task_id":task_id,"status":tasks::IN_PROGRESS,"title":"Restated"}),
+        )
+        .unwrap();
+        let restated = update_task(&pool, workspace, user, restated)
+            .await
+            .expect("a status the task already has changes nothing a run owns");
+        assert_eq!(restated["title"], "Restated");
+        assert_eq!(restated["status"], tasks::IN_PROGRESS);
+        cleanup(&pool, organization, user).await;
+    }
+
     #[tokio::test]
     async fn actions_enforce_workspace_roles_sparse_updates_and_mentions() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
@@ -589,6 +748,7 @@ mod tests {
             workspace,
             user,
             None,
+            Origin::Member,
             Task {
                 title: Some("Ship".into()),
                 description: "Keep".into(),
@@ -610,6 +770,8 @@ mod tests {
             json!(user)
         );
         assert!(!complete["completed_at"].is_null());
+        assert!(!complete["shipped_at"].is_null());
+        assert!(complete["reopened_at"].is_null());
         let update: Update = serde_json::from_value(
             json!({"task_id":task_id,"status":"created","assignee_id":null}),
         )
@@ -617,9 +779,18 @@ mod tests {
         let reopened = update_task(&pool, workspace, user, update).await.unwrap();
         assert!(reopened["assignee_id"].is_null());
         assert!(reopened["completed_at"].is_null());
+        assert_eq!(
+            reopened["shipped_at"], complete["shipped_at"],
+            "the move back out stays visible as a reopen"
+        );
+        assert!(!reopened["reopened_at"].is_null(), "and is dated");
         let raised: Update =
             serde_json::from_value(json!({"task_id":task_id,"priority":1})).unwrap();
         let raised = update_task(&pool, workspace, user, raised).await.unwrap();
+        assert_eq!(
+            raised["reopened_at"], reopened["reopened_at"],
+            "a later write leaves the date of the move alone"
+        );
         assert_eq!(raised["priority"], json!(1));
         assert_eq!(
             raised["status"],
@@ -720,6 +891,7 @@ mod tests {
                 workspace,
                 user,
                 None,
+                Origin::Member,
                 Task {
                     title: Some("No".into()),
                     description: String::new(),
@@ -900,8 +1072,8 @@ mod tests {
     /// other.
     #[tokio::test]
     async fn a_schedule_runs_one_firing_at_a_time_and_does_not_hold_up_another() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let watch = |name: &str| reminders::Reminder {
             content: name.into(),
             due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
@@ -935,11 +1107,11 @@ mod tests {
 
         // One from each schedule, and then nothing: the second firing of each
         // is waiting on the first, not on the other schedule.
-        let first = reminders::claim_turn(&pool, LEASE)
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("the oldest firing is claimable");
-        let second = reminders::claim_turn(&pool, LEASE)
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("the other schedule is not held up by the first");
@@ -948,14 +1120,19 @@ mod tests {
             "a schedule with a firing in flight must not be handed its next one"
         );
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "both schedules now have a firing in flight, so neither offers its second"
         );
 
         // And once a firing is done, the one behind it is offered — to the same
         // schedule, so the next comparison is against what the first recorded.
-        reminders::finish_turn(&pool, first.id).await.unwrap();
-        let next = reminders::claim_turn(&pool, LEASE)
+        reminders::finish_turn(&pool, first.id, first.attempts)
+            .await
+            .unwrap();
+        let next = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("the firing behind a finished one is offered");
@@ -981,8 +1158,8 @@ mod tests {
     /// alone, never by how many times it has been tried.
     #[tokio::test]
     async fn a_firing_on_its_last_attempt_still_holds_the_one_behind_it() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1032,7 +1209,7 @@ mod tests {
         .await
         .unwrap();
 
-        let third = reminders::claim_turn(&pool, LEASE)
+        let third = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("a firing whose claim went stale is offered again");
@@ -1044,7 +1221,10 @@ mod tests {
             .unwrap();
         assert_eq!(attempts, 3, "the third claim reaches the attempt bound");
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "a firing out for the last time still holds the one behind it; otherwise the two run \
              together and the watch compares both against the same reading"
         );
@@ -1123,9 +1303,24 @@ mod tests {
         // one compares against the last reading that worked. Overwriting it
         // with nothing would report the world changed when all that happened is
         // that this firing did not run.
-        reminders::record_observation(&pool, watch_id, Uuid::new_v4())
+        sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(watch_id)
+            .execute(&pool)
             .await
             .unwrap();
+        reminders::deliver_next(&pool, Sweep::Workspace(workspace))
+            .await
+            .unwrap();
+        let turn = reminders::claim_turn(&pool, Sweep::Workspace(workspace), LEASE)
+            .await
+            .unwrap()
+            .expect("the watch's firing is claimable");
+        assert_eq!(
+            reminders::record_observation(&pool, &turn, Uuid::new_v4(), LEASE)
+                .await
+                .unwrap(),
+            reminders::Observation::Unanswered
+        );
         assert_eq!(
             reminders::watch_baseline(&pool, watch_id).await.unwrap(),
             Some(None),
@@ -1146,9 +1341,12 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        reminders::record_observation(&pool, watch_id, answered)
-            .await
-            .unwrap();
+        assert_eq!(
+            reminders::record_observation(&pool, &turn, answered, LEASE)
+                .await
+                .unwrap(),
+            reminders::Observation::Kept
+        );
         let kept = reminders::watch_baseline(&pool, watch_id)
             .await
             .unwrap()
@@ -1164,6 +1362,11 @@ mod tests {
             "the cap keeps the leading characters, so two readings stay comparable"
         );
 
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(watch_id)
+            .execute(&pool)
+            .await
+            .unwrap();
         cleanup(&pool, organization, user).await;
     }
 
@@ -1172,8 +1375,8 @@ mod tests {
     /// pending. Both deliver exactly one message per firing.
     #[tokio::test]
     async fn an_automation_moves_to_its_next_firing_where_a_one_shot_is_finished() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let one_shot = reminders::Reminder {
             content: "Once".into(),
             due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
@@ -1230,15 +1433,15 @@ mod tests {
         .await
         .unwrap();
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         assert!(
-            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
+            reminders::deliver_next(&pool, sweep).await.unwrap() == Delivered::Nothing,
             "the rescheduled automation is not due again immediately"
         );
 
@@ -1279,7 +1482,7 @@ mod tests {
     #[tokio::test]
     async fn a_finite_count_delivers_exactly_the_firings_it_named() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
-        let _dispatch = dispatching().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1304,11 +1507,11 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         assert!(
-            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
+            reminders::deliver_next(&pool, sweep).await.unwrap() == Delivered::Nothing,
             "COUNT=1 must not leave a second firing scheduled"
         );
 
@@ -1339,7 +1542,7 @@ mod tests {
     #[tokio::test]
     async fn a_prompt_is_written_down_as_a_turn_and_stores_no_message_of_its_own() {
         let (pool, organization, workspace, user, chat_id) = fixture().await;
-        let _dispatch = dispatching().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1369,9 +1572,9 @@ mod tests {
         .await
         .unwrap();
 
-        let delivered = reminders::deliver_next(&pool).await.unwrap();
+        let delivered = reminders::deliver_next(&pool, sweep).await.unwrap();
         assert_eq!(delivered, Delivered::Settled);
-        let turn = reminders::claim_turn(&pool, LEASE)
+        let turn = reminders::claim_turn(&pool, sweep, LEASE)
             .await
             .unwrap()
             .expect("a prompt leaves a turn to run");
@@ -1381,7 +1584,10 @@ mod tests {
         assert_eq!(turn.reminder_id, id);
         assert!(turn.prompt.starts_with("Say what changed"), "{turn:?}");
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "a claimed turn is not offered to a second worker inside its lease"
         );
 
@@ -1406,9 +1612,14 @@ mod tests {
         assert_eq!(fired, 1);
         assert_eq!(message_id, None);
 
-        reminders::finish_turn(&pool, turn.id).await.unwrap();
+        reminders::finish_turn(&pool, turn.id, turn.attempts)
+            .await
+            .unwrap();
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "a turn that has run is not owed again"
         );
         cleanup(&pool, organization, user).await;
@@ -1422,8 +1633,8 @@ mod tests {
     /// a crash loop and not a delivery.
     #[tokio::test]
     async fn a_turn_whose_worker_died_is_offered_again_and_then_given_up_on() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1446,19 +1657,19 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        reminders::deliver_next(&pool).await.unwrap();
+        reminders::deliver_next(&pool, sweep).await.unwrap();
 
         // Three claims, each abandoned: the lease of zero is a worker that
         // never came back, without a test that has to wait out a real one.
         for attempt in 1..=3 {
-            let turn = reminders::claim_turn(&pool, ABANDONED)
+            let turn = reminders::claim_turn(&pool, sweep, ABANDONED)
                 .await
                 .unwrap()
                 .unwrap_or_else(|| panic!("attempt {attempt} must be offered the turn"));
             assert_eq!(turn.reminder_id, id);
         }
         assert!(
-            reminders::claim_turn(&pool, ABANDONED)
+            reminders::claim_turn(&pool, sweep, ABANDONED)
                 .await
                 .unwrap()
                 .is_none(),
@@ -1477,13 +1688,569 @@ mod tests {
         cleanup(&pool, organization, user).await;
     }
 
+    /// One owed firing of a one-shot prompt reminder, written down the way a
+    /// claim writes it.
+    async fn owed_turn(pool: &PgPool, workspace: Uuid, user: Uuid, chat_id: Uuid) -> Uuid {
+        let created = reminders::create(
+            pool,
+            workspace,
+            user,
+            chat_id,
+            reminders::Reminder {
+                content: "Long investigation".into(),
+                due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
+                rrule: None,
+                prompt: Some("Work out why the nightly build is slow.".into()),
+                timing_mode: None,
+                time_zone: None,
+            },
+        )
+        .await
+        .unwrap();
+        let id: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+        reminders::deliver_next(pool, Sweep::Workspace(workspace))
+            .await
+            .unwrap();
+        id
+    }
+
+    /// Ages a claim past any lease a test uses, the way a worker that went
+    /// quiet would.
+    async fn backdate(pool: &PgPool, turn: Uuid) {
+        age(pool, turn, LEASE * 2).await;
+    }
+
+    async fn age(pool: &PgPool, turn: Uuid, by: std::time::Duration) {
+        sqlx::query(
+            "UPDATE reminder_turns SET claimed_at = NOW() - make_interval(secs => $2) \
+             WHERE id = $1",
+        )
+        .bind(turn)
+        .bind(by.as_secs_f64())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn claimed_at(pool: &PgPool, turn: Uuid) -> chrono::DateTime<Utc> {
+        sqlx::query_scalar("SELECT claimed_at FROM reminder_turns WHERE id = $1")
+            .bind(turn)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// A second firing of `reminder`, owed behind the first.
+    async fn sibling_turn(pool: &PgPool, reminder: Uuid) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, prompt) \
+             SELECT reminder_id, workspace_id, chat_id, created_by, prompt FROM reminder_turns \
+             WHERE reminder_id = $1 RETURNING id",
+        )
+        .bind(reminder)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A claim whose lease lapsed is one `claim_turn` treats as gone, and the
+    /// schedule's next firing may already have started on the strength of it.
+    /// Renewing the lapsed claim then would put two of one schedule's firings
+    /// in flight, which is what running them one at a time rules out.
+    #[tokio::test]
+    async fn a_lapsed_claim_is_not_revived_once_a_sibling_firing_is_running() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        let sibling = sibling_turn(&pool, reminder).await;
+        backdate(&pool, first.id).await;
+
+        let mut renewal_in_flight = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM reminder_turns WHERE id = $1 FOR UPDATE")
+            .bind(first.id)
+            .execute(&mut *renewal_in_flight)
+            .await
+            .unwrap();
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("a lapsed claim does not hold its sibling back");
+        assert_eq!(second.id, sibling, "the sibling firing is the one taken");
+        renewal_in_flight.rollback().await.unwrap();
+        let before = claimed_at(&pool, first.id).await;
+
+        assert!(
+            !reminders::renew_turn(&pool, first.id, first.attempts, LEASE)
+                .await
+                .unwrap(),
+            "a lapsed claim is not the worker's to renew"
+        );
+        assert_eq!(
+            claimed_at(&pool, first.id).await,
+            before,
+            "the lapsed claim stays lapsed while its sibling runs"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A renewal that waits behind a claim judges its lease when it runs, not
+    /// when it started waiting: the claim may have found it lapsed in between
+    /// and started the schedule's next firing.
+    #[tokio::test]
+    async fn a_renewal_waiting_on_a_claim_judges_its_lease_after_the_claim() {
+        const SHORT: std::time::Duration = std::time::Duration::from_secs(1);
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        let sibling = sibling_turn(&pool, reminder).await;
+
+        let mut claiming = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(reminders::CLAIM_LOCK)
+            .execute(&mut *claiming)
+            .await
+            .unwrap();
+        let renewal = tokio::spawn({
+            let pool = pool.clone();
+            async move { reminders::renew_turn(&pool, first.id, first.attempts, SHORT).await }
+        });
+        tokio::time::sleep(SHORT * 2).await;
+        sqlx::query(
+            "UPDATE reminder_turns SET attempts = 1, claimed_at = clock_timestamp() WHERE id = $1",
+        )
+        .bind(sibling)
+        .execute(&mut *claiming)
+        .await
+        .unwrap();
+        claiming.commit().await.unwrap();
+
+        assert!(
+            !renewal.await.unwrap().unwrap(),
+            "a claim that lapsed while its renewal waited is not revived"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A claim that waited on another worker's longer than its lease is stamped
+    /// when it is taken, not when it began waiting, so it does not start out
+    /// lapsed and refused to the worker that took it.
+    ///
+    /// Compared against the moment the lock was let go rather than by renewing
+    /// it: other tests take the same lock, and a renewal queued behind one of
+    /// them could outwait a short lease whatever the claim was stamped with.
+    #[tokio::test]
+    async fn a_claim_that_waited_on_the_lock_starts_its_lease_when_taken() {
+        const SHORT: std::time::Duration = std::time::Duration::from_secs(1);
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+
+        let mut holding = pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(reminders::CLAIM_LOCK)
+            .execute(&mut *holding)
+            .await
+            .unwrap();
+        let claim = tokio::spawn({
+            let pool = pool.clone();
+            async move { reminders::claim_turn(&pool, sweep, SHORT).await }
+        });
+        tokio::time::sleep(SHORT * 2).await;
+        let released: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&mut *holding)
+            .await
+            .unwrap();
+        holding.commit().await.unwrap();
+        let turn = claim
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("the owed firing is claimed once the lock is free");
+        let claimed = claimed_at(&pool, turn.id).await;
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+
+        assert!(
+            claimed >= released,
+            "a claim that waited {SHORT:?} and more on the lock is stamped when it was taken \
+             ({claimed}), not before the lock was let go ({released})"
+        );
+    }
+
+    /// A turn has no length limit, so the lease is a heartbeat rather than a
+    /// guess at how long a turn takes: a claim that keeps being renewed is
+    /// never offered to a second worker however old it is, and one that stops
+    /// being renewed is offered again once its lease runs out.
+    #[tokio::test]
+    async fn a_renewed_claim_is_not_offered_again_after_its_lease() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let turn = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        assert_eq!(turn.attempts, 1, "the claim names which attempt it is");
+
+        age(&pool, turn.id, LEASE - std::time::Duration::from_secs(60)).await;
+        assert!(
+            reminders::renew_turn(&pool, turn.id, turn.attempts, LEASE)
+                .await
+                .unwrap(),
+            "the worker holding the claim renews it"
+        );
+        assert!(
+            claimed_at(&pool, turn.id).await > Utc::now() - Duration::minutes(1),
+            "a renewal starts the lease over"
+        );
+        assert!(
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
+            "a turn still running and renewing its claim is not handed to a second worker"
+        );
+
+        backdate(&pool, turn.id).await;
+        let again = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("a claim nobody renewed lapses and the firing is offered again");
+        assert_eq!(again.id, turn.id);
+        assert_eq!(again.attempts, 2, "the new claim is the next attempt");
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A worker whose claim lapsed and was taken over must not keep the new
+    /// claim alive: it is not the one running the turn, and if the worker that
+    /// is dies, its renewals would hold the firing for ever.
+    #[tokio::test]
+    async fn a_superseded_claim_is_not_renewed() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        backdate(&pool, first.id).await;
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the lapsed claim is taken over");
+        assert_eq!(second.id, first.id);
+        age(&pool, second.id, LEASE - std::time::Duration::from_secs(60)).await;
+        let before = claimed_at(&pool, first.id).await;
+
+        assert!(
+            !reminders::renew_turn(&pool, first.id, first.attempts, LEASE)
+                .await
+                .unwrap(),
+            "the first worker's claim is gone, so its renewal says so"
+        );
+        assert_eq!(
+            claimed_at(&pool, first.id).await,
+            before,
+            "a stale renewal leaves the newer claim's lease alone"
+        );
+        assert!(
+            reminders::renew_turn(&pool, second.id, second.attempts, LEASE)
+                .await
+                .unwrap(),
+            "the newer claim is still inside its lease, so only the attempt turned the stale renewal away"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
+    /// A turn still running when its claim lapsed may already have a successor:
+    /// `claim_turn` started the schedule's next firing against the baseline as
+    /// it stood. The late reading must not replace that baseline, or the
+    /// successor's comparison and its own reading are both undone.
+    #[tokio::test]
+    async fn a_superseded_turn_does_not_overwrite_the_baseline_its_successor_reads() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        sqlx::query(
+            "UPDATE reminders SET timing_mode = 'condition_watch', rrule = 'FREQ=DAILY' \
+             WHERE id = $1",
+        )
+        .bind(reminder)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        let sibling = sibling_turn(&pool, reminder).await;
+        backdate(&pool, first.id).await;
+        let mut first_still_running = pool.begin().await.unwrap();
+        sqlx::query("SELECT 1 FROM reminder_turns WHERE id = $1 FOR UPDATE")
+            .bind(first.id)
+            .execute(&mut *first_still_running)
+            .await
+            .unwrap();
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the next firing starts once the first one's claim lapsed");
+        first_still_running.rollback().await.unwrap();
+        assert_eq!(second.id, sibling, "the sibling firing is the one taken");
+        let stale = assistant_message(&pool, chat_id, "The build is red.").await;
+        let current = assistant_message(&pool, chat_id, "The build is green.").await;
+
+        let late = reminders::record_observation(&pool, &first, stale, LEASE)
+            .await
+            .unwrap();
+        let baseline_after_late = reminders::watch_baseline(&pool, reminder).await.unwrap();
+        let kept = reminders::record_observation(&pool, &second, current, LEASE)
+            .await
+            .unwrap();
+        let baseline_after_kept = reminders::watch_baseline(&pool, reminder).await.unwrap();
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+
+        assert_eq!(late, reminders::Observation::Superseded);
+        assert_eq!(
+            baseline_after_late,
+            Some(None),
+            "a turn that lost its claim leaves the baseline its successor reads"
+        );
+        assert_eq!(kept, reminders::Observation::Kept);
+        assert_eq!(
+            baseline_after_kept,
+            Some(Some("The build is green.".to_owned())),
+            "the turn holding the claim records its reading"
+        );
+    }
+
+    async fn assistant_message(pool: &PgPool, chat_id: Uuid, content: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO messages (id, chat_id, role, content) \
+             VALUES (gen_random_uuid(), $1, 'assistant', $2) RETURNING id",
+        )
+        .bind(chat_id)
+        .bind(content)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// A worker whose claim lapsed and was taken over finishes only its own
+    /// claim: the newer one stays for the worker running it to finish.
+    #[tokio::test]
+    async fn a_superseded_claim_does_not_finish_the_newer_one() {
+        let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
+        let reminder = owed_turn(&pool, workspace, user, chat_id).await;
+        let first = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the owed firing is claimable");
+        backdate(&pool, first.id).await;
+        let second = reminders::claim_turn(&pool, sweep, LEASE)
+            .await
+            .unwrap()
+            .expect("the lapsed claim is taken over");
+        let remaining = |pool: PgPool, id: Uuid| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM reminder_turns WHERE id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        reminders::finish_turn(&pool, first.id, first.attempts)
+            .await
+            .unwrap();
+        assert_eq!(
+            remaining(pool.clone(), second.id).await,
+            1,
+            "a superseded worker finished the claim another worker is running"
+        );
+
+        reminders::finish_turn(&pool, second.id, second.attempts)
+            .await
+            .unwrap();
+        assert_eq!(
+            remaining(pool.clone(), second.id).await,
+            0,
+            "the worker holding the claim finishes it"
+        );
+
+        sqlx::query("DELETE FROM reminder_turns WHERE reminder_id = $1")
+            .bind(reminder)
+            .execute(&pool)
+            .await
+            .unwrap();
+        cleanup(&pool, organization, user).await;
+    }
+
+    #[tokio::test]
+    async fn a_workspace_sweep_leaves_every_other_workspace_s_firings_alone() {
+        let (pool, organization, workspace, user, _) = fixture().await;
+        let (_, other_organization, other_workspace, other_user, other_chat) = fixture().await;
+        let reminder = |prompt: Option<&str>| reminders::Reminder {
+            content: "Elsewhere".into(),
+            due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
+            rrule: None,
+            prompt: prompt.map(Into::into),
+            timing_mode: None,
+            time_zone: None,
+        };
+        reminders::create(
+            &pool,
+            other_workspace,
+            other_user,
+            other_chat,
+            reminder(None),
+        )
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE workspace_id = $1",
+        )
+        .bind(other_workspace)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let created = reminders::create(
+            &pool,
+            other_workspace,
+            other_user,
+            other_chat,
+            reminder(Some("Say what changed.")),
+        )
+        .await
+        .unwrap();
+        let watch: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+        for (attempts, claimed) in [(0, None), (3, Some(Utc::now() - Duration::days(1)))] {
+            sqlx::query(
+                "INSERT INTO reminder_turns (reminder_id, workspace_id, chat_id, created_by, \
+                 prompt, attempts, claimed_at) VALUES ($1, $2, $3, $4, 'Check it', $5, $6)",
+            )
+            .bind(watch)
+            .bind(other_workspace)
+            .bind(other_chat)
+            .bind(other_user)
+            .bind(attempts)
+            .bind(claimed)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let sweep = Sweep::Workspace(workspace);
+        assert_eq!(
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
+            Delivered::Nothing,
+            "another workspace's due reminder is not this sweep's to deliver"
+        );
+        assert!(
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
+            "another workspace's owed turn is not this sweep's to claim"
+        );
+        let owed: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM reminder_turns WHERE workspace_id = $1")
+                .bind(other_workspace)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            owed, 2,
+            "another workspace's spent turn is not this sweep's to give up on"
+        );
+
+        let delivered = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+                .bind(other_chat)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        assert_eq!(
+            delivered().await,
+            0,
+            "nothing reached the other workspace's chat"
+        );
+
+        let elsewhere = Sweep::Workspace(other_workspace);
+        assert_eq!(
+            reminders::deliver_next(&pool, elsewhere).await.unwrap(),
+            Delivered::Settled,
+            "the reminder is still there for its own workspace's sweep"
+        );
+        assert_eq!(delivered().await, 1);
+        assert_eq!(
+            reminders::claim_turn(&pool, elsewhere, LEASE)
+                .await
+                .unwrap()
+                .map(|turn| turn.reminder_id),
+            Some(watch),
+            "the turn is still there for its own workspace's sweep"
+        );
+        cleanup(&pool, organization, user).await;
+        cleanup(&pool, other_organization, other_user).await;
+    }
+
     /// Stopping a standing job stops the firing it has already claimed as well.
     /// Being answered once more by something just cancelled reads as the cancel
     /// not having worked.
     #[tokio::test]
     async fn cancelling_a_schedule_drops_the_turn_it_has_not_run_yet() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1509,11 +2276,14 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        reminders::deliver_next(&pool).await.unwrap();
+        reminders::deliver_next(&pool, sweep).await.unwrap();
 
         reminders::cancel(&pool, workspace, user, id).await.unwrap();
         assert!(
-            reminders::claim_turn(&pool, LEASE).await.unwrap().is_none(),
+            reminders::claim_turn(&pool, sweep, LEASE)
+                .await
+                .unwrap()
+                .is_none(),
             "a cancelled schedule owes nothing, including what it had already claimed"
         );
         cleanup(&pool, organization, user).await;
@@ -1524,8 +2294,8 @@ mod tests {
     /// reader can tell a schedule that ran out from one somebody stopped.
     #[tokio::test]
     async fn an_automation_past_its_lifetime_expires_rather_than_firing_for_ever() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let created = reminders::create(
             &pool,
             workspace,
@@ -1553,7 +2323,7 @@ mod tests {
         .await
         .unwrap();
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
 
@@ -1578,7 +2348,7 @@ mod tests {
             "a schedule nobody renewed must not get one more message on its way out"
         );
         assert!(
-            reminders::deliver_next(&pool).await.unwrap() == Delivered::Nothing,
+            reminders::deliver_next(&pool, sweep).await.unwrap() == Delivered::Nothing,
             "an expired schedule is never claimed again"
         );
         cleanup(&pool, organization, user).await;
@@ -1586,8 +2356,8 @@ mod tests {
 
     #[tokio::test]
     async fn reminders_cancel_revoke_and_deliver_once_across_workers() {
-        let _dispatch = dispatching().await;
         let (pool, organization, workspace, user, chat_id) = fixture().await;
+        let sweep = Sweep::Workspace(workspace);
         let reminder = || reminders::Reminder {
             content: "Check release".into(),
             due_at: (Utc::now() + Duration::hours(1)).fixed_offset(),
@@ -1624,13 +2394,13 @@ mod tests {
         .await
         .unwrap();
         let (first, second) = tokio::join!(
-            reminders::deliver_next(&pool),
-            reminders::deliver_next(&pool)
+            reminders::deliver_next(&pool, sweep),
+            reminders::deliver_next(&pool, sweep)
         );
         let claimed = |outcome: Delivered| usize::from(outcome != Delivered::Nothing);
         assert_eq!(claimed(first.unwrap()) + claimed(second.unwrap()), 1);
         assert_eq!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
@@ -1655,7 +2425,7 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(
-            reminders::deliver_next(&pool).await.unwrap(),
+            reminders::deliver_next(&pool, sweep).await.unwrap(),
             Delivered::Nothing
         );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
@@ -1691,6 +2461,7 @@ mod tests {
             workspace,
             user,
             None,
+            Origin::Member,
             serde_json::from_value(
                 json!({"title":"atomic admission","description":"Inject a run failure"}),
             )
@@ -1920,6 +2691,7 @@ mod tests {
                 source_id: None,
                 created_by: Some(user),
                 chat_id: None,
+                origin: super::super::tasks::Origin::Member,
             },
         )
         .await

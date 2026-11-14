@@ -5,42 +5,41 @@ use crate::common::context::{
     Harness, MODEL, answer, finish, ordinary, send, state, successful, summaries, summary_response,
     usage,
 };
+use abnegate_agent::context::{
+    self, ContextBreakdown, ContextSource, ContextStatus, ContextUsage, Entry, Policy,
+};
 use abnegate_llm::Message;
 use axum::http::StatusCode;
 use serde_json::{Value, json};
 use std::time::Duration;
 use uuid::Uuid;
-use zone_core::context::{
-    self, ContextBreakdown, ContextSource, ContextStatus, ContextUsage, Entry, Policy,
-};
 
 #[test]
 fn shared_context_fixture_matches_rust_serialization() {
-    let expected = ContextUsage {
-        model: "qwen3.8:27b".into(),
-        used: 3064,
-        limit: Some(32768),
-        reserved: 4096,
-        threshold: Some(22938),
-        remaining: Some(19874),
-        estimated: true,
-        incomplete: false,
-        source: ContextSource::Configured,
-        status: ContextStatus::Ready,
-        breakdown: ContextBreakdown {
-            instructions: 800,
-            conversation: 1200,
-            tools: 600,
-            results: 400,
-            summary: 0,
-            attachments: Some(0),
-            overhead: 64,
-        },
-        revision: 0,
-        compacted_messages: 0,
-        updated_at: "2026-09-06T00:00:00Z".into(),
-        reason: None,
-    };
+    let mut breakdown = ContextBreakdown::default();
+    breakdown.instructions = 800;
+    breakdown.conversation = 1200;
+    breakdown.tools = 600;
+    breakdown.results = 400;
+    breakdown.summary = 0;
+    breakdown.attachments = Some(0);
+    breakdown.overhead = 64;
+    let mut expected = ContextUsage::default();
+    expected.model = "qwen3.8:27b".into();
+    expected.used = 3064;
+    expected.limit = Some(32768);
+    expected.reserved = 4096;
+    expected.threshold = Some(22938);
+    expected.remaining = Some(19874);
+    expected.estimated = true;
+    expected.incomplete = false;
+    expected.source = ContextSource::Configured;
+    expected.status = ContextStatus::Ready;
+    expected.breakdown = breakdown;
+    expected.revision = 0;
+    expected.compacted_messages = 0;
+    expected.updated_at = "2026-09-06T00:00:00Z".into();
+    expected.reason = None;
     let fixture: Value = serde_json::from_str(include_str!("../fixtures/context.json")).unwrap();
     assert_eq!(serde_json::to_value(&expected).unwrap(), fixture);
     assert_eq!(usage(&fixture), expected);
@@ -112,6 +111,56 @@ async fn a_chat_context_choice_caps_ollama_below_native() {
     assert_eq!(inference[0]["num_ctx"], 8192);
 }
 
+async fn choose_window(harness: &Harness, tokens: i64) {
+    sqlx::query("UPDATE chats SET context_tokens = $2 WHERE id = $1")
+        .bind(harness.chat)
+        .bind(tokens)
+        .execute(&harness.pool)
+        .await
+        .expect("the chat keeps its chosen window");
+}
+
+#[tokio::test]
+async fn a_chat_context_choice_keeps_the_reason_its_capacity_was_resolved_with() {
+    let harness = Harness::new(None, false, vec![answer("Done")]).await;
+    choose_window(&harness, 8192).await;
+
+    let response = harness.preview("Ordinary draft", None).await;
+    response.assert_status(StatusCode::OK);
+    let context = usage(&response.json_value()["context"]);
+
+    assert_eq!(context.limit, Some(8192));
+    assert_eq!(context.source, ContextSource::Configured);
+    assert!(!context.incomplete, "{context:?}");
+    assert_eq!(
+        context.reason.as_deref(),
+        Some("The selected alias has no verified deployment route."),
+        "a chosen window that is not cut keeps the note its capacity was resolved with"
+    );
+}
+
+#[tokio::test]
+async fn a_chat_context_choice_cut_by_the_resolved_capacity_says_what_bounded_it() {
+    let harness = Harness::new(Some(32768), false, vec![answer("Done")]).await;
+    choose_window(&harness, 65536).await;
+
+    let response = harness.preview("Ordinary draft", None).await;
+    response.assert_status(StatusCode::OK);
+    let context = usage(&response.json_value()["context"]);
+
+    assert_eq!(context.limit, Some(32768));
+    assert_eq!(context.source, ContextSource::Configured);
+    assert!(!context.incomplete, "{context:?}");
+    assert_eq!(
+        context.reason.as_deref(),
+        Some(
+            "The requested context allocation is bounded by the capacity resolved for this \
+             deployment."
+        ),
+        "a route's own num_ctx is a configured capacity, not the model's native one"
+    );
+}
+
 #[tokio::test]
 async fn cold_text_history_compacts_before_inference_with_bounded_batched_summaries() {
     let harness = Harness::new(Some(4096), false, vec![answer("Done")]).await;
@@ -150,18 +199,15 @@ async fn cold_text_history_compacts_before_inference_with_bounded_batched_summar
             .unwrap()
             .iter()
             .enumerate()
-            .map(|(index, value)| Entry {
-                id: index.to_string(),
-                message: serde_json::from_value::<Message>(value.clone()).unwrap(),
-                preserve: true,
-                consumed: false,
+            .map(|(index, value)| {
+                Entry::new(
+                    index.to_string(),
+                    serde_json::from_value::<Message>(value.clone()).unwrap(),
+                )
+                .with_preserve(true)
             })
             .collect();
-        let budget = Policy {
-            limit: Some(4096),
-            reserved: 1024,
-            source: ContextSource::Configured,
-        };
+        let budget = Policy::new(Some(4096), 1024, ContextSource::Configured);
         assert!(
             context::estimate(MODEL, &entries, None, &budget, None).used
                 <= budget.threshold().unwrap()

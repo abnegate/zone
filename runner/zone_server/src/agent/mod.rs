@@ -13,10 +13,12 @@ pub mod actions;
 pub mod approval;
 pub mod audio;
 pub mod citations;
+pub mod discovery;
 pub mod documents;
 pub mod identifier;
 pub mod images;
 pub mod integrations;
+pub mod learned;
 pub mod memory;
 pub mod models;
 pub mod monitoring;
@@ -24,39 +26,53 @@ pub mod plan;
 pub mod planner;
 pub mod prompt;
 pub mod question;
-pub mod readiness;
 pub mod receipts;
-pub mod releases;
 pub mod runner;
 pub mod skills;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod toolbox;
 pub mod tools;
+pub(crate) mod trace;
 pub mod verification;
 pub mod wait;
 pub mod web;
 
-pub use approval::{ApprovalGate, ApprovalPolicy};
-pub use citations::{Citation, CitationKind, CitationOutcome};
-pub use prompt::{Environment, Surface, Vcs, Verbosity};
-pub use question::{ASK_USER, Answer, Choice, Question};
-pub use receipts::{ActionReceipt, ActionTarget};
-pub use runner::{
-    AgentEvent, AgentRun, LoopBudget, MAX_ITERATIONS, MAX_TOOL_CALLS, Spend, run, run_with_context,
-};
-pub use tools::{ChatTools, ToolProfile, WorkspaceScope};
+pub use approval::ApprovalGate;
+pub use approval::ApprovalPolicy;
+pub use approval::Decision;
+pub use approval::Refusal;
+pub use citations::Citation;
+pub use citations::CitationKind;
+pub use citations::CitationOutcome;
+pub use prompt::Environment;
+pub use prompt::Surface;
+pub use prompt::Vcs;
+pub use prompt::Verbosity;
+pub use question::ASK_USER;
+pub use question::Answer;
+pub use question::Choice;
+pub use question::Question;
+pub use receipts::ActionReceipt;
+pub use receipts::ActionTarget;
+pub use runner::AgentEvent;
+pub use runner::AgentRun;
+pub use runner::LoopBudget;
+pub use runner::MAX_ITERATIONS;
+pub use runner::MAX_TOOL_CALLS;
+pub use runner::Spend;
+pub use runner::run;
+pub use runner::run_with_context;
+pub use tools::ChatTools;
+pub use tools::ToolProfile;
+pub use tools::WorkspaceScope;
 
-use serde::{Deserialize, Serialize};
-use zone_core::tools::REASON_PARAM;
-use zone_core::tools::job::JobStarted;
+use abnegate_agent::tool::REASON_PARAMETER;
+use abnegate_agent::tool::job::JobStarted;
+use serde::Deserialize;
+use serde::Serialize;
 
 use wait::Waiting;
-
-/// How much of a title an approval preview quotes.
-pub(crate) const PREVIEW_TITLE_CHARS: usize = 80;
-
-/// How much of a body an approval preview quotes: enough to recognise the
-/// message being sent without reprinting it.
-pub(crate) const PREVIEW_BODY_CHARS: usize = 200;
 
 /// The model's stated reason for a call, read out of the call's own arguments.
 ///
@@ -66,7 +82,7 @@ pub(crate) const PREVIEW_BODY_CHARS: usize = 200;
 pub fn reason(arguments: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(arguments.trim())
         .ok()?
-        .get(REASON_PARAM)?
+        .get(REASON_PARAMETER)?
         .as_str()
         .map(str::trim)
         .filter(|stated| !stated.is_empty())
@@ -86,9 +102,14 @@ pub struct ToolCallRecord {
     pub success: bool,
     pub detail: String,
     pub duration_ms: u64,
+    /// Absent on calls stored before offsets were kept; the console draws those first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<usize>,
     /// Model thinking that immediately preceded this call, shown in the trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_at: Option<usize>,
     /// Why the model said it was making this call, for side-effecting tools.
     /// Model-authored: the console labels it as stated, never as observed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,6 +131,11 @@ pub struct ToolCallRecord {
     /// What this call is waiting for, and until when.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<Waiting>,
+    /// Why the call did not run, when it was put to the reader and refused. Always written, so
+    /// a record that has none says so, and only one stored before refusals were kept is read
+    /// back from its outcome's words.
+    #[serde(default)]
+    pub refusal: Option<Refusal>,
 }
 
 #[cfg(test)]
@@ -125,12 +151,15 @@ mod tests {
             success: true,
             detail: "3 passages".to_string(),
             duration_ms: 42,
+            at: None,
+            reasoning_at: None,
             reasoning: Some("Search workspace docs first.".into()),
             reason: Some("The user asked what changed in the deploy.".into()),
             preview: None,
             questions: Vec::new(),
             job: None,
             waiting: None,
+            refusal: None,
         };
 
         let json = serde_json::to_value(&record).unwrap();
@@ -160,6 +189,8 @@ mod tests {
             success: true,
             detail: "Waiting for your answer…".to_string(),
             duration_ms: 1,
+            at: None,
+            reasoning_at: None,
             reasoning: None,
             reason: None,
             preview: None,
@@ -186,6 +217,7 @@ mod tests {
                 multi_select: false,
                 required: true,
             }],
+            refusal: None,
         };
 
         let json = serde_json::to_value(&record).unwrap();
@@ -209,6 +241,10 @@ mod tests {
         });
 
         let parsed: ToolCallRecord = serde_json::from_value(stored).unwrap();
+        assert_eq!(
+            parsed.at, None,
+            "a call stored before offsets were kept has none, and the console draws it first"
+        );
         assert_eq!(parsed.reason, None);
         assert_eq!(parsed.reasoning, None);
         assert!(

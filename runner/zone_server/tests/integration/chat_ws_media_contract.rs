@@ -1,6 +1,7 @@
 //! Direct media generation contracts across the authenticated chat WebSocket.
 
 use crate::common::MEDIA;
+use crate::common::comfy;
 use crate::common::context::{Harness, Socket, finish, next, send};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -93,11 +94,7 @@ async fn cancellation_while_waiting_for_capacity_closes_every_media_lane() {
         .expect(1)
         .mount(&occupied)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/history/occupied"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-        .mount(&occupied)
-        .await;
+    comfy::queued(&occupied, "occupied").await;
     Mock::given(method("POST"))
         .and(path("/queue"))
         .and(body_json(json!({"delete":["occupied"]})))

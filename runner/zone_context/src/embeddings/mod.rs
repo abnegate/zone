@@ -3,6 +3,8 @@
 //! This module provides the `EmbeddingService` trait for generating embeddings
 //! and `VectorStore` for storing and searching embeddings in PostgreSQL with pgvector.
 
+#[cfg(feature = "local-embeddings")]
+pub mod cache;
 pub mod embed_cache;
 pub mod eval;
 pub mod hybrid;
@@ -10,31 +12,32 @@ pub mod hybrid;
 pub mod local_rerank;
 pub mod pgvector;
 pub mod providers;
-pub mod query;
 pub mod ranker;
 pub mod rerank;
 pub mod serving;
 
 pub use embed_cache::embed_cached;
-pub use hybrid::{
-    HybridSearchConfig, HybridSearchResult, apply_local_rerank, cap_per_file, finalize_ranking,
-    hybrid_search, hybrid_search_filtered, keyword_only_search, prefer_definition_chunks,
-    semantic_only_search, sort_by_score,
-};
-pub use pgvector::{PgVectorStore, VECTOR_DIMENSION, align_vector};
-pub use query::{
-    RewrittenQuery, embed_query_text, identifier_match_boost, nl_bridge_terms, nl_content_tokens,
-    nl_question_phrases, path_uri_patterns, path_uri_tokens, rewrite_query, sanitize_search_query,
-};
-pub use ranker::{IdentifierRole, LinearRanker, default_ranker, identifier_role, score_hit};
-pub use rerank::{
-    CrossEncoder, OllamaCrossEncoder, blend_rank, lexical_cross_score, probe_cross_encoder,
-};
-pub use serving::{ann_candidate_limit, configure_ann_connection, keyword_candidate_limit};
+pub use hybrid::Id;
+pub use hybrid::hybrid_search;
+pub use hybrid::hybrid_search_filtered;
+pub use hybrid::keyword_only_search;
+pub use hybrid::semantic_only_search;
+pub use pgvector::PgVectorStore;
+pub use pgvector::VECTOR_DIMENSION;
+pub use pgvector::align_vector;
+pub use ranker::default_ranker;
+pub use ranker::score_hit;
+pub use rerank::CrossEncoder;
+pub use rerank::probe_cross_encoder;
+pub use serving::ann_candidate_limit;
+pub use serving::configure_ann_connection;
+pub use serving::keyword_candidate_limit;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::DateTime;
+use chrono::Utc;
+use serde::Deserialize;
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::error::Result;

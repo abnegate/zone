@@ -5,11 +5,16 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
-use zone_core::tools::{
-    MAX_TOOL_OUTPUT_CHARS, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, excerpt,
-};
 
-use super::PREVIEW_TITLE_CHARS;
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::MAXIMUM_TOOL_OUTPUT_CHARACTERS;
+use abnegate_agent::tool::Rendering;
+use abnegate_agent::tool::Tier;
+
 use super::identifier::Kind;
 use super::tools::WorkspaceScope;
 use crate::db::knowledge::{self, Document, DocumentUpdate};
@@ -88,31 +93,28 @@ impl Tool for DocumentTool {
         }
     }
 
-    fn preview(&self, params: &Value) -> Option<String> {
+    fn preview(&self, params: &Value) -> Option<Rendering> {
         let title = params["title"].as_str();
         let characters = params["content"].as_str().map(|body| body.chars().count());
         match self.operation {
-            Operation::Create => Some(format!(
+            Operation::Create => Some(Rendering::from(format!(
                 "Publish a workspace document titled \"{}\", {} characters long.",
-                excerpt(title?, PREVIEW_TITLE_CHARS),
-                characters?
-            )),
+                title?, characters?
+            ))),
             Operation::Update => {
                 let target = params["id"].as_str().unwrap_or("an unnamed document");
-                Some(match (title, characters) {
+                Some(Rendering::from(match (title, characters) {
                     (Some(title), Some(characters)) => format!(
-                        "Retitle workspace document {target} to \"{}\" and replace its text with {characters} characters.",
-                        excerpt(title, PREVIEW_TITLE_CHARS)
+                        "Retitle workspace document {target} to \"{title}\" and replace its text with {characters} characters."
                     ),
-                    (Some(title), None) => format!(
-                        "Retitle workspace document {target} to \"{}\".",
-                        excerpt(title, PREVIEW_TITLE_CHARS)
-                    ),
+                    (Some(title), None) => {
+                        format!("Retitle workspace document {target} to \"{title}\".")
+                    }
                     (None, Some(characters)) => format!(
                         "Replace the text of workspace document {target} with {characters} characters."
                     ),
                     (None, None) => return None,
-                })
+                }))
             }
             _ => None,
         }
@@ -436,7 +438,7 @@ fn listing(mut envelope: Value, records: &[Value]) -> Value {
             envelope[OMITTED] = json!(records.len() - kept);
         }
         cite(&mut envelope, listed);
-        if json_chars(&envelope) <= MAX_TOOL_OUTPUT_CHARS || kept <= 1 {
+        if json_chars(&envelope) <= MAXIMUM_TOOL_OUTPUT_CHARACTERS || kept <= 1 {
             return envelope;
         }
         kept -= 1;
@@ -568,6 +570,7 @@ mod tests {
                 chat_id: chat,
                 user_id: Uuid::new_v4(),
                 offline: false,
+                origin: crate::db::tasks::Origin::Member,
             },
             operation: Operation::Read,
         }
@@ -808,13 +811,13 @@ mod tests {
         let mut untrimmed = base;
         untrimmed[DOCUMENTS] = json!(records);
         assert!(
-            json_chars(&untrimmed) > MAX_TOOL_OUTPUT_CHARS,
+            json_chars(&untrimmed) > MAXIMUM_TOOL_OUTPUT_CHARACTERS,
             "the fixture fits the budget whole, so nothing here is ever trimmed"
         );
         assert!(omitted > 0 && kept > 0, "{kept} kept, {omitted} omitted");
         assert_eq!(kept + omitted, records.len());
         assert!(
-            json_chars(&envelope) <= MAX_TOOL_OUTPUT_CHARS,
+            json_chars(&envelope) <= MAXIMUM_TOOL_OUTPUT_CHARACTERS,
             "a trimmed listing is still over the output budget at {} characters",
             json_chars(&envelope)
         );
@@ -986,6 +989,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: user.id,
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         };
         let mut registry = ToolRegistry::new();
         register(&mut registry, &scope);

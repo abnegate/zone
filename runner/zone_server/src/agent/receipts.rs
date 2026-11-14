@@ -12,12 +12,13 @@
 //! labelled as stated rather than observed wherever it is shown, and nothing
 //! here treats it as evidence.
 
+use abnegate_agent::ToolResult;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use zone_core::tools::ToolResult;
 
+use super::discovery::{self, RECORD_DISCOVERY};
 use super::memory::{MEMORY_APPEND, MEMORY_DELETE, MEMORY_WRITE};
 use super::planner::FINALIZE_PROJECT;
 use crate::db::memory::MemoryCategory;
@@ -76,6 +77,7 @@ pub fn is_write_tool(name: &str) -> bool {
             | "send_message"
             | "create_reminder"
             | "cancel_reminder"
+            | RECORD_DISCOVERY
             | MEMORY_WRITE
             | MEMORY_APPEND
             | MEMORY_DELETE
@@ -108,7 +110,7 @@ pub fn from_write(
         text_field(&args, "chat_id"),
     ]);
     let target_label = clip(&target_label(name, &args, output.as_ref()), LABEL_CHARS);
-    let outcome = clip(&outcome(name, result), OUTCOME_CHARS);
+    let outcome = clip(&outcome(name, result, output.as_ref()), OUTCOME_CHARS);
     let href = href(target_type, &target_id, &chat_id);
 
     Some(ActionReceipt {
@@ -123,14 +125,14 @@ pub fn from_write(
         success: result.success,
         outcome,
         href,
-        reason: super::reason(arguments),
+        reason: discovery::trace_reason(name, super::reason(arguments)),
     })
 }
 
 fn target_type(name: &str) -> Option<ActionTarget> {
     Some(match name {
         "create_task" | "update_task" => ActionTarget::Task,
-        "create_document" | "update_document" => ActionTarget::Document,
+        "create_document" | "update_document" | RECORD_DISCOVERY => ActionTarget::Document,
         "send_message" => ActionTarget::Message,
         "create_reminder" | "cancel_reminder" => ActionTarget::Reminder,
         MEMORY_WRITE | MEMORY_APPEND | MEMORY_DELETE => ActionTarget::Memory,
@@ -148,7 +150,7 @@ fn target_type(name: &str) -> Option<ActionTarget> {
 /// assistant message and streamed to the console, and a chat is readable by
 /// anyone holding workspace read access — not only by the person the memory
 /// belongs to. A fact's name is the model's, chosen to describe what one
-/// person asked to have remembered, so it does not go in a field the whole
+/// person said about themselves, so it does not go in a field the whole
 /// workspace reads. The two forced titles are constants that name nothing
 /// about anybody, so they stay.
 fn memory_entry(name: &str, args: &Value) -> Option<(MemoryCategory, Option<&'static str>)> {
@@ -191,6 +193,12 @@ fn target_label(name: &str, args: &Value, output: Option<&Value>) -> String {
         text_field(args, "content"),
     ]);
     match name {
+        // Never from the call's arguments. A refused call has no output, and
+        // what it was refused for may be the credential in its subject, so the
+        // label is the subject only once the store has taken it.
+        RECORD_DISCOVERY => recorded(output)
+            .map(|stored| stored.subject)
+            .unwrap_or_else(|| fallback_label(name).to_string()),
         "create_task" | "update_task" | "create_document" | "update_document" => title
             .or(content)
             .unwrap_or_else(|| fallback_label(name).to_string()),
@@ -208,6 +216,7 @@ fn fallback_label(name: &str) -> &'static str {
     match name {
         "create_task" | "update_task" => "Task",
         "create_document" | "update_document" => "Document",
+        RECORD_DISCOVERY => "Discovery",
         "send_message" => "Message",
         "create_reminder" | "cancel_reminder" => "Reminder",
         MEMORY_WRITE | MEMORY_APPEND | MEMORY_DELETE => "Memory",
@@ -216,7 +225,7 @@ fn fallback_label(name: &str) -> &'static str {
     }
 }
 
-fn outcome(name: &str, result: &ToolResult) -> String {
+fn outcome(name: &str, result: &ToolResult, output: Option<&Value>) -> String {
     if !result.success {
         // A memory tool's failure is reported by its kind and nothing else.
         // The store's messages name the entry and quote what it currently
@@ -248,12 +257,20 @@ fn outcome(name: &str, result: &ToolResult) -> String {
         "send_message" => "Message sent".to_string(),
         "create_reminder" => "Reminder scheduled".to_string(),
         "cancel_reminder" => "Reminder cancelled".to_string(),
+        RECORD_DISCOVERY => recorded(output)
+            .map(|stored| stored.outcome)
+            .unwrap_or_else(|| "Discovery recorded".to_string()),
         MEMORY_WRITE => "Memory written".to_string(),
         MEMORY_APPEND => "Memory appended".to_string(),
         MEMORY_DELETE => "Memory forgotten".to_string(),
         FINALIZE_PROJECT => "Project created and started".to_string(),
         _ => "Write completed".to_string(),
     }
+}
+
+/// What `record_discovery` answered a stored call with.
+fn recorded(output: Option<&Value>) -> Option<discovery::Stored> {
+    serde_json::from_value(output?.clone()).ok()
 }
 
 /// What a failed memory call puts on its receipt: which kind of write was
@@ -576,8 +593,8 @@ mod tests {
 
     /// A fact is receipted under its kind and never under its name. The
     /// receipt is stored on the assistant message and a chat is readable by
-    /// anyone with workspace read access, so the name one person chose for
-    /// what they asked to have remembered does not go in it — the same reason
+    /// anyone with workspace read access, so the name the model gave to what
+    /// one person said about themselves does not go in it — the same reason
     /// `reading_what_is_remembered_mints_no_receipt` gives for minting none.
     ///
     /// A single-entry kind still resolves to its forced title, which is a
@@ -734,6 +751,127 @@ mod tests {
         assert_eq!(json["href"], "");
         let parsed: ActionReceipt = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, built);
+    }
+
+    const DISCOVERY: &str = r#"{"kind":"lesson","subject":"Frontend tests need isolation","statement":"Run bun test with --isolate."}"#;
+
+    fn answered(outcome: &str) -> ToolResult {
+        ToolResult::success(
+            json!(discovery::Stored {
+                id: Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap(),
+                subject: "Frontend tests need isolation".to_string(),
+                kind: crate::db::knowledge::discovery::Kind::Lesson,
+                outcome: outcome.to_string(),
+                superseded: Some("Run bun test.".to_string()),
+            })
+            .to_string(),
+        )
+    }
+
+    #[test]
+    fn a_recorded_discovery_is_receipted_as_the_document_it_became() {
+        let built = receipt(
+            RECORD_DISCOVERY,
+            DISCOVERY,
+            answered(crate::agent::discovery::RECORDED),
+        );
+
+        assert!(is_write_tool(RECORD_DISCOVERY));
+        assert_eq!(built.action, RECORD_DISCOVERY);
+        assert_eq!(built.target_type, ActionTarget::Document);
+        assert_eq!(built.target_id, "33333333-3333-3333-3333-333333333333");
+        assert_eq!(built.target_label, "Frontend tests need isolation");
+        assert_eq!(built.outcome, "Recorded as a new entry.");
+        assert_eq!(built.href, "/wiki?id=33333333-3333-3333-3333-333333333333");
+        assert_eq!(built.reason, None);
+        assert!(built.success);
+        assert_eq!(
+            serde_json::to_value(&built).unwrap()["target_type"],
+            "document"
+        );
+    }
+
+    #[test]
+    fn a_discovery_receipt_says_which_of_the_three_things_the_store_did() {
+        for line in [
+            crate::agent::discovery::RECORDED,
+            crate::agent::discovery::REPLACED,
+            crate::agent::discovery::UNCHANGED,
+        ] {
+            assert_eq!(
+                receipt(RECORD_DISCOVERY, DISCOVERY, answered(line)).outcome,
+                line
+            );
+        }
+        assert_eq!(
+            receipt(
+                RECORD_DISCOVERY,
+                DISCOVERY,
+                ToolResult::success(json!({"id": "doc-7"}).to_string())
+            )
+            .outcome,
+            "Discovery recorded"
+        );
+    }
+
+    /// The refused subject may be the credential it was refused for, and a
+    /// receipt is stored on a message the whole workspace reads. So nothing on
+    /// it comes from the call's arguments: not the label, which every other
+    /// document receipt falls back to them for, not a title a call slipped in
+    /// beside them, and not a reason, which restates what the call carried.
+    #[test]
+    fn a_refused_discovery_is_receipted_without_any_of_what_it_carried() {
+        let refusal = crate::agent::discovery::Declined::Screened(
+            crate::agent::memory::rules::Refusal::Secret,
+        )
+        .message();
+
+        for arguments in [
+            r#"{"kind":"lesson","subject":"The deploy token","statement":"It is ghp_abcdefgh1234"}"#,
+            r#"{"kind":"lesson","subject":"ghp_abcdefgh1234","statement":"The deploy token"}"#,
+            r#"{"kind":"lesson","subject":"The deploy token","statement":"It is ghp_abcdefgh1234","title":"ghp_abcdefgh1234","content":"ghp_abcdefgh1234","id":"ghp_abcdefgh1234"}"#,
+            r#"{"kind":"lesson","subject":"The deploy token","statement":"Kept in the vault.","reason":"The deploy token is ghp_abcdefgh1234"}"#,
+        ] {
+            let built = receipt(RECORD_DISCOVERY, arguments, ToolResult::error(&refusal));
+
+            assert!(!built.success);
+            assert_eq!(built.target_type, ActionTarget::Document);
+            assert_eq!(built.target_id, "");
+            assert_eq!(built.target_label, "Discovery");
+            assert_eq!(built.outcome, refusal);
+            assert_eq!(built.href, "");
+            assert_eq!(built.reason, None);
+            let on_the_message = serde_json::to_string(&built).expect("a receipt serialises");
+            for carried in ["ghp_abcdefgh1234", "The deploy token"] {
+                assert!(
+                    !on_the_message.contains(carried),
+                    "{carried} reached the message: {on_the_message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_discovery_receipt_never_carries_a_stated_reason() {
+        let built = receipt(
+            RECORD_DISCOVERY,
+            r#"{"kind":"lesson","subject":"Frontend tests need isolation","statement":"Run bun test with --isolate.","reason":"So the next run starts with it."}"#,
+            answered(crate::agent::discovery::RECORDED),
+        );
+
+        assert!(built.success);
+        assert_eq!(built.reason, None);
+        assert!(
+            !serde_json::to_string(&built)
+                .unwrap()
+                .contains("Run bun test."),
+            "what an entry said before is the model's to read, not the receipt's to carry"
+        );
+        assert_eq!(
+            serde_json::to_value(&built).unwrap().get("reason"),
+            None,
+            "the tool takes no reason, so one that arrives is not its to show"
+        );
     }
 
     /// A kind this build does not know is not a memory entry it can name, so

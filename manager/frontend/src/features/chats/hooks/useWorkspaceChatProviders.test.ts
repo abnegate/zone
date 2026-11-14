@@ -80,6 +80,31 @@ describe('useWorkspaceChatProviders', () => {
     expect(mockGetWorkspaceChatProviders).toHaveBeenCalledTimes(2);
   });
 
+  it("never reports the previous workspace's offers for the next one", async () => {
+    mockGetWorkspaceChatProviders.mockImplementation((workspaceId: string) =>
+      workspaceId === 'ws-1' ? Promise.resolve(offers(claude)) : new Promise(() => {})
+    );
+    const seen: Array<string | undefined> = [];
+
+    const { result, rerender } = renderHook(
+      ({ workspaceId }) => {
+        const loaded = useWorkspaceChatProviders(workspaceId);
+        seen.push(`${workspaceId}:${loaded.providers?.default.label ?? 'none'}`);
+        return loaded;
+      },
+      { initialProps: { workspaceId: 'ws-1' as string | null } }
+    );
+    await waitFor(() => {
+      expect(result.current.providers?.default.label).toBe('Claude Code');
+    });
+    seen.length = 0;
+
+    rerender({ workspaceId: 'ws-2' });
+
+    expect(seen).not.toContain('ws-2:Claude Code');
+    expect(result.current.providers).toBeNull();
+  });
+
   it('drops a response that arrives after the workspace changed', async () => {
     let resolve: (value: WorkspaceChatProviders) => void = () => {};
     const first = new Promise<WorkspaceChatProviders>((done) => {

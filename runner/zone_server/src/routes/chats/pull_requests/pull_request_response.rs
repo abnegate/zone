@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::services::chat::pull_request::{Status, Tracked};
+use crate::services::chat::pull_request::{Connection, Status, Tracked};
 
 /// One pull request a chat opened, as its panel shows it.
 #[derive(Debug, Serialize)]
@@ -21,6 +21,13 @@ pub struct PullRequestResponse {
     pub writable: bool,
     /// Whether one of the workspace's sources holds a credential for it.
     pub credentialed: bool,
+    /// How the workspace reaches GitHub for it; `disconnected` asks for
+    /// GitHub to be connected again.
+    pub connection: Connection,
+    /// Whether a failing or conflicted state starts a run that fixes it.
+    pub auto_fix: bool,
+    /// Whether a run auto-fix started is still working.
+    pub auto_fixing: bool,
 }
 
 impl PullRequestResponse {
@@ -28,7 +35,7 @@ impl PullRequestResponse {
         let Tracked {
             row,
             status,
-            credentialed,
+            connection,
         } = tracked;
         Self {
             id: row.id,
@@ -43,9 +50,12 @@ impl PullRequestResponse {
                 .or(row.title),
             dismissed: row.dismissed_at.is_some(),
             created_at: row.created_at,
+            auto_fix: row.auto_fix,
+            auto_fixing: row.auto_fixing,
             status,
             writable,
-            credentialed,
+            credentialed: connection.credentialed(),
+            connection,
         }
     }
 }

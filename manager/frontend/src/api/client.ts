@@ -170,7 +170,7 @@ class Client {
   // Chats API (delegates to chatsApi)
 
   async getChats(workspaceId: string, archived?: boolean): Promise<Chat[]> {
-    return chatsApi.getChats(workspaceId, archived);
+    return (await chatsApi.getChats(workspaceId, { archived })).chats;
   }
 
   async getChat(id: string): Promise<ChatWithMessages> {
@@ -243,12 +243,18 @@ class Client {
     return projectsApi.unlinkSource(projectId);
   }
 
-  // Deprecated GitHub-specific methods (kept for backward compatibility)
-  async linkGitHub(projectId: string, repoUrl: string): Promise<Project> {
+  async linkGitHub(
+    projectId: string,
+    repositoryUrl: string,
+    githubInstallationId?: string
+  ): Promise<Project> {
     const response = await fetch(`${API_BASE}/api/projects/${projectId}/github`, {
-      method: 'PUT',
+      method: 'POST',
       headers: this.getHeaders(),
-      body: JSON.stringify({ repo_url: repoUrl }),
+      body: JSON.stringify({
+        repo_url: repositoryUrl,
+        ...(githubInstallationId && { github_installation_id: githubInstallationId }),
+      }),
     });
     if (!response.ok) {
       throw new Error(`Failed to link GitHub: ${response.status}`);
@@ -271,8 +277,8 @@ class Client {
 
   // Tasks API (delegates to tasksApi)
 
-  async getTasks(workspaceId: string, projectId?: string, status?: string) {
-    return tasksApi.getTasks(workspaceId, projectId, status);
+  async getTasks(workspaceId: string, projectId?: string) {
+    return tasksApi.getTasks(workspaceId, projectId);
   }
 
   async getTask(id: string) {

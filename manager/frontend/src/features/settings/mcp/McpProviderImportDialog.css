@@ -1,0 +1,58 @@
+.mcp-provider-import {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-field-gap);
+  min-width: 0;
+}
+
+.mcp-provider-import-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.mcp-provider-import-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--ui-text-sm);
+  overflow-wrap: anywhere;
+}
+
+.mcp-provider-import-server {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.mcp-provider-import-detail {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ui-space-1) var(--ui-space-2);
+  min-width: 0;
+}
+
+.mcp-provider-import-target {
+  font-family: var(--ui-font-mono);
+  color: var(--ui-text-secondary);
+}
+
+.mcp-provider-import-note {
+  color: var(--ui-text-secondary);
+}
+
+.mcp-provider-import-refusal {
+  color: var(--ui-error);
+}
+
+.mcp-provider-import > .modal-actions,
+.mcp-provider-import > .modal-error {
+  margin-top: 0;
+  margin-bottom: 0;
+}

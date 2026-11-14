@@ -3,17 +3,22 @@
 //! This module provides the core types for representing content gathered from sources,
 //! along with utilities for tokenization, chunking, and intelligent sizing.
 
-mod code_chunker;
+mod retention;
 mod sizing;
 mod tokenizer;
+mod uri_namespace;
 
-pub use code_chunker::*;
+pub use retention::Retention;
 pub use sizing::*;
 pub use tokenizer::*;
+pub use uri_namespace::UriNamespace;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use chrono::DateTime;
+use chrono::Utc;
+use serde::Deserialize;
+use serde::Serialize;
 use uuid::Uuid;
 
 // Re-export SourceCategory as ContentCategory for domain clarity
@@ -75,7 +80,7 @@ impl ContentItem {
     /// Set the content and update token count
     pub fn with_content(mut self, content: impl Into<String>) -> Self {
         let content = content.into();
-        self.token_count = estimate_tokens(&content);
+        self.token_count = abnegate_index::estimate_tokens(&content);
         self.content = Some(content);
         self.metadata_only = false;
         self
@@ -196,7 +201,7 @@ impl ContentChunk {
         end_offset: usize,
     ) -> Self {
         let text = text.into();
-        let token_count = estimate_tokens(&text);
+        let token_count = abnegate_index::estimate_tokens(&text);
         Self {
             id: Uuid::new_v4(),
             content_item_id,
@@ -354,6 +359,9 @@ pub struct FetchResult {
     pub stats: FetchStats,
     /// Every live file URI in the source (used to retain the index)
     pub live_uris: Vec<String>,
+    /// The namespace of a listing the source cut short: `live_uris` may miss
+    /// live files in it, so the index keeps every record it holds there
+    pub truncated: Option<UriNamespace>,
     /// Provider version after this fetch (tree SHA / fingerprint)
     pub version: Option<String>,
 }
@@ -369,8 +377,22 @@ impl FetchResult {
             fetched_at: Utc::now(),
             stats: FetchStats::default(),
             live_uris: Vec::new(),
+            truncated: None,
             version: None,
         }
+    }
+
+    /// The records the index keeps for this source: the namespace a truncated
+    /// listing covers, else the live URIs, or the fetched items' when the
+    /// adapter lists none
+    pub fn retention(&self) -> Retention {
+        if let Some(namespace) = &self.truncated {
+            return Retention::Namespace(namespace.clone());
+        }
+        if self.live_uris.is_empty() {
+            return Retention::Exact(self.items.iter().map(|item| item.uri.clone()).collect());
+        }
+        Retention::Exact(self.live_uris.clone())
     }
 
     /// Add an item to the result
@@ -565,6 +587,40 @@ mod tests {
 
         assert_eq!(result.stats.items_fetched, 1);
         assert!(result.stats.total_tokens > 0);
+    }
+
+    #[test]
+    fn the_index_keeps_the_live_uris_or_else_the_fetched_ones() {
+        let source_id = Uuid::new_v4();
+        let mut result = FetchResult::new(source_id, false);
+        result.add_item(ContentItem::new(
+            source_id,
+            ContentCategory::File,
+            "/fetched.rs",
+            "fetched.rs",
+        ));
+
+        assert_eq!(
+            result.retention(),
+            Retention::Exact(vec!["/fetched.rs".to_string()])
+        );
+
+        result.live_uris = vec!["/fetched.rs".to_string(), "/unchanged.rs".to_string()];
+
+        assert_eq!(
+            result.retention(),
+            Retention::Exact(result.live_uris.clone())
+        );
+    }
+
+    #[test]
+    fn a_truncated_listing_retains_the_namespace_it_covers() {
+        let namespace = UriNamespace::new("github://owner/repo/", "@main");
+        let mut result = FetchResult::new(Uuid::new_v4(), false);
+        result.live_uris = vec!["github://owner/repo/listed.rs@main".to_string()];
+        result.truncated = Some(namespace.clone());
+
+        assert_eq!(result.retention(), Retention::Namespace(namespace));
     }
 
     #[test]

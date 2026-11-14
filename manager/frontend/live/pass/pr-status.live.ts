@@ -14,7 +14,7 @@ import {
 /**
  * Row 30, second half: the pull request a task run opened was merged on
  * GitHub; the server's reception sweep runs every thirty minutes, and after
- * it the task card reads "PR: merged". The scratch branch is deleted last.
+ * it the task card reads "PR merged". The scratch branch is deleted last.
  */
 
 const REPO =
@@ -105,12 +105,12 @@ test.describe('pull request status', () => {
         branchDeleted = `deleted ${branch}`;
       }
     }
-    const merged_shown = status === 'merged' && /PR: merged/.test(cardText);
+    const merged_shown = status === 'merged' && /PR merged/.test(cardText);
     record(30, {
       result: merged_shown ? 'WORKS' : 'FAILS',
       cause: merged_shown
         ? undefined
-        : 'product: the run opened and pushed the pull request and the card showed "PR: open" and "View Pull Request"; after the merge the reception sweep recorded merged_at on the run, but nothing writes tasks.pr_status, so the card never reads "PR: merged"',
+        : 'product: the run opened and pushed the pull request and the card showed "PR open" and "View PR"; after the merge the reception sweep recorded merged_at on the run, but nothing writes tasks.pr_status, so the card never reads "PR merged"',
       task_id: taskId,
       pr_url: prUrl,
       status_before_wait: statusBefore,

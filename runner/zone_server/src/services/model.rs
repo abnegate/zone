@@ -1,5 +1,6 @@
 //! Capabilities reported by the installed inference engine.
 
+use abnegate_agent::chat::Capacity;
 use reqwest::Client;
 use serde::Deserialize;
 use std::sync::LazyLock;
@@ -26,6 +27,7 @@ pub struct ModelProfile {
     pub tools: Option<bool>,
     pub reasoning: Option<bool>,
     pub needs_character: bool,
+    pub context_length: Option<u64>,
 }
 
 #[derive(Deserialize, Default)]
@@ -37,6 +39,8 @@ pub struct Model {
     system: Option<String>,
     #[serde(default)]
     modelfile: Option<String>,
+    #[serde(default)]
+    model_info: Option<serde_json::Value>,
 }
 
 impl Model {
@@ -76,6 +80,7 @@ impl Model {
                 tools: Some(true),
                 reasoning: Some(true),
                 needs_character: false,
+                context_length: None,
             };
         }
         ModelProfile {
@@ -84,6 +89,7 @@ impl Model {
             tools: None,
             reasoning: None,
             needs_character: needs_character(name, None, false),
+            context_length: None,
         }
     }
 
@@ -106,6 +112,7 @@ impl Model {
             tools,
             reasoning: self.supports_reasoning(),
             needs_character: needs_character(name, tools, self.expects_persona()),
+            context_length: self.model_info.as_ref().and_then(Capacity::native_window),
             capabilities: self.capabilities,
         }
     }
@@ -181,7 +188,7 @@ fn name_tokens(name: &str) -> impl Iterator<Item = &str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Model, ModelProfile, needs_character};
+    use super::{Capacity, Model, ModelProfile, needs_character};
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -240,6 +247,7 @@ mod tests {
                 tools: Some(true),
                 reasoning: Some(false),
                 needs_character: false,
+                context_length: None,
             }
         );
         let imported = model(Some(vec!["completion"]));
@@ -251,6 +259,7 @@ mod tests {
                 tools: Some(false),
                 reasoning: Some(false),
                 needs_character: true,
+                context_length: None,
             }
         );
         let persona = model_with(json!({
@@ -265,7 +274,82 @@ mod tests {
                 tools: Some(false),
                 reasoning: Some(false),
                 needs_character: true,
+                context_length: None,
             }
+        );
+    }
+
+    #[test]
+    fn a_native_window_is_read_from_model_info() {
+        assert_eq!(
+            Capacity::native_window(
+                &json!({"general.architecture": "gemma3", "gemma3.context_length": 131_072})
+            ),
+            Some(131_072)
+        );
+        for (info, why) in [
+            (
+                json!({"general.architecture": "gemma3", "llama.context_length": 8192}),
+                "another architecture's window",
+            ),
+            (
+                json!({"general.architecture": "gemma3", "gemma3.context_length": 0}),
+                "a zero window",
+            ),
+            (
+                json!({"general.architecture": "gemma3", "gemma3.context_length": "8192"}),
+                "a window written as text",
+            ),
+            (
+                json!({"general.architecture": 3, "3.context_length": 8192}),
+                "an architecture that is not a name",
+            ),
+            (json!({"gemma3.context_length": 8192}), "no architecture"),
+            (json!("opaque"), "metadata of another shape"),
+        ] {
+            assert_eq!(Capacity::native_window(&info), None, "{why}");
+        }
+    }
+
+    #[test]
+    fn profile_reads_the_native_window_of_the_architecture() {
+        let window = |info: serde_json::Value| {
+            model_with(json!({"capabilities": ["completion"], "model_info": info}))
+                .into_profile("qwen3:8b")
+                .context_length
+        };
+        assert_eq!(
+            window(json!({"general.architecture": "qwen3", "qwen3.context_length": 40960})),
+            Some(40960)
+        );
+        assert_eq!(
+            window(json!({"general.architecture": "qwen3", "llama.context_length": 4096})),
+            None,
+            "another architecture's window is not this model's"
+        );
+        assert_eq!(
+            window(json!({"general.architecture": "qwen3", "qwen3.context_length": 0})),
+            None
+        );
+        assert_eq!(window(json!({"qwen3.context_length": 40960})), None);
+        assert_eq!(
+            model_with(json!({"capabilities": ["completion", "tools"], "model_info": "opaque"}))
+                .into_profile("qwen3:8b"),
+            ModelProfile {
+                capabilities: Some(vec!["completion".to_string(), "tools".to_string()]),
+                completion: Some(true),
+                tools: Some(true),
+                reasoning: Some(false),
+                needs_character: false,
+                context_length: None,
+            },
+            "metadata of another shape costs only the window"
+        );
+        assert_eq!(
+            model(Some(vec!["completion"]))
+                .into_profile("qwen3:8b")
+                .context_length,
+            None
         );
     }
 
@@ -373,6 +457,7 @@ mod tests {
                 tools: Some(true),
                 reasoning: Some(true),
                 needs_character: false,
+                context_length: None,
             }
         );
     }
@@ -395,6 +480,7 @@ mod tests {
                 tools: None,
                 reasoning: None,
                 needs_character: true,
+                context_length: None,
             }
         );
     }

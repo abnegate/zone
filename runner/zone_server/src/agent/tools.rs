@@ -1,6 +1,6 @@
 //! The tools a chat agent can call.
 //!
-//! These implement [`zone_core::tools::Tool`], the same trait the task runner
+//! These implement [`abnegate_agent::Tool`], the same trait the task runner
 //! and the CLI use, so there is one tool abstraction in the codebase rather
 //! than one per caller. What differs here is scope: each tool carries the
 //! workspace and chat it was built for, so a call can never reach another
@@ -10,28 +10,64 @@
 //! File and shell operations run in the server runtime, inside the container
 //! for Docker deployments, with the server process permissions.
 
+pub mod context;
+pub mod environment;
+
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::mcp;
+use abnegate_agent::mcp::McpHub;
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::Tier;
+use abnegate_agent_cli::AgentKind;
+use abnegate_exec::Niceness;
 use abnegate_llm::ToolDefinition;
 use async_trait::async_trait;
-use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use serde_json::Value;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
-use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use zone_core::commands;
+use zone_core::commands::Shell;
+use zone_core::llm::Toolset;
+use zone_core::servers;
 
-use super::toolbox::{
-    LOAD_TOOLS, Listed, LoadToolsTool, SEARCH_TOOLS, SearchToolsTool, Toolbox, purpose,
-};
-
-use super::citations::{self, Citation};
-use super::identifier::{self, Kind};
-use super::receipts::{self, ActionReceipt};
-use crate::db::{
-    DbResult, chat_attached_sources, chat_sources, knowledge, message_embeddings, projects,
-    sources, users, workspace_members,
-};
+use super::citations;
+use super::citations::Citation;
+use super::identifier;
+use super::identifier::Kind;
+use super::receipts;
+use super::receipts::ActionReceipt;
+use super::toolbox::LOAD_TOOLS;
+use super::toolbox::Listed;
+use super::toolbox::LoadToolsTool;
+use super::toolbox::SEARCH_TOOLS;
+use super::toolbox::SearchToolsTool;
+use super::toolbox::Toolbox;
+use super::toolbox::purpose;
+use crate::db::DbResult;
+use crate::db::chat_attached_sources;
+use crate::db::chat_sources;
+use crate::db::knowledge;
+use crate::db::mcp_servers;
+use crate::db::message_embeddings;
+use crate::db::projects;
+use crate::db::sources;
+use crate::db::tasks::Origin;
+use crate::db::users;
+use crate::db::workspace_members;
+use crate::services::mcp_servers::load;
+use crate::services::mcp_servers::organization::OrganizationHub;
 use crate::state::AppState;
+use crate::utils::text::truncate;
 
 /// Bound legacy search snippets and inventory summaries; full document reads are preserved.
 const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
@@ -78,7 +114,7 @@ const QUERY_ECHO_CHARS: usize = 500;
 ///
 /// Fixed by the chat or task being answered, never by model arguments, which
 /// keeps tool calls inside the caller's tenant. Every workspace tool
-/// holds one of these, because `zone_core`'s `ToolContext` describes a working
+/// holds one of these, because `abnegate_agent`'s `ToolContext` describes a working
 /// directory and knows nothing about tenants.
 #[derive(Clone)]
 pub struct WorkspaceScope {
@@ -88,6 +124,8 @@ pub struct WorkspaceScope {
     pub user_id: Uuid,
     /// When true, this chat never uses public web search, page fetch, or curl/wget.
     pub offline: bool,
+    /// Recorded on every task the turn's agent creates.
+    pub origin: Origin,
 }
 
 /// Whether `actor` may act on the workspace as a task initiator: an active
@@ -107,6 +145,57 @@ pub(crate) async fn task_writer(state: &AppState, workspace: Uuid, actor: Uuid) 
     }
 }
 
+/// The hub of the workspace's organization and the workspace's overrides of
+/// its servers, when any of them is connected. A turn waits only on the
+/// servers the workspace is offered. A preview (`connect` false) reads only a
+/// hub a turn already built, and asks the database nothing while no
+/// organization has one.
+async fn organization_servers(
+    scope: &WorkspaceScope,
+    connect: bool,
+) -> Option<(Arc<OrganizationHub>, BTreeMap<Uuid, bool>)> {
+    let state = &scope.state;
+    if !state.mcp().policy().enabled || (!connect && state.mcp().organizations() == 0) {
+        return None;
+    }
+    let workspace = scope.workspace_id;
+    let organization = match mcp_servers::organization_for_workspace(state.db(), workspace).await {
+        Ok(organization) => organization?,
+        Err(error) => {
+            tracing::debug!(
+                %workspace,
+                %error,
+                "Could not read the workspace's organization; offering none of its MCP servers"
+            );
+            return None;
+        }
+    };
+    let built = if connect {
+        None
+    } else {
+        Some(state.mcp().existing_organization(organization)?)
+    };
+    if built.as_ref().is_some_and(|hub| hub.connected() == 0) {
+        return None;
+    }
+    let overrides = match mcp_servers::workspace_overrides(state.db(), workspace).await {
+        Ok(overrides) => overrides,
+        Err(error) => {
+            tracing::debug!(
+                %workspace,
+                %error,
+                "Could not read the workspace's MCP overrides; offering none of its organization's servers"
+            );
+            return None;
+        }
+    };
+    let hub = match built {
+        Some(hub) => hub,
+        None => load::workspace(state, organization, &overrides).await?,
+    };
+    (hub.connected() > 0).then_some((hub, overrides))
+}
+
 /// Where server tools start when the model gives a relative path.
 pub(crate) fn host_root() -> std::path::PathBuf {
     std::env::var_os("ZONE_CHAT_AGENT_CWD")
@@ -115,83 +204,32 @@ pub(crate) fn host_root() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("/"))
 }
 
-/// The only process environment variables a tool may see.
-///
-/// The server's environment also holds the database URL, the JWT and
-/// encryption keys, the LiteLLM master key and provider API keys. A shell that
-/// inherited those would print them into tool output and into stored messages,
-/// so both profiles start from this list and nothing else.
-const SAFE_ENV: &[&str] = &[
-    "ALL_PROXY",
-    "HOME",
-    "HTTPS_PROXY",
-    "HTTP_PROXY",
-    "LANG",
-    "NO_PROXY",
-    "PATH",
-    "SHELL",
-    "TERM",
-    "TMPDIR",
-    "TOOL_RUNNER_PROXY_URL",
-    "TZ",
-    "USER",
-    "XDG_RUNTIME_DIR",
-    "all_proxy",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-];
-
-/// Locale variables (`LC_ALL`, `LC_CTYPE`, and the rest) pass through as a set.
-const SAFE_ENV_PREFIX: &str = "LC_";
-
-/// Names an operator has deliberately added to [`SAFE_ENV`], comma separated.
-const ENV_PASSTHROUGH: &str = "ZONE_AGENT_ENV_PASSTHROUGH";
-
 /// Bytes a file tool will read in one call.
 const MAX_TOOL_FILE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Seconds a tool-launched command may run before it is killed.
 const TOOL_COMMAND_TIMEOUT_SECS: u64 = 300;
 
-fn safe_env(
-    vars: impl IntoIterator<Item = (String, String)>,
-    passthrough: &str,
-) -> HashMap<String, String> {
-    let operator: HashSet<&str> = passthrough
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .collect();
-    vars.into_iter()
-        .filter(|(key, _)| {
-            SAFE_ENV.contains(&key.as_str())
-                || key.starts_with(SAFE_ENV_PREFIX)
-                || operator.contains(key.as_str())
-        })
-        .collect()
-}
-
-fn tool_env() -> HashMap<String, String> {
-    safe_env(
-        std::env::vars(),
-        &std::env::var(ENV_PASSTHROUGH).unwrap_or_default(),
-    )
-}
-
 /// Chat keeps the host's filesystem reach, but gets the same narrow environment
 /// as a task run.
-fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
-    ToolContext {
-        cwd,
-        env: tool_env(),
-        max_file_size: MAX_TOOL_FILE_BYTES,
-        command_timeout: TOOL_COMMAND_TIMEOUT_SECS,
+fn context(
+    profile: ToolProfile,
+    working_directory: PathBuf,
+    session: Session,
+    denied: Vec<PathBuf>,
+    chat_offline: bool,
+    niceness: Niceness,
+) -> ToolContext {
+    context::build(context::Config {
+        working_directory,
+        session,
+        denied,
+        niceness,
         unrestricted: profile == ToolProfile::Chat,
-        denied: Vec::new(),
-        session: Session::Detached,
-        offline: false,
-    }
+        maximum_file_size: MAX_TOOL_FILE_BYTES,
+        command_timeout: Duration::from_secs(TOOL_COMMAND_TIMEOUT_SECS),
+        chat_offline,
+    })
 }
 
 /// Which surface is assembling the shared tool set.
@@ -199,6 +237,17 @@ fn context(profile: ToolProfile, cwd: std::path::PathBuf) -> ToolContext {
 pub enum ToolProfile {
     Chat,
     Task,
+}
+
+impl ToolProfile {
+    /// Whether this surface's host tools include `run_shell`: only a chat's,
+    /// whose context is unrestricted.
+    fn shell(self) -> Shell {
+        match self {
+            Self::Chat => Shell::Included,
+            Self::Task => Shell::Excluded,
+        }
+    }
 }
 
 struct TaskLease {
@@ -230,8 +279,15 @@ struct TaskLease {
 /// weaker rule. And the recall the profile block invites — read before you
 /// answer about the person — is exactly the call a chat would otherwise pay
 /// the trip on every time.
-const NEVER_DEFERRED: [&str; 6] = [
+///
+/// `record_discovery` is here on the memory tools' first ground. `prompt::
+/// section::workspace` tells a run and a chat to record what they verified
+/// before they finish, unasked, and the moment that rule applies is the end of
+/// the work: a model that has to load the schema first is one round trip from
+/// skipping a write nobody asked it for.
+const NEVER_DEFERRED: [&str; 7] = [
     "start_task",
+    super::discovery::RECORD_DISCOVERY,
     super::memory::MEMORY_LIST,
     super::memory::MEMORY_READ,
     super::memory::MEMORY_WRITE,
@@ -249,7 +305,8 @@ pub const PLAN_HELD: &str = "This task requires its plan approved before anythin
 ///
 /// Chat and tasks share workspace tools. Tasks have a sandboxed file/shell
 /// context and only receive workspace tools for an active initiating writer.
-/// Server-wide MCP tools are restricted to chats because they carry no task scope.
+/// MCP tools, the instance's and the organization's, follow the workspace
+/// tools: every chat is offered them, a task only for that writer.
 pub struct ChatTools {
     registry: ToolRegistry,
     context: ToolContext,
@@ -275,7 +332,7 @@ pub struct ChatTools {
     /// Tiers for a catalog assembled by name rather than from tools, so a
     /// prompt test is answered by the same declaration production reads.
     #[cfg(test)]
-    tiers: HashMap<String, Tier>,
+    tiers: std::collections::HashMap<String, Tier>,
     /// Frozen at assembly, like the catalog, so a prompt built from a
     /// hand-written catalog still carries the guidance it was handed.
     mcp_guidance: Option<String>,
@@ -304,14 +361,24 @@ impl ChatTools {
     /// Search tools stay registered and degrade to keyword search when
     /// embeddings are unavailable, so the model can still look things up.
     pub async fn build(scope: WorkspaceScope) -> Self {
-        let denied = scope.state.config().agents.state.clone();
-        Self::assemble(Some(scope), ToolProfile::Chat, None, true, denied).await
+        let agents = &scope.state.config().agents;
+        let (denied, niceness) = (agents.state.clone(), agents.niceness);
+        Self::assemble(Some(scope), ToolProfile::Chat, None, true, denied, niceness).await
     }
 
     /// Preview only the known catalog; never start MCP processes while drafting.
     pub async fn preview(scope: WorkspaceScope) -> Self {
-        let denied = scope.state.config().agents.state.clone();
-        Self::assemble(Some(scope), ToolProfile::Chat, None, false, denied).await
+        let agents = &scope.state.config().agents;
+        let (denied, niceness) = (agents.state.clone(), agents.niceness);
+        Self::assemble(
+            Some(scope),
+            ToolProfile::Chat,
+            None,
+            false,
+            denied,
+            niceness,
+        )
+        .await
     }
 
     /// Point relative paths at `directory`, which a chat's project gave it, or
@@ -319,7 +386,7 @@ impl ChatTools {
     pub async fn starting_in(mut self, directory: Option<std::path::PathBuf>) -> Self {
         match directory {
             Some(directory) => {
-                self.context.cwd = directory;
+                self.context.working_directory = directory;
                 self
             }
             None => self.using_workspace_directories().await,
@@ -342,7 +409,7 @@ impl ChatTools {
                     return self;
                 }
             };
-        self.context.cwd = scope
+        self.context.working_directory = scope
             .state
             .config()
             .host_mounts
@@ -351,12 +418,19 @@ impl ChatTools {
     }
 
     pub fn working_directory(&self) -> &std::path::Path {
-        &self.context.cwd
+        &self.context.working_directory
     }
 
     /// Whether this chat opted out of public web (search, page fetch, curl/wget).
     pub fn offline(&self) -> bool {
-        self.context.offline
+        self.scope.as_ref().is_some_and(|scope| scope.offline)
+    }
+
+    /// The origin a task this tool set's agent creates is recorded with.
+    pub fn origin(&self) -> Origin {
+        self.scope
+            .as_ref()
+            .map_or(Origin::Member, |scope| scope.origin)
     }
 
     /// No tools at all, for a chat that answers from the server's own context.
@@ -366,7 +440,14 @@ impl ChatTools {
     pub fn empty() -> Self {
         Self {
             registry: ToolRegistry::new(),
-            context: context(ToolProfile::Chat, host_root()),
+            context: context(
+                ToolProfile::Chat,
+                host_root(),
+                Session::Detached,
+                Vec::new(),
+                false,
+                Niceness::DEFAULT,
+            ),
             scope: None,
             workspace: Vec::new(),
             profile: ToolProfile::Chat,
@@ -377,7 +458,7 @@ impl ChatTools {
             toolbox: Arc::new(Toolbox::default()),
             remote: HashSet::new(),
             #[cfg(test)]
-            tiers: HashMap::new(),
+            tiers: Default::default(),
             mcp_guidance: None,
             lease: None,
             plan_hold: false,
@@ -400,10 +481,7 @@ impl ChatTools {
         names: &[&str],
         mcp_guidance: Option<String>,
     ) -> Self {
-        let host = match profile {
-            ToolProfile::Chat => ToolRegistry::with_host_tools(),
-            ToolProfile::Task => ToolRegistry::with_defaults(),
-        };
+        let host = commands::registry(profile.shell());
         let tiers = names
             .iter()
             .filter_map(|name| Some(((*name).to_string(), host.tier(name)?)))
@@ -434,13 +512,20 @@ impl ChatTools {
     fn from_names(
         profile: ToolProfile,
         names: &[&str],
-        tiers: HashMap<String, Tier>,
+        tiers: std::collections::HashMap<String, Tier>,
         mcp_guidance: Option<String>,
     ) -> Self {
         let mut sorted: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
         sorted.sort();
         Self {
-            context: context(profile, host_root()),
+            context: context(
+                profile,
+                host_root(),
+                Session::Detached,
+                Vec::new(),
+                false,
+                Niceness::DEFAULT,
+            ),
             profile,
             name_set: sorted.iter().cloned().collect(),
             // A catalog stated by name is stated in full: nothing is deferred
@@ -473,7 +558,7 @@ impl ChatTools {
             .copied()
             .chain(deferred.iter().map(|(name, _)| *name))
             .collect();
-        let mut built = Self::from_names(profile, &every, HashMap::new(), None);
+        let mut built = Self::from_names(profile, &every, Default::default(), None);
         built.core = core.iter().map(|name| (*name).to_string()).collect();
         built.remote = remote.iter().map(|name| (*name).to_string()).collect();
         built.toolbox.publish(
@@ -490,26 +575,56 @@ impl ChatTools {
     }
 
     /// Sandboxed tools and workspace tools authorized as the initiating task actor.
+    /// A task the run creates is the run's doing, not a member's, so it is automation.
     pub async fn for_task(
         state: &AppState,
         cwd: std::path::PathBuf,
         workspace_id: Uuid,
         actor: Option<Uuid>,
     ) -> Self {
-        let scope = match actor {
-            Some(user_id) if task_writer(state, workspace_id, user_id).await => {
-                Some(WorkspaceScope {
-                    state: state.clone(),
-                    workspace_id,
-                    user_id,
-                    chat_id: None,
-                    offline: false,
-                })
-            }
+        let writer = match actor {
+            Some(user_id) if task_writer(state, workspace_id, user_id).await => Some(user_id),
             _ => None,
         };
-        let denied = state.config().agents.state.clone();
-        Self::assemble(scope, ToolProfile::Task, Some(cwd), true, denied).await
+        Self::task(state, cwd, workspace_id, writer).await
+    }
+
+    /// The catalog [`Self::for_task`] assembles for a writer it authorized,
+    /// for a prompt test with no membership to read.
+    #[cfg(test)]
+    pub(crate) async fn for_task_writer(
+        state: &AppState,
+        cwd: std::path::PathBuf,
+        workspace_id: Uuid,
+        writer: Uuid,
+    ) -> Self {
+        Self::task(state, cwd, workspace_id, Some(writer)).await
+    }
+
+    async fn task(
+        state: &AppState,
+        cwd: std::path::PathBuf,
+        workspace_id: Uuid,
+        writer: Option<Uuid>,
+    ) -> Self {
+        let scope = writer.map(|user_id| WorkspaceScope {
+            state: state.clone(),
+            workspace_id,
+            user_id,
+            chat_id: None,
+            offline: false,
+            origin: Origin::Automation,
+        });
+        let agents = &state.config().agents;
+        Self::assemble(
+            scope,
+            ToolProfile::Task,
+            Some(cwd),
+            true,
+            agents.state.clone(),
+            agents.niceness,
+        )
+        .await
     }
 
     /// A task that requires its plan approved is handed `submit_plan`, and
@@ -616,9 +731,10 @@ impl ChatTools {
     async fn assemble(
         scope: Option<WorkspaceScope>,
         profile: ToolProfile,
-        task_cwd: Option<std::path::PathBuf>,
+        task_cwd: Option<PathBuf>,
         connect: bool,
-        denied: std::path::PathBuf,
+        denied: PathBuf,
+        niceness: Niceness,
     ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
@@ -643,6 +759,7 @@ impl ChatTools {
             // both the catalog and the definitions sort by name.
             super::documents::register(&mut registry, scope);
             core.extend(registry.names().iter().map(|name| name.to_string()));
+            super::discovery::register(&mut registry, scope);
             super::actions::register(&mut registry, scope);
             super::integrations::register(&mut registry, scope);
             if scope.chat_id.is_some() {
@@ -670,17 +787,8 @@ impl ChatTools {
             .map(|name| name.to_string())
             .collect();
 
-        match profile {
-            ToolProfile::Chat => {
-                for tool in ToolRegistry::with_host_tools().into_tools() {
-                    registry.register(tool);
-                }
-            }
-            ToolProfile::Task => {
-                for tool in ToolRegistry::with_defaults().into_tools() {
-                    registry.register(tool);
-                }
-            }
+        for tool in commands::registry(profile.shell()).into_tools() {
+            registry.register(tool);
         }
 
         // Host tools are core: a turn that can read a file should not have to
@@ -693,20 +801,29 @@ impl ChatTools {
                 .map(|name| name.to_string()),
         );
 
-        // A preview (connect = false) only sees a hub already connected, so
-        // drafting never spawns a server process.
+        // A preview (connect = false) only sees the hubs already connected,
+        // so drafting never spawns a server process.
+        let mut connected_servers = 0;
         if let Some(scope) = &scope {
             let hub = if connect {
-                Some(scope.state.mcp_hub().await)
+                Some(scope.state.mcp().instance().await)
             } else {
-                scope.state.existing_mcp()
+                scope.state.mcp().existing_instance()
             };
             let before: HashSet<String> = registry
                 .names()
                 .iter()
                 .map(|name| name.to_string())
                 .collect();
-            let added = hub.map_or(0, |hub| registry.register_mcp(hub));
+            let hub = hub.as_deref();
+            connected_servers = hub.map_or(0, McpHub::server_count);
+            let mut added = hub.map_or(0, |hub| mcp::register(&mut registry, hub));
+            if let Some((organization, overrides)) = organization_servers(scope, connect).await {
+                let registered = organization
+                    .register(&mut registry, &|server| load::offered(&overrides, server));
+                added += registered.tools;
+                connected_servers += registered.servers;
+            }
             if added > 0 {
                 match profile {
                     ToolProfile::Chat => {
@@ -766,19 +883,17 @@ impl ChatTools {
             ToolProfile::Chat => host_root(),
             ToolProfile::Task => task_cwd.unwrap_or_else(host_root),
         };
-        let mut context = context(profile, cwd);
-        context.denied.push(denied);
-        if let Some(scope) = scope.as_ref() {
-            context.offline = scope.offline;
-            if let Some(chat_id) = scope.chat_id {
-                context.session = Session::Chat(chat_id);
-            }
-        }
-        let mcp_guidance = registry.mcp_guidance();
+        let session = scope
+            .as_ref()
+            .and_then(|scope| scope.chat_id)
+            .map_or(Session::Detached, Session::Chat);
+        let offline = scope.as_ref().is_some_and(|scope| scope.offline);
+        let context = context(profile, cwd, session, vec![denied], offline, niceness);
+        let mcp_guidance = servers::prompt(connected_servers, &registry.names());
 
         let mut assembled = Self {
             #[cfg(test)]
-            tiers: HashMap::new(),
+            tiers: Default::default(),
             registry,
             context,
             scope,
@@ -905,7 +1020,7 @@ impl ChatTools {
     /// The name this turn's model calls the tool `name` by.
     pub fn qualified(&self, name: &str) -> String {
         match self.agent {
-            Some(agent) => agent.tool(name),
+            Some(agent) => agent.tool(Toolset::SERVER, name),
             None => name.to_string(),
         }
     }
@@ -950,7 +1065,9 @@ impl ChatTools {
     /// Not `preview`: that constructor previews the *catalog*, while this
     /// previews one call.
     pub fn effect(&self, name: &str, arguments: &str) -> Option<String> {
-        self.registry.preview(name, arguments)
+        self.registry
+            .preview(name, arguments)
+            .map(|preview| preview.text)
     }
 
     /// Run a tool by name, turning every failure mode into a `ToolResult`.
@@ -1118,14 +1235,6 @@ pub(super) fn optional_string_arg<'a>(params: &'a Value, key: &str) -> Option<&'
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-}
-
-/// Truncate on a character boundary, marking that we cut.
-pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
-    match text.char_indices().nth(max_chars) {
-        Some((byte_idx, _)) => format!("{}…", &text[..byte_idx]),
-        None => text.to_string(),
-    }
 }
 
 /// Collapse whitespace so a chunk of prose costs one line of prompt.
@@ -1375,7 +1484,7 @@ impl SearchKnowledgeTool {
             match ctx.state.embedding_service() {
                 Some(embedding_service) => {
                     match embedding_service
-                        .embed(&zone_context::embed_query_text(
+                        .embed(&abnegate_index::embed_query_text(
                             embedding_service.model(),
                             query,
                         ))
@@ -1699,7 +1808,7 @@ impl SearchChatHistoryTool {
             match ctx.state.embedding_service() {
                 Some(embedding_service) => {
                     match embedding_service
-                        .embed(&zone_context::embed_query_text(
+                        .embed(&abnegate_index::embed_query_text(
                             embedding_service.model(),
                             query,
                         ))
@@ -2006,114 +2115,33 @@ mod tests {
         assert!(tools.has("read_file"));
     }
     use super::*;
+    use crate::services::mcp_servers::testing;
+    use crate::state::lazy_pool;
     use crate::state::test_config;
+    use abnegate_agent::tool::OFF_LIMITS;
+    use abnegate_agent::tool::Preview;
+    use abnegate_agent::tool::REASON_DESCRIPTION;
+    use abnegate_agent::tool::REASON_PARAMETER;
+    use abnegate_agent::tool::job::JobCommand;
+    use abnegate_agent::tool::job::Jobs;
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::time::timeout;
-    use zone_core::tools::{REASON_DESCRIPTION, REASON_PARAM};
-
-    fn process_env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.to_string()))
-            .collect()
-    }
-
-    const SECRETS: &[(&str, &str)] = &[
-        ("DATABASE_URL", "postgres://zone:hunter2@postgres:5432/zone"),
-        ("JWT_SECRET", "a-signing-key-of-at-least-32-characters"),
-        ("ENCRYPTION_KEY", "12345678901234567890123456789012"),
-        ("SECURITY_LITELLM_MASTER_KEY", "sk-master"),
-        ("SECURITY_MANAGER_API_KEY", "manager-key"),
-        ("LITELLM_KEY", "sk-litellm"),
-        ("POSTGRES_PASSWORD", "hunter2"),
-        ("OPENAI_API_KEY", "sk-provider"),
-    ];
-
-    #[test]
-    fn safe_env_keeps_a_working_shell_and_drops_every_secret() {
-        let mut vars = process_env(&[
-            ("PATH", "/usr/local/bin:/usr/bin"),
-            ("HOME", "/home/zone"),
-            ("USER", "zone"),
-            ("SHELL", "/bin/sh"),
-            ("LANG", "en_NZ.UTF-8"),
-            ("LC_CTYPE", "en_NZ.UTF-8"),
-            ("TERM", "xterm-256color"),
-            ("TZ", "Pacific/Auckland"),
-            ("TMPDIR", "/tmp"),
-            ("HTTPS_PROXY", "http://127.0.0.1:28888"),
-            ("no_proxy", "localhost,127.0.0.1"),
-            ("TOOL_RUNNER_PROXY_URL", "http://127.0.0.1:28888"),
-        ]);
-        vars.extend(process_env(SECRETS));
-
-        let env = safe_env(vars, "");
-
-        for key in [
-            "PATH",
-            "HOME",
-            "USER",
-            "SHELL",
-            "LANG",
-            "LC_CTYPE",
-            "TERM",
-            "TZ",
-            "TMPDIR",
-            "HTTPS_PROXY",
-            "no_proxy",
-            "TOOL_RUNNER_PROXY_URL",
-        ] {
-            assert!(env.contains_key(key), "{key} must reach a tool");
-        }
-        for (key, _) in SECRETS {
-            assert!(!env.contains_key(*key), "{key} must not reach a tool");
-        }
-    }
-
-    #[test]
-    fn safe_env_honours_the_operator_passthrough() {
-        let vars = process_env(&[
-            ("CARGO_HOME", "/opt/cargo"),
-            ("SSH_AUTH_SOCK", "/tmp/agent.sock"),
-            ("JWT_SECRET", "a-signing-key-of-at-least-32-characters"),
-        ]);
-
-        let env = safe_env(vars, " CARGO_HOME , ,SSH_AUTH_SOCK ");
-
-        assert_eq!(
-            env.get("CARGO_HOME").map(String::as_str),
-            Some("/opt/cargo")
-        );
-        assert_eq!(
-            env.get("SSH_AUTH_SOCK").map(String::as_str),
-            Some("/tmp/agent.sock")
-        );
-        assert!(!env.contains_key("JWT_SECRET"));
-    }
-
-    #[test]
-    fn safe_env_passthrough_is_exact_not_a_prefix() {
-        let vars = process_env(&[("JWT_SECRET", "s"), ("JWT", "s")]);
-        let env = safe_env(vars, "JWT");
-        assert!(env.contains_key("JWT"));
-        assert!(!env.contains_key("JWT_SECRET"));
-    }
 
     #[tokio::test]
     async fn chat_tools_never_carry_the_process_environment() {
         let tools = ChatTools::build(scope()).await;
         assert!(
-            !tools.context.env.contains_key("CARGO_MANIFEST_DIR"),
+            !tools.context.environment.inherits()
+                && !tools.context.environment.contains("CARGO_MANIFEST_DIR"),
             "the process environment leaked into the chat tool context"
         );
-        for key in tools.context.env.keys() {
-            assert!(
-                SAFE_ENV.contains(&key.as_str()) || key.starts_with(SAFE_ENV_PREFIX),
-                "{key} is not on the tool environment allowlist"
-            );
-        }
+        assert_eq!(
+            tools.context.environment,
+            environment::policy(),
+            "the chat tool context is not on the tool environment allowlist"
+        );
     }
 
     #[tokio::test]
@@ -2167,24 +2195,10 @@ mod tests {
             let refused = result
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains(zone_core::tools::OFF_LIMITS));
+                .is_some_and(|error| error.contains(OFF_LIMITS));
             assert!(!result.success && refused, "{call}: {result:?}");
             assert!(!format!("{result:?}").contains(TURN), "{call}: {result:?}");
         }
-    }
-
-    #[test]
-    fn truncate_marks_cut_text() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello", 3), "hel…");
-    }
-
-    #[test]
-    fn truncate_respects_char_boundaries() {
-        // Multi-byte characters must not be split, which byte slicing would do.
-        let text = "αβγδε";
-        assert_eq!(truncate(text, 3), "αβγ…");
-        assert_eq!(truncate(text, 99), text);
     }
 
     #[test]
@@ -2379,6 +2393,7 @@ mod tests {
             chat_id: chat,
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         })
     }
 
@@ -2760,6 +2775,7 @@ mod tests {
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         }
     }
 
@@ -2782,7 +2798,7 @@ mod tests {
     }
 
     /// Every tool the user is asked to approve, across both crates: four host
-    /// tools from `zone_core` and three that write outward from here.
+    /// tools from `abnegate_agent` and three that write outward from here.
     const REASONED_TOOLS: [&str; 7] = [
         "apply_patch",
         "comment_on_issue",
@@ -2793,9 +2809,9 @@ mod tests {
         "write_file",
     ];
 
-    /// `zone_core` holds its own four to one sentence, but only the assembled
+    /// `abnegate_agent` holds its own four to one sentence, but only the assembled
     /// chat catalog can hold all seven to it at once. The sentence lives in
-    /// `zone_core::tools::REASON_DESCRIPTION`; a second copy anywhere, however
+    /// `abnegate_agent::tool::REASON_DESCRIPTION`; a second copy anywhere, however
     /// lightly reworded, fails here.
     ///
     /// Read from `all_definitions`, not from what a turn is handed: three of
@@ -2812,7 +2828,7 @@ mod tests {
         for definition in tools.all_definitions() {
             let name = &definition.function.name;
             let schema = &definition.function.parameters;
-            let Some(property) = schema["properties"].get(REASON_PARAM) else {
+            let Some(property) = schema["properties"].get(REASON_PARAMETER) else {
                 continue;
             };
 
@@ -2828,8 +2844,8 @@ mod tests {
                     .as_array()
                     .unwrap_or_else(|| panic!("{name} has no required array"))
                     .iter()
-                    .any(|entry| entry.as_str() == Some(REASON_PARAM)),
-                "{name} does not advertise {REASON_PARAM} as required"
+                    .any(|entry| entry.as_str() == Some(REASON_PARAMETER)),
+                "{name} does not advertise {REASON_PARAMETER} as required"
             );
             asked.insert(name.clone());
         }
@@ -2927,12 +2943,25 @@ mod tests {
             crate::agent::memory::MEMORY_WRITE,
             crate::agent::memory::MEMORY_APPEND,
             crate::agent::memory::MEMORY_DELETE,
+            crate::agent::discovery::RECORD_DISCOVERY,
         ] {
             assert!(
                 tools.names().contains(&name.to_string()),
                 "{name} must be available"
             );
         }
+        assert_eq!(
+            tools.tier(crate::agent::discovery::RECORD_DISCOVERY),
+            Tier::Write,
+            "recording is the one unasked write, so nobody is asked to confirm it"
+        );
+        assert!(
+            tools
+                .workspace
+                .iter()
+                .any(|name| name == crate::agent::discovery::RECORD_DISCOVERY),
+            "a call has to pass the workspace authorization every workspace tool passes"
+        );
         assert!(tools.context.unrestricted);
         assert_eq!(tools.profile(), ToolProfile::Chat);
         assert!(!tools.mutating("list_projects"));
@@ -2975,6 +3004,10 @@ mod tests {
         assert!(!tools.names().contains(&"start_task".to_string()));
         assert!(!tools.names().contains(&"generate_image".to_string()));
         assert!(!tools.names().contains(&"query_prometheus".to_string()));
+        assert!(
+            !tools.has(crate::agent::discovery::RECORD_DISCOVERY),
+            "a run nobody authorized records nothing about the workspace"
+        );
         for name in crate::agent::models::NAMES {
             assert!(
                 !tools.names().contains(&name.to_string()),
@@ -2990,9 +3023,11 @@ mod tests {
     }
 
     fn memory_tools() -> [&'static str; 5] {
-        use crate::agent::memory::{
-            MEMORY_APPEND, MEMORY_DELETE, MEMORY_LIST, MEMORY_READ, MEMORY_WRITE,
-        };
+        use crate::agent::memory::MEMORY_APPEND;
+        use crate::agent::memory::MEMORY_DELETE;
+        use crate::agent::memory::MEMORY_LIST;
+        use crate::agent::memory::MEMORY_READ;
+        use crate::agent::memory::MEMORY_WRITE;
         [
             MEMORY_LIST,
             MEMORY_READ,
@@ -3009,7 +3044,10 @@ mod tests {
     /// catalog, and memory has to stay out of it.
     #[tokio::test]
     async fn a_run_with_an_authorized_writer_still_gets_no_memory_tool() {
-        use crate::db::{organizations, users, workspace_members, workspaces};
+        use crate::db::organizations;
+        use crate::db::users;
+        use crate::db::workspace_members;
+        use crate::db::workspaces;
         use crate::state::test_config;
 
         let pool = sqlx::PgPool::connect(
@@ -3069,6 +3107,14 @@ mod tests {
                 "{name} reached a background run"
             );
         }
+        assert!(
+            tools
+                .definitions()
+                .iter()
+                .any(|definition| definition.function.name
+                    == crate::agent::discovery::RECORD_DISCOVERY),
+            "a run is where most of what is worth recording is found, so its schema is sent"
+        );
 
         sqlx::query("DELETE FROM organizations WHERE id = $1")
             .bind(organization.id)
@@ -3130,14 +3176,9 @@ mod tests {
         assert_eq!(session, Session::Task(run));
         assert_eq!(crate::agent::wait::waits_taken(session), 0);
 
-        let job = zone_core::tools::job::Jobs::spawn(
-            session,
-            &zone_core::tools::job::JobCommand::shell("sleep 30"),
-            directory.path(),
-            &tools.context.env,
-        )
-        .await
-        .expect("the job starts");
+        let job = Jobs::spawn(&JobCommand::shell("sleep 30"), &tools.context)
+            .await
+            .expect("the job starts");
         let wait_for = tools
             .registry
             .get(crate::agent::wait::WAIT_FOR)
@@ -3158,7 +3199,7 @@ mod tests {
         );
 
         crate::agent::wait::reset_session(session);
-        zone_core::tools::job::Jobs::kill_session(session).await;
+        Jobs::kill_session(session).await;
     }
 
     #[tokio::test]
@@ -3282,17 +3323,14 @@ mod tests {
         config.agents.state = root.to_path_buf();
         let home = config
             .agents
-            .create_home(Uuid::new_v4(), zone_core::llm::AgentKind::Codex)
+            .create_home(Uuid::new_v4(), abnegate_agent_cli::AgentKind::Codex)
             .expect("the organization's codex home");
         std::fs::write(
             home.join("auth.json"),
             json!({"login": OTHER_LOGIN}).to_string(),
         )
         .unwrap();
-        let db = PgPoolOptions::new()
-            .connect_lazy("postgres://localhost/test")
-            .expect("a lazy pool needs no server");
-        let state = AppState::new(config, db, None);
+        let state = AppState::new(config, lazy_pool(), None);
         state.disable_mcp();
         let scope = WorkspaceScope {
             state,
@@ -3300,6 +3338,7 @@ mod tests {
             workspace_id: Uuid::new_v4(),
             chat_id: Some(Uuid::new_v4()),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         };
         (scope, home)
     }
@@ -3311,7 +3350,7 @@ mod tests {
             && result
                 .error
                 .as_deref()
-                .is_some_and(|error| error.contains(zone_core::tools::OFF_LIMITS))
+                .is_some_and(|error| error.contains(OFF_LIMITS))
     }
 
     /// Every organization's agent state sits under one directory the server's
@@ -3516,7 +3555,10 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_tools_recheck_actor_and_chat_scope() {
-        use crate::db::{organizations, users, workspace_members, workspaces};
+        use crate::db::organizations;
+        use crate::db::users;
+        use crate::db::workspace_members;
+        use crate::db::workspaces;
         use crate::state::test_config;
         let Ok(database_url) = std::env::var("DATABASE_URL") else {
             return;
@@ -3568,6 +3610,7 @@ mod tests {
             chat_id: Some(chat),
             user_id: user.id,
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         };
         let tools = ChatTools::build(scope.clone()).await;
         // The workspace reads a viewer can serve without a connected provider,
@@ -3636,5 +3679,579 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    /// A tool that leaves its preview to the registry.
+    struct Unpreviewed;
+
+    #[async_trait]
+    impl Tool for Unpreviewed {
+        fn name(&self) -> &str {
+            "unpreviewed"
+        }
+
+        fn description(&self) -> &str {
+            "Says nothing of its own about a call."
+        }
+
+        fn parameters_schema(&self) -> Value {
+            json!({"type": "object", "properties": {"target": {"type": "string"}}})
+        }
+
+        fn tier(&self) -> Tier {
+            Tier::Host
+        }
+
+        async fn execute(
+            &self,
+            _parameters: Value,
+            _context: &ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::success("done"))
+        }
+    }
+
+    fn assert_waits_with_zones_wait_for(tools: &ChatTools) {
+        use crate::agent::wait::KIND_CHECK;
+        use crate::agent::wait::KIND_JOB;
+        use crate::agent::wait::KIND_TASK_RUN;
+        use crate::agent::wait::WAIT_FOR;
+
+        let definition = tools
+            .all_definitions()
+            .iter()
+            .find(|definition| definition.function.name == WAIT_FOR)
+            .expect("the registry offers wait_for");
+        let kinds = definition.function.parameters["properties"]["kind"]["enum"]
+            .as_array()
+            .expect("Zone's wait_for names its kinds");
+        for kind in [KIND_JOB, KIND_TASK_RUN, KIND_CHECK] {
+            assert!(
+                kinds.iter().any(|named| named.as_str() == Some(kind)),
+                "wait_for does not wait on {kind}: {kinds:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_chat_registry_waits_with_zones_wait_for() {
+        let tools = ChatTools::preview(scope()).await;
+
+        assert_waits_with_zones_wait_for(&tools);
+    }
+
+    #[tokio::test]
+    async fn a_task_registry_waits_with_zones_wait_for() {
+        let tools = ChatTools::for_task(
+            &AppState::for_tests(),
+            std::env::temp_dir(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await;
+
+        assert_waits_with_zones_wait_for(&tools);
+    }
+
+    #[test]
+    fn a_tool_without_its_own_preview_shows_its_name_and_arguments() {
+        let mut tools = ChatTools::empty();
+        tools.registry.register(Arc::new(Unpreviewed));
+        let arguments = json!({"target": "staging"});
+
+        let effect = tools
+            .effect("unpreviewed", &arguments.to_string())
+            .expect("a known tool is always previewed");
+
+        assert_eq!(effect, Preview::of(&Unpreviewed, &arguments).text);
+        assert!(
+            effect.contains("unpreviewed") && effect.contains("staging"),
+            "{effect}"
+        );
+        assert_eq!(tools.effect("absent", "{}"), None);
+        assert_eq!(tools.effect("unpreviewed", "{not json"), None);
+    }
+
+    #[tokio::test]
+    async fn run_shell_stays_on_a_chat() {
+        let chat = ChatTools::preview(scope()).await;
+        let task = ChatTools::for_task(
+            &AppState::for_tests(),
+            std::env::temp_dir(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await;
+
+        assert!(chat.has("run_shell"));
+        assert_eq!(chat.tier("run_shell"), Tier::Host);
+        assert!(!task.has("run_shell"));
+        assert_eq!(
+            ChatTools::with_names(ToolProfile::Chat, &["run_shell"], None).tier("run_shell"),
+            Tier::Host
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chat_run_command_takes_zones_extra_programs() {
+        let tools = ChatTools::preview(scope()).await;
+
+        let result = tools
+            .execute(
+                "run_command",
+                &json!({"command": "env", "reason": "List the environment."}).to_string(),
+            )
+            .await;
+
+        assert!(result.success, "{result:?}");
+        assert!(
+            result
+                .output
+                .as_deref()
+                .is_some_and(|output| output.contains("PATH=")),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_mcp_server_is_offered_a_revision_that_has_a_handshake() {
+        use abnegate_agent::mcp::McpConfig;
+        use abnegate_agent::mcp::McpServer;
+
+        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("stub_mcp_server.py");
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let offered = directory.path().join("offered");
+        let hub = McpHub::connect(&McpConfig::default().with_server(
+            "stub",
+            McpServer::command(
+                "python3",
+                [
+                    script.to_string_lossy().into_owned(),
+                    offered.to_string_lossy().into_owned(),
+                ],
+            ),
+        ))
+        .await;
+
+        assert_eq!(hub.server_count(), 1, "the stub server has to connect");
+        assert_eq!(
+            std::fs::read_to_string(&offered).expect("the stub records the offer"),
+            "2025-11-25"
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_guidance_follows_the_connected_servers() {
+        use abnegate_agent::mcp::McpConfig;
+        use abnegate_agent::mcp::McpServer;
+
+        let unconnected = ChatTools::preview(scope()).await;
+        assert_eq!(unconnected.mcp_guidance(), None);
+
+        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("stub_mcp_server.py");
+        let hub = McpHub::connect(&McpConfig::default().with_server(
+            "stub",
+            McpServer::command("python3", [script.to_string_lossy().into_owned()]),
+        ))
+        .await;
+        assert_eq!(hub.server_count(), 1, "the stub server has to connect");
+        let state = AppState::new(test_config(), lazy_pool(), None);
+        state.install_mcp(hub);
+
+        let connected = ChatTools::preview(WorkspaceScope { state, ..scope() }).await;
+
+        assert!(connected.has("stub__delegate"), "{:?}", connected.names());
+        let guidance = connected
+            .mcp_guidance()
+            .expect("a connected server earns guidance");
+        assert_eq!(
+            Some(guidance.clone()),
+            servers::prompt(1, &connected.registry.names())
+        );
+        assert!(guidance.contains("two underscores"), "{guidance}");
+    }
+
+    const STUB: &str = "stub";
+    const STUB_TOOL: &str = "stub__delegate";
+
+    /// A workspace whose organization stores the stub stdio server, on an
+    /// instance that runs an organization's commands and attaches no server
+    /// of its own, so an MCP tool in a catalog came through the organization.
+    struct Tenant {
+        pool: sqlx::PgPool,
+        state: AppState,
+        organization: Uuid,
+        workspace: Uuid,
+        user: Uuid,
+        server: Uuid,
+    }
+
+    impl Tenant {
+        async fn storing(allowlist: Option<&[&str]>) -> Self {
+            Self::serving(allowlist, testing::state).await
+        }
+
+        async fn switched_off() -> Self {
+            Self::serving(None, testing::switched_off).await
+        }
+
+        async fn serving<Made>(
+            allowlist: Option<&[&str]>,
+            state: impl FnOnce(crate::config::Config, sqlx::PgPool) -> Made,
+        ) -> Self
+        where
+            Made: Future<Output = AppState>,
+        {
+            use crate::db::mcp_servers::NewMcpServer;
+            use crate::db::mcp_servers::create_authorized;
+            use crate::db::organization_members;
+            use crate::db::organization_members::OrgRole;
+            use crate::db::organizations;
+            use crate::db::workspaces;
+            use crate::services::mcp_servers::definition::Definition;
+            use crate::services::mcp_servers::transport::Transport;
+
+            let pool = sqlx::PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .expect("the test database");
+            let suffix = Uuid::new_v4().simple().to_string();
+            let user =
+                users::create_user(&pool, &format!("{suffix}@example.com"), "hash", None, false)
+                    .await
+                    .expect("a user")
+                    .id;
+            let organization = organizations::create_organization(&pool, "Servers", &suffix, None)
+                .await
+                .expect("an organization")
+                .id;
+            let workspace =
+                workspaces::create_workspace(&pool, organization, "Servers", &suffix, None)
+                    .await
+                    .expect("a workspace")
+                    .id;
+            organization_members::add_member(&pool, organization, user, OrgRole::Admin, None)
+                .await
+                .expect("an organization administrator");
+            workspace_members::add_member(
+                &pool,
+                workspace,
+                user,
+                workspace_members::WorkspaceRole::Member,
+                None,
+            )
+            .await
+            .expect("a workspace member");
+            let state = state(
+                crate::config::Config {
+                    mcp_commands: true,
+                    ..test_config()
+                },
+                pool.clone(),
+            )
+            .await;
+            let stub = Definition::stub(STUB).server;
+            let server = create_authorized(
+                &pool,
+                state.master_key(),
+                organization,
+                user,
+                NewMcpServer {
+                    name: STUB.to_string(),
+                    transport: Transport::Stdio.as_str().to_string(),
+                    command: stub.command,
+                    arguments: stub.arguments,
+                    url: None,
+                    tools: allowlist
+                        .map(|tools| tools.iter().map(|tool| tool.to_string()).collect()),
+                    enabled: true,
+                    environment: Default::default(),
+                    headers: Default::default(),
+                },
+            )
+            .await
+            .expect("the organization's server is stored")
+            .id;
+            Self {
+                pool,
+                state,
+                organization,
+                workspace,
+                user,
+                server,
+            }
+        }
+
+        fn scope(&self) -> WorkspaceScope {
+            WorkspaceScope {
+                state: self.state.clone(),
+                workspace_id: self.workspace,
+                chat_id: Some(Uuid::new_v4()),
+                user_id: self.user,
+                offline: false,
+                origin: crate::db::tasks::Origin::Member,
+            }
+        }
+
+        async fn chat(&self) -> ChatTools {
+            ChatTools::build(self.scope()).await
+        }
+
+        async fn run(&self) -> ChatTools {
+            ChatTools::for_task(
+                &self.state,
+                std::env::temp_dir(),
+                self.workspace,
+                Some(self.user),
+            )
+            .await
+        }
+
+        async fn overriding(&self, enabled: bool) {
+            self.switching(self.server, enabled).await;
+        }
+
+        async fn switching(&self, server: Uuid, enabled: bool) {
+            sqlx::query(
+                "INSERT INTO workspace_mcp_servers (workspace_id, server_id, organization_id, enabled) \
+                 VALUES ($1, $2, $3, $4) \
+                 ON CONFLICT (workspace_id, server_id) DO UPDATE SET enabled = EXCLUDED.enabled",
+            )
+            .bind(self.workspace)
+            .bind(server)
+            .bind(self.organization)
+            .bind(enabled)
+            .execute(&self.pool)
+            .await
+            .expect("the workspace's override is stored");
+        }
+
+        fn connected(&self) -> Option<usize> {
+            self.state
+                .mcp()
+                .existing_organization(self.organization)
+                .map(|hub| hub.connected())
+        }
+
+        async fn settled(&self) -> Option<usize> {
+            load::organization(&self.state, self.organization)
+                .await
+                .map(|hub| hub.connected())
+        }
+
+        async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .expect("the organization is removed");
+            sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(self.user)
+                .execute(&self.pool)
+                .await
+                .expect("the user is removed");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_organization_server_reaches_a_chat_and_a_writers_run() {
+        let tenant = Tenant::storing(None).await;
+
+        let chat = tenant.chat().await;
+        let run = tenant.run().await;
+        let unattributed =
+            ChatTools::for_task(&tenant.state, std::env::temp_dir(), tenant.workspace, None).await;
+        tenant.remove().await;
+
+        for (holder, tools) in [("chat", &chat), ("run", &run)] {
+            assert!(
+                tools.has(STUB_TOOL),
+                "the {holder}'s catalog lacks the organization's tool: {:?}",
+                tools.names()
+            );
+            assert!(
+                tools.remote.contains(STUB_TOOL),
+                "the {holder}'s catalog does not mark the server's own text as remote"
+            );
+        }
+        assert!(!unattributed.has(STUB_TOOL), "{:?}", unattributed.names());
+    }
+
+    #[tokio::test]
+    async fn a_workspace_override_switches_an_organization_server_off() {
+        let tenant = Tenant::storing(None).await;
+
+        let inherited = tenant.chat().await;
+        tenant.overriding(false).await;
+        let chat = tenant.chat().await;
+        let run = tenant.run().await;
+        let connected = tenant.connected();
+        tenant.overriding(true).await;
+        let restored = tenant.chat().await;
+        tenant.remove().await;
+
+        assert!(inherited.has(STUB_TOOL), "{:?}", inherited.names());
+        assert_eq!(
+            connected,
+            Some(1),
+            "the override leaves the server connected"
+        );
+        assert!(!chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert!(!run.has(STUB_TOOL), "{:?}", run.names());
+        assert!(!chat.remote.contains(STUB_TOOL));
+        assert!(restored.has(STUB_TOOL), "{:?}", restored.names());
+    }
+
+    #[tokio::test]
+    async fn a_turn_does_not_wait_on_a_server_its_workspace_switched_off() {
+        use crate::db::mcp_servers::NewMcpServer;
+        use crate::db::mcp_servers::create_authorized;
+        use crate::services::mcp_servers::status::Status;
+        use crate::services::mcp_servers::transport::Transport;
+
+        let tenant = Tenant::storing(None).await;
+        let silent = create_authorized(
+            &tenant.pool,
+            tenant.state.master_key(),
+            tenant.organization,
+            tenant.user,
+            NewMcpServer {
+                name: "silent".to_string(),
+                transport: Transport::Stdio.as_str().to_string(),
+                command: Some("sh".to_string()),
+                arguments: vec!["-c".to_string(), "exec sleep 3600".to_string()],
+                url: None,
+                tools: None,
+                enabled: true,
+                environment: Default::default(),
+                headers: Default::default(),
+            },
+        )
+        .await
+        .expect("the silent server is stored")
+        .id;
+        tenant.switching(silent, false).await;
+
+        let chat = tenant.chat().await;
+        let status = tenant
+            .state
+            .mcp()
+            .existing_organization(tenant.organization)
+            .map(|hub| hub.connection(silent).status);
+        tenant.state.mcp().forget(tenant.organization);
+        tenant.remove().await;
+
+        assert!(chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert_eq!(
+            status,
+            Some(Status::Connecting),
+            "the turn waited for a server its workspace switched off"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allowlist_hides_the_organization_tools_it_leaves_out() {
+        let tenant = Tenant::storing(Some(&["other"])).await;
+
+        let chat = tenant.chat().await;
+        let run = tenant.run().await;
+        let connected = tenant.connected();
+        tenant.remove().await;
+
+        assert_eq!(
+            connected,
+            Some(1),
+            "the server has to connect, or the allowlist hides nothing"
+        );
+        assert!(!chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert!(!run.has(STUB_TOOL), "{:?}", run.names());
+    }
+
+    #[tokio::test]
+    async fn a_preview_reads_an_organization_hub_and_never_builds_one() {
+        let tenant = Tenant::storing(None).await;
+
+        let before = ChatTools::preview(tenant.scope()).await;
+        let unbuilt = tenant.connected();
+        let hubs = tenant.state.mcp().organizations();
+        let chat = tenant.chat().await;
+        let after = ChatTools::preview(tenant.scope()).await;
+        tenant.remove().await;
+
+        assert!(!before.has(STUB_TOOL), "{:?}", before.names());
+        assert_eq!(unbuilt, None, "a preview built the organization's hub");
+        assert_eq!(hubs, 0);
+        assert!(chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert!(
+            after.has(STUB_TOOL),
+            "a preview lacks the tool of a hub a turn already built: {:?}",
+            after.names()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_organization_server_alone_earns_mcp_guidance() {
+        let tenant = Tenant::storing(None).await;
+        let instance = tenant.state.mcp().instance().await.server_count();
+
+        let chat = tenant.chat().await;
+        tenant.remove().await;
+
+        assert_eq!(instance, 0, "the instance attaches no server of its own");
+        let guidance = chat
+            .mcp_guidance()
+            .expect("a connected organization server earns guidance");
+        assert_eq!(Some(guidance), servers::prompt(1, &chat.registry.names()));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_offers_the_workspace_no_tool_earns_no_mcp_guidance() {
+        let switched = Tenant::storing(None).await;
+        switched.overriding(false).await;
+        let narrowed = Tenant::storing(Some(&["other"])).await;
+
+        let overridden = switched.chat().await;
+        let hidden = narrowed.chat().await;
+        let connected = (switched.settled().await, narrowed.connected());
+        switched.remove().await;
+        narrowed.remove().await;
+
+        assert_eq!(
+            connected,
+            (Some(1), Some(1)),
+            "both servers have to connect, or nothing would be counted anyway"
+        );
+        for (reason, chat) in [("override", &overridden), ("allowlist", &hidden)] {
+            assert!(!chat.has(STUB_TOOL), "{reason}: {:?}", chat.names());
+            assert_eq!(
+                chat.mcp_guidance(),
+                None,
+                "{reason}: guidance about MCP tools with none in the catalog"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_master_switch_keeps_an_organization_server_out_of_every_turn() {
+        let tenant = Tenant::switched_off().await;
+
+        let chat = tenant.chat().await;
+        let run = tenant.run().await;
+        let built = tenant.connected();
+        let hubs = tenant.state.mcp().organizations();
+        tenant.remove().await;
+
+        assert!(!chat.has(STUB_TOOL), "{:?}", chat.names());
+        assert!(!run.has(STUB_TOOL), "{:?}", run.names());
+        assert_eq!(chat.mcp_guidance(), None);
+        assert_eq!(built, None, "a turn built the organization's hub");
+        assert_eq!(hubs, 0);
     }
 }

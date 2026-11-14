@@ -1,5 +1,7 @@
 //! Task database queries
 
+use std::collections::HashMap;
+
 use chrono::NaiveDateTime;
 use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
@@ -9,8 +11,13 @@ use crate::services::task_progress;
 
 use super::{
     DbResult,
+    auto_projects::{self, Claim},
     workspace_members::{self, WorkspaceRole},
 };
+
+mod origin;
+
+pub use origin::Origin;
 
 /// Result of a tenant-scoped mutation without exposing resource existence.
 #[derive(Debug)]
@@ -28,12 +35,12 @@ pub enum MutationError {
     Project,
     #[error("Source is not available in this workspace")]
     Source,
-    #[error("Task has an active run")]
+    #[error("{ACTIVE_RUN}")]
     ActiveRun,
 }
 
 impl MutationError {
-    fn into_database(self) -> sqlx::Error {
+    pub(crate) fn into_database(self) -> sqlx::Error {
         match self {
             Self::Database(error) => error,
             error => sqlx::Error::Protocol(error.to_string()),
@@ -46,6 +53,15 @@ impl MutationError {
 pub enum RunMutation {
     Created(TaskRunRow),
     Active(TaskRunRow),
+    Stopping,
+}
+
+/// Result of stopping a task run by hand: the run it stopped, or `Finished`
+/// when the run had already ended before the stop reached it.
+#[derive(Debug)]
+pub enum Stop {
+    Stopped(Box<TaskRunRow>),
+    Finished,
 }
 
 const PLACEHOLDER_CHARACTERS: usize = 60;
@@ -85,6 +101,86 @@ pub fn placeholder_title(description: &str) -> String {
 
 pub const UNTITLED_AND_UNDESCRIBED: &str = "A task needs a title or a description";
 
+pub const ACTIVE_RUN: &str = "Task has an active run";
+
+pub const STOPPING: &str = "The stopped run is still shutting down; try again in a moment";
+
+pub const UNKNOWN_STATUS: &str = "Unknown task status";
+
+/// Every value `tasks_priority_check` admits, so a caller can refuse another
+/// before the constraint turns it into a server error.
+pub const PRIORITIES: std::ops::RangeInclusive<i32> = 1..=5;
+
+pub const PRIORITY_OUT_OF_RANGE: &str = "Priority must be between 1 and 5";
+
+pub const CREATED: &str = "created";
+pub const QUEUED: &str = "queued";
+pub const IN_PROGRESS: &str = "in_progress";
+pub const BLOCKED: &str = "blocked";
+pub const PAUSED: &str = "paused";
+pub const REVIEW: &str = "review";
+pub const COMPLETE: &str = "complete";
+pub const CANCELLED: &str = "cancelled";
+
+/// Every value `tasks_status_check` admits, kept equal to the newest migration
+/// that redefines it so a caller can refuse an unknown status before the
+/// constraint turns it into a server error.
+pub const STATUSES: [&str; 8] = [
+    CREATED,
+    QUEUED,
+    IN_PROGRESS,
+    BLOCKED,
+    PAUSED,
+    REVIEW,
+    COMPLETE,
+    CANCELLED,
+];
+
+/// Nothing unattended starts, retries, advances or merges a task in one of these.
+pub const WITHHELD: [&str; 2] = [PAUSED, CANCELLED];
+
+/// No work is left on a task in one of these: it holds no project open and
+/// satisfies whatever depends on it.
+pub const CLOSED: [&str; 2] = [COMPLETE, CANCELLED];
+
+/// A status `tasks_status_check` admits, so a write that carries one cannot
+/// reach the constraint as a server error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Status(&'static str);
+
+impl Status {
+    pub const CREATED: Self = Self(CREATED);
+    pub const IN_PROGRESS: Self = Self(IN_PROGRESS);
+    pub const COMPLETE: Self = Self(COMPLETE);
+
+    pub fn parse(value: &str) -> Option<Self> {
+        STATUSES
+            .into_iter()
+            .find(|status| *status == value)
+            .map(Self)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+/// The stamps a status write leaves, as `SET` clauses for an `UPDATE` in
+/// which `status` still reads the value being replaced. `shipped_at` is when
+/// the task last reached `complete` and `reopened_at` when it then left; both
+/// outlive every later write, and only reaching `complete` again resets them.
+pub(crate) fn completion_stamps(status: &str) -> String {
+    format!(
+        "completed_at = CASE WHEN {status}::text IS NULL OR {status} = status THEN completed_at \
+           WHEN {status} = '{COMPLETE}' THEN COALESCE(completed_at, NOW()) ELSE NULL END, \
+         shipped_at = CASE WHEN {status} = '{COMPLETE}' AND status <> '{COMPLETE}' THEN NOW() \
+           ELSE shipped_at END, \
+         reopened_at = CASE WHEN {status} = '{COMPLETE}' AND status <> '{COMPLETE}' THEN NULL \
+           WHEN {status} <> '{COMPLETE}' AND status = '{COMPLETE}' THEN NOW() \
+           ELSE reopened_at END"
+    )
+}
+
 /// A title someone gave, trimmed, or `None` for a blank one.
 pub fn given_title(title: Option<&str>) -> Option<&str> {
     title.map(str::trim).filter(|title| !title.is_empty())
@@ -116,6 +212,7 @@ pub struct Create<'a> {
     pub created_by: Option<Uuid>,
     /// The chat whose agent created the task; kept only when that chat is in the task's workspace.
     pub chat_id: Option<Uuid>,
+    pub origin: Origin,
 }
 
 /// Sparse values accepted by an atomic task update.
@@ -124,7 +221,7 @@ pub struct Patch<'a> {
     pub title: Option<&'a str>,
     pub description: Option<&'a str>,
     pub acceptance_criteria: Option<&'a str>,
-    pub status: Option<&'a str>,
+    pub status: Option<Status>,
     pub priority: Option<i32>,
     pub project_ids: Option<&'a [Uuid]>,
     pub require_plan_approval: Option<bool>,
@@ -133,13 +230,40 @@ pub struct Patch<'a> {
     pub model_name: Option<&'a str>,
 }
 
+/// Sparse values applied alike to every task of one bulk update. Projects
+/// are linked and unlinked one by one, so links outside both lists stay.
+pub struct Changes<'a> {
+    pub status: Option<Status>,
+    pub priority: Option<i32>,
+    pub add_projects: &'a [Uuid],
+    pub remove_projects: &'a [Uuid],
+    pub is_agentic: Option<bool>,
+    pub require_plan_approval: Option<bool>,
+}
+
+/// Result of a bulk update, which applies to every listed task or to none.
+#[derive(Debug)]
+pub enum Edit {
+    Applied(Vec<TaskRow>),
+    NotFound,
+    /// The listed tasks whose status a live run owns and the update would change.
+    Running(Vec<Uuid>),
+}
+
+/// The columns a [`TaskRow`] reads, without the projects it is linked to.
+const TASK_COLUMNS: &str = "id, title, description, acceptance_criteria, status, priority, \
+    model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, \
+    source_ids, workspace_id, worker_id, queued_at, started_at, completed_at, created_at, \
+    updated_at, pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending";
+
 /// Task row from database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct TaskRow {
     pub id: Uuid,
     pub workspace_id: Uuid,
     pub created_by: Option<Uuid>,
-    pub project_ids: Vec<Uuid>, // Associated projects via task_projects join table
+    #[sqlx(skip)]
+    pub project_ids: Vec<Uuid>,
     pub title: String,
     pub title_pending: bool,
     pub description: String,
@@ -171,15 +295,25 @@ pub struct TaskRow {
 /// heartbeating, keeps blocking a second admission, and stays sweepable.
 const ACTIVE_RUN_STATUSES: &str = "('running','waiting')";
 
+/// A stopped run whose owner is still alive to tear it down, over
+/// `task_runs` aliased `r`. Its task stays reserved for it until the owner
+/// releases it or its lease lapses, so no second worker shares the branch.
+pub(crate) const DRAINING: &str = "r.status = 'cancelled' AND r.owner IS NOT NULL \
+     AND r.heartbeat_at > NOW() - INTERVAL '60 seconds'";
+
 /// Why the sweeper failed a run, both in the row it writes and in the frame it
 /// publishes to whoever was waiting on that run.
 const ORPHANED: &str = "orphaned";
 
+/// Why a run a user stopped ended, both in the row and in the frame published
+/// to whoever was waiting on that run.
+pub const STOPPED: &str = "Task run was stopped";
+
 /// The one status a finished run reports as a success.
-const COMPLETED: &str = "completed";
+pub(crate) const COMPLETED: &str = "completed";
 
 /// The status the sweeper writes onto a run whose lease went stale.
-const FAILED: &str = "failed";
+pub(crate) const FAILED: &str = "failed";
 
 /// Identity carried by every side effect of a claimed task run.
 #[derive(Debug, Clone, Copy)]
@@ -409,6 +543,29 @@ pub async fn get_task_project_ids(pool: &PgPool, task_id: Uuid) -> DbResult<Vec<
     Ok(rows.into_iter().map(|r| r.project_id).collect())
 }
 
+/// The one project the run's task belongs to, or `None` when it belongs to
+/// none or to several.
+///
+/// A task may be filed under any number of projects, so a run has one project
+/// only when its task does. What this answers is written down beside what the
+/// run records, and a note tagged with one of three projects would say
+/// something about the other two that nothing verified.
+pub async fn run_project(pool: &PgPool, run_id: Uuid) -> DbResult<Option<Uuid>> {
+    let projects: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT link.project_id FROM task_projects link \
+         JOIN task_runs run ON run.task_id = link.task_id \
+         WHERE run.id = $1 ORDER BY link.project_id LIMIT 2",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(match projects.as_slice() {
+        [project] => Some(*project),
+        _ => None,
+    })
+}
+
 /// List tasks with optional filters (workspace_id is required)
 pub async fn list_tasks(
     pool: &PgPool,
@@ -561,6 +718,7 @@ pub async fn create_task(
         source_id,
         created_by: None,
         chat_id: None,
+        origin: Origin::Automation,
     };
     let mut transaction = pool.begin().await?;
     let task = create_in(&mut transaction, &input).await?;
@@ -637,8 +795,8 @@ async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbRes
     let (title, title_pending) = stored_title(input.title, input.description);
     let row = sqlx::query!(
         r#"
-        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending, chat_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT id FROM chats WHERE id = $11 AND workspace_id = $1))
+        INSERT INTO tasks (workspace_id, title, description, acceptance_criteria, priority, is_agentic, require_plan_approval, source_id, created_by, title_pending, chat_id, origin)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (SELECT id FROM chats WHERE id = $11 AND workspace_id = $1), $12)
         RETURNING id, title, description, acceptance_criteria, status, priority,
                   model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
                   workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
@@ -654,7 +812,8 @@ async fn insert_task(connection: &mut PgConnection, input: &Create<'_>) -> DbRes
         input.source_id,
         input.created_by,
         title_pending,
-        input.chat_id
+        input.chat_id,
+        input.origin.as_str()
     )
     .fetch_one(&mut *connection)
     .await?;
@@ -680,6 +839,9 @@ pub async fn update_task(
     priority: Option<i32>,
     project_ids: Option<&[Uuid]>,
 ) -> DbResult<Option<TaskRow>> {
+    let status = status
+        .map(|status| Status::parse(status).ok_or_else(|| super::actions::invalid(UNKNOWN_STATUS)))
+        .transpose()?;
     let input = Patch {
         id,
         title,
@@ -729,39 +891,253 @@ pub async fn update_task_authorized(
     if let Some(project_ids) = input.project_ids {
         lock_projects(&mut transaction, workspace_id, project_ids).await?;
     }
-    let Some(task) = update_task_in(&mut transaction, &input).await? else {
+    let Some(held) = hold(&mut transaction, input.id).await? else {
+        return Err(MutationError::ActiveRun);
+    };
+    if held.refuses(input.status) {
+        return Err(MutationError::ActiveRun);
+    }
+    let Some(task) = apply_update(&mut transaction, &input, &held).await? else {
         return Ok(Mutation::NotFound);
     };
     transaction.commit().await?;
+    if held.releases(input.status) {
+        release(pool, &[task.id]).await;
+    }
     Ok(Mutation::Applied(task))
 }
 
-/// Whether the run lifecycle currently owns this task's status.
+/// Apply `changes` to every task in `ids` in one transaction, or to none.
+/// Duplicate ids collapse and the rows come back in ascending id order.
+pub async fn update_tasks_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    workspace_id: Uuid,
+    ids: &[Uuid],
+    changes: Changes<'_>,
+) -> Result<Edit, MutationError> {
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+
+    let mut transaction = pool.begin().await?;
+    if !lock_writer(&mut transaction, workspace_id, user_id).await? {
+        return Ok(Edit::NotFound);
+    }
+    let Some(locked) = lock_tasks(&mut transaction, workspace_id, &ids).await? else {
+        return Ok(Edit::NotFound);
+    };
+    lock_projects(&mut transaction, workspace_id, changes.add_projects).await?;
+
+    let running: Vec<Uuid> = locked
+        .iter()
+        .filter(|(_, held)| held.refuses(changes.status))
+        .map(|(id, _)| *id)
+        .collect();
+    if !running.is_empty() {
+        return Ok(Edit::Running(running));
+    }
+    let released: Vec<Uuid> = locked
+        .iter()
+        .filter(|(_, held)| held.releases(changes.status))
+        .map(|(id, _)| *id)
+        .collect();
+
+    let updated = apply_changes(&mut transaction, &ids, &changes).await?;
+    transaction.commit().await?;
+
+    release(pool, &released).await;
+    Ok(Edit::Applied(updated))
+}
+
+/// Lock every task in `ids`, which must be sorted and distinct, in id order,
+/// and read what each lock found; `None` when any is missing or belongs to
+/// another workspace. A row of another workspace is never locked, so a
+/// stranger's id cannot make this wait on that workspace's writers.
+async fn lock_tasks(
+    connection: &mut PgConnection,
+    workspace_id: Uuid,
+    ids: &[Uuid],
+) -> DbResult<Option<Vec<(Uuid, Held)>>> {
+    let rows: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id, status, active_run_id FROM tasks \
+         WHERE id = ANY($1) AND workspace_id = $2 ORDER BY id FOR UPDATE",
+    )
+    .bind(ids)
+    .bind(workspace_id)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    Ok((rows.len() == ids.len()).then(|| {
+        rows.into_iter()
+            .map(|(id, status, run)| {
+                (
+                    id,
+                    Held {
+                        status,
+                        running: run.is_some(),
+                    },
+                )
+            })
+            .collect()
+    }))
+}
+
+/// Apply `changes` to every task in `ids` with one statement per kind of
+/// change, whatever the number of tasks. The caller holds every row lock and
+/// has found no live run that owns a status `changes` would change.
+async fn apply_changes(
+    connection: &mut PgConnection,
+    ids: &[Uuid],
+    changes: &Changes<'_>,
+) -> DbResult<Vec<TaskRow>> {
+    let status = changes.status.map(Status::as_str);
+    if let Some(status) = status {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE tasks SET {} WHERE id = ANY($1) AND status <> $2",
+            completion_stamps("$2")
+        )))
+        .bind(ids)
+        .bind(status)
+        .execute(&mut *connection)
+        .await?;
+    }
+    let mut tasks: Vec<TaskRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "UPDATE tasks SET status = COALESCE($2, status), priority = COALESCE($3, priority), \
+           is_agentic = COALESCE($4, is_agentic), \
+           require_plan_approval = COALESCE($5, require_plan_approval), updated_at = NOW() \
+         WHERE id = ANY($1) RETURNING {TASK_COLUMNS}"
+    )))
+    .bind(ids)
+    .bind(status)
+    .bind(changes.priority)
+    .bind(changes.is_agentic)
+    .bind(changes.require_plan_approval)
+    .fetch_all(&mut *connection)
+    .await?;
+
+    if !changes.remove_projects.is_empty() {
+        sqlx::query("DELETE FROM task_projects WHERE task_id = ANY($1) AND project_id = ANY($2)")
+            .bind(ids)
+            .bind(changes.remove_projects)
+            .execute(&mut *connection)
+            .await?;
+    }
+    if !changes.add_projects.is_empty() {
+        sqlx::query(
+            "INSERT INTO task_projects (task_id, project_id) \
+             SELECT task.id, project.id \
+             FROM unnest($1::uuid[]) AS task(id), unnest($2::uuid[]) AS project(id) \
+             ON CONFLICT (task_id, project_id) DO NOTHING",
+        )
+        .bind(ids)
+        .bind(changes.add_projects)
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    let links: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "SELECT task_id, project_id FROM task_projects \
+         WHERE task_id = ANY($1) ORDER BY task_id, project_id",
+    )
+    .bind(ids)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut projects: HashMap<Uuid, Vec<Uuid>> = HashMap::with_capacity(ids.len());
+    for (task, project) in links {
+        projects.entry(task).or_default().push(project);
+    }
+
+    tasks.sort_unstable_by_key(|task| task.id);
+    for task in &mut tasks {
+        task.project_ids = projects.remove(&task.id).unwrap_or_default();
+    }
+    Ok(tasks)
+}
+
+/// Tell automation a person took tasks back out of [`WITHHELD`]. The move
+/// has committed by now, so a failure here is logged and the move still
+/// reported: the caller has a run to start or tasks to answer with.
+async fn release(pool: &PgPool, task_ids: &[Uuid]) {
+    if task_ids.is_empty() {
+        return;
+    }
+    if let Err(error) = super::auto_projects::reopen(pool, task_ids).await {
+        tracing::warn!(?task_ids, %error, "Could not reopen the auto projects of tasks a person gave back");
+    }
+}
+
+/// What a task's row lock found: its status, and whether a live run owns it.
 ///
 /// The worker advances `tasks.status` from the run, so a caller-supplied status
-/// while a run is live would race those transitions. A missing task reads the
-/// same way as one whose status is not the caller's to set.
-async fn run_is_active(
-    connection: &mut PgConnection,
-    task_id: Uuid,
-    changes_status: bool,
-) -> DbResult<bool> {
-    let active: Option<Option<Uuid>> =
-        sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id = $1 FOR UPDATE")
+/// while a run is live would race those transitions.
+struct Held {
+    status: String,
+    running: bool,
+}
+
+impl Held {
+    fn changes(&self, status: Option<Status>) -> Option<Status> {
+        status.filter(|status| status.as_str() != self.status)
+    }
+
+    fn refuses(&self, status: Option<Status>) -> bool {
+        self.running && self.changes(status).is_some()
+    }
+
+    fn withheld(&self) -> bool {
+        WITHHELD.contains(&self.status.as_str())
+    }
+
+    fn releases(&self, status: Option<Status>) -> bool {
+        self.withheld() && status.is_some_and(|status| !WITHHELD.contains(&status.as_str()))
+    }
+}
+
+async fn hold(connection: &mut PgConnection, task_id: Uuid) -> DbResult<Option<Held>> {
+    let row: Option<(String, Option<Uuid>)> =
+        sqlx::query_as("SELECT status, active_run_id FROM tasks WHERE id = $1 FOR UPDATE")
             .bind(task_id)
             .fetch_optional(&mut *connection)
             .await?;
-    Ok(active.is_none() || (changes_status && active.flatten().is_some()))
+    Ok(row.map(|(status, run)| Held {
+        status,
+        running: run.is_some(),
+    }))
 }
 
 /// Apply `input` inside the caller's transaction; `None` when the task is
-/// gone, or when `input` sets a status that a live run owns.
+/// gone, or when `input` changes a status that a live run owns.
 pub(crate) async fn update_task_in(
     connection: &mut PgConnection,
     input: &Patch<'_>,
 ) -> DbResult<Option<TaskRow>> {
-    if run_is_active(connection, input.id, input.status.is_some()).await? {
+    let Some(held) = hold(connection, input.id).await? else {
         return Ok(None);
+    };
+    if held.refuses(input.status) {
+        return Ok(None);
+    }
+    apply_update(connection, input, &held).await
+}
+
+/// The caller holds the task's row lock, which is where `held` came from,
+/// and has found no live run that owns the status `input` changes.
+async fn apply_update(
+    connection: &mut PgConnection,
+    input: &Patch<'_>,
+    held: &Held,
+) -> DbResult<Option<TaskRow>> {
+    let status = held.changes(input.status).map(Status::as_str);
+    if let Some(status) = status {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE tasks SET {} WHERE id = $1",
+            completion_stamps("$2")
+        )))
+        .bind(input.id)
+        .bind(status)
+        .execute(&mut *connection)
+        .await?;
     }
     let row = sqlx::query!(
         r#"
@@ -787,7 +1163,7 @@ pub(crate) async fn update_task_in(
         input.title,
         input.description,
         input.acceptance_criteria,
-        input.status,
+        status,
         input.priority,
         input.require_plan_approval,
         input.is_agentic,
@@ -898,37 +1274,9 @@ pub async fn queue_task_as(
     if active.is_none() || active.flatten().is_some() {
         return Ok(None);
     }
-    let row = sqlx::query!(
-        r#"
-        UPDATE tasks
-        SET status = 'queued',
-            queued_at = NOW(),
-            updated_at = NOW()
-        WHERE id = $1
-        RETURNING id, title, description, acceptance_criteria, status, priority,
-                  model_name, dependencies, is_agentic, require_plan_approval, github_repo_url, source_id, source_ids,
-                  workspace_id, worker_id, queued_at, started_at, completed_at, created_at, updated_at,
-                  pr_url, branch_name, pr_status, pr_created_at, created_by, title_pending
-        "#,
-        id
-    )
-    .fetch_optional(&mut *transaction)
-    .await?;
-
-    let result = match row {
-        Some(r) => {
-            let mut task = map_task_row!(r);
-            task.project_ids =
-                sqlx::query_scalar("SELECT project_id FROM task_projects WHERE task_id=$1")
-                    .bind(task.id)
-                    .fetch_all(&mut *transaction)
-                    .await?;
-            Ok(Some(task))
-        }
-        None => Ok(None),
-    };
+    let task = queue_task_in(&mut transaction, id).await?;
     transaction.commit().await?;
-    result
+    Ok(task)
 }
 
 /// Membership locks always precede task locks in user-triggered operations.
@@ -959,13 +1307,19 @@ pub async fn queue_task_authorized(
     }
     // Re-queueing a task the worker is already running would reset the status
     // underneath it, so an active run is a conflict rather than a refusal.
-    if run_is_active(&mut transaction, id, true).await? {
+    let Some(held) = hold(&mut transaction, id).await? else {
+        return Err(MutationError::ActiveRun);
+    };
+    if held.running {
         return Err(MutationError::ActiveRun);
     }
     let Some(task) = queue_task_in(&mut transaction, id).await? else {
         return Ok(Mutation::NotFound);
     };
     transaction.commit().await?;
+    if held.withheld() {
+        release(pool, &[id]).await;
+    }
     Ok(Mutation::Applied(task))
 }
 
@@ -975,6 +1329,7 @@ async fn queue_task_in(connection: &mut PgConnection, id: Uuid) -> DbResult<Opti
         UPDATE tasks
         SET status = 'queued',
             queued_at = NOW(),
+            reopened_at = CASE WHEN status = 'complete' THEN NOW() ELSE reopened_at END,
             updated_at = NOW()
         WHERE id = $1
         RETURNING id, title, description, acceptance_criteria, status, priority,
@@ -1035,9 +1390,25 @@ pub async fn create_task_run_authorized(
     if let Some(run) = active {
         return Ok(Mutation::Applied(RunMutation::Active(run)));
     }
+    let stopping: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_runs r ON r.id = t.active_run_id \
+         WHERE t.id = $1 AND {DRAINING})"
+    )))
+    .bind(task_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    if stopping {
+        return Ok(Mutation::Applied(RunMutation::Stopping));
+    }
 
+    let released = hold(&mut transaction, task_id)
+        .await?
+        .is_some_and(|held| held.withheld());
     let run = insert_task_run(&mut transaction, task_id, Some(user_id)).await?;
     transaction.commit().await?;
+    if released {
+        release(pool, &[task_id]).await;
+    }
     Ok(Mutation::Applied(RunMutation::Created(run)))
 }
 
@@ -1059,11 +1430,17 @@ async fn insert_task_run(
     )
     .fetch_one(&mut *connection)
     .await?;
-    sqlx::query("UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), completed_at = NULL, updated_at = NOW() WHERE id = $1")
-        .bind(task_id)
-        .bind(row.id)
-        .execute(&mut *connection)
-        .await?;
+    sqlx::query(
+        "UPDATE tasks SET active_run_id = $2, status = 'queued', queued_at = NOW(), \
+           completed_at = NULL, \
+           reopened_at = CASE WHEN status = 'complete' THEN NOW() ELSE reopened_at END, \
+           updated_at = NOW() \
+         WHERE id = $1",
+    )
+    .bind(task_id)
+    .bind(row.id)
+    .execute(&mut *connection)
+    .await?;
     Ok(TaskRunRow {
         id: row.id,
         task_id: row.task_id,
@@ -1111,6 +1488,7 @@ pub async fn create_task_as(
         source_id,
         created_by: actor,
         chat_id: None,
+        origin: actor.map_or(Origin::Automation, |_| Origin::Member),
     };
     let Some(actor) = actor else {
         let mut transaction = pool.begin().await?;
@@ -1295,6 +1673,38 @@ pub async fn start_owned_task_run(
         .bind(run_id).bind(owner).execute(pool).await?.rows_affected() == 1)
 }
 
+/// Keep a stopped run's reservation of its task alive while its owner tears
+/// down; false once the reservation is gone.
+pub async fn drain_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE task_runs r SET heartbeat_at = NOW() FROM tasks t \
+         WHERE r.id = $1 AND r.owner = $2 AND r.status = 'cancelled' \
+           AND t.id = r.task_id AND t.active_run_id = r.id",
+    )
+    .bind(run_id)
+    .bind(owner)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Hand a stopped run's task back once its owner has torn down, so the next
+/// run can be admitted.
+pub async fn release_task_run(pool: &PgPool, run_id: Uuid, owner: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE tasks t SET active_run_id = NULL, updated_at = NOW() FROM task_runs r \
+         WHERE t.active_run_id = $1 AND r.id = $1 AND r.task_id = t.id \
+           AND r.owner = $2 AND r.status = 'cancelled'",
+    )
+    .bind(run_id)
+    .bind(owner)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
 pub async fn owns_task_run(pool: &PgPool, run_id: Uuid, owner: Option<Uuid>) -> DbResult<bool> {
     sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT EXISTS(SELECT 1 FROM task_runs WHERE id = $1 AND owner IS NOT DISTINCT FROM $2 AND status IN {ACTIVE_RUN_STATUSES} AND heartbeat_at > NOW() - INTERVAL '60 seconds')")))
         .bind(run_id).bind(owner).fetch_one(pool).await
@@ -1317,6 +1727,53 @@ pub async fn sweep_task_runs(pool: &PgPool) -> DbResult<u64> {
         task_progress::publish_terminal(*run, FAILED, Some(ORPHANED));
     }
     Ok(failed.len() as u64)
+}
+
+/// Cancel a live run on a workspace member's behalf and pause its task.
+///
+/// Unfenced on owner and heartbeat: a stuck run is exactly the one whose
+/// lease cannot be trusted. Locks the task before the run, like
+/// [`complete_owned_task_run`], so it never deadlocks against a finishing run.
+/// A run whose owner is alive keeps its task reserved, with its lease renewed
+/// for the teardown, until that owner releases it: the owner may still be
+/// working in the task's branch, on this replica or until its next heartbeat
+/// on another.
+pub async fn stop_task_run_authorized(
+    pool: &PgPool,
+    user_id: Uuid,
+    run_id: Uuid,
+) -> DbResult<Mutation<Stop>> {
+    let mut transaction = pool.begin().await?;
+    let task_id: Option<Uuid> = sqlx::query_scalar("SELECT task_id FROM task_runs WHERE id = $1")
+        .bind(run_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+    let Some(task_id) = task_id else {
+        return Ok(Mutation::NotFound);
+    };
+    if lock_task_writer(&mut transaction, task_id, user_id)
+        .await?
+        .is_none()
+    {
+        return Ok(Mutation::NotFound);
+    }
+    let row: Option<TaskRunRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!("UPDATE task_runs SET status = $2, completed_at = NOW(), error_message = $3, current_phase = NULLIF(current_phase, 'waiting'), pending_question = NULL, pending_wait = NULL, heartbeat_at = CASE WHEN owner IS NOT NULL AND heartbeat_at > NOW() - INTERVAL '60 seconds' THEN NOW() ELSE heartbeat_at END WHERE id = $1 AND status IN {ACTIVE_RUN_STATUSES} RETURNING id, task_id, status, current_phase, progress_percent, started_at, completed_at, error_message, artifacts, triggered_by, pending_question, pending_wait, plan")))
+        .bind(run_id).bind(CANCELLED).bind(STOPPED).fetch_optional(&mut *transaction).await?;
+    let Some(run) = row else {
+        transaction.commit().await?;
+        return Ok(Mutation::Applied(Stop::Finished));
+    };
+    let draining: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM task_runs r WHERE r.id = $1 AND {DRAINING})"
+    )))
+    .bind(run.id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE tasks SET status = $3, updated_at = NOW(), active_run_id = CASE WHEN $4 THEN active_run_id END WHERE id = $1 AND active_run_id = $2")
+        .bind(run.task_id).bind(run.id).bind(PAUSED).bind(draining).execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    task_progress::publish_terminal(run.id, CANCELLED, Some(STOPPED));
+    Ok(Mutation::Applied(Stop::Stopped(Box::new(run))))
 }
 
 /// Update task run progress
@@ -1606,37 +2063,60 @@ pub async fn set_dependencies(pool: &PgPool, task_id: Uuid, dependencies: &[Uuid
     Ok(())
 }
 
+#[derive(Debug)]
+pub enum Unattended {
+    /// The run that was admitted.
+    Created(Uuid),
+    Active,
+    Withheld,
+    /// The drive admitting it no longer holds its project's claim.
+    Lost,
+}
+
 /// Admit a run nobody will be watching, as the person automation runs as.
 ///
 /// The actor is authorized the way a run started from the console is, so a
 /// run the driver starts carries exactly the authority a run that person
 /// started would. A task that already has a run is reported rather than
-/// admitted twice.
+/// admitted twice, and a task a person paused or cancelled is refused under
+/// the same row lock, so a move that lands after the driver last read the
+/// task still wins. A drive admits under its `claim`, held on the project's
+/// row until the run is in, so a drive another instance took over admits
+/// nothing.
 pub async fn create_unattended_task_run(
     pool: &PgPool,
     task_id: Uuid,
     actor: Uuid,
-) -> DbResult<RunMutation> {
+    claim: Option<Claim>,
+) -> DbResult<Unattended> {
     let mut transaction = pool.begin().await?;
     // Membership before the task lock, as every user-triggered admission
     // orders them; then the row is held so two drivers cannot both find no
-    // active run and each insert one.
+    // active run and each insert one. The project's row goes between them,
+    // as the drive's other writes lock it before any task.
     authorize_task_in(&mut transaction, task_id, actor, true).await?;
-    sqlx::query("SELECT id FROM tasks WHERE id = $1 FOR UPDATE")
+    if let Some(claim) = claim
+        && !auto_projects::holds(&mut transaction, claim).await?
+    {
+        transaction.rollback().await?;
+        return Ok(Unattended::Lost);
+    }
+    let status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
         .fetch_one(&mut *transaction)
         .await?;
-    let active = sqlx::query_as::<_, TaskRunRow>(sqlx::AssertSqlSafe(format!(
-        "SELECT id, task_id, triggered_by, status, current_phase, progress_percent, started_at, \
-                completed_at, error_message, artifacts, pending_question, pending_wait, plan \
-         FROM task_runs WHERE task_id = $1 AND status IN {ACTIVE_RUN_STATUSES} \
-         ORDER BY started_at DESC, id LIMIT 1"
+    if WITHHELD.contains(&status.as_str()) {
+        transaction.rollback().await?;
+        return Ok(Unattended::Withheld);
+    }
+    let active: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM task_runs WHERE task_id = $1 AND status IN {ACTIVE_RUN_STATUSES})"
     )))
     .bind(task_id)
-    .fetch_optional(&mut *transaction)
+    .fetch_one(&mut *transaction)
     .await?;
-    if let Some(run) = active {
-        return Ok(RunMutation::Active(run));
+    if active {
+        return Ok(Unattended::Active);
     }
     let run = insert_task_run(&mut transaction, task_id, Some(actor)).await?;
     sqlx::query("UPDATE task_runs SET unattended = TRUE WHERE id = $1")
@@ -1644,7 +2124,7 @@ pub async fn create_unattended_task_run(
         .execute(&mut *transaction)
         .await?;
     transaction.commit().await?;
-    Ok(RunMutation::Created(run))
+    Ok(Unattended::Created(run.id))
 }
 
 /// How a run is being run: whether anyone is there to answer it, and the
@@ -1695,7 +2175,7 @@ pub async fn record_run_model(
 pub async fn complete_merged_task(pool: &PgPool, task_id: Uuid, pr_url: &str) -> DbResult<bool> {
     Ok(sqlx::query(
         "UPDATE tasks SET status = 'complete', pr_status = 'merged', completed_at = NOW(), \
-           updated_at = NOW() \
+           shipped_at = NOW(), reopened_at = NULL, updated_at = NOW() \
          WHERE id = $1 AND active_run_id IS NULL AND status <> 'complete' AND pr_url = $2",
     )
     .bind(task_id)

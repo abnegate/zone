@@ -1,6 +1,6 @@
+use abnegate_agent_cli::AgentKind;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Serializer};
-use zone_core::llm::AgentKind;
 
 use super::Reason;
 
@@ -25,6 +25,13 @@ pub struct Notice {
     pub carried: bool,
     /// How many Unicode scalar values of the answer were written before the switch.
     pub at: usize,
+    /// How many tool calls the turn had made before the switch, which orders a
+    /// call at the same offset on the right side of the divider.
+    #[serde(default)]
+    pub calls: usize,
+    /// What the login being left thought after its last call, which belongs above the divider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
 }
 
 fn named<S: Serializer>(agent: &AgentKind, serializer: S) -> Result<S::Ok, S::Error> {

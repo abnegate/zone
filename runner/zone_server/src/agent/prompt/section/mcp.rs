@@ -16,7 +16,7 @@ mod tests {
     fn attached_guidance_is_rendered_as_its_own_section() {
         let tools = ChatTools::with_names(
             ToolProfile::Chat,
-            &["magents_spawn_session"],
+            &["magents__spawn_session"],
             Some("Server guidance.".to_string()),
         );
         let environment = environment();

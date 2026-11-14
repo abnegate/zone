@@ -5,7 +5,13 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Tier;
 
 use super::tools::{WorkspaceScope, string_arg};
 use crate::config::ComfyUiConfig;
@@ -152,7 +158,6 @@ mod tests {
     use uuid::Uuid;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
-    use zone_core::tools::Session;
 
     fn scope(comfyui_enabled: bool) -> WorkspaceScope {
         let mut config = test_config();
@@ -165,6 +170,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         }
     }
 
@@ -326,6 +332,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         };
         assert_ne!(
             scope.state.config().comfyui.audio_checkpoint,
@@ -333,16 +340,9 @@ mod tests {
             "the pin must differ from the process default or this proves nothing"
         );
 
-        let context = ToolContext {
-            cwd: std::path::PathBuf::from("/"),
-            env: std::collections::HashMap::new(),
-            max_file_size: 1024 * 1024,
-            command_timeout: 30,
-            unrestricted: false,
-            denied: Vec::new(),
-            session: Session::Detached,
-            offline: false,
-        };
+        let mut context = ToolContext::default().within("/");
+        context.maximum_file_size = 1024 * 1024;
+        context.command_timeout = Duration::from_secs(30);
         let result = GenerateAudioTool(scope)
             .execute(json!({"prompt": "forest ambience"}), &context)
             .await

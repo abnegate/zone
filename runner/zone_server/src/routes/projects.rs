@@ -1,5 +1,11 @@
 //! Project endpoints
 
+use std::collections::HashMap;
+use std::fmt;
+
+use abnegate_secret::REDACTED;
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -10,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::AuthUser;
-use crate::db::projects::{self, NewProject, ProjectRow};
-use crate::db::{auto_projects, chats, sources, sync_config, workspace_members};
+use crate::db::github_installations::{self, InstallationStatus, InstallationSummary};
+use crate::db::projects::{self, LinkError, NewProject, ProjectRow, Reorder};
+use crate::db::{auto_projects, chats, sources, sync_config, tasks, workspace_members};
 use crate::error::ServerError;
 use crate::services::model::Model;
 use crate::services::route::Route;
@@ -22,6 +29,11 @@ use super::common::Timestamps;
 
 /// The statuses `projects.status` accepts.
 pub const PROJECT_STATUSES: [&str; 3] = ["active", "on_hold", "cancelled"];
+
+const INTERNAL_ERROR: &str = "Internal server error";
+
+const CONFLICTING_CREDENTIALS: &str =
+    "Send either access_token or github_installation_id, not both.";
 
 fn not_found() -> ServerError {
     ServerError::NotFound("Project not found".to_string())
@@ -89,6 +101,38 @@ async fn refuse_unless_writable(
     Ok(())
 }
 
+/// An installation id the caller gave, once it is confirmed to belong to
+/// `workspace_id`'s organization and to be neither revoked nor suspended.
+async fn attachable_installation(
+    state: &AppState,
+    workspace_id: Uuid,
+    installation_id: Uuid,
+) -> Result<Uuid, ServerError> {
+    github_installations::attachable(state.db(), workspace_id, installation_id)
+        .await?
+        .map(|installation| installation.id)
+        .ok_or_else(unattachable)
+}
+
+fn unattachable() -> ServerError {
+    ServerError::BadRequest(github_installations::UNATTACHABLE.to_string())
+}
+
+/// The installations `ids` name, keyed by id, in one query.
+async fn installations(
+    state: &AppState,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, InstallationSummary>, ServerError> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    Ok(github_installations::summaries(state.db(), ids)
+        .await?
+        .into_iter()
+        .map(|summary| (summary.id, summary))
+        .collect())
+}
+
 /// A source id the caller gave, once it is confirmed to live in `workspace_id`.
 async fn source_in_workspace(
     state: &AppState,
@@ -127,20 +171,27 @@ fn refuse_unless_driven(state: &AppState) -> Result<(), ServerError> {
     ))
 }
 
-/// One project's response, with what automation knows about it.
-async fn describe(state: &AppState, row: ProjectRow) -> ProjectResponse {
-    let automation = auto_projects::automation(state.db(), row.id)
-        .await
-        .ok()
-        .flatten();
-    ProjectResponse {
-        project: ProjectData::from(row).with_automation(automation.as_ref()),
-    }
+/// One project's response, with what automation and GitHub know about it.
+async fn describe(state: &AppState, row: ProjectRow) -> Result<ProjectResponse, ServerError> {
+    let installation_ids: Vec<Uuid> = row.github_installation_id.into_iter().collect();
+    let (automation, installations) = tokio::join!(
+        auto_projects::automation(state.db(), row.id),
+        installations(state, &installation_ids),
+    );
+    let installations = installations?;
+    let installation = row
+        .github_installation_id
+        .and_then(|id| installations.get(&id));
+    Ok(ProjectResponse {
+        project: ProjectData::from(row)
+            .with_automation(automation.ok().flatten().as_ref())
+            .with_installation(installation),
+    })
 }
 
 async fn respond(state: &AppState, project: Option<ProjectRow>) -> Result<Response, ServerError> {
     let project = project.ok_or_else(not_found)?;
-    Ok(Json(describe(state, project).await).into_response())
+    Ok(Json(describe(state, project).await?).into_response())
 }
 
 /// Project data
@@ -153,6 +204,13 @@ pub struct ProjectData {
     description: Option<String>,
     status: String,
     github_repo_url: Option<String>,
+    github_installation_id: Option<Uuid>,
+    github_installation_status: Option<InstallationStatus>,
+    github_account_login: Option<String>,
+    position: i32,
+    /// Listed only, and only once a member has typed in or added to the project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<String>,
     /// Whether the project runs itself, and why it stopped or when it finished.
     auto: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +228,16 @@ impl ProjectData {
             self.auto = automation.auto;
             self.auto_paused_reason = automation.paused_reason.clone();
             self.auto_completed_at = automation.completed_at.map(|at| at.to_rfc3339());
+        }
+        self
+    }
+
+    /// Carry the status and account of the GitHub installation behind the
+    /// project's repository into the response.
+    fn with_installation(mut self, installation: Option<&InstallationSummary>) -> Self {
+        if let Some(installation) = installation {
+            self.github_installation_status = Some(installation.status());
+            self.github_account_login = Some(installation.account_login.clone());
         }
         self
     }
@@ -197,6 +265,11 @@ impl From<ProjectRow> for ProjectData {
             description: row.description,
             status: row.status,
             github_repo_url: row.github_repo_url,
+            github_installation_id: row.github_installation_id,
+            github_installation_status: None,
+            github_account_login: None,
+            position: row.position,
+            last_used_at: None,
             auto: false,
             auto_paused_reason: None,
             auto_completed_at: None,
@@ -233,6 +306,11 @@ pub struct UpdateProjectRequest {
     auto: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ReorderProjectsRequest {
+    project_ids: Vec<Uuid>,
+}
+
 /// Link source request
 #[derive(Debug, Deserialize)]
 pub struct LinkSourceRequest {
@@ -240,10 +318,25 @@ pub struct LinkSourceRequest {
 }
 
 /// Link GitHub request
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct LinkGitHubRequest {
     repo_url: String,
     access_token: Option<String>,
+    github_installation_id: Option<Uuid>,
+}
+
+impl fmt::Debug for LinkGitHubRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LinkGitHubRequest")
+            .field("repo_url", &self.repo_url)
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| REDACTED),
+            )
+            .field("github_installation_id", &self.github_installation_id)
+            .finish()
+    }
 }
 
 /// Start an auto project: the brief the interview opens with.
@@ -273,19 +366,19 @@ pub async fn start_auto(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(workspace_id): Path<Uuid>,
-    Json(req): Json<AutoProjectRequest>,
+    Json(request): Json<AutoProjectRequest>,
 ) -> Result<Response, ServerError> {
     let user_id = user_id(&auth)?;
     refuse_unless_writable(&state, workspace_id, user_id).await?;
     refuse_unless_driven(&state)?;
-    let brief = req.brief.trim();
+    let brief = request.brief.trim();
     if brief.is_empty() {
         return Err(ServerError::BadRequest("A brief is required".to_string()));
     }
     if brief.chars().count() > BRIEF_CHARS {
         return Err(ServerError::BadRequest("The brief is too long".to_string()));
     }
-    let model = req
+    let model = request
         .model_name
         .as_deref()
         .map(str::trim)
@@ -350,54 +443,103 @@ pub async fn list(
         return Err(ServerError::NotFound("Workspace not found".to_string()));
     }
 
-    let rows =
-        projects::list_projects(state.db(), query.workspace_id, query.status.as_deref()).await?;
-    let automation = auto_projects::automation_for_workspace(state.db(), query.workspace_id)
-        .await
-        .unwrap_or_default();
+    let (rows, automation, used) = tokio::join!(
+        projects::list_projects(state.db(), query.workspace_id, query.status.as_deref()),
+        auto_projects::automation_for_workspace(state.db(), query.workspace_id),
+        projects::last_used(state.db(), query.workspace_id),
+    );
+    let rows = rows?;
+    let used = used?;
+    let automation: HashMap<Uuid, auto_projects::ProjectAutomation> = automation
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.project_id, entry))
+        .collect();
+    let mut installation_ids: Vec<Uuid> = rows
+        .iter()
+        .filter_map(|row| row.github_installation_id)
+        .collect();
+    installation_ids.sort_unstable();
+    installation_ids.dedup();
+    let installations = installations(&state, &installation_ids).await?;
     Ok(Json(ProjectsListResponse {
         projects: rows
             .into_iter()
             .map(|row| {
-                let known = automation.iter().find(|entry| entry.project_id == row.id);
-                ProjectData::from(row).with_automation(known)
+                let known = automation.get(&row.id);
+                let installation = row
+                    .github_installation_id
+                    .and_then(|id| installations.get(&id));
+                let last_used_at = used.get(&row.id).map(|at| at.and_utc().to_rfc3339());
+                ProjectData {
+                    last_used_at,
+                    ..ProjectData::from(row)
+                        .with_automation(known)
+                        .with_installation(installation)
+                }
             })
             .collect(),
     })
     .into_response())
 }
 
+/// PUT /api/workspaces/{workspace_id}/projects/order
+pub async fn reorder(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
+    Json(request): Json<ReorderProjectsRequest>,
+) -> Result<Response, ServerError> {
+    let user_id = user_id(&auth)?;
+    if !workspace_members::is_member(state.db(), user_id, workspace_id).await? {
+        return Err(ServerError::NotFound("Workspace not found".to_string()));
+    }
+    if !workspace_members::can_write(state.db(), workspace_id, user_id).await? {
+        return Err(ServerError::Forbidden(
+            "Workspace write access required".to_string(),
+        ));
+    }
+    match projects::reorder(state.db(), workspace_id, &request.project_ids).await? {
+        Reorder::Reordered => Ok(StatusCode::NO_CONTENT.into_response()),
+        Reorder::Duplicated => Err(ServerError::BadRequest(
+            "The order must name each project at most once".to_string(),
+        )),
+    }
+}
+
 /// POST /api/projects
 pub async fn create(
     State(state): State<AppState>,
     auth: AuthUser,
-    Json(req): Json<CreateProjectRequest>,
+    Json(request): Json<CreateProjectRequest>,
 ) -> Result<Response, ServerError> {
     let user_id = user_id(&auth)?;
-    if !workspace_members::can_write(state.db(), req.workspace_id, user_id).await? {
+    if !workspace_members::can_write(state.db(), request.workspace_id, user_id).await? {
         return Err(ServerError::Forbidden(
             "Workspace write access required".to_string(),
         ));
     }
 
-    let status = req.status.as_deref().map(known_status).transpose()?;
-    let source_id = match req.source_id {
-        Some(source_id) => Some(source_in_workspace(&state, source_id, req.workspace_id).await?),
+    let status = request.status.as_deref().map(known_status).transpose()?;
+    let source_id = match request.source_id {
+        Some(source_id) => {
+            Some(source_in_workspace(&state, source_id, request.workspace_id).await?)
+        }
         None => None,
     };
 
     let project = projects::create(
         state.db(),
         NewProject {
-            name: &req.name,
-            description: req.description.as_deref(),
-            workspace_id: Some(req.workspace_id),
+            name: &request.name,
+            description: request.description.as_deref(),
+            workspace_id: Some(request.workspace_id),
             source_id,
             status,
         },
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(describe(&state, project).await)).into_response())
+    Ok((StatusCode::CREATED, Json(describe(&state, project).await?)).into_response())
 }
 
 /// GET /api/projects/:id
@@ -407,7 +549,7 @@ pub async fn get(
     Path(id): Path<Uuid>,
 ) -> Result<Response, ServerError> {
     let project = readable(&state, &auth, id).await?;
-    Ok(Json(describe(&state, project).await).into_response())
+    Ok(Json(describe(&state, project).await?).into_response())
 }
 
 /// PUT|PATCH /api/projects/:id
@@ -415,13 +557,13 @@ pub async fn update(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-    Json(req): Json<UpdateProjectRequest>,
+    Json(request): Json<UpdateProjectRequest>,
 ) -> Result<Response, ServerError> {
     let (_, workspace_id) = writable(&state, &auth, id).await?;
     let user_id = user_id(&auth)?;
-    let status = req.status.as_deref().map(known_status).transpose()?;
+    let status = request.status.as_deref().map(known_status).transpose()?;
 
-    if let Some(auto) = req.auto {
+    if let Some(auto) = request.auto {
         if auto {
             refuse_unless_driven(&state)?;
         }
@@ -449,8 +591,8 @@ pub async fn update(
         projects::update_project(
             state.db(),
             id,
-            req.name.as_deref(),
-            req.description.as_deref(),
+            request.name.as_deref(),
+            request.description.as_deref(),
             status,
         )
         .await?,
@@ -480,10 +622,10 @@ pub async fn link_source(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-    Json(req): Json<LinkSourceRequest>,
+    Json(request): Json<LinkSourceRequest>,
 ) -> Result<Response, ServerError> {
     let (_, workspace_id) = writable(&state, &auth, id).await?;
-    let source_id = source_in_workspace(&state, req.source_id, workspace_id).await?;
+    let source_id = source_in_workspace(&state, request.source_id, workspace_id).await?;
 
     respond(
         &state,
@@ -508,26 +650,45 @@ pub async fn link_github(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
-    Json(req): Json<LinkGitHubRequest>,
+    Json(request): Json<LinkGitHubRequest>,
 ) -> Result<Response, ServerError> {
-    writable(&state, &auth, id).await?;
+    let (_, workspace_id) = writable(&state, &auth, id).await?;
+    if request.access_token.is_some() && request.github_installation_id.is_some() {
+        return Err(ServerError::BadRequest(CONFLICTING_CREDENTIALS.to_string()));
+    }
+    let installation = match request.github_installation_id {
+        Some(installation_id) => {
+            Some(attachable_installation(&state, workspace_id, installation_id).await?)
+        }
+        None => None,
+    };
 
-    // The token is stored the way source credentials are: encrypted at rest,
-    // opened by the checkout and pull request code that uses it.
-    let sealed = req
+    let sealed = request
         .access_token
         .as_deref()
-        .map(|token| crate::crypto::encrypt(state.encryption_key(), token))
+        .map(|token| encrypt_value(&SecretValue::new(token), state.master_key()))
         .transpose()
         .map_err(|error| {
             tracing::error!(%error, "Could not encrypt the repository token");
-            ServerError::Internal("Internal server error".to_string())
+            ServerError::Internal(INTERNAL_ERROR.to_string())
         })?;
-    respond(
-        &state,
-        projects::link_github(state.db(), id, &req.repo_url, sealed.as_deref()).await?,
+    let linked = projects::link_github(
+        state.db(),
+        id,
+        &request.repo_url,
+        sealed.as_deref(),
+        installation,
     )
     .await
+    .map_err(link_refusal)?;
+    respond(&state, linked).await
+}
+
+fn link_refusal(error: LinkError) -> ServerError {
+    match error {
+        LinkError::Unattachable => unattachable(),
+        LinkError::Database(error) => ServerError::from(error),
+    }
 }
 
 /// DELETE /api/projects/:id/github
@@ -582,6 +743,32 @@ pub struct AutomationCounts {
     paused: usize,
 }
 
+impl AutomationCounts {
+    /// A cancelled task the driver parked is not counted as paused: resuming
+    /// the project would not pick it up.
+    fn of(listed: &[AutomationTask]) -> Self {
+        let stage =
+            |task: &AutomationTask| task.stage.as_deref().and_then(auto_projects::Stage::parse);
+        Self {
+            total: listed.len(),
+            agentic: listed.iter().filter(|task| task.is_agentic).count(),
+            complete: listed
+                .iter()
+                .filter(|task| task.status == tasks::COMPLETE)
+                .count(),
+            in_flight: listed
+                .iter()
+                .filter(|task| stage(task).is_some_and(auto_projects::Stage::in_flight))
+                .count(),
+            paused: listed
+                .iter()
+                .filter(|task| stage(task) == Some(auto_projects::Stage::Paused))
+                .filter(|task| task.status != tasks::CANCELLED)
+                .count(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct AutomationResponse {
     project_id: Uuid,
@@ -630,27 +817,7 @@ pub async fn automation(
             auto_created: task.auto_created.unwrap_or(false),
         })
         .collect();
-    let counts = AutomationCounts {
-        total: listed.len(),
-        agentic: listed.iter().filter(|task| task.is_agentic).count(),
-        complete: listed
-            .iter()
-            .filter(|task| task.status == "complete")
-            .count(),
-        in_flight: listed
-            .iter()
-            .filter(|task| {
-                task.stage
-                    .as_deref()
-                    .and_then(auto_projects::Stage::parse)
-                    .is_some_and(auto_projects::Stage::in_flight)
-            })
-            .count(),
-        paused: listed
-            .iter()
-            .filter(|task| task.stage.as_deref() == Some("paused"))
-            .count(),
-    };
+    let counts = AutomationCounts::of(&listed);
     Ok(Json(AutomationResponse {
         project_id: id,
         auto: automation.auto,
@@ -680,4 +847,168 @@ pub async fn resume_automation(
     auto_projects::resume_paused_tasks(state.db(), id).await?;
     crate::workers::auto_project::poke(id);
     respond(&state, projects::get_project(state.db(), id).await?).await
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    fn automation_task(status: &str, stage: Option<auto_projects::Stage>) -> AutomationTask {
+        AutomationTask {
+            task_id: Uuid::new_v4(),
+            title: "Ships a change".to_string(),
+            status: status.to_string(),
+            is_agentic: true,
+            kind: None,
+            stage: stage.map(|stage| stage.as_str().to_string()),
+            reason: None,
+            runs: 0,
+            review_rounds: 0,
+            reviewers: None,
+            pr_url: None,
+            head: None,
+            checks: None,
+            merge_sha: None,
+            auto_created: false,
+        }
+    }
+
+    #[test]
+    fn a_cancelled_task_the_driver_parked_is_not_counted_as_paused() {
+        let only_cancelled = AutomationCounts::of(&[automation_task(
+            tasks::CANCELLED,
+            Some(auto_projects::Stage::Paused),
+        )]);
+        assert_eq!(only_cancelled.paused, 0);
+
+        let counts = AutomationCounts::of(&[
+            automation_task(tasks::CANCELLED, Some(auto_projects::Stage::Paused)),
+            automation_task(tasks::PAUSED, Some(auto_projects::Stage::Paused)),
+            automation_task(tasks::BLOCKED, Some(auto_projects::Stage::Paused)),
+            automation_task(tasks::REVIEW, Some(auto_projects::Stage::AwaitingChecks)),
+            automation_task(tasks::COMPLETE, Some(auto_projects::Stage::Merged)),
+            automation_task(tasks::CREATED, None),
+        ]);
+        assert_eq!(counts.total, 6);
+        assert_eq!(counts.agentic, 6);
+        assert_eq!(counts.complete, 1);
+        assert_eq!(counts.in_flight, 1);
+        assert_eq!(
+            counts.paused, 2,
+            "a task a person paused counts as paused; only a cancelled one does not"
+        );
+    }
+
+    #[test]
+    fn an_installation_refused_at_the_write_is_a_bad_request() {
+        assert!(matches!(
+            link_refusal(LinkError::Unattachable),
+            ServerError::BadRequest(message) if message == github_installations::UNATTACHABLE
+        ));
+        assert!(!matches!(
+            link_refusal(LinkError::Database(sqlx::Error::PoolTimedOut)),
+            ServerError::BadRequest(_)
+        ));
+    }
+
+    fn row(github_installation_id: Option<Uuid>) -> ProjectRow {
+        ProjectRow {
+            id: Uuid::new_v4(),
+            workspace_id: Some(Uuid::new_v4()),
+            source_id: None,
+            name: "Zone".to_string(),
+            description: None,
+            status: "active".to_string(),
+            github_repo_url: Some("https://github.com/abnegate/zone".to_string()),
+            github_access_token: Some("ENC[v1:sealed]".to_string()),
+            created_at: None,
+            updated_at: None,
+            github_installation_id,
+            position: 0,
+        }
+    }
+
+    fn summary(id: Uuid, revoked: bool) -> InstallationSummary {
+        InstallationSummary {
+            id,
+            account_login: "abnegate".to_string(),
+            suspended_at: Some(Utc::now()),
+            revoked_at: revoked.then(Utc::now),
+        }
+    }
+
+    fn serialized(data: ProjectData) -> Value {
+        serde_json::to_value(data).unwrap()
+    }
+
+    #[test]
+    fn a_token_project_reports_no_installation() {
+        let body = serialized(ProjectData::from(row(None)).with_installation(None));
+
+        assert_eq!(body["github_installation_id"], Value::Null);
+        assert_eq!(body["github_installation_status"], Value::Null);
+        assert_eq!(body["github_account_login"], Value::Null);
+        assert!(
+            body.get("github_access_token").is_none(),
+            "the sealed token must never reach a response"
+        );
+    }
+
+    #[test]
+    fn an_installation_project_reports_its_status_and_account() {
+        let installation_id = Uuid::new_v4();
+        let installation = summary(installation_id, false);
+
+        let body = serialized(
+            ProjectData::from(row(Some(installation_id))).with_installation(Some(&installation)),
+        );
+
+        assert_eq!(body["github_installation_id"], json!(installation_id));
+        assert_eq!(body["github_installation_status"], json!("suspended"));
+        assert_eq!(body["github_account_login"], json!("abnegate"));
+    }
+
+    #[test]
+    fn revocation_outranks_suspension_in_the_response() {
+        let installation_id = Uuid::new_v4();
+        let installation = summary(installation_id, true);
+
+        let body = serialized(
+            ProjectData::from(row(Some(installation_id))).with_installation(Some(&installation)),
+        );
+
+        assert_eq!(body["github_installation_status"], json!("revoked"));
+    }
+
+    #[test]
+    fn a_link_request_accepts_an_installation_without_a_token() {
+        let installation_id = Uuid::new_v4();
+
+        let request: LinkGitHubRequest = serde_json::from_value(json!({
+            "repo_url": "https://github.com/abnegate/zone",
+            "github_installation_id": installation_id,
+        }))
+        .unwrap();
+
+        assert_eq!(request.github_installation_id, Some(installation_id));
+        assert_eq!(request.access_token, None);
+    }
+
+    #[test]
+    fn debug_redacts_the_access_token() {
+        let request: LinkGitHubRequest = serde_json::from_value(json!({
+            "repo_url": "https://github.com/abnegate/zone",
+            "access_token": "ghp_plaintext_token",
+        }))
+        .unwrap();
+
+        let rendered = format!("{request:?}");
+
+        assert!(!rendered.contains("ghp_plaintext_token"), "{rendered}");
+        assert!(rendered.contains(REDACTED), "{rendered}");
+        assert!(rendered.contains("abnegate/zone"), "{rendered}");
+    }
 }

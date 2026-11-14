@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { SYSTEM_DARK_QUERY } from '../shared/context/ThemeContext';
 import {
   paintShell,
   SHELL_ATTRIBUTE,
@@ -13,6 +14,7 @@ const config: ShellConfig = {
   attribute: SHELL_ATTRIBUTE,
   templateAttribute: SHELL_TEMPLATE_ATTRIBUTE,
   themeKey: 'theme',
+  systemDarkQuery: SYSTEM_DARK_QUERY,
   sessionKeys: ['access', 'refresh'],
   routes: { '/': '/login', '/login': '/login', '/reset-password': '/reset-password' },
   tokenRoutes: ['/reset-password'],
@@ -120,7 +122,7 @@ describe('paintShell', () => {
   it('falls back to the system theme', () => {
     const matchMedia = window.matchMedia;
     window.matchMedia = ((query: string) => ({
-      matches: query.includes('dark'),
+      matches: query === SYSTEM_DARK_QUERY,
     })) as typeof matchMedia;
     try {
       visit('/login');

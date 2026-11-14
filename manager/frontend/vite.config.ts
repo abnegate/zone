@@ -5,7 +5,10 @@ import react from '@vitejs/plugin-react';
 import tailwind from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-import { SERVICE_WORKER_FILE } from './src/shared/serviceWorker';
+import {
+  SERVICE_WORKER_FILE,
+  SERVICE_WORKER_NAVIGATION_DENYLIST,
+} from './src/shared/serviceWorker';
 import { FEATURE_STYLESHEET_ATTRIBUTE } from './src/shared/stylesheet';
 
 const frontendRoot = fileURLToPath(new URL('.', import.meta.url));
@@ -107,6 +110,9 @@ export default defineConfig(({ command }) => {
         injectRegister: false,
         filename: SERVICE_WORKER_FILE,
         includeAssets: ['favicon.ico', 'logo192.png', 'logo512.png'],
+        workbox: {
+          navigateFallbackDenylist: SERVICE_WORKER_NAVIGATION_DENYLIST,
+        },
         manifest: {
           name: 'Zone Dashboard',
           short_name: 'Zone',

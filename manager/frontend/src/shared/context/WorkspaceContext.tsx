@@ -1,12 +1,13 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useState } from 'react';
 import { useAuth } from '../../features/auth/context';
-import type { Organization, OrgRole, Workspace } from '../../types';
+import type { Organization, OrgRole, Workspace, WorkspaceRole } from '../../types';
 
 interface WorkspaceContextType {
   organizations: Organization[];
   currentOrganization: Organization | null;
   currentWorkspace: Workspace | null;
   workspaces: Workspace[];
+  writable: boolean;
   loading: boolean;
   resolvingRole: boolean;
   error: string | null;
@@ -20,6 +21,12 @@ const WorkspaceContext = createContext<WorkspaceContextType | undefined>(undefin
 
 const ORG_STORAGE_KEY = 'manager_current_org';
 const WS_STORAGE_KEY = 'manager_current_workspace';
+
+const VIEWER: WorkspaceRole = 'viewer';
+
+export function permitsWrites(workspace: Workspace | null | undefined): boolean {
+  return workspace?.role !== VIEWER;
+}
 
 export function WorkspaceProvider({
   children,
@@ -43,6 +50,7 @@ export function WorkspaceProvider({
   const userId = user?.id;
   const workspacesLoading = organizationId !== undefined && workspacesFor !== organizationId;
   const loading = organizationsLoading || workspacesLoading;
+  const writable = permitsWrites(currentWorkspace);
   const resolvingRole =
     currentOrganization !== null &&
     currentOrganization.role === undefined &&
@@ -176,6 +184,7 @@ export function WorkspaceProvider({
         currentOrganization,
         currentWorkspace,
         workspaces,
+        writable,
         loading,
         resolvingRole,
         error,

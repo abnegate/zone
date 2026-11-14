@@ -1,15 +1,18 @@
 import { z } from 'zod';
 import { AiProviderSchema } from '../settings/workspace/schemas';
+import { TASK_STATUSES } from '../tasks/status';
 import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
 import {
   ACTION_TARGETS,
+  CHAT_ACTIVITIES,
   CHAT_TASK_RUN_STATUSES,
-  CHAT_TASK_STATUSES,
   HANDOVER_AGENTS,
   HANDOVER_REASONS,
   PULL_REQUEST_CHECKS,
+  PULL_REQUEST_CONNECTIONS,
   PULL_REQUEST_MERGEABILITY,
   PULL_REQUEST_STATES,
+  REFUSALS,
 } from './types';
 
 export const MessageRoleSchema = z.enum(['user', 'assistant', 'system']);
@@ -29,7 +32,7 @@ export const MessageAttachmentSchema = z.object({
  * would otherwise throw for the whole GET and leave the chat permanently
  * unopenable, since the value is persisted in messages.metadata.
  */
-function tolerantArray<T extends z.ZodTypeAny>(element: T) {
+export function tolerantArray<T extends z.ZodTypeAny>(element: T) {
   return z.array(z.unknown()).transform((items) =>
     items
       .map((item) => element.safeParse(item))
@@ -131,6 +134,10 @@ export const WaitSettledSchema = z.object({
   verdict: z.enum(['settled', 'timed_out', 'silent', 'unreadable']),
 });
 
+/// A value this client cannot read is dropped, so the call is labelled from its
+/// words, as one stored before refusals were kept is.
+export const RefusalSchema = z.enum(REFUSALS).nullable().optional().catch(undefined);
+
 export const ToolCallRecordSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -138,7 +145,9 @@ export const ToolCallRecordSchema = z.object({
   success: z.boolean(),
   detail: z.string(),
   duration_ms: z.number(),
+  at: z.number().int().nonnegative().optional().catch(undefined),
   reasoning: z.string().optional(),
+  reasoning_at: z.number().int().nonnegative().optional().catch(undefined),
   reason: statedReason,
   preview: observedPreview,
   /**
@@ -155,6 +164,8 @@ export const ToolCallRecordSchema = z.object({
    */
   job: JobStartedSchema.optional().catch(undefined),
   waiting: WaitingSchema.optional().catch(undefined),
+  /** Declared for the same reason, and forgiving on the terms `RefusalSchema` gives. */
+  refusal: RefusalSchema,
 });
 
 export const CitationSchema = z.object({
@@ -229,6 +240,8 @@ export const HandoverSchema = z.object({
   resets_at: absentWhenEmpty,
   carried: z.boolean(),
   at: z.number().int().nonnegative(),
+  calls: z.number().int().nonnegative().optional().catch(undefined),
+  reasoning: z.string().optional().catch(undefined),
 });
 
 export const HandoversSchema = tolerantArray(HandoverSchema);
@@ -242,6 +255,7 @@ export const MessageMetadataSchema = z
     web_search: z.boolean().optional(),
     memory_used: z.boolean().optional().catch(undefined),
     reasoning: z.string().optional(),
+    reasoning_at: z.number().int().nonnegative().optional().catch(undefined),
     handovers: HandoversSchema.optional().catch(undefined),
     source: z.string().optional().catch(undefined),
     reminder_id: z.string().optional().catch(undefined),
@@ -386,9 +400,20 @@ export const ChatProvidersSchema = z.object({
   cli: z.boolean().optional().catch(undefined),
 });
 
+export const RecentChatSchema = z.object({
+  model_name: z.string(),
+  provider: AiProviderSchema.nullable(),
+  provider_model: z.string().nullable(),
+  reasoning_effort: ReasoningEffortSchema,
+  agent_enabled: z.boolean(),
+  offline: z.boolean(),
+  context_tokens: z.number().int().positive().nullable(),
+});
+
 export const WorkspaceChatProvidersSchema = z.object({
   default: ChatProviderOfferSchema,
   providers: tolerantArray(ChatProviderOfferSchema),
+  recent: RecentChatSchema.nullish().catch(null),
 });
 
 export const SendMessageRequestSchema = z.object({
@@ -399,6 +424,7 @@ export const ChatsResponseSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),
   chats: z.array(ChatSchema).default([]),
+  total: z.number().int().nonnegative().optional(),
 });
 
 export const ChatResponseSchema = z.object({
@@ -470,6 +496,10 @@ export const PullRequestStatusSchema = z.object({
     unavailable: z.string().nullable(),
   }),
   draft_unavailable: z.string().nullable().catch(null),
+  threads: z
+    .object({ open: z.number().int().nonnegative(), resolved: z.number().int().nonnegative() })
+    .nullable()
+    .catch(null),
   observed_at: z.string(),
 });
 
@@ -486,6 +516,29 @@ export const ChatPullRequestSchema = z.object({
   status: PullRequestStatusSchema.nullable().catch(null),
   writable: z.boolean(),
   credentialed: z.boolean(),
+  connection: z.enum(PULL_REQUEST_CONNECTIONS).catch('uncredentialed'),
+  auto_fix: z.boolean().catch(false),
+  auto_fixing: z.boolean().catch(false),
+});
+
+export const ChatPullIndicatorSchema = z.object({
+  id: z.string(),
+  number: z.number(),
+  url: z.string(),
+  title: z.string().nullable().catch(null),
+  status: PullRequestStatusSchema.nullable().catch(null),
+  ready: z.boolean().catch(false),
+});
+
+export const ChatIndicatorSchema = z.object({
+  chat_id: z.string(),
+  activity: z.enum(CHAT_ACTIVITIES).catch('idle'),
+  pull_request: ChatPullIndicatorSchema.nullable().catch(null),
+  pull_requests: z.number().catch(0),
+});
+
+export const ChatIndicatorsResponseSchema = z.object({
+  chats: tolerantArray(ChatIndicatorSchema).default([]),
 });
 
 export const ChatPullRequestsResponseSchema = z.object({
@@ -510,7 +563,7 @@ export const ChatTaskSchema = z.object({
   id: z.string(),
   title: z.string(),
   title_pending: z.boolean(),
-  status: z.enum(CHAT_TASK_STATUSES),
+  status: z.enum(TASK_STATUSES),
   is_agentic: z.boolean(),
   href: z.string(),
   created_at: z.string().nullable(),

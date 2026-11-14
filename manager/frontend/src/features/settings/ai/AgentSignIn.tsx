@@ -17,7 +17,7 @@ import type {
   ClaudeScope,
   SignInFlow,
 } from './schemas';
-import type { AgentAccess, Attempt, SignInAction } from './types';
+import { type AgentAccess, type Attempt, SettingsLevel, type SignInAction } from './types';
 import { accountLabel } from './usage';
 import { useExpired } from './useExpired';
 import './AgentSignIn.css';
@@ -28,6 +28,9 @@ export const USAGE_POLL_INTERVAL = 60_000;
 
 const ROUTING =
   "New chats start on the account with the most headroom and stay on it until it runs out; the other agent's accounts take over when this one is spent.";
+
+const ORGANIZATION_WIDE_SIGN_IN =
+  'Signing in here signs in for every workspace in this organization.';
 
 type Awaiting = 'device' | 'browser';
 type Outcome = 'waiting' | 'finished' | 'failed';
@@ -48,7 +51,9 @@ interface AgentSignInProps {
   organizationId: string;
   agent: Agent;
   access: AgentAccess;
+  level: SettingsLevel;
   unsaved: boolean;
+  saveLabel: string;
   heading: 'h3' | 'h4';
   status: AgentStatus | undefined;
   attempt: Attempt | undefined;
@@ -86,11 +91,20 @@ function signedInDetail(status: AgentStatus, agent: Agent, lapsed: boolean): str
   return parts.length > 0 ? parts.join(' · ') : 'Signed in for this organization.';
 }
 
+function signInPrompt(account: string, name: string, level: SettingsLevel): string {
+  const prompt = `Sign in with a ${account} subscription to use ${name}`;
+  return level === SettingsLevel.Workspace
+    ? `${prompt}. ${ORGANIZATION_WIDE_SIGN_IN}`
+    : `${prompt} in this organization.`;
+}
+
 export function AgentSignIn({
   organizationId,
   agent,
   access,
+  level,
   unsaved,
+  saveLabel,
   heading,
   status,
   attempt,
@@ -366,7 +380,7 @@ export function AgentSignIn({
   } else if (status?.state === 'expired') {
     detail = `Sign in again to keep using ${name}.`;
   } else if (status) {
-    detail = `Sign in with a ${account} subscription to use ${name} in this organization.`;
+    detail = signInPrompt(account, name, level);
   }
 
   let actions: ReactNode = null;
@@ -400,7 +414,7 @@ export function AgentSignIn({
             <Badge variant={badge.tint}>{badge.label}</Badge>
             <p className="agent-sign-in-detail">{detail}</p>
             {status.state === 'signed_in' && unsaved && (
-              <p className="form-hint agent-sign-in-note">Save Changes to use this provider.</p>
+              <p className="form-hint agent-sign-in-note">{saveLabel} to use this provider.</p>
             )}
           </div>
           {actions}

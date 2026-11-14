@@ -1,5 +1,8 @@
 import { readFileSync } from 'node:fs';
-import { test as base, expect, type Page } from '@playwright/test';
+import { test as base, expect, type Locator, type Page } from '@playwright/test';
+import { setupCompleteKey } from '../src/features/models/setupComplete';
+
+export { SOURCES_PATH } from '../src/features/settings/navigation/sections';
 
 /**
  * The live suite talks to a real server. Nothing here mocks a route, forges a
@@ -35,10 +38,18 @@ export const comfyStub = process.env.ZONE_COMFY_STUB || 'http://127.0.0.1:8188';
 
 /** Sign in through the real login form and land on the seeded workspace. */
 export async function signIn(page: Page, who: Tenant = state.owner): Promise<void> {
-  await page.addInitScript((context) => {
-    localStorage.setItem('manager_current_org', context.organization);
-    localStorage.setItem('manager_current_workspace', context.workspace);
-  }, { organization: who.organization.id, workspace: who.workspace.id });
+  await page.addInitScript(
+    (context) => {
+      localStorage.setItem('manager_current_org', context.organization);
+      localStorage.setItem('manager_current_workspace', context.workspace);
+      localStorage.setItem(context.setupComplete, '1');
+    },
+    {
+      organization: who.organization.id,
+      workspace: who.workspace.id,
+      setupComplete: setupCompleteKey(who.user.id),
+    }
+  );
 
   // An already-signed-in page is bounced off /login, so the session in hand is
   // dropped first: a test may sign in as a second account on the same page.
@@ -146,6 +157,31 @@ export async function sendAndSettle(page: Page, message: string, timeout = 240_0
   // going is what says the turn is finished rather than still streaming.
   await expect(assistant).toHaveCount(before + 1, { timeout });
   await expect(page.locator('.message-status')).toHaveCount(0, { timeout });
+}
+
+export async function chooseOption(trigger: Locator, value: string): Promise<void> {
+  await trigger.click();
+  const listbox = trigger.page().getByRole('listbox');
+  await listbox.locator(`[role="option"][data-value="${value}"]`).click();
+  await expect(listbox).toHaveCount(0);
+}
+
+export type TaskAction = 'Run' | 'Rename' | 'Delete';
+
+export async function chooseTaskAction(
+  page: Page,
+  title: string,
+  action: TaskAction
+): Promise<void> {
+  await page.getByRole('button', { name: `Actions for ${title}`, exact: true }).click();
+  await page.getByRole('menuitem', { name: action, exact: true }).click();
+}
+
+export async function deleteTask(page: Page, title: string): Promise<void> {
+  await chooseTaskAction(page, title, 'Delete');
+  const dialog = page.getByRole('dialog', { name: `Delete "${title}"?`, exact: true });
+  await dialog.getByRole('button', { name: 'Delete task', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
 }
 
 /** Every test asserts a clean console, so a broken render cannot pass as a pass. */

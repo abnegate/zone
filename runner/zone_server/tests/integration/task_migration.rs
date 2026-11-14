@@ -1,58 +1,18 @@
+use sqlx::ConnectOptions;
 use sqlx::migrate::MigrateError;
-use sqlx::{ConnectOptions, PgPool, postgres::PgPoolOptions};
+use sqlx::migrate::Migrator;
+use std::collections::BTreeSet;
+use std::path::Path;
 use std::time::Duration;
-use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
+use zone_server::db::auto_projects::Stage;
 use zone_server::db::{ai_settings, memory, migrations, tasks};
 
-/// Every test replays the whole chain into an empty database; more at once
-/// only queue on the same disk writes, and the tests' own time bounds with them.
-static DATABASES: Semaphore = Semaphore::const_new(4);
+use crate::common::Database;
 
-struct Database {
-    admin: PgPool,
-    pool: PgPool,
-    name: String,
-    _slot: SemaphorePermit<'static>,
-}
+const PREFIX: &str = "task_migration";
 
 impl Database {
-    async fn new() -> Self {
-        let slot = DATABASES
-            .acquire()
-            .await
-            .expect("the database slots are never closed");
-        let admin =
-            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("disposable database"))
-                .await
-                .unwrap();
-        // Identifiers contain only a fixed prefix and UUID hexadecimal.
-        let name = format!("task_migration_{}", Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(&admin)
-            .await
-            .unwrap();
-        let options = (*admin.connect_options()).clone().database(&name);
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .connect_with(options)
-            .await
-            .unwrap();
-        Self {
-            admin,
-            pool,
-            name,
-            _slot: slot,
-        }
-    }
-
-    async fn through(&self, version: i64) {
-        sqlx::migrate!("./migrations")
-            .run_to(version, &self.pool)
-            .await
-            .unwrap();
-    }
-
     async fn task(&self) -> Uuid {
         let organization = Uuid::new_v4();
         let workspace = Uuid::new_v4();
@@ -103,20 +63,11 @@ impl Database {
             .unwrap();
         (workspace, owner)
     }
-
-    async fn cleanup(self) {
-        self.pool.close().await;
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP DATABASE {}", self.name)))
-            .execute(&self.admin)
-            .await
-            .unwrap();
-        self.admin.close().await;
-    }
 }
 
 #[tokio::test]
 async fn a_dirty_ledger_refuses_to_migrate() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     sqlx::query("UPDATE _sqlx_migrations SET success=false WHERE version=1")
         .execute(&database.pool)
@@ -131,7 +82,7 @@ async fn a_dirty_ledger_refuses_to_migrate() {
 
 #[tokio::test]
 async fn a_checksum_mismatch_refuses_to_migrate() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     sqlx::query("UPDATE _sqlx_migrations SET checksum='\\x00'::bytea WHERE version=1")
         .execute(&database.pool)
@@ -146,7 +97,7 @@ async fn a_checksum_mismatch_refuses_to_migrate() {
 
 #[tokio::test]
 async fn legacy_completion_and_recovery_both_commit_without_losing_success() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
     let run = Uuid::new_v4();
@@ -193,7 +144,7 @@ async fn legacy_completion_and_recovery_both_commit_without_losing_success() {
 
 #[tokio::test]
 async fn task_migration_works_with_one_connection_fresh_and_applied() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(2))
@@ -212,7 +163,7 @@ async fn task_migration_works_with_one_connection_fresh_and_applied() {
 
 #[tokio::test]
 async fn migration_command_needs_only_database_and_propagates_failures() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     let url = database.pool.connect_options().to_url_lossy().to_string();
     for expected in [true, false] {
         if !expected {
@@ -245,7 +196,7 @@ async fn migration_command_needs_only_database_and_propagates_failures() {
 
 #[tokio::test]
 async fn reconcile_skips_tasks_another_server_locked() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let tasks = database.reconcilable(2).await;
     let (held, free) = (tasks[0], tasks[1]);
@@ -301,7 +252,7 @@ async fn reconcile_skips_tasks_another_server_locked() {
 
 #[tokio::test]
 async fn reconcile_bounds_each_batch() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let total = 105;
     database.reconcilable(total).await;
@@ -341,7 +292,7 @@ async fn reconcile_bounds_each_batch() {
 
 #[tokio::test]
 async fn waiting_runs_hold_the_admission_slot_the_running_index_used_to_hold() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
 
@@ -380,7 +331,7 @@ async fn waiting_runs_hold_the_admission_slot_the_running_index_used_to_hold() {
 
 #[tokio::test]
 async fn a_run_stores_one_pending_question_and_only_known_statuses() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
     let run = Uuid::new_v4();
@@ -437,7 +388,7 @@ async fn a_run_stores_one_pending_question_and_only_known_statuses() {
 
 #[tokio::test]
 async fn a_parked_run_keeps_its_lease_and_gives_it_back_once() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
     let run = tasks::create_task_run(&database.pool, task).await.unwrap();
@@ -520,7 +471,7 @@ async fn a_parked_run_keeps_its_lease_and_gives_it_back_once() {
 
 #[tokio::test]
 async fn the_sweeper_orphans_a_parked_run_whose_worker_died() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let task = database.task().await;
     let run = tasks::create_task_run(&database.pool, task).await.unwrap();
@@ -587,7 +538,7 @@ async fn agent_providers_and_logins_are_accepted() {
         "UPDATE organization_ai_settings SET provider=$2 WHERE organization_id=$1";
     const WORKSPACE_PROVIDER: &str =
         "UPDATE workspace_ai_settings SET provider=$2 WHERE workspace_id=$1";
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let (workspace, _) = database.workspace().await;
     let organization: Uuid =
@@ -642,7 +593,7 @@ async fn agent_providers_and_logins_are_accepted() {
 
 #[tokio::test]
 async fn failed_review_verdicts_and_unlink_events_are_accepted() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
 
     let verdict: bool = sqlx::query_scalar(
@@ -689,7 +640,7 @@ async fn failed_review_verdicts_and_unlink_events_are_accepted() {
 
 #[tokio::test]
 async fn ai_settings_default_to_unrouted_completions() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let (workspace, _) = database.workspace().await;
     let organization: Uuid =
@@ -739,7 +690,7 @@ async fn ai_settings_default_to_unrouted_completions() {
 #[tokio::test]
 async fn a_memory_entry_name_is_unique_per_person() {
     const NAME: &str = "Deploy window";
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let (workspace, owner) = database.workspace().await;
     let entry = "INSERT INTO knowledge_entries(workspace_id,created_by,category,title,content) VALUES($1,$2,$3,$4,'Body')";
@@ -769,7 +720,7 @@ async fn a_memory_entry_name_is_unique_per_person() {
 
 #[tokio::test]
 async fn workspace_theme_defaults_match_the_product() {
-    let database = Database::new().await;
+    let database = Database::new(PREFIX).await;
     migrations::run(&database.pool).await.unwrap();
     let (workspace, _) = database.workspace().await;
     sqlx::query("INSERT INTO workspace_themes(workspace_id) VALUES($1)")
@@ -800,148 +751,378 @@ async fn workspace_theme_defaults_match_the_product() {
     database.cleanup().await;
 }
 
-/// 004 adds the chat's login key under the brief lock of an unvalidated
-/// constraint, and 005 proves the rows while chats stay writable. A login kept
-/// before them keeps its id, and an organization may then hold a second one.
-#[tokio::test]
-async fn the_chat_login_key_is_added_unvalidated_and_proven_after() {
-    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
-         WHERE conrelid = 'chats'::regclass AND conname = 'chats_agent_login_id_fkey'";
-    const SIGN_IN: &str =
-        "INSERT INTO agent_logins(organization_id,agent) VALUES($1,'claude') RETURNING id";
-    let database = Database::new().await;
-    database.through(2).await;
-    let (workspace, _) = database.workspace().await;
-    let organization: Uuid =
-        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE id=$1")
-            .bind(workspace)
-            .fetch_one(&database.pool)
-            .await
-            .unwrap();
-    let kept: Uuid = sqlx::query_scalar(SIGN_IN)
-        .bind(organization)
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
-    sqlx::query(SIGN_IN)
-        .bind(organization)
-        .fetch_one(&database.pool)
-        .await
-        .expect_err("the initial schema keeps one login per agent");
-
-    database.through(4).await;
-    let added: bool = sqlx::query_scalar(VALIDATED)
-        .fetch_one(&database.pool)
-        .await
-        .expect("004 adds the chat's login key");
-    database.through(5).await;
-    let proven: bool = sqlx::query_scalar(VALIDATED)
-        .fetch_one(&database.pool)
-        .await
-        .expect("005 keeps the chat's login key");
-
-    assert!(!added, "004 must not scan chats under its exclusive lock");
-    assert!(proven, "005 validates what 004 added");
-    let logins: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM agent_logins WHERE organization_id=$1")
-            .bind(organization)
-            .fetch_all(&database.pool)
-            .await
-            .unwrap();
-    assert_eq!(logins, [kept], "004 must keep the login saved before it");
-    sqlx::query(SIGN_IN)
-        .bind(organization)
-        .fetch_one(&database.pool)
-        .await
-        .expect("004 lets an organization keep a second login of one agent");
-    database.cleanup().await;
+#[derive(Debug, PartialEq, sqlx::FromRow)]
+struct Parking {
+    stage: String,
+    reason: Option<String>,
+    parked_stage: Option<String>,
+    parked_reason: Option<String>,
 }
 
-/// 009 adds a chat's provider checks, and widens its effort check, under the
-/// brief lock of unvalidated constraints, and 010 proves the rows while chats
-/// stay writable.
 #[tokio::test]
-async fn the_chat_provider_checks_are_added_unvalidated_and_proven_after() {
-    const CHECKS: [&str; 3] = [
-        "chats_provider_check",
-        "chats_provider_model_check",
-        "chats_reasoning_effort_check",
+async fn a_database_at_github_connections_is_backfilled_by_the_migrations_after_it() {
+    const GITHUB_CONNECTIONS: i64 = 3;
+    const STATUS_CHECK: &str = "tasks_status_check";
+    const PARKED_CHECK: &str = "task_automation_parked_check";
+    const STATUSES_BEFORE: [&str; 6] = [
+        tasks::CREATED,
+        tasks::QUEUED,
+        tasks::IN_PROGRESS,
+        tasks::REVIEW,
+        tasks::COMPLETE,
+        tasks::BLOCKED,
     ];
-    const CHECK_VIOLATION: &str = "23514";
-    const VALIDATED: &str = "SELECT convalidated FROM pg_constraint \
-         WHERE conrelid = 'chats'::regclass AND conname = $1";
-    let database = Database::new().await;
-    database.through(8).await;
+    const GAVE_UP: &str = "task \"Backfill\" used its 3 runs";
+    const WAITING_ON_A_PERSON: &str =
+        "nothing can start until a person looks at: Task 1: needs a person";
+    const WAITING_ON_A_TASK: &str = "nothing can start: 1 task(s) remain but none is runnable; \
+        they wait on tasks that are not agentic or did not finish: Task 2";
+    const WITHOUT_ACCESS: &str =
+        "the person who turned automation on no longer has write access to the workspace";
+    let database = Database::new(PREFIX).await;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    Migrator::new(directory.as_path())
+        .await
+        .unwrap()
+        .run_to(GITHUB_CONNECTIONS, &database.pool)
+        .await
+        .unwrap();
     let (workspace, _) = database.workspace().await;
-    let kept: Uuid = sqlx::query_scalar(
-        "INSERT INTO chats(workspace_id,title,model_name,reasoning_effort) \
-         VALUES($1,'Kept','gpt-4o','high') RETURNING id",
+    for status in STATUSES_BEFORE {
+        for stamped in [true, false] {
+            sqlx::query(
+                "INSERT INTO tasks(workspace_id, title, description, status, completed_at) \
+                 VALUES ($1, 'Backfill', 'Regression', $2, \
+                   CASE WHEN $3 THEN TIMESTAMP '2026-01-02 03:04:05' END)",
+            )
+            .bind(workspace)
+            .bind(status)
+            .bind(stamped)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        }
+    }
+    let project: Uuid = sqlx::query_scalar(
+        "INSERT INTO projects(workspace_id, name, auto) VALUES ($1, 'Backfill', TRUE) RETURNING id",
     )
     .bind(workspace)
     .fetch_one(&database.pool)
     .await
     .unwrap();
+    sqlx::query(
+        "INSERT INTO projects(workspace_id, name, auto, auto_paused_reason) \
+         VALUES ($1, 'Stalled on a person', TRUE, $2), ($1, 'Stalled on a task', TRUE, $3), \
+                ($1, 'Without access', TRUE, $4)",
+    )
+    .bind(workspace)
+    .bind(WAITING_ON_A_PERSON)
+    .bind(WAITING_ON_A_TASK)
+    .bind(WITHOUT_ACCESS)
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO task_automation(task_id, project_id, stage, reason) \
+         SELECT id, $2, CASE WHEN status = $3 THEN $6 ELSE $7 END, \
+                CASE WHEN status = $3 THEN $4 END \
+         FROM tasks WHERE workspace_id = $1 AND status = ANY($5) AND completed_at IS NULL",
+    )
+    .bind(workspace)
+    .bind(project)
+    .bind(tasks::BLOCKED)
+    .bind(GAVE_UP)
+    .bind([tasks::BLOCKED, tasks::IN_PROGRESS].as_slice())
+    .bind(Stage::Paused.as_str())
+    .bind(Stage::Running.as_str())
+    .execute(&database.pool)
+    .await
+    .unwrap();
 
-    database.through(9).await;
-    let mut added = Vec::new();
-    for check in CHECKS {
-        let validated: bool = sqlx::query_scalar(VALIDATED)
-            .bind(check)
-            .fetch_one(&database.pool)
-            .await
-            .unwrap_or_else(|error| panic!("009 adds {check}: {error}"));
-        added.push(validated);
-    }
-    database.through(10).await;
-    let mut proven = Vec::new();
-    for check in CHECKS {
-        let validated: bool = sqlx::query_scalar(VALIDATED)
-            .bind(check)
-            .fetch_one(&database.pool)
-            .await
-            .unwrap_or_else(|error| panic!("010 keeps {check}: {error}"));
-        proven.push(validated);
-    }
+    migrations::run(&database.pool).await.unwrap();
 
-    assert_eq!(
-        added, [false; 3],
-        "009 must not scan chats under its exclusive lock"
-    );
-    assert_eq!(proven, [true; 3], "010 validates what 009 added");
-    let provider: Option<String> = sqlx::query_scalar("SELECT provider FROM chats WHERE id=$1")
-        .bind(kept)
+    let migrated: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE workspace_id = $1")
+        .bind(workspace)
         .fetch_one(&database.pool)
         .await
         .unwrap();
+    let shipped: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT status, shipped_at IS NOT DISTINCT FROM completed_at FROM tasks \
+         WHERE workspace_id = $1 AND shipped_at IS NOT NULL",
+    )
+    .bind(workspace)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let reopened: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tasks WHERE workspace_id = $1 AND reopened_at IS NOT NULL",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    let validated: Vec<String> = sqlx::query_scalar(
+        "SELECT conname::text FROM pg_constraint \
+         WHERE conname = ANY($1) AND convalidated ORDER BY conname",
+    )
+    .bind([STATUS_CHECK, PARKED_CHECK].as_slice())
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let automation: Vec<Parking> = sqlx::query_as(
+        "SELECT stage, reason, parked_stage, parked_reason FROM task_automation \
+         WHERE project_id = $1 ORDER BY stage",
+    )
+    .bind(project)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    let driven: bool =
+        sqlx::query_scalar("SELECT auto_driven_at IS NOT NULL FROM projects WHERE id = $1")
+            .bind(project)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    let stalled: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM projects WHERE workspace_id = $1 AND auto_stalled ORDER BY name",
+    )
+    .bind(workspace)
+    .fetch_all(&database.pool)
+    .await
+    .unwrap();
+    database.cleanup().await;
+
+    assert_eq!(migrated, 12, "every task survives the migration");
     assert_eq!(
-        provider, None,
-        "a chat kept before 009 follows its workspace"
+        shipped,
+        vec![(tasks::COMPLETE.to_string(), true)],
+        "only a task that is complete and was stamped shipped, when it was completed"
     );
-    let refused = sqlx::query("UPDATE chats SET provider='gemini' WHERE id=$1")
-        .bind(kept)
+    assert_eq!(
+        reopened, 0,
+        "no task is dated as having left completion before that was recorded"
+    );
+    assert_eq!(
+        validated,
+        vec![PARKED_CHECK, STATUS_CHECK],
+        "both constraints hold for the rows that were already there"
+    );
+    assert_eq!(
+        automation,
+        vec![
+            Parking {
+                stage: Stage::Paused.as_str().to_string(),
+                reason: Some(GAVE_UP.to_string()),
+                parked_stage: None,
+                parked_reason: None,
+            },
+            Parking {
+                stage: Stage::Running.as_str().to_string(),
+                reason: None,
+                parked_stage: None,
+                parked_reason: None,
+            },
+        ],
+        "a row automation paused before the migration is not one a person parked"
+    );
+    assert!(!driven, "no project has had a pass under the new order");
+    assert_eq!(
+        stalled,
+        vec!["Stalled on a person", "Stalled on a task"],
+        "only a project paused for stalling is one a task given back starts again"
+    );
+}
+
+#[tokio::test]
+async fn driver_tasks_still_waiting_move_to_the_front_of_the_most_urgent_first_order() {
+    const MCP_SERVERS: i64 = 7;
+    const QUEUED: &str = "Queued by the driver";
+    const RANKED_BY_A_PERSON: &str = "Ranked by a person";
+    const SHIPPED: &str = "Shipped by the driver";
+    const DROPPED: &str = "Dropped by the driver";
+    let lowest = *tasks::PRIORITIES.start();
+    let highest = *tasks::PRIORITIES.end();
+    let database = Database::new(PREFIX).await;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    Migrator::new(directory.as_path())
+        .await
+        .unwrap()
+        .run_to(MCP_SERVERS, &database.pool)
+        .await
+        .unwrap();
+    let (workspace, _) = database.workspace().await;
+    let project: Uuid = sqlx::query_scalar(
+        "INSERT INTO projects(workspace_id, name, auto) VALUES ($1, 'Driven', TRUE) RETURNING id",
+    )
+    .bind(workspace)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    for (title, status, auto_created) in [
+        (QUEUED, tasks::CREATED, true),
+        (RANKED_BY_A_PERSON, tasks::CREATED, false),
+        (SHIPPED, tasks::COMPLETE, true),
+        (DROPPED, tasks::CANCELLED, true),
+    ] {
+        sqlx::query(
+            "WITH task AS ( \
+               INSERT INTO tasks(workspace_id, title, description, status, priority, is_agentic) \
+               VALUES ($1, $2, 'Regression', $3, $4, TRUE) RETURNING id \
+             ) \
+             INSERT INTO task_automation(task_id, project_id, kind, auto_created) \
+             SELECT id, $5, 'ci', $6 FROM task",
+        )
+        .bind(workspace)
+        .bind(title)
+        .bind(status)
+        .bind(lowest)
+        .bind(project)
+        .bind(auto_created)
         .execute(&database.pool)
         .await
-        .expect_err("the provider check must hold once proven");
-    assert_eq!(
-        refused.as_database_error().unwrap().code().as_deref(),
-        Some(CHECK_VIOLATION)
-    );
+        .unwrap();
+    }
+
+    migrations::run(&database.pool).await.unwrap();
+
+    let ranked: Vec<(String, i32)> =
+        sqlx::query_as("SELECT title, priority FROM tasks WHERE workspace_id = $1 ORDER BY title")
+            .bind(workspace)
+            .fetch_all(&database.pool)
+            .await
+            .unwrap();
     database.cleanup().await;
+
+    assert_eq!(
+        ranked,
+        vec![
+            (DROPPED.to_string(), lowest),
+            (QUEUED.to_string(), highest),
+            (RANKED_BY_A_PERSON.to_string(), lowest),
+            (SHIPPED.to_string(), lowest),
+        ],
+        "only a driver task still to run is moved from the old front of the queue to the new one"
+    );
+}
+
+/// The tables `sql` holds a lock on until its transaction ends, upper-cased,
+/// read from each kind of statement a migration changes a live table with.
+fn locked_tables(sql: &str) -> BTreeSet<String> {
+    const QUALIFIERS: [&str; 6] = ["TABLE", "IF", "NOT", "EXISTS", "ONLY", "CONCURRENTLY"];
+    const SCHEMA: &str = "PUBLIC.";
+    let code = sql
+        .lines()
+        .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_uppercase();
+    let mut tables = BTreeSet::new();
+    for statement in code.split(';') {
+        let words: Vec<&str> = statement.split_whitespace().collect();
+        for at in 0..words.len() {
+            let named = match &words[at..] {
+                ["ALTER" | "DROP" | "LOCK", "TABLE", named @ ..] => named,
+                ["CREATE", "INDEX", index @ ..] | ["CREATE", "UNIQUE", "INDEX", index @ ..] => {
+                    index
+                        .iter()
+                        .position(|word| *word == "ON")
+                        .map_or(&[][..], |on| &index[on + 1..])
+                }
+                ["LOCK" | "UPDATE", named @ ..] if at == 0 => named,
+                _ => continue,
+            };
+            for word in named.iter().skip_while(|word| QUALIFIERS.contains(*word)) {
+                let name = word.split('(').next().unwrap_or(word);
+                let name = name.trim_end_matches(',').trim_matches('"');
+                tables.insert(name.strip_prefix(SCHEMA).unwrap_or(name).to_string());
+                if !word.ends_with(',') {
+                    break;
+                }
+            }
+        }
+    }
+    tables
+}
+
+#[test]
+fn every_kind_of_statement_that_locks_a_table_counts_it() {
+    const TASKS: &str = "TASKS";
+    const PROJECTS: &str = "PROJECTS";
+    const ONE_TABLE: &str = "SET LOCAL lock_timeout = '5s';\n\
+        ALTER TABLE tasks ADD COLUMN reopened_at timestamp; -- ALTER TABLE projects\n\
+        UPDATE tasks SET shipped_at = completed_at WHERE status = 'complete';\n\
+        INSERT INTO tasks (id) SELECT id FROM tasks ON CONFLICT (id) DO UPDATE SET title = '';\n\
+        CREATE INDEX tasks_shipped ON tasks (shipped_at);";
+    const SECOND_TABLE: [&str; 9] = [
+        "ALTER TABLE IF EXISTS ONLY public.projects ADD COLUMN driven boolean",
+        "DO $$ BEGIN ALTER TABLE projects ADD COLUMN driven boolean; END $$",
+        "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS projects_driven\n    ON public.projects USING btree (driven)",
+        "CREATE INDEX projects_driven ON projects(driven)",
+        "DROP TABLE IF EXISTS projects CASCADE",
+        "DROP TABLE tasks, projects",
+        "LOCK TABLE projects IN SHARE MODE",
+        "LOCK ONLY \"projects\"",
+        "update projects set driven = false",
+    ];
+
+    assert_eq!(
+        locked_tables(ONE_TABLE),
+        BTreeSet::from([TASKS.to_string()])
+    );
+    for statement in SECOND_TABLE {
+        assert_eq!(
+            locked_tables(&format!("{ONE_TABLE}\n{statement};")),
+            BTreeSet::from([PROJECTS.to_string(), TASKS.to_string()]),
+            "`{statement}` locks a second table"
+        );
+    }
+}
+
+/// A migration that locks two tables can deadlock with the server, which
+/// takes the same pairs in both orders. 0003 predates this and has run everywhere.
+#[test]
+fn each_migration_after_github_connections_alters_one_table() {
+    const FIRST: i64 = 4;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
+        let path = entry.expect("migration entry is readable").path();
+        if !path.extension().is_some_and(|extension| extension == "sql") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .expect("migration path has a file name")
+            .to_string_lossy()
+            .into_owned();
+        let version: i64 = name
+            .split('_')
+            .next()
+            .expect("a migration name opens with its version")
+            .parse()
+            .expect("a migration name opens with its version");
+        if version < FIRST {
+            continue;
+        }
+        let sql = std::fs::read_to_string(&path).expect("migration is readable");
+        let locked = locked_tables(&sql);
+        assert!(
+            locked.len() <= 1,
+            "{name} locks {locked:?} in one transaction, so its boot can deadlock with a \
+             statement that locks the same tables in the other order; change each in a migration \
+             of its own"
+        );
+    }
 }
 
 /// Every lock a later migration takes on a live table is one ordinary traffic
 /// already holds, and the boot holds sqlx's advisory lock while it queues for
 /// them: an unbounded wait wedges every other instance instead of failing with
-/// 55P03. The initial schema creates an empty database, so it is exempt. So is
-/// a migration released without the bound: every database that ran it records
-/// its checksum, and adding the bound now would stop each of them at boot.
+/// 55P03. The v1 baseline creates an empty database, so it is exempt.
 #[test]
-fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait() {
+fn each_table_altering_migration_after_the_baseline_bounds_its_lock_wait() {
     const FIRST: i64 = 2;
-    const RELEASED: [&str; 2] = ["002_chat_offline.sql", "003_chat_context_tokens.sql"];
     const BOUND: &str = "SET LOCAL lock_timeout = '5s';";
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
-    let mut bounded: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&directory).expect("migrations directory is readable") {
         let path = entry.expect("migration entry is readable").path();
         if !path.extension().is_some_and(|extension| extension == "sql") {
@@ -960,7 +1141,6 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             .expect("a migration name opens with its version");
         let sql = std::fs::read_to_string(&path).expect("migration is readable");
         if version < FIRST
-            || RELEASED.contains(&name.as_str())
             || sql.lines().any(|line| line.trim() == "-- no-transaction")
             || !sql.to_ascii_uppercase().contains("ALTER TABLE")
         {
@@ -976,24 +1156,7 @@ fn each_table_altering_migration_after_the_initial_schema_bounds_its_lock_wait()
             "{name} alters a table inside sqlx's transaction without opening on `{BOUND}`, so it \
              queues behind any conflicting lock while the boot holds the migration advisory lock"
         );
-        bounded.push(name);
     }
-    bounded.sort();
-    assert_eq!(
-        bounded,
-        [
-            "004_agent_login_usage.sql",
-            "005_agent_login_usage_validation.sql",
-            "006_runpod_api_key.sql",
-            "007_devices.sql",
-            "009_chat_provider.sql",
-            "010_chat_provider_validation.sql",
-            "011_time_zones.sql",
-            "012_task_title_pending.sql",
-            "015_task_chat.sql",
-        ],
-        "the set of table-altering migrations changed; a new one needs its own lock bound"
-    );
 }
 
 /// sqlx hands a `-- no-transaction` file to the server as one simple query, and

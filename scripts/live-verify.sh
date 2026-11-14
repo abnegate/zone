@@ -43,6 +43,13 @@
 # ZONE_LIVE_BROWSER_PATH names an installed Chromium when the pinned Playwright
 # would otherwise download one.
 #
+# The server runs with MCP off (ZONE_MCP_ENABLED=false) unless
+# ZONE_LIVE_MCP_ENABLED says otherwise; the lanes that drive MCP servers
+# (live/pass/mcp.live.ts) need it on.
+#
+#   ZONE_LIVE_MCP_ENABLED=true ZONE_LIVE_REAL_PASS=1 \
+#     ./scripts/live-verify.sh live/pass/mcp.live.ts
+#
 # Required: DATABASE_URL, REDIS_URL, JWT_SECRET, ENCRYPTION_KEY. A migrated
 # database is not required — the server migrates on startup.
 #
@@ -193,7 +200,7 @@ COMFYUI_UPSCALE_MODEL=RealESRGAN_x4plus.safetensors \
 COMFYUI_TRAIN_COMMAND="$train_command" \
 ZONE_VISION_MODEL="${ZONE_VISION_MODEL:-$root/comfyui/models/vision/u2net.onnx}" \
 MONITORING_ENABLED=false \
-ZONE_MCP_ENABLED=false \
+ZONE_MCP_ENABLED="${ZONE_LIVE_MCP_ENABLED:-false}" \
 SQLX_OFFLINE=true \
 RUST_LOG="${RUST_LOG:-zone_server=info}" \
   "$root/runner/target/debug/zone-server" >"$work/server.log" 2>&1 &

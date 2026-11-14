@@ -1,4 +1,4 @@
-import { expect, signIn, state, test } from './harness';
+import { expect, signIn, SOURCES_PATH, state, test } from './harness';
 
 test.describe('the console against a real server', () => {
   test('signs in with a real account and renders the shell', async ({ page, consoleErrors }) => {
@@ -30,7 +30,14 @@ test.describe('the console against a real server', () => {
   test('reaches every workspace page without a console error', async ({ page, consoleErrors }) => {
     await signIn(page);
 
-    for (const path of ['/chats', '/models', '/tasks', '/projects', '/sources', '/settings']) {
+    for (const path of [
+      '/chats',
+      '/models',
+      '/tasks',
+      '/projects',
+      SOURCES_PATH,
+      '/settings/workspace/general',
+    ]) {
       await page.goto(path);
       await expect(page.locator('main, .app-content, .workspace-content').first()).toBeVisible();
     }

@@ -11,6 +11,10 @@ use std::env;
 #[cfg(any(test, feature = "test-support"))]
 use crate::variables::Variables;
 
+mod offline;
+
+pub use offline::Offline;
+
 /// Why a public fetch refused to leave.
 pub const OFFLINE: &str = "Public web access is offline until the VPN is enabled.";
 

@@ -14,7 +14,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 
-import { structFields } from '../../test/rust';
+import { rustVariants, structFields } from '../../test/rust';
+import jobs from './jobs.contract.json';
 import {
   ActionReceiptSchema,
   ChatTaskPublicationSchema,
@@ -32,12 +33,21 @@ import {
 } from './schemas';
 import {
   ACTION_TARGETS,
+  APPROVAL_CANCELLED_DETAIL,
+  APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_ANSWER_DETAIL,
+  AWAITING_APPROVAL_DETAIL,
+  CHAT_ACTIVITIES,
+  DENIED_DETAIL,
   PULL_REQUEST_CHECKS,
   PULL_REQUEST_MERGEABILITY,
   PULL_REQUEST_STATES,
   REASONED_TOOLS,
+  REFUSALS,
+  TOOL_ERROR_PREFIX,
+  UNFINISHED_DETAIL,
 } from './types';
+import { CHAT_SORT, listSort, SERVER_CHAT_SORT } from './utils/arrange';
 
 const CITATIONS_RS = join(
   import.meta.dir,
@@ -58,7 +68,7 @@ const QUESTION_RS = join(
 
 const CHAT_WS_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ws/chat.rs');
 
-const JOB_RS = join(import.meta.dir, '../../../../../runner/zone_core/src/tools/job.rs');
+const JOB_EXIT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/ws/chat/job.rs');
 
 const WAIT_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/agent/wait.rs');
 
@@ -69,17 +79,12 @@ const RECEIPTS_RS = join(
   '../../../../../runner/zone_server/src/agent/receipts.rs'
 );
 
-const REASONED_TOOLS_RS = 'REASONED_TOOLS';
+const REFUSAL_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/agent/approval/refusal.rs'
+);
 
-function rustVariants(source: string, enumName: string): string[] {
-  const body = source.match(new RegExp(`pub enum ${enumName} \\{([^}]*)\\}`))?.[1];
-  if (!body) throw new Error(`${enumName} not found in the Rust source`);
-  return body
-    .split('\n')
-    .map((line) => line.trim().replace(/,$/, ''))
-    .filter((line) => line.length > 0 && !line.startsWith('//'))
-    .map((variant) => variant.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase());
-}
+const REASONED_TOOLS_RS = 'REASONED_TOOLS';
 
 /// Reads a `const NAME: [&str; N] = [..]` literal. The declared length is part
 /// of the match, so a list that grew without its count being updated — which
@@ -99,7 +104,7 @@ function rustStringArray(source: string, constantName: string): string[] {
 
 /// Reads the value of a `const NAME: &str = ".."` literal.
 function rustStringConstant(source: string, constantName: string): string {
-  const value = source.match(new RegExp(`const ${constantName}: &str = "([^"]*)";`))?.[1];
+  const value = source.match(new RegExp(`const ${constantName}: &str =\\s*"([^"]*)";`))?.[1];
   if (value === undefined) throw new Error(`${constantName} not found in the Rust source`);
   return value;
 }
@@ -207,6 +212,56 @@ describe('a question call is labelled the same live as it is after a reload', ()
   test('the console writes the detail the server persists, ellipsis included', () => {
     expect(AWAITING_ANSWER_DETAIL).toBe(
       rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'AWAITING_ANSWER_DETAIL')
+    );
+  });
+});
+
+/**
+ * The approval a reader gave is client-only, so after the result settles a
+ * call, or after a reload, the server's words are all that say it was denied.
+ */
+describe('a refused call keeps why it did not run after the server settles it', () => {
+  test('the console reads the words the server tells a denied call', () => {
+    expect(DENIED_DETAIL).toBe(rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'DENIED'));
+  });
+
+  test('the console reads the words the server tells a call nobody approved in time', () => {
+    expect(APPROVAL_TIMED_OUT_DETAIL).toBe(
+      rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'APPROVAL_TIMED_OUT')
+    );
+  });
+
+  test('the console reads the words the server tells a call its stopped turn cancelled', () => {
+    expect(APPROVAL_CANCELLED_DETAIL).toBe(
+      rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'APPROVAL_CANCELLED')
+    );
+  });
+
+  test('the console reads the prefix the server puts in front of a failed call', () => {
+    expect(TOOL_ERROR_PREFIX).toBe(
+      rustStringConstant(readFileSync(REFUSAL_RS, 'utf8'), 'ERROR_PREFIX')
+    );
+  });
+});
+
+describe('a refused call is labelled from what refused it', () => {
+  test('the console reads every refusal the server stores', () => {
+    expect([...REFUSALS].sort()).toEqual(
+      rustVariants(readFileSync(REFUSAL_RS, 'utf8'), 'Refusal').sort()
+    );
+  });
+});
+
+describe('a call a stopped turn left open is labelled the same live as after a reload', () => {
+  test('the console writes the detail the server stores a call awaiting approval with', () => {
+    expect(AWAITING_APPROVAL_DETAIL).toBe(
+      rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'AWAITING_APPROVAL_DETAIL')
+    );
+  });
+
+  test('the console writes the detail the server stores an unfinished call with', () => {
+    expect(UNFINISHED_DETAIL).toBe(
+      rustStringConstant(readFileSync(CHAT_WS_RS, 'utf8'), 'UNFINISHED_DETAIL')
     );
   });
 });
@@ -535,19 +590,26 @@ describe('the question card the console draws is the one the server sent', () =>
  *
  * Each of the four travels as a named Rust struct rather than inside an enum
  * variant precisely so `structFields` can read it; an enum payload would be
- * unreadable here and so unpinned.
+ * unreadable here and so unpinned. The started job is `abnegate-agent`'s,
+ * whose source is not in this repository, so `jobs.contract.json` stands
+ * between them: `ws/chat/job.rs` holds the crate's type to that file, and this
+ * test holds the console to it.
  */
 describe('the job and wait cards the console draws are the ones the server sent', () => {
-  const job = readFileSync(JOB_RS, 'utf8');
+  const exit = readFileSync(JOB_EXIT_RS, 'utf8');
   const wait = readFileSync(WAIT_RS, 'utf8');
   const agent = readFileSync(AGENT_RS, 'utf8');
 
-  test('JobStarted carries the same fields on both sides', () => {
-    expect(zodFields(JobStartedSchema)).toEqual(rustStructFields(job, 'JobStarted'));
+  test('JobStarted carries the same fields on both sides, optional where the contract says', () => {
+    expect(zodFields(JobStartedSchema)).toEqual(
+      Object.fromEntries(
+        Object.entries(jobs.job_started_fields).map(([field, { optional }]) => [field, optional])
+      )
+    );
   });
 
   test('JobExited carries the same fields on both sides, optional where serde may omit', () => {
-    expect(zodFields(JobExitedSchema)).toEqual(rustStructFields(job, 'JobExited'));
+    expect(zodFields(JobExitedSchema)).toEqual(rustStructFields(exit, 'JobExit'));
   });
 
   test('Waiting carries the same fields on both sides, optional where serde may omit', () => {
@@ -565,7 +627,9 @@ describe('the job and wait cards the console draws are the ones the server sent'
     expect(rust).toHaveProperty('waiting', true);
     expect(rust).not.toHaveProperty('exited');
     expect(rust).not.toHaveProperty('settled');
-    expect(zodFields(ToolCallRecordSchema)).toEqual(rust);
+    // Always written, but a record stored before refusals were kept has none.
+    expect(rust).toHaveProperty('refusal', false);
+    expect(zodFields(ToolCallRecordSchema)).toEqual({ ...rust, refusal: true });
   });
 });
 
@@ -582,6 +646,44 @@ describe('a chat pull request reads as the server describes it', () => {
   ] as const)('%s variants match', (file, name, values) => {
     const source = readFileSync(join(PULL_REQUEST_RS, file), 'utf8');
     expect([...values].sort()).toEqual(rustVariants(source, name).sort());
+  });
+
+  /// The reader's only evidence that review comments were addressed. Reading it
+  /// off a field the server stopped sending would leave every chat's row
+  /// claiming a clean review nobody checked, so the name is pinned here.
+  test('the status carries the review threads readiness is read from', () => {
+    const source = readFileSync(join(PULL_REQUEST_RS, 'status.rs'), 'utf8');
+    expect(Object.keys(rustStructFields(source, 'Status'))).toContain('threads');
+  });
+});
+
+const CHATS_DB_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/db/chats/sort.rs');
+
+describe('the chat list asks for an order the server lists by', () => {
+  /// The list query deserialises this enum, so a name the console sends that
+  /// the server does not know fails the whole list rather than one sort. The
+  /// status order is the console's own and must stay out of it.
+  test('Sort variants match the orders the console sends', () => {
+    const source = readFileSync(CHATS_DB_RS, 'utf8');
+    expect([...SERVER_CHAT_SORT].sort()).toEqual(rustVariants(source, 'Sort').sort());
+  });
+
+  test('every order a reader can pick resolves to one the server serves', () => {
+    for (const sort of CHAT_SORT) {
+      expect(SERVER_CHAT_SORT).toContain(listSort(sort));
+    }
+  });
+});
+
+const INDICATOR_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/services/chat/indicator.rs'
+);
+
+describe('a chat row reads the activity the server named', () => {
+  test('Activity variants match', () => {
+    const source = readFileSync(INDICATOR_RS, 'utf8');
+    expect([...CHAT_ACTIVITIES].sort()).toEqual(rustVariants(source, 'Activity').sort());
   });
 });
 

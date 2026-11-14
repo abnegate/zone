@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
+use abnegate_agent::context::Entry;
 use abnegate_llm::{Message, Role};
 use abnegate_search::SearchContext;
-use zone_core::context::Entry;
 
 use super::{INSTRUCTIONS, RunContext, prompt};
 
@@ -45,12 +45,11 @@ pub fn assemble(context: &RunContext, unseen: &[String], note: String) -> Option
         return None;
     }
     Some(RunContext {
-        entries: std::iter::once(Entry {
-            id: INSTRUCTIONS.into(),
-            message: Message::system(note),
-            preserve: true,
-            consumed: true,
-        })
+        entries: std::iter::once(
+            Entry::new(INSTRUCTIONS, Message::system(note))
+                .with_preserve(true)
+                .with_consumed(true),
+        )
         .chain(entries)
         .collect(),
         summary: None,
@@ -65,11 +64,13 @@ pub fn assemble(context: &RunContext, unseen: &[String], note: String) -> Option
 
 #[cfg(test)]
 mod tests {
-    use zone_core::context::project;
-    use zone_core::llm::provider::render;
+    use abnegate_agent::context::project;
+    use abnegate_agent_cli::transcript::render;
 
     use super::*;
-    use crate::services::chat::session::composed;
+    use crate::agent::learned::{self, Facts, Learned};
+    use crate::db::knowledge::{LearnedCategory, LearnedEntryRow};
+    use crate::services::chat::session::{composed, informed};
 
     const EARLIER: &str = "2026-09-09T09:30:00+12:00";
     const LATER: &str = "2026-09-09T09:31:00+12:00";
@@ -78,6 +79,29 @@ mod tests {
 
     fn retrieval() -> String {
         prompt::retrieved(&["[knowledge] Deploys: run the checklist first.".to_string()])
+    }
+
+    /// A chat's learned block in a workspace whose one learned fact is
+    /// `convention`.
+    fn conventions(convention: &str) -> String {
+        learned::render(
+            &Learned {
+                facts: vec![Facts {
+                    category: LearnedCategory::RepositoryConvention,
+                    entries: vec![LearnedEntryRow {
+                        id: uuid::Uuid::new_v4(),
+                        workspace_id: uuid::Uuid::nil(),
+                        title: "Migration names".to_string(),
+                        content: convention.to_string(),
+                        tags: Vec::new(),
+                        updated_at: None,
+                    }],
+                }],
+                ..Learned::default()
+            },
+            learned::MAX_RENDERED_BYTES,
+        )
+        .text
     }
 
     /// A chat two turns in, as `session::build` and `prepare_chat` leave it: the
@@ -125,6 +149,31 @@ mod tests {
             unknown, prompt,
             "a session with no hash on record is sent the prompt"
         );
+    }
+
+    /// What the workspace has learned is part of the prompt a session is held
+    /// to. A block that moved by one entry, or arrived where there was none,
+    /// sends the whole prompt again, as changed memory does; the same block a
+    /// minute later sends the clock line alone.
+    #[test]
+    fn a_resumed_turn_sends_the_prompt_again_when_what_the_workspace_learned_changed() {
+        let before = conventions("Migrations are timestamped.");
+        let after = conventions("Migrations are timestamped and named in snake_case.");
+        let prompt = informed(EARLIER, &before, "");
+        let seen = prompt::stable(&prompt);
+        let later = informed(LATER, &before, "");
+        let changed = informed(LATER, &after, "");
+        let unlearned = prompt::stable(&composed(EARLIER, ""));
+
+        let unchanged = note(&later, Some(&seen), "", &SearchContext::NotRequested);
+        let resent = note(&changed, Some(&seen), "", &SearchContext::NotRequested);
+        let arrived = note(&later, Some(&unlearned), "", &SearchContext::NotRequested);
+
+        assert!(prompt.ends_with(&before), "{prompt}");
+        assert_eq!(Some(unchanged.as_str()), prompt::now(&later));
+        assert!(!unchanged.contains(&before), "{unchanged}");
+        assert_eq!(resent, changed);
+        assert_eq!(arrived, later);
     }
 
     #[test]

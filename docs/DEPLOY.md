@@ -39,14 +39,14 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 
 | Area | Where | Status for this design |
 |---|---|---|
-| Agent loop with file + command tools | `runner/zone_core/src/tools/mod.rs:163` (`Tool` trait: `name/description/parameters_schema/execute/timeout/mutating`), `command.rs`, `file.rs` | Reuse. Shell + files is the universal primitive; generation needs no template system |
+| Agent loop with file + command tools | `abnegate-agent` (abnegate/crates) `src/tool/mod.rs:86` (`Tool` trait: `name/description/parameters_schema/execute/timeout/tier`), `src/tool/command/`, `src/tool/file/`; Zone's set in `runner/zone_core/src/commands.rs` `registry` | Reuse. Shell + files is the universal primitive; generation needs no template system |
 | Tool-family registration pattern | `runner/zone_server/src/agent/actions.rs:11-47` (enum-discriminated struct, `pub fn register(registry, &WorkspaceScope)`) | Copy for `agent/deploy.rs` |
 | `WorkspaceScope { state, workspace_id, chat_id, user_id }` | `runner/zone_server/src/agent/tools.rs:48` | Extend: tasks have no scope today (`ChatTools::for_task(state, cwd)`) |
 | Chat approval gate | `runner/zone_server/src/agent/approval.rs` — `ApprovalPolicy` + `ApprovalGate` (DashMap of oneshots), `APPROVAL_TIMEOUT = 300s` = denial, `requires_approval` hardcoded to `write_file\|apply_patch\|run_command\|run_shell` at :206; ws `ApproveTool{id,approved}` in `ws/chat.rs` | Reuse the *shape*; the gate is in-memory and per-chat. Tasks use `ApprovalPolicy::auto()` (`workers/task.rs:522`) |
 | Receipts | `runner/zone_server/src/agent/receipts.rs` — `ActionReceipt`, `ActionTarget{Task,Document,Message,Reminder}` (:24), `is_write_tool` (:50) | Extend with `Deployment`. The runner already attaches `receipt: Option<ActionReceipt>` to `ToolCallCompleted`; the task worker discards it (`workers/task.rs:536-541`) because tasks lack a scope |
 | Durable claim precedent | `runner/zone_server/src/db/reminders.rs:61-63` — `FOR UPDATE SKIP LOCKED` inside one transaction | Copy for `db/deployments.rs::claim_next` and `runner_jobs` |
 | Worker patterns | `runner/zone_server/src/workers/` — boot interval loops started at `main.rs:186-188`; `pr.rs:38` is the closest analogue (reads project creds, drives abnegate-vcs, compensates with `checkout(original_branch)`) | Copy pattern A (boot loop) |
-| Encrypted-at-rest precedent | `sources.credentials_encrypted` + `crypto::encrypt/decrypt(state.encryption_key(), ..)` (`routes/sources.rs:408`, `agent/integrations.rs:220`; `crypto/mod.rs:30,61,98` AES-256-GCM, Argon2id-derived key) | Copy for target credentials. **Anti-precedents:** `projects.github_access_token` and all `*_ai_settings` keys are plaintext; `ai_settings` routes have no admin guard |
+| Encrypted-at-rest precedent | `sources.credentials_encrypted` written with `abnegate_secret::encrypt_value(.., state.master_key())` and read with `secret::Unseal::open_strict` (`routes/sources.rs:432`, `agent/integrations.rs:442`; `runner/zone_server/src/secret/unseal.rs`): `ENC[v1:…]` envelopes, AES-256-GCM under an Argon2id key derived from `ENCRYPTION_KEY` (`secret/derivation.rs`). Values sealed before envelopes existed still open; `zone-server --seal-secrets` reseals them (see "Sealing stored credentials") | Copy for target credentials. **Anti-precedents:** all `*_ai_settings` keys are plaintext; `ai_settings` routes have no admin guard |
 | Auth extractors | `runner/zone_server/src/auth/workspace_guard.rs` — `WorkspaceMember` (:16), `WorkspaceWriter` (:95), `WorkspaceAdmin` (:130) | Use consistently (only `organizations.rs`/`workspaces.rs` do today) |
 | Error path | `runner/zone_server/src/error.rs` `ServerError` + `Result` | Use; avoid the match-pyramid style of `routes/projects.rs` |
 | Subprocess job substrate | `runner/zone_server/src/services/runner.rs:96` `RunnerService` ↔ `zone-runner serve --stdio` NDJSON (`Spawn{job_id, workspace, command, args, env, timeout_secs}/Cancel` → `Ready{version, capabilities}/Output/JobCompleted/JobFailed`). Complete, tested, **never constructed in prod**. `abnegate-exec` executor: timeout, output caps, process-group kill, `Proxy` env | Reuse as the in-server pseudo-runner; add a remote transport (§6) |
@@ -62,11 +62,11 @@ Verified on `main` (`d3fb7cf`). Reuse is the default; each row says whether it's
 
 **Gaps that block the feature (phase 0):**
 
-- No queue consumer. `claim_next_task` (`runner/zone_server/migrations/001_initial_schema.sql:864`) and the whole `runner/zone_server/queries/*.sql` directory are dead; runs are `tokio::spawn` from `routes/tasks.rs:479`, bounded by `MAX_CONCURRENT_TASKS = 5` and `TASK_TIMEOUT_SECS = 3600` (`workers/task.rs:24,27`). A restart orphans `task_runs` rows in `running`.
+- No queue consumer. `claim_next_task` (`runner/zone_server/migrations/0001_v1.sql`) is dead; runs are `tokio::spawn` from `routes/tasks.rs:479`, bounded by `MAX_CONCURRENT_TASKS = 5` (`workers/task.rs`), with no time limit on a run: a run holds its permit until it finishes, is stopped or loses its lease, and gives it back while it is parked on a question or a wait. A restart orphans `task_runs` rows in `running`.
 - The task workspace directory is never created and the repo is never cloned (`workers/task.rs:271-278`). Tasks without a repo run in the server's own cwd.
 - `tasks.status` never advances during a run; `tasks.created_by` (migration 006) is never written.
 - The prod image installs only `curl ca-certificates libssl3t64 libstdc++6` (`manager/Dockerfile:50`): no `git` (the PR worker is broken in prod), no `docker`, `kubectl`, `helm`. No docker socket on `manager`. Helm runs the server with `readOnlyRootFilesystem`.
-- No container registry anywhere; CI publishes binaries, never images. No `kube-rs`/`bollard`. `run_command`'s allowlist (`zone_core/src/tools/command.rs:96-108`) has no deploy tooling and rejects `| > && ;`.
+- No container registry anywhere; CI publishes binaries, never images. No `kube-rs`/`bollard`. `run_command`'s allowlist (`abnegate-agent` `DEFAULT_COMMANDS` in `src/tool/command/run/mod.rs:55` plus `EXTRA_COMMANDS` in `runner/zone_core/src/commands.rs:20`) has no deploy tooling and rejects `| > && ;`.
 
 ## 3. What we take from Imagine
 
@@ -624,7 +624,7 @@ The gate is **the deployment row**, not an in-memory oneshot. Policy is per targ
 
 **Blocking flow in `deploy_app`:**
 
-1. Validate manifest + target, upsert `releases`, insert `deployments` as `pending_approval` (or `approved` for `auto`), with `approval_deadline_at = now + min(target.approval_timeout_secs, remaining task budget − 5 min)`.
+1. Validate manifest + target, upsert `releases`, insert `deployments` as `pending_approval` (or `approved` for `auto`), with `approval_deadline_at = now + target.approval_timeout_secs`.
 2. Notify (§7.5). For a chat origin, additionally emit `AgentEvent::ToolApprovalRequired` so the existing inline prompt appears; its `ApproveTool{id, approved}` answer routes to the same `db::deployments::approve()`.
 3. Subscribe to the `deploy::events` broadcast for this id, then re-read the row (closes the race where the decision landed before subscribing).
 4. Await: `approved` → with `wait: true` (the default for tasks) keep awaiting to a terminal status within the deploy budget, then return `{status, verification summary, urls}`; `rejected` → return a tool error the model can act on; deadline → return `{status: pending_approval, timed_out: true}`.
@@ -632,7 +632,7 @@ The gate is **the deployment row**, not an in-memory oneshot. Policy is per targ
 
 `deploy_app` and `rollback_deployment` are `mutating()` but are **not** added to `approval.rs::requires_approval`: the target policy is the single gate, so a chat user is not prompted twice. Agent-requested rollback is always `pending_approval` regardless of policy — rolling back a live app is the riskier direction.
 
-Stated tradeoff: while blocked, a task holds one of `MAX_CONCURRENT_TASKS = 5` permits and its LLM context; `approval_timeout_secs` bounds that, and `TASK_TIMEOUT_SECS = 3600` still applies.
+Stated tradeoff: while blocked, a task holds one of `MAX_CONCURRENT_TASKS = 5` permits and its LLM context; `approval_timeout_secs` bounds that. The run itself has no time limit: it holds the permit until it finishes, is stopped or loses its lease, and gives it back while it is parked on a question or a wait.
 
 ### 7.5 Notifier — `runner/zone_server/src/notify/`
 
@@ -957,3 +957,31 @@ Use `zone-server --migrate-only` (or `make db-migrate` in the Compose environmen
 Task checkouts capture the default-base commit, the task branch and its starting commit before tools run. Retries resume the stored remote task branch, preserving prior commits and branch identity when the title changes. Publication includes commits made by task tools, pushes updates before returning an existing PR and creates a missing PR for outstanding branch commits after an interrupted publication. Pushes never force remote history; divergence, changed checkout identity or rewritten baseline history fails the run. Switching away from the prepared task branch also fails explicitly.
 
 Publication failure leaves the run `failed` and the task `blocked`, with the agent summary, tool-call count and publication error retained in run artifacts. Private checkouts are removed on failure as on success. Creator-null legacy tasks remain sandbox-only and record an explicit skipped publication result. An unchanged checkout needs no publication token, and branch preparation preserves existing PR status without marking a no-op as pending.
+
+## Sealing stored credentials
+
+Zone seals credentials in `ENC[v1:…]` envelopes. Values written before envelopes existed, and the plaintext tokens some columns still hold, are sealed in place by a one-off run:
+
+```sh
+zone-server --seal-secrets --dry-run --backup /backups/zone.dump
+zone-server --seal-secrets --backup /backups/zone.dump
+```
+
+The run needs `DATABASE_URL`, the deployment's `ENCRYPTION_KEY` and `pg_restore` on `PATH`. `--backup` is required, also for a dry run: it must be a non-empty `pg_dump -Fc` archive of the same database (`pg_dump -Fc -f /backups/zone.dump "$DATABASE_URL"`) that holds the definition and the data of every table in the database and creates every extension it uses, since restoring it is the rollback (a `--data-only` dump is refused). The run lists the archive with `pg_restore --list`, reads it through in full with `pg_restore --file /dev/null`, and refuses to start when any of this does not hold. Reading the archive is not restoring it: to prove the backup restores, `pg_restore` it into a scratch database first.
+
+Every run, dry or not, counts first and refuses to go on when no sealed-looking value opens under the key, across every column or across the columns it writes to (the signature of a wrong `ENCRYPTION_KEY`). A database that holds only plaintext gives the run nothing to test the key against, so it logs a warning and goes on: check `ENCRYPTION_KEY` is the server's before running it. `--dry-run` then prints the per-column report of what a run would write and changes nothing. A real run seals in batches of 100 rows, each a compare-and-swap on the value it read, and reopens every envelope before writing it. A row that changed since it was read is left for the next run; a run that stops part way can be rerun and skips what it already sealed. The exit status is non-zero when the run could not start or finish, or an envelope did not reopen as its credential.
+
+What each column takes:
+
+- `sources.credentials_encrypted`, `agent_logins.credential`, `mcp_servers.secrets` and `sync_configs.webhook_secret_encrypted`: values sealed before envelopes existed are resealed; plaintext is reported, not sealed, because some or all of their readers refuse it.
+- `projects.github_access_token` and the GitHub sync `token`: plaintext and earlier sealed values are both sealed.
+- The GitHub App private key, the Linear API key and the AI settings keys: counted in the report, never written.
+- In every column, envelopes are skipped, and values that look sealed but do not open under the key are reported.
+
+Order and rollback:
+
+1. Deploy the new server binary first. It reads envelopes, values sealed before envelopes existed, and plaintext where the column allows it.
+2. Take the backup, run `--dry-run`, read the report, then run without it.
+3. After a run, the previous binary cannot read `ENC[v1:…]` values. Restoring the backup is the only rollback, so keep it until the new binary is settled.
+
+Run while the server is idle if possible. Resealing a webhook secret changes its ciphertext, and a secret rotation in flight compares ciphertext (`superseded` in `routes/sync.rs`, `unsigned` in `sync/hook.rs`), so a rotation racing the run can read its secret as replaced. Every resealed `sync_configs` row also gets a new `updated_at`.

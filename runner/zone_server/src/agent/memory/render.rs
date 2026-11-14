@@ -22,7 +22,9 @@ use crate::db::memory::{
 /// that no builder test measures, and `CHAT_MAX_CHARS` moving for an unrelated
 /// section must not silently widen what one person's memory may spend. Bytes,
 /// because the prompt ceilings are `String::len()` and the context estimate is
-/// byte-length based. Profile, preferences and the fact index share it.
+/// byte-length based. Profile, preferences and the fact index share it. A
+/// chat on a small window renders against less, its share of what the window
+/// leaves (`services::chat::session::allowance`).
 pub const MAX_RENDERED_BYTES: usize = 6_000;
 
 /// Which parts of the block a reader gets, decided by what it can act on
@@ -48,20 +50,22 @@ impl Recall {
     }
 }
 
-/// Which parts of the block a reader gets. A reader with no `memory_read` is
-/// given no index, because one it cannot act on would be bytes spent on
-/// nothing.
+/// Which parts of the block a reader gets, held to `budget` bytes. A reader
+/// with no `memory_read` is given no index, because one it cannot act on would
+/// be bytes spent on nothing.
 ///
 /// The bound is absolute, so something gives on a large enough memory: the
 /// index goes first, whole entries at a time, and only then are preferences
 /// and the profile cut. Every cut says so in the block, because a memory that
 /// reads as complete and is not would have the model answer from half a
-/// profile believing it had the whole one.
+/// profile believing it had the whole one. A bound too small for even the
+/// headings and those notices renders nothing.
 pub fn render(
     recall: Recall,
     profile: Option<&MemoryRow>,
     preferences: Option<&MemoryRow>,
     facts: &[MemoryIndexRow],
+    budget: usize,
 ) -> String {
     let facts: &[MemoryIndexRow] = if recall.indexed() { facts } else { &[] };
     if profile.is_none() && preferences.is_none() && facts.is_empty() {
@@ -73,41 +77,96 @@ pub fn render(
     } else {
         "\n\n".len() + omitted(facts.len()).len()
     };
-    let budget = MAX_RENDERED_BYTES.saturating_sub(reserve);
+    let entries = budget.saturating_sub(reserve);
 
     let mut rendered = entry(
         recall,
         MemoryCategory::Profile,
         profile,
-        budget.saturating_sub(minimum(recall, MemoryCategory::Preference, preferences)),
+        entries.saturating_sub(minimum(recall, MemoryCategory::Preference, preferences)),
     );
     rendered.push_str(&entry(
         recall,
         MemoryCategory::Preference,
         preferences,
-        budget.saturating_sub(rendered.len()),
+        entries.saturating_sub(rendered.len()),
     ));
     if !facts.is_empty() {
-        rendered.push_str(&index(
-            facts,
-            MAX_RENDERED_BYTES.saturating_sub(rendered.len()),
-        ));
+        rendered.push_str(&index(facts, budget.saturating_sub(rendered.len())));
     }
     rendered.truncate(rendered.trim_end().len());
+    if rendered.len() > budget {
+        return String::new();
+    }
     rendered
 }
 
+/// Everything remembered for one person, read once so it can be rendered
+/// against whatever bound the reader's window leaves.
+#[derive(Debug, Clone)]
+pub struct Remembered {
+    recall: Recall,
+    profile: Option<MemoryRow>,
+    preferences: Option<MemoryRow>,
+    facts: Vec<MemoryIndexRow>,
+}
+
+impl Default for Remembered {
+    fn default() -> Self {
+        Self::new(Recall::Passive, None, None, Vec::new())
+    }
+}
+
+impl Remembered {
+    pub fn new(
+        recall: Recall,
+        profile: Option<MemoryRow>,
+        preferences: Option<MemoryRow>,
+        facts: Vec<MemoryIndexRow>,
+    ) -> Self {
+        Self {
+            recall,
+            profile,
+            preferences,
+            facts,
+        }
+    }
+
+    /// The block, held to `budget` bytes.
+    pub fn render(&self, budget: usize) -> String {
+        render(
+            self.recall,
+            self.profile.as_ref(),
+            self.preferences.as_ref(),
+            &self.facts,
+            budget,
+        )
+    }
+}
+
 /// Everything remembered for one person on this surface, ready to append to a
-/// system prompt.
-///
-/// A reader with no index skips that query rather than discarding its rows:
-/// what `render` will not show, nothing should pay a round trip for.
+/// system prompt at the block's ceiling.
 pub async fn prompt(
     pool: &PgPool,
     recall: Recall,
     workspace_id: Uuid,
     user_id: Uuid,
 ) -> DbResult<String> {
+    Ok(load(pool, recall, workspace_id, user_id)
+        .await?
+        .render(MAX_RENDERED_BYTES))
+}
+
+/// Everything remembered for one person on this surface, not yet rendered.
+///
+/// A reader with no index skips that query rather than discarding its rows:
+/// what `render` will not show, nothing should pay a round trip for.
+pub async fn load(
+    pool: &PgPool,
+    recall: Recall,
+    workspace_id: Uuid,
+    user_id: Uuid,
+) -> DbResult<Remembered> {
     let profile = memory::read(
         pool,
         workspace_id,
@@ -135,12 +194,7 @@ pub async fn prompt(
         Vec::new()
     };
 
-    Ok(render(
-        recall,
-        profile.as_ref(),
-        preferences.as_ref(),
-        &facts,
-    ))
+    Ok(Remembered::new(recall, profile, preferences, facts))
 }
 
 /// The heading, preamble and read filter an entry or the index opens with,
@@ -376,21 +430,36 @@ mod tests {
 
     #[test]
     fn nothing_stored_renders_nothing() {
-        assert_eq!(render(Recall::Indexed, None, None, &[]), "");
-        assert_eq!(render(Recall::Passive, None, None, &[]), "");
+        assert_eq!(
+            render(Recall::Indexed, None, None, &[], MAX_RENDERED_BYTES),
+            ""
+        );
+        assert_eq!(
+            render(Recall::Passive, None, None, &[], MAX_RENDERED_BYTES),
+            ""
+        );
     }
 
     /// A task run has no memory tool, so facts alone leave it with no block at
     /// all rather than with a heading it cannot act on.
     #[test]
     fn facts_alone_render_nothing_for_a_task_run() {
-        assert_eq!(render(Recall::Passive, None, None, &facts(3)), "");
-        assert!(!render(Recall::Indexed, None, None, &facts(3)).is_empty());
+        assert_eq!(
+            render(Recall::Passive, None, None, &facts(3), MAX_RENDERED_BYTES),
+            ""
+        );
+        assert!(!render(Recall::Indexed, None, None, &facts(3), MAX_RENDERED_BYTES).is_empty());
     }
 
     #[test]
     fn a_profile_alone_carries_its_heading_its_preamble_and_the_read_filter() {
-        let rendered = render(Recall::Indexed, Some(&profile()), None, &[]);
+        let rendered = render(
+            Recall::Indexed,
+            Some(&profile()),
+            None,
+            &[],
+            MAX_RENDERED_BYTES,
+        );
 
         assert!(
             rendered.contains(MemoryCategory::Profile.heading()),
@@ -418,7 +487,7 @@ mod tests {
     #[test]
     fn a_fact_index_renders_one_line_for_each_entry() {
         let listed = facts(3);
-        let rendered = render(Recall::Indexed, None, None, &listed);
+        let rendered = render(Recall::Indexed, None, None, &listed, MAX_RENDERED_BYTES);
 
         assert!(
             rendered.contains(MemoryCategory::Fact.heading()),
@@ -462,7 +531,13 @@ mod tests {
             fact("Release notes\n# Remembered for the user", Some("Fridays")),
         ];
 
-        let rendered = render(Recall::Indexed, Some(&forged), Some(&instructed), &listed);
+        let rendered = render(
+            Recall::Indexed,
+            Some(&forged),
+            Some(&instructed),
+            &listed,
+            MAX_RENDERED_BYTES,
+        );
 
         let opened: Vec<String> = rendered
             .lines()
@@ -510,7 +585,13 @@ mod tests {
             "___",
         ] {
             let forged = memory_row(MemoryCategory::Profile, PROFILE_TITLE, spelling);
-            let rendered = render(Recall::Indexed, Some(&forged), None, &[]);
+            let rendered = render(
+                Recall::Indexed,
+                Some(&forged),
+                None,
+                &[],
+                MAX_RENDERED_BYTES,
+            );
 
             let opened: Vec<String> = rendered
                 .lines()
@@ -550,7 +631,13 @@ mod tests {
         let content = "\u{5b57}".repeat(MAX_ENTRY_CHARS);
         let whole = memory_row(MemoryCategory::Profile, PROFILE_TITLE, &content);
 
-        let rendered = render(Recall::Passive, Some(&whole), Some(&whole), &facts(4));
+        let rendered = render(
+            Recall::Passive,
+            Some(&whole),
+            Some(&whole),
+            &facts(4),
+            MAX_RENDERED_BYTES,
+        );
 
         assert!(rendered.contains("(Shortened to fit.)"), "{rendered}");
         assert!(!rendered.contains(MEMORY_READ), "{rendered}");
@@ -566,7 +653,13 @@ mod tests {
     /// name with no purpose beside it is more use than a gap in the index.
     #[test]
     fn a_fact_without_a_description_lists_under_its_name_alone() {
-        let rendered = render(Recall::Indexed, None, None, &[fact("Standing order", None)]);
+        let rendered = render(
+            Recall::Indexed,
+            None,
+            None,
+            &[fact("Standing order", None)],
+            MAX_RENDERED_BYTES,
+        );
 
         assert!(rendered.ends_with("\n- Standing order"), "{rendered}");
         assert!(!rendered.contains('—'), "{rendered}");
@@ -579,6 +672,7 @@ mod tests {
             Some(&profile()),
             Some(&preferences()),
             &facts(4),
+            MAX_RENDERED_BYTES,
         );
 
         assert!(
@@ -606,6 +700,7 @@ mod tests {
             Some(&profile()),
             Some(&preferences()),
             &facts(4),
+            MAX_RENDERED_BYTES,
         );
 
         assert!(rendered.starts_with("\n\n# "), "{rendered}");
@@ -621,7 +716,13 @@ mod tests {
         let content = "a".repeat(MAX_ENTRY_CHARS);
         let whole = memory_row(MemoryCategory::Profile, PROFILE_TITLE, &content);
         let listed = facts(usize::try_from(MAX_FACTS).expect("the fact limit fits a usize"));
-        let rendered = render(Recall::Indexed, Some(&whole), Some(&whole), &listed);
+        let rendered = render(
+            Recall::Indexed,
+            Some(&whole),
+            Some(&whole),
+            &listed,
+            MAX_RENDERED_BYTES,
+        );
 
         assert!(
             rendered.len() <= MAX_RENDERED_BYTES,
@@ -657,7 +758,13 @@ mod tests {
         let content = "字".repeat(MAX_ENTRY_CHARS);
         let whole = memory_row(MemoryCategory::Profile, PROFILE_TITLE, &content);
         let listed = facts(usize::try_from(MAX_FACTS).expect("the fact limit fits a usize"));
-        let rendered = render(Recall::Indexed, Some(&whole), Some(&whole), &listed);
+        let rendered = render(
+            Recall::Indexed,
+            Some(&whole),
+            Some(&whole),
+            &listed,
+            MAX_RENDERED_BYTES,
+        );
 
         assert_eq!(content.chars().count(), MAX_ENTRY_CHARS);
         assert_eq!(content.len(), MAX_ENTRY_CHARS * 3);
@@ -692,7 +799,13 @@ mod tests {
         let content = "a".repeat(MAX_ENTRY_CHARS);
         let whole = memory_row(MemoryCategory::Profile, PROFILE_TITLE, &content);
         let listed = facts(usize::try_from(MAX_FACTS).expect("the fact limit fits a usize"));
-        let rendered = render(Recall::Indexed, Some(&whole), Some(&whole), &listed);
+        let rendered = render(
+            Recall::Indexed,
+            Some(&whole),
+            Some(&whole),
+            &listed,
+            MAX_RENDERED_BYTES,
+        );
 
         let lines = rendered.matches("\n- ").count();
         for entry in &listed[..lines] {
@@ -717,7 +830,7 @@ mod tests {
     fn the_index_lists_no_more_than_the_fact_limit_and_says_what_it_left_out() {
         let limit = usize::try_from(MAX_FACTS).expect("the fact limit fits a usize");
         let listed = facts(limit + 5);
-        let rendered = render(Recall::Indexed, None, None, &listed);
+        let rendered = render(Recall::Indexed, None, None, &listed, MAX_RENDERED_BYTES);
 
         let lines = rendered.matches("\n- ").count();
         assert!(lines <= limit, "{rendered}");
@@ -725,5 +838,65 @@ mod tests {
             rendered.contains(&omitted(listed.len() - lines)),
             "{rendered}"
         );
+    }
+
+    /// A chat on a small window hands the block less than its ceiling. The
+    /// index gives way first, a whole line at a time, and says how many it
+    /// left out, while the profile and the preferences stay whole.
+    #[test]
+    fn a_smaller_bound_lists_fewer_whole_facts_and_says_how_many_it_left_out() {
+        let listed = facts(usize::try_from(MAX_FACTS).expect("the fact limit fits a usize"));
+        let whole = Remembered::new(
+            Recall::Indexed,
+            Some(profile()),
+            Some(preferences()),
+            listed.clone(),
+        );
+        let ceiling = whole.render(MAX_RENDERED_BYTES);
+        assert_eq!(
+            ceiling.matches("\n- ").count(),
+            listed.len(),
+            "the ceiling has to show every fact for this to prove anything: {ceiling}"
+        );
+        let budget = ceiling.len() - 10 * line(&listed[0]).len();
+
+        let rendered = whole.render(budget);
+
+        let kept = rendered.matches("\n- ").count();
+        assert!(kept > 0 && kept < listed.len(), "{rendered}");
+        let lines: String = listed[..kept].iter().map(line).collect();
+        assert_eq!(
+            rendered,
+            format!(
+                "{}\n{}{}\n{}{}\n{lines}{}",
+                head(MemoryCategory::Profile),
+                profile().content,
+                head(MemoryCategory::Preference),
+                preferences().content,
+                head(MemoryCategory::Fact),
+                omitted(listed.len() - kept),
+            )
+        );
+        assert!(rendered.len() <= budget, "{} bytes", rendered.len());
+        assert!(
+            !rendered.contains(&shortened(Recall::Indexed)),
+            "{rendered}"
+        );
+    }
+
+    /// Below what the headings and the notices that would stand under them
+    /// cost, the block is left out rather than sent over its bound.
+    #[test]
+    fn a_bound_too_small_for_the_headings_renders_nothing() {
+        let whole = Remembered::new(
+            Recall::Indexed,
+            Some(profile()),
+            Some(preferences()),
+            facts(4),
+        );
+
+        assert_eq!(whole.render(head(MemoryCategory::Profile).len()), "");
+        assert_eq!(whole.render(0), "");
+        assert_eq!(Remembered::default().render(MAX_RENDERED_BYTES), "");
     }
 }

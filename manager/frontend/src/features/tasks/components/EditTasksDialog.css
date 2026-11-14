@@ -1,0 +1,49 @@
+.edit-tasks {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.edit-tasks-projects {
+  min-width: 0;
+  margin-inline: 0;
+  padding: 0;
+  border: 0;
+}
+
+.edit-tasks-project-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  max-height: calc(var(--ui-control-height-sm) * 8);
+  margin-inline: calc(var(--ui-space-1) * -1);
+  padding-inline: var(--ui-space-1);
+  overflow-y: auto;
+}
+
+.edit-tasks-project-list .ui-checkbox-wrapper {
+  align-items: center;
+}
+
+.edit-tasks-project-list .ui-checkbox {
+  margin: 0;
+}
+
+.edit-tasks-project-list .ui-checkbox-copy {
+  flex: 1;
+}
+
+.edit-tasks-project-list .ui-checkbox-copy .ui-label {
+  display: flex;
+  align-items: center;
+  min-height: var(--ui-control-height-sm);
+  font-weight: 400;
+  color: var(--ui-text-primary);
+  overflow-wrap: anywhere;
+}
+
+@media (any-pointer: coarse) {
+  .edit-tasks-project-list .ui-checkbox-copy .ui-label {
+    min-height: var(--ui-control-height);
+  }
+}

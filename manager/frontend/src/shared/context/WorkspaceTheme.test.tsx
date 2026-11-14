@@ -3,7 +3,7 @@ import { act, render } from '@testing-library/react';
 import { client } from '../../api/client';
 import type { useAuth } from '../../features/auth';
 import type { WorkspaceTheme as Configuration } from '../../types';
-import { ThemeProvider, useTheme } from './ThemeContext';
+import { THEME_STORAGE_KEY, ThemeProvider, useTheme } from './ThemeContext';
 import type { useWorkspace } from './WorkspaceContext';
 import { WorkspaceTheme } from './WorkspaceTheme';
 
@@ -42,7 +42,7 @@ describe('WorkspaceTheme synchronization', () => {
   }
   beforeEach(() => {
     localStorage.clear();
-    localStorage.setItem('manager_theme', 'light');
+    localStorage.setItem(THEME_STORAGE_KEY, 'light');
     document.documentElement.style.cssText = '';
     authenticated = true;
     workspace = 'a';

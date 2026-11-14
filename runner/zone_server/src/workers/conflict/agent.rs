@@ -8,24 +8,33 @@
 //! forbidden in prose.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::EnvironmentPolicy;
+use abnegate_agent::tool::ReadFileTool;
+use abnegate_agent::tool::WriteFileTool;
 use abnegate_llm::{Message, ToolDefinition};
 use abnegate_vcs::conflict::Conflict;
 use async_trait::async_trait;
+use zone_core::application::application;
 use zone_core::llm::LlmClient;
-use zone_core::tools::{
-    ReadFileTool, Session, Tool, ToolContext, ToolRegistry, ToolResult, WriteFileTool,
-};
+use zone_core::vpn::Offline;
+use zone_core::walk;
 
 use super::scope::{RepairScope, Scoped};
 
 /// Turns a repair may take before it has either finished or lost its way.
 const MAX_TURNS: usize = 12;
 
-/// Longest a single repair may run.
-pub const REPAIR_TIMEOUT: Duration = Duration::from_secs(600);
+const MAXIMUM_FILE_SIZE: usize = 10 * 1024 * 1024;
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Everything one repair turn needs, already scoped and isolated.
 pub struct RepairTask<'a> {
@@ -123,22 +132,49 @@ impl RepairAgent for ModelRepairAgent {
 
 /// The tool context a repair runs in: the throwaway checkout, and nothing else.
 pub fn context(conflict: &Conflict, environment: HashMap<String, String>) -> ToolContext {
-    ToolContext {
-        cwd: conflict.path().to_path_buf(),
-        env: environment,
-        max_file_size: 10 * 1024 * 1024,
-        command_timeout: 60,
-        unrestricted: false,
-        denied: Vec::new(),
-        session: Session::Detached,
-        offline: false,
-    }
+    isolated(conflict.path(), environment)
+}
+
+fn isolated(working_directory: &Path, environment: HashMap<String, String>) -> ToolContext {
+    let policy = environment
+        .into_iter()
+        .fold(EnvironmentPolicy::empty(), |policy, (name, value)| {
+            policy.with(name, value)
+        });
+    let mut context = ToolContext::default()
+        .within(working_directory)
+        .with_environment(policy)
+        .with_application(application())
+        .with_proxy(zone_routing::proxy())
+        .with_public_web(Arc::new(Offline::new(false)))
+        .with_search_timeout(walk::BUDGET);
+    context.maximum_file_size = MAXIMUM_FILE_SIZE;
+    context.command_timeout = COMMAND_TIMEOUT;
+    context
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use abnegate_agent::ToolError;
+    use abnegate_agent::tool::RunCommandTool;
     use abnegate_vcs::conflict::ConflictedPath;
+    use zone_core::vpn::{Hold, OFFLINE};
+
+    use super::super::environment;
+    use super::*;
+
+    fn variables() -> Vec<(String, String)> {
+        [
+            ("PATH", "/usr/bin"),
+            ("LANG", "en_US.UTF-8"),
+            ("TERM", "xterm-256color"),
+            ("GITHUB_TOKEN", "ghp_notreal"),
+            ("DATABASE_URL", "postgres://user:notreal@host/db"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+    }
 
     fn registry(root: &std::path::Path, files: &[&str]) -> ToolRegistry {
         let scope = Arc::new(RepairScope::confined(
@@ -176,16 +212,11 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         std::fs::write(root.path().join("README.md"), "docs").unwrap();
         let registry = registry(root.path(), &["src/value.rs"]);
-        let context = ToolContext {
-            cwd: root.path().to_path_buf(),
-            env: HashMap::new(),
-            max_file_size: 1024,
-            command_timeout: 5,
-            unrestricted: false,
-            denied: Vec::new(),
-            session: Session::Detached,
-            offline: false,
-        };
+        let mut context = ToolContext::default()
+            .within(root.path())
+            .with_environment(EnvironmentPolicy::empty());
+        context.maximum_file_size = 1024;
+        context.command_timeout = Duration::from_secs(5);
 
         for name in ["read_file", "write_file"] {
             let outcome = registry
@@ -203,6 +234,67 @@ mod tests {
             std::fs::read_to_string(root.path().join("README.md")).unwrap(),
             "docs",
             "a refused write must not have happened"
+        );
+    }
+    #[test]
+    fn a_repair_context_carries_the_isolated_environment_exactly() {
+        let expected = environment::restricted(variables(), Path::new("/isolated"));
+        let context = isolated(Path::new("/checkout"), expected.clone());
+
+        let names: Vec<&str> = context.environment.names().collect();
+        let mut keys: Vec<&str> = expected.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(names, keys);
+        for (name, value) in &expected {
+            assert_eq!(
+                context
+                    .environment
+                    .get(name)
+                    .as_ref()
+                    .map(|secret| secret.expose()),
+                Some(value.as_str()),
+                "{name}"
+            );
+        }
+        assert!(!context.environment.inherits());
+        assert!(!context.environment.contains("GITHUB_TOKEN"));
+        assert!(!context.environment.contains("DATABASE_URL"));
+    }
+
+    #[test]
+    fn a_repair_context_keeps_its_limits() {
+        let context = isolated(Path::new("/checkout"), HashMap::new());
+
+        assert_eq!(context.working_directory, Path::new("/checkout"));
+        assert_eq!(context.command_timeout, Duration::from_secs(60));
+        assert_eq!(context.maximum_file_size, 10 * 1024 * 1024);
+        assert_eq!(context.application, application());
+        assert!(context.proxy.is_some());
+    }
+
+    #[test]
+    fn a_repair_walks_for_zones_twenty_five_seconds() {
+        let context = isolated(Path::new("/checkout"), HashMap::new());
+
+        assert_eq!(context.search_timeout, Duration::from_secs(25));
+    }
+
+    #[tokio::test]
+    async fn a_repair_refuses_curl_while_the_vpn_is_required_and_off() {
+        let root = tempfile::TempDir::new().unwrap();
+        let context = isolated(root.path(), HashMap::new());
+        let _vpn = Hold::required_off();
+
+        let refused = RunCommandTool::with_commands(&["curl"])
+            .execute(
+                serde_json::json!({ "command": "curl", "args": ["https://example.com"] }),
+                &context,
+            )
+            .await;
+
+        assert!(
+            matches!(&refused, Err(ToolError::Execution(message)) if message == OFFLINE),
+            "{refused:?}"
         );
     }
 }

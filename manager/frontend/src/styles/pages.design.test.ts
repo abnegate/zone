@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
-import { media, read, rule } from '../test/css';
+import { media, read, rule, token } from '../test/css';
 
 const features = join(import.meta.dir, '..', 'features');
 
@@ -317,7 +317,7 @@ describe('auth layout', () => {
   });
 
   it('sizes session rows at 40 with a 28px pager', () => {
-    const sessions = read(join(features, 'auth', 'pages', 'SessionsPage.css'));
+    const sessions = read(join(features, 'auth', 'components', 'SessionsSection.css'));
     expect(rule(sessions, '.sessions-table td')).toContain('height: var(--ui-list-row)');
     expect(rule(sessions, '.sessions-table td')).toContain('padding: 0 var(--ui-space-3)');
     expect(rule(sessions, '.sessions-table td')).toContain('box-shadow: inset 0 -1px');
@@ -330,48 +330,257 @@ const legacyScales = /var\(--(gray|blue|green|red|yellow|purple)-\d+\)/;
 
 describe('tasks page layout', () => {
   const css = read(join(features, 'tasks', 'pages', 'TasksPage.css'));
+  const boardStyles = join(features, 'tasks', 'components', 'board');
+  const board = read(join(boardStyles, 'Board.css'));
+  const columns = read(join(boardStyles, 'Column.css'));
+  const cards = read(join(boardStyles, 'Card.css'));
+  const SELECTING_SELECTOR =
+    '.board[data-selecting] .task-card-selector, .task-card[data-selected] .task-card-selector';
+  const SELECTING_CARD = '.board[data-selecting] .task-card, .task-card[data-selected]';
+  const SELECTING_GRIP =
+    '.board[data-selecting] .task-card-handle::after, .task-card[data-selected] .task-card-handle::after';
 
-  it('lays tasks out as a 56px-row table with a 32px header', () => {
-    expect(rule(css, '.tasks-table-wrapper')).toContain('border: 1px solid var(--ui-border)');
-    expect(rule(css, '.tasks-table th')).toContain('height: var(--ui-control-height)');
-    expect(rule(css, '.tasks-table td')).toContain('height: var(--ui-list-row-2)');
-    expect(rule(css, '.tasks-table td')).toContain('box-shadow: inset 0 -1px var(--ui-border)');
-    expect(rule(css, '.task-card-title')).toContain('height: var(--ui-space-5)');
-    expect(rule(css, '.task-project')).toContain('height: var(--ui-space-4)');
-    expect(rule(css, '.task-card .task-description')).toContain('height: var(--ui-space-4)');
+  it('scrolls the board sideways in its own row of fixed-width columns', () => {
+    expect(rule(board, '.board')).toContain('overflow-x: auto');
+    const column = rule(columns, '.board-column');
+    expect(column).toContain('flex-shrink: 0');
+    expect(column).toContain('width: 280px');
   });
 
-  it('guarantees the title 60% of its row and keeps the badges from pushing it out', () => {
-    expect(rule(css, '.task-card-title h3')).toContain('min-width: 60%');
-    expect(rule(css, '.task-badges')).toContain('overflow: hidden');
-    expect(rule(css, '.task-badges')).not.toContain('flex-shrink: 0');
+  it('keeps every column rule in the column stylesheet', () => {
+    expect(board).not.toMatch(/(^|[\s,}])\.board-column\s*[{,]/);
   });
 
-  it('keeps badges and pull request rows on the palette', () => {
-    expect(css).not.toMatch(legacyScales);
-    expect(css).not.toContain('.task-agentic-badge');
-    expect(css).not.toContain('.task-pr-info');
-    expect(rule(css, '.task-branch')).toContain('height: var(--ui-badge-height)');
+  it('gives the drag grip a 24px hit area, and 44px on a touch screen, without growing the grip', () => {
+    const handle = rule(cards, '.task-card-handle');
+    expect(handle).toContain('width: var(--ui-space-3)');
+    expect(handle).toContain('height: var(--ui-space-5)');
+    expect(handle).toContain('--task-card-handle-target: var(--ui-space-6)');
+    const grip = rule(cards, '.task-card-handle svg');
+    expect(grip).toContain('width: 0.5rem');
+    expect(grip).toContain('height: var(--ui-space-3)');
+
+    const target = rule(cards, '.task-card-handle::after');
+    expect(target).toContain('position: absolute');
+    expect(target).toContain('width: var(--task-card-handle-target)');
+    expect(target).toContain('height: var(--task-card-handle-target)');
+    expect(target).toContain("content: ''");
+
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-handle')).toContain('--task-card-handle-target: 2.75rem');
+    expect(rule(touch, '.task-card-handle::after')).toContain('transform: none');
   });
 
-  it('keeps the pull request on one row and truncates the model and source', () => {
-    expect(rule(css, '.task-pr')).toContain('display: flex');
-    expect(css).not.toContain('.task-meta > * + *::before');
-    const giveWay = rule(css, '.task-model,\n.task-source');
-    expect(giveWay).toContain('min-width: 0');
-    expect(giveWay).toContain('text-overflow: ellipsis');
+  it('ends the grip hit area at the grip, clear of the title beside it', () => {
+    const target = rule(cards, '.task-card-handle::after');
+    expect(target).toContain('right: 0');
+    expect(target).toContain('transform: translateY(-50%)');
+    expect(target).not.toContain('left:');
   });
 
-  it('sets the branch tag next to the pull request', () => {
-    expect(rule(css, '.task-actions')).toContain('align-items: center');
-    const slot = rule(css, '.task-branch-slot');
-    expect(slot).toContain('min-width: 0');
-    expect(slot).toContain('height: var(--ui-badge-height)');
-    const branch = rule(css, '.task-branch');
-    expect(branch).toContain('display: block');
-    expect(branch).toContain('text-overflow: ellipsis');
-    expect(branch).not.toContain('max-width: 50%');
-    expect(branch).not.toContain('flex:');
+  it('shows the grip and the menu wherever any pointer is coarse, not only without hover', () => {
+    expect(cards).not.toContain('(hover: none)');
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-handle, .task-card-menu')).toContain('opacity: 1');
+  });
+
+  it('shows the card checkboxes only while selecting, never on hover or focus', () => {
+    const selector = rule(cards, '.task-card-selector');
+    expect(selector).toContain('display: none');
+    expect(selector).not.toContain('opacity');
+    expect(rule(cards, SELECTING_SELECTOR)).toBe('display: flex;');
+    expect(cards).not.toMatch(/:(hover|focus-within) \.task-card-selector/);
+    expect(media(cards, '(any-pointer: coarse)')).not.toContain('.task-card-selector');
+  });
+
+  it('indents the title and everything under it together, and only while selecting', () => {
+    expect(rule(cards, '.task-card-heading')).not.toContain('padding-left');
+    expect(rule(cards, SELECTING_CARD)).toBe(
+      'padding-left: calc( var(--task-card-select-left) + var(--task-card-select-size) + var(--task-card-select-gap) );'
+    );
+  });
+
+  it('gives the grip its whole 44px square on a touch screen until selecting shares it with the checkbox', () => {
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-handle::after')).not.toContain('width');
+    expect(rule(touch, SELECTING_GRIP)).toBe(
+      'width: calc(var(--task-card-select-left) + var(--ui-space-2));'
+    );
+    const card = rule(touch, '.task-card');
+    expect(card).toContain('--task-card-select-above: var(--ui-space-3)');
+    expect(card).toContain('--task-card-select-below: var(--ui-space-4)');
+  });
+
+  it('stretches the checkbox hit area from its outer edge to the title, whatever its border', () => {
+    const target = rule(cards, '.task-card-select::after');
+    expect(target).toContain('left: 50%');
+    expect(target).toContain(
+      'width: calc(var(--task-card-select-size) + var(--task-card-select-gap))'
+    );
+    expect(target).toContain('translate( calc(var(--task-card-select-size) / -2)');
+    expect(target).not.toContain('inset');
+  });
+
+  it('keeps the drag placeholder muted and dashed in the dark theme and under the pointer', () => {
+    const placeholder = rule(
+      cards,
+      ".task-card-dragging,\n.task-card-dragging:hover,\n:root[data-theme='dark'] .task-card-dragging,\n:root[data-theme='dark'] .task-card-dragging:hover"
+    );
+    expect(placeholder).toContain('background: var(--ui-bg-muted)');
+    expect(placeholder).toContain('border-style: dashed');
+    expect(placeholder).toContain('border-color: var(--ui-border-strong)');
+  });
+
+  it('gives the card title one rule, shared by the card and the copy that is dragged', () => {
+    const title = rule(cards, '.task-card-title');
+    expect(title).toContain('font-size: var(--ui-text-sm)');
+    expect(title).toContain('line-clamp: 2');
+    expect(rule(cards, '.task-card-open')).not.toContain('font-size');
+    expect(cards).not.toContain('.task-card-overlay .task-card-heading');
+  });
+
+  it('keeps the card details on one line that never wraps', () => {
+    const details = rule(cards, '.task-card-meta');
+    expect(details).toContain('white-space: nowrap');
+    expect(details).not.toContain('flex-wrap');
+    const project = rule(cards, '.task-card-project');
+    expect(project).toContain('min-width: 0');
+    expect(project).toContain('text-overflow: ellipsis');
+    expect(rule(cards, '.task-card-fact')).toContain('flex-shrink: 0');
+    expect(cards).not.toContain('.task-card-agentic::before');
+  });
+
+  it('lays each link on a card out as one row behind a shared label column', () => {
+    expect(rule(cards, '.task-card-links')).toContain('--task-card-link-label: 4rem');
+    expect(rule(cards, '.task-card-link-label,\n.task-card .task-relation-label')).toContain(
+      'flex: 0 0 var(--task-card-link-label)'
+    );
+    expect(rule(cards, '.task-card .task-relation')).toContain('flex-direction: row');
+    expect(rule(cards, '.task-card-pull-request')).toContain('min-height: var(--ui-space-6)');
+  });
+
+  it('stacks a relation into rows only while it is expanded', () => {
+    const relations = read(join(boardStyles, 'Relation.css'));
+    expect(rule(cards, '.task-card .task-relation-list')).toContain('flex-direction: row');
+    const expanded = rule(cards, '.task-card .task-relation[data-expanded] .task-relation-list');
+    expect(expanded).toContain('flex-direction: column');
+    expect(expanded).toContain('align-items: stretch');
+    const toggle = rule(relations, '.task-relation-toggle');
+    expect(toggle).toContain('z-index: 1');
+    expect(toggle).toContain('min-width: var(--ui-space-6)');
+    expect(toggle).toContain('min-height: var(--ui-space-6)');
+    expect(rule(relations, '.task-relation-toggle:focus-visible')).toContain(
+      'outline: 2px solid var(--ui-border-focus)'
+    );
+  });
+
+  it('gives the title the full width of the card unless the menu is always shown', () => {
+    expect(rule(cards, '.task-card-heading')).not.toContain('padding-right');
+    expect(rule(cards, '.task-card-heading:has(.task-title-edit)')).toContain(
+      'padding-right: var(--ui-control-height-sm)'
+    );
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-heading')).toContain(
+      'padding-right: var(--ui-control-height-sm)'
+    );
+    expect(rule(cards, '.task-card-menu')).toContain('background: var(--task-card-surface)');
+    expect(rule(cards, '.task-card-menu::before')).toContain(
+      'linear-gradient(to right, transparent, var(--task-card-surface))'
+    );
+    expect(rule(cards, ":root[data-theme='dark'] .task-card:hover")).toContain(
+      '--task-card-surface: var(--ui-bg-hover)'
+    );
+    expect(rule(touch, '.task-card-menu::before')).toContain('content: none');
+    expect(rule(cards, '.task-card:has(.task-title-edit) .task-card-menu::before')).toContain(
+      'content: none'
+    );
+  });
+
+  it('tints the pull request icon by status and leaves the rest of the row quiet', () => {
+    expect(rule(cards, '.task-card-pull-request .pull-request-icon')).toContain(
+      'color: var(--ui-text-muted)'
+    );
+    for (const [status, colour] of [
+      ['open', '--ui-success-600'],
+      ['merged', '--ui-accent'],
+      ['closed', '--ui-error-600'],
+    ]) {
+      expect(rule(cards, `.task-card-pull-request-${status} .pull-request-icon`)).toContain(
+        `color: var(${colour})`
+      );
+    }
+    expect(cards).not.toContain('.task-card-pull-request-pending');
+    expect(cards).not.toContain('.task-card-pull-request-untinted');
+  });
+
+  it('makes room above a focused card for its ring without moving the card', () => {
+    expect(rule(columns, '.board-column')).toContain('--board-column-ring: 3px');
+    expect(rule(columns, '.board-column-body')).toContain(
+      'padding: 0 var(--ui-space-2) var(--ui-space-2)'
+    );
+    const focused = rule(columns, '.board-column-body:has(.task-card-open:focus-visible)');
+    expect(focused).toContain('margin-top: calc(-1 * var(--board-column-ring))');
+    expect(focused).toContain('padding-top: var(--board-column-ring)');
+    expect(rule(cards, '.task-card-open:focus-visible::after')).toContain(
+      '0 0 0 var(--board-column-ring) var(--ui-border-focus)'
+    );
+    expect(rule(columns, '.board-column:focus-visible')).toContain('outline-offset: -2px');
+  });
+
+  it('contains only vertical overscroll in a column, so a sideways swipe reaches the board', () => {
+    const body = rule(columns, '.board-column-body');
+    expect(body).toContain('overscroll-behavior-y: contain');
+    expect(body).not.toContain('overscroll-behavior: contain');
+  });
+
+  it('names the board skeleton apart from every other skeleton', () => {
+    expect(board).not.toMatch(/\.skeleton\b/);
+    expect(board).not.toMatch(/[\s.]skeleton-(title|text|badge|card|meta|tag|count)/);
+    expect(rule(board, '.board-skeleton-title')).toContain('max-width: 75%');
+    expect(rule(board, '.task-card.board-skeleton-card')).toContain('pointer-events: none');
+  });
+
+  it('stops the drop highlight fading in when motion is reduced', () => {
+    expect(rule(columns, '.board-column-body')).toContain('transition:');
+    const reduced = media(columns, '(prefers-reduced-motion: reduce)');
+    expect(rule(reduced, '.board-column-body')).toContain('transition: none');
+  });
+
+  it('snaps one column at a time on a phone', () => {
+    const phone = media(board, '(max-width: 768px)');
+    expect(rule(phone, '.board')).toContain('scroll-snap-type: x mandatory');
+    expect(rule(phone, '.board[data-dragging]')).toContain('scroll-snap-type: none');
+    const column = rule(media(columns, '(max-width: 768px)'), '.board-column');
+    expect(column).toContain('scroll-snap-align: start');
+    expect(column).toContain('width: min(85vw, 300px)');
+  });
+
+  it('leaves no table or table skeleton rules behind', () => {
+    for (const selector of [
+      '.tasks-table',
+      '.task-card-agentic td',
+      '.task-actions',
+      '.task-delete',
+      '.task-badges',
+      '.task-project',
+      '.task-priority',
+      '.task-model',
+      '.task-source',
+      '.task-pr',
+      '.task-branch',
+      '.task-rename',
+      '.task-card-title',
+      '.task-card .task-description',
+      '.tasks-page .skeleton',
+    ]) {
+      expect(css).not.toContain(selector);
+    }
+  });
+
+  it('keeps the task styles on the palette', () => {
+    for (const styles of [css, board, columns, cards]) {
+      expect(styles).not.toMatch(legacyScales);
+    }
   });
 
   it('wraps the task filters instead of shrinking them off the page bar', () => {
@@ -391,10 +600,50 @@ describe('tasks page layout', () => {
     expect(rule(css, '.log-entry')).toContain('min-height: var(--ui-control-height-sm)');
   });
 
-  it('opens the editor from a pointer row and sizes the editor chrome to the header', () => {
-    expect(rule(css, '.tasks-table tbody .task-card')).toContain('cursor: pointer');
+  it('sizes the editor chrome to the header', () => {
     expect(rule(css, '.task-details-header')).toContain('height: var(--ui-header-height)');
     expect(rule(css, '.task-details-actions')).toContain('height: var(--ui-header-height)');
+  });
+});
+
+describe('bulk edit dialog', () => {
+  const kit = join(import.meta.dir, '..', '..', '..', '..', 'packages', 'ui', 'src', 'styles');
+  const globals = read(join(kit, 'globals.css'));
+  const variables = read(join(kit, 'variables.css'));
+  const dialog = read(join(features, 'tasks', 'components', 'EditTasksDialog.css'));
+  const ROOT_FONT_SIZE = 16;
+
+  function pixels(length: string): number {
+    const value = Number.parseFloat(length);
+    return length.endsWith('rem') ? value * ROOT_FONT_SIZE : value;
+  }
+
+  function declaration(block: string, property: string): string {
+    const match = block.match(new RegExp(`(?:^|; )${property}: ([^;]+)`));
+    if (!match) throw new Error(`${property} is not declared`);
+    return match[1].trim();
+  }
+
+  const focus = rule(globals, '.ui-checkbox:focus-visible');
+  const ring =
+    pixels(declaration(focus, 'outline').split(' ')[0]) +
+    pixels(declaration(focus, 'outline-offset'));
+
+  it('pads the scrolling project list sideways so a focused checkbox shows its whole ring', () => {
+    const list = rule(dialog, '.edit-tasks-project-list');
+    expect(list).toContain('overflow-y: auto');
+    expect(declaration(list, 'padding-inline')).toBe('var(--ui-space-1)');
+    expect(declaration(list, 'margin-inline')).toBe('calc(var(--ui-space-1) * -1)');
+    expect(pixels(token(variables, 'ui-space-1'))).toBeGreaterThanOrEqual(ring);
+  });
+
+  it('leaves room above and below a centred checkbox for its ring', () => {
+    expect(rule(dialog, '.edit-tasks-project-list .ui-checkbox-wrapper')).toContain(
+      'align-items: center'
+    );
+    const row = pixels(token(variables, 'ui-control-height-sm'));
+    const box = pixels(declaration(rule(globals, '.ui-checkbox'), 'height'));
+    expect((row - box) / 2).toBeGreaterThanOrEqual(ring);
   });
 });
 
@@ -440,8 +689,8 @@ describe('projects page layout', () => {
   });
 });
 
-describe('sources page layout', () => {
-  const css = read(join(features, 'sources', 'pages', 'SourcesPage.css'));
+describe('sources section layout', () => {
+  const css = read(join(features, 'sources', 'components', 'SourcesSection.css'));
 
   it('lays sources out as a 56px-row table with a 32px header', () => {
     expect(rule(css, '.sources-table-wrapper')).toContain('border: 1px solid var(--ui-border)');
@@ -461,12 +710,64 @@ describe('sources page layout', () => {
       'padding: var(--ui-panel-padding) var(--ui-gutter)'
     );
     expect(rule(css, '.source-details-actions')).toContain('height: var(--ui-header-height)');
+    expect(rule(css, '.source-details-header h3')).toContain('font-size: var(--ui-heading-size)');
+  });
+
+  it('sticks the editor footer to the settings scroller instead of scrolling a body of its own', () => {
+    const footer = rule(css, '.source-details-actions');
+    expect(footer).toContain('position: sticky');
+    expect(footer).toContain('bottom: 0;');
+    expect(footer).toContain('background: var(--ui-bg-elevated)');
+    expect(footer).toContain('border-radius: 0 0 var(--ui-radius-card) var(--ui-radius-card)');
+    expect(css).not.toContain('.page-body');
+    expect(rule(css, '.source-details')).not.toContain('flex: 1');
+    expect(rule(css, '.source-details')).not.toContain('min-height');
+    expect(rule(css, '.source-details-body')).not.toContain('overflow');
+    expect(rule(css, '.source-details-body')).not.toContain('flex: 1');
+  });
+
+  it('shows source form hints in full over the two-line settings clamp in any import order', () => {
+    const settings = read(join(features, 'settings', 'pages', 'SettingsPage.css'));
+    expect(rule(settings, '.settings-page .form-hint')).toContain('display: -webkit-box');
+    const hint = rule(css, '.settings-page .source-details .form-hint');
+    expect(hint).toContain('display: block');
+    expect(hint).toContain('overflow: visible');
+    expect(hint).toContain('-webkit-line-clamp: unset');
+  });
+
+  it('leaves the empty state to sit in the section flow like its sibling sections', () => {
+    expect(css).not.toContain('.sources-empty');
+  });
+
+  it('aligns the access token disclosure with the field labels', () => {
+    expect(rule(css, '.github-configuration > .ui-btn-link')).toContain('padding-inline: 0');
+  });
+
+  it('drops the URL and verified columns when the settings column is too narrow for the actions', () => {
+    expect(rule(css, '.sources-table-wrapper')).toContain('container-type: inline-size');
+    const desktop = media(css, '(min-width: 769px)');
+    expect(desktop).toContain('@container (max-width: 48rem)');
+    expect(
+      rule(
+        desktop,
+        '.sources-table th:nth-child(4),\n.sources-table td:nth-child(4),\n.sources-table th:nth-child(5),\n.sources-table td:nth-child(5)'
+      )
+    ).toContain('display: none');
+    const name = rule(desktop, '.sources-table td:first-child');
+    expect(name).toContain('width: 100%');
+    expect(name).toContain('max-width: 0');
+  });
+
+  it('lets the URL column absorb the spare width so the actions fit the settings column', () => {
+    const cell = rule(css, '.sources-table .source-url-cell');
+    expect(cell).toContain('width: 100%');
+    expect(cell).toContain('max-width: 0');
   });
 });
 
 describe('settings page layout', () => {
-  const css = read(join(features, 'settings', 'workspace', 'pages', 'WorkspaceSettingsPage.css'));
-  const page = read(join(features, 'settings', 'workspace', 'pages', 'WorkspaceSettingsPage.tsx'));
+  const css = read(join(features, 'settings', 'pages', 'SettingsPage.css'));
+  const section = read(join(features, 'settings', 'server', 'components', 'FeaturesSection.tsx'));
 
   it('sticks the save footer to the scroller edge so it does not lift at the end of the scroll', () => {
     const footer = rule(css, '.settings-actions');
@@ -479,12 +780,19 @@ describe('settings page layout', () => {
     expect(body).toContain('flex-direction: column');
   });
 
-  it('keeps feature setup on a settings tab without a content card', () => {
+  it('pads the scroller under the source editor footer so a focused field scrolls clear of it', () => {
+    const body = rule(css, '.settings-page .page-body:has(.source-details-actions)');
+    expect(body).toContain('padding-bottom: 0');
+    expect(body).toContain(
+      'scroll-padding-bottom: calc(var(--ui-header-height) + var(--ui-space-2))'
+    );
+  });
+
+  it('keeps feature setup in a settings section without a content card', () => {
     const panel = read(join(features, 'models', 'components', 'FeaturesPanel.css'));
     expect(panel).not.toContain('.card');
     expect(rule(panel, '.models-feature')).toContain('border-bottom: 1px solid var(--ui-border)');
-    expect(page).toContain('value="features"');
-    expect(page).toContain('<FeaturesPanel');
+    expect(section).toContain('<FeaturesPanel');
   });
 });
 
@@ -527,9 +835,10 @@ describe('models page layout', () => {
     expect(rule(pulls, '.pull-job-row')).toContain('height: var(--ui-space-5)');
   });
 
-  it('sends the empty state to the settings features tab', () => {
+  it('sends the empty state to the server features section', () => {
     expect(page).not.toContain('<FeaturesPanel');
-    expect(page).toContain("navigate('/settings?tab=features')");
+    expect(page).toContain('SettingsSection.Features');
+    expect(page).not.toContain("'/settings?tab=features'");
   });
 });
 
@@ -566,5 +875,17 @@ describe('setup license list', () => {
     const panel = read(join(features, 'models', 'components', 'FeaturesPanel.css'));
     expect(rule(panel, '.models-setup-licenses ul')).toContain('list-style: none');
     expect(rule(panel, '.models-setup-licenses li')).toContain('overflow-wrap: anywhere');
+  });
+});
+
+describe('github repository picker', () => {
+  const css = read(join(features, 'github', 'components', 'RepositoryPicker.css'));
+
+  it('lays the popup out in flow so a scrolling wizard or modal body grows instead of clipping it', () => {
+    const popup = rule(css, '.repository-picker-popup');
+    expect(popup).not.toContain('position');
+    expect(popup).toContain('max-height: min(16rem, 40dvh)');
+    expect(popup).toContain('overflow-y: auto');
+    expect(css).not.toContain('ui-fade-down');
   });
 });

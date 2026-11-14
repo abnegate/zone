@@ -12,8 +12,6 @@ use std::{fs, io};
 
 use zone_context::content::truncate_chars;
 
-use crate::agent::prompt::TASK_MAX_CHARS;
-
 /// In render order. Zone's own file is last so it sits closest to the task.
 const FILES: [&str; 3] = ["AGENTS.md", "CLAUDE.md", ".zone/instructions.md"];
 
@@ -38,10 +36,12 @@ const ELEMENT_CLOSE: &str = "\n</file>";
 const ELEMENT_OMITTED: &str = "\" omitted/>";
 const TRUNCATED: &str = "\n[truncated; read the file for the rest]";
 
-/// The whole block's ceiling, tags and precedence statement included. Guidance
-/// is runtime data, so it cannot be folded under `TASK_MAX_CHARS`, which a pure
-/// unit test asserts over the prompt builder's deterministic output.
-const MAX_CHARS: usize = TASK_MAX_CHARS / 2;
+/// The whole block's ceiling, tags and precedence statement included: roughly
+/// 1,750 tokens of every run's context for text the checkout wrote. It is a
+/// figure of its own and no share of `agent::prompt::TASK_MAX_CHARS`, which is
+/// raised whenever a system section grows: the room a checkout is given to
+/// speak in must not widen because the system's own prompt did.
+const MAX_CHARS: usize = 7_000;
 
 /// The most one file may contribute, which is the whole budget when it is the
 /// only file present.
@@ -571,6 +571,20 @@ mod tests {
         assert!(rendered.contains("Head of the file."), "{rendered}");
         assert!(rendered.contains(TRUNCATED), "{rendered}");
         assert!(rendered.chars().count() <= MAX_CHARS, "{}", rendered.len());
+    }
+
+    /// Written out rather than read from the constant: the cap was once a share
+    /// of the prompt builder's ceiling, and a bullet added to a system section
+    /// handed every checkout 200 more characters to speak in.
+    #[test]
+    fn an_oversized_file_fills_the_block_to_seven_thousand_characters_and_no_further() {
+        let root = checkout();
+        write(root.path(), "AGENTS.md", &"a".repeat(40_000));
+
+        let rendered = block(root.path());
+
+        assert_eq!(MAX_CHARS, 7_000);
+        assert_eq!(rendered.chars().count(), 7_000);
     }
 
     /// `String::from_utf8` guarantees valid UTF-8, so a byte slice at the cut

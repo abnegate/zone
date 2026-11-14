@@ -9,6 +9,7 @@ import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import SubNav from '../../../shared/components/SubNav/SubNav';
 import { getErrors } from '../../../validation';
+import { SOURCES_LOCATION } from '../../settings/navigation/sections';
 import { sourcesQueryKey } from '../../sources/hooks/sourcesQueryKey';
 import {
   AutomationPanel,
@@ -16,7 +17,14 @@ import {
   CreateProjectWizard,
   SyncConfigCard,
 } from '../components';
-import { useAutomation, useCanAdministerWorkspace, useProjects, useSyncConfigs } from '../hooks';
+import { ProjectList } from '../components/ProjectList';
+import {
+  useAutomation,
+  useCanAdministerWorkspace,
+  useCanWriteWorkspace,
+  useProjects,
+  useSyncConfigs,
+} from '../hooks';
 import { CreateSyncConfigRequestSchema, UpdateProjectRequestSchema } from '../schemas';
 import type {
   CreateSyncConfigRequest,
@@ -29,7 +37,17 @@ import type {
   SyncProvider,
   UpdateProjectRequest,
 } from '../types';
-import { formatDate } from '../utils/formatters';
+import { cardDate, formatDate } from '../utils/formatters';
+import {
+  isProjectSort,
+  moveId,
+  PROJECT_SORT_OPTIONS,
+  type ProjectSort,
+  readSort,
+  sortKey,
+  sortProjects,
+  writeSort,
+} from '../utils/order';
 import './ProjectsPage.css';
 import { useWorkspace } from '../../../shared/context';
 
@@ -54,7 +72,7 @@ function FolderIcon() {
 }
 
 export default function ProjectsPage() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedProjectId = searchParams.get('id');
@@ -68,7 +86,23 @@ export default function ProjectsPage() {
     createProject: createProjectMutation,
     updateProject: updateProjectMutation,
     deleteProject: deleteProjectMutation,
+    reorderProjects,
   } = useProjects(statusFilter);
+
+  const sortStorageKey = sortKey(user?.id);
+  const [sort, setSort] = useState<ProjectSort>(() => readSort(sortStorageKey));
+  useEffect(() => {
+    setSort(readSort(sortStorageKey));
+  }, [sortStorageKey]);
+
+  const [orderError, setOrderError] = useState<string | null>(null);
+  const sortChoices = useRef(0);
+
+  const chooseSort = (next: ProjectSort) => {
+    sortChoices.current += 1;
+    setSort(next);
+    writeSort(sortStorageKey, next);
+  };
 
   // Sources query
   const { currentWorkspace } = useWorkspace();
@@ -79,6 +113,12 @@ export default function ProjectsPage() {
     enabled: isAuthenticated && !!workspaceId,
   });
   const canAdministerSync = useCanAdministerWorkspace(workspaceId);
+  const canReorder = useCanWriteWorkspace(workspaceId);
+  const shownWorkspace = useRef(workspaceId);
+  shownWorkspace.current = workspaceId;
+  useEffect(() => {
+    if (workspaceId) setOrderError(null);
+  }, [workspaceId]);
 
   // State
   const [searchQuery, setSearchQuery] = useState('');
@@ -405,13 +445,34 @@ export default function ProjectsPage() {
   };
 
   const query = searchQuery.trim().toLowerCase();
-  const visibleProjects = query
-    ? projects.filter(
-        (project) =>
-          project.name.toLowerCase().includes(query) ||
-          (project.description || '').toLowerCase().includes(query)
-      )
-    : projects;
+  const visibleProjects = sortProjects(
+    query
+      ? projects.filter(
+          (project) =>
+            project.name.toLowerCase().includes(query) ||
+            (project.description || '').toLowerCase().includes(query)
+        )
+      : projects,
+    sort
+  );
+
+  const moveProject = (id: string, index: number) => {
+    const order = moveId(
+      visibleProjects.map((project) => project.id),
+      id,
+      index
+    );
+    const previous = sort;
+    const requestedIn = workspaceId;
+    chooseSort('custom');
+    const choice = sortChoices.current;
+    setOrderError(null);
+    reorderProjects(order).catch((error: unknown) => {
+      if (shownWorkspace.current !== requestedIn) return;
+      if (sortChoices.current === choice) chooseSort(previous);
+      setOrderError(error instanceof Error ? error.message : 'Failed to reorder projects');
+    });
+  };
   const searchEmpty = !loading && !error && projects.length > 0 && visibleProjects.length === 0;
 
   return (
@@ -440,9 +501,18 @@ export default function ProjectsPage() {
             aria-label="Search projects"
           />
         </div>
+        <div className="projects-sort">
+          <Select
+            compact
+            value={sort}
+            onValueChange={(value) => isProjectSort(value) && chooseSort(value)}
+            aria-label="Sort projects"
+            options={[...PROJECT_SORT_OPTIONS]}
+          />
+        </div>
         <Tabs
           value={statusFilter}
-          onValueChange={(v) => setStatusFilter(v as ProjectStatus | 'all')}
+          onValueChange={(value) => setStatusFilter(value as ProjectStatus | 'all')}
           className="projects-tabs"
         >
           <TabsList>
@@ -523,51 +593,60 @@ export default function ProjectsPage() {
               defaultWidthRem={20}
             >
               <div className="projects-list">
-                {visibleProjects.map((project) => (
-                  <div
-                    key={project.id}
-                    className={`card--list project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
-                    onClick={() => selectProject(project)}
-                    onKeyDown={(e) => e.key === 'Enter' && selectProject(project)}
-                    role="button"
-                    tabIndex={0}
-                  >
-                    <div className="project-card-header">
-                      <h3 className="project-name">{project.name}</h3>
-                      <span className="project-card-badges">
-                        {project.auto && (
-                          <Badge variant="accent" data-testid="auto-badge">
-                            Auto
-                          </Badge>
-                        )}
-                        <Badge variant={statusVariants[project.status]}>
-                          {statusLabels[project.status]}
-                        </Badge>
-                      </span>
-                    </div>
-                    <p className="project-description">{project.description}</p>
-                    <div className="project-card-footer">
-                      {(() => {
-                        const source = getProjectSource(project);
-                        return source ? (
-                          <a
-                            href={source.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="source-link"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <span className={`source-type-icon ${source.source_type}`} />
-                            {source.name}
-                          </a>
-                        ) : (
-                          <span className="no-source">No source</span>
-                        );
-                      })()}
-                      <span>{formatDate(project.updated_at)}</span>
-                    </div>
+                {orderError && (
+                  <div className="projects-order-error" role="alert">
+                    {orderError}
                   </div>
-                ))}
+                )}
+                <ProjectList
+                  projects={visibleProjects}
+                  movable={canReorder}
+                  onMove={moveProject}
+                  renderCard={(project) => (
+                    <div
+                      className={`card--list project-card ${selectedProject?.id === project.id ? 'selected' : ''}`}
+                      onClick={() => selectProject(project)}
+                      onKeyDown={(event) => event.key === 'Enter' && selectProject(project)}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      <div className="project-card-header">
+                        <h3 className="project-name">{project.name}</h3>
+                        <span className="project-card-badges">
+                          {project.auto && (
+                            <Badge variant="accent" data-testid="auto-badge">
+                              Auto
+                            </Badge>
+                          )}
+                          <Badge variant={statusVariants[project.status]}>
+                            {statusLabels[project.status]}
+                          </Badge>
+                        </span>
+                      </div>
+                      <p className="project-description">{project.description}</p>
+                      <div className="project-card-footer">
+                        {(() => {
+                          const source = getProjectSource(project);
+                          return source ? (
+                            <a
+                              href={source.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="source-link"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <span className={`source-type-icon ${source.source_type}`} />
+                              {source.name}
+                            </a>
+                          ) : (
+                            <span className="no-source">No source</span>
+                          );
+                        })()}
+                        <span>{cardDate(project, sort)}</span>
+                      </div>
+                    </div>
+                  )}
+                />
               </div>
             </SubNav>
             {selectedProject ? (
@@ -895,7 +974,7 @@ export default function ProjectsPage() {
             wrapperClassName="form-group"
             helpText={
               sources.length === 0
-                ? 'No sources configured. Add one in the Sources page.'
+                ? `No sources configured. Add one in ${SOURCES_LOCATION}.`
                 : undefined
             }
             options={[

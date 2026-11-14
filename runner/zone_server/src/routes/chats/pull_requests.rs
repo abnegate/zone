@@ -27,7 +27,7 @@ use update_request::UpdateRequest;
 
 const CHAT_WITHOUT_WORKSPACE: &str = "Chat has no workspace association";
 const PULL_REQUEST_NOT_FOUND: &str = "Pull request not found";
-const NOTHING_TO_CHANGE: &str = "Name at least one of dismissed, draft or auto_merge";
+const NOTHING_TO_CHANGE: &str = "Name at least one of dismissed, draft, auto_merge or auto_fix";
 
 /// GET /api/chats/{id}/pull-requests
 pub async fn list(
@@ -69,6 +69,11 @@ pub async fn update(
             .await
             .map_err(refused)?;
     }
+    if let Some(enabled) = request.auto_fix {
+        row = pull_request::set_auto_fix(&state, chat.id, &row, enabled, user(&auth)?)
+            .await
+            .map_err(refused)?;
+    }
     if let Some(dismissed) = request.dismissed {
         row = chat_pull_requests::dismiss(state.db(), chat.id, row.id, dismissed)
             .await?
@@ -104,11 +109,13 @@ async fn chat(state: &AppState, auth: &AuthUser, id: Uuid) -> Result<(ChatRow, U
 }
 
 async fn writable(state: &AppState, auth: &AuthUser, workspace: Uuid) -> Result<bool, ServerError> {
-    let user = auth
-        .0
+    Ok(workspace_members::can_write(state.db(), workspace, user(auth)?).await?)
+}
+
+fn user(auth: &AuthUser) -> Result<Uuid, ServerError> {
+    auth.0
         .user_id()
-        .map_err(|_| ServerError::Unauthorized("Invalid user".to_string()))?;
-    Ok(workspace_members::can_write(state.db(), workspace, user).await?)
+        .map_err(|_| ServerError::Unauthorized("Invalid user".to_string()))
 }
 
 async fn owned(state: &AppState, chat: Uuid, id: Uuid) -> Result<PullRequestRow, ServerError> {
@@ -119,7 +126,34 @@ async fn owned(state: &AppState, chat: Uuid, id: Uuid) -> Result<PullRequestRow,
 
 fn refused(error: Error) -> ServerError {
     match error {
-        Error::Uncredentialed | Error::Refused(_) => ServerError::Conflict(error.to_string()),
-        Error::Unreachable | Error::Storage => ServerError::Internal(error.to_string()),
+        Error::Uncredentialed
+        | Error::Disconnected
+        | Error::Unauthenticated
+        | Error::Refused(_) => ServerError::Conflict(error.to_string()),
+        Error::Unreachable => ServerError::BadGateway(error.to_string()),
+        Error::Storage | Error::Unsaved => ServerError::Internal(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_out_of_reach_is_a_bad_gateway() {
+        assert!(matches!(
+            refused(Error::Unreachable),
+            ServerError::BadGateway(message) if message == Error::Unreachable.to_string()
+        ));
+        assert!(matches!(refused(Error::Storage), ServerError::Internal(_)));
+        assert!(matches!(refused(Error::Unsaved), ServerError::Internal(_)));
+        for error in [
+            Error::Uncredentialed,
+            Error::Disconnected,
+            Error::Unauthenticated,
+            Error::Refused("Resource not accessible by integration".to_string()),
+        ] {
+            assert!(matches!(refused(error), ServerError::Conflict(_)));
+        }
     }
 }

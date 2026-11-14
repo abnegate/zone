@@ -1,5 +1,5 @@
+use abnegate_agent_cli::AgentKind;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 /// The coding agent CLI session a chat's turns resume, and the login they run on.
 #[derive(Debug, Clone, PartialEq, Eq)]

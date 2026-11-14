@@ -7,11 +7,16 @@ import {
   statSync,
 } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Page } from '@playwright/test';
 import {
   api,
+  chooseOption,
+  chooseTaskAction,
+  deleteTask,
   expect,
   signIn,
+  SOURCES_PATH,
   state,
   test as base,
   tokenFor,
@@ -42,7 +47,7 @@ export const model =
   'qwen3.8:27b';
 export const evidenceDir =
   process.env.ZONE_LIVE_EVIDENCE ??
-  join(__dirname, '..', '..', '..', '..', 'docs', 'live-real-pass-2026-09-20');
+  fileURLToPath(new URL('../../../../docs/live-real-pass-2026-09-20', import.meta.url));
 const work = process.env.ZONE_LIVE_WORK ?? '/tmp/zone-live-verify';
 export const serverLogPath = join(work, 'server.log');
 
@@ -164,12 +169,16 @@ export const test = base;
 export {
   api,
   approveIfAsked,
+  chooseOption,
+  chooseTaskAction,
+  deleteTask,
   expect,
   newChat,
   send,
   setChecked,
   settled,
   signIn,
+  SOURCES_PATH,
   stamp,
   state,
   tokenFor,

@@ -1,8 +1,12 @@
 //! Chat database queries
 
+pub mod activity;
 pub mod occupancy;
+mod page;
 pub mod provider;
+pub mod recent;
 mod session;
+mod sort;
 
 use abnegate_llm::ReasoningEffort;
 use chrono::NaiveDateTime;
@@ -12,14 +16,22 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::services::character::ChatCharacter;
-use zone_core::llm::AgentKind;
+use abnegate_agent_cli::AgentKind;
 
 use super::DbResult;
 
+pub use page::Page;
 pub use session::ChatSession;
+pub use sort::Sort;
 
 fn effort(value: &str) -> ReasoningEffort {
     value.parse().unwrap_or_default()
+}
+
+/// Whether a member typed the message, rather than a reminder, project or
+/// other automation posting it under the member's role.
+pub(crate) fn typed(role: &str, metadata: Option<&serde_json::Value>) -> bool {
+    role == "user" && metadata.is_none_or(|metadata| metadata.get("source").is_none())
 }
 
 /// Chat row from database
@@ -53,7 +65,7 @@ pub struct ChatRow {
 
 /// A stored message. The shape is the conversation store's, not Postgres's,
 /// so a row and what the trait returns cannot drift apart.
-pub use zone_chat::StoredMessage as MessageRow;
+pub use abnegate_agent::chat::StoredMessage as MessageRow;
 
 /// Helper macro to map a row to ChatRow
 macro_rules! map_chat_row {
@@ -77,69 +89,58 @@ macro_rules! map_chat_row {
     };
 }
 
-/// List chats with optional workspace and archived filter
+/// The workspace's chats, only the archived or unarchived ones when `archived`
+/// says which, in `sort` order and cut to `page`.
 pub async fn list_chats(
     pool: &PgPool,
-    workspace_id: Option<Uuid>,
+    workspace_id: Uuid,
     archived: Option<bool>,
+    sort: Sort,
+    page: Page,
 ) -> DbResult<Vec<ChatRow>> {
-    match (workspace_id, archived) {
-        (Some(wid), Some(a)) => {
-            let rows = sqlx::query!(
-                r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
-                FROM chats
-                WHERE workspace_id = $1 AND archived = $2
-                ORDER BY updated_at DESC
-                "#,
-                wid,
-                a
-            )
-            .fetch_all(pool)
-            .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
-        }
-        (Some(wid), None) => {
-            let rows = sqlx::query!(
-                r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
-                FROM chats
-                WHERE workspace_id = $1
-                ORDER BY updated_at DESC
-                "#,
-                wid
-            )
-            .fetch_all(pool)
-            .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
-        }
-        (None, Some(a)) => {
-            let rows = sqlx::query!(
-                r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
-                FROM chats
-                WHERE archived = $1
-                ORDER BY updated_at DESC
-                "#,
-                a
-            )
-            .fetch_all(pool)
-            .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
-        }
-        (None, None) => {
-            let rows = sqlx::query!(
-                r#"
-                SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
-                FROM chats
-                ORDER BY updated_at DESC
-                "#
-            )
-            .fetch_all(pool)
-            .await?;
-            Ok(rows.into_iter().map(|r| map_chat_row!(r)).collect())
-        }
-    }
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, workspace_id, title, model_name, archived, agent_enabled, agent_sandboxed, auto_approve, reasoning_effort, offline, context_tokens, created_at, updated_at
+        FROM chats
+        WHERE workspace_id = $1 AND ($2::bool IS NULL OR archived = $2)
+        ORDER BY
+            CASE WHEN $3::text = 'updated_desc' THEN updated_at END DESC,
+            CASE WHEN $3::text = 'updated_asc' THEN updated_at END ASC,
+            CASE WHEN $3::text = 'created_desc' THEN created_at END DESC,
+            CASE WHEN $3::text = 'created_asc' THEN created_at END ASC,
+            CASE WHEN $3::text = 'title_asc' THEN lower(title) END ASC,
+            CASE WHEN $3::text = 'title_desc' THEN lower(title) END DESC,
+            id ASC
+        LIMIT $4 OFFSET $5
+        "#,
+        workspace_id,
+        archived,
+        sort.as_str(),
+        page.limit,
+        page.offset
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|row| map_chat_row!(row)).collect())
+}
+
+/// How many chats `list_chats` would return across every page.
+pub async fn count_chats(
+    pool: &PgPool,
+    workspace_id: Uuid,
+    archived: Option<bool>,
+) -> DbResult<i64> {
+    sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) AS "total!"
+        FROM chats
+        WHERE workspace_id = $1 AND ($2::bool IS NULL OR archived = $2)
+        "#,
+        workspace_id,
+        archived
+    )
+    .fetch_one(pool)
+    .await
 }
 
 /// The titles of the given chats, for labelling rows that carry only a chat id.
@@ -317,6 +318,16 @@ pub async fn update_chat(
             .execute(&mut *transaction)
             .await?;
     }
+    let configured = model_name.is_some()
+        || agent_enabled.is_some()
+        || reasoning_effort.is_some()
+        || context_tokens.is_some();
+    if configured {
+        sqlx::query("UPDATE chats SET used_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+    }
     let row = sqlx::query!(
         r#"
         UPDATE chats
@@ -360,11 +371,31 @@ pub async fn complete_title(
         .bind(chat_id).bind(message_id).bind(title).execute(pool).await?.rows_affected() == 1)
 }
 
-/// Delete a chat
+/// Delete a chat, once every write still holding it has finished.
+///
+/// A turn's writes take the chat's lease and then its turn, and a subagent's write holds its
+/// turn, or its message when it has none, before it touches the subagent. Removing the chat cascades to its subagents before its
+/// turns, so taking the lease, the turns and the messages first keeps the order those writes take their locks
+/// in: the delete waits for them instead of deadlocking with them.
 pub async fn delete_chat(pool: &PgPool, id: Uuid) -> DbResult<bool> {
-    let result = sqlx::query!("DELETE FROM chats WHERE id = $1", id)
-        .execute(pool)
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT 1 FROM chat_leases WHERE chat_id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *transaction)
         .await?;
+    sqlx::query("SELECT 1 FROM chat_turns WHERE chat_id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SELECT 1 FROM messages WHERE chat_id = $1 FOR UPDATE")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    let result = sqlx::query("DELETE FROM chats WHERE id = $1")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -384,7 +415,7 @@ pub async fn archive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>> 
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_chat_row!(r)))
+    Ok(row.map(|row| map_chat_row!(row)))
 }
 
 /// Unarchive a chat
@@ -402,7 +433,7 @@ pub async fn unarchive_chat(pool: &PgPool, id: Uuid) -> DbResult<Option<ChatRow>
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| map_chat_row!(r)))
+    Ok(row.map(|row| map_chat_row!(row)))
 }
 
 /// List messages for a chat
@@ -421,14 +452,11 @@ pub async fn list_messages(pool: &PgPool, chat_id: Uuid) -> DbResult<Vec<Message
 
     Ok(rows
         .into_iter()
-        .map(|r| MessageRow {
-            title_claimed: false,
-            id: r.id,
-            chat_id: r.chat_id,
-            role: r.role,
-            content: r.content,
-            metadata: r.metadata,
-            created_at: r.created_at,
+        .map(|row| {
+            let mut message = MessageRow::new(row.id, row.chat_id, row.role, row.content);
+            message.metadata = row.metadata;
+            message.created_at = row.created_at;
+            message
         })
         .collect())
 }
@@ -486,10 +514,13 @@ pub async fn create_message_with_id(
     let mut transaction = pool.begin().await?;
     // The row lock serializes first-user-message ownership with every insertion
     // and explicit rename, including requests served by different processes.
-    sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
-        .bind(chat_id)
-        .execute(&mut *transaction)
-        .await?;
+    sqlx::query(
+        "UPDATE chats SET updated_at = NOW(), used_at = CASE WHEN $2 THEN NOW() ELSE used_at END WHERE id = $1",
+    )
+    .bind(chat_id)
+    .bind(typed(role, metadata.as_ref()))
+    .execute(&mut *transaction)
+    .await?;
 
     let title_claimed = if role == "user" {
         sqlx::query(
@@ -534,15 +565,10 @@ pub async fn create_message_with_id(
 
     transaction.commit().await?;
 
-    Ok(MessageRow {
-        title_claimed,
-        id: row.0,
-        chat_id: row.1,
-        role: row.2,
-        content: row.3,
-        metadata: row.4,
-        created_at: row.5,
-    })
+    let mut message = MessageRow::new(row.0, row.1, row.2, row.3).with_title_claimed(title_claimed);
+    message.metadata = row.4;
+    message.created_at = row.5;
+    Ok(message)
 }
 
 /// Create a message with background embedding generation
@@ -631,27 +657,11 @@ pub async fn create_message_with_embedding(
     Ok(message)
 }
 
-/// Delete a message
-pub async fn delete_message(pool: &PgPool, chat_id: Uuid, message_id: Uuid) -> DbResult<bool> {
-    let result = sqlx::query!(
-        "DELETE FROM messages WHERE id = $1 AND chat_id = $2",
-        message_id,
-        chat_id
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
-}
-
-// ---------------------------------------------------------------------------
-// What a chat is for. An ordinary chat is an assistant; a planner chat is the
-// interview an auto project comes out of; an updates chat is where every
-// notice about a project lands. The purpose and the project are read through
-// a query of their own rather than widened onto `ChatRow`, which the compile
-// time queries above produce.
-// ---------------------------------------------------------------------------
-
+/// What a chat is for. An ordinary chat is an assistant; a planner chat is the
+/// interview an auto project comes out of; an updates chat is where every
+/// notice about a project lands. The purpose and the project are read through
+/// a query of their own rather than widened onto `ChatRow`, which the compile
+/// time queries above produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatPurpose {
     Assistant,

@@ -297,12 +297,17 @@ RUN set -eu; \
     chmod -R o+rX /opt/swift; \
     rm swift.tar.gz
 
-FROM runtime-base AS runtime
+FROM runtime-base AS runtime-packages
+
+# Existing volumes hold files owned by 999. A package that adds a system user
+# takes the next free id, so zone claims this one before any of them can.
+RUN groupadd --system --gid 999 zone \
+    && useradd --system --uid 999 --gid zone --create-home --home-dir /home/zone --shell /bin/bash zone
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential pkg-config openssh-client gh jq ripgrep fd-find less file \
         procps unzip zip xz-utils bzip2 wget cmake ninja-build \
-        python3 python3-pip python3-venv pipx nodejs npm \
+        python3 python3-pip python3-venv pipx nodejs npm postgresql-client \
     && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && rm -rf /var/lib/apt/lists/*
 
@@ -328,6 +333,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libncurses-dev libpython3-dev libxml2-dev uuid-dev tzdata \
     && rm -rf /var/lib/apt/lists/*
 
+# Shared libraries Playwright's browsers link against. Without them the
+# browsers download and then refuse to launch, so an agent in this image can
+# run the unit tests of a web project but never its end-to-end ones.
+#
+# The package list, the libraries it has to deliver, and the check that it did
+# all live beside the script, so the manager-image workflow can run exactly
+# this against the same base image on a pull request.
+COPY manager/browser-packages.txt manager/browser-libraries.txt /opt/browser/
+COPY manager/bin/install-browser-libraries.sh /opt/browser/install.sh
+RUN sh /opt/browser/install.sh /opt/browser
+
+FROM runtime-packages AS runtime
+
 COPY --from=rust-toolchain /opt/rust /opt/rust
 COPY --from=go-toolchain /usr/local/go /usr/local/go
 COPY --from=jvm /opt/jvm /opt/jvm
@@ -343,9 +361,7 @@ ENV PATH="$PATH:/opt/rust/bin:/usr/local/go/bin:/opt/jvm/gradle/bin:/opt/jvm/mav
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN ln -s /usr/local/bin/bun /usr/local/bin/bunx
 
-RUN groupadd --system zone \
-    && useradd --system --gid zone --create-home --home-dir /home/zone --shell /bin/bash zone \
-    && mkdir -p /opt/tools/bin \
+RUN mkdir -p /opt/tools/bin \
     && chown -R zone:zone /opt/tools \
     && printf 'prefix=/opt/tools\n' > /etc/npmrc \
     && printf '[global]\nbreak-system-packages = true\n' > /etc/pip.conf \

@@ -5,10 +5,10 @@
 //! its agreed answer is written to the knowledge store as a standing instruction.
 //!
 //! A wrongly promoted instruction silently steers every later answer in the workspace,
-//! so the bars are deliberately high: the question must recur across several separate
-//! chats, the cluster must stay tight around its first member, and the answers given
-//! must agree with each other. Every promotion records its provenance and can be
-//! retired with [`crate::db::knowledge::retire_standing_instruction`].
+//! so no single thread can promote one: the question must recur in more than one chat,
+//! the cluster must stay tight around its first member, and the answers given must
+//! agree with each other. Every promotion records its provenance and can be retired
+//! with [`crate::db::knowledge::retire_standing_instruction`].
 //!
 //! A cluster that clears every bar is still screened against the rulebook the
 //! memory tools share, [`crate::agent::memory::rules`], so a credential, a
@@ -27,8 +27,8 @@ use crate::db::{DbResult, knowledge};
 use crate::state::AppState;
 
 pub const PROMOTION_INTERVAL_SECONDS: u64 = 6 * 60 * 60;
-const MINIMUM_OCCURRENCES: usize = 4;
-const MINIMUM_DISTINCT_CHATS: usize = 3;
+const MINIMUM_OCCURRENCES: usize = 3;
+const MINIMUM_DISTINCT_CHATS: usize = 2;
 const MINIMUM_QUESTION_SIMILARITY: f32 = 0.88;
 const ANSWER_SIMILARITY: f32 = 0.85;
 const MINIMUM_ANSWER_AGREEMENT: f32 = 0.6;
@@ -53,7 +53,8 @@ pub struct PromotionPolicy {
     pub minimum_question_similarity: f32,
     /// Cosine similarity at which two answers count as saying the same thing.
     pub answer_similarity: f32,
-    /// Fraction of the cluster's answers that must agree with the one being promoted.
+    /// Fraction of the cluster's other answers that must agree with the one being
+    /// promoted. High enough that the minimum number of answers must be unanimous.
     pub minimum_answer_agreement: f32,
     pub minimum_question_characters: usize,
     pub minimum_answer_characters: usize,
@@ -390,7 +391,7 @@ pub struct Screening {
 ///
 /// Only the half a server can check is enforced here, because a worker has no
 /// prompt to carry the rest. What keeps a one-off disclosure out is upstream:
-/// an answer reaches this point only after recurring across several chats with
+/// an answer reaches this point only after recurring in more than one chat with
 /// its wording agreed.
 pub fn screen(candidates: Vec<PromotionCandidate>) -> Screening {
     let mut screening = Screening::default();
@@ -482,8 +483,13 @@ async fn active_workspaces(pool: &PgPool, since: NaiveDateTime) -> DbResult<Vec<
     .await
 }
 
-/// Each user question in the workspace paired with the assistant reply it drew,
-/// skipping any question whose reply is separated from it by another question.
+/// Each question a member typed in the workspace paired with the assistant reply it
+/// drew, skipping any question whose reply is separated from it by another user message.
+///
+/// A prompt that a reminder, a watch or another automation posts under the member's
+/// role is not a question anybody asked, and it repeats by construction: two watches in
+/// two chats would clear every bar on their own. The predicate is
+/// `db::chats::typed`, stated in the form `idx_messages_typed` indexes.
 ///
 /// The cap keeps the most recent exchanges, so a busy workspace keeps learning rather
 /// than freezing on its oldest history.
@@ -532,6 +538,10 @@ pub async fn load_exchanges(
             ON answer_embedding.message_id = reply.id
         WHERE chat.workspace_id = $1
           AND question.role = 'user'
+          AND NOT COALESCE(
+              jsonb_typeof(question.metadata) = 'object' AND question.metadata ? 'source',
+              FALSE
+          )
           AND question.created_at >= $2
           AND char_length(question.content) >= $3
         ORDER BY question.created_at DESC, question.id DESC
@@ -644,7 +654,10 @@ pub async fn run_cycle(state: &AppState, policy: &PromotionPolicy) -> DbResult<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::chats::typed;
+    use crate::db::message_embeddings::store_message_embedding;
     use chrono::NaiveDate;
+    use serde_json::{Value, json};
 
     const EMBEDDING_DIMENSION: usize = 4;
     const TESTS_QUESTION: [f32; 4] = [1.0, 0.05, 0.0, 0.0];
@@ -719,6 +732,20 @@ mod tests {
         ]
     }
 
+    const DISSENTING_ANSWER: &str =
+        "Ask the platform team to run them for you in the shared environment.";
+
+    fn with_one_dissenter(occurrences: usize) -> Vec<Exchange> {
+        let mut exchanges = recurring_question();
+        exchanges.truncate(occurrences);
+        let dissenter = exchanges
+            .last_mut()
+            .expect("at least one exchange to dissent");
+        dissenter.answer = DISSENTING_ANSWER.to_string();
+        dissenter.answer_embedding = Some(CONTRADICTING_ANSWER.to_vec());
+        exchanges
+    }
+
     fn answered(answer: &str) -> Vec<Exchange> {
         recurring_question()
             .into_iter()
@@ -762,14 +789,34 @@ mod tests {
     #[test]
     fn cluster_below_occurrence_threshold_is_not_promoted() {
         let mut exchanges = recurring_question();
-        exchanges.truncate(3);
+        exchanges.truncate(2);
 
         let policy = PromotionPolicy::default();
-        assert_eq!(policy.minimum_occurrences, 4);
         assert!(
             promotion_candidates(&exchanges, &policy).is_empty(),
-            "three occurrences must stay below the four-occurrence bar"
+            "two occurrences must stay below the three-occurrence bar"
         );
+        assert_eq!(policy.minimum_occurrences, 3);
+    }
+
+    #[test]
+    fn three_occurrences_across_two_chats_are_promoted() {
+        let mut exchanges = recurring_question();
+        exchanges.truncate(3);
+        exchanges[2].chat_id = exchanges[1].chat_id;
+
+        let candidates = promotion_candidates(&exchanges, &PromotionPolicy::default());
+
+        assert_eq!(
+            candidates.len(),
+            1,
+            "a question asked three times in two chats should promote"
+        );
+        let candidate = &candidates[0];
+        assert_eq!(candidate.answer, RUN_TESTS_ANSWER);
+        assert_eq!(candidate.occurrences, 3);
+        assert_eq!(candidate.distinct_chats, 2);
+        assert!((candidate.agreement - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -789,16 +836,15 @@ mod tests {
     fn repetition_inside_one_chat_is_not_promoted() {
         let exchanges: Vec<Exchange> = recurring_question()
             .into_iter()
-            .enumerate()
-            .map(|(index, mut exchange)| {
-                exchange.chat_id = Uuid::from_u128(if index == 0 { 101 } else { 102 });
+            .map(|mut exchange| {
+                exchange.chat_id = Uuid::from_u128(101);
                 exchange
             })
             .collect();
 
         assert!(
             promotion_candidates(&exchanges, &PromotionPolicy::default()).is_empty(),
-            "a question repeated within two chats must not clear the three-chat bar"
+            "a question repeated within one chat must not clear the two-chat bar"
         );
     }
 
@@ -921,7 +967,7 @@ mod tests {
             105,
             "How do I run the tests again?",
             TESTS_QUESTION,
-            "Ask the platform team to run them for you in the shared environment.",
+            DISSENTING_ANSWER,
             CONTRADICTING_ANSWER,
         ));
 
@@ -932,6 +978,42 @@ mod tests {
             "the answer the workspace agrees on must win over a lone outlier"
         );
         assert!(candidates[0].agreement >= 0.6);
+    }
+
+    #[test]
+    fn three_answers_with_one_dissenter_are_not_promoted() {
+        let policy = PromotionPolicy::default();
+        let exchanges = with_one_dissenter(3);
+
+        assert!(
+            promotion_candidates(&exchanges, &policy).is_empty(),
+            "at the minimum count the answers must be unanimous"
+        );
+
+        let unbarred = PromotionPolicy {
+            minimum_answer_agreement: 0.5,
+            ..policy
+        };
+        let candidates = promotion_candidates(&exchanges, &unbarred);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "occurrences and chats pass, so answer agreement is what refused it"
+        );
+        assert!((candidates[0].agreement - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn four_answers_with_one_dissenter_are_promoted() {
+        let candidates = promotion_candidates(&with_one_dissenter(4), &PromotionPolicy::default());
+
+        assert_eq!(
+            candidates.len(),
+            1,
+            "two of the other three agreeing clears the 0.6 bar"
+        );
+        assert_eq!(candidates[0].answer, RUN_TESTS_ANSWER);
+        assert!((candidates[0].agreement - 2.0 / 3.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1108,12 +1190,218 @@ mod tests {
         );
     }
 
+    const WATCH_PROMPT: &str = "What changed in the deploy queue since the last reading?";
+    const WATCH_ANSWER: &str = "Nothing has changed in the deploy queue since the last reading.";
+
+    /// A workspace of its own in the test database, so a pass reads only the
+    /// exchanges its test stored.
+    struct Stored {
+        pool: PgPool,
+        workspace: Uuid,
+    }
+
+    impl Stored {
+        async fn workspace() -> Self {
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("isolated test database"),
+            )
+            .await
+            .expect("the test database accepts connections");
+            let organization = Uuid::new_v4();
+            let workspace = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Promotion', $1::text)",
+            )
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+            sqlx::query(
+                "INSERT INTO workspaces (id, organization_id, name, slug) VALUES ($1, $2, 'Promotion', $1::text)",
+            )
+            .bind(workspace)
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("a workspace");
+            Self { pool, workspace }
+        }
+
+        async fn chat(&self) -> Uuid {
+            sqlx::query_scalar(
+                "INSERT INTO chats (workspace_id, title, model_name) VALUES ($1, 'Work', 'test') RETURNING id",
+            )
+            .bind(self.workspace)
+            .fetch_one(&self.pool)
+            .await
+            .expect("a chat")
+        }
+
+        /// A user-role message stored `minutes_ago` and the reply it drew a
+        /// second later, both embedded.
+        async fn exchange(
+            &self,
+            chat: Uuid,
+            question: &str,
+            metadata: Option<Value>,
+            minutes_ago: i32,
+        ) {
+            let asked: Uuid = sqlx::query_scalar(
+                "INSERT INTO messages (chat_id, role, content, metadata, created_at)
+                 VALUES ($1, 'user', $2, $3, NOW() - make_interval(mins => $4))
+                 RETURNING id",
+            )
+            .bind(chat)
+            .bind(question)
+            .bind(metadata)
+            .bind(minutes_ago)
+            .fetch_one(&self.pool)
+            .await
+            .expect("a question");
+            let replied: Uuid = sqlx::query_scalar(
+                "INSERT INTO messages (chat_id, role, content, created_at)
+                 VALUES ($1, 'assistant', $2, NOW() - make_interval(mins => $3) + INTERVAL '1 second')
+                 RETURNING id",
+            )
+            .bind(chat)
+            .bind(WATCH_ANSWER)
+            .bind(minutes_ago)
+            .fetch_one(&self.pool)
+            .await
+            .expect("a reply");
+            for (message, embedding) in [(asked, TESTS_QUESTION), (replied, TESTS_ANSWER)] {
+                store_message_embedding(&self.pool, message, chat, &embedding, "test")
+                    .await
+                    .expect("an embedding");
+            }
+        }
+
+        async fn promote(&self) -> PromotionReport {
+            promote_workspace(&self.pool, self.workspace, &PromotionPolicy::default())
+                .await
+                .expect("the pass runs")
+        }
+
+        async fn instructions(&self) -> Vec<String> {
+            knowledge::list_standing_instructions(&self.pool, self.workspace)
+                .await
+                .expect("the standing instructions")
+                .into_iter()
+                .map(|instruction| instruction.content)
+                .collect()
+        }
+    }
+
+    /// A condition watch asks the same thing at every firing, and each firing is
+    /// stored under the member's role in the chat it reports to. Two watches in
+    /// two chats cleared every bar without anybody having asked anything.
+    #[tokio::test]
+    async fn a_prompt_a_reminder_repeats_across_chats_is_not_promoted() {
+        let stored = Stored::workspace().await;
+        let first = stored.chat().await;
+        let second = stored.chat().await;
+        for (chat, minutes_ago) in [(first, 30), (first, 20), (second, 10)] {
+            let fired = json!({"source": "reminder", "reminder_id": Uuid::new_v4()});
+            stored
+                .exchange(chat, WATCH_PROMPT, Some(fired), minutes_ago)
+                .await;
+        }
+
+        assert_eq!(stored.promote().await, PromotionReport::default());
+        assert_eq!(stored.instructions().await, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn the_same_question_typed_across_chats_is_still_promoted() {
+        let stored = Stored::workspace().await;
+        let first = stored.chat().await;
+        let second = stored.chat().await;
+        for (chat, metadata, minutes_ago) in [
+            (first, None, 30),
+            (first, Some(json!({})), 20),
+            (second, Some(json!({"actor_id": Uuid::new_v4()})), 10),
+        ] {
+            stored
+                .exchange(chat, WATCH_PROMPT, metadata, minutes_ago)
+                .await;
+        }
+
+        assert_eq!(
+            stored.promote().await,
+            PromotionReport {
+                exchanges: 3,
+                candidates: 1,
+                created: 1,
+                ..PromotionReport::default()
+            }
+        );
+        assert_eq!(stored.instructions().await, [WATCH_ANSWER]);
+    }
+
+    /// The query states in SQL what `db::chats::typed` states in Rust, so the
+    /// two are held together over every shape metadata is stored in.
+    #[tokio::test]
+    async fn a_question_is_read_exactly_when_the_chat_store_calls_it_typed() {
+        let stored = Stored::workspace().await;
+        let chat = stored.chat().await;
+        let shapes = [
+            ("nothing", None),
+            ("an empty object", Some(json!({}))),
+            ("an actor", Some(json!({"actor_id": Uuid::new_v4()}))),
+            ("a reminder", Some(json!({"source": "reminder"}))),
+            ("a project", Some(json!({"source": "auto_project"}))),
+            ("a null source", Some(json!({"source": null}))),
+            ("a list", Some(json!(["source"]))),
+        ];
+        let question = |label: &str| format!("A question stored with {label} as its metadata");
+        let mut expected = Vec::new();
+        for (minutes_ago, (label, metadata)) in (1..).zip(shapes) {
+            if typed("user", metadata.as_ref()) {
+                expected.push(question(label));
+            }
+            stored
+                .exchange(chat, &question(label), metadata, minutes_ago)
+                .await;
+        }
+
+        let mut read: Vec<String> =
+            load_exchanges(&stored.pool, stored.workspace, &PromotionPolicy::default())
+                .await
+                .expect("the exchanges")
+                .into_iter()
+                .map(|exchange| exchange.question)
+                .collect();
+        read.sort();
+        expected.sort();
+
+        assert_eq!(read, expected);
+        assert_eq!(
+            expected,
+            [
+                question("a list"),
+                question("an actor"),
+                question("an empty object"),
+                question("nothing"),
+            ]
+        );
+    }
+
     #[test]
-    fn default_policy_keeps_a_high_bar() {
+    fn the_default_policy_asks_for_three_occurrences_in_two_chats_and_keeps_its_similarity_bars() {
         let policy = PromotionPolicy::default();
-        assert!(policy.minimum_occurrences >= 4);
-        assert!(policy.minimum_distinct_chats >= 3);
-        assert!(policy.minimum_question_similarity >= 0.85);
-        assert!(policy.minimum_answer_agreement > 0.5);
+        assert_eq!(policy.minimum_occurrences, 3);
+        assert_eq!(policy.minimum_distinct_chats, 2);
+        assert!(
+            (policy.minimum_question_similarity - 0.88).abs() < 1e-6,
+            "kept: it decides which questions are the same one, and lower merges different ones"
+        );
+        assert!(
+            (policy.answer_similarity - 0.85).abs() < 1e-6,
+            "kept: it decides which answers say the same thing, and lower counts dissent as agreement"
+        );
+        assert!(
+            (policy.minimum_answer_agreement - 0.6).abs() < 1e-6,
+            "kept: three answers agree at 0, 0.5 or 1, so 0.6 holds the minimum to unanimity"
+        );
     }
 }

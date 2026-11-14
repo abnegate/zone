@@ -75,6 +75,7 @@ impl Workspace {
             chat_id: Some(chat),
             user_id: self.owner.user,
             offline: false,
+            origin: zone_server::db::tasks::Origin::Member,
         })
         .await
     }
@@ -88,6 +89,7 @@ impl Workspace {
             self.workspace,
             self.owner.user,
             Some(self.chat),
+            zone_server::db::tasks::Origin::Member,
             input,
         )
         .await

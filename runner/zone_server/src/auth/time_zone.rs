@@ -2,7 +2,7 @@
 
 use axum::http::HeaderMap;
 
-use crate::services::time_zone::TimeZone;
+use crate::services::time_zone::{self, TimeZone};
 
 pub const HEADER: &str = "x-zone-time-zone";
 
@@ -11,7 +11,7 @@ pub fn claim(headers: &HeaderMap) -> Option<TimeZone> {
     headers
         .get(HEADER)
         .and_then(|value| value.to_str().ok())
-        .and_then(|name| TimeZone::parse(name).ok())
+        .and_then(|name| time_zone::parse(name).ok())
 }
 
 #[cfg(test)]

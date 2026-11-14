@@ -1,0 +1,92 @@
+import { memo, useLayoutEffect, useRef } from 'react';
+import { gestureOf, keepText } from '../../gesture';
+import type { Relations } from '../../relations';
+import type { TitleDraft } from '../../TitleDraft';
+import { awaitsTitle } from '../../title';
+import type { BoardActions, Task } from '../../types';
+import { TaskTitleInput } from '../TaskTitleInput';
+import { CardBody } from './CardBody';
+import { CardMenu } from './CardMenu';
+import { CardSensor } from './CardSensor';
+
+export interface CardContentProps {
+  task: Task;
+  projects: string;
+  relations: Relations;
+  now: number;
+  renaming: TitleDraft | null;
+  selected: boolean;
+  writable: boolean;
+  actions: BoardActions;
+}
+
+export const CardContent = memo(function CardContent({
+  task,
+  projects,
+  relations,
+  now,
+  renaming,
+  selected,
+  writable,
+  actions,
+}: CardContentProps) {
+  const open = useRef<HTMLButtonElement>(null);
+  const wasRenaming = useRef(renaming !== null);
+  const pending = awaitsTitle(task);
+
+  useLayoutEffect(() => {
+    const lost = document.activeElement === null || document.activeElement === document.body;
+    if (wasRenaming.current && !renaming && lost) open.current?.focus();
+    wasRenaming.current = renaming !== null;
+  }, [renaming]);
+
+  const title =
+    renaming && writable ? (
+      <TaskTitleInput
+        title={task.title}
+        draft={renaming}
+        onSave={(value) => actions.retitle(task, value)}
+        onDone={() => actions.finish(task)}
+      />
+    ) : (
+      <button
+        ref={open}
+        type="button"
+        className={
+          pending
+            ? 'task-card-title task-card-open task-card-title-pending'
+            : 'task-card-title task-card-open'
+        }
+        title={task.title}
+        aria-busy={pending || undefined}
+        onMouseDown={keepText}
+        onClick={(event) => {
+          const gesture = writable ? gestureOf(event) : null;
+          if (gesture === null) {
+            actions.open(task);
+            return;
+          }
+          event.preventDefault();
+          actions.select(task, gesture);
+        }}
+      >
+        {task.title}
+      </button>
+    );
+
+  return (
+    <>
+      <CardBody
+        task={task}
+        projects={projects}
+        relations={relations}
+        now={now}
+        title={title}
+        onOpen={(related) => actions.open(related, task)}
+      />
+      <div className="task-card-menu" onPointerDown={CardSensor.shield}>
+        <CardMenu task={task} selected={selected} writable={writable} actions={actions} />
+      </div>
+    </>
+  );
+});

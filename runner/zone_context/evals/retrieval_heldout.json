@@ -85,9 +85,9 @@
       "id": "derive_encryption_key",
       "query": "Where is the AES-256-GCM encryption key derived with Argon2id?",
       "expect_identifiers": [],
-      "expect_uri_contains": ["crypto/mod.rs"],
+      "expect_uri_contains": ["secret/derivation.rs"],
       "judgments": [
-        {"uri_contains": "crypto/mod.rs", "grade": 3, "must_contain": ["derive_key"]},
+        {"uri_contains": "secret/derivation.rs", "grade": 3, "must_contain": ["derive", "MasterKey"]},
         {"uri_contains": "state.rs", "grade": 2}
       ]
     },
@@ -99,16 +99,6 @@
       "judgments": [
         {"uri_contains": "adapters/notion.rs", "grade": 3, "must_contain": ["NotionAdapter"]},
         {"uri_contains": "adapters/mod.rs", "grade": 2}
-      ]
-    },
-    {
-      "id": "trim_command_output",
-      "query": "How does run_command trim oversized stdout?",
-      "expect_identifiers": ["run_command"],
-      "expect_uri_contains": ["tools/command.rs"],
-      "judgments": [
-        {"uri_contains": "tools/command.rs", "grade": 3, "must_contain": ["trim_middle"]},
-        {"uri_contains": "agent/compact.rs", "grade": 1}
       ]
     },
     {

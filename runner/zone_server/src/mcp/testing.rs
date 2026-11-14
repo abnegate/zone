@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use uuid::Uuid;
+use zone_core::llm::BuiltinTools;
 
 use super::endpoint::PATH;
 use super::scope::Scope;
@@ -22,25 +23,19 @@ pub(crate) fn scope(chat: Uuid) -> Scope {
         user: Some(Uuid::new_v4()),
         approval: ApprovalPolicy::auto(),
         calls: UNLIMITED,
+        builtin: BuiltinTools::Withheld,
     }
-}
-
-pub(crate) fn state() -> AppState {
-    let db = sqlx::PgPool::connect_lazy("postgres://localhost/test")
-        .expect("a lazy pool needs no server");
-    let state = AppState::new(crate::state::test_config(), db, None);
-    state.disable_mcp();
-    state
 }
 
 pub(crate) async fn tools(chat: Uuid) -> Arc<ChatTools> {
     Arc::new(
         ChatTools::build(WorkspaceScope {
-            state: state(),
+            state: AppState::for_tests(),
             workspace_id: Uuid::new_v4(),
             chat_id: Some(chat),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         })
         .await,
     )
@@ -70,6 +65,7 @@ pub(crate) async fn open(approval: ApprovalPolicy) -> Opened {
             user: Some(user),
             approval: approval.clone(),
             calls: UNLIMITED,
+            builtin: BuiltinTools::Withheld,
         },
         Arc::clone(&tools),
         sender,

@@ -45,7 +45,12 @@ for (const width of [390, 1280]) {
     await page.getByText(chat.title, { exact: true }).click();
     await expect(page.getByRole('heading', { name: chat.title })).toBeVisible();
     const row = page.locator('.chat-item');
-    if (width < 768) await page.getByRole('button', { name: 'Back to chats' }).click();
+    if (width < 768) {
+      await page.getByRole('button', { name: 'Back to chats' }).click();
+      await expect(page).toHaveURL('/chats');
+      await expect(page.locator('.chats-page')).not.toHaveClass(/has-chat/);
+    }
+    await expect(row).toBeVisible();
     await row.hover();
     const actions = row.getByRole('button', { name: `Actions for ${chat.title}` });
     await actions.click();

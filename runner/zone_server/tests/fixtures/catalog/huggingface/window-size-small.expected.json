@@ -1,0 +1,157 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "author": "Qwen",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by Qwen. Qwen2 architecture with 32K context.",
+          "details": {
+            "context_length": 32768,
+            "family": "qwen2",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "0.5B"
+          },
+          "digest": "00000000000000000000000076cde359bc2f5649",
+          "downloads": 412331,
+          "likes": 132,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "size": 491400032,
+          "sizes": [
+            {
+              "label": "qwen2.5-0.5b-instruct",
+              "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct",
+              "size": 491400032
+            },
+            {
+              "label": "qwen2.5-0.5b-instruct-full-precision",
+              "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct-full-precision",
+              "size": 1265620000
+            }
+          ],
+          "tags": [
+            "gguf",
+            "chat",
+            "text-generation",
+            "en",
+            "conversational"
+          ],
+          "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "author": "TheBloke",
+          "description": "GGUF model by TheBloke. Llama architecture with 2K context.",
+          "details": {
+            "context_length": 2048,
+            "family": "llama",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "1.1B"
+          },
+          "digest": "0000000000000000000000005e5fdc6cd51304bf",
+          "downloads": 61277,
+          "likes": 177,
+          "modified_at": "2023-12-31T13:00:00.000Z",
+          "name": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "size": 668788096,
+          "tags": [
+            "gguf",
+            "llama",
+            "en",
+            "dataset:cerebras/SlimPajama-627B"
+          ],
+          "url": "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": "offset:2"
+    }
+  },
+  "list": {
+    "body": {
+      "models": [
+        {
+          "author": "Qwen",
+          "capabilities": [
+            "text"
+          ],
+          "description": "Text Generation GGUF model by Qwen. Qwen2 architecture with 32K context.",
+          "details": {
+            "context_length": 32768,
+            "family": "qwen2",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "0.5B"
+          },
+          "digest": "00000000000000000000000076cde359bc2f5649",
+          "downloads": 412331,
+          "likes": 132,
+          "modified_at": "2026-09-01T10:00:00.000Z",
+          "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "size": 491400032,
+          "sizes": [
+            {
+              "label": "qwen2.5-0.5b-instruct",
+              "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct",
+              "size": 491400032
+            },
+            {
+              "label": "qwen2.5-0.5b-instruct-full-precision",
+              "name": "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct-full-precision",
+              "size": 1265620000
+            }
+          ],
+          "tags": [
+            "gguf",
+            "chat",
+            "text-generation",
+            "en",
+            "conversational"
+          ],
+          "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        },
+        {
+          "author": "TheBloke",
+          "description": "GGUF model by TheBloke. Llama architecture with 2K context.",
+          "details": {
+            "context_length": 2048,
+            "family": "llama",
+            "format": "gguf",
+            "license": "apache-2.0",
+            "parameter_size": "1.1B"
+          },
+          "digest": "0000000000000000000000005e5fdc6cd51304bf",
+          "downloads": 61277,
+          "likes": 177,
+          "modified_at": "2023-12-31T13:00:00.000Z",
+          "name": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "size": 668788096,
+          "tags": [
+            "gguf",
+            "llama",
+            "en",
+            "dataset:cerebras/SlimPajama-627B"
+          ],
+          "url": "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "use_cases": [
+            "Chat"
+          ]
+        }
+      ],
+      "next_cursor": "offset:2"
+    },
+    "status": 200
+  }
+}

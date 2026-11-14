@@ -8,6 +8,8 @@ use crate::frontend::{self, FrontendKind};
 /// so this address must stay the same across launches.
 pub const WEBVIEW_BIND: &str = "127.0.0.1:24727";
 
+pub const MANAGER_DIR: &str = "manager";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientPlatform {
     Desktop,
@@ -72,7 +74,7 @@ fn is_filesystem_root(path: &std::path::Path) -> bool {
 /// Locate the bundled manager SPA for the Tauri client.
 pub fn resolve_manager_dir(inputs: ManagerDirInputs) -> PathBuf {
     if let Some(dir) = inputs.resource_dir.filter(|path| is_filesystem_root(path)) {
-        for candidate in [dir.join("manager"), dir.clone()] {
+        for candidate in [dir.join(MANAGER_DIR), dir.clone()] {
             if candidate.join("index.html").is_file() {
                 return candidate;
             }
@@ -80,7 +82,7 @@ pub fn resolve_manager_dir(inputs: ManagerDirInputs) -> PathBuf {
     }
 
     if let Some(dir) = inputs.app_data_dir {
-        let manager = dir.join("manager");
+        let manager = dir.join(MANAGER_DIR);
         if manager.join("index.html").is_file() {
             return manager;
         }
@@ -214,7 +216,7 @@ mod tests {
     fn prefers_bundled_resource_manager() {
         let root = tempfile::tempdir().unwrap();
         let resource = root.path().join("resources");
-        write_index(&resource.join("manager"));
+        write_index(&resource.join(MANAGER_DIR));
         write_index(&root.path().join("data/manager"));
         write_index(&root.path().join("share"));
 
@@ -230,7 +232,7 @@ mod tests {
                 cwd: root.path().join("cwd"),
                 system_share_dir: Some(root.path().join("share")),
             });
-            assert_eq!(resolved, resource.join("manager"));
+            assert_eq!(resolved, resource.join(MANAGER_DIR));
         }
     }
 
@@ -279,6 +281,25 @@ mod tests {
             });
             assert_eq!(resolved, data);
         }
+    }
+
+    #[test]
+    fn desktop_prefers_unpacked_bundle_over_share_and_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let unpacked = root.path().join("app-data").join(MANAGER_DIR);
+        write_index(&unpacked);
+        let share = root.path().join("usr/share/zone/manager");
+        write_index(&share);
+        write_index(&root.path().join("cwd/manager/frontend/build"));
+
+        let resolved = resolve_manager_dir(ManagerDirInputs {
+            platform: ClientPlatform::Desktop,
+            resource_dir: Some(root.path().join("Zone.app/Contents/Resources")),
+            app_data_dir: Some(root.path().join("app-data")),
+            cwd: root.path().join("cwd"),
+            system_share_dir: Some(share),
+        });
+        assert_eq!(resolved, unpacked);
     }
 
     #[test]

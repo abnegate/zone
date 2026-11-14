@@ -54,6 +54,9 @@ export interface SourceDefinition {
   // Public URL for this source, when one can be derived from the form
   getUrl?: (state: Record<string, unknown>) => string | undefined;
 
+  // The instance a token entered on the form is for, so a save is refused once the source reads elsewhere
+  getInstance?: (state: Record<string, unknown>) => string | undefined;
+
   // Get field IDs for state initialization
   getFieldIds: () => string[];
 }

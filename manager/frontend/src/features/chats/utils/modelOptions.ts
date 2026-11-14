@@ -44,8 +44,9 @@ export function selectedContextTokens(
   chosen: number | null | undefined,
   native?: number | null
 ): number {
-  if (chosen && chosen > 0) return chosen;
-  if (native && native > 0) return native;
+  const ceiling = native && native > 0 ? native : null;
+  if (chosen && chosen > 0) return ceiling ? Math.min(chosen, ceiling) : chosen;
+  if (ceiling) return ceiling;
   return DEFAULT_CONTEXT_TOKENS;
 }
 

@@ -37,7 +37,8 @@ fn embed_manager() {
         }
     }
 
-    if files.is_empty() {
+    let embedded = !files.is_empty();
+    if !embedded {
         let stub = copy_root.join("index.html");
         fs::write(&stub, "<!DOCTYPE html><title>Zone</title>").expect("stub manager");
         files.push(("index.html".into(), stub));
@@ -71,6 +72,7 @@ fn embed_manager() {
     }
     rust.push_str("];\n");
     rust.push_str(&format!("pub const STAMP: &str = \"{stamp}\";\n"));
+    rust.push_str(&format!("pub const EMBEDDED: bool = {embedded};\n"));
     fs::write(out.join("manager_files.rs"), rust).expect("write manager_files.rs");
 }
 

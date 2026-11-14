@@ -253,7 +253,6 @@ test.describe('Chat regressions', () => {
     socket.setOnSend(async () => {
       await socket.emit({ type: 'message_start', message_id: 'a1', role: 'assistant' });
       await socket.emit({ type: 'chunk', content: '```rust\nfn main() {\n', index: 0 });
-      await socket.emit({ type: 'status', message: 'Generating response…' });
     });
 
     await page.fill('.message-form textarea', 'Show a rust main');
@@ -766,6 +765,7 @@ test.describe('Chat regressions', () => {
         tool_call_id: 'tool',
         name: 'read_file',
         arguments: '{}',
+        at: 'Half a'.length,
       });
     });
 
@@ -794,6 +794,7 @@ test.describe('Chat regressions', () => {
       tool_call_id: 'tool',
       name: 'read_file',
       arguments: '{}',
+      at: 'Half a'.length,
     });
     await expect(page.getByText('Running…')).toBeVisible();
     await expect(page.getByText('Did not finish')).toHaveCount(0);
@@ -814,13 +815,43 @@ test.describe('Chat regressions', () => {
       content: 'Half a reply, finished after the drop.',
     });
 
-    await expect(page.getByText('Half a reply, finished after the drop.')).toBeVisible();
-    await expect(page.getByText('Read 20 lines')).toBeVisible();
+    await expect(page.locator('.message-assistant .message-content')).toHaveText(
+      /^Half a.*Read 20 lines.*reply, finished after the drop\.$/
+    );
     await expect(page.getByText('[Stopped before answering]')).toHaveCount(0);
     await page.screenshot({
       path: testInfo.outputPath('resumes-after-drop.png'),
       fullPage: true,
     });
+  });
+
+  test('going back before the address catches up keeps the chat closed', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockChatRoutes(page);
+    await page.reload();
+    await expect(page.locator('.chat-item')).toHaveCount(1);
+
+    // The router commits the chat's address in a transition, a task after the
+    // click itself, so going back in between is what a quick tap on a busy
+    // phone does.
+    const closed = await page.evaluate(async () => {
+      const settle = async () => {
+        for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+      };
+      document.querySelector<HTMLElement>('.chat-item')?.click();
+      await settle();
+      const back = document.querySelector<HTMLElement>('.chat-back');
+      back?.click();
+      await settle();
+      return back !== null && !document.querySelector('.chats-page.has-chat');
+    });
+    expect(closed).toBe(true);
+
+    await expect(page).toHaveURL('/chats');
+    await expect(page.locator('.chat-item')).toBeVisible();
+    await page.waitForTimeout(500);
+    await expect(page.locator('.chats-page')).not.toHaveClass(/has-chat/);
+    await expect(page.locator('.chat-item')).not.toHaveClass(/active/);
   });
 
   test('shows a replay that arrived before the chat had loaded', async ({ page }, testInfo) => {

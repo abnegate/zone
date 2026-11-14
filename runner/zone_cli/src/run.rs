@@ -2,21 +2,47 @@
 //!
 //! Handles running the AI agent locally.
 
+use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use abnegate_agent::Agent;
+use abnegate_agent::AgentCallback;
+use abnegate_agent::AgentConfig;
+use abnegate_agent::AgentPhase;
+use abnegate_agent::AgentState;
+use abnegate_agent::FileSessionStore;
+use abnegate_agent::Session;
+use abnegate_agent::SessionStore;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::session::SessionError;
+use abnegate_agent::tool::Preview;
+use abnegate_agent::tool::Tier;
+use abnegate_agent::tool::ToolResult;
 use abnegate_llm::LlmConfig;
+use abnegate_llm::ToolCall;
+use async_trait::async_trait;
 use console::style;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
 use thiserror::Error;
-
-use zone_core::{
-    Agent, AgentCallback, AgentConfig, AgentError, AgentPhase, FileSessionStore, LlmClient,
-    Session, SessionStore, ToolContext, ToolResult, llm,
-};
+use zone_core::commands;
+use zone_core::commands::Shell;
+use zone_core::llm;
+use zone_core::llm::LlmClient;
+use zone_core::local;
+use zone_core::servers;
 
 use crate::auth::AuthManager;
 use crate::config::Config;
 use crate::explanation::Explanation;
+
+#[cfg(test)]
+mod turns;
+
+const MAXIMUM_TOKENS: u32 = 4096;
+
+const TEMPERATURE: f32 = 0.7;
 
 /// Run error
 #[derive(Debug, Error)]
@@ -38,9 +64,9 @@ pub enum RunError {
     )]
     LlmNotConfigured { path: String },
     #[error("Agent error: {0}")]
-    Agent(#[from] AgentError),
+    Agent(#[from] abnegate_agent::RunError),
     #[error("Session error: {0}")]
-    Session(#[from] zone_core::session::SessionError),
+    Session(#[from] SessionError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -69,32 +95,34 @@ impl CliCallback {
     }
 }
 
+#[async_trait]
 impl AgentCallback for CliCallback {
     fn on_phase_change(&self, phase: AgentPhase, message: Option<&str>) {
-        let msg = match phase {
+        let label = match phase {
             AgentPhase::Thinking => "Thinking...".to_string(),
             AgentPhase::Acting => "Executing tools...".to_string(),
             AgentPhase::Observing => "Processing results...".to_string(),
             AgentPhase::Responding => "Generating response...".to_string(),
             AgentPhase::Complete => "Complete".to_string(),
             AgentPhase::Error => "Error".to_string(),
+            _ => phase.to_string(),
         };
 
         if let Some(detail) = message {
-            self.spinner.set_message(format!("{} ({})", msg, detail));
+            self.spinner.set_message(format!("{} ({})", label, detail));
         } else {
-            self.spinner.set_message(msg);
+            self.spinner.set_message(label);
         }
     }
 
-    fn on_tool_call(&self, tool_name: &str, args: &str) {
+    fn on_tool_call(&self, tool_name: &str, arguments: &str) {
         if self.verbose {
             self.spinner.suspend(|| {
                 println!(
                     "{} {} {}",
                     style("→").cyan(),
                     style(tool_name).yellow().bold(),
-                    style(truncate(args, 80)).dim()
+                    style(truncate(arguments, 80)).dim()
                 );
             });
         } else {
@@ -130,15 +158,18 @@ impl AgentCallback for CliCallback {
         self.finish();
         println!("\n{}\n", response);
     }
+
+    async fn approve(&self, _call: &ToolCall, _tier: Tier, _preview: &Preview) -> bool {
+        true
+    }
 }
 
-/// Truncate a string to a maximum length
-fn truncate(s: &str, max_len: usize) -> String {
-    let s = s.replace('\n', " ");
-    if s.len() > max_len {
-        format!("{}...", &s[..max_len])
-    } else {
-        s
+/// Truncate a string to a maximum number of characters
+fn truncate(text: &str, maximum_length: usize) -> String {
+    let text = text.replace('\n', " ");
+    match text.char_indices().nth(maximum_length) {
+        Some((cut, _)) => format!("{}...", &text[..cut]),
+        None => text,
     }
 }
 
@@ -161,10 +192,89 @@ fn llm_config(config: &Config) -> Result<LlmConfig, RunError> {
         config.model.clone(),
         config.llm_api_key.clone().unwrap_or_default(),
     )
-    .with_temperature(0.7)
-    .with_maximum_tokens(4096)
+    .with_temperature(TEMPERATURE)
+    .with_maximum_tokens(MAXIMUM_TOKENS)
     .with_timeout(llm::TIMEOUT)
     .with_read_timeout(llm::READ_TIMEOUT))
+}
+
+/// The tools a local run offers before any MCP server's are added
+fn registry() -> ToolRegistry {
+    commands::registry(Shell::Excluded)
+}
+
+/// The tools a local run offers, and how many MCP servers contributed to them
+async fn tools() -> (ToolRegistry, usize) {
+    let mut tools = registry();
+    let connected = servers::attach(&mut tools).await;
+    (tools, connected)
+}
+
+/// The agent a local run drives in `working_directory`, given `tools` from
+/// `connected` MCP servers
+fn agent(
+    llm: LlmClient,
+    tools: ToolRegistry,
+    connected: usize,
+    maximum_iterations: usize,
+    working_directory: &Path,
+) -> Agent {
+    let model = llm.config().default_model.clone();
+    let guidance = servers::prompt(connected, &tools.names());
+    let summarizer = Arc::new(llm.summarizer());
+    let config = AgentConfig::default()
+        .with_maximum_iterations(maximum_iterations)
+        .with_maximum_tokens(MAXIMUM_TOKENS);
+    Agent::new(
+        Arc::new(llm),
+        model,
+        tools,
+        config,
+        local::context(working_directory),
+    )
+    .with_summarizer(summarizer)
+    .with_guidance(guidance)
+}
+
+/// Save a finished first turn on `prompt`, run in `working_directory`
+async fn save(
+    store: &dyn SessionStore,
+    state: AgentState,
+    prompt: &str,
+    working_directory: &Path,
+) -> Result<Session, SessionError> {
+    let session = Session::new(
+        state,
+        create_session_title(prompt),
+        Some(working_directory.display().to_string()),
+    );
+    store.save(&session).await?;
+    Ok(session)
+}
+
+/// The directory a resumed session works in: its own, or the current one
+fn working_directory(session: &Session) -> PathBuf {
+    session
+        .project_directory
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap())
+}
+
+/// Continue `session` with `prompt`, and save it
+async fn proceed(
+    agent: &Agent,
+    store: &dyn SessionStore,
+    session: &mut Session,
+    prompt: &str,
+    callback: &dyn AgentCallback,
+) -> Result<(), RunError> {
+    agent
+        .continue_run(&mut session.state, prompt, callback)
+        .await?;
+    session.updated_at = chrono::Utc::now();
+    store.save(session).await?;
+    Ok(())
 }
 
 /// Run the agent with a prompt
@@ -188,28 +298,21 @@ pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result
         style(format!("({})", metadata.host)).dim()
     );
 
-    // Set up working directory
-    let cwd = if let Some(ws) = workspace {
-        PathBuf::from(ws)
+    let cwd = if let Some(workspace) = workspace {
+        PathBuf::from(workspace)
     } else {
         std::env::current_dir()?
     };
 
-    // Create agent
-    let llm = LlmClient::new(llm_config);
-    let tools = zone_core::tools::with_defaults_and_mcp().await;
-    let agent_config = AgentConfig {
-        max_iterations: config.max_iterations as usize,
-        ..Default::default()
-    };
-    let context = ToolContext {
-        cwd: cwd.clone(),
-        ..Default::default()
-    };
+    let (tools, connected) = tools().await;
+    let agent = agent(
+        LlmClient::new(llm_config),
+        tools,
+        connected,
+        config.max_iterations as usize,
+        &cwd,
+    );
 
-    let agent = Agent::new(llm, tools, agent_config, context);
-
-    // Create callback
     let callback = CliCallback::new(verbose);
 
     println!(
@@ -219,14 +322,10 @@ pub async fn run(prompt: &str, workspace: Option<&str>, verbose: bool) -> Result
     );
     println!();
 
-    // Run agent
     let state = agent.run(prompt, &callback).await?;
 
-    // Save session
     let session_store = FileSessionStore::new(Config::ensure_sessions_directory()?);
-    let title = create_session_title(prompt);
-    let session = Session::new(state, title, Some(cwd.display().to_string()));
-    session_store.save(&session).await?;
+    let session = save(&session_store, state, prompt, &cwd).await?;
 
     println!(
         "{} {} {}",
@@ -243,8 +342,7 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
     let config = Config::load()?;
     let session_store = FileSessionStore::new(Config::ensure_sessions_directory()?);
 
-    // Load session
-    let session = if last {
+    let mut session = if last {
         session_store
             .most_recent()
             .await?
@@ -254,13 +352,11 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
             uuid::Uuid::parse_str(id).map_err(|_| RunError::InvalidSession(id.to_string()))?;
         session_store.load(uuid).await?
     } else {
-        // Interactive selection
         let summaries = session_store.list().await?;
         if summaries.is_empty() {
             return Err(RunError::NoSessions);
         }
 
-        // Display sessions
         println!("{}", style("Recent sessions:").bold());
         for (i, s) in summaries.iter().take(10).enumerate() {
             let status = if s.finished {
@@ -282,7 +378,6 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
             );
         }
 
-        // Use dialoguer for selection
         let selection: usize = dialoguer::Input::new()
             .with_prompt("Select session (1-10)")
             .validate_with(|input: &usize| {
@@ -322,43 +417,23 @@ pub async fn resume(session_id: Option<&str>, last: bool, verbose: bool) -> Resu
         style(format!("({})", metadata.host)).dim()
     );
 
-    let cwd = session
-        .project_dir
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap());
+    let cwd = working_directory(&session);
+    let (tools, connected) = tools().await;
+    let agent = agent(
+        LlmClient::new(llm_config),
+        tools,
+        connected,
+        config.max_iterations as usize,
+        &cwd,
+    );
 
-    let llm = LlmClient::new(llm_config);
-    let tools = zone_core::tools::with_defaults_and_mcp().await;
-    let agent_config = AgentConfig {
-        max_iterations: config.max_iterations as usize,
-        ..Default::default()
-    };
-    let context = ToolContext {
-        cwd: cwd.clone(),
-        ..Default::default()
-    };
-
-    let agent = Agent::new(llm, tools, agent_config, context);
-
-    // Get continuation prompt
     let prompt: String = dialoguer::Input::new()
         .with_prompt("Continue with")
         .interact_text()?;
 
     let callback = CliCallback::new(verbose);
 
-    // Continue the session
-    let mut session = session;
-    agent
-        .continue_run(&mut session.state, &prompt, &callback)
-        .await?;
-
-    // Update timestamp and save
-    session.updated_at = chrono::Utc::now();
-    session_store.save(&session).await?;
-
-    Ok(())
+    proceed(&agent, &session_store, &mut session, &prompt, &callback).await
 }
 
 /// List recent sessions
@@ -392,7 +467,7 @@ pub async fn list_sessions(limit: usize) -> Result<(), RunError> {
             style(format!("({})", age_str)).dim()
         );
 
-        if let Some(dir) = &s.project_dir {
+        if let Some(dir) = &s.project_directory {
             println!("    {}", style(dir).dim());
         }
     }
@@ -451,6 +526,13 @@ mod tests {
     #[test]
     fn test_truncate_empty() {
         assert_eq!(truncate("", 10), "");
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_character() {
+        let text = format!("a{}", "é".repeat(80));
+
+        assert_eq!(truncate(&text, 80), format!("a{}...", "é".repeat(79)));
     }
 
     #[test]

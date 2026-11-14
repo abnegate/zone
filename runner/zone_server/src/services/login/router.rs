@@ -14,11 +14,11 @@ pub use observed::Observed;
 
 use std::cmp::Ordering;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_llm::{Limit, Window};
 use chrono::{DateTime, TimeDelta, Utc};
 use futures::future::join_all;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use super::credential;
 use super::usage::{self, Availability, Snapshot};
@@ -38,7 +38,9 @@ const REST: TimeDelta = TimeDelta::minutes(5);
 /// every login but those in `exclude` is resolved, its usage brought up to date, and ranked:
 /// `preferred`'s logins before every other agent's, and within an agent the most headroom first,
 /// then those whose usage is unknown, then the least recently used, then by label. A login that
-/// is exhausted or cannot be resolved is never picked.
+/// is exhausted or cannot be resolved is never picked. A login's usage is judged by the windows
+/// that limit `model`: one scoped to another model, such as `7d Fable` for a session on Opus,
+/// neither exhausts the login nor takes from its headroom.
 ///
 /// A login that refused `model`, the one the session runs on `preferred`, for want of usage
 /// credits within [`unfunded::COOL_DOWN`] cannot run the session: it ranks after every other
@@ -73,7 +75,7 @@ pub async fn pick(
     if let Some(login) = sticky.and_then(|sticky| logins.iter().find(|login| login.id == sticky))
         && AgentKind::named(&login.agent) == Some(preferred)
         && !cooling.contains(&login.id)
-        && Standing::of(login, login.snapshot().as_ref(), now).usable()
+        && Standing::of(login, login.snapshot().as_ref(), model, now).usable()
     {
         match credential::resolve(state, login).await {
             Ok(resolved) => {
@@ -126,7 +128,7 @@ pub async fn pick(
     usage::refresh(state, &mut candidates).await;
     let mut ranked = Vec::with_capacity(candidates.len());
     for chosen in candidates {
-        match Standing::of(&chosen.login, chosen.snapshot.as_ref(), now) {
+        match Standing::of(&chosen.login, chosen.snapshot.as_ref(), model, now) {
             Standing::Exhausted { until } => spent.push(until),
             standing => ranked.push((standing, chosen)),
         }
@@ -316,6 +318,7 @@ fn group(preferred: AgentKind, agent: AgentKind) -> usize {
 mod tests {
     use std::time::{Duration, Instant};
 
+    use abnegate_agent_cli::login::claude::Tokens;
     use abnegate_secret::SecretValue;
     use chrono::SubsecRound;
     use futures::future::try_join_all;
@@ -329,7 +332,7 @@ mod tests {
     use super::*;
     use crate::config::{AgentConfig, Config};
     use crate::db::agent_logins::{AgentLoginRow, Insert};
-    use crate::services::login::claude::Tokens;
+    use crate::services::login::claude::Sealed;
     use crate::services::login::credential::Login;
 
     const UNREACHABLE: &str = "http://127.0.0.1:1/v1/oauth/token";
@@ -400,7 +403,7 @@ mod tests {
         async fn login(&self, agent: AgentKind, label: &str, headroom: Option<f64>) -> Uuid {
             let credential = match agent {
                 AgentKind::Claude => Some(self.sealed(Utc::now() + TimeDelta::hours(8))),
-                AgentKind::Codex => None,
+                _ => None,
             };
             let login = self.insert(agent, label, credential.as_deref()).await;
             if let Some(headroom) = headroom {
@@ -443,15 +446,15 @@ mod tests {
         }
 
         fn sealed(&self, expires_at: DateTime<Utc>) -> String {
-            Tokens {
-                access: SecretValue::new(format!("access-{}", Uuid::new_v4())),
-                refresh: None,
+            Tokens::new(
+                SecretValue::new(format!("access-{}", Uuid::new_v4())),
+                None,
                 expires_at,
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            }
-            .seal(self.state.encryption_key())
+                None,
+                "user:inference",
+                None,
+            )
+            .seal(self.state.master_key())
             .expect("tokens to seal")
         }
 
@@ -475,6 +478,13 @@ mod tests {
                 fetched_at,
             };
             agent_logins::observe(&self.pool, login, &snapshot)
+                .await
+                .expect("the login's usage to be stored");
+        }
+
+        /// Stores a reading of `login`'s usage made of `windows`, read now.
+        async fn windows(&self, login: Uuid, windows: Vec<Window>) {
+            agent_logins::observe(&self.pool, login, &Snapshot::new(windows, Utc::now()))
                 .await
                 .expect("the login's usage to be stored");
         }
@@ -595,6 +605,88 @@ mod tests {
             Some(70.0)
         );
         assert!(matches!(chosen.resolved, Login::Claude { .. }));
+    }
+
+    #[tokio::test]
+    async fn a_limit_on_another_model_never_spends_a_login_for_the_sessions_model() {
+        let scene = Scene::new().await;
+        let five_hours = Utc::now() + TimeDelta::hours(3);
+        let soon = Utc::now() + TimeDelta::hours(14);
+        let later = Utc::now() + TimeDelta::days(2);
+        let latest = Utc::now() + TimeDelta::days(3);
+        let session = scene.login(AgentKind::Claude, "session", None).await;
+        let weekly = scene.login(AgentKind::Claude, "weekly", None).await;
+        let roomy = scene.login(AgentKind::Claude, "roomy", None).await;
+        let tight = scene.login(AgentKind::Claude, "tight", None).await;
+        scene
+            .windows(
+                session,
+                vec![
+                    window(FIVE_HOURS, 100.0, Some(five_hours)),
+                    window(SEVEN_DAYS, 15.0, Some(latest)),
+                    window("7d Fable", 3.0, Some(latest)),
+                ],
+            )
+            .await;
+        scene
+            .windows(
+                weekly,
+                vec![
+                    window(SEVEN_DAYS, 100.0, Some(soon)),
+                    window("7d Fable", 0.0, Some(soon)),
+                ],
+            )
+            .await;
+        scene
+            .windows(
+                roomy,
+                vec![
+                    window(SEVEN_DAYS, 71.0, Some(later)),
+                    window("7d Fable", 100.0, Some(later)),
+                ],
+            )
+            .await;
+        scene
+            .windows(
+                tight,
+                vec![
+                    window(SEVEN_DAYS, 86.0, Some(latest)),
+                    window("7d Fable", 100.0, Some(latest)),
+                ],
+            )
+            .await;
+
+        let on_opus = scene.running(MODEL, AgentKind::Claude, &[], None).await;
+        let after_roomy = scene
+            .running(MODEL, AgentKind::Claude, &[roomy], None)
+            .await;
+        let on_fable = pick(
+            &scene.state,
+            scene.organization,
+            AgentKind::Claude,
+            &[],
+            None,
+            Some("fable"),
+            false,
+        )
+        .await;
+        scene.remove().await;
+
+        assert_eq!(
+            on_opus, roomy,
+            "the most headroom on opus is the login's own"
+        );
+        assert_eq!(after_roomy, tight);
+        match on_fable {
+            Err(Error::Exhausted {
+                resets_at: Some(at),
+            }) => assert_eq!(
+                at.timestamp_micros(),
+                five_hours.timestamp_micros(),
+                "a fable session is spent on every login until the earliest reset"
+            ),
+            other => panic!("expected every login to be spent on fable, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -979,9 +1071,10 @@ mod tests {
         usage.verify().await;
     }
 
-    /// The windows claude's stream reports in `infos`, as the agent's reader reads them.
+    /// The windows claude's stream reports in `infos`, as the agent's reader reads them and Zone
+    /// names them.
     fn streamed(infos: &[serde_json::Value]) -> Vec<Window> {
-        let mut reader = AgentKind::Claude.reader();
+        let mut reader = AgentKind::Claude.turn();
         let mut events = Vec::new();
         for info in infos {
             let line = serde_json::json!({"type": "rate_limit_event", "rate_limit_info": info});
@@ -990,7 +1083,9 @@ mod tests {
         events
             .into_iter()
             .filter_map(|event| match event {
-                zone_core::llm::provider::AgentEvent::Window(window) => Some(window),
+                abnegate_agent_cli::AgentEvent::Window(window) => {
+                    Some(zone_core::llm::window::renamed(window))
+                }
                 _ => None,
             })
             .collect()

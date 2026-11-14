@@ -4,7 +4,8 @@
 //!
 //! **On a schedule.** [`housekeeping`] owns every periodic sweep: knowledge
 //! refresh, source resync, answer promotion, learning, agent analytics,
-//! regression watching, scheduled digests and reception sync. Each states its
+//! regression watching, scheduled digests, reception sync, abandoned
+//! subagents and MCP server convergence. Each states its
 //! period in [`housekeeping::Periodic`] rather than opening its own timer, and
 //! this module's other files hold only the work itself.
 //!
@@ -35,5 +36,6 @@ pub mod regression;
 pub mod reminders;
 pub mod reports;
 pub mod source_resync;
+pub mod subagents;
 pub mod task;
 pub mod titles;

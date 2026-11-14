@@ -18,6 +18,7 @@ those two commits.
 - [Zone's own broken links](#zones-own-broken-links)
 - [What not to copy](#what-not-to-copy)
 - [Suggested order](#suggested-order)
+- [Since this review](#since-this-review)
 
 ## The two systems in a paragraph each
 
@@ -359,3 +360,193 @@ cross-repository correlation, the retrieval judge and repo-inference
 feedback. Each is either not applicable to how zone takes in work, off by
 default and unread in claudear itself, or already covered by something zone
 renders directly into the prompt.
+
+## Since this review
+
+Added 2026-11-11. Everything above is the comparison as it stood at the two
+commits named at the top and is left as written, its numbers included. This
+section records what has changed in zone since, where it bears on the review.
+The constants and names are the ones in the code on that date.
+
+### The evidence bars moved down one notch
+
+Six bars were lowered and five were kept. Wherever the body quotes a bar, it
+quotes the left-hand column.
+
+| Bar | At the review | Now |
+|---|---|---|
+| Convention, observations (`MINIMUM_OBSERVATIONS`) | 4 | 3 |
+| Convention, distinct runs (`MINIMUM_DISTINCT_RUNS`) | 3 | 2 |
+| Convention, agreement (`MINIMUM_AGREEMENT`) | 0.75 | 0.70 |
+| Convention, confidence (`MINIMUM_CONFIDENCE`) | 0.6 | 0.6, kept |
+| Lesson, distinct runs (`MINIMUM_RUNS`) | 3 | 2 |
+| Lesson, mean quality (`MINIMUM_MEAN_QUALITY`) | 0.6 | 0.6, kept |
+| Promotion, occurrences (`MINIMUM_OCCURRENCES`) | 4 | 3 |
+| Promotion, distinct chats (`MINIMUM_DISTINCT_CHATS`) | 3 | 2 |
+| Promotion, question similarity (`MINIMUM_QUESTION_SIMILARITY`) | 0.88 | 0.88, kept |
+| Promotion, answer similarity (`ANSWER_SIMILARITY`) | 0.85 | 0.85, kept |
+| Promotion, answer agreement (`MINIMUM_ANSWER_AGREEMENT`) | 0.6 | 0.6, kept |
+
+Why each kept bar stayed:
+
+- Convention confidence. It is what makes the new minimum count unanimous:
+  three observations of three score 0.625 and clear it, three of four score
+  0.525 and do not.
+- Lesson mean quality. A change nobody has reviewed or merged scores 0.55, so
+  any move toward that figure would let two untouched pull requests teach a
+  lesson.
+- Promotion question similarity. It decides which questions are the same one,
+  not how much evidence is needed, and a lower value merges different
+  questions.
+- Promotion answer similarity. It decides which answers say the same thing,
+  and a lower value counts dissent as agreement.
+- Promotion answer agreement. Three answers can agree at 0, 0.5 or 1, so 0.6
+  holds the minimum count to unanimity and tolerates one dissenter from four
+  answers up.
+
+The bars are still conjunctive and each is still pinned by a test that fails
+when its constant moves, in the three modules and in
+`tests/integration/learning_thresholds.rs`. One limit is unchanged and matters
+more at two runs than it did at three: distinct runs are counted, not distinct
+tasks, so a task run twice can supply both runs a convention or a lesson
+needs.
+
+Three occurrences in two chats is a bar two automations could clear on their
+own, so two guards came with it. `load_exchanges` reads only the questions
+`db::chats::typed` calls typed: a prompt that a reminder, a watch or another
+automation posts under the member's role is not an occurrence, and two watches
+asking the same thing in two chats promote nothing. And because chats are
+counted, not people, while the block now reaches every member's chat (G5,
+below), the standing-instruction preamble says that each entry answers a
+recurring question and never by itself permits a write, a send or a command
+the user did not ask for.
+
+### G5 is closed: chats read what the workspace learned
+
+A chat's system prompt now carries the standing instructions, the repository
+conventions, the strategy lessons and the recorded discoveries described
+below. `agent::learned` loads each family, renders it with the renderer that
+already sat beside its store, and holds the whole block to
+`MAX_RENDERED_BYTES`, 8,000 bytes, the figure the skills index is held to.
+Past the bound an entry too large to be shown even alone under its family's
+heading goes first; then whichever family currently renders largest gives up
+the entry at the end of its list, whole, until the block fits. A family down
+to its last entry gives nothing while another still has a second. The block
+closes by saying how many entries were left out, the ones past a store's row
+limit included, and the discoveries block keeps its own count, so no entry is
+counted twice. Every block keeps its `READ_FILTER`.
+
+Two things differ from the sketch under G5. The block sits before the memory
+block, not after it, which is the order a task run reads them in. And a
+character card with its agent off reads none of it. Each family is read on its
+own, so a store that cannot be read costs the turn that family and a warning,
+not the block and not the reply. A chat with its agent off also searches the
+knowledge store before it answers, and that search now leaves out the entries
+the block already shows. Task runs are unchanged: they read the same families,
+each held only by its own limit.
+
+### Inline recording: `record_discovery`
+
+The review describes a zone that learns only through its two passes. There is
+now a third way in. `record_discovery` is a tool a chat or an authorized task
+run calls, unasked, when it has verified something durable about the
+repository that the next run would otherwise rediscover. It writes a
+`knowledge_entries` row in a fourth reserved category, `agent-discovery`, with
+its kind (`convention` or `lesson`), the run or chat it came from and the date
+it was recorded in tags, and with the member that run or chat was acting for
+as its author. The prompt calls it the one workspace write made
+unasked. A chat's memory write of what a person says about themselves is also
+made unasked, but it is that person's entry and not the workspace's.
+
+- No bar. One agent's note from one run or one chat is stored as it is, which
+  is why it has a category of its own and renders under its own heading,
+  `# Recorded while working here`, introduced as leads to check and not
+  instructions. It does not render under a pass-derived family's preamble or
+  compete with pass-derived facts for their row limit.
+- Screened, by a rulebook of its own. `rules::refused_discovery` keeps the
+  credential detector but shows it a long run that reads as a name (a
+  repository path, a branch, a route, a `SCREAMING_SNAKE` constant) with its
+  digits respelt, so the entropy rule does not take a name for a generated
+  value. It narrows identifiers to a person's email address and an
+  international telephone number, and narrows suppression to an instruction:
+  one that opens a clause, or one that says whom something is kept from. What
+  the docs do not mention and what a log never tells you are statements, and
+  are recorded. The memory rulebook, `rules::refused`, is unchanged and still
+  screens the memory tools and the promotion pass; it would refuse what a
+  repository note exists to say. A control character or one that does not
+  show is refused as well, so a person reviewing the entry sees the text the
+  model reads, and so is a call carrying any field beside the three.
+- Kept out of the trace when refused. A call the tool is about to refuse for
+  its shape, its size or what the screen found leaves only its kind in the
+  chat's tool trace, in a run's tool-call record and in the run log, and no
+  receipt for the tool carries a stated reason. A call it takes leaves the
+  entry it stores there, not the text the model wrote, so the copy of a field
+  written twice that no screen read is left out too.
+- Bounded in bytes. A subject and its statement are stored with their white
+  space collapsed to the one line a prompt renders, and that line holds
+  `MAX_ENTRY_BYTES`, 1,000 bytes, for the two together. The rendered block
+  holds `MAX_RENDERED_BYTES`, 6,000 bytes, and is read from at most
+  `MAX_LISTED`, 117, rows. They come most recent first, and only a source's
+  `ALLOWANCE`, its three most recent, are ordered that way: what a run or
+  chat recorded beyond it comes after every source's allowance, dealt a
+  source at a time. So one chat or one run cannot fill the block, and a run's
+  second and third entries are not hidden behind what older sources each
+  recorded once; the share is settled at the read, and nothing limits how
+  many a source writes.
+  Entries that do not fit are left out whole and the block says how many,
+  counted against everything recorded.
+- One entry per subject. Recording a subject again replaces its entry, which
+  is how a stale note is corrected, and the call is answered with the
+  statement it wrote over.
+- Deletion is final, as far as a fingerprint can tell. A subject whose entry
+  was deleted through `DELETE /api/knowledge/{id}` is refused when recorded
+  again, and so is its statement under another subject: the entry keeps a
+  fingerprint of each, taken past casing and spacing and nothing else, so a
+  reworded note is recorded as a new one. The two pass-derived families still
+  revive a deleted row when a pass re-derives it from fresh evidence.
+- Unconfirmed. The tool is in the write tier, so nobody approves the call in a
+  chat or in a run; a plan hold still refuses it. Recording needs member
+  standing, read on every call, and a run with no authorized initiator does
+  not hold the tool.
+
+This also changes two rows of the capability table as they would read today:
+the prompt-blocks row gains a fourth learned block on both surfaces, and the
+storage row gains a fourth reserved category, still with provenance in tags
+(G10 is untouched).
+
+### Zone's own broken links, revisited
+
+Checked against the code on the date above.
+
+- Item 2 is closed. Chats read standing instructions and learned facts, as
+  described under G5 above.
+- Item 4 is open as written, with one neighbouring hole closed.
+  `retire_learned_fact` and `retire_standing_instruction` still have no HTTP
+  or UI caller, and the generic `DELETE /api/knowledge/{id}` is still the only
+  reachable retirement. What is closed is the other unguarded path to a
+  learned row, which the review did not list: `update_document` matched any
+  local row that was not a memory, so a call handed a learned entry's id could
+  rewrite it past every bar and screen. It now refuses the four learned
+  categories (`standing-instruction`, `repository-convention`,
+  `strategy-lesson`, `agent-discovery`), and the document listing and read
+  report those rows as not editable. They stay readable and deletable.
+- Item 9 is open for the two passes. No test yet runs the learning or the
+  promotion pass and finds its row in an assembled prompt. The half from the
+  store to the prompt is now covered: `tests/integration/prompt_assembly.rs`
+  seeds a standing instruction, a convention and a discovery and finds each
+  in the system entry a chat is prepared with, and
+  `tests/integration/discovery.rs` takes a `record_discovery` call through to
+  the block `learned_facts_prompt` renders for its workspace. Neither joins
+  the tool to a chat's reader, so `tests/integration/discovery_crossing.rs`
+  does, with nothing between the two but the database. In
+  `what_one_chat_records_the_next_chat_and_the_next_run_of_its_workspace_read`
+  one chat records through the tool, and the entry is the one line listed in
+  the system entry a second chat of the workspace is prepared with and in the
+  block a run of it is handed, and in neither for another workspace. In
+  `a_deleted_discovery_leaves_the_next_prompt_and_cannot_be_recorded_back_into_it`
+  the entry is deleted from the store, leaves both, and is refused when a
+  chat records it again.
+- Items 1, 3, 5 to 8, 10 and 11 are not addressed by this work.
+
+In "Suggested order", step 2 (G5) is done. Nothing else in that list has
+moved.

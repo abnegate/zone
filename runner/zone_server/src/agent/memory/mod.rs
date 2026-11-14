@@ -1,9 +1,9 @@
-//! Remember what the user asked to have remembered, and nothing else.
+//! Remember what the user said about themselves, and nothing else.
 //!
 //! Zone's other memory is server-derived: the learning loop earns a standing
 //! instruction by clearing an occurrence and agreement bar. This is the other
-//! half — what a person said about themselves, written because they asked for
-//! it, read back under their own name.
+//! half — what a person said about themselves, written when they say it
+//! whether or not they asked for that, read back under their own name.
 //!
 //! Every tool here is chat-only. A background run reads the user's profile and
 //! preferences from the rendered block and can act on them, but it cannot
@@ -16,13 +16,20 @@
 //! cannot is stated in the prompt instead — [`rules`]'s own module doc draws
 //! that line.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::Tier;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use zone_core::tools::{Session, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
+use super::approval::Refusal;
 use super::tools::WorkspaceScope;
 use crate::db::memory::{
     self, MAX_FACTS, MAX_NAME_CHARS, MemoryCategory, MemoryIndexRow, MemoryOutcome, MemoryRow,
@@ -94,7 +101,7 @@ pub const TRACE_DETAIL: &str = "Private to the person it belongs to; not shown h
 
 /// The outcome line the trace shows for a finished call.
 pub fn trace_detail(name: &str, detail: &str) -> String {
-    if is_private(name) {
+    if is_private(name) && Refusal::worded(detail).is_none() {
         TRACE_DETAIL.to_string()
     } else {
         detail.to_string()
@@ -112,8 +119,9 @@ pub const LIST_DESCRIPTION: &str = "List what is remembered for this user: each 
 pub const READ_DESCRIPTION: &str = "Read one remembered entry in full. Do this before changing \
     an entry, so the version you write with is the version you read.";
 
-pub const WRITE_DESCRIPTION: &str = "Store something the user asked to have remembered, or \
-    replace an entry you have read. Their profile, how they want you to work, or a named fact.";
+pub const WRITE_DESCRIPTION: &str = "Store something durable the user told you about themselves, \
+    whether or not they asked you to, or replace an entry you have read. Their profile, how they \
+    want you to work, or a named fact.";
 
 pub const APPEND_DESCRIPTION: &str = "Add a line to a remembered entry without rewriting it. \
     Use this when the entry is a list and the user added to it.";
@@ -424,7 +432,13 @@ impl WriteTool {
         if category == MemoryCategory::Fact && description.is_none() {
             return Err(description_required());
         }
-        allowed(&request.content, description)?;
+        let named =
+            (category.title().is_none() && request.version.is_none()).then_some(title.as_str());
+        allowed(
+            [Some(request.content.as_str()), description, named]
+                .into_iter()
+                .flatten(),
+        )?;
 
         let scope = &self.0;
         let outcome = memory::write(
@@ -495,7 +509,7 @@ impl AppendTool {
         let request: AppendRequest = parse(params)?;
         let category = category(&request.category)?;
         let title = entry(category, request.name.as_deref())?;
-        allowed(&request.content, None)?;
+        allowed([request.content.as_str()])?;
 
         let scope = &self.0;
         let outcome = memory::append(
@@ -626,9 +640,12 @@ fn stated(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|text| !text.is_empty())
 }
 
-/// Both halves of an entry are stored, so the rulebook screens both.
-fn allowed(content: &str, description: Option<&str>) -> Result<(), String> {
-    for text in std::iter::once(content).chain(description) {
+/// Everything a call stores is screened: the content, the description, and
+/// the name a new fact is created under. A call that quotes a version, and an
+/// append, reach an entry by the name it already has and store no new one, so
+/// an entry named before names were screened can still be changed.
+fn allowed<'a>(texts: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    for text in texts {
         if let Some(refusal) = rules::refused(text) {
             return Err(refusal.message().to_string());
         }
@@ -818,6 +835,19 @@ mod tests {
         );
     }
 
+    /// An approval's outcome is one of a few fixed sentences that name nothing
+    /// remembered, so hiding it would only hide why the call did not run.
+    #[test]
+    fn a_memory_call_keeps_why_its_approval_did_not_go_through() {
+        use crate::agent::approval::refusal::{APPROVAL_CANCELLED, APPROVAL_TIMED_OUT, DENIED};
+
+        for refusal in [DENIED, APPROVAL_TIMED_OUT, APPROVAL_CANCELLED] {
+            let failed = format!("Error: {refusal}");
+            assert_eq!(trace_detail(MEMORY_WRITE, refusal), refusal);
+            assert_eq!(trace_detail(MEMORY_WRITE, &failed), failed);
+        }
+    }
+
     /// PR 6's rule for its timeout strings, carried over: a refusal a model
     /// can read as a write that stuck is worse than no refusal at all. Two of
     /// the four claim words are also this feature's vocabulary — `Not stored:`
@@ -946,8 +976,9 @@ mod tests {
         );
         assert_eq!(
             WRITE_DESCRIPTION,
-            "Store something the user asked to have remembered, or replace an entry you have \
-             read. Their profile, how they want you to work, or a named fact."
+            "Store something durable the user told you about themselves, whether or not they \
+             asked you to, or replace an entry you have read. Their profile, how they want you \
+             to work, or a named fact."
         );
         assert_eq!(
             APPEND_DESCRIPTION,
@@ -1041,6 +1072,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         }
     }
 
@@ -1056,10 +1088,7 @@ mod tests {
     }
 
     fn context(session: Session) -> ToolContext {
-        ToolContext {
-            session,
-            ..ToolContext::default()
-        }
+        ToolContext::default().with_session(session)
     }
 
     fn chat() -> ToolContext {
@@ -1272,7 +1301,7 @@ mod tests {
         for tool in tools() {
             assert!(
                 tool.parameters_schema()["properties"]
-                    .get(zone_core::tools::REASON_PARAM)
+                    .get(abnegate_agent::tool::REASON_PARAMETER)
                     .is_none(),
                 "{} asks for a reason",
                 tool.name()
@@ -1376,6 +1405,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(refusal(&result), Refusal::Identifier.message());
+    }
+
+    /// The index lists a fact by its name at every turn that reads it, so the
+    /// name a fact is created under is stored text as its content is.
+    #[tokio::test]
+    async fn the_name_a_new_fact_is_created_under_is_screened_as_the_content_is() {
+        for (name, expected) in [
+            (CREDENTIAL, Refusal::Secret),
+            (CONTACT, Refusal::Identifier),
+            (SUPPRESSION, Refusal::Suppression),
+        ] {
+            let result = WriteTool(scope())
+                .execute(
+                    json!({
+                        "category": "fact",
+                        "name": name,
+                        "description": "When we ship.",
+                        "content": "Thursdays, after standup."
+                    }),
+                    &chat(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(refusal(&result), expected.message(), "{name}");
+        }
     }
 
     #[test]
@@ -1501,6 +1556,7 @@ mod tests {
                 chat_id: Some(Uuid::new_v4()),
                 user_id: user,
                 offline: false,
+                origin: crate::db::tasks::Origin::Member,
             },
             pool,
             organization,
@@ -1744,6 +1800,61 @@ mod tests {
         assert_eq!(message(&after), NOTHING_REMEMBERED);
 
         fixture.clean().await;
+    }
+
+    /// A replace and an append reach an entry by the name it already has and
+    /// store no new one, so an entry named before names were screened stays
+    /// one its owner can still change.
+    #[tokio::test]
+    async fn an_entry_named_before_names_were_screened_can_still_be_replaced_and_added_to() {
+        let fixture = fixture().await;
+        let scope = &fixture.scope;
+        let created = memory::write(
+            scope.state.db(),
+            MemoryWrite {
+                workspace_id: scope.workspace_id,
+                user_id: scope.user_id,
+                category: MemoryCategory::Fact,
+                title: CONTACT,
+                description: Some("Who to ask before a release."),
+                content: "Ask before the release branch is cut.",
+                version: None,
+            },
+        )
+        .await
+        .expect("the store takes a name the tool would now refuse");
+        assert!(matches!(created, MemoryOutcome::Created { version: 1 }));
+
+        let replaced = WriteTool(scope.clone())
+            .execute(
+                json!({
+                    "category": "fact",
+                    "name": CONTACT,
+                    "description": "Who to ask before a release.",
+                    "content": "Ask before the release branch is cut, and again before tagging.",
+                    "version": 1
+                }),
+                &chat(),
+            )
+            .await
+            .unwrap();
+        let appended = AppendTool(scope.clone())
+            .execute(
+                json!({"category": "fact", "name": CONTACT, "content": "Never on a Friday."}),
+                &chat(),
+            )
+            .await
+            .unwrap();
+        fixture.clean().await;
+
+        assert_eq!(
+            message(&replaced),
+            memory::updated(MemoryCategory::Fact, CONTACT, 2)
+        );
+        assert_eq!(
+            message(&appended),
+            memory::appended(MemoryCategory::Fact, CONTACT, 3)
+        );
     }
 
     #[tokio::test]

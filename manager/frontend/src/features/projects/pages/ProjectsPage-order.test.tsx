@@ -1,0 +1,574 @@
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  spyOn,
+} from 'bun:test';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type React from 'react';
+import { MemoryRouter } from 'react-router-dom';
+import { clientModule } from '../../../test/client';
+import { chooseSelect } from '../../../test/select';
+import type { Project } from '../types';
+import { formatDate } from '../utils/formatters';
+import { applyOrder, sortKey } from '../utils/order';
+
+const SLOT_HEIGHT = 72;
+
+let userId = 'user-1';
+let role = 'member';
+
+let stored: Project[] = [];
+const mockGetProjects = mock(() => Promise.resolve(stored));
+const mockReorderProjects = mock((_workspace: string, order: readonly string[]) => {
+  stored = applyOrder(stored, order);
+  return Promise.resolve();
+});
+
+mock.module('../../../api/projects', () => ({
+  projectsApi: {
+    getProjects: mockGetProjects,
+    reorderProjects: mockReorderProjects,
+    createProject: mock(),
+    updateProject: mock(),
+    deleteProject: mock(),
+    getSyncConfigs: mock(() => Promise.resolve([])),
+    createSyncConfig: mock(),
+    deleteSyncConfig: mock(),
+    startAutoProject: mock(),
+    getAutomation: mock(),
+    resumeAutomation: mock(),
+  },
+}));
+
+const mockGetWorkspaceMembers = mock(() =>
+  Promise.resolve({ members: [{ user_id: userId, role }] })
+);
+let membersFail = false;
+
+mock.module('../../../api/client', () =>
+  clientModule({
+    getSources: mock(() => Promise.resolve([])),
+    getWorkspaceMembers: () =>
+      membersFail ? Promise.reject(new Error('Unavailable')) : mockGetWorkspaceMembers(),
+  })
+);
+
+mock.module('../../../features/auth', () => ({
+  useAuth: () => ({
+    isAuthenticated: true,
+    user: { id: userId, email: 'test@test.com' },
+    roles: ['user'],
+    permissions: [],
+    hasPermission: () => true,
+    hasAnyPermission: () => true,
+    hasRole: () => true,
+  }),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => children,
+  ResendVerificationButton: () => null,
+  VerificationPendingBanner: () => null,
+}));
+
+mock.module('../../../shared/context/WorkspaceContext', () => ({
+  useWorkspace: () => ({
+    currentWorkspace: { id: 'workspace-1', name: 'Test Workspace' },
+    loading: false,
+  }),
+}));
+
+let ProjectsPage: typeof import('./ProjectsPage').default;
+
+beforeAll(async () => {
+  ProjectsPage = (await import('./ProjectsPage')).default;
+});
+
+afterAll(() => {
+  mock.restore();
+});
+
+function project(id: string, name: string, overrides: Partial<Project>): Project {
+  return {
+    id,
+    name,
+    description: null,
+    status: 'active',
+    github_repo_url: null,
+    source_id: null,
+    auto: false,
+    position: 0,
+    last_used_at: null,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    ...overrides,
+  };
+}
+
+const PROJECTS: Project[] = [
+  project('cloud', 'Cloud', {
+    position: 1,
+    created_at: '2026-11-06T00:00:00Z',
+    last_used_at: '2026-11-01T00:00:00Z',
+  }),
+  project('jbs', 'JBS', {
+    position: 2,
+    status: 'on_hold',
+    created_at: '2026-10-01T00:00:00Z',
+    last_used_at: '2026-11-05T00:00:00Z',
+  }),
+  project('zone', 'Zone', {
+    position: 3,
+    created_at: '2026-09-01T00:00:00Z',
+    last_used_at: null,
+  }),
+];
+
+function renderPage() {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, gcTime: 0 },
+      mutations: { retry: false, gcTime: 0 },
+    },
+  });
+  return render(
+    <MemoryRouter initialEntries={['/projects']}>
+      <QueryClientProvider client={queryClient}>
+        <ProjectsPage />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+}
+
+function shownOrder(): string[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('.project-slot')).map(
+    (slot) => slot.dataset.project ?? ''
+  );
+}
+
+async function loaded() {
+  await screen.findByText('Zone');
+}
+
+describe('project order', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    userId = 'user-1';
+    role = 'member';
+    membersFail = false;
+    stored = PROJECTS.map((item) => ({ ...item }));
+    mockGetProjects.mockReset();
+    mockGetProjects.mockImplementation(() => Promise.resolve(stored));
+    mockReorderProjects.mockClear();
+  });
+
+  it('lists projects in the custom order until another sort is chosen', async () => {
+    renderPage();
+    await loaded();
+
+    expect(shownOrder()).toEqual(['cloud', 'jbs', 'zone']);
+    expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent('Custom');
+  });
+
+  it('sorts by the chosen option and offers every one', async () => {
+    renderPage();
+    await loaded();
+
+    chooseSelect('Sort projects', 'Most recently used');
+    expect(shownOrder()).toEqual(['jbs', 'cloud', 'zone']);
+
+    chooseSelect('Sort projects', 'Date added');
+    expect(shownOrder()).toEqual(['cloud', 'jbs', 'zone']);
+
+    chooseSelect('Sort projects', 'Name');
+    expect(shownOrder()).toEqual(['cloud', 'jbs', 'zone']);
+
+    chooseSelect('Sort projects', 'Status');
+    expect(shownOrder()).toEqual(['cloud', 'zone', 'jbs']);
+  });
+
+  describe('the date on each card', () => {
+    const shownDate = (id: string) =>
+      document.querySelector(
+        `.project-slot[data-project="${id}"] .project-card-footer > :last-child`
+      )?.textContent;
+
+    it('is when the project was last used once sorted by most recently used', async () => {
+      renderPage();
+      await loaded();
+
+      chooseSelect('Sort projects', 'Most recently used');
+
+      expect(shownDate('jbs')).toBe(formatDate('2026-11-05T00:00:00Z'));
+      expect(shownDate('cloud')).toBe(formatDate('2026-11-01T00:00:00Z'));
+      expect(shownDate('zone')).toBe('Never used');
+    });
+
+    it('is when the project was added once sorted by date added', async () => {
+      renderPage();
+      await loaded();
+
+      chooseSelect('Sort projects', 'Date added');
+
+      expect(shownDate('cloud')).toBe(formatDate('2026-11-06T00:00:00Z'));
+      expect(shownDate('zone')).toBe(formatDate('2026-09-01T00:00:00Z'));
+    });
+
+    it('is when the project was last updated in any other order', async () => {
+      renderPage();
+      await loaded();
+
+      expect(shownDate('cloud')).toBe(formatDate('2026-01-01T00:00:00Z'));
+      chooseSelect('Sort projects', 'Name');
+      expect(shownDate('cloud')).toBe(formatDate('2026-01-01T00:00:00Z'));
+    });
+  });
+
+  it('remembers each viewer’s sort', async () => {
+    const first = renderPage();
+    await loaded();
+    chooseSelect('Sort projects', 'Most recently used');
+    expect(localStorage.getItem(sortKey('user-1'))).toBe('recent');
+    first.unmount();
+
+    const again = renderPage();
+    await loaded();
+    expect(shownOrder()).toEqual(['jbs', 'cloud', 'zone']);
+    again.unmount();
+
+    userId = 'user-2';
+    renderPage();
+    await loaded();
+    expect(shownOrder()).toEqual(['cloud', 'jbs', 'zone']);
+  });
+
+  describe('dragging', () => {
+    let measure: ReturnType<typeof spyOn>;
+
+    beforeEach(() => {
+      const original = HTMLElement.prototype.getBoundingClientRect;
+      measure = spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (
+        this: HTMLElement
+      ) {
+        const slot = this.closest('.project-drag-overlay')
+          ? document.querySelector<HTMLElement>('.project-slot[data-dragging]')
+          : this.closest<HTMLElement>('.project-slot');
+        if (!slot?.parentElement) return original.call(this);
+        const index = Array.from(slot.parentElement.querySelectorAll('.project-slot')).indexOf(
+          slot
+        );
+        const top = index * (SLOT_HEIGHT + 4);
+        return {
+          x: 0,
+          y: top,
+          top,
+          bottom: top + SLOT_HEIGHT,
+          left: 0,
+          right: 300,
+          width: 300,
+          height: SLOT_HEIGHT,
+        } as DOMRect;
+      });
+    });
+
+    afterEach(() => {
+      measure.mockRestore();
+    });
+
+    async function ready() {
+      await loaded();
+      await screen.findByRole('button', { name: 'Move Zone' });
+    }
+
+    function grip(name: string): HTMLElement {
+      return screen.getByRole('button', { name: `Move ${name}` });
+    }
+
+    async function press(target: HTMLElement, code: string) {
+      await act(async () => {
+        fireEvent.keyDown(target, { code, key: code === 'Space' ? ' ' : code });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+
+    function announced(text: string) {
+      return waitFor(() => expect(screen.getByText(text)).toBeInTheDocument());
+    }
+
+    it('gives each card a grip that says how to move it by keyboard', async () => {
+      renderPage();
+      await ready();
+
+      const handle = grip('Zone');
+      expect(handle).toHaveAttribute('aria-roledescription', 'drag handle');
+      expect(
+        document.getElementById(handle.getAttribute('aria-describedby') ?? '')
+      ).toHaveTextContent(/press space or enter to pick it up/);
+    });
+
+    it('gives a viewer who cannot change the workspace no grips', async () => {
+      role = 'viewer';
+      renderPage();
+      await loaded();
+      await waitFor(() => expect(mockGetWorkspaceMembers).toHaveBeenCalled());
+      await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+
+      expect(screen.queryByRole('button', { name: /^Move / })).toBeNull();
+    });
+
+    it('gives no grips when the role cannot be read', async () => {
+      membersFail = true;
+      renderPage();
+      await loaded();
+      await act(() => new Promise((resolve) => setTimeout(resolve, 50)));
+
+      expect(screen.queryByRole('button', { name: /^Move / })).toBeNull();
+    });
+
+    it('moves a project by keyboard, saves the order and switches to custom', async () => {
+      renderPage();
+      await ready();
+      const handle = grip('Zone');
+      handle.focus();
+
+      await press(handle, 'Space');
+      await announced('Picked up Zone, at position 3 of 3.');
+      await press(handle, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(handle, 'ArrowUp');
+      await announced('Zone would move to position 1 of 3.');
+      await press(handle, 'Space');
+
+      await announced('Zone dropped at position 1 of 3.');
+      expect(mockReorderProjects).toHaveBeenCalledWith('workspace-1', ['zone', 'cloud', 'jbs']);
+      await waitFor(() => expect(shownOrder()).toEqual(['zone', 'cloud', 'jbs']));
+    });
+
+    it('saves the order shown by another sort and switches to custom', async () => {
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+      expect(shownOrder()).toEqual(['jbs', 'cloud', 'zone']);
+      const handle = grip('Zone');
+      handle.focus();
+
+      await press(handle, 'Space');
+      await press(handle, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(handle, 'Space');
+
+      await announced('Zone dropped at position 2 of 3.');
+      expect(mockReorderProjects).toHaveBeenCalledWith('workspace-1', ['jbs', 'zone', 'cloud']);
+      expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent('Custom');
+      expect(localStorage.getItem(sortKey('user-1'))).toBe('custom');
+      await waitFor(() => expect(shownOrder()).toEqual(['jbs', 'zone', 'cloud']));
+    });
+
+    it('leaves the order alone when a move is cancelled', async () => {
+      renderPage();
+      await ready();
+      const handle = grip('Cloud');
+      handle.focus();
+
+      await press(handle, 'Space');
+      await press(handle, 'ArrowDown');
+      await announced('Cloud would move to position 2 of 3.');
+      await press(handle, 'Escape');
+
+      await announced('Moving Cloud cancelled. It stays at position 1 of 3.');
+      expect(mockReorderProjects).not.toHaveBeenCalled();
+      expect(shownOrder()).toEqual(['cloud', 'jbs', 'zone']);
+    });
+
+    it('does not open the project when its grip is pressed', async () => {
+      renderPage();
+      await ready();
+
+      fireEvent.click(grip('JBS'));
+      fireEvent.keyDown(grip('JBS'), { key: 'Enter' });
+
+      expect(screen.queryByRole('heading', { name: 'JBS', level: 2 })).toBeNull();
+    });
+
+    async function failingMove() {
+      mockReorderProjects.mockImplementationOnce(() =>
+        Promise.reject(new Error('Workspace write access required'))
+      );
+      mockGetProjects.mockImplementation(() => new Promise(() => {}));
+      const handle = grip('Zone');
+      handle.focus();
+
+      await press(handle, 'Space');
+      await press(handle, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(handle, 'Space');
+
+      const alert = await screen.findByRole('alert');
+      expect(within(alert).getByText('Workspace write access required')).toBeInTheDocument();
+    }
+
+    it('puts the order back without waiting for a reload when saving it fails', async () => {
+      renderPage();
+      await ready();
+
+      await failingMove();
+
+      expect(shownOrder()).toEqual(['cloud', 'jbs', 'zone']);
+    });
+
+    it('keeps a newer move when an earlier one fails', async () => {
+      let refuseFirst: (reason: Error) => void = () => undefined;
+      mockReorderProjects.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            refuseFirst = reject;
+          })
+      );
+      renderPage();
+      await ready();
+      mockGetProjects.mockImplementation(() => new Promise(() => {}));
+
+      const zone = grip('Zone');
+      zone.focus();
+      await press(zone, 'Space');
+      await press(zone, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(zone, 'Space');
+      await waitFor(() => expect(shownOrder()).toEqual(['cloud', 'zone', 'jbs']));
+
+      const cloud = grip('Cloud');
+      cloud.focus();
+      await press(cloud, 'Space');
+      await press(cloud, 'ArrowDown');
+      await press(cloud, 'ArrowDown');
+      await announced('Cloud would move to position 3 of 3.');
+      await press(cloud, 'Space');
+      await waitFor(() => expect(shownOrder()).toEqual(['zone', 'jbs', 'cloud']));
+
+      await act(async () => {
+        refuseFirst(new Error('Workspace write access required'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await waitFor(() =>
+        expect(mockReorderProjects).toHaveBeenLastCalledWith('workspace-1', [
+          'zone',
+          'jbs',
+          'cloud',
+        ])
+      );
+      await waitFor(() => expect(shownOrder()).toEqual(['zone', 'jbs', 'cloud']));
+    });
+
+    it('keeps a sort chosen while a failing save was pending', async () => {
+      let refuse: (reason: Error) => void = () => undefined;
+      mockReorderProjects.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            refuse = reject;
+          })
+      );
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+      const handle = grip('Zone');
+      handle.focus();
+      await press(handle, 'Space');
+      await press(handle, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(handle, 'Space');
+      chooseSelect('Sort projects', 'Name');
+
+      await act(async () => {
+        refuse(new Error('Workspace write access required'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await screen.findByRole('alert');
+      expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent('Name');
+      expect(localStorage.getItem(sortKey('user-1'))).toBe('name');
+    });
+
+    it('keeps custom when the viewer picked it again while a failing save was pending', async () => {
+      let refuse: (reason: Error) => void = () => undefined;
+      mockReorderProjects.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            refuse = reject;
+          })
+      );
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+      const handle = grip('Zone');
+      handle.focus();
+      await press(handle, 'Space');
+      await press(handle, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(handle, 'Space');
+      chooseSelect('Sort projects', 'Name');
+      chooseSelect('Sort projects', 'Custom');
+
+      await act(async () => {
+        refuse(new Error('Workspace write access required'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await screen.findByRole('alert');
+      expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent('Custom');
+      expect(localStorage.getItem(sortKey('user-1'))).toBe('custom');
+    });
+
+    it('stays on custom when a move made in another sort fails behind a newer move', async () => {
+      let refuseFirst: (reason: Error) => void = () => undefined;
+      mockReorderProjects.mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            refuseFirst = reject;
+          })
+      );
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+      const zone = grip('Zone');
+      zone.focus();
+      await press(zone, 'Space');
+      await press(zone, 'ArrowUp');
+      await announced('Zone would move to position 2 of 3.');
+      await press(zone, 'Space');
+      await waitFor(() => expect(shownOrder()).toEqual(['jbs', 'zone', 'cloud']));
+      const cloud = grip('Cloud');
+      cloud.focus();
+      await press(cloud, 'Space');
+      await press(cloud, 'ArrowUp');
+      await announced('Cloud would move to position 2 of 3.');
+      await press(cloud, 'Space');
+      await announced('Cloud dropped at position 2 of 3.');
+
+      await act(async () => {
+        refuseFirst(new Error('Workspace write access required'));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      await waitFor(() => expect(mockReorderProjects).toHaveBeenCalledTimes(2));
+      expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent('Custom');
+    });
+
+    it('puts the sort back when saving a move made in another sort fails', async () => {
+      renderPage();
+      await ready();
+      chooseSelect('Sort projects', 'Most recently used');
+
+      await failingMove();
+
+      expect(screen.getByRole('combobox', { name: 'Sort projects' })).toHaveTextContent(
+        'Most recently used'
+      );
+      expect(localStorage.getItem(sortKey('user-1'))).toBe('recent');
+    });
+  });
+});

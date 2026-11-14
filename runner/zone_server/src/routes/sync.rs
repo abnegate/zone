@@ -17,6 +17,8 @@
 
 use std::ops::RangeInclusive;
 
+use abnegate_secret::SecretValue;
+use abnegate_secret::encrypt_value;
 use axum::{
     Json,
     extract::{Path, State},
@@ -30,11 +32,11 @@ use uuid::Uuid;
 
 use super::common::{AuditEvent, audit};
 use crate::auth::AuthUser;
-use crate::crypto;
 use crate::db::audit::{actions, resources};
 use crate::db::sync_config::{self, SyncConfigRow, SyncDirection};
 use crate::db::{projects, workspace_members};
 use crate::error::ServerError;
+use crate::secret::Unseal;
 use crate::state::AppState;
 use crate::sync::hook::{self, Hook, HookError};
 use crate::sync::{Provider, webhook_path};
@@ -131,7 +133,7 @@ impl WebhookSecret {
     }
 
     fn encrypt(&self, state: &AppState) -> Result<String, ServerError> {
-        crypto::encrypt(state.encryption_key(), self.value())
+        encrypt_value(&SecretValue::new(self.value()), state.master_key())
             .map_err(|_| ServerError::Internal("Failed to encrypt webhook secret".to_string()))
     }
 
@@ -259,8 +261,13 @@ async fn converge(
         else {
             return Ok((current, None));
         };
-        let secret = crypto::open(state.encryption_key(), &kept);
-        if let Err(error) = hook.sign_with(state, current.clone(), &secret).await {
+        let Ok(secret) = state.master_key().open_lenient(&kept) else {
+            return refused(state, current, Some(&kept), HookError::Unopenable).await;
+        };
+        if let Err(error) = hook
+            .sign_with(state, current.clone(), secret.expose())
+            .await
+        {
             return refused(state, current, Some(&kept), error).await;
         }
         pushed = Some(kept);

@@ -10,15 +10,24 @@
 
 use crate::common;
 
-use crate::common::context::{Socket, finish, next, send};
+use crate::common::context::{Socket, finish, next, send, successful};
+use crate::common::stand_in::{MCP_CONFIGURATION, MCP_TOKEN};
 use crate::common::{
     TestClient, context_database_url, create_test_router, create_test_state, test_config,
     test_email, test_password,
 };
 
+use abnegate_agent_cli::Occupancy;
+use abnegate_agent_cli::{AgentKind, CliSettings};
 use axum::http::StatusCode;
+use nix::errno::Errno;
+use nix::fcntl::OFlag;
+use nix::sys::stat;
+use nix::unistd::mkfifo;
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use std::fs::{File, OpenOptions};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -27,27 +36,48 @@ use tokio_tungstenite::connect_async;
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::llm::provider::Occupancy;
-use zone_core::llm::{AgentKind, CliSettings, LlmBackend};
+use zone_core::llm::{LlmBackend, Toolset};
 use zone_server::agent::ASK_USER;
 use zone_server::agent::wait::WAIT_FOR;
-use zone_server::config::ModelBackend;
+use zone_server::config::{AgentConfig, ModelBackend};
+use zone_server::db::agent_logins;
+use zone_server::db::ai_settings;
 use zone_server::db::chats;
 use zone_server::db::chats::occupancy;
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;
 
-/// Longer than the thirty minutes a coding agent's turn gets by default.
-const CHAT_TIMEOUT: Duration = Duration::from_secs(3600);
-
 /// How long the test waits for the spawned agent to report how it was invoked.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long Stop has to end a turn, far past what a turn at rest takes and far
-/// short of the walk [`fanned_out`] sends a tool on.
+/// How long Stop has to end a turn, far past what a turn at rest takes.
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// What a Zone tool call answers when Stop cancels it mid-run.
+const CANCELLED_CALL: &str = "This turn ended while the call ran, so it was cancelled.";
+
 const ANSWER: &str = "Written.";
+
+/// What a stand-in claude had written of a later turn when it exited.
+const UNFINISHED: &str = "Still writ";
+
+/// Where the server keeps its organizations' agent homes, under the test's directory.
+const AGENTS: &str = "agents";
+
+/// What a Codex login holds in its home once signed in.
+const CODEX_CREDENTIALS: &str = r#"{"tokens":{"access_token":"fake-codex-access-token","refresh_token":"fake-codex-refresh-token","account_id":"fake-codex-account"}}"#;
+const CODEX_CREDENTIALS_FILE: &str = "auth.json";
+
+/// The thread a stand-in Codex announces, and the day its rollout is kept under.
+const THREAD: &str = "019b2c41-0000-7000-8000-0000000000c8";
+const SESSIONS: &str = "sessions/2026/11/07";
+
+/// The window Codex's rollout reports for [`THREAD`], and how much of it the turn filled.
+const CODEX_WINDOW: u64 = 475_000;
+const CODEX_FILLED: u64 = 24_638;
+
+/// How long a stand-in Codex lingers after the line that finished its turn before it exits.
+const LINGER: Duration = Duration::from_secs(1);
 
 /// A stand-in for the host's `claude`.
 ///
@@ -79,9 +109,9 @@ impl Agent {
         let mut file = std::fs::File::create(&agent.executable).expect("the stand-in agent");
         writeln!(
             file,
-            "#!/bin/sh\ncat > {prompt}\npwd -P > {directory}\nprintf '%s' \"$ZONE_MCP_TOKEN\" > \
-             {token}\nprintf '%s' \"$*\" > {arguments}.partial\nmv {arguments}.partial \
-             {arguments}\nwhile [ ! -f {release} ]; do sleep 0.05; done\necho \
+            "#!/bin/sh\ncat > {prompt}\npwd -P > {directory}\nprintf '%s' \"{MCP_TOKEN}\" > \
+             {token}\n{{ printf '%s' \"$*\"; {MCP_CONFIGURATION}; }} > {arguments}.partial\nmv \
+             {arguments}.partial {arguments}\nwhile [ ! -f {release} ]; do sleep 0.05; done\necho \
              '{assistant}'\necho '{result}'",
             directory = agent.directory.display(),
             prompt = agent.prompt.display(),
@@ -155,6 +185,78 @@ impl Agent {
         .expect("the reporting stand-in");
     }
 
+    /// Turns the stand-in into a claude that answers, begins a later turn and exits while it is
+    /// still writing it, which leaves the answer it gave cut short.
+    fn exiting_mid_turn(&self) {
+        let lines = [
+            json!({"type": "system", "subtype": "init", "session_id": "s"}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}, "parent_tool_use_id": null}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER}),
+            json!({"type": "system", "subtype": "init", "session_id": "s"}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": UNFINISHED}]}, "parent_tool_use_id": null}),
+        ]
+        .map(|line| format!("echo '{line}'"))
+        .join("\n");
+        std::fs::write(
+            &self.executable,
+            format!("#!/bin/sh\ncat > /dev/null\n{lines}\n"),
+        )
+        .expect("the stand-in that exits mid-turn");
+    }
+
+    /// Turns the stand-in into a claude that answers while a background command it started runs
+    /// on, and never ends.
+    fn answering_over_endless_background_work(&self) {
+        let lines = [
+            json!({"type": "system", "subtype": "init", "session_id": "s"}),
+            json!({"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "bg1", "task_type": "local_bash", "description": "server"}], "session_id": "s"}),
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": ANSWER}]}, "parent_tool_use_id": null}),
+            json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER}),
+        ]
+        .map(|line| format!("echo '{line}'"))
+        .join("\n");
+        std::fs::write(
+            &self.executable,
+            format!("#!/bin/sh\ncat > /dev/null\n{lines}\nexec sleep 600\n"),
+        )
+        .expect("the stand-in whose background work never ends");
+    }
+
+    /// Turns the stand-in into a Codex that answers at once, lingers after the line that finishes
+    /// its turn, and keeps its window in the rollout under its home, as Codex does: read only
+    /// once the agent has exited, after that line.
+    fn reporting_once_it_exits(&self) {
+        let rollout = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {"total_tokens": CODEX_FILLED},
+                    "model_context_window": CODEX_WINDOW,
+                },
+            },
+        });
+        let lines = [
+            json!({"type": "thread.started", "thread_id": THREAD}),
+            json!({"type": "turn.started"}),
+            json!({"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": ANSWER}}),
+            json!({"type": "turn.completed", "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}}),
+        ]
+        .iter()
+        .map(|line| format!("echo '{line}'\n"))
+        .collect::<String>();
+        std::fs::write(
+            &self.executable,
+            format!(
+                "#!/bin/sh\ncat > /dev/null\nmkdir -p \"$CODEX_HOME/{SESSIONS}\"\necho \
+                 '{rollout}' > \"$CODEX_HOME/{SESSIONS}/rollout-2026-11-07T10-00-00-{THREAD}.jsonl\"\n\
+                 {lines}sleep {linger}\n",
+                linger = LINGER.as_secs(),
+            ),
+        )
+        .expect("the reporting codex stand-in");
+    }
+
     /// Turns the stand-in into one that forks a child of its own before it
     /// holds the turn open, and says which processes those are.
     fn forking(&self) -> Processes {
@@ -168,8 +270,9 @@ impl Agent {
         std::fs::write(
             &self.executable,
             format!(
-                "#!/bin/sh\ncat > /dev/null\nprintf '%s' \"$ZONE_MCP_TOKEN\" > {token}\nprintf \
-                 '%s' \"$*\" > {arguments}\nsleep 600 > /dev/null 2>&1 &\nprintf '%s' \"$!\" > \
+                "#!/bin/sh\ncat > /dev/null\nprintf '%s' \"{MCP_TOKEN}\" > {token}\n{{ printf \
+                 '%s' \"$*\"; {MCP_CONFIGURATION}; }} > {arguments}\nsleep 600 > /dev/null 2>&1 \
+                 &\nprintf '%s' \"$!\" > \
                  {forked}\nprintf '%s' \"$$\" > {leader}\nwhile :; do sleep 0.05; done\n",
                 token = self.token.display(),
                 arguments = self.arguments.display(),
@@ -227,35 +330,56 @@ async fn gone(pid: &str) -> bool {
     false
 }
 
-/// A tree of `depth` levels with two links from each to the next, which a walk
-/// that follows links reads `2^depth` times over: one a real walk of a host's
-/// projects takes minutes over, from next to nothing on disk.
-fn fanned_out(root: &Path, depth: usize) {
-    for level in 0..depth {
-        let directory = root.join(level.to_string());
-        std::fs::create_dir_all(&directory).expect("a level of the tree");
-        for link in ["a", "b"] {
-            std::os::unix::fs::symlink(root.join((level + 1).to_string()), directory.join(link))
-                .expect("a link to the next level");
+/// A pipe only the test writes to. A tool that reads it waits there until the
+/// test lets it go, however fast the host's disk is.
+struct Held {
+    path: PathBuf,
+    _directory: TempDir,
+}
+
+impl Held {
+    fn new() -> Self {
+        let directory = TempDir::new().expect("a directory for the held pipe");
+        let path = directory.path().join("held");
+        mkfifo(&path, stat::Mode::S_IRUSR | stat::Mode::S_IWUSR).expect("the held pipe");
+        Self {
+            path,
+            _directory: directory,
         }
     }
-    std::fs::create_dir_all(root.join(depth.to_string())).expect("the last level of the tree");
+
+    /// Wait until a tool opens the pipe to read it, and hand back its
+    /// writing end: the reader waits for as long as the test keeps that open,
+    /// and is let go once it is dropped.
+    async fn reached(&self) -> Option<File> {
+        let deadline = Instant::now() + SPAWN_TIMEOUT;
+        while Instant::now() < deadline {
+            match OpenOptions::new()
+                .write(true)
+                .custom_flags(OFlag::O_NONBLOCK.bits())
+                .open(&self.path)
+            {
+                Ok(writer) => return Some(writer),
+                Err(error) if error.raw_os_error() == Some(Errno::ENXIO as i32) => {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => panic!("the held pipe could not be opened: {error}"),
+            }
+        }
+        None
+    }
 }
 
 /// The MCP server definition zone passed on the command line, as the agent
 /// would have read it: where to reach zone, and which tools it may call.
 fn served(arguments: &str) -> (String, Vec<String>) {
     let endpoint = between(arguments, r#""url":""#, '"').expect("zone named its MCP endpoint");
-    let allowed = match arguments.split("--allowedTools ").nth(1) {
-        Some(rest) => rest
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .split(',')
-            .map(str::to_string)
-            .collect(),
-        None => Vec::new(),
-    };
+    let allowed = arguments
+        .split("--allowedTools ")
+        .skip(1)
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
     (endpoint, allowed)
 }
 
@@ -281,6 +405,8 @@ async fn rpc(endpoint: &str, token: &str, method: &str, params: Value) -> (Statu
 
 struct Harness {
     pool: PgPool,
+    agents: AgentConfig,
+    organization: Uuid,
     workspace: String,
     token: String,
     chat: Uuid,
@@ -316,6 +442,15 @@ impl Harness {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
             .mount(&provider)
             .await;
+        Mock::given(method("GET"))
+            .and(path("/backend-api/wham/usage"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"rate_limit": {"primary_window": {"used_percent": 10.0}}}),
+                ),
+            )
+            .mount(&provider)
+            .await;
 
         let directory = TempDir::new().expect("a temporary directory");
         let agent = Agent::write(directory.path());
@@ -336,6 +471,12 @@ impl Harness {
             agent: kind,
             executable: Some(agent.executable.clone()),
         };
+        config.agents = AgentConfig {
+            state: directory.path().join(AGENTS),
+            codex_api_url: provider.uri(),
+            ..config.agents
+        };
+        let agents = config.agents.clone();
 
         let router = create_test_router(create_test_state(config, pool.clone()));
         let client = TestClient::new(router.clone());
@@ -354,7 +495,7 @@ impl Harness {
             .expect("registration returns an access token")
             .to_string();
         let suffix = Uuid::new_v4();
-        let organization = client
+        let organization: Uuid = client
             .post_json_auth(
                 "/api/organizations",
                 &json!({"name": "Agent tools", "slug": format!("agent-{suffix}")}),
@@ -364,7 +505,8 @@ impl Harness {
             .json_value()["organization"]["id"]
             .as_str()
             .expect("an organization")
-            .to_string();
+            .parse()
+            .expect("an organization id");
         let workspace = client
             .post_json_auth(
                 &format!("/api/organizations/{organization}/workspaces"),
@@ -400,6 +542,8 @@ impl Harness {
 
         Self {
             pool,
+            agents,
+            organization,
             workspace,
             token,
             chat,
@@ -416,13 +560,16 @@ impl Harness {
         let workspace = self.workspace.parse().expect("a workspace id");
         let source = zone_server::db::sources::create_source(
             &self.pool,
-            workspace,
-            &Uuid::new_v4().to_string(),
-            "filesystem",
-            json!({"base_path": directory}),
-            None,
-            None,
-            None,
+            zone_server::db::sources::NewSource {
+                workspace_id: workspace,
+                name: &Uuid::new_v4().to_string(),
+                source_type: "filesystem",
+                config: json!({"base_path": directory}),
+                description: None,
+                url: None,
+                credentials_encrypted: None,
+                github_installation_id: None,
+            },
         )
         .await
         .expect("a source");
@@ -444,6 +591,40 @@ impl Harness {
             .execute(&self.pool)
             .await
             .expect("the chat in the project");
+    }
+
+    /// Runs the organization's turns on Codex, signed in once with a home of its own, as the
+    /// stand-in, which the instance names as its codex.
+    async fn sign_in_to_codex(&self) {
+        sqlx::query(
+            "INSERT INTO organization_ai_settings (organization_id, provider) VALUES ($1, $2) \
+             ON CONFLICT (organization_id) DO UPDATE SET provider = EXCLUDED.provider",
+        )
+        .bind(self.organization)
+        .bind(ai_settings::provider(AgentKind::Codex))
+        .execute(&self.pool)
+        .await
+        .expect("the organization's AI settings");
+        let login = agent_logins::insert(
+            &self.pool,
+            &agent_logins::Insert {
+                organization_id: self.organization,
+                agent: AgentKind::Codex.as_str(),
+                account: Some("codex"),
+                credential: None,
+                label: Some("codex"),
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("a stored login")
+        .id;
+        let home = self
+            .agents
+            .create_login_home(self.organization, AgentKind::Codex, login)
+            .expect("the login's home");
+        std::fs::write(home.join(CODEX_CREDENTIALS_FILE), CODEX_CREDENTIALS)
+            .expect("the codex login's credentials");
     }
 
     async fn socket(&self) -> Socket {
@@ -477,7 +658,9 @@ async fn a_project_chats_agent_runs_in_the_directory_its_prompt_names() {
     let turn = harness.turn("Where are you?").await;
     harness.agent.spawned().await;
     let ran_in = std::fs::read_to_string(&harness.agent.directory).expect("the agent's directory");
-    let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
+    let prompt = zone_core::llm::cli::prompt(
+        &std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt"),
+    );
     harness.agent.finish();
     turn.await.expect("the turn ends");
 
@@ -548,7 +731,9 @@ async fn a_cli_turn_serves_its_tools_for_the_life_of_the_turn_and_no_longer() {
     // Over MCP a question or a wait returns at once, parking nothing, and the
     // turn would read that as an answer nobody gave. So the agent is neither
     // served one nor told of one, and asks the reader in its reply instead.
-    let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
+    let prompt = zone_core::llm::cli::prompt(
+        &std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt"),
+    );
     for tool in [ASK_USER, WAIT_FOR] {
         assert!(!prompt.contains(tool), "the prompt teaches {tool}");
         assert!(!names.contains(&tool), "{tool} was listed: {names:?}");
@@ -648,35 +833,36 @@ async fn stopping_a_codex_turn_kills_its_agent_and_everything_it_forked() {
     stop_ends_the_turn_and_its_processes(AgentKind::Codex).await;
 }
 
-/// A zone tool the agent called is exactly when a reader reaches for Stop, and
-/// the slowest are the ones that walk a directory tree. A walk that keeps its
-/// worker also keeps the turn, whose task the call has just woken on that
-/// worker, however many others are idle: the reader is shown nothing and Stop
-/// goes unread until the walk ends.
+/// A reader reaches for Stop while a zone tool the agent called still runs. A
+/// call that keeps its worker also keeps the turn, whose task the call has
+/// just woken on that worker, however many others are idle: the reader is
+/// shown nothing and Stop goes unread until the call ends. The call here is a
+/// `run_command` of `cat` on a pipe the test holds open, so it is still
+/// running when Stop arrives on any host.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stop_reaches_a_cli_turn_while_a_tool_it_called_walks_a_huge_tree() {
+async fn stop_reaches_a_cli_turn_while_a_tool_it_called_still_runs() {
+    let held = Held::new();
     let harness = Harness::start(true, true).await;
     let processes = harness.agent.forking();
-    let tree = harness._directory.path().join("tree");
-    fanned_out(&tree, 18);
     let mut socket = harness.socket().await;
     send(
         &mut socket,
-        json!({"type": "send", "content": "List everything."}),
+        json!({"type": "send", "content": "Read the pipe."}),
     )
     .await;
     let [leader, forked] = processes.pids().await;
     let (arguments, token) = harness.agent.spawned().await;
     let (endpoint, _) = served(&arguments);
 
-    let call = tokio::spawn(async move {
+    let pipe = held.path.to_string_lossy().into_owned();
+    let mut call = tokio::spawn(async move {
         rpc(
             &endpoint,
             &token,
             "tools/call",
             json!({
-                "name": "list_files",
-                "arguments": {"path": tree.to_string_lossy(), "recursive": true},
+                "name": "run_command",
+                "arguments": {"command": "cat", "args": [pipe], "reason": "Read the pipe."},
             }),
         )
         .await
@@ -684,17 +870,23 @@ async fn stop_reaches_a_cli_turn_while_a_tool_it_called_walks_a_huge_tree() {
     let started = tokio::time::timeout(SPAWN_TIMEOUT, async {
         loop {
             let frame = next(&mut socket).await;
-            if frame["type"] == "tool_call" && frame["name"] == "list_files" {
+            if frame["type"] == "tool_call" && frame["name"] == "run_command" {
                 return frame;
             }
         }
     })
     .await
     .expect("the reader must be shown the call while it runs");
+    let Some(release) = held.reached().await else {
+        let answered = match call.is_finished() {
+            true => format!("{:?}", (&mut call).await),
+            false => "nothing".to_string(),
+        };
+        panic!("the call never read the held pipe, so nothing kept it running: {answered}");
+    };
     assert!(
         !call.is_finished(),
-        "the call finished before the reader was shown it, so its walk held the runtime: \
-         {started}"
+        "the call finished while the test still held its pipe open: {started}"
     );
 
     send(&mut socket, json!({"type": "cancel"})).await;
@@ -707,13 +899,17 @@ async fn stop_reaches_a_cli_turn_while_a_tool_it_called_walks_a_huge_tree() {
         Some(json!("cancelled")),
         "the console must be told the turn stopped: {frames:?}"
     );
+    let (_, answer) = tokio::time::timeout(STOP_TIMEOUT, call)
+        .await
+        .expect("Stop must cancel the call it interrupted")
+        .expect("the call's request completes");
     assert!(
-        !call.is_finished(),
-        "Stop was only read once the call had finished"
+        answer.to_string().contains(CANCELLED_CALL),
+        "Stop must cancel the running call rather than wait for it to finish: {answer}"
     );
     assert!(gone(&leader).await, "the agent outlived Stop");
     assert!(gone(&forked).await, "the agent's child outlived Stop");
-    call.abort();
+    drop(release);
 }
 
 /// A chat whose agent the reader turned off gets no tools, and neither does
@@ -776,17 +972,14 @@ fn system_prompt(preparation: &session::Preparation) -> String {
         .expect("the turn's system prompt")
 }
 
-/// A chat turn on a coding agent gets the chat's whole time budget on the
-/// agent's own clock too, which the operator may set past the thirty minutes
-/// an agent's turn has by default. And it is prepared with no tool that would
-/// park zone's own loop, in its catalog or in its prompt, where a turn on an
-/// endpoint keeps both.
+/// A chat turn on a coding agent runs until the agent is done: nothing puts a
+/// clock on the agent for the chat's sake. And it is prepared with no tool
+/// that would park zone's own loop, in its catalog or in its prompt, where a
+/// turn on an endpoint keeps both.
 #[tokio::test]
-async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
+async fn a_cli_turn_is_prepared_with_no_deadline_and_nothing_that_parks() {
     let harness = common::context::Harness::new(None, true, Vec::new()).await;
-    let mut config = harness.config.clone();
-    config.chat.timeout = CHAT_TIMEOUT;
-    let state = create_test_state(config, harness.pool.clone());
+    let state = create_test_state(harness.config.clone(), harness.pool.clone());
     let chat = chats::get_chat(&harness.pool, harness.chat)
         .await
         .unwrap()
@@ -800,7 +993,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         None,
         Mode::Generation(session::Generation::unrouted(LlmBackend::cli(
             AgentKind::Claude,
-            CliSettings::default(),
+            zone_core::llm::cli::settings(),
         ))),
         route.endpoint().expect("a usable route").clone(),
         None,
@@ -837,7 +1030,11 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
     let LlmBackend::Cli { settings, .. } = agent.llm.backend() else {
         panic!("the turn was moved off its agent");
     };
-    assert_eq!(settings.timeout, CHAT_TIMEOUT);
+    assert!(
+        Instant::now().checked_add(settings.timeout).is_none(),
+        "the agent's clock stops it after {:?}",
+        settings.timeout
+    );
 }
 
 const CREATE_PULL_REQUEST: &str = "create_pull_request";
@@ -870,13 +1067,16 @@ async fn prompted_on(
 async fn add_github_source(pool: &PgPool, workspace: Uuid) -> Uuid {
     zone_server::db::sources::create_source(
         pool,
-        workspace,
-        &Uuid::new_v4().to_string(),
-        zone_server::db::sources::GITHUB,
-        json!({"owner": "abnegate", "repo": "zone"}),
-        None,
-        None,
-        None,
+        zone_server::db::sources::NewSource {
+            workspace_id: workspace,
+            name: &Uuid::new_v4().to_string(),
+            source_type: zone_server::db::sources::GITHUB,
+            config: json!({"owner": "abnegate", "repo": "zone"}),
+            description: None,
+            url: None,
+            credentials_encrypted: None,
+            github_installation_id: None,
+        },
     )
     .await
     .expect("a GitHub source")
@@ -900,11 +1100,11 @@ async fn every_turn_in_a_workspace_on_github_opens_pull_requests_through_zone() 
             (LlmBackend::Http, CREATE_PULL_REQUEST.to_string()),
             (
                 LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
-                AgentKind::Claude.tool(CREATE_PULL_REQUEST),
+                AgentKind::Claude.tool(Toolset::SERVER, CREATE_PULL_REQUEST),
             ),
             (
                 LlmBackend::cli(AgentKind::Codex, CliSettings::default()),
-                AgentKind::Codex.tool(CREATE_PULL_REQUEST),
+                AgentKind::Codex.tool(Toolset::SERVER, CREATE_PULL_REQUEST),
             ),
         ]
     };
@@ -956,7 +1156,7 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
         let turn = harness.turn("Open a pull request for this branch.").await;
         let (arguments, token) = harness.agent.spawned().await;
         let (endpoint, allowed) = served(&arguments);
-        let qualified = AgentKind::Claude.tool(CREATE_PULL_REQUEST);
+        let qualified = AgentKind::Claude.tool(Toolset::SERVER, CREATE_PULL_REQUEST);
 
         assert!(allowed.contains(&qualified), "{allowed:?}");
         let (status, listed) = rpc(&endpoint, &token, "tools/list", json!({})).await;
@@ -976,7 +1176,9 @@ async fn a_coding_agent_on_github_is_served_zones_pull_request_tool_and_told_to_
             "sandboxed {sandboxed}: {names:?}"
         );
 
-        let prompt = std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt");
+        let prompt = zone_core::llm::cli::prompt(
+            &std::fs::read_to_string(&harness.agent.prompt).expect("the agent's prompt"),
+        );
         assert!(
             prompt.contains(&format!("then calling {qualified} so Zone can track it")),
             "sandboxed {sandboxed}: {prompt}"
@@ -1021,9 +1223,132 @@ async fn a_cli_turn_keeps_the_window_its_agent_reported_and_shows_it_as_it_ends(
     assert_eq!(kept.model, "sonnet");
     assert_eq!(
         kept.occupancy,
-        Occupancy {
-            window: 200_000,
-            used: Some(3 + 120 + 16_500 + 9),
-        }
+        Occupancy::reported(200_000, Some(3 + 120 + 16_500 + 9)).expect("a reported window")
     );
+}
+
+/// Codex reports its window only once it has exited, after the line that finished its turn, so
+/// a chat that stopped reading at the finish would keep nothing. The chat reads the turn to its
+/// end, and the window is kept, and shown, all the same.
+#[tokio::test]
+async fn the_chat_reads_the_agent_stream_to_its_end() {
+    let harness = Harness::start_on(AgentKind::Codex, false, true).await;
+    harness.sign_in_to_codex().await;
+    harness.agent.reporting_once_it_exits();
+
+    let frames = harness
+        .turn("How large is your window?")
+        .await
+        .await
+        .expect("the turn ends");
+
+    successful(&frames);
+    let kept = occupancy::get(&harness.pool, harness.chat)
+        .await
+        .expect("the chat's report is readable")
+        .expect("the turn kept the window codex reported once it exited");
+    assert_eq!(kept.agent, AgentKind::Codex);
+    assert_eq!(
+        kept.occupancy,
+        Occupancy::reported(CODEX_WINDOW, Some(CODEX_FILLED)).expect("a reported window")
+    );
+    let usage = &frames
+        .iter()
+        .rev()
+        .find(|frame| frame["type"] == "context")
+        .unwrap_or_else(|| panic!("no context frame in {frames:?}"))["usage"];
+    assert_eq!(usage["limit"], json!(CODEX_WINDOW), "{usage}");
+}
+
+/// An agent stopped before it finished keeps the answer it gave, and the reader is told it was
+/// cut short: the turn is neither an error nor a finished answer.
+#[tokio::test]
+async fn an_answer_the_agent_was_cut_short_after_is_kept_and_marked_cut_short() {
+    let harness = Harness::start(false, true).await;
+    harness.agent.exiting_mid_turn();
+
+    let frames = harness
+        .turn("Write it up.")
+        .await
+        .await
+        .expect("the turn ends");
+
+    successful(&frames);
+    let ended = frames
+        .iter()
+        .find(|frame| frame["type"] == "message_end")
+        .expect("a message_end");
+    let shown = ended["content"].as_str().expect("the answer's content");
+    assert_eq!(
+        shown,
+        format!(
+            "{ANSWER}\n\n{UNFINISHED}\n\n[Cut short: the agent was stopped before it finished]"
+        ),
+        "{frames:?}"
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE chat_id = $1 AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(harness.chat)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the stored answer");
+    assert_eq!(stored, shown, "a reload reads the answer differently");
+}
+
+/// A claude that answers and leaves background work running for ever has no clock to stop it,
+/// so the reader does: Stop keeps the answer it gave, recorded as a turn that was stopped rather
+/// than one that finished.
+#[tokio::test]
+async fn an_answer_given_before_endless_background_work_is_kept_when_the_reader_stops() {
+    let harness = Harness::start(false, true).await;
+    harness.agent.answering_over_endless_background_work();
+    let mut socket = harness.socket().await;
+    send(
+        &mut socket,
+        json!({"type": "send", "content": "Start the server and tell me when it is up."}),
+    )
+    .await;
+
+    let mut frames = Vec::new();
+    let mut shown = String::new();
+    while !shown.contains(ANSWER) {
+        let frame = next(&mut socket).await;
+        if frame["type"] == "chunk" {
+            shown.push_str(frame["content"].as_str().unwrap_or_default());
+        }
+        assert_ne!(
+            frame["type"], "message_end",
+            "the turn ended on its own: {frame}"
+        );
+        frames.push(frame);
+    }
+    send(&mut socket, json!({"type": "cancel"})).await;
+    frames.extend(
+        tokio::time::timeout(STOP_TIMEOUT, finish(&mut socket))
+            .await
+            .expect("Stop must end the turn promptly"),
+    );
+
+    assert_eq!(
+        frames.last().map(|frame| frame["type"].clone()),
+        Some(json!("cancelled")),
+        "{frames:?}"
+    );
+    let stored: String = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE chat_id = $1 AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(harness.chat)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the stored answer");
+    assert_eq!(stored, ANSWER, "the answer given before Stop was lost");
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM chat_turns WHERE chat_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(harness.chat)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the turn");
+    assert_eq!(status, "interrupted", "a stopped turn reads as finished");
 }

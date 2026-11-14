@@ -15,17 +15,20 @@ pub mod tools;
 pub mod verdict;
 
 use std::sync::Arc;
-use std::time::Duration;
 
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolResult;
+use abnegate_agent_cli::{CREDITS_REQUIRED, LONG_CONTEXT_CREDITS_REQUIRED};
 use abnegate_llm::{Message, ToolDefinition};
 use abnegate_secret::SecretValue;
 use abnegate_vcs::{ChangedFile, PullRequestDetail, PullRequestReference, PullRequestService};
 use reqwest::StatusCode;
 use serde_json::Value;
 use thiserror::Error;
+use zone_core::application::application;
 use zone_core::llm::LlmBackend;
-use zone_core::llm::provider::{UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::tools::{ToolContext, ToolResult};
+use zone_core::vpn::Offline;
+use zone_core::walk;
 
 use crate::db::auto_projects::{Finding, ReviewRow};
 use crate::db::tasks::TaskRow;
@@ -36,16 +39,14 @@ pub use verdict::{Outcome, Verdict};
 
 /// Turns a review may take: reads, then the verdict.
 const MAX_TURNS: usize = 12;
-/// How long one review may run.
-const REVIEW_TIMEOUT: Duration = Duration::from_secs(600);
 /// Tokens the verdict turn may spend.
 const REVIEW_TOKENS: u32 = 4_096;
 /// A review is a judgement, not a draft.
 const REVIEW_TEMPERATURE: f32 = 0.0;
-/// How zone_core begins a coding agent's refusal of a model or a context the
-/// signed-in account cannot spend usage credits on, which every tick meets
-/// again.
-const UNFUNDED_MARKERS: [&str; 2] = [UNFUNDED, UNFUNDED_CONTEXT];
+/// How abnegate-agent-cli begins a coding agent's refusal of a model or a
+/// context the signed-in account cannot spend usage credits on, which every
+/// tick meets again.
+const CREDITS_MARKERS: [&str; 2] = [CREDITS_REQUIRED, LONG_CONTEXT_CREDITS_REQUIRED];
 
 #[derive(Debug, Error)]
 pub enum ReviewError {
@@ -59,8 +60,6 @@ pub enum ReviewError {
     Unreachable(String),
     #[error("the reviewer model {reviewer} cannot run: {reason}")]
     Unfunded { reviewer: String, reason: String },
-    #[error("the review did not finish within {} seconds", REVIEW_TIMEOUT.as_secs())]
-    TimedOut,
 }
 
 impl ReviewError {
@@ -74,7 +73,7 @@ impl ReviewError {
         let credits = matches!(&error, abnegate_llm::Error::Limited { limit, .. } if limit.credits);
         let unfunded = credits
             || matches!(backend, LlmBackend::Cli { .. })
-                && UNFUNDED_MARKERS.iter().any(|marker| words.contains(marker));
+                && CREDITS_MARKERS.iter().any(|marker| words.contains(marker));
         if unfunded {
             return Self::Unfunded {
                 reviewer: reviewer.to_string(),
@@ -95,7 +94,6 @@ impl ReviewError {
                 reviewer,
                 reason: endpoint.scrub(&reason),
             },
-            Self::TimedOut => Self::TimedOut,
         }
     }
 
@@ -169,7 +167,7 @@ pub async fn run(
     let registry = tools::registry(shared);
     let definitions: Option<Vec<ToolDefinition>> =
         matches!(client.backend(), LlmBackend::Http).then(|| registry.definitions());
-    let context = ToolContext::default();
+    let context = context();
     let mut messages = vec![
         Message::system(prompt::system(
             request.round,
@@ -234,22 +232,34 @@ pub async fn run(
             "the review did not reach a verdict within {MAX_TURNS} turns"
         )))
     };
-    match tokio::time::timeout(REVIEW_TIMEOUT, session).await {
-        Ok(outcome) => outcome.map_err(|error| error.scrubbed(endpoint)),
-        Err(_) => Err(ReviewError::TimedOut),
-    }
+    session.await.map_err(|error| error.scrubbed(endpoint))
+}
+
+fn context() -> ToolContext {
+    ToolContext::default()
+        .inherit_environment()
+        .with_application(application())
+        .with_proxy(zone_routing::proxy())
+        .with_public_web(Arc::new(Offline::new(false)))
+        .with_search_timeout(walk::BUDGET)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_agent::Tool;
+    use abnegate_agent::ToolError;
+    use abnegate_agent::tool::RunCommandTool;
+    use abnegate_agent_cli::AgentKind;
     use abnegate_llm::Limit;
     use abnegate_vcs::{BranchName, CommitSha, Mergeability};
     use serde_json::json;
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
     use tempfile::TempDir;
     use uuid::Uuid;
-    use zone_core::llm::AgentKind;
+
+    use zone_core::vpn::{Hold, OFFLINE};
 
     use crate::config::{Config, ModelBackend};
 
@@ -421,7 +431,9 @@ mod tests {
 
         assert_eq!(verdict.outcome, Outcome::Approve);
         assert_eq!(verdict.summary, "The cart is sound.");
-        let prompt = std::fs::read_to_string(&prompt).expect("the agent was given a prompt");
+        let prompt = zone_core::llm::cli::prompt(
+            &std::fs::read_to_string(&prompt).expect("the agent was given a prompt"),
+        );
         assert!(
             prompt.contains(DIFF),
             "the agent reviews from the diff inline: {prompt}"
@@ -461,14 +473,79 @@ mod tests {
             panic!("expected an unfunded reviewer, got {error:?}");
         };
         assert_eq!(reviewer, "fable");
-        assert_eq!(reason, &format!("claude: {UNFUNDED}: {REFUSAL}"));
+        assert_eq!(reason, &format!("claude: {CREDITS_REQUIRED}: {REFUSAL}"));
         assert_eq!(
             error.stalled(),
             Some(format!(
-                "the reviewer model fable cannot run: claude: {UNFUNDED}: {REFUSAL}"
+                "the reviewer model fable cannot run: claude: {CREDITS_REQUIRED}: {REFUSAL}"
             )),
             "the task pauses with claude's words rather than asking every tick"
         );
+    }
+
+    /// A refusal for usage credits is read only from the `api_error` claude
+    /// types it with: a Fable refusal in claude's words alone is a failed
+    /// round. A context the account cannot fund pauses the task as a model
+    /// does.
+    #[tokio::test]
+    async fn a_reviewer_is_unfunded_only_by_claudes_typed_refusal() {
+        const LONG_CONTEXT: &str = "API Error: Usage credits required for 1M context";
+        let task = task();
+        let pull = pull();
+        let review = |words: &'static str, kind: Option<&'static str>| {
+            let task = &task;
+            let pull = &pull;
+            async move {
+                let directory = TempDir::new().expect("a temporary directory");
+                let prompt = directory.path().join("prompt");
+                let config = claude(refusing(&directory, &prompt, words, kind));
+                run(
+                    &Endpoint::instance(&config),
+                    backend::instance(&config),
+                    github(),
+                    request(task, pull, "fable"),
+                )
+                .await
+                .expect_err("a refused review")
+            }
+        };
+
+        let worded = review(REFUSAL, None).await;
+        assert!(matches!(worded, ReviewError::Model(_)), "{worded:?}");
+        assert_eq!(
+            worded.stalled(),
+            None,
+            "the next tick asks another reviewer"
+        );
+
+        let long_context = review(LONG_CONTEXT, Some("long_context_credits_required")).await;
+        let ReviewError::Unfunded { reason, .. } = &long_context else {
+            panic!("expected an unfunded reviewer, got {long_context:?}");
+        };
+        assert_eq!(
+            reason,
+            &format!("claude: {LONG_CONTEXT_CREDITS_REQUIRED}: {LONG_CONTEXT}")
+        );
+    }
+
+    /// Each refusal for usage credits abnegate-agent-cli words is unfunded
+    /// however the failure reaches the review, even with no credits limit
+    /// beside it.
+    #[test]
+    fn credits_markers_are_the_crates() {
+        let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::cli::settings());
+        assert_eq!(
+            CREDITS_MARKERS,
+            [CREDITS_REQUIRED, LONG_CONTEXT_CREDITS_REQUIRED]
+        );
+        for marker in CREDITS_MARKERS {
+            let error = ReviewError::model(
+                &agent,
+                "fable",
+                abnegate_llm::Error::Agent(format!("claude: {marker}: {REFUSAL}")),
+            );
+            assert!(matches!(error, ReviewError::Unfunded { .. }), "{error:?}");
+        }
     }
 
     /// A model that fails for any other reason is a failed round, and the next
@@ -506,7 +583,7 @@ mod tests {
         let error = ReviewError::model(
             &LlmBackend::Http,
             "qwen3:32b",
-            abnegate_llm::Error::Timeout(std::time::Duration::from_secs(600)),
+            abnegate_llm::Error::Timeout(Duration::from_secs(600)),
         );
 
         assert!(matches!(error, ReviewError::Unreachable(_)), "{error:?}");
@@ -520,7 +597,7 @@ mod tests {
             "fable",
             abnegate_llm::Error::api(
                 StatusCode::BAD_REQUEST.as_u16(),
-                format!("{UNFUNDED}: {REFUSAL}"),
+                format!("{CREDITS_REQUIRED}: {REFUSAL}"),
             ),
         );
 
@@ -532,10 +609,13 @@ mod tests {
     /// agent's own words, never in the stderr that follows them.
     #[test]
     fn an_unfunded_reviewer_is_read_from_the_agents_own_words() {
-        let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::CliSettings::default());
+        let agent = LlmBackend::cli(
+            AgentKind::Claude,
+            abnegate_agent_cli::CliSettings::default(),
+        );
         let stderr_only = format!(
-            "claude: the agent exited without completing its event stream{}{UNFUNDED}: {REFUSAL}",
-            zone_core::llm::provider::STDERR_HEADING
+            "claude: the agent exited without completing its event stream{}{CREDITS_REQUIRED}: {REFUSAL}",
+            abnegate_agent_cli::STDERR_HEADING
         );
 
         assert!(matches!(
@@ -547,7 +627,7 @@ mod tests {
                 &agent,
                 "sonnet[1m]",
                 abnegate_llm::Error::Agent(format!(
-                    "claude: {UNFUNDED_CONTEXT}: API Error: Usage credits required for 1M context"
+                    "claude: {LONG_CONTEXT_CREDITS_REQUIRED}: API Error: Usage credits required for 1M context"
                 ))
             ),
             ReviewError::Unfunded { .. }
@@ -559,7 +639,10 @@ mod tests {
     /// its words always made it.
     #[test]
     fn a_credits_limit_is_an_unfunded_reviewer_and_any_other_limit_a_model_failure() {
-        let agent = LlmBackend::cli(AgentKind::Claude, zone_core::llm::CliSettings::default());
+        let agent = LlmBackend::cli(
+            AgentKind::Claude,
+            abnegate_agent_cli::CliSettings::default(),
+        );
         let limited = |message: &str, credits: bool| {
             abnegate_llm::Error::limited("claude", Limit::new(message).with_credits(credits))
         };
@@ -590,7 +673,7 @@ mod tests {
             ReviewError::model(
                 &agent,
                 "fable",
-                limited(&format!("{UNFUNDED}: {REFUSAL}"), false)
+                limited(&format!("{CREDITS_REQUIRED}: {REFUSAL}"), false)
             ),
             ReviewError::Unfunded { .. }
         ));
@@ -683,6 +766,94 @@ mod tests {
                 "{status}: {error:?}"
             );
         }
+    }
+
+    /// A completion answered with `message`, after a real delay long enough for the clock to be
+    /// moved while it is outstanding.
+    fn answer(message: Value) -> wiremock::ResponseTemplate {
+        wiremock::ResponseTemplate::new(200)
+            .set_body_json(json!({
+                "id": "completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "qwen3:32b",
+                "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+            }))
+            .set_delay(Duration::from_millis(500))
+    }
+
+    /// How long, in real time, [`advancing`] waits for a request before the test fails rather
+    /// than hangs on a review that ended early.
+    const REQUESTS_WITHIN: Duration = Duration::from_secs(30);
+
+    /// Once `server` has been sent `count` requests, moves the clock on by `duration`.
+    async fn advancing(server: &wiremock::MockServer, count: usize, duration: Duration) {
+        let started = std::time::Instant::now();
+        loop {
+            let received = server
+                .received_requests()
+                .await
+                .map_or(0, |requests| requests.len());
+            if received >= count {
+                break;
+            }
+            assert!(
+                started.elapsed() < REQUESTS_WITHIN,
+                "expected {count} requests within {REQUESTS_WITHIN:?}, received {received}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::pause();
+        tokio::time::advance(duration).await;
+        tokio::time::resume();
+    }
+
+    /// A review is bounded by its turns, not by the clock: one whose two turns take seven
+    /// minutes each still reaches its verdict.
+    #[tokio::test]
+    async fn a_review_that_takes_fourteen_minutes_still_reaches_its_verdict() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+
+        let turn = Duration::from_secs(7 * 60);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(answer(json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_diff",
+                    "type": "function",
+                    "function": {"name": "read_diff", "arguments": "{}"},
+                }],
+            })))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(answer(json!({"role": "assistant", "content": REPLY})))
+            .mount(&server)
+            .await;
+        let task = task();
+        let pull = pull();
+        let endpoint = endpoint(server.uri());
+
+        let (verdict, (), ()) = tokio::join!(
+            run(
+                &endpoint,
+                LlmBackend::Http,
+                github(),
+                request(&task, &pull, "qwen3:32b"),
+            ),
+            advancing(&server, 1, turn),
+            advancing(&server, 2, turn),
+        );
+
+        let verdict = verdict.expect("a slow review still gives its verdict");
+        assert_eq!(verdict.outcome, Outcome::Approve);
     }
 
     #[tokio::test]
@@ -816,5 +987,31 @@ mod tests {
         assert!(matches!(error, ReviewError::Model(_)), "{error:?}");
         assert!(!recorded.contains(KEY), "{recorded}");
         assert!(!recorded.contains("sk-org****e19b"), "{recorded}");
+    }
+    #[test]
+    fn a_review_walks_for_zones_twenty_five_seconds() {
+        assert_eq!(context().search_timeout, Duration::from_secs(25));
+    }
+
+    #[tokio::test]
+    async fn a_review_context_inherits_the_environment_and_the_gate() {
+        let context = context();
+
+        assert!(context.environment.inherits());
+        assert_eq!(context.application, application());
+        assert!(context.proxy.is_some());
+        assert!(context.public_web.is_some());
+
+        let _vpn = Hold::required_off();
+        let refused = RunCommandTool::with_commands(&["curl"])
+            .execute(
+                json!({ "command": "curl", "args": ["https://example.com"] }),
+                &context,
+            )
+            .await;
+        assert!(
+            matches!(&refused, Err(ToolError::Execution(message)) if message == OFFLINE),
+            "{refused:?}"
+        );
     }
 }

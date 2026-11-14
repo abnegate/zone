@@ -4,6 +4,12 @@ use crate::common::{
     MEDIA, TestClient, create_test_pool, create_test_router, create_test_state, test_config,
     test_email, test_password,
 };
+use abnegate_agent::tool::MAXIMUM_SLEEP;
+use abnegate_agent::tool::RunShellTool;
+use abnegate_agent::tool::Tool;
+use abnegate_agent::tool::ToolContext;
+use abnegate_agent::tool::job::JobStarted;
+use abnegate_agent::tool::job::started_text;
 use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{EncodingKey, Header, encode};
@@ -26,13 +32,12 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
-use zone_core::tools::job::{JobExited, JobStarted};
 use zone_server::{
     agent::wait::{Verdict, WaitSettled, Waiting},
     auth::validate_access_token,
     config::Config,
     db::{actions, chats},
-    ws::chat::ServerMessage,
+    ws::chat::{ServerMessage, job::JobExit},
 };
 
 type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -122,6 +127,9 @@ async fn authenticate(address: &str, chat: Uuid, token: &str) -> Socket {
 /// Mirrors AUTH_RECHECK_INTERVAL in the server, which is private to it.
 const AUTH_RECHECK: Duration = Duration::from_secs(10);
 
+/// How long a step of the clock is given to deliver what it sends
+const STEP_READ: Duration = Duration::from_millis(250);
+
 async fn next_json(socket: &mut Socket) -> Option<Value> {
     loop {
         let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
@@ -141,34 +149,28 @@ async fn assert_error(socket: &mut Socket, expected: &str) {
     assert_eq!(frame, json!({"type": "error", "message": expected}));
 }
 
-async fn periodic_error(socket: &mut Socket, count: usize) -> Option<String> {
-    let mut pong = true;
-    for _ in 0..count {
-        tokio::time::advance(Duration::from_secs(30)).await;
-        for _ in 0..3 {
-            tokio::task::yield_now().await;
-        }
-        let frame = socket.next().await?.ok()?;
-        match frame {
-            WsMessage::Ping(data) if pong => {
-                // The server closes the moment it reports, so this pong can
-                // find a broken pipe. Keep reading rather than giving up: the
-                // error frame it sent before closing is still on its way.
-                if socket.send(WsMessage::Pong(data)).await.is_err() {
-                    pong = false;
+/// Steps the paused clock one authorization recheck at a time, reading what
+/// each step sends on the real clock, until the server reports an error.
+/// Reading a ping owes the server a pong, which tungstenite sends before any
+/// later read and which fails once the server has closed. The report lands
+/// MAX_CONSECUTIVE_ERRORS rechecks in, never on a ping's step, so every pong
+/// is sent while the server still reads.
+async fn periodic_error(socket: &mut Socket, steps: usize) -> Option<String> {
+    for _ in 0..steps {
+        tokio::time::pause();
+        tokio::time::advance(AUTH_RECHECK).await;
+        tokio::time::resume();
+        while let Ok(frame) = tokio::time::timeout(STEP_READ, socket.next()).await {
+            match frame?.ok()? {
+                WsMessage::Text(text) => {
+                    let frame: Value = serde_json::from_str(&text).ok()?;
+                    if frame["type"] == "error" {
+                        return frame["message"].as_str().map(str::to_string);
+                    }
                 }
+                WsMessage::Close(_) => return None,
+                _ => {}
             }
-            WsMessage::Text(text) => {
-                let frame: Value = serde_json::from_str(&text).ok()?;
-                if frame["type"] == "error" {
-                    return frame["message"].as_str().map(str::to_string);
-                }
-            }
-            WsMessage::Close(_) => return None,
-            _ => {}
-        }
-        for _ in 0..3 {
-            tokio::task::yield_now().await;
         }
     }
     None
@@ -207,7 +209,10 @@ async fn unauthenticated_connections_reject_bad_tokens_and_excess_fanout() {
 
 #[tokio::test(start_paused = true)]
 async fn silent_connection_receives_an_authentication_timeout() {
-    let pool = PgPool::connect_lazy("postgres://unused:unused@127.0.0.1:9/unused").unwrap();
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(250))
+        .connect_lazy("postgres://unused:unused@127.0.0.1:9/unused")
+        .unwrap();
     let address = spawn(test_config(), pool).await;
     let mut socket = connect(&address, Uuid::new_v4()).await;
 
@@ -723,12 +728,10 @@ async fn repeated_authorization_database_errors_close_an_unstable_connection() {
     let mut socket = authenticate(&address, chat, &token).await;
     pool.close().await;
 
-    tokio::time::pause();
     // Every recheck against the closed pool is an error, so the report is
-    // MAX_CONSECUTIVE_ERRORS authorization ticks away. The bound is patience,
-    // not arithmetic -- the loop returns as soon as the error lands.
+    // MAX_CONSECUTIVE_ERRORS rechecks away. The bound is patience, not
+    // arithmetic -- the loop returns as soon as the error lands.
     let reported = periodic_error(&mut socket, 32).await;
-    tokio::time::resume();
     assert_eq!(
         reported.as_deref(),
         Some("Connection unstable, please reconnect")
@@ -1213,6 +1216,113 @@ const SPAWNING_CALL: &str = "call_run_shell";
 const WAITING_CALL: &str = "call_wait_for";
 const DEADLINE: &str = "2026-09-13T18:30:00Z";
 
+const BEFORE_CALL: &str = "Let me look. ";
+const AFTER_CALL: &str = "Found it.";
+
+#[tokio::test]
+async fn a_tool_call_records_where_in_the_answer_it_ran() {
+    let provider = MockServer::start().await;
+    let rounds = Arc::new(Mutex::new(VecDeque::from(vec![
+        sse(vec![
+            json!({"content": BEFORE_CALL}),
+            json!({"tool_calls": [{
+                "index": 0,
+                "id": "call_list",
+                "type": "function",
+                "function": {"name": "list_chats", "arguments": "{}"}
+            }]}),
+        ]),
+        sse(vec![json!({"content": AFTER_CALL})]),
+    ])));
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(move |_request: &wiremock::Request| {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    rounds
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .expect("extra completion"),
+                )
+        })
+        .mount(&provider)
+        .await;
+
+    let mut config = test_config();
+    config.litellm_host = provider.uri();
+    config.comfyui.enabled = false;
+    config.web_search.enabled = false;
+    let pool = create_test_pool().await;
+    let client = TestClient::new(create_test_router(create_test_state(
+        config.clone(),
+        pool.clone(),
+    )));
+    let (token, _workspace, chat) = seed(&client).await;
+    client
+        .put_json_auth(
+            &format!("/api/chats/{chat}"),
+            &json!({"agent_enabled": true, "agent_sandboxed": true}),
+            &token,
+        )
+        .await
+        .assert_status(axum::http::StatusCode::OK);
+    let address = spawn(config, pool).await;
+    let mut socket = authenticate(&address, chat, &token).await;
+
+    socket
+        .send(WsMessage::Text(
+            json!({"type": "send", "content": "Which chats are there?"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let frames = drain_turn(&mut socket).await;
+
+    let before = BEFORE_CALL.chars().count();
+    let call = frames
+        .iter()
+        .find(|frame| frame["type"] == "tool_call")
+        .expect("the call is announced live");
+    assert_eq!(
+        call["at"], before,
+        "the live frame places the call after the text written before it: {frames:?}"
+    );
+
+    let history = client
+        .get_auth(&format!("/api/chats/{chat}"), &token)
+        .await
+        .json_value();
+    let stored = history["chat"]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .expect("the turn is kept")
+        .clone();
+    let record = &stored["metadata"]["tool_calls"][0];
+    assert_eq!(record["name"], "list_chats");
+    assert_eq!(
+        record["at"], before,
+        "a reload places the call where it ran, not above the whole answer"
+    );
+    let content: Vec<char> = stored["content"].as_str().unwrap().chars().collect();
+    assert_eq!(
+        content[..before].iter().collect::<String>(),
+        BEFORE_CALL,
+        "the offset counts exactly the text that came before the call"
+    );
+    assert!(
+        content[before..]
+            .iter()
+            .collect::<String>()
+            .contains(AFTER_CALL),
+        "the text written after the call follows the offset: {content:?}"
+    );
+}
+
 /// The four frames the job and wait cards are drawn from, serialised straight
 /// off the variant rather than provoked through a socket.
 ///
@@ -1222,11 +1332,7 @@ const DEADLINE: &str = "2026-09-13T18:30:00Z";
 /// than that and are what the console's schemas are written against, so they
 /// are pinned here where no model is needed to read them.
 fn job_started() -> JobStarted {
-    JobStarted {
-        id: JOB_ID.to_string(),
-        pid: 4242,
-        log_path: JOB_LOG_PATH.to_string(),
-    }
+    JobStarted::new(JOB_ID, 4242, JOB_LOG_PATH)
 }
 
 #[test]
@@ -1256,7 +1362,7 @@ fn a_job_exited_frame_is_matched_by_its_job_and_omits_an_exit_code_it_never_had(
     let message = Uuid::new_v4();
     let exited = |exit_code| ServerMessage::JobExited {
         message_id: message,
-        job: JobExited {
+        job: JobExit {
             id: JOB_ID.to_string(),
             exit_code,
         },
@@ -1381,9 +1487,10 @@ const POLLING: [&str; 5] = [
     "monitor start_task progress",
 ];
 
-/// One of the six strings, where it lives, how to find it, and the name it has
-/// to point at now. The two schema strings interpolate the tool's name from a
-/// constant, which `WAIT_FOR_BINDING` holds to `wait_for` separately.
+/// One of the four strings Zone still owns, where it lives, how to find it, and
+/// the name it has to point at now. The shell tool's two strings and the spawn
+/// receipt belong to abnegate-agent, so they are read from the tools Zone links
+/// rather than from a source file.
 struct Rewritten {
     file: &'static str,
     opens: &'static str,
@@ -1392,15 +1499,10 @@ struct Rewritten {
 }
 
 const WAIT_FOR: &str = "wait_for";
-const WAIT_FOR_PLACEHOLDER: &str = "{WAIT_FOR_TOOL}";
-const WAIT_FOR_BINDING: &str = "const WAIT_FOR_TOOL: &str = \"wait_for\";";
-const COMMAND_RS: &str = "runner/zone_core/src/tools/command.rs";
-const JOB_RS: &str = "runner/zone_core/src/tools/job.rs";
 const ACTIONS_RS: &str = "runner/zone_server/src/agent/actions.rs";
 const LITERAL_END: &str = "\";";
-const FORMAT_END: &str = ")";
 
-const REWRITTEN: [Rewritten; 6] = [
+const REWRITTEN: [Rewritten; 4] = [
     Rewritten {
         file: "runner/zone_server/src/agent/prompt/section/workspace.rs",
         opens: "const START_TASK: &str = ",
@@ -1424,18 +1526,6 @@ const REWRITTEN: [Rewritten; 6] = [
         opens: "const RUNNER_STARTED: &str = ",
         closes: LITERAL_END,
         names: WAIT_FOR,
-    },
-    Rewritten {
-        file: COMMAND_RS,
-        opens: "\"Shell command to run",
-        closes: FORMAT_END,
-        names: WAIT_FOR_PLACEHOLDER,
-    },
-    Rewritten {
-        file: COMMAND_RS,
-        opens: "\"This command sleeps for",
-        closes: FORMAT_END,
-        names: WAIT_FOR_PLACEHOLDER,
     },
 ];
 
@@ -1510,8 +1600,8 @@ fn nothing_still_tells_the_model_to_sample_a_status_in_a_loop() {
     assert!(swept > 0, "the sweep walked nothing");
 }
 
-#[test]
-fn every_rewritten_string_points_the_model_at_the_wait_tool() {
+#[tokio::test]
+async fn every_rewritten_string_points_the_model_at_the_wait_tool() {
     let repository = repository();
 
     for rewritten in REWRITTEN {
@@ -1542,17 +1632,54 @@ fn every_rewritten_string_points_the_model_at_the_wait_tool() {
         );
     }
 
-    let command = fs::read_to_string(repository.join(COMMAND_RS)).expect("command.rs is readable");
+    let schema = RunShellTool.parameters_schema();
+    let command = schema["properties"]["command"]["description"]
+        .as_str()
+        .expect("run_shell describes its command");
     assert!(
-        command.contains(WAIT_FOR_BINDING),
-        "the two schema strings name the tool through a constant, and that constant is what \
-         binds the placeholder to {WAIT_FOR}"
+        command.contains(WAIT_FOR),
+        "run_shell's command tells the model how to wait longer without naming {WAIT_FOR}: \
+         {command}"
     );
 
-    let job = fs::read_to_string(repository.join(JOB_RS)).expect("job.rs is readable");
+    let refusal = RunShellTool
+        .execute(
+            json!({
+                "command": format!("sleep {}", MAXIMUM_SLEEP.as_secs() + 1),
+                "reason": "Wait for the deploy."
+            }),
+            &ToolContext::default(),
+        )
+        .await
+        .expect_err("a sleep past the cap is refused")
+        .to_string();
     assert!(
-        job.contains(WAIT_FOR_BINDING),
-        "the spawn receipt points the model at the tool through a second copy of the constant, \
-         and that copy binds it to {WAIT_FOR} too"
+        refusal.contains(WAIT_FOR),
+        "run_shell refuses a long sleep without naming {WAIT_FOR}: {refusal}"
     );
+
+    let receipt = started_text(&JobStarted::new(
+        "job_0123456789ab",
+        48213,
+        "/tmp/job_0123456789ab.log",
+    ));
+    assert!(
+        receipt.contains(WAIT_FOR),
+        "the spawn receipt points the model at the job without naming {WAIT_FOR}: {receipt}"
+    );
+
+    for (string, text) in [
+        ("run_shell's command", command),
+        ("run_shell's refusal", refusal.as_str()),
+        ("the spawn receipt", receipt.as_str()),
+    ] {
+        let lowered = text.to_lowercase();
+        for needle in POLLING {
+            assert!(
+                !lowered.contains(needle),
+                "{string} still says {needle:?}, which sends the model round the loop to look \
+                 again: {text}"
+            );
+        }
+    }
 }

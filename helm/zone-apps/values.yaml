@@ -114,12 +114,30 @@ server:
   # sign-in's usage reading stays fresh before Zone reads it again, in whole
   # seconds; ZONE_CLAUDE_API_URL and ZONE_CODEX_API_URL, unset here, point
   # those reads at https://api.anthropic.com and https://chatgpt.com.
+  # ZONE_MCP_* configure MCP servers as docs/CONFIGURATION.md describes, with
+  # zone-server's own defaults: ZONE_MCP_COMMANDS stays off, so organization
+  # admins can add only HTTP servers, and an empty ZONE_MCP_SERVERS and
+  # ZONE_MCP_CONFIG configure no instance server.
   env:
     PORT: "8000"
     HOST: "0.0.0.0"
     ZONE_AGENT_HOST_LOGIN: "false"
     ZONE_CONSOLE_ORIGINS: ""
     ZONE_AGENT_USAGE_TTL_SECONDS: "60"
+    ZONE_MCP_ENABLED: "true"
+    ZONE_MCP_AUTO_CONNECT: "true"
+    ZONE_MCP_AUTO_MAGENTS: "true"
+    ZONE_MCP_COMMANDS: "false"
+    ZONE_MCP_CONFIG: ""
+    ZONE_MCP_SERVERS: ""
+
+  # Origin a browser reaches Zone at, scheme://host[:port] with no path,
+  # passed to zone-server as APP_BASE_URL. Empty derives it from the first
+  # ingress host, https when ingress.tls covers that host and http otherwise;
+  # with the ingress disabled it stays unset. Set it when TLS ends somewhere
+  # the chart cannot see, or when browsers use another host or port.
+  # env.APP_BASE_URL does the same and wins.
+  baseUrl: ""
 
   # Absolute host directory bind-mounted at /host. Empty leaves chat tools on
   # the pod's /app/workspace. Recreate the deployment after changing it.

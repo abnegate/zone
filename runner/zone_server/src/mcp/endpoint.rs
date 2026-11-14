@@ -12,7 +12,6 @@ use rmcp::model::{CallToolRequestParams, ErrorCode, ErrorData, ProtocolVersion, 
 use serde_json::{Map, Value, json};
 use std::sync::Arc;
 use zone_core::llm::Toolset;
-use zone_core::tools::PERMISSION_TOOL;
 
 use super::protocol::{self, Request, Response};
 use super::turn::Turn;
@@ -120,15 +119,17 @@ async fn dispatch(turn: &Turn, method: &str, params: Option<Value>) -> Result<Va
     }
 }
 
-/// Answer the handshake in the version the client opened it in, so a client
-/// pinned to an older revision of the protocol is not told to speak a newer
-/// one it does not know.
+/// Answer the handshake in the version the client opened it in when that is a
+/// known revision with a handshake, so a client pinned to an older revision is
+/// not told to speak a newer one; otherwise answer in the newest such revision.
 fn initialize(params: Option<&Value>) -> Value {
+    let supported = ProtocolVersion::known_up_to(&ProtocolVersion::LATEST_WITH_INITIALIZE);
     let version = params
         .and_then(|params| params.get("protocolVersion"))
         .cloned()
         .and_then(|version| serde_json::from_value::<ProtocolVersion>(version).ok())
-        .unwrap_or_default();
+        .filter(|version| supported.contains(version))
+        .unwrap_or(ProtocolVersion::LATEST_WITH_INITIALIZE);
 
     json!({
         "protocolVersion": version,
@@ -160,7 +161,7 @@ fn permission_tool() -> McpTool {
     let schema: Map<String, Value> = serde_json::from_str(PERMISSION_SCHEMA)
         .expect("the permission tool's schema is valid JSON");
     McpTool::new(
-        PERMISSION_TOOL,
+        Toolset::PERMISSION,
         "Ask zone whether one of your own tools may run. Zone answers under this chat's approval policy: allowed at once when the chat auto-approves, otherwise once the reader has answered. Answers with an allow or deny envelope; a deny is a refusal to respect, not an error to retry.",
         Arc::new(schema),
     )
@@ -170,10 +171,10 @@ const PERMISSION_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
     "tool_name": {"type": "string", "description": "The tool you are asking about."},
-    "input": {"type": "object", "description": "The input you would call it with."}
+    "input": {"type": "object", "description": "The input you would call it with."},
+    "tool_use_id": {"type": "string", "description": "The id of the call you are asking about."}
   },
-  "required": ["tool_name", "input"],
-  "additionalProperties": false
+  "required": ["tool_name", "input"]
 }"#;
 
 fn describe(definition: &ToolDefinition) -> McpTool {
@@ -196,7 +197,7 @@ async fn call(turn: &Turn, params: Option<Value>) -> Result<Value, ErrorData> {
         })?;
 
     let name = params.name.as_ref();
-    if !turn.serves(name) {
+    if !turn.answers(name) {
         return Err(ErrorData::invalid_params(
             format!("Unknown tool '{name}'"),
             None,
@@ -224,10 +225,11 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::testing::{open, scope, state, tools, wait_for_card, write};
+    use super::super::testing::{open, scope, tools, wait_for_card, write};
     use super::*;
     use crate::agent::wait::WAIT_FOR;
     use crate::agent::{ASK_USER, ApprovalGate, ApprovalPolicy};
+    use crate::state::AppState;
     use axum::body::Body;
     use axum::http::Request as HttpRequest;
     use http_body_util::BodyExt;
@@ -244,7 +246,7 @@ mod tests {
         if let Some(token) = token {
             request = request.header(header::AUTHORIZATION, format!("{BEARER}{token}"));
         }
-        let response = crate::routes::create_router(state())
+        let response = crate::routes::create_router(AppState::for_tests())
             .oneshot(request.body(Body::from(body.to_string())).unwrap())
             .await
             .expect("the router answers");
@@ -297,6 +299,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_handshake_names_only_a_known_revision_that_has_a_handshake() {
+        let opened = open(ApprovalPolicy::auto()).await;
+
+        for (offered, answered) in [
+            (json!("2024-11-05"), "2024-11-05"),
+            (json!("2025-03-26"), "2025-03-26"),
+            (json!("2025-06-18"), "2025-06-18"),
+            (json!("2025-11-25"), "2025-11-25"),
+            (json!(null), "2025-11-25"),
+            (json!(20250618), "2025-11-25"),
+            (json!(""), "2025-11-25"),
+            (json!("1.0"), "2025-11-25"),
+            (json!("2025-07-01"), "2025-11-25"),
+            (json!("2026-07-28"), "2025-11-25"),
+            (json!("2027-01-01"), "2025-11-25"),
+        ] {
+            let (status, answer) = post(
+                Some(&opened.token),
+                rpc(
+                    1,
+                    protocol::INITIALIZE,
+                    json!({"protocolVersion": offered, "capabilities": {}}),
+                ),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK, "{offered}");
+            assert_eq!(
+                answer["result"]["protocolVersion"], answered,
+                "offered {offered}, answered {answer}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_call_without_the_turns_bearer_is_refused() {
         let opened = open(ApprovalPolicy::auto()).await;
 
@@ -318,9 +355,17 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         let tools = answer["result"]["tools"].as_array().expect("a tool array");
-        let served: Vec<&str> = tools
+        let listed: Vec<&str> = tools
             .iter()
             .map(|tool| tool["name"].as_str().expect("a tool name"))
+            .collect();
+        assert!(
+            listed.contains(&Toolset::PERMISSION),
+            "the agent can find the tool its command line tells it to ask: {listed:?}"
+        );
+        let served: Vec<&str> = listed
+            .into_iter()
+            .filter(|name| *name != Toolset::PERMISSION)
             .collect();
         let registered: Vec<&str> = opened
             .tools
@@ -428,7 +473,10 @@ mod tests {
         );
         assert!(listed.contains(&"write_file"), "{listed:?}");
         assert_eq!(
-            listed.len(),
+            listed
+                .iter()
+                .filter(|name| **name != Toolset::PERMISSION)
+                .count(),
             lease.toolset().tools.len(),
             "the agent is allowed exactly the tools this endpoint lists"
         );
@@ -442,6 +490,37 @@ mod tests {
             assert_eq!(status, StatusCode::OK);
             assert_eq!(answer["error"]["code"], -32602, "{name}: {answer}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_agent_can_ask_its_permission_question_over_the_endpoint() {
+        let opened = open(ApprovalPolicy::auto()).await;
+
+        let (status, answer) = post(
+            Some(&opened.token),
+            rpc(
+                15,
+                protocol::TOOLS_CALL,
+                call_of(
+                    Toolset::PERMISSION,
+                    json!({
+                        "tool_name": "Bash",
+                        "input": {"command": "ls"},
+                        "tool_use_id": "toolu_01A",
+                    }),
+                ),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(answer.get("error").is_none(), "{answer}");
+        let text = answer["result"]["content"][0]["text"]
+            .as_str()
+            .expect("the answer is a text block");
+        let verdict: Value = serde_json::from_str(text).expect("a JSON envelope");
+        assert_eq!(verdict["behavior"], "allow", "{verdict}");
+        assert_eq!(verdict["updatedInput"], json!({"command": "ls"}));
     }
 
     #[tokio::test]

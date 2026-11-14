@@ -12,6 +12,7 @@ pub use snapshot::Snapshot;
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_llm::Window;
 use aiusg::provider::{claude, codex, is_signed_out};
 use aiusg::store::Credential;
@@ -20,7 +21,6 @@ use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
 use futures::future::join_all;
 use uuid::Uuid;
-use zone_core::llm::AgentKind;
 
 use super::credential::{self, Login};
 use super::router::Chosen;
@@ -95,13 +95,19 @@ pub async fn fetch(
     let fetched_at = Utc::now();
     let reading = async {
         match agent {
-            AgentKind::Claude => claude::fetch_at(&HTTP, &config.claude_api_url, credential).await,
-            AgentKind::Codex => codex::fetch_at(&HTTP, &config.codex_api_url, credential).await,
+            AgentKind::Claude => {
+                Some(claude::fetch_at(&HTTP, &config.claude_api_url, credential).await)
+            }
+            AgentKind::Codex => {
+                Some(codex::fetch_at(&HTTP, &config.codex_api_url, credential).await)
+            }
+            _ => None,
         }
     };
     let fetched = tokio::time::timeout(TIMEOUT, reading)
         .await
         .map_err(|_| Error::Timeout)?
+        .ok_or_else(|| Error::Unreadable(format!("Zone reads no usage of the {agent} CLI")))?
         .map_err(|error| {
             if is_signed_out(&error) {
                 Error::SignedOut

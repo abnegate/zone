@@ -3,7 +3,7 @@ extensions:
       pack: codeql/rust-all
       extensible: barrierModel
     data:
-      - ["zone_server::utils::url::validate_public_url", "ReturnValue", "request-url", "manual"]
+      - ["abnegate_http::url::validate_public_url", "ReturnValue", "request-url", "manual"]
       - ["zone_server::services::artifacts::safe_path_component", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::artifacts::uuid_component", "ReturnValue", "path-injection", "manual"]
       - ["zone_installer::frontend::sanitize_writable_config_path", "ReturnValue", "path-injection", "manual"]
@@ -32,10 +32,11 @@ extensions:
       - ["zone_server::routes::models::confined_sidecar_path", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::comfy::language::confined", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::services::comfy::adoption::confined", "ReturnValue", "path-injection", "manual"]
-      - ["zone_server::routes::models::providers::catalog_request_url", "ReturnValue", "request-url", "manual"]
       - ["zone_server::config::agent_home", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::config::agent_work", "ReturnValue", "path-injection", "manual"]
       - ["zone_server::config::agent_login_home", "ReturnValue", "path-injection", "manual"]
-      - ["zone_server::config::AgentConfig::login_home", "ReturnValue", "path-injection", "manual"]
-      - ["zone_server::services::agent::sessions::locate", "ReturnValue", "path-injection", "manual"]
-      - ["zone_server::services::login::claude::token_endpoint", "ReturnValue", "request-url", "manual"]
+      - ["<zone_server::config::AgentConfig>::login_home", "ReturnValue", "path-injection", "manual"]
+      - ["abnegate_agent_cli::login::claude::endpoints::checked", "ReturnValue", "request-url", "manual"]
+      - ["<zone_server::pull::comfy_reference::ComfyReference>::parse", "ReturnValue", "path-injection", "manual"]
+      - ["<zone_server::pull::comfy_reference::ComfyReference>::parse", "ReturnValue", "request-url", "manual"]
+      - ["zone_server::setup::confined_relative", "ReturnValue", "path-injection", "manual"]

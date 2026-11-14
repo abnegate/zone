@@ -1,13 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type { Handover } from '../types';
-import {
-  agentChanged,
-  appendHandover,
-  handoverCause,
-  handoverTarget,
-  resetsIn,
-  splitAtHandovers,
-} from './handover';
+import { agentChanged, appendHandover, handoverCause, handoverTarget, resetsIn } from './handover';
 
 const NOW = Date.parse('2026-09-23T04:00:00Z');
 const MINUTE = 60_000;
@@ -22,74 +15,6 @@ const handover = (overrides: Partial<Handover> = {}): Handover => ({
   carried: true,
   at: 0,
   ...overrides,
-});
-
-describe('splitAtHandovers', () => {
-  it('leaves an answer that never moved whole', () => {
-    expect(splitAtHandovers('Hello', [])).toEqual([{ kind: 'text', text: 'Hello', offset: 0 }]);
-  });
-
-  it('puts the divider where the new account took over', () => {
-    const switched = handover({ at: 6 });
-
-    expect(splitAtHandovers('First half. Second half.', [switched])).toEqual([
-      { kind: 'text', text: 'First ', offset: 0 },
-      { kind: 'handover', handover: switched, agentChanged: false },
-      { kind: 'text', text: 'half. Second half.', offset: 6 },
-    ]);
-  });
-
-  it('counts code points as the server does, so an emoji is never halved', () => {
-    const parts = splitAtHandovers('🙂🙂 done', [handover({ at: 2 })]);
-
-    expect(parts[0]).toEqual({ kind: 'text', text: '🙂🙂', offset: 0 });
-    expect(parts[2]).toEqual({ kind: 'text', text: ' done', offset: 2 });
-  });
-
-  it('shows a switch made before any text with nothing ahead of it', () => {
-    const parts = splitAtHandovers('Answer', [handover({ at: 0 })]);
-
-    expect(parts.map((part) => part.kind)).toEqual(['handover', 'text']);
-  });
-
-  it('shows a switch that has not written anything yet', () => {
-    expect(splitAtHandovers('', [handover({ at: 0 })]).map((part) => part.kind)).toEqual([
-      'handover',
-    ]);
-  });
-
-  it('orders switches by where they happened and clamps one past the end', () => {
-    const first = handover({ at: 2, to: 'b@example.com' });
-    const second = handover({ at: 99, from: 'b@example.com', to: 'c@example.com' });
-
-    const parts = splitAtHandovers('abcd', [second, first]);
-
-    expect(parts).toEqual([
-      { kind: 'text', text: 'ab', offset: 0 },
-      { kind: 'handover', handover: first, agentChanged: false },
-      { kind: 'text', text: 'cd', offset: 2 },
-      { kind: 'handover', handover: second, agentChanged: false },
-    ]);
-  });
-
-  it('names the agent only on the switch that changed it', () => {
-    const replayed = handover({ at: 1, carried: false });
-    const toCodex = handover({ at: 2, agent: 'codex', carried: false, to: 'c@example.com' });
-    const stayed = handover({
-      at: 3,
-      from_agent: 'codex',
-      agent: 'codex',
-      carried: false,
-      from: 'c@example.com',
-      to: 'd@example.com',
-    });
-
-    const notices = splitAtHandovers('abcd', [replayed, toCodex, stayed]).filter(
-      (part) => part.kind === 'handover'
-    );
-
-    expect(notices.map((part) => part.agentChanged)).toEqual([false, true, false]);
-  });
 });
 
 describe('agentChanged', () => {

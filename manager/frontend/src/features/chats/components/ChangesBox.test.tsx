@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { chooseMenuItem, openMenu, settleMenu } from '../../../test/menu';
 import type { ChatPullRequest, PullRequestStatus } from '../types';
+import { DISCONNECTED_HINT, UNAVAILABLE_HINT, UNCREDENTIALED_HINT } from '../utils/pullRequests';
 
 const mockGetChatPullRequests = mock();
 const mockUpdateChatPullRequest = mock();
@@ -38,6 +39,7 @@ const STATUS: PullRequestStatus = {
   mergeable: 'blocked',
   auto_merge: { enabled: false, unavailable: null },
   draft_unavailable: null,
+  threads: null,
   observed_at: '2026-11-05T10:00:00Z',
 };
 
@@ -54,6 +56,9 @@ const OPEN: ChatPullRequest = {
   status: STATUS,
   writable: true,
   credentialed: true,
+  connection: 'credentialed',
+  auto_fix: false,
+  auto_fixing: false,
 };
 
 const MENU = 'Actions for widgets #12';
@@ -108,6 +113,32 @@ describe('ChangesBox', () => {
     );
   });
 
+  it('counts its open and resolved review threads', async () => {
+    await shown([withStatus({ threads: { open: 2, resolved: 1 } })]);
+
+    const threads = screen.getByRole('img', { name: '2 open review threads, 1 resolved' });
+    expect(threads.querySelector('.chat-change-threads-open')).toHaveTextContent('2');
+    expect(threads.querySelector('.chat-change-threads-resolved')).toHaveTextContent('1');
+  });
+
+  it('counts resolved review threads without marking any open', async () => {
+    await shown([withStatus({ threads: { open: 0, resolved: 1 } })]);
+
+    const threads = screen.getByRole('img', { name: '0 open review threads, 1 resolved' });
+    expect(threads.querySelector('.chat-change-threads-open')).toBeNull();
+    expect(threads.querySelector('.chat-change-threads-resolved')).toHaveTextContent('1');
+  });
+
+  it('shows no thread count when it has no review threads or GitHub did not list them', async () => {
+    await shown([
+      withStatus({ threads: { open: 0, resolved: 0 } }),
+      { ...withStatus({ threads: null }), id: 'pr-2', number: 13 },
+    ]);
+
+    expect(screen.queryByRole('img', { name: /review thread/ })).toBeNull();
+    expect(document.querySelector('.chat-change-threads')).toBeNull();
+  });
+
   it('names every state a pull request can be in', async () => {
     await shown([
       withStatus({ state: 'merged' }),
@@ -160,6 +191,67 @@ describe('ChangesBox', () => {
     await settleMenu();
     expect(mockUpdateChatPullRequest).toHaveBeenLastCalledWith('chat-1', 'pr-1', {
       auto_merge: false,
+    });
+  });
+
+  it('turns auto-fix on, and off again once it is on', async () => {
+    mockUpdateChatPullRequest
+      .mockResolvedValueOnce({ ...OPEN, auto_fix: true })
+      .mockResolvedValueOnce({ ...OPEN, auto_fix: false });
+    await shown([OPEN]);
+
+    await chooseMenuItem(MENU, 'Fix automatically');
+    expect(mockUpdateChatPullRequest).toHaveBeenCalledWith('chat-1', 'pr-1', {
+      auto_fix: true,
+    });
+
+    await openMenu(MENU);
+    fireEvent.click(menuItem('Stop fixing automatically'));
+    await settleMenu();
+    expect(mockUpdateChatPullRequest).toHaveBeenLastCalledWith('chat-1', 'pr-1', {
+      auto_fix: false,
+    });
+
+    await openMenu(MENU);
+    expect(menuItem('Fix automatically')).toBeInTheDocument();
+  });
+
+  it('says on the row that auto-fix is watching it', async () => {
+    await shown([{ ...OPEN, auto_fix: true }]);
+
+    expect(screen.getByText('Auto-fix')).toHaveAttribute(
+      'title',
+      'Zone starts a run to fix it whenever GitHub reports failing checks or a conflict with its base branch.'
+    );
+    expect(screen.queryByText('Fixing')).toBeNull();
+  });
+
+  it('says on the row when a fix run is working, in place of the standing badge', async () => {
+    await shown([{ ...OPEN, auto_fix: true, auto_fixing: true }]);
+
+    expect(screen.getByText('Fixing')).toHaveAttribute(
+      'title',
+      'A run is working on its branch now, and pushes what it changes when it finishes.'
+    );
+    expect(screen.queryByText('Auto-fix')).toBeNull();
+  });
+
+  it('says nothing about auto-fix on a row it is off for', async () => {
+    await shown([OPEN]);
+
+    expect(screen.queryByText('Auto-fix')).toBeNull();
+    expect(screen.queryByText('Fixing')).toBeNull();
+  });
+
+  it('still lets a writer stop auto-fix once no source or status can be read', async () => {
+    mockUpdateChatPullRequest.mockResolvedValue({ ...OPEN, auto_fix: false });
+    await shown([
+      { ...OPEN, auto_fix: true, credentialed: false, connection: 'uncredentialed', status: null },
+    ]);
+
+    await chooseMenuItem(MENU, 'Stop fixing automatically');
+    expect(mockUpdateChatPullRequest).toHaveBeenCalledWith('chat-1', 'pr-1', {
+      auto_fix: false,
     });
   });
 
@@ -272,15 +364,35 @@ describe('ChangesBox', () => {
   });
 
   it('leaves only open, copy and dismiss to a reader no source lets act', async () => {
-    await shown([{ ...OPEN, credentialed: false }]);
+    await shown([{ ...OPEN, credentialed: false, connection: 'uncredentialed' }]);
 
     await openMenu(MENU);
     for (const name of [/View changes/, /Merge when ready/, /Convert to draft/]) {
       expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
+      expect(menuItem(name)).toHaveTextContent(UNCREDENTIALED_HINT);
     }
     for (const name of ['Open on GitHub', 'Copy link', 'Dismiss']) {
       expect(menuItem(name)).not.toHaveAttribute('aria-disabled');
     }
+  });
+
+  it('says GitHub is unreachable for now rather than asking for a source to be connected', async () => {
+    await shown([{ ...OPEN, credentialed: false, connection: 'unavailable' }]);
+
+    await openMenu(MENU);
+    for (const name of [/View changes/, /Merge when ready/, /Convert to draft/]) {
+      expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
+      expect(menuItem(name)).toHaveTextContent(UNAVAILABLE_HINT);
+      expect(menuItem(name)).not.toHaveTextContent(UNCREDENTIALED_HINT);
+    }
+  });
+
+  it('asks for GitHub to be reconnected when its connection was removed', async () => {
+    await shown([{ ...OPEN, credentialed: false, connection: 'disconnected' }]);
+
+    await openMenu(MENU);
+    expect(menuItem(/View changes/)).toHaveTextContent(DISCONNECTED_HINT);
+    expect(menuItem(/View changes/)).not.toHaveTextContent(UNCREDENTIALED_HINT);
   });
 
   it('lets a read-only reader view the changes but not dismiss or change it', async () => {

@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use super::ErrorResponse;
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, ModelInstaller};
 use crate::setup::{
     FeatureSelect, Plan, PlanError, PlanInput, SetupPlan, comfy_present, make_plan,
     parse_feature_list, parse_features_csv, ram_bytes, view_plan,
@@ -67,7 +67,7 @@ pub async fn get_setup(
 /// POST /api/models/setup
 pub async fn start_setup(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    _installer: ModelInstaller,
     Json(body): Json<SetupRequest>,
 ) -> impl IntoResponse {
     let select = parse_feature_list(body.features.as_deref());

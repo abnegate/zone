@@ -16,6 +16,8 @@ local-embeddings = ["zone_context/local-embeddings"]
 # Subject detection for LoRA training crops, through abnegate-vision. Links the
 # same ONNX Runtime, and is inert until ZONE_VISION_MODEL points at a U2-Net model.
 saliency = ["abnegate-comfy/saliency"]
+# Test hooks for this crate's own integration tests, enabled by its dev-dependency on itself.
+testing = []
 
 [lib]
 name = "zone_server"
@@ -39,8 +41,6 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 # IANA zone name for the session block; chrono resolves the offset, not the name.
 iana-time-zone = "=0.1.65"
-# IANA zone rules a recurring reminder's wall-clock times are read in.
-chrono-tz = "=0.10.4"
 uuid = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
@@ -53,7 +53,7 @@ axum = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 hyper = { version = "=1.11.1", features = ["http1", "server"] }
-hyper-util = { version = "=0.1.20", features = ["tokio", "service"] }
+hyper-util = { version = "=0.1.20", features = ["client-proxy", "service", "tokio"] }
 
 # Database
 sqlx = { workspace = true }
@@ -70,10 +70,10 @@ rand = "=0.10.2"
 getrandom = { workspace = true }
 hmac = "=0.13.0"
 subtle = { workspace = true }
+zeroize = "=1.9.0"
 regex = "=1.13.1"
 
 # Encryption
-aes-gcm = { workspace = true }
 base64 = { workspace = true }
 
 # WebSocket
@@ -88,6 +88,9 @@ nix = { workspace = true, features = ["fs", "user"] }
 # HTML parsing for web content extraction
 scraper = "=0.27.0"
 
+# Codex keeps the MCP servers configured for it in its home's config.toml
+toml = { workspace = true }
+
 # Metrics
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
@@ -99,23 +102,28 @@ rmcp = { workspace = true, default-features = false }
 aiusg = { version = "=0.5.0", default-features = false }
 
 # Internal
+abnegate-agent = { workspace = true, features = ["mcp"] }
+abnegate-agent-cli = { workspace = true, features = ["login"] }
 abnegate-comfy = { workspace = true }
 abnegate-exec = { workspace = true }
 abnegate-http = { workspace = true }
 abnegate-index = { workspace = true }
-abnegate-llm = { workspace = true }
+abnegate-learn = { workspace = true }
+abnegate-llm = { workspace = true, features = ["catalog", "download"] }
 abnegate-notify = { workspace = true, features = ["smtp"] }
+abnegate-recurrence = { workspace = true }
 abnegate-search = { workspace = true }
-abnegate-secret = { workspace = true, features = ["sqlx"] }
-abnegate-vcs = { workspace = true, features = ["github"] }
-zone_chat = { path = "../zone_chat" }
+abnegate-secret = { workspace = true, features = ["derivation", "sqlx"] }
+abnegate-vcs = { workspace = true, features = ["github", "github-app"] }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
+zone_routing = { path = "../zone_routing" }
 
 [dev-dependencies]
+zone_server = { path = ".", default-features = false, features = ["testing"] }
+abnegate-llm = { workspace = true, features = ["catalog", "download", "testing"] }
 abnegate-notify = { workspace = true, features = ["testing"] }
-abnegate-vcs = { workspace = true, features = ["github", "testing"] }
-zone_chat = { path = "../zone_chat" }
+abnegate-vcs = { workspace = true, features = ["github", "github-app", "testing"] }
 zone_core = { path = "../zone_core", features = ["sqlx", "test-support"] }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 http-body-util = "=0.1.5"

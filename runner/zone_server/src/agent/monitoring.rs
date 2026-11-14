@@ -1,14 +1,23 @@
 //! Query the Zone Prometheus and Grafana instances from the chat loop.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
 use async_trait::async_trait;
-use reqwest::{Client, Url};
-use serde_json::{Value, json};
+use reqwest::Client;
+use reqwest::Url;
+use serde_json::Value;
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use zone_core::tools::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
-use super::tools::{WorkspaceScope, optional_string_arg, string_arg, truncate};
+use super::tools::WorkspaceScope;
+use super::tools::optional_string_arg;
+use super::tools::string_arg;
 use crate::config::MonitoringConfig;
+use crate::utils::text::truncate;
 
 const MAX_MONITORING_CHARS: usize = 8_000;
 const DASHBOARD_LIMIT: usize = 50;
@@ -274,8 +283,11 @@ async fn get_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     #[test]
     fn join_api_stays_on_the_configured_origin() {

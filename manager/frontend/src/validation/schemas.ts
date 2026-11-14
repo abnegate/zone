@@ -6,6 +6,7 @@ import type {
   RegisterRequestSchema,
   UserSchema,
 } from '../features/auth/schemas';
+import { WorkspaceRoleSchema } from '../features/auth/schemas';
 import type {
   ChatResponseSchema,
   ChatSchema,
@@ -64,6 +65,7 @@ export const WorkspaceSchema = z.object({
   slug: z.string(),
   description: z.string().nullable(),
   is_active: z.boolean(),
+  role: WorkspaceRoleSchema.optional(),
   created_at: z.string(),
   updated_at: z.string(),
 });
@@ -147,7 +149,6 @@ export {
   MailMetadataSchema,
   SlackConfigSchema,
   SourceCategorySchema,
-  SourceConfigSchema,
   SourceResponseSchema,
   SourceSchema,
   SourcesResponseSchema,
@@ -155,9 +156,10 @@ export {
   SourceTypeSchema,
   SourceTypesResponseSchema,
   SourceVerifyResponseSchema,
+  StoredSourceConfigSchema,
   TextConfigSchema,
   TextMetadataSchema,
-  UpdateSourceRequestSchema,
+  updateSourceRequestSchema,
   WebConfigSchema,
   WebMetadataSchema,
 } from '../features/sources/schemas';

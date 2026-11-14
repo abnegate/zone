@@ -8,8 +8,15 @@
 //! 3. Client sends "send" messages to trigger AI responses
 //! 4. Server streams AI response chunks as they arrive
 //! 5. Client can send "cancel" to interrupt generation
+//!    A "send" during a turn is queued; "interrupt", "edit_queued" and
+//!    "remove_queued" act on the queue, and every change is sent as "queue"
 //! 6. Connection closes on error or client disconnect
 
+use abnegate_agent::chat::{Capacity, ReplayMessage};
+use abnegate_agent::context::ContextUsage;
+use abnegate_agent::tool::Session as ToolSession;
+use abnegate_agent::tool::job::{JobStarted, JobStatus, Jobs, parse_receipt};
+use abnegate_agent_cli::SubagentStep;
 use abnegate_comfy::MediaType;
 use abnegate_llm::{Message as LlmMessage, Role as LlmRole, Usage};
 use axum::{
@@ -31,26 +38,28 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_core::llm::{BuiltinTools, LlmBackend, Observer};
-use zone_core::tools::Session as ToolSession;
-use zone_core::tools::job::{self, JobExited, JobStarted, JobState, Jobs};
+use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
 
+use crate::agent::learned;
 use crate::agent::wait::{self, Outcome, WaitSettled, Waited, Waiting};
 use crate::agent::{
-    self, ActionReceipt, AgentEvent, AgentRun, ChatTools, Citation, Question, Spend,
+    self, ActionReceipt, AgentEvent, AgentRun, ChatTools, Citation, Question, Refusal, Spend,
     ToolCallRecord, WorkspaceScope,
 };
 use crate::auth::validate_access_token;
 use crate::db::{
     self, chat_attached_sources, chat_sources, chats, knowledge, sessions, workspace_members,
 };
+use crate::mcp::AgentTools;
 #[cfg(test)]
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
 use crate::services::chat::driver::Driver;
 use crate::services::chat::handover::{self, Cause, Handover, Notice};
+use crate::services::chat::observers::Observers;
 use crate::services::chat::pull_request::Recorder;
 use crate::services::chat::session::{self, Session};
+use crate::services::chat::subagent::{Announcer, ChatSubagent, Tracker};
 use crate::services::completion_tokens::{FilterStep, TokenFilter};
 use crate::services::endpoint::{Endpoint, Origin};
 use crate::services::login::router;
@@ -59,8 +68,13 @@ use crate::services::route::Route;
 use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
-use zone_chat::history::ReplayMessage;
-use zone_core::context::ContextUsage;
+
+mod ending;
+pub mod job;
+mod queue;
+
+use ending::Ending;
+use queue::{Finished, Interrupted, Queued, Started};
 
 /// WebSocket polling interval in milliseconds
 const WS_POLL_INTERVAL_MS: u64 = 50;
@@ -97,6 +111,14 @@ const MAX_CONTEXT_IN_PROMPT: usize = 5;
 
 /// Maximum response length (100KB - same as message)
 const MAX_RESPONSE_LENGTH: usize = 100_000;
+
+const TRUNCATED_NOTE: &str = "\n\n[Response truncated due to length limit]";
+
+const INTERRUPTED_NOTE: &str = "\n\n[Response interrupted]";
+
+/// The answer a coding agent gave before it was stopped stands, so the turn is no failure, but
+/// the reader is told it did not end on its own.
+const CUT_SHORT_NOTE: &str = "\n\n[Cut short: the agent was stopped before it finished]";
 
 /// Bound image output independently from text so a provider cannot make a
 /// WebSocket frame or message metadata grow without limit.
@@ -234,6 +256,7 @@ struct LiveTurn {
 impl LiveTurn {
     fn record(&mut self, message: &ServerMessage) {
         match message {
+            ServerMessage::Subagent { .. } | ServerMessage::SubagentsRemoved { .. } => {}
             ServerMessage::MessageStart { .. } => {
                 self.status = None;
                 self.frames.clear();
@@ -313,7 +336,15 @@ impl ChatStream {
     /// one twice.
     async fn join(&self) -> (Vec<ServerMessage>, broadcast::Receiver<ServerMessage>) {
         let live = self.live.lock().await;
-        (live.replay(), self.events.subscribe())
+        let mut frames = live.replay();
+        if let Some((messages, held)) = queue::snapshot(self.chat_id) {
+            frames.push(ServerMessage::Queue {
+                messages,
+                held,
+                started: None,
+            });
+        }
+        (frames, self.events.subscribe())
     }
 }
 
@@ -329,6 +360,141 @@ async fn publish(stream: &ChatStream, message: ServerMessage) {
     let mut live = stream.live.lock().await;
     live.record(&message);
     let _ = stream.events.send(message);
+}
+
+/// Publishes each change a turn's tracker stores to a chat's subagents.
+struct SubagentFrames {
+    stream: Arc<ChatStream>,
+}
+
+#[async_trait::async_trait]
+impl Announcer for SubagentFrames {
+    async fn announce(&self, subagent: ChatSubagent, steps: Vec<SubagentStep>) {
+        let chat_id = self.stream.chat_id;
+        publish(
+            &self.stream,
+            ServerMessage::Subagent {
+                chat_id,
+                subagent,
+                steps,
+            },
+        )
+        .await;
+    }
+}
+
+/// Tells every connection to each subagent's chat that a sweep stopped it.
+pub(crate) async fn announce_stopped_subagents(stopped: Vec<db::chat_subagents::Stopped>) {
+    for db::chat_subagents::Stopped { subagent, failed } in stopped {
+        let frames = SubagentFrames {
+            stream: ChatStream::of(subagent.chat_id),
+        };
+        frames
+            .announce(ChatSubagent::from(subagent), failed.0)
+            .await;
+    }
+}
+
+/// Tells every connection to `chat_id` that deleting a message removed these
+/// subagents.
+pub(crate) async fn announce_removed_subagents(chat_id: Uuid, ids: Vec<Uuid>) {
+    if ids.is_empty() {
+        return;
+    }
+    publish(
+        &ChatStream::of(chat_id),
+        ServerMessage::SubagentsRemoved { chat_id, ids },
+    )
+    .await;
+}
+
+/// Broadcast the queue as it is now. Read under the lock a joining connection
+/// reads it under, so the last queue frame every connection sees is current.
+async fn announce(stream: &ChatStream, started: Option<Queued>) {
+    let _live = stream.live.lock().await;
+    let (messages, held) = queue::snapshot(stream.chat_id).unwrap_or_default();
+    let _ = stream.events.send(ServerMessage::Queue {
+        messages,
+        held,
+        started,
+    });
+}
+
+/// A turn holds the chat's generation permit, including one the queue did not start.
+fn generating(chat_id: Uuid) -> bool {
+    CHAT_GENERATIONS
+        .get(&chat_id)
+        .is_some_and(|generation| generation.available_permits() == 0)
+}
+
+fn cancel_turns(chat_id: Uuid) {
+    for entry in CHAT_CANCELLATIONS
+        .iter()
+        .filter(|entry| entry.key().0 == chat_id)
+    {
+        let _ = entry.value().send(());
+    }
+    crate::agent::ApprovalPolicy::deny_chat(chat_id);
+}
+
+/// Register the turn a message is starting under the queue's lock, so a Stop
+/// or Interrupt that takes the lock next cancels this turn and not one before it.
+fn begin(chat_id: Uuid, started: Started) -> (Queued, Generation) {
+    let generation = Generation::registered(chat_id, started.turn);
+    (started.message, generation)
+}
+
+/// Run a message and then whatever was queued behind it, with nobody needing
+/// to stay connected.
+fn drive(
+    state: AppState,
+    stream: Arc<ChatStream>,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    first: (Queued, Generation),
+    told: bool,
+) {
+    let announcer = stream.clone();
+    let started = told.then(|| first.0.clone());
+    let turn = move |(message, generation): (Queued, Generation)| {
+        let state = state.clone();
+        let stream = stream.clone();
+        async move {
+            handle_send_message(
+                &state,
+                &stream,
+                chat_id,
+                workspace_id,
+                message.author,
+                &message.content,
+                message.metadata,
+                generation,
+                false,
+            )
+            .await
+        }
+    };
+    let running = turn(first);
+    let teller = announcer.clone();
+    tokio::spawn(async move {
+        if started.is_some() {
+            announce(&announcer, started).await;
+        }
+        let draining = queue::drain(
+            chat_id,
+            running,
+            move |started| turn(begin(chat_id, started)),
+            move |started| {
+                let stream = teller.clone();
+                async move { announce(&stream, started).await }
+            },
+        );
+        let drained =
+            futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(draining)).await;
+        if drained.is_err() {
+            announce(&announcer, None).await;
+        }
+    });
 }
 
 /// Send frames the caller already holds to one connection.
@@ -353,7 +519,10 @@ struct Generation {
 
 impl Generation {
     fn new(chat_id: Uuid) -> Self {
-        let message_id = Uuid::new_v4();
+        Self::registered(chat_id, Uuid::new_v4())
+    }
+
+    fn registered(chat_id: Uuid, message_id: Uuid) -> Self {
         let (sender, cancel) = broadcast::channel(1);
         CHAT_CANCELLATIONS.insert((chat_id, message_id), sender);
         Self {
@@ -429,15 +598,30 @@ fn reported(endpoint: &Endpoint, message: String) -> String {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// Authenticate with JWT
-    Auth { token: String },
-    /// Send a new user message
+    Auth {
+        token: String,
+    },
+    /// Send a new user message, queued behind a turn that is still running.
     Send {
+        #[serde(default = "Uuid::new_v4")]
+        id: Uuid,
         content: String,
         #[serde(default)]
         metadata: Option<serde_json::Value>,
     },
     /// Cancel current generation
     Cancel,
+    /// Stop the running turn and send this queued message next.
+    Interrupt {
+        id: Uuid,
+    },
+    EditQueued {
+        id: Uuid,
+        content: String,
+    },
+    RemoveQueued {
+        id: Uuid,
+    },
     /// Confirm or reject a mutating file/shell tool call.
     ApproveTool {
         tool_call_id: String,
@@ -492,8 +676,11 @@ pub enum ServerMessage {
         tool_call_id: String,
         name: String,
         arguments: String,
+        at: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         reasoning: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_at: Option<usize>,
         /// The model's stated reason, for side-effecting tools that carry one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
@@ -539,7 +726,7 @@ pub enum ServerMessage {
     /// A background job is no longer running. Matched to its card by `job.id`
     /// rather than by a call, because the call that observes an exit is rarely
     /// the call that started the job.
-    JobExited { message_id: Uuid, job: JobExited },
+    JobExited { message_id: Uuid, job: job::JobExit },
     /// The model opened a wait, and the turn is suspended on it. Unlike a
     /// question this is not the last frame of the turn: a second run resumes
     /// the same message once the wait settles.
@@ -565,6 +752,8 @@ pub enum ServerMessage {
         duration_ms: u64,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         citations: Vec<Citation>,
+        /// Always sent, as it is always stored on the record.
+        refusal: Option<Refusal>,
     },
     /// A workspace write finished. Stored on the message so a reload still
     /// shows the action, target, actor, time, outcome, and item link.
@@ -598,6 +787,14 @@ pub enum ServerMessage {
     },
     /// Generation cancelled
     Cancelled { message_id: Option<Uuid> },
+    /// The whole queue, sent on every change. `started` is the message that
+    /// just left it to begin a turn.
+    Queue {
+        messages: Vec<Queued>,
+        held: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        started: Option<Queued>,
+    },
     /// Error message
     Error { message: String },
     /// Non-fatal progress (e.g. web search in progress)
@@ -608,6 +805,15 @@ pub enum ServerMessage {
         #[serde(flatten)]
         notice: Notice,
     },
+    /// One of the chat's subagents changed. `steps` holds only the steps this
+    /// change touched. Never replayed: a joining client reads them over REST.
+    Subagent {
+        chat_id: Uuid,
+        subagent: ChatSubagent,
+        steps: Vec<SubagentStep>,
+    },
+    /// Deleting a message removed the subagents it started. Never replayed.
+    SubagentsRemoved { chat_id: Uuid, ids: Vec<Uuid> },
 }
 
 fn is_not_resumed(resumed: &bool) -> bool {
@@ -771,38 +977,52 @@ const MEMORY_USED_KEY: &str = "memory_used";
 /// Both are workspace-readable — the record rides the assistant message's
 /// metadata and the frame goes to every reader with the chat open — so a
 /// memory tool's arguments and stated reason are reduced here, before either
-/// exists. Lifted out of the loop so the trace a call leaves can be tested
-/// with the arguments a real call carries.
+/// exists, and so are those of a discovery its tool is about to refuse, which
+/// may be refused for the credential in them. Lifted out of the loop so the
+/// trace a call leaves can be tested with the arguments a real call carries.
 fn trace_started(
     message_id: Uuid,
     id: String,
     name: String,
     arguments: &str,
-    reasoning: Option<String>,
+    at: usize,
+    thought: Option<Thought>,
 ) -> (ToolCallRecord, ServerMessage) {
-    let reason = crate::agent::memory::trace_reason(&name, crate::agent::reason(arguments));
+    let (reasoning, reasoning_at) = thought.map_or((None, None), |thought| {
+        (Some(thought.text), Some(thought.at))
+    });
+    let reason = crate::agent::discovery::trace_reason(
+        &name,
+        crate::agent::memory::trace_reason(&name, crate::agent::reason(arguments)),
+    );
     let shown = crate::agent::memory::trace_arguments(&name, arguments)
+        .or_else(|| crate::agent::discovery::trace_arguments(&name, arguments))
         .unwrap_or_else(|| arguments.to_string());
     let record = ToolCallRecord {
         id: id.clone(),
         name: name.clone(),
         arguments: shown.clone(),
         success: false,
-        detail: "Did not finish".to_string(),
+        detail: UNFINISHED_DETAIL.to_string(),
         duration_ms: 0,
+        at: Some(at),
         reasoning: reasoning.clone(),
+        reasoning_at,
         reason: reason.clone(),
         preview: None,
         questions: Vec::new(),
         job: None,
         waiting: None,
+        refusal: None,
     };
     let frame = ServerMessage::ToolCall {
         message_id,
         tool_call_id: id,
         name,
         arguments: shown,
+        at,
         reasoning,
+        reasoning_at,
         reason,
     };
     (record, frame)
@@ -817,10 +1037,11 @@ fn merge_metadata(
     tool_calls: &[ToolCallRecord],
     citations: &[Citation],
     receipts: &[ActionReceipt],
-    reasoning: Option<&str>,
+    reasoning: Option<&Thinking>,
     handovers: &[Notice],
     usage: Option<Usage>,
 ) -> Option<serde_json::Value> {
+    let reasoning = reasoning.filter(|thinking| !thinking.text.is_empty());
     if tool_calls.is_empty()
         && citations.is_empty()
         && receipts.is_empty()
@@ -850,7 +1071,8 @@ fn merge_metadata(
         object.insert("action_receipts".to_string(), serde_json::json!(receipts));
     }
     if let Some(reasoning) = reasoning {
-        object.insert("reasoning".to_string(), serde_json::json!(reasoning));
+        object.insert("reasoning".to_string(), serde_json::json!(reasoning.text));
+        object.insert("reasoning_at".to_string(), serde_json::json!(reasoning.at));
     }
     if !handovers.is_empty() {
         object.insert(HANDOVERS_KEY.to_string(), serde_json::json!(handovers));
@@ -877,10 +1099,56 @@ const MEDIA_QUEUED: &str = "Waiting for another generation...";
 
 /// `placeholder` in place of whatever follows the `told` bytes Zone itself opened an answer with,
 /// when the model wrote nothing there.
-fn fill_silence(content: &mut String, told: usize, placeholder: &str) {
-    if content[told..].trim().is_empty() {
+fn fill_silence(content: &mut String, told: usize, placeholder: &str) -> bool {
+    let silent = content[told..].trim().is_empty();
+    if silent {
         content.truncate(told);
         content.push_str(placeholder);
+    }
+    silent
+}
+
+/// Keeps every offset inside the `kept` characters a placeholder was written after.
+fn clamp_offsets(
+    kept: usize,
+    tool_calls: &mut [ToolCallRecord],
+    handovers: &mut [Notice],
+    thinking: &mut Thinking,
+) {
+    for call in tool_calls {
+        call.at = call.at.map(|at| at.min(kept));
+        call.reasoning_at = call.reasoning_at.map(|at| at.min(kept));
+    }
+    for notice in handovers {
+        notice.at = notice.at.min(kept);
+    }
+    thinking.at = thinking.at.min(kept);
+}
+
+/// Model thinking not yet attached to a call, and where in the answer it began.
+#[derive(Debug, Default)]
+struct Thinking {
+    text: String,
+    at: usize,
+}
+
+/// Thinking handed to the call it preceded.
+struct Thought {
+    text: String,
+    at: usize,
+}
+
+impl Thinking {
+    fn push(&mut self, content: &str, at: impl FnOnce() -> usize) {
+        if self.text.is_empty() {
+            self.at = at();
+        }
+        self.text.push_str(content);
+    }
+
+    fn take(&mut self) -> Option<Thought> {
+        let text = std::mem::take(&mut self.text);
+        (!text.is_empty()).then_some(Thought { text, at: self.at })
     }
 }
 
@@ -891,8 +1159,8 @@ const STOPPED_BEFORE_ANSWERING: &str = "[Stopped before answering]";
 /// waiting on the reader rather than stopped.
 const AWAITING_ANSWER: &str = "[Waiting for your answer]";
 
-/// The same again, for a turn whose wait was cut short by cancellation, a lost
-/// lease or the turn's own deadline. It stopped waiting rather than gave up,
+/// The same again, for a turn whose wait was cut short by cancellation or a lost
+/// lease. It stopped waiting rather than gave up,
 /// and the two read very differently to whoever comes back to the chat.
 const STOPPED_AFTER_WAITING: &str = "[Stopped while waiting]";
 
@@ -901,11 +1169,27 @@ const STOPPED_AFTER_WAITING: &str = "[Stopped while waiting]";
 /// the same call.
 const AWAITING_ANSWER_DETAIL: &str = "Waiting for your answer…";
 
+/// The outcome a call is stored with until its result replaces it, so it is
+/// what a call the turn never finished is left showing. The console writes the
+/// same string onto a call a stopped turn left open.
+const UNFINISHED_DETAIL: &str = "Did not finish";
+
+/// The outcome a call is stored with while it waits for the reader to allow it.
+const AWAITING_APPROVAL_DETAIL: &str = "Waiting for approval…";
+
+/// Leaves every call that was put to the reader and has no result when its turn ends as one the
+/// turn never finished, whether it was still waiting or had been allowed and was running.
+fn leave_unfinished(tool_calls: &mut [ToolCallRecord]) {
+    for call in tool_calls
+        .iter_mut()
+        .filter(|call| call.detail == AWAITING_APPROVAL_DETAIL)
+    {
+        call.detail = UNFINISHED_DETAIL.to_string();
+    }
+}
+
 /// Another writer took the chat's lease, so this turn may no longer persist.
 const OWNERSHIP_LOST: &str = "Chat generation ownership was lost";
-
-/// The turn's own wall clock ran out, wherever it was spent.
-const GENERATION_TIMED_OUT: &str = "Response generation timed out";
 
 /// What a turn that produced neither prose nor an image is stored as.
 ///
@@ -926,19 +1210,19 @@ const fn silent_turn(asked: bool, waited: bool) -> &'static str {
 /// A tool reaches a frame through its result text and nothing else: the
 /// registry holds no pid, `ToolResult` has no detail slot, and the completion
 /// event's `detail` is a truncated first line. Reading the line back is
-/// `zone_core`'s, which owns the format and checks what it read by rebuilding
+/// `abnegate_agent`'s, which owns the format and checks what it read by rebuilding
 /// the receipt from it; what is left here is which messages may carry one.
 fn spawned_job(message: &ReplayMessage) -> Option<(String, JobStarted)> {
     if message.role != LlmRole::Tool {
         return None;
     }
     let call = message.tool_call_id.clone()?;
-    let job = job::parse_receipt(message.content.as_deref()?)?;
+    let job = parse_receipt(message.content.as_deref()?)?;
     Some((call, job))
 }
 
 /// Where a job has got to, or nothing once the registry has let it go.
-async fn job_state(chat_id: Uuid, id: &str) -> Option<JobState> {
+async fn job_state(chat_id: Uuid, id: &str) -> Option<JobStatus> {
     Jobs::read(ToolSession::Chat(chat_id), id, 0, 0)
         .await
         .ok()
@@ -946,11 +1230,11 @@ async fn job_state(chat_id: Uuid, id: &str) -> Option<JobState> {
 }
 
 /// How a job ended, as the exit field the console reads. No code means killed.
-fn job_exit(id: &str, state: Option<JobState>) -> JobExited {
-    JobExited {
+fn job_exit(id: &str, state: Option<JobStatus>) -> job::JobExit {
+    job::JobExit {
         id: id.to_string(),
         exit_code: match state {
-            Some(JobState::Exited(code)) => Some(code),
+            Some(JobStatus::Exited(code)) => Some(code),
             _ => None,
         },
     }
@@ -961,7 +1245,7 @@ fn job_exit(id: &str, state: Option<JobState>) -> JobExited {
 /// A job still running here is about to be killed with the turn, so the state
 /// is read before anything kills it: that is what tells a job that finished
 /// apart from one the turn took with it.
-async fn job_exits(chat_id: Uuid, tracked: &[String]) -> Vec<JobExited> {
+async fn job_exits(chat_id: Uuid, tracked: &[String]) -> Vec<job::JobExit> {
     let mut exits = Vec::with_capacity(tracked.len());
     for id in tracked {
         exits.push(job_exit(id, job_state(chat_id, id).await));
@@ -975,7 +1259,7 @@ async fn job_exits(chat_id: Uuid, tracked: &[String]) -> Vec<JobExited> {
 /// hands its timeout back as an ordinary outcome, and a lost wait reads the
 /// same way. Announcing an exit for either would draw a kill that never
 /// happened, and taking the id out of `tracked` would silence the real end.
-async fn job_wait_exit(chat_id: Uuid, id: &str, tracked: &mut Vec<String>) -> Option<JobExited> {
+async fn job_wait_exit(chat_id: Uuid, id: &str, tracked: &mut Vec<String>) -> Option<job::JobExit> {
     let state = job_state(chat_id, id).await?;
     if !state.settled() {
         return None;
@@ -990,33 +1274,28 @@ enum WaitEnd {
     Settled(Outcome),
     Cancelled,
     Lost,
-    Expired,
 }
 
-/// The first of the four things that can end a wait.
+/// The first of the three things that can end a wait.
 ///
 /// Cancellation and the lease guard are passed in rather than awaited inside
 /// the turn's own event arm, where neither would ever be reached: those arms
 /// are biased and only re-read when the select is re-entered. It matters most
 /// to the turn a disconnected socket leaves running, where a reconnected
-/// client's cancel is the only thing that can stop the wait before the turn's
-/// own clock does.
+/// client's cancel is the only thing that can stop the wait before it settles.
 ///
-/// Polled in the order written: an outcome landing in the same tick as the
-/// deadline has happened, and reporting it as a timeout would tell the model
-/// nothing had.
+/// Polled in the order written: an outcome landing in the same tick as a stop
+/// has happened, and dropping it would tell the model nothing had.
 async fn settle_wait(
     outcome: impl Future<Output = Outcome>,
     lost: impl Future<Output = ()>,
     cancel: &mut broadcast::Receiver<()>,
-    stream_deadline: tokio::time::Instant,
 ) -> WaitEnd {
     tokio::select! {
         biased;
         outcome = outcome => WaitEnd::Settled(outcome),
         () = lost => WaitEnd::Lost,
         _ = cancel.recv() => WaitEnd::Cancelled,
-        _ = tokio::time::sleep_until(stream_deadline) => WaitEnd::Expired,
     }
 }
 
@@ -1027,7 +1306,7 @@ async fn publish_live_assistant(
     citations: &[Citation],
     receipts: &[ActionReceipt],
     images: &[ChatImageAttachment],
-    reasoning: &str,
+    reasoning: &Thinking,
     handovers: &[Notice],
     usage: Option<Usage>,
 ) -> Result<(), String> {
@@ -1036,7 +1315,7 @@ async fn publish_live_assistant(
         && citations.is_empty()
         && receipts.is_empty()
         && images.is_empty()
-        && reasoning.is_empty()
+        && reasoning.text.is_empty()
         && handovers.is_empty()
     {
         return Ok(());
@@ -1052,7 +1331,7 @@ async fn publish_live_assistant(
                 tool_calls,
                 citations,
                 receipts,
-                (!reasoning.is_empty()).then_some(reasoning),
+                Some(reasoning),
                 handovers,
                 usage,
             ),
@@ -1291,8 +1570,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                     // the turn from the top instead of rendering a gap.
                     Err(broadcast::error::RecvError::Lagged(frames)) => {
                         tracing::warn!(%chat_id, frames, "Chat connection fell behind, replaying");
-                        let (resume, receiver) = stream.join().await;
+                        let (mut resume, receiver) = stream.join().await;
                         events = receiver;
+                        // The queue changes it missed may have emptied it, which
+                        // a join alone says nothing about.
+                        if !resume.iter().any(|frame| matches!(frame, ServerMessage::Queue { .. })) {
+                            resume.push(ServerMessage::Queue {
+                                messages: Vec::new(),
+                                held: false,
+                                started: None,
+                            });
+                        }
                         if !forward(&sender, resume).await {
                             break;
                         }
@@ -1316,7 +1604,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
 
                         // Parse client message
                         match serde_json::from_str::<ClientMessage>(&text) {
-                            Ok(ClientMessage::Send { content, metadata }) => {
+                            Ok(ClientMessage::Send { id, content, metadata }) => {
                                 // Rate limiting check
                                 if rate_limit_window_start.elapsed() > Duration::from_secs(60) {
                                     message_count = 0;
@@ -1349,40 +1637,66 @@ async fn handle_socket(socket: WebSocket, state: AppState, chat_id: Uuid) {
                                     continue;
                                 }
 
-                                // Handle the send message
-                                let task_state = state.clone();
-                                let task_stream = stream.clone();
-                                let task_content = content;
-                                let generation = Generation::new(chat_id);
-                                tokio::spawn(async move {
-                                    handle_send_message(
-                                        &task_state,
-                                        &task_stream,
-                                        chat_id,
-                                        workspace_id,
-                                        user_id,
-                                        &task_content,
-                                        metadata,
-                                        generation,
-                                        false,
-                                    ).await;
+                                let message = Queued { id, content, metadata, author: user_id };
+                                let started = queue::with(chat_id, |queue| {
+                                    queue
+                                        .submit(message, generating(chat_id))
+                                        .map(|started| begin(chat_id, started))
                                 });
+                                match started {
+                                    // A message that starts at once never showed in the
+                                    // queue, so there is no change for anyone to hear.
+                                    Some(started) => {
+                                        let told = started.0.id != id;
+                                        drive(state.clone(), stream.clone(), chat_id, workspace_id, started, told);
+                                    }
+                                    None => announce(&stream, None).await,
+                                }
                             }
                             Ok(ClientMessage::Cancel) => {
-                                // Broadcast cancellation to all active streams for this chat
-                                // Iterate and send to all matching (chat_id, *) keys
-                                let keys_to_cancel: Vec<_> = CHAT_CANCELLATIONS
-                                    .iter()
-                                    .filter(|entry| entry.key().0 == chat_id)
-                                    .map(|entry| *entry.key())
-                                    .collect();
-
-                                for key in keys_to_cancel {
-                                    if let Some(tx) = CHAT_CANCELLATIONS.get(&key) {
-                                        let _ = tx.send(());
+                                queue::with(chat_id, |queue| {
+                                    queue.stop(generating(chat_id));
+                                    cancel_turns(chat_id);
+                                });
+                            }
+                            Ok(ClientMessage::Interrupt { id }) => {
+                                let started = queue::with(chat_id, |queue| {
+                                    match queue.interrupt(id, generating(chat_id)) {
+                                        Interrupted::Cancel => {
+                                            cancel_turns(chat_id);
+                                            None
+                                        }
+                                        Interrupted::Start(started) => Some(begin(chat_id, started)),
+                                        Interrupted::Missing => None,
                                     }
+                                });
+                                match started {
+                                    Some(started) => {
+                                        drive(state.clone(), stream.clone(), chat_id, workspace_id, started, true);
+                                    }
+                                    None => announce(&stream, None).await,
                                 }
-                                crate::agent::ApprovalPolicy::deny_chat(chat_id);
+                            }
+                            Ok(ClientMessage::EditQueued { id, content }) => {
+                                if content.len() > MAX_MESSAGE_LENGTH {
+                                    let error_msg = ServerMessage::Error {
+                                        message: "Message too long".to_string(),
+                                    };
+                                    let _ = send_server(&sender, error_msg).await;
+                                    continue;
+                                }
+                                queue::with(chat_id, |queue| {
+                                    if content.trim().is_empty() {
+                                        queue.remove(id)
+                                    } else {
+                                        queue.edit(id, content, user_id)
+                                    }
+                                });
+                                announce(&stream, None).await;
+                            }
+                            Ok(ClientMessage::RemoveQueued { id }) => {
+                                queue::with(chat_id, |queue| queue.remove(id));
+                                announce(&stream, None).await;
                             }
                             Ok(ClientMessage::ApproveTool {
                                 tool_call_id,
@@ -1512,14 +1826,6 @@ async fn resolve_generation_source(
         store,
     )
     .await
-}
-
-fn generation_deadline(
-    timeout: Duration,
-) -> Result<tokio::time::Instant, Box<dyn std::error::Error + Send + Sync>> {
-    tokio::time::Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| "Chat generation deadline is not representable".into())
 }
 
 async fn watch_lease(
@@ -2445,6 +2751,8 @@ async fn handle_audio_generation(
 /// must still be put to somebody. It waits, finds no one, and is declined —
 /// which is the right answer when the alternative is acting unasked. Reading
 /// tools are below that tier and run either way, so a watch still works.
+/// Whether the user's message was saved: a queued turn stopped before then has
+/// left nothing in the chat, so the queue puts it back.
 async fn handle_send_message(
     state: &AppState,
     stream: &Arc<ChatStream>,
@@ -2455,7 +2763,7 @@ async fn handle_send_message(
     metadata: Option<serde_json::Value>,
     mut request: Generation,
     unattended: bool,
-) {
+) -> bool {
     let generation = CHAT_GENERATIONS
         .entry(chat_id)
         .or_insert_with(|| Arc::new(Semaphore::new(1)))
@@ -2464,7 +2772,7 @@ async fn handle_send_message(
         biased;
         _ = request.cancel.recv() => {
             request.cancelled(stream).await;
-            return;
+            return false;
         }
         permit = generation.acquire() => permit.expect("chat semaphore is never closed"),
     };
@@ -2480,7 +2788,7 @@ async fn handle_send_message(
             },
         )
         .await;
-        return;
+        return false;
     }
     let mut session = match Session::acquire(state, chat_id, workspace_id, request.message_id).await
     {
@@ -2493,32 +2801,22 @@ async fn handle_send_message(
                 },
             )
             .await;
-            return;
+            return false;
         }
     };
-    if generation_deadline(state.config().chat.timeout).is_err() {
-        let _ = session.close().await;
-        publish(
-            stream,
-            ServerMessage::Error {
-                message: "Chat generation deadline is not representable".into(),
-            },
-        )
-        .await;
-        return;
-    }
     crate::agent::ApprovalPolicy::register(chat_id, request.approvals.clone());
     let mut jobs: Vec<String> = Vec::new();
     let preparation = tokio::select! {
         biased;
-        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:OWNERSHIP_LOST.into()}).await; return; }
+        _ = session.guard.lost() => { let _=session.close().await; publish(stream,ServerMessage::Error {message:OWNERSHIP_LOST.into()}).await; return false; }
         _ = request.cancel.recv() => {
             let _=session.close().await;
                         request.cancelled(stream).await;
-            return;
+            return false;
         }
         result = prepare_message(state, chat_id, workspace_id, content, metadata.as_ref()) => result,
     };
+    let mut saved = false;
     let result = async {
         let routing = preparation?;
         if request.is_cancelled() {
@@ -2530,6 +2828,7 @@ async fn handle_send_message(
         // before honouring Stop. Dropping an INSERT future cannot roll it back.
         let mut message=LlmMessage::user(content);message.images=session::images(metadata.as_ref());
         let user_message=session.store.begin(&session.lease,session.turn,Uuid::new_v4(),content,metadata.clone(),ReplayMessage::from(&message)).await?;
+        saved = true;
         crate::workers::titles::spawn(state.clone(),&user_message);
         spawn_message_embedding_task(state.clone(),user_message.id,chat_id,content.to_string());
         publish(stream,ServerMessage::MessageSaved {message_id:user_message.id,role:"user".into(),content:content.to_string(),metadata:metadata.clone()}).await;
@@ -2654,6 +2953,7 @@ async fn handle_send_message(
         )
         .await;
     }
+    saved
 }
 
 /// Run one chat turn with nobody connected.
@@ -2691,9 +2991,33 @@ pub(crate) async fn run_turn(
     content: &str,
     metadata: Option<serde_json::Value>,
 ) -> Uuid {
+    let message_id = Uuid::new_v4();
+    run_turn_as(
+        state,
+        message_id,
+        chat_id,
+        workspace_id,
+        user_id,
+        content,
+        metadata,
+    )
+    .await;
+    message_id
+}
+
+/// [`run_turn`] with its answer's id chosen by the caller, so the caller can
+/// stop this turn and no other through [`cancel_turn`] while it runs.
+pub(crate) async fn run_turn_as(
+    state: &AppState,
+    message_id: Uuid,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    content: &str,
+    metadata: Option<serde_json::Value>,
+) {
     let stream = ChatStream::of(chat_id);
-    let generation = Generation::new(chat_id);
-    let message_id = generation.message_id;
+    let generation = Generation::registered(chat_id, message_id);
     handle_send_message(
         state,
         &stream,
@@ -2708,7 +3032,26 @@ pub(crate) async fn run_turn(
         true,
     )
     .await;
-    message_id
+    let released = queue::with(chat_id, |queue| match queue.release() {
+        Finished::Next(started) => Some(Some(begin(chat_id, started))),
+        Finished::Held => Some(None),
+        Finished::Idle => None,
+    });
+    match released {
+        Some(Some(started)) => drive(state.clone(), stream, chat_id, workspace_id, started, true),
+        Some(None) => announce(&stream, None).await,
+        None => {}
+    }
+}
+
+/// Stops the one turn answering under `message_id` the way a person's Stop
+/// does: it ends as a cancelled turn and releases the chat's queue on its way
+/// out, where dropping it part way would leave the queue held. A turn already
+/// over has nothing left to stop.
+pub(crate) fn cancel_turn(chat_id: Uuid, message_id: Uuid) {
+    if let Some(cancellation) = CHAT_CANCELLATIONS.get(&(chat_id, message_id)) {
+        let _ = cancellation.send(());
+    }
 }
 
 async fn prepare_message(
@@ -3012,7 +3355,7 @@ async fn prepare_chat(
         None => None,
     };
     if let Some(organization) = organization {
-        handover::settle(state.config(), organization, &resolved);
+        handover::settle(state.config(), organization, &resolved).await;
     }
     let current = resolved.login.clone();
     let chosen = route.chosen().is_some();
@@ -3047,6 +3390,7 @@ async fn prepare_chat(
             resolved,
             session: previous.clone(),
             directory: directory.clone(),
+            origin: db::tasks::Origin::of_turn(metadata),
         }),
         endpoint,
         driver,
@@ -3076,6 +3420,7 @@ async fn prepare_chat(
         agentic,
         &search.capability(),
         &preparation.environment,
+        &preparation.findings.text,
         &preparation.memory,
         &preparation.skills,
     );
@@ -3084,7 +3429,7 @@ async fn prepare_chat(
         let query_embedding = match state.embedding_service() {
             Some(embedding_service) => {
                 match embedding_service
-                    .embed(&zone_context::embed_query_text(
+                    .embed(&abnegate_index::embed_query_text(
                         embedding_service.model(),
                         content,
                     ))
@@ -3101,41 +3446,19 @@ async fn prepare_chat(
         };
 
         let attached = chat_attached_sources::scope(state.db(), Some(chat_id)).await;
-        let mut knowledge_hits = Vec::new();
-        if let (Some(embedding), None) = (query_embedding.as_deref(), attached.as_ref()) {
-            match knowledge::search_knowledge_entries(
-                state.db(),
-                embedding,
-                workspace_id,
-                MAX_CONTEXT_IN_PROMPT as i64,
-                0.5,
-            )
-            .await
-            {
-                Ok(hits) => knowledge_hits = hits,
-                Err(error) => tracing::warn!(%error, "Knowledge semantic search failed"),
+        let knowledge_hits = match &attached {
+            Some(_) => Vec::new(),
+            None => {
+                retrieve_knowledge(
+                    state.db(),
+                    query_embedding.as_deref(),
+                    content,
+                    workspace_id,
+                    &preparation.findings,
+                )
+                .await
             }
-        }
-        if attached.is_none() {
-            match knowledge::search_knowledge_keyword(
-                state.db(),
-                content,
-                workspace_id,
-                MAX_CONTEXT_IN_PROMPT as i64,
-            )
-            .await
-            {
-                Ok(hits) => {
-                    knowledge_hits = knowledge::fuse_knowledge_hits(
-                        knowledge_hits,
-                        hits,
-                        content,
-                        MAX_CONTEXT_IN_PROMPT,
-                    );
-                }
-                Err(error) => tracing::warn!(%error, "Knowledge keyword search failed"),
-            }
-        }
+        };
 
         let mut source_lines = Vec::new();
         if let Some(context_service) = state.context_service() {
@@ -3207,6 +3530,55 @@ async fn prepare_chat(
     Ok(preparation)
 }
 
+/// `hits` less the entries `findings` already shows the chat.
+fn unshown(
+    hits: Vec<knowledge::KnowledgeSearchHit>,
+    findings: &learned::Block,
+) -> Vec<knowledge::KnowledgeSearchHit> {
+    hits.into_iter()
+        .filter(|hit| !findings.shown.contains(&hit.entry_id))
+        .collect()
+}
+
+/// The workspace's knowledge entries that answer `content`, best first: what its embedding is
+/// near, when it has one, fused with what its words match.
+///
+/// What a workspace learned is filed in the same store, and the chat already reads it in
+/// `findings`, so an entry shown there is left out here rather than said twice. Each search asks
+/// for that many more than the prompt holds, which is the most it could lose, so a learned entry
+/// never costs a document its place. One a bound kept out of `findings` is still found here.
+async fn retrieve_knowledge(
+    pool: &PgPool,
+    embedding: Option<&[f32]>,
+    content: &str,
+    workspace_id: Uuid,
+    findings: &learned::Block,
+) -> Vec<knowledge::KnowledgeSearchHit> {
+    let limit = i64::try_from(MAX_CONTEXT_IN_PROMPT + findings.shown.len()).unwrap_or(i64::MAX);
+    let mut hits = Vec::new();
+    if let Some(embedding) = embedding {
+        match knowledge::search_knowledge_entries(pool, embedding, workspace_id, limit, 0.5).await {
+            Ok(semantic) => hits = unshown(semantic, findings),
+            Err(error) => tracing::warn!(%error, "Knowledge semantic search failed"),
+        }
+    }
+    match knowledge::search_knowledge_keyword(pool, content, workspace_id, limit).await {
+        Ok(keyword) => {
+            hits = knowledge::fuse_knowledge_hits(
+                hits,
+                unshown(keyword, findings),
+                content,
+                MAX_CONTEXT_IN_PROMPT,
+            );
+        }
+        Err(error) => {
+            tracing::warn!(%error, "Knowledge keyword search failed");
+            hits.truncate(MAX_CONTEXT_IN_PROMPT);
+        }
+    }
+    hits
+}
+
 /// Settles the coding agent session `preparation` runs in, when it runs in one: a session the
 /// chat resumes is sent only what it has not seen, opened by one system note. One with nothing
 /// left to answer, or whose place in the chat can't be read, starts afresh on the whole
@@ -3258,13 +3630,29 @@ async fn pin(
 
 /// A sandboxed chat (`chats.agent_sandboxed`) gives the agent zone's tools and
 /// nothing else. An unsandboxed one leaves it the file and shell tools it
-/// ships with, which run outside zone, which zone never sees, and which no
-/// approval card can reach.
+/// ships with, which run outside zone. Claude asks zone before running one,
+/// under the chat's approval policy; codex's are confined by its sandbox alone.
 fn builtin_tools(sandboxed: bool) -> BuiltinTools {
     match sandboxed {
         true => BuiltinTools::Withheld,
         false => BuiltinTools::Granted,
     }
+}
+
+/// A turn's coding agent reaches the turn's tools only when it is served them,
+/// but is watched either way. Both belong to the backend they were attached
+/// to, so a turn that moves to another backend equips it again.
+fn equipped(
+    client: LlmClient,
+    served: Option<&AgentTools>,
+    observer: &Arc<dyn Observer>,
+    sandboxed: bool,
+) -> LlmClient {
+    let client = match served {
+        Some(served) => client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed)),
+        None => client,
+    };
+    client.with_observer(observer.clone())
 }
 
 /// `jobs` collects the background jobs this turn started and has not yet
@@ -3291,8 +3679,8 @@ async fn handle_chat_generation(
         endpoint,
         stop,
         mut budget,
-        timeout,
         environment: _,
+        findings: _,
         memory: _,
         skills: _,
         session: mut pinned,
@@ -3302,6 +3690,7 @@ async fn handle_chat_generation(
         driver,
     } = preparation;
     let offline = tools.offline();
+    let origin = tools.origin();
     let directory = tools.working_directory().to_path_buf();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
@@ -3310,7 +3699,7 @@ async fn handle_chat_generation(
     // returned.
     let mut agent_tools = agentic
         .then(|| {
-            crate::mcp::AgentTools::serve(
+            AgentTools::serve(
                 llm_client.backend(),
                 &mut tools,
                 crate::mcp::Scope {
@@ -3319,26 +3708,32 @@ async fn handle_chat_generation(
                     user: Some(user_id),
                     approval: generation.approvals.clone(),
                     calls: budget.max_tool_calls,
+                    builtin: builtin_tools(sandboxed),
                 },
                 &crate::mcp::local_endpoint(state.config()),
             )
         })
         .flatten();
-    let recorder: Arc<dyn Observer> = Arc::new(Recorder::new(state.clone(), chat_id, workspace_id));
-    let mut llm_client = match &agent_tools {
-        Some(served) => llm_client
-            .with_toolset(served.lease.toolset(), builtin_tools(sandboxed))
-            .with_observer(recorder.clone()),
-        None => llm_client,
-    };
     let mut token_filter = TokenFilter::new(stop);
     let assistant_message_id = generation.message_id;
-    let stream_deadline = generation_deadline(timeout)?;
     if generation.cancel.try_recv().is_ok() {
         session.close().await?;
         generation.cancelled(stream).await;
         return Ok(());
     }
+    let tracker = Tracker::new(
+        state.clone(),
+        chat_id,
+        assistant_message_id,
+        Arc::new(SubagentFrames {
+            stream: ChatStream::of(chat_id),
+        }),
+    );
+    let observer: Arc<dyn Observer> = Arc::new(Observers::new(
+        Recorder::new(state.clone(), chat_id, workspace_id, user_id),
+        tracker,
+    ));
+    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
 
     publish(
         stream,
@@ -3369,7 +3764,7 @@ async fn handle_chat_generation(
 
     let mut full_content = String::new();
     let mut pending_content = String::new();
-    let mut round_reasoning = String::new();
+    let mut round_reasoning = Thinking::default();
     let mut pending_images = Vec::<String>::new();
     let mut generated_images = Vec::new();
     let mut chunk_index = 0;
@@ -3379,6 +3774,7 @@ async fn handle_chat_generation(
     let mut response_truncated = false;
     let mut asked = false;
     let mut waited = false;
+    let mut cut_short = false;
     let mut tool_calls: Vec<ToolCallRecord> = Vec::new();
     let mut citations: Vec<Citation> = Vec::new();
     let mut action_receipts: Vec<ActionReceipt> = Vec::new();
@@ -3401,7 +3797,6 @@ async fn handle_chat_generation(
     let told = full_content.len();
 
     loop {
-        wait::set_ceiling(ToolSession::Chat(chat_id), stream_deadline);
         let written = (full_content.len(), tool_calls.len());
         let round = agent::run_with_context(
             AgentRun {
@@ -3435,12 +3830,6 @@ async fn handle_chat_generation(
                 _ = generation.cancel.recv() => {
                     cancelled = true;
                     tracing::debug!("Stream cancelled for message {}", assistant_message_id);
-                    break;
-                }
-
-                _ = tokio::time::sleep_until(stream_deadline) => {
-                    tracing::warn!("LLM stream timeout for chat {}, message {}", chat_id, assistant_message_id);
-                    failure = Some(GENERATION_TIMED_OUT.to_string());
                     break;
                 }
 
@@ -3487,7 +3876,7 @@ async fn handle_chat_generation(
                             replay.summary=Some(summary);
                         }
                         Some(AgentEvent::Context(usage)) => {
-                            if usage.status==zone_core::context::ContextStatus::Blocked { blocked=Some(usage.clone()); }
+                            if usage.status==abnegate_agent::context::ContextStatus::Blocked { blocked=Some(usage.clone()); }
                             if let Err(error)=session.store.assert_current(&session.lease).await {failure=Some(error.to_string());break;}
                             publish(stream,ServerMessage::Context {chat_id,message_id:Some(assistant_message_id),usage}).await;
                         }
@@ -3509,7 +3898,7 @@ async fn handle_chat_generation(
                         }
                         Some(AgentEvent::Finalizing(message)) => { publish(stream,ServerMessage::Status {message}).await; }
                         Some(AgentEvent::Reasoning(content)) => {
-                            round_reasoning.push_str(&content);
+                            round_reasoning.push(&content, || full_content.chars().count());
                             publish(stream, ServerMessage::Reasoning { content }).await;
                             persist = true;
                         }
@@ -3555,7 +3944,7 @@ async fn handle_chat_generation(
                         }
                         Some(AgentEvent::ToolApprovalRequired { id, name, arguments, reason, preview }) => {
                             if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
-                                record.detail = "Waiting for approval…".to_string();
+                                record.detail = AWAITING_APPROVAL_DETAIL.to_string();
                                 record.preview.clone_from(&preview);
                             }
                             let arguments = crate::agent::memory::trace_arguments(&name, &arguments)
@@ -3575,12 +3964,15 @@ async fn handle_chat_generation(
                         Some(AgentEvent::ToolCallStarted { id, name, arguments }) => {
                             // Recorded before the tool runs so a turn cancelled
                             // mid-call still shows what it was doing.
-                            let reasoning = {
-                                let text = std::mem::take(&mut round_reasoning);
-                                (!text.is_empty()).then_some(text)
-                            };
-                            let (record, tool_msg) =
-                                trace_started(assistant_message_id, id, name, &arguments, reasoning);
+                            let thought = round_reasoning.take();
+                            let (record, tool_msg) = trace_started(
+                                assistant_message_id,
+                                id,
+                                name,
+                                &arguments,
+                                full_content.chars().count(),
+                                thought,
+                            );
                             tool_calls.push(record);
                             publish(stream, tool_msg).await;
                             persist_now = true;
@@ -3607,7 +3999,7 @@ async fn handle_chat_generation(
                                 continue;
                             };
 
-                            if zone_core::tools::is_vision_url(&url) && !replay.entries.iter().any(|entry|entry.message.images.contains(&url) || entry.message.generated_images.iter().any(|image|image.image_url.url==url)) {
+                            if abnegate_agent::tool::is_vision_url(&url) && !replay.entries.iter().any(|entry|entry.message.images.contains(&url) || entry.message.generated_images.iter().any(|image|image.image_url.url==url)) {
                                 pending_images.push(url);
                             }
                             let media_msg = if attachment.mime.starts_with("audio/") {
@@ -3625,12 +4017,13 @@ async fn handle_chat_generation(
                             publish(stream, media_msg).await;
                             persist_now = true;
                         }
-                        Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms, citations: observed, receipt }) => {
+                        Some(AgentEvent::ToolCallCompleted { id, name, success, detail, duration_ms, citations: observed, receipt, refusal }) => {
                             let detail = crate::agent::memory::trace_detail(&name, &detail);
                             if let Some(record) = tool_calls.iter_mut().find(|r| r.id == id) {
                                 record.success = success;
                                 record.detail = detail.clone();
                                 record.duration_ms = duration_ms;
+                                record.refusal = refusal;
                             }
                             crate::agent::citations::merge(&mut citations, observed.clone());
 
@@ -3642,6 +4035,7 @@ async fn handle_chat_generation(
                                 detail,
                                 duration_ms,
                                 citations: observed,
+                                refusal,
                             };
                             publish(stream, tool_msg).await;
                             if let Some(receipt) = receipt {
@@ -3716,6 +4110,7 @@ async fn handle_chat_generation(
                             }
                             break;
                         }
+                        Some(AgentEvent::CutShort) => cut_short = true,
                         None => {
                             // Stream ended
                             break;
@@ -3767,7 +4162,12 @@ async fn handle_chat_generation(
                 .as_mut()
                 .and_then(|pinned| pinned.restart(llm_client.backend().clone()))
         {
-            llm_client = llm_client.with_backend(backend);
+            llm_client = equipped(
+                llm_client.with_backend(backend),
+                agent_tools.as_ref(),
+                &observer,
+                sandboxed,
+            );
             replay = whole.clone();
             context = match continuing {
                 true => handover::replayed(&whole),
@@ -3779,12 +4179,11 @@ async fn handle_chat_generation(
             continue;
         }
         if let Some(cause) = handing.take() {
-            let remaining = stream_deadline.saturating_duration_since(tokio::time::Instant::now());
             let moved = match handover.as_mut() {
                 Some(handover) if !cancelled => {
                     observed.record(state, handover.login()).await;
                     let session = pinned.as_ref().and_then(|pinned| pinned.id());
-                    handover.next(state, &cause, session, remaining).await
+                    handover.next(state, &cause, session).await
                 }
                 _ => Err(None),
             };
@@ -3826,7 +4225,11 @@ async fn handle_chat_generation(
                 }
             }
             tracing::info!(%chat_id, from = %switch.from.id, to = %switch.to.id, carried = switch.carried, "Handing the turn over to another login");
-            let notice = switch.notice(full_content.chars().count());
+            let notice = switch.notice(
+                full_content.chars().count(),
+                tool_calls.len(),
+                round_reasoning.take().map(|thought| thought.text),
+            );
             publish(
                 stream,
                 ServerMessage::Status {
@@ -3866,11 +4269,7 @@ async fn handle_chat_generation(
                 switch.backend.clone(),
                 effort,
             ));
-            if let Some(served) = &agent_tools {
-                llm_client = llm_client
-                    .with_toolset(served.lease.toolset(), builtin_tools(sandboxed))
-                    .with_observer(recorder.clone());
-            }
+            llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
             tools = ChatTools::empty();
             continuing = wrote;
             context = match (wrote, switch.carried) {
@@ -3915,7 +4314,6 @@ async fn handle_chat_generation(
             ),
             session.guard.lost(),
             &mut generation.cancel,
-            stream_deadline,
         )
         .await
         {
@@ -3926,10 +4324,6 @@ async fn handle_chat_generation(
             }
             WaitEnd::Lost => {
                 failure = Some(OWNERSHIP_LOST.to_string());
-                break;
-            }
-            WaitEnd::Expired => {
-                failure = Some(GENERATION_TIMED_OUT.to_string());
                 break;
             }
         };
@@ -3994,6 +4388,7 @@ async fn handle_chat_generation(
             chat_id: Some(chat_id),
             user_id,
             offline,
+            origin,
         })
         .await
         .starting_in(Some(directory.clone()))
@@ -4023,7 +4418,7 @@ async fn handle_chat_generation(
         ran.record(state.db(), chat_id, occupancy).await;
         replay.policy = session::policy(
             &state.config().chat,
-            &zone_chat::capacity::Capacity::reported(&ran.model, occupancy.window),
+            &Capacity::reported(&ran.model, occupancy.window),
         );
         replay.reported = occupancy.used;
     }
@@ -4040,6 +4435,7 @@ async fn handle_chat_generation(
         )
         .await;
     }
+    leave_unfinished(&mut tool_calls);
 
     // Nothing generated yet: there is no reply worth keeping. A turn that ran
     // tools or produced an image before it broke is worth keeping even with no
@@ -4076,12 +4472,17 @@ async fn handle_chat_generation(
         return Ok(());
     }
 
-    // Save assistant message to database
-    // Note: We save even truncated responses so users see partial results
-    if response_truncated {
-        full_content.push_str("\n\n[Response truncated due to length limit]");
+    let ending = if response_truncated {
+        Ending::Truncated
     } else if failure.is_some() {
-        full_content.push_str("\n\n[Response interrupted]");
+        Ending::Interrupted
+    } else if cut_short {
+        Ending::CutShort
+    } else {
+        Ending::Finished
+    };
+    if let Some(note) = ending.note() {
+        full_content.push_str(note);
     }
 
     // Tools can run without the model ever producing prose. The turn is still
@@ -4090,8 +4491,11 @@ async fn handle_chat_generation(
     // An image is its own answer, so it does not need the placeholder.
     // A turn that ended on a question or a wait is not silent but waiting, and
     // saying so keeps the card's own bubble from reading as a failure.
-    if generated_images.is_empty() {
-        fill_silence(&mut full_content, told, silent_turn(asked, waited));
+    if generated_images.is_empty()
+        && fill_silence(&mut full_content, told, silent_turn(asked, waited))
+    {
+        let kept = full_content[..told].chars().count();
+        clamp_offsets(kept, &mut tool_calls, &mut handovers, &mut round_reasoning);
     }
 
     merge_cited_sources(state, chat_id, &full_content, &mut citations).await;
@@ -4103,7 +4507,7 @@ async fn handle_chat_generation(
         &tool_calls,
         &citations,
         &action_receipts,
-        (!round_reasoning.is_empty()).then_some(round_reasoning.as_str()),
+        Some(&round_reasoning),
         &handovers,
         usage,
     );
@@ -4111,7 +4515,7 @@ async fn handle_chat_generation(
     let partial = if !pending_content.is_empty() || !pending_images.is_empty() {
         let mut message = LlmMessage::assistant(pending_content);
         message.images = pending_images;
-        Some(zone_chat::history::ReplayMessage::from(&message))
+        Some(ReplayMessage::from(&message))
     } else {
         None
     };
@@ -4141,17 +4545,10 @@ async fn handle_chat_generation(
                 .retain(|entry| entry.message.role == LlmRole::System);
             replay
                 .entries
-                .extend(
-                    history
-                        .entries
-                        .into_iter()
-                        .map(|entry| zone_core::context::Entry {
-                            id: entry.id,
-                            message: entry.message.into_message(),
-                            preserve: false,
-                            consumed: entry.consumed,
-                        }),
-                );
+                .extend(history.entries.into_iter().map(|entry| {
+                    abnegate_agent::context::Entry::new(entry.id, entry.message.into_message())
+                        .with_consumed(entry.consumed)
+                }));
             replay.summary = history.summary.map(session::core_summary);
             replay.search(&SearchContext::new(&state.config().web_search));
             let usage = blocked.unwrap_or_else(|| replay.usage(&model, definitions.as_deref()));
@@ -4404,10 +4801,135 @@ mod tests {
         assert!(interleave_context_lines(Vec::new(), Vec::new(), 5).is_empty());
     }
 
+    #[test]
+    fn a_hit_the_learned_block_shows_is_dropped_and_the_rest_keep_their_order() {
+        fn hit(entry_id: Uuid) -> knowledge::KnowledgeSearchHit {
+            knowledge::KnowledgeSearchHit {
+                entry_id,
+                similarity: 0.9,
+                title: "Runbook".to_string(),
+                content: "Rotate the deploy key.".to_string(),
+                category: None,
+                tags: Vec::new(),
+            }
+        }
+        let [first, shown, second] = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        let findings = learned::Block {
+            text: String::new(),
+            shown: std::collections::HashSet::from([shown]),
+        };
+
+        let kept = unshown(vec![hit(first), hit(shown), hit(second)], &findings);
+
+        assert_eq!(
+            kept.iter().map(|hit| hit.entry_id).collect::<Vec<_>>(),
+            [first, second]
+        );
+        assert_eq!(
+            unshown(vec![hit(first), hit(shown)], &learned::Block::default()).len(),
+            2,
+            "a chat with no learned block retrieves as it always did"
+        );
+    }
+
+    /// A recurring question is promoted to a standing instruction titled with
+    /// the question itself, so the next time it is asked that entry is what a
+    /// keyword search ranks first. The chat already reads it in its learned
+    /// block: retrieved again it would say the same thing twice and push one
+    /// of the workspace's documents out. An entry the block does not show is
+    /// still there to be found.
+    #[tokio::test]
+    async fn retrieval_leaves_out_what_the_learned_block_already_shows() {
+        const QUESTION: &str = "How do I rotate the deploy key?";
+
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+        )
+        .await
+        .expect("the test database");
+        let suffix = Uuid::new_v4().simple().to_string();
+        let organization = db::organizations::create_organization(&pool, "Learned", &suffix, None)
+            .await
+            .expect("an organization");
+        let workspace =
+            workspaces::create_workspace(&pool, organization.id, "Learned", &suffix, None)
+                .await
+                .expect("a workspace")
+                .id;
+        let (instruction, _) = knowledge::upsert_standing_instruction(
+            &pool,
+            &knowledge::StandingInstruction {
+                workspace_id: workspace,
+                title: "Repeated answer: how do I rotate the deploy key".to_string(),
+                content: "Rotate the deploy key from the vault console. To rotate the deploy \
+                          key you need the operator role."
+                    .to_string(),
+                provenance: knowledge::PromotionProvenance {
+                    fingerprint: "promoted-deploy-key".to_string(),
+                    occurrences: 4,
+                    distinct_chats: 3,
+                    last_confirmed: chrono::NaiveDate::from_ymd_opt(2026, 11, 11)
+                        .expect("a real date"),
+                },
+            },
+        )
+        .await
+        .expect("a standing instruction");
+        let mut documents = std::collections::HashSet::new();
+        for index in 0..MAX_CONTEXT_IN_PROMPT {
+            let document: Uuid = sqlx::query_scalar(
+                "INSERT INTO knowledge_entries (workspace_id, title, content) \
+                 VALUES ($1, $2, $3) RETURNING id",
+            )
+            .bind(workspace)
+            .bind(format!("Runbook {index}"))
+            .bind(format!(
+                "Section {index} of the operations handbook says when to rotate a key, and \
+                 further down which deploy it belongs to."
+            ))
+            .fetch_one(&pool)
+            .await
+            .expect("a document");
+            documents.insert(document);
+        }
+
+        let findings = learned::prompt(&pool, workspace, learned::MAX_RENDERED_BYTES).await;
+        let retrieved = retrieve_knowledge(&pool, None, QUESTION, workspace, &findings).await;
+        let unshown =
+            retrieve_knowledge(&pool, None, QUESTION, workspace, &learned::Block::default()).await;
+        sqlx::query("DELETE FROM organizations WHERE id = $1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .expect("the workspace and everything in it go");
+
+        assert_eq!(
+            findings.shown,
+            std::collections::HashSet::from([instruction]),
+            "the block shows the instruction: {}",
+            findings.text
+        );
+        assert_eq!(
+            retrieved
+                .iter()
+                .map(|hit| hit.entry_id)
+                .collect::<std::collections::HashSet<_>>(),
+            documents,
+            "every slot goes to a document the chat has not already read"
+        );
+        assert_eq!(retrieved.len(), MAX_CONTEXT_IN_PROMPT);
+        assert_eq!(unshown.len(), MAX_CONTEXT_IN_PROMPT);
+        assert!(
+            unshown.iter().any(|hit| hit.entry_id == instruction),
+            "an entry the block does not show is still retrieved: {unshown:?}"
+        );
+    }
+
     /// The capability tail closes each arm here because these four calls pass
-    /// no memory. A user with something remembered reads the block after that
-    /// tail, which `session`'s own tests pin; what this one holds is that the
-    /// persona, the agent contracts and the tail are unchanged by its arrival.
+    /// nothing learned and no memory. A chat with either reads its blocks
+    /// after that tail, which `session`'s own tests pin; what this one holds is
+    /// that the persona, the agent contracts and the tail are unchanged by
+    /// their arrival.
     #[tokio::test]
     async fn system_prompt_preserves_persona_and_agent_contracts() {
         let state = AppState::for_tests();
@@ -4417,6 +4939,7 @@ mod tests {
             chat_id: Some(Uuid::new_v4()),
             user_id: Uuid::new_v4(),
             offline: false,
+            origin: crate::db::tasks::Origin::Member,
         })
         .await;
         let character = ChatCharacter {
@@ -4441,6 +4964,7 @@ mod tests {
             &environment,
             "",
             "",
+            "",
         );
         assert!(persona.starts_with("Stay Ari."), "{persona}");
         assert!(persona.ends_with(CAPABILITY), "{persona}");
@@ -4452,6 +4976,7 @@ mod tests {
             true,
             CAPABILITY,
             &environment,
+            "",
             "",
             "",
         );
@@ -4470,6 +4995,7 @@ mod tests {
             &environment,
             "",
             "",
+            "",
         );
         assert!(combined.starts_with("Stay Ari.\n\n"), "{combined}");
         assert!(
@@ -4483,6 +5009,7 @@ mod tests {
             false,
             CAPABILITY,
             &environment,
+            "",
             "",
             "",
         );
@@ -4665,11 +5192,11 @@ mod tests {
         use crate::services::provider::Provider;
         use crate::services::stages::AUTO;
         use crate::services::stages::testing::{MODEL_FLAG, StandIn};
+        use abnegate_agent_cli::AgentKind;
         use tempfile::TempDir;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
-        use zone_core::llm::AgentKind;
 
         const CATALOG: &str = "/api/tags";
         const QUESTION: &str = "What is a monad?";
@@ -4731,7 +5258,12 @@ mod tests {
                     .expect("the chat's provider");
             }
 
+            /// Deletes the chat first, which waits for whatever its last turn is still writing,
+            /// and then the organization.
             async fn remove(&self) {
+                chats::delete_chat(&self.pool, self.chat)
+                    .await
+                    .expect("the chat to be removed");
                 sqlx::query("DELETE FROM organizations WHERE id = $1")
                     .bind(self.id)
                     .execute(&self.pool)
@@ -5101,7 +5633,14 @@ mod tests {
             .await;
             organization.remove().await;
 
-            let Ok(Routing::Image(config, LlmBackend::Cli { agent, settings }, _)) = routing else {
+            let Ok(Routing::Image(
+                config,
+                LlmBackend::Cli {
+                    agent, settings, ..
+                },
+                _,
+            )) = routing
+            else {
                 panic!("expected an image route carrying the organization's agent");
             };
             assert_eq!(agent, AgentKind::Claude);
@@ -5125,16 +5664,16 @@ mod tests {
             access: &str,
             headroom: f64,
         ) -> Uuid {
-            let sealed = crate::services::login::claude::Tokens {
-                access: abnegate_secret::SecretValue::new(access),
-                refresh: None,
-                expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(8),
-                issued_at: None,
-                scope: "user:inference".to_string(),
-                subscription: None,
-            }
-            .seal(state.encryption_key())
-            .expect("tokens to seal");
+            let tokens = abnegate_agent_cli::login::claude::Tokens::new(
+                abnegate_secret::SecretValue::new(access),
+                None,
+                chrono::Utc::now() + chrono::TimeDelta::hours(8),
+                None,
+                "user:inference",
+                None,
+            );
+            let sealed = crate::services::login::claude::Sealed::seal(&tokens, state.master_key())
+                .expect("tokens to seal");
             let login = db::agent_logins::insert(
                 &organization.pool,
                 &db::agent_logins::Insert {
@@ -5447,7 +5986,7 @@ cat 'DIR/reply.jsonl'
                                 .split_terminator('\0')
                                 .map(str::to_string)
                                 .collect(),
-                            stdin,
+                            stdin: zone_core::llm::cli::prompt(&stdin),
                             directory: directory.trim().to_string(),
                         })
                         .filter(|run| run.flag("--session-id").or(run.flag("--resume")).is_some())
@@ -5521,7 +6060,8 @@ cat 'DIR/reply.jsonl'
                     }
                 }
 
-                async fn ask(&self, content: &str) {
+                /// Runs one turn on `content` and returns the id of its answer.
+                async fn ask(&self, content: &str) -> Uuid {
                     run_turn(
                         &self.state,
                         self.organization.chat,
@@ -5530,13 +6070,16 @@ cat 'DIR/reply.jsonl'
                         content,
                         None,
                     )
-                    .await;
+                    .await
                 }
 
                 /// Puts the chat in a new project whose source is the folder `path`.
                 async fn in_project(&self, path: &std::path::Path) {
-                    self.sourced("filesystem", serde_json::json!({"base_path": path}))
-                        .await;
+                    self.sourced(
+                        db::sources::FILESYSTEM,
+                        serde_json::json!({"base_path": path}),
+                    )
+                    .await;
                 }
 
                 /// Puts the chat in a new project whose source is `kind` with `config`.
@@ -5544,13 +6087,16 @@ cat 'DIR/reply.jsonl'
                     let pool = &self.organization.pool;
                     let source = db::sources::create_source(
                         pool,
-                        self.organization.workspace,
-                        &Uuid::new_v4().to_string(),
-                        kind,
-                        config,
-                        None,
-                        None,
-                        None,
+                        db::sources::NewSource {
+                            workspace_id: self.organization.workspace,
+                            name: &Uuid::new_v4().to_string(),
+                            source_type: kind,
+                            config,
+                            description: None,
+                            url: None,
+                            credentials_encrypted: None,
+                            github_installation_id: None,
+                        },
                     )
                     .await
                     .expect("a source");
@@ -5605,7 +6151,7 @@ cat 'DIR/reply.jsonl'
                 fn transcript(&self, directory: &std::path::Path, id: &str) -> std::path::PathBuf {
                     self.home()
                         .join("projects")
-                        .join(crate::services::agent::sessions::sanitized(directory))
+                        .join(abnegate_agent_cli::Session::project(directory))
                         .join(format!("{id}.jsonl"))
                 }
 
@@ -6036,7 +6582,7 @@ cat 'DIR/reply.jsonl'
                 std::fs::write(&file, "").expect("a file where the clones would go");
                 let chat = Chat::cloning_under(file.join("clones")).await;
                 chat.sourced(
-                    "github",
+                    db::sources::GITHUB,
                     serde_json::json!({"owner": "owner", "repo": "repository"}),
                 )
                 .await;
@@ -6057,7 +6603,7 @@ cat 'DIR/reply.jsonl'
                 std::fs::write(&file, "").expect("a file where the clones would go");
                 let chat = Chat::cloning_under(file.join("clones")).await;
                 chat.sourced(
-                    "github",
+                    db::sources::GITHUB,
                     serde_json::json!({"owner": "owner", "repo": "repository"}),
                 )
                 .await;
@@ -6125,6 +6671,220 @@ cat 'DIR/reply.jsonl'
                 let second = second.expect("the replay recorded its session");
                 assert_eq!(second.id, fresh);
                 assert_eq!(second.prompt, first.prompt);
+            }
+
+            #[tokio::test]
+            async fn a_refused_resume_replays_with_the_tools_and_the_watch_of_the_turn() {
+                const SURVEY: &str = "toolu_01Survey";
+                let chat = Chat::on_claude().await;
+                sqlx::query(
+                    "UPDATE chats SET agent_enabled = TRUE, agent_sandboxed = FALSE WHERE id = $1",
+                )
+                .bind(chat.organization.chat)
+                .execute(&chat.organization.pool)
+                .await
+                .expect("an agentic, unsandboxed chat");
+
+                chat.ask(FIRST).await;
+                std::fs::write(
+                    chat.agent.directory.path().join("reply.jsonl"),
+                    subagents_until_the_first_result(),
+                )
+                .expect("the stand-in's reply");
+                chat.agent.refuse();
+                let stream = ChatStream::of(chat.organization.chat);
+                let (_, mut frames) = stream.join().await;
+                let watched = tokio::spawn(async move {
+                    loop {
+                        match frames.recv().await {
+                            Ok(ServerMessage::Subagent { subagent, .. })
+                                if subagent.external_id == SURVEY =>
+                            {
+                                return subagent.message_id;
+                            }
+                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(broadcast::error::RecvError::Closed) => return None,
+                        }
+                    }
+                });
+                let replayed_turn = chat.ask(SECOND).await;
+                let watched = tokio::time::timeout(Duration::from_secs(30), watched)
+                    .await
+                    .expect("nothing watched the replay's subagents: no survey reached its readers")
+                    .expect("the chat's readers");
+                drop(stream);
+                let runs = chat.agent.runs();
+                let stored =
+                    db::chat_subagents::list(&chat.organization.pool, chat.organization.chat)
+                        .await
+                        .expect("the chat's subagents");
+                chat.remove().await;
+
+                let [served, _, replayed] = runs.as_slice() else {
+                    panic!("expected three sessioned runs, got {}", runs.len());
+                };
+                assert!(
+                    served.flag("--mcp-config").is_some(),
+                    "the chat serves its agent tools: {:?}",
+                    served.arguments
+                );
+                assert!(
+                    replayed.flag("--mcp-config").is_some(),
+                    "the replay lost zone's tools: {:?}",
+                    replayed.arguments
+                );
+                for flag in ["--tools", "--permission-prompt-tool"] {
+                    assert_eq!(
+                        replayed.flag(flag),
+                        served.flag(flag),
+                        "the replay changed {flag}"
+                    );
+                }
+                assert_eq!(
+                    watched,
+                    Some(replayed_turn),
+                    "the survey was not the replayed turn's"
+                );
+                assert!(
+                    stored.iter().any(|row| row.external_id == SURVEY),
+                    "the replay's survey reached its readers but not the store: {stored:?}"
+                );
+            }
+
+            /// Claude's subagents fixture up to the turn's first result, which
+            /// leaves its background review still running when the turn ends.
+            fn subagents_until_the_first_result() -> String {
+                const FIXTURE: &str = include_str!(
+                    "../../../zone_core/src/llm/client/fixtures/claude/subagents.jsonl"
+                );
+                let mut reply = String::new();
+                for line in FIXTURE
+                    .lines()
+                    .filter(|line| !line.contains(r#""subtype":"init""#))
+                {
+                    reply.push_str(line);
+                    reply.push('\n');
+                    if line.starts_with(r#"{"type":"result""#) {
+                        return reply;
+                    }
+                }
+                panic!("the fixture has no result");
+            }
+
+            #[tokio::test]
+            async fn a_turns_subagents_reach_its_readers_and_its_store_and_are_swept_when_it_ends()
+            {
+                use abnegate_agent_cli::{StepStatus, SubagentStatus};
+
+                const SURVEY: &str = "toolu_01Survey";
+                const REVIEW: &str = "toolu_04Review";
+                let chat = Chat::on_claude().await;
+                std::fs::write(
+                    chat.agent.directory.path().join("reply.jsonl"),
+                    subagents_until_the_first_result(),
+                )
+                .expect("the stand-in's reply");
+                let stream = ChatStream::of(chat.organization.chat);
+                let (_, mut frames) = stream.join().await;
+
+                chat.ask(FIRST).await;
+                let mut started = None;
+                let mut announced = Vec::new();
+                let mut replayed = Vec::new();
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        match frames.recv().await.expect("the chat's frames") {
+                            ServerMessage::MessageStart { message_id, .. } => {
+                                started = Some(message_id);
+                            }
+                            ServerMessage::Subagent {
+                                subagent, steps, ..
+                            } => {
+                                replayed.extend(stream.join().await.0);
+                                let swept = subagent.external_id == REVIEW
+                                    && subagent.status == SubagentStatus::Stopped;
+                                announced.push((subagent, steps));
+                                if swept {
+                                    return;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                })
+                .await
+                .expect("the review is swept once the turn ends");
+                let answer: Uuid = sqlx::query_scalar(
+                    "SELECT id FROM messages WHERE chat_id = $1 AND role = 'assistant'",
+                )
+                .bind(chat.organization.chat)
+                .fetch_one(&chat.organization.pool)
+                .await
+                .expect("the chat's answer");
+                let stored =
+                    db::chat_subagents::list(&chat.organization.pool, chat.organization.chat)
+                        .await
+                        .expect("the chat's subagents");
+                let survey = stored
+                    .iter()
+                    .find(|row| row.external_id == SURVEY)
+                    .expect("the survey")
+                    .clone();
+                let steps = db::chat_subagents::steps(
+                    &chat.organization.pool,
+                    chat.organization.chat,
+                    survey.id,
+                )
+                .await
+                .expect("the survey's steps")
+                .expect("the survey");
+                chat.remove().await;
+
+                assert_eq!(
+                    started,
+                    Some(answer),
+                    "the console's answer is the stored one"
+                );
+                assert!(
+                    announced
+                        .iter()
+                        .all(|(subagent, _)| subagent.message_id == Some(answer)),
+                    "{announced:?}"
+                );
+                let named: std::collections::BTreeSet<&str> = announced
+                    .iter()
+                    .map(|(subagent, _)| subagent.external_id.as_str())
+                    .collect();
+                assert_eq!(named, std::collections::BTreeSet::from([SURVEY, REVIEW]));
+                assert!(
+                    !replayed
+                        .iter()
+                        .any(|frame| matches!(frame, ServerMessage::Subagent { .. })),
+                    "a joining client reads subagents over REST: {replayed:?}"
+                );
+                let statuses: Vec<(&str, &str)> = stored
+                    .iter()
+                    .map(|row| (row.external_id.as_str(), row.status.as_str()))
+                    .collect();
+                assert_eq!(
+                    statuses,
+                    [
+                        (SURVEY, SubagentStatus::Completed.as_str()),
+                        (REVIEW, SubagentStatus::Stopped.as_str()),
+                    ]
+                );
+                let taken: Vec<(&str, Option<&str>, StepStatus)> = steps
+                    .iter()
+                    .map(|step| (step.name.as_str(), step.subject.as_deref(), step.status))
+                    .collect();
+                assert_eq!(
+                    taken,
+                    [
+                        ("Grep", Some("pub mod"), StepStatus::Succeeded),
+                        ("Read", Some("/w/src/missing.rs"), StepStatus::Failed),
+                    ]
+                );
+                assert_eq!(survey.step_count, 2);
             }
         }
 
@@ -6222,6 +6982,58 @@ cat 'DIR/reply.jsonl'
             message,
             "Ollama is down: nothing answered at host.docker.internal:11434."
         );
+    }
+
+    #[test]
+    fn a_placeholder_keeps_every_offset_ahead_of_it() {
+        let notice = "> The folder is gone.\n\n";
+        let mut content = format!("{notice}\n\n");
+        let kept = notice.chars().count();
+        let mut calls = vec![ToolCallRecord {
+            at: Some(kept + 2),
+            reasoning_at: Some(kept + 1),
+            ..call("read_file", true)
+        }];
+        let mut handovers = vec![moved(kept + 2)];
+        let mut thinking = Thinking {
+            text: "Still thinking.".to_string(),
+            at: kept + 2,
+        };
+
+        assert!(fill_silence(
+            &mut content,
+            notice.len(),
+            STOPPED_BEFORE_ANSWERING
+        ));
+        clamp_offsets(kept, &mut calls, &mut handovers, &mut thinking);
+
+        assert_eq!(
+            calls[0].at,
+            Some(kept),
+            "the call no longer cuts the placeholder"
+        );
+        assert_eq!(calls[0].reasoning_at, Some(kept));
+        assert_eq!(handovers[0].at, kept);
+        assert_eq!(thinking.at, kept);
+        assert!(
+            !fill_silence(&mut format!("{notice}Written."), notice.len(), "[silent]"),
+            "an answer with prose is not silent, so nothing moves"
+        );
+    }
+
+    #[test]
+    fn thinking_remembers_where_it_began_and_hands_that_to_its_call() {
+        let mut thinking = Thinking::default();
+        thinking.push("Look at ", || 13);
+        thinking.push("the file.", || 20);
+
+        let thought = thinking.take().expect("thinking was written");
+        assert_eq!(thought.at, 13, "the offset is where the thinking began");
+        assert_eq!(thought.text, "Look at the file.");
+        assert!(thinking.take().is_none(), "the call took it");
+
+        thinking.push("Next.", || 30);
+        assert_eq!(thinking.at, 30, "the next thought starts its own offset");
     }
 
     #[test]
@@ -6338,11 +7150,7 @@ cat 'DIR/reply.jsonl'
     const JOB_LOG: &str = "/w/.zone/jobs/job_9f3c1a7b2e04.log";
 
     fn spawned() -> JobStarted {
-        JobStarted {
-            id: JOB_ID.to_string(),
-            pid: 48213,
-            log_path: JOB_LOG.to_string(),
-        }
+        JobStarted::new(JOB_ID, 48213, JOB_LOG)
     }
 
     #[test]
@@ -6392,7 +7200,9 @@ cat 'DIR/reply.jsonl'
             tool_call_id: "call-1".to_string(),
             name: "read_file".to_string(),
             arguments: "{}".to_string(),
+            at: 0,
             reasoning: None,
+            reasoning_at: None,
             reason: None,
         });
         turn.record(&chunk("Found it", 0));
@@ -6408,14 +7218,16 @@ cat 'DIR/reply.jsonl'
         Notice {
             from: "a@example.com".to_string(),
             to: "c@example.com".to_string(),
-            from_agent: zone_core::llm::AgentKind::Claude,
-            agent: zone_core::llm::AgentKind::Codex,
+            from_agent: abnegate_agent_cli::AgentKind::Claude,
+            agent: abnegate_agent_cli::AgentKind::Codex,
             reason: crate::services::chat::handover::Reason::Limit,
             resets_at: chrono::DateTime::parse_from_rfc3339("2026-09-23T06:10:00Z")
                 .ok()
                 .map(|at| at.with_timezone(&chrono::Utc)),
             carried: false,
             at,
+            calls: 0,
+            reasoning: None,
         }
     }
 
@@ -6442,6 +7254,7 @@ cat 'DIR/reply.jsonl'
                 "resets_at": "2026-09-23T06:10:00Z",
                 "carried": false,
                 "at": 12,
+                "calls": 0,
             })
         );
     }
@@ -6486,6 +7299,7 @@ cat 'DIR/reply.jsonl'
                     "resets_at": "2026-09-23T06:10:00Z",
                     "carried": false,
                     "at": 10,
+                    "calls": 0,
                 }],
                 "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
             })
@@ -6653,6 +7467,268 @@ cat 'DIR/reply.jsonl'
             !CHAT_STREAMS.contains_key(&chat_id),
             "the last holder leaving frees the chat's frames"
         );
+    }
+
+    fn subagent(chat_id: Uuid) -> ChatSubagent {
+        let now = chrono::Utc::now();
+        ChatSubagent {
+            id: Uuid::new_v4(),
+            chat_id,
+            message_id: Some(Uuid::new_v4()),
+            external_id: "toolu_01Agent".to_string(),
+            description: "Ask for a review".to_string(),
+            kind: None,
+            model: None,
+            background: true,
+            status: abnegate_agent_cli::SubagentStatus::Running,
+            tool_uses: None,
+            duration_ms: None,
+            tokens: None,
+            last_tool: None,
+            summary: None,
+            error: None,
+            step_count: 1,
+            revision: 2,
+            started_at: now,
+            finished_at: None,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_subagent_reaches_every_connection_but_is_never_replayed() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        publish(&stream, started(Uuid::new_v4())).await;
+        let (_, mut connection) = stream.join().await;
+        let frames = SubagentFrames {
+            stream: stream.clone(),
+        };
+        let changed = subagent(chat_id);
+        let step = SubagentStep::new("toolu_x", "Bash", abnegate_agent_cli::StepStatus::Running);
+
+        frames.announce(changed.clone(), vec![step]).await;
+
+        let frame = connection.recv().await.expect("the subagent frame");
+        assert_eq!(
+            serde_json::to_value(&frame).expect("a frame"),
+            serde_json::json!({
+                "type": "subagent",
+                "chat_id": chat_id,
+                "subagent": serde_json::to_value(&changed).expect("a subagent"),
+                "steps": [{"id": "toolu_x", "name": "Bash", "subject": null, "status": "running"}],
+            })
+        );
+        assert_eq!(
+            frame_kinds(&stream.join().await.0),
+            ["message_start"],
+            "a joining client reads subagents over REST"
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_subagents_reach_every_connection_but_are_never_replayed() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        publish(&stream, started(Uuid::new_v4())).await;
+        let (_, mut connection) = stream.join().await;
+        let removed = vec![Uuid::new_v4(), Uuid::new_v4()];
+
+        announce_removed_subagents(chat_id, Vec::new()).await;
+        announce_removed_subagents(chat_id, removed.clone()).await;
+
+        let frame = connection.recv().await.expect("the removal frame");
+        assert_eq!(
+            serde_json::to_value(&frame).expect("a frame"),
+            serde_json::json!({
+                "type": "subagents_removed",
+                "chat_id": chat_id,
+                "ids": removed,
+            }),
+            "a removal of nothing is not sent"
+        );
+        assert_eq!(
+            frame_kinds(&stream.join().await.0),
+            ["message_start"],
+            "a joining client reads subagents over REST"
+        );
+    }
+
+    #[derive(Debug)]
+    struct Watching;
+
+    impl Observer for Watching {
+        fn observe(&self, _output: &abnegate_agent_cli::Output) {}
+    }
+
+    fn observed(client: &LlmClient) -> Option<Arc<dyn Observer>> {
+        client.observer().cloned()
+    }
+
+    fn cli() -> LlmBackend {
+        LlmBackend::cli(
+            abnegate_agent_cli::AgentKind::Claude,
+            abnegate_agent_cli::CliSettings::default(),
+        )
+    }
+
+    #[test]
+    fn a_coding_agent_is_watched_whether_or_not_it_is_served_tools() {
+        let observer: Arc<dyn Observer> = Arc::new(Watching);
+        let client = LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli());
+
+        let client = equipped(client, None, &observer, true);
+        assert!(
+            observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
+            "a turn the agent tools are off for is still watched"
+        );
+
+        let client = client.with_backend(cli());
+        assert!(
+            observed(&client).is_none(),
+            "a new backend starts unwatched"
+        );
+        let client = equipped(client, None, &observer, true);
+        assert!(
+            observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
+            "a turn handed over to another login is watched again"
+        );
+
+        let endpoint = equipped(
+            LlmClient::new(abnegate_llm::LlmConfig::default()),
+            None,
+            &observer,
+            true,
+        );
+        assert!(matches!(endpoint.backend(), LlmBackend::Http));
+    }
+
+    #[test]
+    fn a_coding_agent_served_tools_is_watched_beside_them() {
+        let observer: Arc<dyn Observer> = Arc::new(Watching);
+        let mut tools = ChatTools::empty();
+        let served = AgentTools::serve(
+            &cli(),
+            &mut tools,
+            crate::mcp::testing::scope(Uuid::new_v4()),
+            "http://127.0.0.1:1/mcp",
+        )
+        .expect("a coding agent is served the turn's tools");
+
+        for (sandboxed, kept) in [
+            (true, BuiltinTools::Withheld),
+            (false, BuiltinTools::Granted),
+        ] {
+            let client = equipped(
+                LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli()),
+                Some(&served),
+                &observer,
+                sandboxed,
+            );
+
+            assert!(
+                client.toolset().is_some(),
+                "sandboxed {sandboxed}: the agent reaches the turn's tools"
+            );
+            assert_eq!(client.builtin_tools(), kept, "sandboxed {sandboxed}");
+            assert!(
+                observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
+                "sandboxed {sandboxed}: serving tools does not unwatch the agent"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_joining_connection_sees_the_queue_and_later_changes() {
+        let chat_id = Uuid::new_v4();
+        let stream = ChatStream::of(chat_id);
+        let (frames, _) = stream.join().await;
+        assert!(frames.is_empty(), "an empty queue sends nothing on join");
+
+        let first = Queued {
+            id: Uuid::new_v4(),
+            content: "first".into(),
+            metadata: None,
+            author: Uuid::new_v4(),
+        };
+        let second = Queued {
+            id: Uuid::new_v4(),
+            content: "second".into(),
+            ..first.clone()
+        };
+        queue::with(chat_id, |queue| queue.submit(first, false));
+        queue::with(chat_id, |queue| queue.submit(second.clone(), false));
+
+        let (frames, mut events) = stream.join().await;
+        let [
+            ServerMessage::Queue {
+                messages,
+                held,
+                started,
+            },
+        ] = frames.as_slice()
+        else {
+            panic!(
+                "a reload sees the queue: {}",
+                frame_kinds(&frames).join(",")
+            );
+        };
+        assert_eq!(messages, std::slice::from_ref(&second));
+        assert!(!held);
+        assert!(started.is_none());
+
+        queue::with(chat_id, |queue| queue.remove(second.id));
+        announce(&stream, None).await;
+        let Ok(ServerMessage::Queue { messages, .. }) = events.recv().await else {
+            panic!("every connection hears the queue change");
+        };
+        assert!(messages.is_empty());
+        queue::with(chat_id, |queue| queue.finish(true));
+    }
+
+    #[test]
+    fn a_queue_frame_carries_what_the_console_renders() {
+        let id = Uuid::new_v4();
+        let frame = ServerMessage::Queue {
+            messages: vec![Queued {
+                id,
+                content: "next".into(),
+                metadata: Some(serde_json::json!({ "attachments": [] })),
+                author: Uuid::new_v4(),
+            }],
+            held: true,
+            started: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            serde_json::json!({
+                "type": "queue",
+                "messages": [{ "id": id, "content": "next", "metadata": { "attachments": [] } }],
+                "held": true,
+            })
+        );
+    }
+
+    #[test]
+    fn queue_actions_deserialize() {
+        let id = Uuid::new_v4();
+        let send: ClientMessage = serde_json::from_value(
+            serde_json::json!({ "type": "send", "id": id, "content": "hi" }),
+        )
+        .unwrap();
+        assert!(matches!(send, ClientMessage::Send { id: sent, .. } if sent == id));
+        let interrupt: ClientMessage =
+            serde_json::from_value(serde_json::json!({ "type": "interrupt", "id": id })).unwrap();
+        assert!(matches!(interrupt, ClientMessage::Interrupt { id: target } if target == id));
+        let edit: ClientMessage = serde_json::from_value(
+            serde_json::json!({ "type": "edit_queued", "id": id, "content": "changed" }),
+        )
+        .unwrap();
+        assert!(matches!(edit, ClientMessage::EditQueued { content, .. } if content == "changed"));
+        let remove: ClientMessage =
+            serde_json::from_value(serde_json::json!({ "type": "remove_queued", "id": id }))
+                .unwrap();
+        assert!(matches!(remove, ClientMessage::RemoveQueued { id: target } if target == id));
     }
 
     /// A user with a live session, and a chat in a workspace it can write to.
@@ -7033,12 +8109,6 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
-    fn generation_deadlines_accept_normal_timeouts_and_reject_overflow() {
-        assert!(generation_deadline(Duration::from_secs(30)).is_ok());
-        assert!(generation_deadline(Duration::MAX).is_err());
-    }
-
-    #[test]
     fn queued_generation_cannot_replace_the_active_approval_gate() {
         let chat = Uuid::new_v4();
         let active = crate::agent::ApprovalPolicy::required(crate::agent::ApprovalGate::new());
@@ -7066,7 +8136,9 @@ cat 'DIR/reply.jsonl'
         let json = r#"{"type": "send", "content": "Hello AI"}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::Send { content, metadata } => {
+            ClientMessage::Send {
+                content, metadata, ..
+            } => {
                 assert_eq!(content, "Hello AI");
                 assert!(metadata.is_none());
             }
@@ -7079,7 +8151,9 @@ cat 'DIR/reply.jsonl'
         let json = r#"{"type": "send", "content": "Hello", "metadata": {"key": "value"}}"#;
         let msg: ClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            ClientMessage::Send { content, metadata } => {
+            ClientMessage::Send {
+                content, metadata, ..
+            } => {
                 assert_eq!(content, "Hello");
                 assert!(metadata.is_some());
                 let meta = metadata.unwrap();
@@ -7466,7 +8540,9 @@ cat 'DIR/reply.jsonl'
             tool_call_id: "call_abc".to_string(),
             name: "search_knowledge".to_string(),
             arguments: r#"{"query":"deploys"}"#.to_string(),
+            at: 0,
             reasoning: Some("Need workspace deploy docs.".to_string()),
+            reasoning_at: None,
             reason: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -7487,6 +8563,7 @@ cat 'DIR/reply.jsonl'
             detail: "3 passages".to_string(),
             duration_ms: 128,
             citations: Vec::new(),
+            refusal: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"tool_result\""));
@@ -7507,12 +8584,15 @@ cat 'DIR/reply.jsonl'
             success: true,
             detail: "2 tasks".to_string(),
             duration_ms: 7,
+            at: None,
             reasoning: None,
+            reasoning_at: None,
             reason: None,
             preview: None,
             questions: Vec::new(),
             job: None,
             waiting: None,
+            refusal: None,
         }];
         let metadata = serde_json::json!({ "tool_calls": records });
 
@@ -7536,12 +8616,15 @@ cat 'DIR/reply.jsonl'
             success: true,
             detail: "ok".to_string(),
             duration_ms: 3,
+            at: None,
             reasoning: Some("Inspect the workspace first.".to_string()),
+            reasoning_at: None,
             reason: Some("The user asked which tests are failing.".to_string()),
             preview: None,
             questions: Vec::new(),
             job: None,
             waiting: None,
+            refusal: None,
         }];
 
         let merged = merge_metadata(images, &records, &[], &[], None, &[], None)
@@ -7632,7 +8715,11 @@ cat 'DIR/reply.jsonl'
             "call_1".to_string(),
             MEMORY_WRITE.to_string(),
             r#"{"category":"fact","name":"Deploy window","description":"When we ship.","content":"Thursdays, never Fridays.","reason":"They ship on Thursdays, so remembering it."}"#,
-            Some("I should remember this.".to_string()),
+            0,
+            Some(Thought {
+                text: "I should remember this.".to_string(),
+                at: 0,
+            }),
         );
         let record_json = serde_json::to_string(&record).expect("a record serialises");
         let frame_json = serde_json::to_string(&frame).expect("a frame serialises");
@@ -7670,6 +8757,7 @@ cat 'DIR/reply.jsonl'
             "call_2".to_string(),
             "read_file".to_string(),
             r#"{"path":"src/main.rs","reason":"To see what main does."}"#,
+            0,
             None,
         );
         assert!(
@@ -7689,6 +8777,130 @@ cat 'DIR/reply.jsonl'
         );
     }
 
+    /// The trace is written before the tool runs, so a call the tool goes on
+    /// to refuse would otherwise leave what it was refused for where the whole
+    /// workspace reads it: the credential in a subject, in a statement, or in
+    /// a reason nobody asked for.
+    #[test]
+    fn a_discovery_the_tool_will_refuse_leaves_none_of_its_text_in_the_trace() {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use serde_json::json;
+        const SECRET: &str = "ghp_abcdefgh1234";
+        const SUBJECT: &str = "The deploy token";
+
+        for arguments in [
+            json!({"kind": "lesson", "subject": format!("{SUBJECT} is {SECRET}"), "statement": "Kept in the vault."}),
+            json!({"kind": "lesson", "subject": SUBJECT, "statement": format!("It is {SECRET}")}),
+            json!({"kind": "lesson", "subject": SUBJECT, "statement": "Kept in the vault.", "reason": format!("It is {SECRET}")}),
+        ] {
+            let (record, frame) = trace_started(
+                Uuid::new_v4(),
+                "call_1".to_string(),
+                RECORD_DISCOVERY.to_string(),
+                &arguments.to_string(),
+                0,
+                None,
+            );
+
+            assert_eq!(record.name, RECORD_DISCOVERY);
+            assert_eq!(record.arguments, r#"{"kind":"lesson"}"#, "{arguments}");
+            assert_eq!(record.reason, None, "{arguments}");
+            let record = serde_json::to_string(&record).expect("a record serialises");
+            let frame = serde_json::to_string(&frame).expect("a frame serialises");
+            for refused in [SECRET, SUBJECT, "Kept in the vault."] {
+                assert!(!record.contains(refused), "{refused} in {record}");
+                assert!(!frame.contains(refused), "{refused} in {frame}");
+            }
+        }
+
+        let unreadable = trace_started(
+            Uuid::new_v4(),
+            "call_2".to_string(),
+            RECORD_DISCOVERY.to_string(),
+            &json!({"kind": SECRET, "subject": SUBJECT}).to_string(),
+            0,
+            None,
+        )
+        .0;
+        assert_eq!(
+            unreadable.arguments, "{}",
+            "a kind the store does not know is model-written text like any other"
+        );
+    }
+
+    #[test]
+    fn a_discovery_the_tool_will_take_is_traced_as_the_entry_it_stores() {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use serde_json::json;
+        let arguments = json!({
+            "kind": " lesson ",
+            "subject": "Frontend tests  need isolation",
+            "statement": "Run bun test\nwith --isolate.",
+        })
+        .to_string();
+        let stored = json!({
+            "kind": "lesson",
+            "subject": "Frontend tests need isolation",
+            "statement": "Run bun test with --isolate.",
+        })
+        .to_string();
+
+        let (record, frame) = trace_started(
+            Uuid::new_v4(),
+            "call_1".to_string(),
+            RECORD_DISCOVERY.to_string(),
+            &arguments,
+            0,
+            None,
+        );
+
+        assert_eq!(
+            record.arguments, stored,
+            "the entry the workspace reads anyway"
+        );
+        assert_eq!(record.reason, None);
+        assert_eq!(
+            serde_json::to_value(&frame).expect("a frame serialises")["arguments"],
+            stored
+        );
+    }
+
+    /// The tool reads a field written twice by its last copy, so a call whose
+    /// earlier copy carries a credential is taken, and that copy must not
+    /// reach the trace the workspace reads.
+    #[test]
+    fn a_discovery_with_a_field_written_twice_leaves_the_unread_copy_out_of_the_trace() {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use serde_json::json;
+        const SECRET: &str = "ghp_abcdefgh1234";
+        let arguments = format!(
+            r#"{{"kind":"lesson","subject":"The deploy token","statement":"It is {SECRET}","statement":"Kept in the vault."}}"#
+        );
+
+        let (record, frame) = trace_started(
+            Uuid::new_v4(),
+            "call_1".to_string(),
+            RECORD_DISCOVERY.to_string(),
+            &arguments,
+            0,
+            None,
+        );
+
+        assert_eq!(
+            record.arguments,
+            json!({
+                "kind": "lesson",
+                "subject": "The deploy token",
+                "statement": "Kept in the vault.",
+            })
+            .to_string()
+        );
+        let record = serde_json::to_string(&record).expect("a record serialises");
+        let frame = serde_json::to_string(&frame).expect("a frame serialises");
+        assert!(!record.contains(SECRET), "{record}");
+        assert!(!frame.contains(SECRET), "{frame}");
+    }
+
     fn call(name: &str, success: bool) -> ToolCallRecord {
         ToolCallRecord {
             id: "call_1".to_string(),
@@ -7697,12 +8909,15 @@ cat 'DIR/reply.jsonl'
             success,
             detail: "ok".to_string(),
             duration_ms: 1,
+            at: None,
             reasoning: None,
+            reasoning_at: None,
             reason: None,
             preview: None,
             questions: Vec::new(),
             job: None,
             waiting: None,
+            refusal: None,
         }
     }
 
@@ -7758,8 +8973,19 @@ cat 'DIR/reply.jsonl'
         .expect("the turn had calls");
         assert!(wrote.get(MEMORY_USED_KEY).is_none(), "{wrote}");
 
-        let quiet =
-            merge_metadata(None, &[], &[], &[], Some("Thinking."), &[], None).expect("reasoning");
+        let quiet = merge_metadata(
+            None,
+            &[],
+            &[],
+            &[],
+            Some(&Thinking {
+                text: "Thinking.".to_string(),
+                at: 0,
+            }),
+            &[],
+            None,
+        )
+        .expect("reasoning");
         assert!(quiet.get(MEMORY_USED_KEY).is_none(), "{quiet}");
     }
 
@@ -7770,24 +8996,34 @@ cat 'DIR/reply.jsonl'
             &[],
             &[],
             &[],
-            Some("The capital is Paris."),
+            Some(&Thinking {
+                text: "The capital is Paris.".to_string(),
+                at: 0,
+            }),
             &[],
             None,
         )
         .expect("reasoning");
         assert_eq!(merged["reasoning"], "The capital is Paris.");
+        assert_eq!(merged["reasoning_at"], 0);
 
         let merged = merge_metadata(
             Some(serde_json::json!("invalid image metadata")),
             &[],
             &[],
             &[],
-            Some("Recovered"),
+            Some(&Thinking {
+                text: "Recovered".to_string(),
+                at: 0,
+            }),
             &[],
             None,
         )
         .expect("reasoning replaces malformed metadata");
-        assert_eq!(merged, serde_json::json!({"reasoning":"Recovered"}));
+        assert_eq!(
+            merged,
+            serde_json::json!({"reasoning": "Recovered", "reasoning_at": 0})
+        );
     }
 
     #[test]
@@ -8040,6 +9276,31 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
+    fn a_started_call_records_where_in_the_answer_it_ran_on_the_frame_and_the_record() {
+        let (record, frame) = trace_started(
+            Uuid::nil(),
+            "call_1".to_string(),
+            "read_file".to_string(),
+            r#"{"path":"src/main.rs"}"#,
+            13,
+            Some(Thought {
+                text: "Read main first.".to_string(),
+                at: 5,
+            }),
+        );
+
+        assert_eq!(record.at, Some(13), "a reload draws the call where it ran");
+        assert_eq!(
+            record.reasoning_at,
+            Some(5),
+            "and its thinking where it began"
+        );
+        let json = serde_json::to_value(frame).unwrap();
+        assert_eq!(json["at"], 13, "the live trace draws the call where it ran");
+        assert_eq!(json["reasoning_at"], 5);
+    }
+
+    #[test]
     fn tool_call_carries_the_stated_reason_to_the_console() {
         let json = serde_json::to_value(ServerMessage::ToolCall {
             message_id: Uuid::nil(),
@@ -8047,7 +9308,9 @@ cat 'DIR/reply.jsonl'
             name: "create_pull_request".into(),
             arguments: r#"{"title":"Fix the export","reason":"The user asked me to open it."}"#
                 .into(),
+            at: 0,
             reasoning: None,
+            reasoning_at: None,
             reason: Some("The user asked me to open it.".into()),
         })
         .unwrap();
@@ -8075,7 +9338,7 @@ cat 'DIR/reply.jsonl'
 
         let exited = serde_json::to_value(ServerMessage::JobExited {
             message_id,
-            job: JobExited {
+            job: job::JobExit {
                 id: JOB_ID.into(),
                 exit_code: Some(1),
             },
@@ -8127,7 +9390,7 @@ cat 'DIR/reply.jsonl'
     fn a_job_killed_with_its_turn_reports_no_exit_code() {
         let json = serde_json::to_value(ServerMessage::JobExited {
             message_id: Uuid::new_v4(),
-            job: JobExited {
+            job: job::JobExit {
                 id: JOB_ID.into(),
                 exit_code: None,
             },
@@ -8143,8 +9406,10 @@ cat 'DIR/reply.jsonl'
     #[test]
     fn a_spawn_receipt_reads_back_as_the_job_it_announced() {
         let job = spawned();
-        let message =
-            ReplayMessage::from(&LlmMessage::tool_result("call_1", job::started_text(&job)));
+        let message = ReplayMessage::from(&LlmMessage::tool_result(
+            "call_1",
+            abnegate_agent::tool::job::started_text(&job),
+        ));
 
         let (call, read) = spawned_job(&message).expect("a spawn receipt announces its job");
         assert_eq!(call, "call_1");
@@ -8154,7 +9419,7 @@ cat 'DIR/reply.jsonl'
     #[test]
     fn anything_but_a_spawn_receipt_starts_no_job_card() {
         let job = spawned();
-        let receipt = job::started_text(&job);
+        let receipt = abnegate_agent::tool::job::started_text(&job);
         let mut mislabelled =
             ReplayMessage::from(&LlmMessage::tool_result("call_1", receipt.as_str()));
         mislabelled.role = LlmRole::Assistant;
@@ -8210,6 +9475,14 @@ cat 'DIR/reply.jsonl'
     }
 
     #[test]
+    fn an_answer_cut_short_is_marked_as_neither_finished_nor_failed() {
+        assert_eq!(Ending::Finished.note(), None);
+        assert_eq!(Ending::CutShort.note(), Some(CUT_SHORT_NOTE));
+        assert_ne!(Ending::CutShort.note(), Ending::Interrupted.note());
+        assert_ne!(Ending::CutShort.note(), Ending::Truncated.note());
+    }
+
+    #[test]
     fn a_reload_mid_wait_replays_the_call_it_is_waiting_on() {
         let message_id = Uuid::new_v4();
         let mut turn = LiveTurn::default();
@@ -8219,7 +9492,9 @@ cat 'DIR/reply.jsonl'
             tool_call_id: "call_2".to_string(),
             name: wait::WAIT_FOR.to_string(),
             arguments: "{}".to_string(),
+            at: 0,
             reasoning: None,
+            reasoning_at: None,
             reason: None,
         });
         turn.record(&ServerMessage::WaitStarted {
@@ -8256,7 +9531,7 @@ cat 'DIR/reply.jsonl'
         });
         turn.record(&ServerMessage::JobExited {
             message_id,
-            job: JobExited {
+            job: job::JobExit {
                 id: JOB_ID.into(),
                 exit_code: Some(0),
             },
@@ -8349,22 +9624,12 @@ cat 'DIR/reply.jsonl'
         broadcast::channel(1)
     }
 
-    fn unreachable_deadline() -> tokio::time::Instant {
-        tokio::time::Instant::now() + Duration::from_secs(3600)
-    }
-
     #[tokio::test]
     async fn a_cancel_during_a_wait_stops_it() {
         let (sender, mut cancel) = cancellation();
         sender.send(()).unwrap();
 
-        let end = settle_wait(
-            std::future::pending(),
-            std::future::pending(),
-            &mut cancel,
-            unreachable_deadline(),
-        )
-        .await;
+        let end = settle_wait(std::future::pending(), std::future::pending(), &mut cancel).await;
         assert_eq!(
             end,
             WaitEnd::Cancelled,
@@ -8373,35 +9638,11 @@ cat 'DIR/reply.jsonl'
     }
 
     #[tokio::test]
-    async fn a_wait_the_turn_has_no_time_left_for_ends_the_turn() {
-        let (_sender, mut cancel) = cancellation();
-
-        let end = settle_wait(
-            std::future::pending(),
-            std::future::pending(),
-            &mut cancel,
-            tokio::time::Instant::now(),
-        )
-        .await;
-        assert_eq!(
-            end,
-            WaitEnd::Expired,
-            "a wait clamped by the turn's deadline times out rather than hanging"
-        );
-    }
-
-    #[tokio::test]
     async fn a_lost_lease_during_a_wait_outranks_a_cancel() {
         let (sender, mut cancel) = cancellation();
         sender.send(()).unwrap();
 
-        let end = settle_wait(
-            std::future::pending(),
-            std::future::ready(()),
-            &mut cancel,
-            tokio::time::Instant::now(),
-        )
-        .await;
+        let end = settle_wait(std::future::pending(), std::future::ready(()), &mut cancel).await;
         assert_eq!(end, WaitEnd::Lost);
     }
 
@@ -8415,13 +9656,12 @@ cat 'DIR/reply.jsonl'
             std::future::ready(outcome.clone()),
             std::future::ready(()),
             &mut cancel,
-            tokio::time::Instant::now(),
         )
         .await;
         assert_eq!(
             end,
             WaitEnd::Settled(outcome),
-            "a settle in the same tick as the deadline is not a timeout"
+            "a settle in the same tick as a stop is still the outcome"
         );
     }
 
@@ -8454,11 +9694,15 @@ cat 'DIR/reply.jsonl'
     }
 
     async fn background(session: ToolSession, cwd: &std::path::Path, script: &str) -> JobStarted {
+        let context = abnegate_agent::ToolContext::default()
+            .within(cwd)
+            .with_session(session)
+            .with_application(zone_core::application::application())
+            .with_environment(abnegate_agent::tool::EnvironmentPolicy::empty())
+            .with_proxy(abnegate_agent::tool::Proxy::default());
         Jobs::spawn(
-            session,
-            &job::JobCommand::shell(script),
-            cwd,
-            &std::collections::HashMap::new(),
+            &abnegate_agent::tool::job::JobCommand::shell(script),
+            &context,
         )
         .await
         .unwrap()
@@ -8524,7 +9768,7 @@ cat 'DIR/reply.jsonl'
 
         assert_eq!(
             job_exits(chat_id, &tracked).await,
-            [JobExited {
+            [job::JobExit {
                 id: running.id.clone(),
                 exit_code: None,
             }],
@@ -8548,7 +9792,7 @@ cat 'DIR/reply.jsonl'
 
         assert_eq!(
             job_wait_exit(chat_id, &finished.id, &mut tracked).await,
-            Some(JobExited {
+            Some(job::JobExit {
                 id: finished.id.clone(),
                 exit_code: Some(5),
             }),

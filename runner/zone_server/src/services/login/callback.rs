@@ -3,12 +3,15 @@
 //! the sign-in; it never exchanges a code itself.
 
 mod limits;
-mod page;
+pub mod page;
 
 use std::env;
 use std::path::Path;
 use std::sync::Arc;
 
+use abnegate_agent_cli::login::claude::CALLBACK_PATH;
+use abnegate_agent_cli::login::claude::LOOPBACK_HOST;
+use abnegate_agent_cli::login::claude::Reply;
 use axum::Router;
 use axum::extract::{Query, Request};
 use axum::http::header::{self, HOST};
@@ -23,7 +26,6 @@ use hyper_util::service::TowerToHyperService;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use super::claude::{CALLBACK_PATH, LOOPBACK_HOST, Reply};
 use super::oauth;
 use crate::config::Callback;
 use limits::Limits;
@@ -168,9 +170,10 @@ mod tests {
 
     use super::*;
     use crate::services::login::caller::Caller;
-    use crate::services::login::claude::{Redirect, Scope};
     use crate::services::login::console::{Console, RECEIPT, handed};
     use crate::services::login::pending;
+    use abnegate_agent_cli::login::claude::Redirect;
+    use abnegate_agent_cli::login::claude::Scope;
 
     const TEST_NET: &str = "192.0.2.1:9";
     const PROBE: Duration = Duration::from_secs(2);
@@ -206,13 +209,15 @@ mod tests {
             session: Uuid::new_v4(),
         };
         let started = oauth::start(
+            &crate::state::test_config(),
             Uuid::new_v4(),
             &caller,
             Scope::Inference,
             Redirect::Loopback(address.port()),
             Console::at(CONSOLE, &[CONSOLE.to_string()]),
         )
-        .await;
+        .await
+        .expect("a started sign-in");
         Url::parse(&started.url)
             .expect("an authorize URL")
             .query_pairs()

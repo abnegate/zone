@@ -16,6 +16,7 @@
 
 mod agent_tools;
 mod endpoint;
+mod progress;
 mod protocol;
 mod scope;
 mod turn;
@@ -26,4 +27,4 @@ pub(crate) mod testing;
 pub use agent_tools::{AgentTools, offered};
 pub use endpoint::{BODY_LIMIT, PATH, endpoint, local_endpoint, serve};
 pub use scope::Scope;
-pub use turn::{Lease, Turn, merged};
+pub use turn::{Lease, Turn, merged, settle};

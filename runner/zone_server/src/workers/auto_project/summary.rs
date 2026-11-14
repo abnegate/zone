@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use abnegate_agent_cli::CUT_SHORT;
 use abnegate_llm::{Message, finish_reason};
 use abnegate_vcs::PullRequestDetail;
 
@@ -80,7 +81,10 @@ async fn generate(
         }
     };
     let choice = response.choices.into_iter().next()?;
-    if choice.finish_reason.as_deref() == Some(finish_reason::LENGTH) {
+    if matches!(
+        choice.finish_reason.as_deref(),
+        Some(finish_reason::LENGTH | CUT_SHORT)
+    ) {
         return None;
     }
     choice.message.content
@@ -160,6 +164,32 @@ mod tests {
             agent.chose_its_own_model(),
             "claude was not left to choose its model"
         );
+    }
+
+    #[tokio::test]
+    async fn a_summary_its_agent_was_cut_short_in_falls_back_to_the_pull_request() {
+        let instance = completing(
+            "Shoppers can now fill a cart with several items, so the",
+            CUT_SHORT,
+        )
+        .await;
+        let organization = Organization::saving(Saved {
+            fast: Some(SAVED_MODEL),
+            ..Saved::default()
+        })
+        .await;
+        let task = cart_task(&organization.pool, organization.workspace).await;
+
+        let summary = high_level(
+            &organization.state(&instance.uri()),
+            &task,
+            &cart(),
+            "Approved with no findings.",
+        )
+        .await;
+        organization.remove().await;
+
+        assert_eq!(summary, "Shoppers cannot buy more than one item.");
     }
 
     #[tokio::test]

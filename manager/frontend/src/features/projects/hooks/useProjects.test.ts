@@ -9,6 +9,7 @@ const mockGetProjects = mock();
 const mockCreateProject = mock();
 const mockUpdateProject = mock();
 const mockDeleteProject = mock();
+const mockReorderProjects = mock();
 
 mock.module('../../../api/projects', () => ({
   projectsApi: {
@@ -16,6 +17,7 @@ mock.module('../../../api/projects', () => ({
     createProject: mockCreateProject,
     updateProject: mockUpdateProject,
     deleteProject: mockDeleteProject,
+    reorderProjects: mockReorderProjects,
   },
 }));
 
@@ -239,5 +241,35 @@ describe('useProjects', () => {
     await result.current.refetch();
 
     expect(mockGetProjects).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a list refreshed while a reorder was pending when that reorder fails', async () => {
+    const listed = (ids: string[]) =>
+      ids.map((id, index) => ({ ...mockProjects[0], id, name: id, position: index + 1 }));
+    mockGetProjects.mockResolvedValue(listed(['a', 'b']));
+    let refuse: (reason: Error) => void = () => undefined;
+    mockReorderProjects.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          refuse = reject;
+        })
+    );
+    const { result } = renderHook(() => useProjects(), { wrapper: createWrapper() });
+    await waitFor(() => expect(result.current.projects).toHaveLength(2));
+
+    const saving = result.current.reorderProjects(['b', 'a']).catch(() => undefined);
+    await waitFor(() =>
+      expect(result.current.projects.map((project) => project.id)).toEqual(['b', 'a'])
+    );
+    mockGetProjects.mockResolvedValue(listed(['a', 'b', 'c']));
+    await result.current.refetch();
+    await waitFor(() => expect(result.current.projects).toHaveLength(3));
+    mockGetProjects.mockImplementation(() => new Promise(() => {}));
+
+    refuse(new Error('Refused'));
+    await saving;
+
+    await waitFor(() => expect(mockReorderProjects).toHaveBeenCalledTimes(1));
+    expect(result.current.projects.map((project) => project.id)).toEqual(['a', 'b', 'c']);
   });
 });

@@ -1,5 +1,6 @@
 //! AI provider settings database queries
 
+use abnegate_agent_cli::AgentKind;
 use abnegate_secret::SecretValue;
 use chrono::NaiveDateTime;
 use sqlx::{Executor, PgConnection, PgPool, Postgres};
@@ -7,7 +8,6 @@ use uuid::Uuid;
 use zone_context::embeddings::providers::{
     PROVIDER_BEDROCK, PROVIDER_OPENAI, PROVIDER_SELF_HOSTED,
 };
-use zone_core::llm::AgentKind;
 
 use crate::services::endpoint;
 use crate::services::hosts::Hosts;
@@ -32,19 +32,25 @@ pub(crate) const PROVIDERS: [&str; 6] = [
     PROVIDER_CODEX,
 ];
 
+/// Each coding agent Zone runs, beside the provider that selects it. An agent the crate drives
+/// that is missing here has no provider, rather than one no setting can select.
+const AGENT_PROVIDERS: [(AgentKind, &str); 2] = [
+    (AgentKind::Claude, PROVIDER_CLAUDE_CODE),
+    (AgentKind::Codex, PROVIDER_CODEX),
+];
+
 pub fn agent(provider: &str) -> Option<AgentKind> {
-    match provider {
-        PROVIDER_CLAUDE_CODE => Some(AgentKind::Claude),
-        PROVIDER_CODEX => Some(AgentKind::Codex),
-        _ => None,
-    }
+    AGENT_PROVIDERS
+        .iter()
+        .find(|(_, selecting)| *selecting == provider)
+        .map(|(agent, _)| *agent)
 }
 
-pub fn provider(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => PROVIDER_CLAUDE_CODE,
-        AgentKind::Codex => PROVIDER_CODEX,
-    }
+pub fn provider(agent: AgentKind) -> Option<&'static str> {
+    AGENT_PROVIDERS
+        .iter()
+        .find(|(kind, _)| *kind == agent)
+        .map(|(_, provider)| *provider)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -75,6 +81,7 @@ pub struct Update<'a> {
     pub bedrock_access_key: Option<&'a str>,
     pub bedrock_secret_key: Option<&'a str>,
     pub bedrock_use_iam_role: Option<bool>,
+    pub clear_bedrock_use_iam_role: bool,
     pub model_fast: Option<&'a str>,
     pub model_reasoning: Option<&'a str>,
     pub model_embedding: Option<&'a str>,
@@ -491,6 +498,31 @@ pub struct WorkspaceAiSettingsRow {
     pub updated_at: Option<NaiveDateTime>,
 }
 
+impl WorkspaceAiSettingsRow {
+    /// Whether the row overrides nothing, so the workspace reads exactly as one
+    /// without a row.
+    pub fn sets_nothing(&self) -> bool {
+        self.provider.is_none()
+            && self.litellm_host.is_none()
+            && self.litellm_key.is_none()
+            && self.openai_api_key.is_none()
+            && self.openai_base_url.is_none()
+            && self.anthropic_api_key.is_none()
+            && self.anthropic_base_url.is_none()
+            && self.runpod_api_key.is_none()
+            && self.bedrock_region.is_none()
+            && self.bedrock_access_key.is_none()
+            && self.bedrock_secret_key.is_none()
+            && self.bedrock_use_iam_role.is_none()
+            && self.model_fast.is_none()
+            && self.model_reasoning.is_none()
+            && self.model_embedding.is_none()
+            && self.model_image.is_none()
+            && self.model_video.is_none()
+            && self.model_audio.is_none()
+    }
+}
+
 /// Which endpoint keys the owning organization saved. A workspace host never
 /// receives them, so a workspace that names one without its own key sends none.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, sqlx::FromRow)]
@@ -659,7 +691,7 @@ where
             $1, COALESCE($2, 'self_hosted'),
             NULLIF(BTRIM($3), ''), NULLIF(BTRIM($4), ''), NULLIF(BTRIM($5), ''),
             NULLIF(BTRIM($6), ''), NULLIF(BTRIM($7), ''), NULLIF(BTRIM($8), ''),
-            $9, $10, $11, $12,
+            $9, $10, $11, CASE WHEN $20 THEN NULL ELSE $12 END,
             NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), ''),
             NULLIF(BTRIM($19), ''),
@@ -701,7 +733,10 @@ where
             bedrock_region = COALESCE($9, organization_ai_settings.bedrock_region),
             bedrock_access_key = COALESCE($10, organization_ai_settings.bedrock_access_key),
             bedrock_secret_key = COALESCE($11, organization_ai_settings.bedrock_secret_key),
-            bedrock_use_iam_role = COALESCE($12, organization_ai_settings.bedrock_use_iam_role),
+            bedrock_use_iam_role = CASE
+                WHEN $20 THEN NULL
+                ELSE COALESCE($12, organization_ai_settings.bedrock_use_iam_role)
+            END,
             -- NULL keeps the saved model; an empty string clears it to NULL.
             model_fast = CASE
                 WHEN $13 IS NULL THEN organization_ai_settings.model_fast
@@ -767,6 +802,7 @@ where
     .bind(update.model_video)
     .bind(update.model_audio)
     .bind(update.runpod_api_key)
+    .bind(update.clear_bedrock_use_iam_role)
     .fetch_one(executor)
     .await?;
 
@@ -933,7 +969,8 @@ where
             $1, $2,
             NULLIF(BTRIM($3), ''), NULLIF(BTRIM($4), ''), NULLIF(BTRIM($5), ''),
             NULLIF(BTRIM($6), ''), NULLIF(BTRIM($7), ''), NULLIF(BTRIM($8), ''),
-            $9, $10, $11, $12,
+            NULLIF(BTRIM($9), ''), NULLIF(BTRIM($10), ''), NULLIF(BTRIM($11), ''),
+            CASE WHEN $20 THEN NULL ELSE $12 END,
             NULLIF(BTRIM($13), ''), NULLIF(BTRIM($14), ''), NULLIF(BTRIM($15), ''),
             NULLIF(BTRIM($16), ''), NULLIF(BTRIM($17), ''), NULLIF(BTRIM($18), ''),
             NULLIF(BTRIM($19), ''),
@@ -972,10 +1009,25 @@ where
                 WHEN BTRIM($8) = '' THEN NULL
                 ELSE BTRIM($8)
             END,
-            bedrock_region = COALESCE($9, workspace_ai_settings.bedrock_region),
-            bedrock_access_key = COALESCE($10, workspace_ai_settings.bedrock_access_key),
-            bedrock_secret_key = COALESCE($11, workspace_ai_settings.bedrock_secret_key),
-            bedrock_use_iam_role = COALESCE($12, workspace_ai_settings.bedrock_use_iam_role),
+            bedrock_region = CASE
+                WHEN $9 IS NULL THEN workspace_ai_settings.bedrock_region
+                WHEN BTRIM($9) = '' THEN NULL
+                ELSE BTRIM($9)
+            END,
+            bedrock_access_key = CASE
+                WHEN $10 IS NULL THEN workspace_ai_settings.bedrock_access_key
+                WHEN BTRIM($10) = '' THEN NULL
+                ELSE BTRIM($10)
+            END,
+            bedrock_secret_key = CASE
+                WHEN $11 IS NULL THEN workspace_ai_settings.bedrock_secret_key
+                WHEN BTRIM($11) = '' THEN NULL
+                ELSE BTRIM($11)
+            END,
+            bedrock_use_iam_role = CASE
+                WHEN $20 THEN NULL
+                ELSE COALESCE($12, workspace_ai_settings.bedrock_use_iam_role)
+            END,
             -- NULL keeps the saved model; an empty string clears it to NULL.
             model_fast = CASE
                 WHEN $13 IS NULL THEN workspace_ai_settings.model_fast
@@ -1041,13 +1093,16 @@ where
     .bind(update.model_video)
     .bind(update.model_audio)
     .bind(update.runpod_api_key)
+    .bind(update.clear_bedrock_use_iam_role)
     .fetch_one(executor)
     .await?;
 
     Ok(row)
 }
 
-/// Upsert workspace settings while holding the organization and workspace membership rows.
+/// Upsert workspace settings while holding the organization and workspace
+/// membership rows. A save that leaves the row setting nothing deletes it, so
+/// the workspace inherits everything and reads as `None`.
 pub async fn upsert_workspace_authorized(
     pool: &PgPool,
     hosts: &Hosts,
@@ -1055,7 +1110,7 @@ pub async fn upsert_workspace_authorized(
     workspace_id: Uuid,
     user_id: Uuid,
     update: Update<'_>,
-) -> AccessResult<WorkspaceSettings<WorkspaceAiSettingsRow>> {
+) -> AccessResult<WorkspaceSettings<Option<WorkspaceAiSettingsRow>>> {
     let mut transaction = pool.begin().await?;
     lock_organization(&mut transaction, SHARE_ORGANIZATION, organization_id).await?;
     authorize_workspace(
@@ -1075,7 +1130,13 @@ pub async fn upsert_workspace_authorized(
     )
     .await?;
     validate_keys(&update, &saved, &inherited, hosts)?;
-    let settings = upsert_workspace(&mut *transaction, workspace_id, &update).await?;
+    let upserted = upsert_workspace(&mut *transaction, workspace_id, &update).await?;
+    let settings = if upserted.sets_nothing() {
+        delete_workspace(&mut *transaction, workspace_id).await?;
+        None
+    } else {
+        Some(upserted)
+    };
     let organization_keys = organization_keys(&mut *transaction, organization_id).await?;
     transaction.commit().await?;
     Ok(WorkspaceSettings {
@@ -1387,9 +1448,30 @@ mod tests {
     fn each_agent_provider_selects_its_agent_and_back() {
         assert_eq!(agent(PROVIDER_CLAUDE_CODE), Some(AgentKind::Claude));
         assert_eq!(agent(PROVIDER_CODEX), Some(AgentKind::Codex));
-        for kind in AgentKind::ALL {
-            assert_eq!(agent(provider(kind)), Some(kind));
+        for &kind in AgentKind::ALL {
+            let selecting = provider(kind).expect("every agent the crate drives has a provider");
+            assert_eq!(agent(selecting), Some(kind));
         }
+    }
+
+    /// A provider is one an operator can save, and an agent's provider reads back as that agent,
+    /// so no agent is named by a provider the settings would refuse or read as no agent.
+    #[test]
+    fn every_agents_provider_is_a_provider_that_selects_it() {
+        for (kind, selecting) in AGENT_PROVIDERS {
+            assert!(
+                PROVIDERS.contains(&selecting),
+                "{selecting} cannot be saved"
+            );
+            assert_eq!(provider(kind), Some(selecting));
+            assert_eq!(agent(selecting), Some(kind));
+        }
+        let agents: Vec<AgentKind> = AGENT_PROVIDERS.iter().map(|(kind, _)| *kind).collect();
+        assert_eq!(
+            agents,
+            AgentKind::ALL,
+            "an agent the crate drives has no provider"
+        );
     }
 
     #[test]
@@ -1598,6 +1680,102 @@ mod tests {
             completions_routed: true,
             created_at: None,
             updated_at: None,
+        }
+    }
+
+    #[test]
+    fn a_workspace_row_without_overrides_sets_nothing() {
+        assert!(workspace_row().sets_nothing());
+        assert!(
+            WorkspaceAiSettingsRow {
+                completions_routed: false,
+                ..workspace_row()
+            }
+            .sets_nothing(),
+            "whether a row is routed is no override"
+        );
+    }
+
+    #[test]
+    fn a_workspace_row_with_any_override_sets_something() {
+        let text = || Some("set".to_string());
+        let secret = || Some(SecretValue::new("set"));
+        let overriding = [
+            WorkspaceAiSettingsRow {
+                provider: Some(PROVIDER_SELF_HOSTED.to_string()),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                litellm_host: text(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                litellm_key: secret(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                openai_api_key: secret(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                openai_base_url: text(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                anthropic_api_key: secret(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                anthropic_base_url: text(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                runpod_api_key: secret(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                bedrock_region: text(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                bedrock_access_key: secret(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                bedrock_secret_key: secret(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                bedrock_use_iam_role: Some(false),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                model_fast: text(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                model_reasoning: text(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                model_embedding: text(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                model_image: text(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                model_video: text(),
+                ..workspace_row()
+            },
+            WorkspaceAiSettingsRow {
+                model_audio: text(),
+                ..workspace_row()
+            },
+        ];
+        for (index, row) in overriding.iter().enumerate() {
+            assert!(!row.sets_nothing(), "override {index} was ignored");
         }
     }
 

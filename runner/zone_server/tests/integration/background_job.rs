@@ -4,10 +4,12 @@
 
 use crate::common;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use abnegate_agent::ToolContext;
+use abnegate_agent::tool::job::{self, JobCommand, Jobs, TAIL_JOB, UNAVAILABLE};
+use abnegate_agent::tool::{EnvironmentPolicy, Session};
 use futures_util::SinkExt;
 use serde_json::json;
 use sqlx::PgPool;
@@ -17,8 +19,8 @@ use tokio_tungstenite::tungstenite::Message as WebSocketMessage;
 use uuid::Uuid;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_core::tools::Session;
-use zone_core::tools::job::{self, JobCommand, Jobs, TAIL_JOB, UNAVAILABLE};
+use zone_core::application::application;
+use zone_server::agent::tools::context;
 use zone_server::agent::{ChatTools, WorkspaceScope};
 use zone_server::db::tasks;
 use zone_server::state::AppState;
@@ -37,6 +39,10 @@ const READER_PROBE: Duration = Duration::from_millis(500);
 /// Longest a socket frame is waited for.
 const FRAME: Duration = Duration::from_secs(20);
 
+/// The file and command limits a server context is built with.
+const MAXIMUM_FILE_SIZE: usize = 10 * 1024 * 1024;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// The model a chat turn resolves to against the stubbed provider.
 const CHAT_MODEL: &str = "llama3.2:3b";
 
@@ -46,20 +52,47 @@ const TASK_MODEL: &str = "gpt-4";
 
 /// The only process variable a job needs: without `PATH` a cleared environment
 /// cannot resolve the program at all.
-fn environment() -> HashMap<String, String> {
-    std::env::var("PATH")
-        .map(|path| HashMap::from([("PATH".to_string(), path)]))
-        .unwrap_or_default()
+fn environment() -> EnvironmentPolicy {
+    EnvironmentPolicy::empty().allow(["PATH"])
 }
 
-/// Where a chat tool set's jobs would land, resolved the way the tool set
-/// resolves it. Nothing in these tests spawns a chat job there, and the
-/// assertions at the end of each test are what keep it that way.
-fn chat_root() -> PathBuf {
+/// The context a job is spawned under: `session`'s, rooted at `root`, keeping
+/// its files under `.zone/` the way every server context does.
+fn spawning(session: Session, root: &Path) -> ToolContext {
+    ToolContext::default()
+        .within(root)
+        .with_session(session)
+        .with_application(application())
+        .with_environment(environment())
+}
+
+/// Every directory a chat tool set's jobs could land in, resolved the way the
+/// tool set resolves it: the override if one is set, the process's own
+/// directory otherwise.
+///
+/// Both are shared. `chat_agent` sets the override for the whole binary and
+/// starts chat jobs of its own there, and the checkout it points at sits under
+/// `CARGO_TARGET_TMPDIR`, which every run on the same build directory shares.
+/// A `.zone/` in either may be somebody else's job, so a test here can only
+/// speak for the jobs it started itself.
+fn chat_roots() -> Vec<PathBuf> {
     std::env::var_os("ZONE_CHAT_AGENT_CWD")
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .into_iter()
+        .chain(std::env::current_dir().ok())
+        .collect()
+}
+
+fn assert_none_logged_in_chat_roots(jobs: &[&str]) {
+    for root in chat_roots() {
+        for job in jobs {
+            let stray = job::log_path(&root, &application(), job);
+            assert!(
+                !stray.exists(),
+                "a job wrote its log into the server's own working directory: {stray:?}"
+            );
+        }
+    }
 }
 
 fn directory() -> TempDir {
@@ -246,6 +279,7 @@ async fn chat_tools(state: &AppState, workspace: Uuid, user: Uuid, chat: Uuid) -
         chat_id: Some(chat),
         user_id: user,
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await
 }
@@ -318,10 +352,8 @@ async fn a_job_is_readable_through_tail_job_only_from_the_session_that_started_i
     let root = directory();
 
     let started = Jobs::spawn(
-        Session::Task(owning.run),
         &JobCommand::new("echo", vec!["ledger".to_string()]),
-        root.path(),
-        &environment(),
+        &spawning(Session::Task(owning.run), root.path()),
     )
     .await
     .expect("a job the run owns");
@@ -386,10 +418,7 @@ async fn a_job_is_readable_through_tail_job_only_from_the_session_that_started_i
         .await
         .expect("the working directory is removable");
     assert!(!log.exists(), "a job log outlived its test");
-    assert!(
-        !chat_root().join(EXCLUDED).exists(),
-        "a job wrote its log into the server's own working directory"
-    );
+    assert_none_logged_in_chat_roots(&[&started.id]);
 }
 
 /// A chat works in a checkout it does not own — in a linked worktree its
@@ -411,10 +440,8 @@ async fn a_chat_spawn_leaves_the_exclude_file_alone_and_a_task_spawn_writes_it_o
 
     let chat = Uuid::new_v4();
     let by_chat = Jobs::spawn(
-        Session::Chat(chat),
         &JobCommand::new("echo", vec!["chat".to_string()]),
-        root.path(),
-        &environment(),
+        &spawning(Session::Chat(chat), root.path()),
     )
     .await
     .expect("a chat may start a job");
@@ -428,10 +455,8 @@ async fn a_chat_spawn_leaves_the_exclude_file_alone_and_a_task_spawn_writes_it_o
 
     let run = Uuid::new_v4();
     let first = Jobs::spawn(
-        Session::Task(run),
         &JobCommand::new("echo", vec!["task".to_string()]),
-        root.path(),
-        &environment(),
+        &spawning(Session::Task(run), root.path()),
     )
     .await
     .expect("a run may start a job");
@@ -441,10 +466,8 @@ async fn a_chat_spawn_leaves_the_exclude_file_alone_and_a_task_spawn_writes_it_o
         "a task run's checkout keeps its own job logs out of its diff"
     );
     let second = Jobs::spawn(
-        Session::Task(run),
         &JobCommand::new("echo", vec!["task again".to_string()]),
-        root.path(),
-        &environment(),
+        &spawning(Session::Task(run), root.path()),
     )
     .await
     .expect("a second job in the same checkout");
@@ -470,10 +493,7 @@ async fn a_chat_spawn_leaves_the_exclude_file_alone_and_a_task_spawn_writes_it_o
     for log in &logs {
         assert!(!log.exists(), "a job log outlived its test: {log:?}");
     }
-    assert!(
-        !chat_root().join(EXCLUDED).exists(),
-        "a job wrote its log into the server's own working directory"
-    );
+    assert_none_logged_in_chat_roots(&[&by_chat.id, &first.id, &second.id]);
 }
 
 /// Whatever directory a call names, a spawn writes into the session's own
@@ -492,10 +512,8 @@ async fn a_task_spawn_naming_another_checkout_writes_only_into_its_own() {
     let session = Session::Task(Uuid::new_v4());
 
     let started = Jobs::spawn(
-        session,
         &JobCommand::new("pwd", Vec::new()).within(stranger.path()),
-        checkout.path(),
-        &environment(),
+        &spawning(session, checkout.path()),
     )
     .await
     .expect("a job keyed to the run");
@@ -504,7 +522,7 @@ async fn a_task_spawn_naming_another_checkout_writes_only_into_its_own() {
     let log = PathBuf::from(&started.log_path);
     assert_eq!(
         log,
-        job::log_path(checkout.path(), &started.id),
+        job::log_path(checkout.path(), &application(), &started.id),
         "the log belongs to the session's own tree"
     );
     assert!(log.exists(), "the job wrote no log at all: {log:?}");
@@ -541,10 +559,55 @@ async fn a_task_spawn_naming_another_checkout_writes_only_into_its_own() {
         !checkout.path().join(EXCLUDED).exists(),
         "the emptied log directory is still in the checkout"
     );
+    assert_none_logged_in_chat_roots(&[&started.id]);
+}
+
+/// A server context keeps a job's log under `.zone/jobs`, where Zone's logs
+/// have always lived, and not under the crate's own default directory.
+#[tokio::test]
+async fn a_background_job_logs_under_dot_zone_jobs() {
+    let root = directory();
+    let session = Session::Task(Uuid::new_v4());
+    let server = context::build(context::Config {
+        working_directory: root.path().to_path_buf(),
+        session,
+        denied: Vec::new(),
+        unrestricted: false,
+        maximum_file_size: MAXIMUM_FILE_SIZE,
+        command_timeout: COMMAND_TIMEOUT,
+        chat_offline: false,
+        niceness: abnegate_exec::Niceness::DEFAULT,
+    });
+
+    let started = Jobs::spawn(
+        &JobCommand::new("echo", vec!["logged".to_string()]),
+        &server,
+    )
+    .await
+    .expect("a job keyed to the run");
+    settled(session, &started.id).await;
+
+    let log = PathBuf::from(&started.log_path);
     assert!(
-        !chat_root().join(EXCLUDED).exists(),
-        "a job wrote its log into the server's own working directory"
+        started.log_path.contains("/.zone/jobs/"),
+        "a job log left Zone's own directory: {log:?}"
     );
+    assert_eq!(
+        log,
+        root.path()
+            .join(".zone")
+            .join("jobs")
+            .join(format!("{}.log", started.id)),
+        "the log is named for its job inside the session's own tree"
+    );
+    assert!(log.exists(), "the job wrote no log at all: {log:?}");
+
+    assert_eq!(Jobs::kill_session(session).await, 1);
+    assert!(
+        !log.exists(),
+        "a job log outlived the run that started it: {log:?}"
+    );
+    assert_none_logged_in_chat_roots(&[&started.id]);
 }
 
 /// A background job outlives the tool call that started it and nothing drops a
@@ -575,10 +638,8 @@ async fn a_job_a_run_started_is_dead_once_the_run_reaches_a_terminal_status() {
     let gate = gate(root.path());
 
     let started = Jobs::spawn(
-        Session::Task(prepared.run),
         &blocking_on(&gate),
-        root.path(),
-        &environment(),
+        &spawning(Session::Task(prepared.run), root.path()),
     )
     .await
     .expect("a job keyed to the run");
@@ -610,10 +671,7 @@ async fn a_job_a_run_started_is_dead_once_the_run_reaches_a_terminal_status() {
         .await
         .expect("the working directory is removable");
     assert!(!log.exists(), "a job log outlived its run");
-    assert!(
-        !chat_root().join(EXCLUDED).exists(),
-        "a job wrote its log into the server's own working directory"
-    );
+    assert_none_logged_in_chat_roots(&[&started.id]);
 }
 
 /// The same debt on the other surface, settled at the one exit every chat turn
@@ -653,10 +711,8 @@ async fn a_job_a_chat_turn_started_is_dead_once_the_turn_ends() {
     let root = directory();
     let gate = gate(root.path());
     let started = Jobs::spawn(
-        Session::Chat(chat_id),
         &blocking_on(&gate),
-        root.path(),
-        &environment(),
+        &spawning(Session::Chat(chat_id), root.path()),
     )
     .await
     .expect("a job keyed to the chat");
@@ -711,10 +767,7 @@ async fn a_job_a_chat_turn_started_is_dead_once_the_turn_ends() {
         .await
         .expect("the working directory is removable");
     assert!(!log.exists(), "a job log outlived its turn");
-    assert!(
-        !chat_root().join(EXCLUDED).exists(),
-        "a job wrote its log into the server's own working directory"
-    );
+    assert_none_logged_in_chat_roots(&[&started.id]);
 }
 
 /// One streamed completion carrying `content` and nothing else.

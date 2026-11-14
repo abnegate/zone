@@ -2,12 +2,12 @@
 
 use crate::common;
 
+use abnegate_agent::chat::{NewEntry, ReplayMessage, Summary, fingerprint};
 use abnegate_llm::{Message, Role, ToolCall};
 use serde_json::json;
 use sqlx::{Executor, PgPool};
 use std::time::Duration;
 use uuid::Uuid;
-use zone_chat::history::{NewEntry, ReplayMessage, Summary, fingerprint};
 use zone_server::db::chats;
 use zone_server::db::context::{Error, Lease, Store};
 
@@ -72,14 +72,11 @@ fn envelope(id: &str, call: &str, mutating: bool) -> NewEntry {
         r#"{"path":"notes.txt"}"#,
     )]);
     message.content = Some("I will inspect the saved evidence.".into());
-    NewEntry {
-        id: id.into(),
-        message: ReplayMessage::from(&message),
-        mutations: if mutating {
-            vec![call.into()]
-        } else {
-            Vec::new()
-        },
+    let entry = NewEntry::new(id, ReplayMessage::from(&message));
+    if mutating {
+        entry.with_mutations([call])
+    } else {
+        entry
     }
 }
 
@@ -112,32 +109,26 @@ async fn visible(pool: &PgPool, chat: Uuid, id: Uuid) -> Option<String> {
 }
 
 fn result(id: &str, call: &str, content: &str) -> NewEntry {
-    NewEntry {
-        id: id.into(),
-        message: ReplayMessage::from(&Message::tool_result(call, content)),
-        mutations: Vec::new(),
-    }
+    NewEntry::new(
+        id,
+        ReplayMessage::from(&Message::tool_result(call, content)),
+    )
 }
 
 fn assistant(id: &str, content: &str) -> NewEntry {
-    NewEntry {
-        id: id.into(),
-        message: ReplayMessage::from(&Message::assistant(content)),
-        mutations: Vec::new(),
-    }
+    NewEntry::new(id, ReplayMessage::from(&Message::assistant(content)))
 }
 
 async fn summary(store: &Store, ids: &[&str], revision: u64) -> Summary {
     let history = store.load().await.unwrap();
     let entries = ids.iter().map(|id| (*id).to_string()).collect::<Vec<_>>();
-    Summary {
-        content:
-            "Objective: finish the request. Evidence: retained by stable ids. Pending: answer user."
-                .into(),
-        fingerprint: fingerprint(&history.entries, &entries).unwrap(),
+    let fingerprint = fingerprint(&history.entries, &entries).unwrap();
+    Summary::new(
+        "Objective: finish the request. Evidence: retained by stable ids. Pending: answer user.",
         entries,
+        fingerprint,
         revision,
-    }
+    )
 }
 
 #[tokio::test]
@@ -736,12 +727,25 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
     use zone_server::services::chat::session::{self, Mode};
     use zone_server::services::route::Route;
     use zone_server::state::AppState;
-    let (pool, _, chat, _) = fixture().await;
+    let (pool, _, chat, workspace) = fixture().await;
+    let organization = zone_server::db::mcp_servers::organization_for_workspace(&pool, workspace)
+        .await
+        .unwrap()
+        .expect("the workspace's organization");
+    sqlx::query(
+        "INSERT INTO mcp_servers (organization_id, name, transport, command) \
+         VALUES ($1, 'stub', 'stdio', 'python3')",
+    )
+    .bind(organization)
+    .execute(&pool)
+    .await
+    .unwrap();
     let mut config = common::test_config();
     config.litellm_host = "http://127.0.0.1:1".into();
     config.ollama_host = "http://127.0.0.1:1".into();
     let state = AppState::new(config, pool.clone(), None);
-    assert!(state.existing_mcp().is_none());
+    assert!(state.mcp().existing_instance().is_none());
+    assert!(state.mcp().existing_organization(organization).is_none());
     for enabled in [false, true] {
         let row = chats::update_chat(
             &pool,
@@ -773,12 +777,21 @@ async fn preview_does_not_initialize_mcp_in_real_application_state() {
         .await
         .unwrap();
         assert!(
-            state.existing_mcp().is_none(),
+            state.mcp().existing_instance().is_none(),
             "Preview initialized MCP children"
+        );
+        assert!(
+            state.mcp().existing_organization(organization).is_none(),
+            "Preview built the organization's MCP hub"
         );
     }
     sqlx::query("DELETE FROM chats WHERE id=$1")
         .bind(chat)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM mcp_servers WHERE organization_id=$1")
+        .bind(organization)
         .execute(&pool)
         .await
         .unwrap();

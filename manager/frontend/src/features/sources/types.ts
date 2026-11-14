@@ -1,26 +1,18 @@
-/**
- * Source Types
- * All source-related types for the sources feature.
- */
+import type { GitHubInstallationStatus } from '../github/installationStatus';
 
 export type SourceCategory = 'file' | 'calendar' | 'mail' | 'chat' | 'web' | 'text';
 
 export type SourceType =
   | 'github'
   | 'gitlab'
-  | 'filesystem' // File sources
-  | 'ical' // Calendar sources
-  | 'imap' // Mail sources
+  | 'filesystem'
+  | 'ical'
+  | 'imap'
   | 'discord'
-  | 'slack' // Chat sources
+  | 'slack'
   | 'web'
-  | 'text'; // Simple sources
+  | 'text';
 
-// =============================================================================
-// Source Configuration Types
-// =============================================================================
-
-// File source configs
 export interface GitHubConfig {
   owner: string;
   repo: string;
@@ -29,8 +21,10 @@ export interface GitHubConfig {
 }
 
 export interface GitLabConfig {
-  project_id: string;
+  project_id?: string;
+  project?: string;
   host?: string;
+  base_url?: string;
   branch?: string;
   base_path?: string;
 }
@@ -40,13 +34,11 @@ export interface FilesystemConfig {
   allow_writes?: boolean;
 }
 
-// Calendar source configs
 export interface ICalConfig {
   url: string;
   refresh_interval?: number;
 }
 
-// Mail source configs
 export interface IMAPConfig {
   host: string;
   port?: number;
@@ -55,7 +47,6 @@ export interface IMAPConfig {
   folder?: string;
 }
 
-// Chat source configs
 export interface DiscordConfig {
   server_id: string;
   channel_ids?: string[];
@@ -66,7 +57,6 @@ export interface SlackConfig {
   channel_ids?: string[];
 }
 
-// Simple source configs
 export interface WebConfig {
   url: string;
   headers?: Record<string, string>;
@@ -88,10 +78,6 @@ export type SourceConfig =
   | WebConfig
   | TextConfig;
 
-// =============================================================================
-// Main Source Type
-// =============================================================================
-
 export interface Source {
   id: string;
   name: string;
@@ -103,19 +89,20 @@ export interface Source {
   is_active: boolean;
   last_verified_at: string | null;
   last_error: string | null;
+  github_installation_id?: string | null;
+  has_credentials?: boolean;
+  github_installation_status?: GitHubInstallationStatus | null;
+  github_account_login?: string | null;
   created_at: string;
   updated_at: string;
 }
-
-// =============================================================================
-// Request/Response Types
-// =============================================================================
 
 export interface CreateSourceRequest {
   name: string;
   source_type: SourceType;
   config: SourceConfig;
   credentials?: string;
+  github_installation_id?: string;
   description?: string;
   url?: string;
 }
@@ -124,9 +111,11 @@ export interface UpdateSourceRequest {
   name?: string;
   config?: SourceConfig;
   credentials?: string;
+  github_installation_id?: string | null;
   description?: string;
   is_active?: boolean;
   url?: string;
+  instance?: string;
 }
 
 export interface SourceType_Info {
@@ -136,21 +125,10 @@ export interface SourceType_Info {
   enabled: boolean;
 }
 
-// API Response types
 export interface ApiResponse {
   success?: boolean;
   error?: string;
 }
-
-// The following Response types are now exported from schemas.ts as Zod-inferred types:
-// - SourcesResponse
-// - SourceResponse
-// - SourceTypesResponse
-// - SourceVerifyResponse
-
-// =============================================================================
-// Content Types (unified content from all source types)
-// =============================================================================
 
 export interface ContentItem {
   id: string;
@@ -228,5 +206,3 @@ export interface ContentListResult {
   total: number;
   has_more: boolean;
 }
-
-// ContentResponse is now exported from schemas.ts as a Zod-inferred type

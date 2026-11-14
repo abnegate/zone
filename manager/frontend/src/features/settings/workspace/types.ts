@@ -10,6 +10,7 @@ export interface Workspace {
   slug: string;
   description: string | null;
   is_active: boolean;
+  role?: WorkspaceRole;
   created_at: string;
   updated_at: string;
 }
@@ -90,7 +91,7 @@ export interface WorkspaceThemeResponse {
 
 export type AiProvider = import('./schemas').AiProviderZ;
 
-export interface AiSettings {
+export interface CommonAiSettings {
   provider: AiProvider;
   has_litellm_key: boolean;
   litellm_host: string | null;
@@ -100,7 +101,6 @@ export interface AiSettings {
   anthropic_base_url: string | null;
   has_runpod_api_key: boolean;
   bedrock_region: string | null;
-  bedrock_use_iam_role: boolean;
   has_bedrock_credentials: boolean;
   model_fast: string | null;
   model_reasoning: string | null;
@@ -109,6 +109,10 @@ export interface AiSettings {
   model_video: string | null;
   model_audio: string | null;
   completions_routed: boolean;
+}
+
+export interface AiSettings extends CommonAiSettings {
+  bedrock_use_iam_role: boolean;
 }
 
 export interface OrganizationAiSettingsSave extends AiSettings {
@@ -121,8 +125,10 @@ export interface OrganizationKeys {
   anthropic: boolean;
 }
 
-export interface WorkspaceAiSettings extends AiSettings {
+export interface WorkspaceAiSettings extends CommonAiSettings {
+  bedrock_use_iam_role: boolean | null;
   overrides: boolean;
+  inherits_provider: boolean;
   organization_keys: OrganizationKeys;
 }
 
@@ -138,7 +144,7 @@ export interface UpdateAiSettingsRequest {
   bedrock_region?: string;
   bedrock_access_key?: string;
   bedrock_secret_key?: string;
-  bedrock_use_iam_role?: boolean;
+  bedrock_use_iam_role?: boolean | null;
   model_fast?: string;
   model_reasoning?: string;
   model_embedding?: string;

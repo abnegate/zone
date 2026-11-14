@@ -182,6 +182,7 @@ setup_env_file() {
     log_info ""
     log_warn "Review ${ENV_FILE} and update:"
     log_warn "  - Domain name (DOMAIN_HOST_WEBUI)"
+    log_warn "  - Public origin (APP_BASE_URL), unless browsers reach Zone at http://manager.<domain>"
     log_warn "  - VPN credentials (VPN_OPENVPN_USER, VPN_OPENVPN_PASSWORD)"
     log_warn "  - ACME email (ADVANCED_ACME_EMAIL)"
 }

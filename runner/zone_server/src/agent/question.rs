@@ -6,6 +6,12 @@
 //! chooses arrives as the next user message. A task run parks instead, waiting
 //! on the registry at the bottom of this file.
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::Tier;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
@@ -16,7 +22,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use uuid::Uuid;
-use zone_core::tools::{Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
 
 pub const ASK_USER: &str = "ask_user";
 pub const MAX_QUESTIONS: usize = 4;
@@ -503,6 +508,9 @@ pub fn forget(run: Uuid) {
 
 #[cfg(test)]
 mod tests {
+    use zone_core::commands;
+    use zone_core::commands::Shell;
+
     use super::*;
 
     fn arguments(questions: Value) -> String {
@@ -958,14 +966,14 @@ mod tests {
     #[test]
     fn no_other_catalog_tool_ends_the_turn() {
         for registry in [
-            ToolRegistry::with_defaults(),
-            ToolRegistry::with_host_tools(),
+            commands::registry(Shell::Excluded),
+            commands::registry(Shell::Included),
         ] {
             for name in registry.names() {
                 assert_eq!(registry.ends_turn(name), Some(false), "{name}");
             }
         }
-        let mut registry = ToolRegistry::with_host_tools();
+        let mut registry = commands::registry(Shell::Included);
         register(&mut registry);
         assert_eq!(registry.ends_turn(ASK_USER), Some(true));
         assert_eq!(registry.tier(ASK_USER), Some(Tier::Read));

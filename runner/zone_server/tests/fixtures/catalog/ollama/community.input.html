@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Ollama Search</title>
+  </head>
+  <body>
+    <header>
+      <a href="/">Ollama</a>
+      <a href="/search">Models</a>
+      <a href="/docs">Docs</a>
+      <a href="/pricing">Pricing</a>
+      <a href="/signin">Sign in</a>
+      <a href="/download">Download</a>
+    </header>
+    <main>
+      <ul role="list" class="grid">
+      <li x-test-model class="flex items-baseline border-b py-6">
+        <a href="/library/qwen2.5-coder" class="group w-full">
+          <div class="flex flex-col mb-1" title="qwen2.5-coder">
+            <h2 class="truncate text-xl font-medium"><span x-test-search-response-title>qwen2.5-coder</span></h2>
+            <p class="max-w-lg break-words text-neutral-800 text-md">The latest series of Code-Specific Qwen models, with significant improvements in code generation, code reasoning, and code fixing.</p>
+          </div>
+          <div class="flex flex-wrap space-x-2">
+          <span x-test-capability class="rounded-md bg-indigo-50 px-2">tools</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">0.5b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">1.5b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">3b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">7b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">14b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">32b</span>
+          </div>
+          <p class="my-1 flex space-x-5 text-[13px] font-medium text-neutral-500">
+            <span class="flex items-center"><span x-test-pull-count>7.4M</span>&nbsp;<span>Pulls</span></span> <span class="flex items-center"><span x-test-tag-count>199</span>&nbsp;<span>Tags</span></span> <span class="flex items-center">Updated&nbsp;<span x-test-updated>5 months ago</span></span>
+          </p>
+        </a>
+      </li>
+      <li x-test-model class="flex items-baseline border-b py-6">
+        <a href="/jmorgan/coder" class="group w-full">
+          <div class="flex flex-col mb-1" title="jmorgan/coder">
+            <h2 class="truncate text-xl font-medium"><span x-test-search-response-title>jmorgan/coder</span></h2>
+            <p class="max-w-lg break-words text-neutral-800 text-md">A 7B coding assistant tuned for completion and refactoring.</p>
+          </div>
+          <div class="flex flex-wrap space-x-2">
+          <span x-test-capability class="rounded-md bg-indigo-50 px-2">tools</span>
+          </div>
+          <p class="my-1 flex space-x-5 text-[13px] font-medium text-neutral-500">
+            <span class="flex items-center"><span x-test-pull-count>12.3K</span>&nbsp;<span>Pulls</span></span> <span class="flex items-center"><span x-test-tag-count>2</span>&nbsp;<span>Tags</span></span> <span class="flex items-center">Updated&nbsp;<span x-test-updated>6 days ago</span></span>
+          </p>
+        </a>
+      </li>
+      <li x-test-model class="flex items-baseline border-b py-6">
+        <a href="/library/codellama" class="group w-full">
+          <div class="flex flex-col mb-1" title="codellama">
+            <h2 class="truncate text-xl font-medium"><span x-test-search-response-title>codellama</span></h2>
+            <p class="max-w-lg break-words text-neutral-800 text-md">A large language model that can use text prompts to generate and discuss code.</p>
+          </div>
+          <div class="flex flex-wrap space-x-2">
+          <span x-test-size class="rounded-md bg-gray-50 px-2">7b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">13b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">34b</span>
+          <span x-test-size class="rounded-md bg-gray-50 px-2">70b</span>
+          </div>
+          <p class="my-1 flex space-x-5 text-[13px] font-medium text-neutral-500">
+            <span class="flex items-center"><span x-test-pull-count>3.4M</span>&nbsp;<span>Pulls</span></span> <span class="flex items-center"><span x-test-tag-count>199</span>&nbsp;<span>Tags</span></span> <span class="flex items-center">Updated&nbsp;<span x-test-updated>1 year ago</span></span>
+          </p>
+        </a>
+      </li>
+      </ul>
+    </main>
+    <footer>
+      <a href="/blog">Blog</a>
+      <a href="/library">Library</a>
+      <a href="/privacy">Privacy</a>
+      <a href="https://github.com/ollama/ollama">GitHub</a>
+    </footer>
+  </body>
+</html>

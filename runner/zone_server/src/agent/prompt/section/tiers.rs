@@ -7,7 +7,7 @@
 //! outward tier, which no other section covers.
 
 use crate::agent::prompt::{Context, Surface};
-use zone_core::tools::Tier;
+use abnegate_agent::tool::Tier;
 
 const HEADING: &str = "Action tiers:";
 
@@ -32,12 +32,16 @@ pub(in crate::agent::prompt) const OUTWARD_TAIL: &str = "Sending it publishes it
 /// The list decides wording, never tiering: what reaches this prose is the
 /// tier the tool itself declares, so a tool retiered in the catalog stops
 /// being described as outward here without anyone editing this table.
+///
+/// `create_pull_request` is deliberately absent. It is still outward at the
+/// router and still publishes, but `workspace` tells a chat to open the pull
+/// request its work needs the moment that work is done, and naming it here
+/// would put the one rule that waits to be asked beside the one that does not.
 const OUTWARD_PHRASES: &[(&str, &str)] = &[
     ("send_message", "a chat message"),
     ("create_reminder", "a scheduled reminder"),
     ("create_document", "a document other people read"),
     ("update_document", "a revision others read"),
-    ("create_pull_request", "a pull request"),
     ("comment_on_issue", "an issue comment"),
 ];
 
@@ -217,8 +221,23 @@ mod tests {
         let rendered = render(&chat_context(&tools, false, &environment)).unwrap();
 
         assert!(rendered.contains("a chat message"), "{rendered}");
-        assert!(!rendered.contains("a pull request"), "{rendered}");
         assert!(!rendered.contains("an issue comment"), "{rendered}");
+    }
+
+    /// Every other outward call waits to be asked for in the user's own words.
+    /// The pull request that carries work the user asked for does not, so the
+    /// tier that would say it does never names it.
+    #[test]
+    fn the_pull_request_is_never_named_among_the_calls_that_wait_to_be_asked() {
+        for rendered in [chat(false), chat(true), task()] {
+            assert!(!rendered.contains("a pull request"), "{rendered}");
+        }
+        assert!(
+            !OUTWARD_PHRASES
+                .iter()
+                .any(|(tool, _)| *tool == "create_pull_request"),
+            "workspace decides when a pull request is opened"
+        );
     }
 
     /// The prose follows the tier the tool declares, not a list of names kept

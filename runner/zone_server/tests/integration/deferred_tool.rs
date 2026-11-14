@@ -3,7 +3,7 @@
 //! E4's whole case is a number: a chat profile carries forty-odd tools and every
 //! schema is sent on every round, which on a 32k window is the single largest
 //! fixed cost in the context. This assembles the real catalog for a real
-//! workspace and asks `zone_core::context::estimate` — the same function that
+//! workspace and asks `abnegate_agent::context::estimate` — the same function that
 //! fills `ContextBreakdown.tools` in production — what each set costs.
 //!
 //! It asserts a floor rather than an exact figure. An exact one would be a test
@@ -12,8 +12,8 @@
 use crate::common;
 
 use crate::common::context::Harness;
+use abnegate_agent::context::{ContextSource, Policy, estimate};
 use uuid::Uuid;
-use zone_core::context::{ContextSource, Policy, estimate};
 use zone_server::agent::tools::{ChatTools, WorkspaceScope};
 
 /// The window E4 names. A 32k local model is where this matters; on a large
@@ -26,11 +26,7 @@ const MODEL: &str = "qwen2.5-coder:7b";
 const LEAST_SAVING: f64 = 0.40;
 
 fn policy() -> Policy {
-    Policy {
-        limit: Some(WINDOW),
-        reserved: 0,
-        source: ContextSource::Configured,
-    }
+    Policy::new(Some(WINDOW), 0, ContextSource::Configured)
 }
 
 #[tokio::test]
@@ -54,6 +50,7 @@ async fn deferring_the_schemas_is_most_of_the_tool_block_on_a_32k_window() {
         chat_id: Some(harness.chat),
         user_id: user,
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await;
 
@@ -148,6 +145,7 @@ async fn every_deferred_tool_is_still_reachable_by_name() {
         chat_id: Some(harness.chat),
         user_id: user,
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await;
 

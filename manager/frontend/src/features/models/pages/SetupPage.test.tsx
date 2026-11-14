@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { SetupPlan } from '../../../api/models';
 import { clientModule } from '../../../test/client';
+import { MODEL_ACCESS_NOTICE } from '../components/ModelAccessNotice';
 import { setupCompleteKey } from '../setupComplete';
 
 const mockGetSetup = mock();
@@ -50,7 +51,10 @@ mock.module('../../../shared/context/WorkspaceContext', () => ({
   }),
 }));
 
+const router = { ...(await import('react-router-dom')) };
+
 mock.module('react-router-dom', () => ({
+  ...router,
   useNavigate: () => mockNavigate,
 }));
 
@@ -78,6 +82,12 @@ const pull = {
   cancel: mock(),
   dismiss: mock(),
 };
+
+const access = { canInstall: true, canRemove: true };
+
+mock.module('../hooks/useModelAccess', () => ({
+  useModelAccess: () => access,
+}));
 
 mock.module('../hooks/usePull', () => ({
   usePull: () => pull,
@@ -181,6 +191,8 @@ describe('SetupPage', () => {
     mockPull.mockReset();
     mockPull.mockImplementation(() => Promise.resolve(true));
     pull.jobs = [];
+    access.canInstall = true;
+    access.canRemove = true;
     mockGetSetup.mockResolvedValue(plan());
     mockGetHostMounts.mockReset();
     mockGetWorkspaceHostDirectories.mockReset();
@@ -258,5 +270,17 @@ describe('SetupPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Install selected' }));
     await waitFor(() => expect(mockStartSetup).toHaveBeenCalled());
     await waitFor(() => expect(mockPull).toHaveBeenCalledTimes(2));
+  });
+
+  it('lets a user who cannot install models read the plan and skip on', async () => {
+    access.canInstall = false;
+    render(<SetupPage />);
+    expect(await screen.findByText(MODEL_ACCESS_NOTICE)).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Vision' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Install selected' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
+    expect(await screen.findByRole('heading', { name: 'Host folders' })).toBeInTheDocument();
+    expect(mockStartSetup).not.toHaveBeenCalled();
+    expect(mockPull).not.toHaveBeenCalled();
   });
 });

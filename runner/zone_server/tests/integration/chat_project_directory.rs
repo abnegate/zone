@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use abnegate_agent::ToolResult;
 use abnegate_secret::{REDACTED, SecretValue};
 use abnegate_vcs::RepositoryUrl;
 use nix::fcntl::{Flock, FlockArg};
@@ -15,7 +16,6 @@ use sqlx::PgPool;
 use tempfile::TempDir;
 use uuid::Uuid;
 use zone_core::llm::LlmBackend;
-use zone_core::tools::ToolResult;
 use zone_server::db::projects::{self, NewProject};
 use zone_server::db::{chats, organizations, sources, workspace_host_directories, workspaces};
 use zone_server::services::chat::session::{self, Mode, Preparation};
@@ -27,7 +27,6 @@ use crate::common::{context_database_url, create_test_state, test_config};
 
 const REMOTE: &str = "git@github.com:owner/repository.git";
 const GITHUB: &str = "https://github.com/owner/repository";
-const TIMEOUT: Duration = Duration::from_secs(120);
 const UNREACHABLE: &str = "http://127.0.0.1:9";
 const TOKEN: &str = "ghp_a-token-nothing-may-repeat";
 
@@ -86,17 +85,21 @@ impl Fixture {
 
     async fn source(&self, kind: &str, config: Value, token: Option<&str>) -> Uuid {
         let sealed = token.map(|token| {
-            zone_server::crypto::encrypt(self.state.encryption_key(), token).expect("a token")
+            abnegate_secret::encrypt_value(&SecretValue::new(token), self.state.master_key())
+                .expect("a token")
         });
         sources::create_source(
             &self.pool,
-            self.workspace,
-            &Uuid::new_v4().to_string(),
-            kind,
-            config,
-            None,
-            None,
-            sealed.as_deref(),
+            sources::NewSource {
+                workspace_id: self.workspace,
+                name: &Uuid::new_v4().to_string(),
+                source_type: kind,
+                config,
+                description: None,
+                url: None,
+                credentials_encrypted: sealed.as_deref(),
+                github_installation_id: None,
+            },
         )
         .await
         .expect("a source")
@@ -173,7 +176,6 @@ impl Fixture {
             self.workspace,
             url,
             token.map(SecretValue::new),
-            TIMEOUT,
         )
     }
 }
@@ -411,7 +413,7 @@ async fn a_project_linked_to_a_repository_with_no_source_starts_in_its_checkout(
     let path = checkout(&mounted.path().join("repository"), REMOTE);
     fixture.mount(&[mounted.path()]).await;
     let project = fixture.project(None).await;
-    projects::link_github(&fixture.pool, project, GITHUB, None)
+    projects::link_github(&fixture.pool, project, GITHUB, None, None)
         .await
         .expect("a linked repository");
     let chat = fixture.chat(Some(project)).await;
@@ -432,7 +434,7 @@ async fn a_source_comes_before_the_repository_linked_to_its_project() {
         .source("filesystem", json!({"path": folder.path()}), None)
         .await;
     let project = fixture.project(Some(source)).await;
-    projects::link_github(&fixture.pool, project, GITHUB, None)
+    projects::link_github(&fixture.pool, project, GITHUB, None, None)
         .await
         .expect("a linked repository");
     let chat = fixture.chat(Some(project)).await;
@@ -457,7 +459,7 @@ async fn a_source_that_is_gone_gives_way_to_the_repository_linked_to_its_project
         )
         .await;
     let project = fixture.project(Some(source)).await;
-    projects::link_github(&fixture.pool, project, GITHUB, None)
+    projects::link_github(&fixture.pool, project, GITHUB, None, None)
         .await
         .expect("a linked repository");
     let chat = fixture.chat(Some(project)).await;
@@ -585,8 +587,8 @@ async fn one_workspaces_clone_is_not_anothers() {
     let (_holder, url) = remote();
     let root = fixture.clones.path();
 
-    let one = Missing::new(root, fixture.workspace, url.clone(), None, TIMEOUT);
-    let two = Missing::new(root, other.workspace, url, None, TIMEOUT);
+    let one = Missing::new(root, fixture.workspace, url.clone(), None);
+    let two = Missing::new(root, other.workspace, url, None);
     fixture.remove().await;
     other.remove().await;
 

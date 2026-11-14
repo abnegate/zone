@@ -1,4 +1,5 @@
 # Cargo audit configuration
 
 [advisories]
-ignore = []
+# See docs/DEPENDENCIES.md, "Locked but unbuilt libsqlite3-sys".
+ignore = ["RUSTSEC-2026-0459"]

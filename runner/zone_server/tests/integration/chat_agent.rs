@@ -1,6 +1,9 @@
 //! Exercise the real streaming loop against deterministic provider responses.
 use crate::common;
 
+use abnegate_agent::Tool;
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::job::{self, Jobs};
 use abnegate_llm::{LlmConfig, Message, Role, ToolCall};
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -13,9 +16,8 @@ use uuid::Uuid;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::LlmClient;
-use zone_core::tools::job::{self, Jobs};
-use zone_core::tools::{Session, Tool};
 use zone_core::variables::Variables;
+use zone_server::agent::approval::refusal::{APPROVAL_CANCELLED, DENIED};
 use zone_server::agent::prompt;
 use zone_server::agent::wait::{self, KIND_JOB, WAIT_FOR};
 use zone_server::agent::{
@@ -126,7 +128,7 @@ fn stream(status: u16, deltas: Vec<Value>) -> ResponseTemplate {
 
 /// Bounds the wait on a database nothing answers on, so a call that reaches it
 /// costs a test milliseconds rather than the default acquire timeout.
-const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Where a chat tool set in this binary has its session checkout, and so where
 /// a job started through one writes its log.
@@ -185,6 +187,7 @@ async fn chat_catalog(chat_id: Uuid) -> ChatTools {
         workspace_id: Uuid::new_v4(),
         chat_id: Some(chat_id),
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await
 }
@@ -754,9 +757,46 @@ async fn denied_writes_do_not_touch_the_file() {
     )));
     assert!(events.iter().any(|event| matches!(
         event,
-        AgentEvent::ToolCallCompleted { id, success: false, .. } if id == "deny_write"
+        AgentEvent::ToolCallCompleted { id, success: false, detail, .. }
+            if id == "deny_write" && detail.contains(DENIED)
     )));
     assert_eq!(answer(&events), "Stopped.");
+}
+
+#[tokio::test]
+async fn a_write_whose_turn_stops_while_it_waits_is_told_it_was_cancelled() {
+    let path = std::env::temp_dir().join(format!("zone-cancel-{}.txt", Uuid::new_v4()));
+    std::fs::write(&path, "before").unwrap();
+    let gate = ApprovalGate::new();
+    let poll = gate.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            poll.cancel_all();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    let write = json!({"id":"cancel_write","name":"write_file","arguments":{"path":path,"content":"after"}});
+    let (events, _) = exercise_approved(
+        vec![(200, text(&write.to_string())), (200, text("Stopped."))],
+        vec![Message::user("Overwrite the file.")],
+        ApprovalPolicy::required(gate),
+    )
+    .await;
+    let kept = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(kept, "before");
+    let detail = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCallCompleted { id, detail, .. } if id == "cancel_write" => {
+                Some(detail.as_str())
+            }
+            _ => None,
+        })
+        .expect("the cancelled call completes");
+    assert!(detail.contains(APPROVAL_CANCELLED), "{detail}");
+    assert!(!detail.contains(DENIED), "nobody denied it: {detail}");
 }
 
 #[tokio::test]
@@ -1057,7 +1097,7 @@ async fn the_assembled_system_prompt_reaches_the_provider_in_section_order() {
 /// pin that string beside the other three the prompt layer owns.
 #[tokio::test]
 async fn the_turn_offers_the_wait_and_carries_no_surviving_poll_instruction() {
-    /// Over `MAX_SLEEP_SECS`, so the sleep cap refuses it and the model reads
+    /// Over `MAXIMUM_SLEEP`, so the sleep cap refuses it and the model reads
     /// what it is told to do instead.
     const OVER_CAP: &str = "sleep 120";
 
@@ -1328,12 +1368,15 @@ async fn a_stated_reason_reaches_the_approval_frame_and_the_stored_record() {
         success: true,
         detail: "Wrote".to_string(),
         duration_ms: 0,
+        at: None,
         reasoning: None,
+        reasoning_at: None,
         reason: zone_server::agent::reason(&arguments),
         preview: Some("Write 5 characters to the draft, replacing whatever is there.".to_string()),
         questions: Vec::new(),
         job: None,
         waiting: None,
+        refusal: None,
     };
     assert_eq!(record.reason.as_deref(), Some(WHY));
     let stored = serde_json::to_value(&record).unwrap();
@@ -1361,7 +1404,7 @@ async fn a_stated_reason_reaches_the_approval_frame_and_the_stored_record() {
 #[tokio::test]
 async fn a_side_effecting_call_omitting_its_reason_still_executes() {
     assert!(
-        zone_core::tools::WriteFileTool.parameters_schema()["required"]
+        abnegate_agent::tool::WriteFileTool.parameters_schema()["required"]
             .as_array()
             .expect("required array")
             .iter()
@@ -2025,13 +2068,19 @@ use zone_server::agent::memory::{
 };
 use zone_server::db::memory::{MemoryCategory, remembered};
 
-/// The section's heading, and the nine rules under it that name no tool, as
+/// The section's heading, and the eleven rules under it that name no tool, as
 /// literals because the constants carrying them are private to that section.
 const MEMORY_SECTION: &str = "Memory:";
 
-const MEMORY_RULES: [&str; 9] = [
+const MEMORY_RULES: [&str; 11] = [
     "- \"Remember that\", \"forget that\" and \"from now on\" are always a write: call the tool \
      before you say you have noted it.",
+    "- Do not wait to be asked: when the user tells you something durable about themselves, \
+     such as who they are, how they want you to work or a fact a later conversation will need, \
+     write it, then say in a line that you did. Unasked, what the rules below keep out you \
+     leave unwritten, without saying so.",
+    "- Never write again what the user asked you to forget, whether in this conversation or as \
+     an entry you deleted, unless they ask for it again.",
     "- Write what will still be true and worth reading in a month. A passing mention is not \
      one; a durable phrasing beats a precise figure.",
     "- Only what the user said about themselves. Not what you concluded about them, and not \
@@ -2050,7 +2099,7 @@ const MEMORY_RULES: [&str; 9] = [
     "- Forget only what the user asked you to forget.",
 ];
 
-/// The tenth rule is built from the tool names, as the section builds it, so a
+/// The twelfth rule is built from the tool names, as the section builds it, so a
 /// renamed tool moves this with it rather than leaving it matching nothing.
 fn memory_rules() -> Vec<String> {
     let mut rules: Vec<String> = MEMORY_RULES
@@ -2361,6 +2410,7 @@ async fn memory_catalog(fixture: &Fixture) -> ChatTools {
         workspace_id: fixture.workspace,
         chat_id: Some(fixture.chat),
         offline: false,
+        origin: zone_server::db::tasks::Origin::Member,
     })
     .await
 }

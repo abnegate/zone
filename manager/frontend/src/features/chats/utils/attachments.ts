@@ -1,3 +1,5 @@
+import { cancelled, isCancelled } from '../../../api/upload';
+
 export interface Attachment {
   id: string;
   name: string;
@@ -82,18 +84,59 @@ export function isTextFile(file: File): boolean {
   return TEXT_EXTENSIONS.has(extension);
 }
 
-function readAsDataUrl(file: File): Promise<string> {
+type ReadOptions = {
+  signal?: AbortSignal;
+  onProgress?: (fraction: number) => void;
+};
+
+const ReadFormat = {
+  Text: 'text',
+  DataUrl: 'data-url',
+} as const;
+
+type ReadFormat = (typeof ReadFormat)[keyof typeof ReadFormat];
+
+function read(file: File, format: ReadFormat, options: ReadOptions): Promise<string> {
+  const { signal, onProgress } = options;
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(cancelled());
+      return;
+    }
     const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
+    const abort = () => reader.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    const settle = () => signal?.removeEventListener('abort', abort);
+    reader.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total);
+    };
+    reader.onload = () => {
+      settle();
+      resolve(String(reader.result));
+    };
+    reader.onerror = () => {
+      settle();
+      reject(reader.error);
+    };
+    reader.onabort = () => {
+      settle();
+      reject(cancelled());
+    };
+    if (format === ReadFormat.DataUrl) {
+      reader.readAsDataURL(file);
+    } else {
+      reader.readAsText(file);
+    }
   });
 }
 
-export async function readAttachment(file: File): Promise<Attachment> {
+export function attachmentId(file: File): string {
+  return `${file.name}-${file.size}-${file.lastModified}`;
+}
+
+export async function readAttachment(file: File, options: ReadOptions = {}): Promise<Attachment> {
   const base = {
-    id: `${file.name}-${file.size}-${file.lastModified}`,
+    id: attachmentId(file),
     name: file.name,
     size: file.size,
     type: file.type,
@@ -104,8 +147,9 @@ export async function readAttachment(file: File): Promise<Attachment> {
       return { ...base, rejected: `over ${formatBytes(MAX_IMAGE_BYTES)}` };
     }
     try {
-      return { ...base, url: await readAsDataUrl(file) };
-    } catch {
+      return { ...base, url: await read(file, ReadFormat.DataUrl, options) };
+    } catch (error) {
+      if (isCancelled(error)) throw error;
       return { ...base, rejected: 'could not be read' };
     }
   }
@@ -119,8 +163,9 @@ export async function readAttachment(file: File): Promise<Attachment> {
   }
 
   try {
-    return { ...base, text: await file.text() };
-  } catch {
+    return { ...base, text: await read(file, ReadFormat.Text, options) };
+  } catch (error) {
+    if (isCancelled(error)) throw error;
     return { ...base, rejected: 'could not be read' };
   }
 }

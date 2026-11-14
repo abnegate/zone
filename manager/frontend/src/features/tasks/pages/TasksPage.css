@@ -12,11 +12,23 @@
   width: 12.5rem;
 }
 
+.tasks-access {
+  margin: 0;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-sm);
+}
+
 .tasks-body {
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+.tasks-body[data-selecting] {
+  padding-bottom: calc(
+    var(--ui-control-height-sm) + var(--ui-space-3) + var(--ui-space-8) + var(--ui-safe-bottom)
+  );
 }
 
 .tasks-body .error-banner {
@@ -102,64 +114,14 @@
   border-top: 1px solid var(--ui-border);
 }
 
-.tasks-table-wrapper {
-  width: 100%;
-  min-width: 0;
-  overflow-x: auto;
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-card);
-  background: var(--ui-bg-elevated);
+.task-details-access {
+  margin: 0 auto 0 0;
+  color: var(--ui-text-secondary);
+  font-size: var(--ui-text-sm);
 }
 
-.tasks-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.tasks-table th {
-  height: var(--ui-control-height);
-  padding: 0 var(--ui-space-3);
-  text-align: left;
-  white-space: nowrap;
-  font-size: var(--ui-text-2xs);
-  font-weight: 600;
-  letter-spacing: var(--ui-tracking-wider);
-  text-transform: uppercase;
-  color: var(--ui-text-muted);
-  background: var(--ui-bg-surface);
-  box-shadow: inset 0 -1px var(--ui-border);
-}
-
-.tasks-table td {
-  height: var(--ui-list-row-2);
-  padding: 0 var(--ui-space-3);
-  border-bottom: none;
-  box-shadow: inset 0 -1px var(--ui-border);
-  vertical-align: middle;
-}
-
-.tasks-table tbody tr:last-child td {
-  box-shadow: none;
-}
-
-.tasks-table tbody tr:hover td {
-  background: var(--ui-bg-hover);
-}
-
-.tasks-table tbody .task-card {
-  cursor: pointer;
-}
-
-.tasks-table th:last-child,
-.tasks-table td:last-child {
-  width: 1%;
-  text-align: right;
-}
-
-.task-card-agentic td:first-child {
-  box-shadow:
-    inset 2px 0 0 var(--ui-accent),
-    inset 0 -1px var(--ui-border);
+.task-details-fields {
+  display: contents;
 }
 
 .task-title-button {
@@ -226,217 +188,6 @@
 .task-details-title {
   flex: 1;
   min-width: 0;
-}
-
-.task-rename {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  width: var(--ui-space-5);
-  height: var(--ui-space-5);
-  padding: 0;
-  color: var(--ui-text-muted);
-  background: none;
-  border: 0;
-  border-radius: var(--ui-radius-sm);
-  cursor: pointer;
-}
-
-.task-rename:hover {
-  color: var(--ui-text-primary);
-  background: var(--ui-bg-muted);
-}
-
-.task-rename:focus-visible {
-  outline: 2px solid var(--ui-border-focus);
-  outline-offset: 1px;
-}
-
-.task-card-title {
-  display: flex;
-  align-items: center;
-  gap: var(--ui-space-2);
-  height: var(--ui-space-5);
-}
-
-.task-card-title h3 {
-  flex: 1;
-  min-width: 60%;
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--ui-font-body);
-  font-size: var(--ui-text-sm);
-  font-weight: 600;
-  line-height: var(--ui-space-5);
-}
-
-.task-badges {
-  display: flex;
-  align-items: center;
-  gap: var(--ui-space-1);
-  min-width: 0;
-  overflow: hidden;
-}
-
-.task-project {
-  height: var(--ui-space-4);
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--ui-text-xs);
-  line-height: var(--ui-space-4);
-  color: var(--ui-text-muted);
-}
-
-.task-card .task-description {
-  height: var(--ui-space-4);
-  margin: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--ui-text-xs);
-  line-height: var(--ui-space-4);
-  color: var(--ui-text-secondary);
-}
-
-.task-priority {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--ui-text-xs);
-  color: var(--ui-text-muted);
-}
-
-.task-model,
-.task-source {
-  display: block;
-  min-width: 0;
-  max-width: 10rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--ui-text-xs);
-  color: var(--ui-text-muted);
-}
-
-.task-source {
-  color: var(--ui-text-secondary);
-}
-
-.task-pr {
-  display: flex;
-  align-items: center;
-  gap: var(--ui-space-2);
-  min-width: 0;
-}
-
-.task-pr-link {
-  flex-shrink: 0;
-  color: var(--ui-accent);
-  font-weight: 500;
-  text-decoration: none;
-}
-
-.task-pr-link::after {
-  content: ' ↗';
-}
-
-.task-pr-link:hover {
-  text-decoration: underline;
-}
-
-.task-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--ui-space-2);
-  height: var(--ui-control-height-sm);
-  white-space: nowrap;
-}
-
-.task-branch-slot {
-  min-width: 0;
-  height: var(--ui-badge-height);
-}
-
-.task-branch {
-  display: block;
-  max-width: 10rem;
-  height: var(--ui-badge-height);
-  padding: 0 var(--ui-space-1-5);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--ui-font-mono);
-  font-size: var(--ui-text-2xs);
-  line-height: var(--ui-badge-height);
-  color: var(--ui-text-secondary);
-  background: var(--ui-bg-muted);
-  border-radius: var(--ui-radius-sm);
-}
-
-.task-delete:hover {
-  color: var(--ui-error);
-  background: var(--ui-error-muted);
-}
-
-.tasks-page .skeleton-card {
-  pointer-events: none;
-}
-
-.tasks-page .skeleton {
-  background: linear-gradient(
-    90deg,
-    var(--ui-bg-muted) 25%,
-    var(--ui-border) 50%,
-    var(--ui-bg-muted) 75%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-  border-radius: var(--ui-radius-sm);
-}
-
-@keyframes shimmer {
-  0% {
-    background-position: 200% 0;
-  }
-  100% {
-    background-position: -200% 0;
-  }
-}
-
-.tasks-page .skeleton-title {
-  flex: 1;
-  height: var(--ui-space-3);
-  max-width: 55%;
-}
-
-.tasks-page .skeleton-badge {
-  width: 3.5rem;
-  height: var(--ui-badge-height);
-}
-
-.tasks-page .skeleton-text {
-  height: var(--ui-space-3);
-  margin: var(--ui-space-1) 0;
-}
-
-.tasks-page .skeleton-text.short {
-  width: 30%;
-}
-
-.tasks-page .skeleton-tag {
-  width: 5rem;
-  height: var(--ui-space-3);
-}
-
-.tasks-page .skeleton-btn {
-  width: 4rem;
-  height: var(--ui-control-height-sm);
 }
 
 .tasks-page .loading {
@@ -520,6 +271,16 @@
 
 :root[data-theme='dark'] .execution-notice strong {
   color: var(--ui-error-400);
+}
+
+.execution-notice--neutral {
+  background: var(--ui-bg-muted);
+  border-color: var(--ui-border);
+}
+
+.execution-notice--neutral strong,
+:root[data-theme='dark'] .execution-notice--neutral strong {
+  color: var(--ui-text-primary);
 }
 
 .execution-notice p {
@@ -746,10 +507,6 @@
 }
 
 @media (max-width: 768px) {
-  .tasks-table {
-    min-width: 56rem;
-  }
-
   .tasks-filters {
     flex: 1 1 100%;
     flex-wrap: wrap;

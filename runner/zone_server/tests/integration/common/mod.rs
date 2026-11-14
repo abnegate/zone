@@ -5,9 +5,17 @@
 
 #![allow(dead_code)]
 
+pub mod comfy;
 pub mod context;
+pub mod database;
+pub mod github_app;
+pub mod logs;
 pub mod mail;
+pub mod mcp;
+pub mod stand_in;
 pub mod transcript;
+
+pub use database::Database;
 
 use axum::Router;
 use axum::body::Body;
@@ -89,6 +97,7 @@ pub fn test_config() -> Config {
         app_base_url: "http://localhost:3000".to_string(),
         github_api_url: zone_server::config::DEFAULT_GITHUB_API_URL.to_string(),
         github_api_allows_http: false,
+        github_web_url: zone_server::config::DEFAULT_GITHUB_WEB_URL.to_string(),
         web_search: zone_server::services::search::defaults(),
         comfyui: zone_server::services::comfy::settings::development(),
         source_index: Default::default(),
@@ -100,6 +109,8 @@ pub fn test_config() -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
+        mcp_commands: false,
     }
 }
 
@@ -152,6 +163,10 @@ pub struct TestClient {
 }
 
 impl TestClient {
+    pub async fn sign_in_with_role(&self, role: &str) -> String {
+        sign_in_with_role(&self.router, role).await
+    }
+
     /// Create a new test client
     pub fn new(router: Router) -> Self {
         Self {
@@ -180,6 +195,16 @@ impl TestClient {
     /// Create a test client on `pool`, for a test that needs a database of its own.
     pub fn with_pool(pool: PgPool) -> Self {
         let state = create_test_state(test_config(), pool);
+        let router = create_test_router(state.clone());
+        Self {
+            router,
+            state: Some(state),
+        }
+    }
+
+    /// Create a test client over `state` as it is, for a test whose instance MCP servers really
+    /// connect: every other constructor installs an empty instance hub first.
+    pub fn with_state(state: AppState) -> Self {
         let router = create_test_router(state.clone());
         Self {
             router,
@@ -416,6 +441,62 @@ impl TestResponse {
     }
 }
 
+async fn post_auth(router: &Router, uri: &str, body: Value) -> Value {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("Content-Type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    assert!(status.is_success(), "{uri} answered {status}: {json}");
+    json
+}
+
+/// Registers through the API, grants a seeded global role, and signs in again
+/// so the access token carries that role's permissions and no more: the
+/// registration role and the instance admin flag the first account on a fresh
+/// database gets are both removed.
+pub async fn sign_in_with_role(router: &Router, role: &str) -> String {
+    let email = test_email();
+    let credentials = serde_json::json!({
+        "email": &email,
+        "password": test_password(),
+    });
+    post_auth(router, "/api/auth/register", credentials.clone()).await;
+    let pool = create_test_pool().await;
+    let user = zone_server::db::users::get_user_by_email(&pool, &email)
+        .await
+        .unwrap()
+        .expect("the registered user exists");
+    sqlx::query("UPDATE users SET is_admin = false WHERE id = $1")
+        .bind(user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
+        .bind(user.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    zone_server::db::users::assign_user_role(&pool, user.id, role)
+        .await
+        .unwrap();
+    let signed_in = post_auth(router, "/api/auth/login", credentials).await;
+    signed_in["access_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("login must return an access token, got {signed_in}"))
+        .to_string()
+}
+
 /// Helper to generate a unique test email
 pub fn test_email() -> String {
     format!("test-{}@example.com", uuid::Uuid::new_v4())
@@ -428,15 +509,31 @@ pub fn test_email() -> String {
 pub fn test_password() -> String {
     static PASSWORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PASSWORD
-        .get_or_init(|| {
-            let id = uuid::Uuid::new_v4();
-            let mut chars: Vec<char> = id.simple().to_string().chars().collect();
-            if let Some(letter) = chars.iter_mut().find(|ch| ch.is_ascii_lowercase()) {
-                *letter = letter.to_ascii_uppercase();
-            }
-            chars.into_iter().collect()
-        })
+        .get_or_init(|| password(uuid::Uuid::new_v4()))
         .clone()
+}
+
+fn password(id: uuid::Uuid) -> String {
+    format!("Zone1{}", id.simple())
+}
+
+#[test]
+fn every_generated_password_meets_the_registration_rules() {
+    for id in [
+        0x11111111_1111_4111_8111_111111111111,
+        0x11111111_1111_4111_a111_111111111111,
+        0xaaaaaaaa_aaaa_4aaa_aaaa_aaaaaaaaaaaa,
+    ] {
+        let id = uuid::Uuid::from_u128(id);
+        let password = password(id);
+        assert!(
+            password.len() >= 8
+                && password.chars().any(char::is_uppercase)
+                && password.chars().any(char::is_lowercase)
+                && password.chars().any(|character| character.is_ascii_digit()),
+            "the password built from {id} is refused by registration"
+        );
+    }
 }
 
 /// Create a test config with a custom litellm_host for mocking external services
@@ -466,6 +563,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         app_base_url: "http://localhost:3000".to_string(),
         github_api_url: zone_server::config::DEFAULT_GITHUB_API_URL.to_string(),
         github_api_allows_http: false,
+        github_web_url: zone_server::config::DEFAULT_GITHUB_WEB_URL.to_string(),
         web_search: zone_server::services::search::defaults(),
         comfyui: zone_server::services::comfy::settings::development(),
         source_index: Default::default(),
@@ -477,6 +575,8 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
+        mcp_enabled: true,
+        mcp_commands: false,
     }
 }
 

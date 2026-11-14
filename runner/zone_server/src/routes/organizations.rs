@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::{AuthUser, OrgAdmin, OrgMember, OrgOwner, WorkspaceAdmin, WorkspaceMember};
+use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
 use crate::db::{organization_members, organizations, workspaces};
 use crate::services::login::devices;
@@ -338,7 +339,18 @@ pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl Into
                 .into_response();
         }
     };
-    match organizations::delete_organization(state.db(), owner.org_id).await {
+    let deleted = match tokio::spawn(erase(state.clone(), owner.org_id)).await {
+        Ok(deleted) => deleted,
+        Err(error) => {
+            tracing::error!(organization = %owner.org_id, %error, "The delete did not finish");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse::new("Internal server error")),
+            )
+                .into_response();
+        }
+    };
+    match deleted {
         Ok(true) => {
             removal.run(&state).await;
             audit(
@@ -379,6 +391,17 @@ pub async fn delete(State(state): State<AppState>, owner: OrgOwner) -> impl Into
                 .into_response()
         }
     }
+}
+
+/// Deletes the organization and stops its MCP servers, which hold its secrets. Run as a task of
+/// its own: a caller that disconnects drops the handler wherever it waits, and a delete that
+/// committed must still stop the servers on this replica.
+async fn erase(state: AppState, organization: Uuid) -> DbResult<bool> {
+    let deleted = organizations::delete_organization(state.db(), organization).await?;
+    if deleted {
+        state.mcp().forget(organization);
+    }
+    Ok(deleted)
 }
 
 #[derive(Debug, Serialize)]
@@ -603,10 +626,6 @@ pub async fn delete_workspace(
         }
     }
 }
-
-// ============================================================================
-// Organization Member Management
-// ============================================================================
 
 /// Organization member response
 #[derive(Debug, Serialize)]
@@ -1015,5 +1034,229 @@ pub async fn remove_member(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Weak;
+    use std::time::Duration;
+
+    use abnegate_secret::SecretValue;
+    use abnegate_secret::encrypt_value;
+    use serde_json::json;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    use super::*;
+    use crate::config::Config;
+    use crate::db::projects;
+    use crate::db::sync_config;
+    use crate::services::mcp_servers::load;
+    use crate::services::mcp_servers::organization::OrganizationHub;
+    use crate::services::mcp_servers::testing::Tenant;
+    use crate::services::mcp_servers::testing::stub;
+    use crate::state::test_config;
+    use crate::sync::hook::HOOK_ID;
+    use crate::sync::hook::HOOK_SIGNED;
+
+    const REPOSITORY: &str = "http://127.0.0.1/acme/project";
+    const WEBHOOK: u64 = 7;
+    const POLL: Duration = Duration::from_millis(20);
+    const PATIENCE: Duration = Duration::from_secs(20);
+    const NEVER: Duration = Duration::from_secs(3600);
+    const HELD: &str = "SELECT pg_backend_pid() FROM organizations WHERE id = $1 FOR UPDATE";
+    const BLOCKING: &str = "SELECT EXISTS(SELECT 1 FROM pg_stat_activity \
+         WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)))";
+
+    fn owner(tenant: &Tenant) -> OrgOwner {
+        OrgOwner {
+            org_id: tenant.organization,
+            user_id: tenant.user,
+            email: tenant.email.clone(),
+        }
+    }
+
+    /// How many servers the organization's hub connected, and the hub, held only weakly.
+    async fn serving(state: &AppState, tenant: &Tenant) -> (usize, Weak<OrganizationHub>) {
+        tenant.store(state, stub("stub")).await;
+        let hub = load::organization(state, tenant.organization)
+            .await
+            .expect("the organization's hub");
+        (hub.connected(), Arc::downgrade(&hub))
+    }
+
+    /// A GitHub sync in the tenant's workspace whose webhook Zone registered.
+    async fn hooked(state: &AppState, tenant: &Tenant) {
+        let project =
+            projects::create_project(&tenant.pool, "Hooked", None, Some(tenant.workspace))
+                .await
+                .expect("a project");
+        let token = encrypt_value(&SecretValue::new("ghp_hooks"), state.master_key())
+            .expect("a sealed token");
+        projects::link_github(&tenant.pool, project.id, REPOSITORY, Some(&token), None)
+            .await
+            .expect("the project is connected to GitHub");
+        sync_config::create_sync_config(
+            &tenant.pool,
+            project.id,
+            "github",
+            true,
+            json!({ "external_repo_url": REPOSITORY, HOOK_ID: WEBHOOK, HOOK_SIGNED: true }),
+            None,
+        )
+        .await
+        .expect("a sync with a registered webhook");
+    }
+
+    async fn eventually(mut met: impl AsyncFnMut() -> bool) -> bool {
+        tokio::time::timeout(PATIENCE, async {
+            while !met().await {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    async fn removing(github: &MockServer) -> bool {
+        github
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|request| request.method.as_str() == "DELETE")
+    }
+
+    async fn blocking(tenant: &Tenant, holder: i32) -> bool {
+        sqlx::query_scalar(BLOCKING)
+            .bind(holder)
+            .fetch_one(&tenant.pool)
+            .await
+            .expect("the sessions the holder blocks")
+    }
+
+    async fn stored(tenant: &Tenant) -> bool {
+        organizations::get_organization(&tenant.pool, tenant.organization)
+            .await
+            .expect("the organization is read")
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn deleting_an_organization_stops_its_mcp_servers() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica().await;
+        let (connected, held) = serving(&state, &tenant).await;
+
+        let response = delete(State(state.clone()), owner(&tenant))
+            .await
+            .into_response();
+        let forgotten = state
+            .mcp()
+            .existing_organization(tenant.organization)
+            .is_none();
+        tenant.remove().await;
+
+        assert_eq!(connected, 1, "the stub server has to connect");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(forgotten, "the deleted organization kept its hub");
+        assert!(
+            held.upgrade().is_none(),
+            "the deleted organization's servers kept running"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_leaves_while_a_webhook_is_removed_leaves_no_mcp_server_running() {
+        let github = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path(format!("/repos/acme/project/hooks/{WEBHOOK}")))
+            .respond_with(ResponseTemplate::new(204).set_delay(NEVER))
+            .mount(&github)
+            .await;
+        let tenant = Tenant::new().await;
+        let state = tenant
+            .configured(Config {
+                github_api_url: github.uri(),
+                github_api_allows_http: true,
+                mcp_commands: true,
+                ..test_config()
+            })
+            .await;
+        hooked(&state, &tenant).await;
+        let (connected, held) = serving(&state, &tenant).await;
+
+        let reached = {
+            let deleting = delete(State(state.clone()), owner(&tenant));
+            tokio::pin!(deleting);
+            tokio::select! {
+                _ = &mut deleting => false,
+                reached = eventually(async || removing(&github).await) => reached,
+            }
+        };
+        let kept = stored(&tenant).await;
+        let forgotten = state
+            .mcp()
+            .existing_organization(tenant.organization)
+            .is_none();
+        tenant.remove().await;
+
+        assert_eq!(connected, 1, "the stub server has to connect");
+        assert!(reached, "the delete never came to remove the webhook");
+        assert!(!kept, "the organization was not deleted");
+        assert!(forgotten, "the deleted organization kept its hub");
+        assert!(
+            held.upgrade().is_none(),
+            "the deleted organization's servers kept running"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_leaves_before_the_delete_commits_leaves_no_mcp_server_running() {
+        let tenant = Tenant::new().await;
+        let state = tenant.replica().await;
+        let (connected, held) = serving(&state, &tenant).await;
+        let mut holding = tenant.pool.begin().await.expect("a transaction");
+        let holder: i32 = sqlx::query_scalar(HELD)
+            .bind(tenant.organization)
+            .fetch_one(&mut *holding)
+            .await
+            .expect("the organization is held");
+
+        let waited = {
+            let deleting = delete(State(state.clone()), owner(&tenant));
+            tokio::pin!(deleting);
+            tokio::select! {
+                _ = &mut deleting => false,
+                waited = eventually(async || blocking(&tenant, holder).await) => waited,
+            }
+        };
+        holding
+            .commit()
+            .await
+            .expect("the organization is released");
+        let deleted = eventually(async || !stored(&tenant).await).await;
+        let forgotten = eventually(async || {
+            state
+                .mcp()
+                .existing_organization(tenant.organization)
+                .is_none()
+        })
+        .await;
+        tenant.remove().await;
+
+        assert_eq!(connected, 1, "the stub server has to connect");
+        assert!(waited, "the delete never waited for the organization");
+        assert!(deleted, "the organization was not deleted");
+        assert!(forgotten, "the deleted organization kept its hub");
+        assert!(
+            held.upgrade().is_none(),
+            "the deleted organization's servers kept running"
+        );
     }
 }

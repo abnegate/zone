@@ -1,0 +1,93 @@
+name: Manager Image
+
+# Nothing else builds the manager image, so until this existed a wrong package
+# name in its browser libraries reached whoever next built it, and a package
+# that added a system user moved zone off the uid its volumes carry. Building
+# the whole image here would mean fetching every language toolchain it carries,
+# so these check the parts with no other cover: the browser libraries, the
+# package layers that can move zone's uid, and the entrypoint that recovers a
+# volume.
+
+on:
+  pull_request:
+    paths:
+      - 'manager/Dockerfile'
+      - 'manager/docker-entrypoint.sh'
+      - 'manager/browser-packages.txt'
+      - 'manager/browser-libraries.txt'
+      - 'manager/bin/install-browser-libraries.sh'
+      - 'scripts/test-manager-entrypoint.sh'
+      - 'scripts/test-manager-user.sh'
+      - '.github/workflows/manager-image.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'manager/Dockerfile'
+      - 'manager/docker-entrypoint.sh'
+      - 'manager/browser-packages.txt'
+      - 'manager/browser-libraries.txt'
+      - 'manager/bin/install-browser-libraries.sh'
+      - 'scripts/test-manager-entrypoint.sh'
+      - 'scripts/test-manager-user.sh'
+      - '.github/workflows/manager-image.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  browser-libraries:
+    name: Browser Libraries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the base image the manager runtime is built on
+        id: base
+        run: |
+          set -eu
+          image=$(sed -nE 's/^FROM ([^ ]+) AS runtime-base$/\1/p' manager/Dockerfile)
+          if [ -z "$image" ]; then
+            echo "::error::no runtime-base stage found in manager/Dockerfile"
+            exit 1
+          fi
+          echo "Checking against $image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Install the browser libraries and check they resolve
+        env:
+          BASE_IMAGE: ${{ steps.base.outputs.image }}
+        run: |
+          set -eu
+          docker run --rm \
+            --volume "$PWD/manager:/manager:ro" \
+            "$BASE_IMAGE" \
+            sh /manager/bin/install-browser-libraries.sh /manager
+
+  service-user:
+    name: Service User
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the package layers and check zone kept its uid
+        run: sh scripts/test-manager-user.sh
+
+  entrypoint:
+    name: Entrypoint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the entrypoint recovers a volume and stays inside it
+        run: sh scripts/test-manager-entrypoint.sh

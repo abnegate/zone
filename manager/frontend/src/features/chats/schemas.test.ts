@@ -4,11 +4,14 @@ import {
   ActionReceiptSchema,
   ActionTargetSchema,
   ChatProvidersSchema,
+  ChatPullRequestSchema,
   ChatSchema,
+  ChatTasksResponseSchema,
   CreateChatRequestSchema,
   HandoverSchema,
   MessageMetadataSchema,
   MessageSchema,
+  PullRequestStatusSchema,
   WorkspaceChatProvidersSchema,
 } from './schemas';
 import { ACTION_TARGETS } from './types';
@@ -360,5 +363,90 @@ describe('the providers a chat can run on', () => {
     });
     expect(parsed.default.models.map((model) => model.name)).toEqual(['gpt-6-sol', 'gpt-5.5']);
     expect(parsed.providers).toHaveLength(2);
+  });
+});
+
+describe('a pull request status', () => {
+  const status = {
+    title: 'Add widgets',
+    state: 'open',
+    draft: false,
+    additions: 1,
+    deletions: 1,
+    changed_files: 1,
+    checks: 'passing',
+    mergeable: 'clean',
+    auto_merge: { enabled: false, unavailable: null },
+    draft_unavailable: null,
+    observed_at: '2026-11-05T10:00:00Z',
+  };
+
+  it('keeps the review thread counts the server sent', () => {
+    const parsed = PullRequestStatusSchema.parse({ ...status, threads: { open: 2, resolved: 3 } });
+    expect(parsed.threads).toEqual({ open: 2, resolved: 3 });
+  });
+
+  it('reads counts no server could send, or none at all, as unknown', () => {
+    for (const threads of [{ open: -1, resolved: 0 }, { open: 1.5, resolved: 0 }, undefined]) {
+      expect(PullRequestStatusSchema.parse({ ...status, threads }).threads).toBeNull();
+    }
+  });
+});
+
+describe('a chat pull request', () => {
+  const pullRequest = {
+    id: 'pr-1',
+    provider: 'github',
+    owner: 'acme',
+    repo: 'widgets',
+    number: 12,
+    url: 'https://github.com/acme/widgets/pull/12',
+    title: null,
+    dismissed: false,
+    created_at: '2026-11-05T10:00:00Z',
+    status: null,
+    writable: true,
+    credentialed: false,
+  };
+
+  it('keeps every way the server says GitHub is reached', () => {
+    for (const connection of ['credentialed', 'uncredentialed', 'disconnected', 'unavailable']) {
+      expect(ChatPullRequestSchema.parse({ ...pullRequest, connection }).connection).toBe(
+        connection
+      );
+    }
+  });
+
+  it('reads a connection it does not know, or none, as uncredentialed', () => {
+    for (const connection of ['rerouted', undefined]) {
+      expect(ChatPullRequestSchema.parse({ ...pullRequest, connection }).connection).toBe(
+        'uncredentialed'
+      );
+    }
+  });
+});
+
+describe('a chat task', () => {
+  const task = {
+    id: 'task-1',
+    title: 'Fix the build',
+    title_pending: false,
+    is_agentic: true,
+    href: '/tasks?id=task-1',
+    created_at: '2026-11-05T10:00:00Z',
+    updated_at: '2026-11-05T10:00:00Z',
+    run: null,
+    pull_request: null,
+  };
+
+  it('keeps a paused or cancelled task in the panel', () => {
+    const parsed = ChatTasksResponseSchema.parse({
+      tasks: [
+        { ...task, id: 'task-1', status: 'paused' },
+        { ...task, id: 'task-2', status: 'cancelled' },
+      ],
+    });
+
+    expect(parsed.tasks.map((listed) => listed.status)).toEqual(['paused', 'cancelled']);
   });
 });

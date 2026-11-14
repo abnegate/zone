@@ -1,0 +1,543 @@
+{
+  "pages": {
+    "": {
+      "models": [
+        {
+          "_id": "665053471407",
+          "id": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "modelId": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+          "author": "Qwen",
+          "sha": "00000000000000000000000076cde359bc2f5649",
+          "lastModified": "2026-09-01T10:00:00.000Z",
+          "createdAt": "2025-03-01T10:00:00.000Z",
+          "private": false,
+          "downloads": 412331,
+          "likes": 132,
+          "tags": [
+            "gguf",
+            "chat",
+            "text-generation",
+            "en",
+            "base_model:Qwen/Qwen2.5-0.5B-Instruct",
+            "license:apache-2.0",
+            "endpoints_compatible",
+            "region:us",
+            "conversational"
+          ],
+          "library_name": "gguf",
+          "pipeline_tag": "text-generation",
+          "cardData": {
+            "license": "apache-2.0"
+          },
+          "gguf": {
+            "total": 491400032,
+            "architecture": "qwen2",
+            "context_length": 32768,
+            "totalFileSize": 491400032
+          },
+          "siblings": [
+            {
+              "rfilename": "README.md",
+              "size": 5012
+            },
+            {
+              "rfilename": "qwen2.5-0.5b-instruct.gguf",
+              "size": 491400032
+            },
+            {
+              "rfilename": "qwen2.5-0.5b-instruct-full-precision.gguf",
+              "size": 1265620000
+            }
+          ]
+        },
+        {
+          "_id": "665013920298",
+          "id": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+          "modelId": "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+          "author": "bartowski",
+          "sha": "00000000000000000000000014da5c36b9451717",
+          "lastModified": "2026-09-01T10:00:00.000Z",
+          "createdAt": "2025-03-01T10:00:00.000Z",
+          "private": false,
+          "downloads": 268004,
+          "likes": 289,
+          "tags": [
+            "gguf",
+            "facebook",
+            "meta",
+            "pytorch",
+            "llama",
+            "llama-3",
+            "text-generation",
+            "en",
+            "de",
+            "base_model:meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "license:llama3.1",
+            "endpoints_compatible",
+            "region:us",
+            "conversational",
+            "imatrix"
+          ],
+          "library_name": "gguf",
+          "pipeline_tag": "text-generation",
+          "cardData": {
+            "license": "llama3.1"
+          },
+          "gguf": {
+            "total": 4920739232,
+            "architecture": "llama",
+            "context_length": 131072,
+            "totalFileSize": 4920739232
+          }
+        },
+        {
+          "_id": "665093693736",
+          "id": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+          "modelId": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF",
+          "author": "TheBloke",
+          "sha": "00000000000000000000000060238d98a2f82339",
+          "lastModified": "2023-12-11T22:23:01.000Z",
+          "createdAt": "2025-03-01T10:00:00.000Z",
+          "private": false,
+          "downloads": 98310,
+          "likes": 452,
+          "tags": [
+            "transformers",
+            "gguf",
+            "mistral",
+            "finetuned",
+            "text-generation",
+            "arxiv:2310.06825",
+            "base_model:mistralai/Mistral-7B-Instruct-v0.2",
+            "license:apache-2.0",
+            "region:us"
+          ],
+          "library_name": "gguf",
+          "pipeline_tag": "text-generation",
+          "cardData": {
+            "license": "apache-2.0"
+          },
+          "gguf": {
+            "total": 4368439584,
+            "architecture": "llama",
+            "context_length": 32768,
+            "totalFileSize": 4368439584
+          },
+          "siblings": [
+            {
+              "rfilename": "mistral-7b-instruct-v0.2.gguf",
+              "size": 4368439584
+            },
+            {
+              "rfilename": "mistral-7b-instruct-v0.2.imatrix.gguf",
+              "size": 4988000
+            }
+          ]
+        }
+      ],
+      "next": "catalog-page-2"
+    },
+    "catalog-page-2": {
+      "models": [
+        {
+          "_id": "665033270022",
+          "id": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "modelId": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+          "author": "TheBloke",
+          "sha": "0000000000000000000000005e5fdc6cd51304bf",
+          "lastModified": "2023-12-31T13:00:00.000Z",
+          "createdAt": "2025-03-01T10:00:00.000Z",
+          "private": false,
+          "downloads": 61277,
+          "likes": 177,
+          "tags": [
+            "transformers",
+            "gguf",
+            "llama",
+            "en",
+            "dataset:cerebras/SlimPajama-627B",
+            "base_model:TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+            "license:apache-2.0",
+            "region:us"
+          ],
+          "library_name": "gguf",
+          "cardData": {
+            "license": "apache-2.0"
+          },
+          "gguf": {
+            "total": 668788096,
+            "architecture": "llama",
+            "context_length": 2048,
+            "totalFileSize": 668788096
+          },
+          "siblings": [
+            {
+              "rfilename": "tinyllama-1.1b-chat-v1.0.gguf",
+              "size": 668788096
+            }
+          ]
+        },
+        {
+          "_id": "665074292910",
+          "id": "microsoft/Phi-3-mini-4k-instruct-gguf",
+          "modelId": "microsoft/Phi-3-mini-4k-instruct-gguf",
+          "author": "microsoft",
+          "sha": "0000000000000000000000001a3ec27c73a63054",
+          "lastModified": "2026-09-01T10:00:00.000Z",
+          "createdAt": "2025-03-01T10:00:00.000Z",
+          "private": false,
+          "downloads": 54210,
+          "likes": 495,
+          "tags": [
+            "gguf",
+            "nlp",
+            "code",
+            "text-generation",
+            "en",
+            "license:mit",
+            "region:us",
+            "conversational"
+          ],
+          "library_name": "gguf",
+          "pipeline_tag": "text-generation",
+          "cardData": {
+            "license": "mit"
+          },
+          "gguf": {
+            "total": 2393231072,
+            "architecture": "phi3",
+            "context_length": 4096,
+            "totalFileSize": 2393231072
+          },
+          "siblings": [
+            {
+              "rfilename": "Phi-3-mini-4k-instruct-q4.gguf",
+              "size": 2393231072
+            },
+            {
+              "rfilename": "Phi-3-mini-4k-instruct-fp16.gguf",
+              "size": 7643295936
+            }
+          ]
+        },
+        {
+          "_id": "665026430855",
+          "id": "google/gemma-2-2b-it-GGUF",
+          "modelId": "google/gemma-2-2b-it-GGUF",
+          "author": "google",
+          "sha": "0000000000000000000000007ba8a34be191c3bb",
+          "lastModified": "2026-09-01T10:00:00.000Z",
+          "createdAt": "2025-03-01T10:00:00.000Z",
+          "private": false,
+          "downloads": 33005,
+          "likes": 140,
+          "tags": [
+            "transformers",
+            "gguf",
+            "conversational",
+            "text-generation",
+            "base_model:google/gemma-2-2b-it",
+            "license:gemma",
+            "region:us"
+          ],
+          "library_name": "gguf",
+          "pipeline_tag": "text-generation",
+          "cardData": {
+            "license": "gemma"
+          },
+          "gguf": {
+            "total": 2778000000,
+            "architecture": "gemma2",
+            "context_length": 8192,
+            "totalFileSize": 2778000000
+          },
+          "siblings": [
+            {
+              "rfilename": "2b_it_v2.gguf",
+              "size": 10460000000
+            }
+          ]
+        }
+      ],
+      "next": "catalog-page-3"
+    },
+    "catalog-page-3": {
+      "models": [
+        {
+          "_id": "665054813671",
+          "id": "unsloth/Llama-3.2-3B-Instruct-GGUF",
+          "modelId": "unsloth/Llama-3.2-3B-Instruct-GGUF",
+          "author": "unsloth",
+          "sha": "0000000000000000000000003cd70760bd9613e4",
+          "lastModified": "2026-09-01T10:00:00.000Z",
+          "createdAt": "2025-03-01T10:00:00.000Z",
+          "private": false,
+          "downloads": 20441,
+          "likes": 96,
+          "tags": [
+            "transformers",
+            "gguf",
+            "llama",
+            "llama-3",
+            "meta",
+            "facebook",
+            "unsloth",
+            "image-text-to-text",
+            "en"
+          ],
+          "library_name": "gguf",
+          "pipeline_tag": "image-text-to-text",
+          "cardData": {
+            "license": "llama3.2"
+          },
+          "gguf": {
+            "total": 2019377440,
+            "architecture": "llama",
+            "context_length": 131072,
+            "totalFileSize": 2019377440
+          },
+          "siblings": [
+            {
+              "rfilename": "Llama-3.2-3B-Instruct.gguf",
+              "size": 2019377440
+            },
+            {
+              "rfilename": "mmproj-model.gguf",
+              "size": 860000000
+            }
+          ]
+        },
+        {
+          "_id": "665036009145",
+          "id": "Qwen/Qwen2.5-72B-Instruct-GGUF",
+          "modelId": "Qwen/Qwen2.5-72B-Instruct-GGUF",
+          "author": "Qwen",
+          "sha": "000000000000000000000000587232e34056ecea",
+          "lastModified": "2026-09-01T10:00:00.000Z",
+          "createdAt": "2025-03-01T10:00:00.000Z",
+          "private": false,
+          "downloads": 8120,
+          "likes": 64,
+          "tags": [
+            "gguf",
+            "chat",
+            "text-generation",
+            "en",
+            "license:other",
+            "region:us",
+            "conversational"
+          ],
+          "library_name": "gguf",
+          "pipeline_tag": "text-generation",
+          "cardData": {
+            "license": "other"
+          },
+          "gguf": {
+            "total": 47415710080,
+            "architecture": "qwen2",
+            "context_length": 32768,
+            "totalFileSize": 47415710080
+          },
+          "siblings": [
+            {
+              "rfilename": "qwen2.5-72b-instruct-00001-of-00002.gguf",
+              "size": 23700000000
+            },
+            {
+              "rfilename": "qwen2.5-72b-instruct-00002-of-00002.gguf",
+              "size": 23715710080
+            }
+          ]
+        }
+      ],
+      "next": null
+    }
+  },
+  "adapters": {
+    "black-forest-labs/FLUX.1-dev": [
+      {
+        "_id": "665092927810",
+        "id": "XLabs-AI/flux-RealismLora",
+        "modelId": "XLabs-AI/flux-RealismLora",
+        "author": "XLabs-AI",
+        "sha": "0000000000000000000000004670ef961b8ff3fc",
+        "lastModified": "2026-09-01T10:00:00.000Z",
+        "createdAt": "2025-03-01T10:00:00.000Z",
+        "private": false,
+        "downloads": 18220,
+        "likes": 1103,
+        "tags": [
+          "diffusers",
+          "lora",
+          "Stable Diffusion",
+          "image-generation",
+          "Flux",
+          "text-to-image",
+          "en",
+          "base_model:black-forest-labs/FLUX.1-dev",
+          "base_model:adapter:black-forest-labs/FLUX.1-dev",
+          "license:other",
+          "region:us"
+        ],
+        "library_name": "diffusers",
+        "pipeline_tag": "text-to-image",
+        "cardData": {
+          "license": "other",
+          "base_model": "black-forest-labs/FLUX.1-dev"
+        },
+        "siblings": [
+          {
+            "rfilename": "README.md",
+            "size": 3200
+          },
+          {
+            "rfilename": "lora.safetensors",
+            "size": 22416552
+          },
+          {
+            "rfilename": "lora_comfy.safetensors",
+            "size": 22417000
+          }
+        ]
+      },
+      {
+        "_id": "665029836295",
+        "id": "city96/FLUX.1-dev-gguf",
+        "modelId": "city96/FLUX.1-dev-gguf",
+        "author": "city96",
+        "sha": "00000000000000000000000004d2310204722e59",
+        "lastModified": "2026-09-01T10:00:00.000Z",
+        "createdAt": "2025-03-01T10:00:00.000Z",
+        "private": false,
+        "downloads": 41870,
+        "likes": 1012,
+        "tags": [
+          "gguf",
+          "text-to-image",
+          "image-generation",
+          "flux",
+          "base_model:black-forest-labs/FLUX.1-dev",
+          "base_model:adapter:black-forest-labs/FLUX.1-dev",
+          "license:other",
+          "region:us"
+        ],
+        "library_name": "gguf",
+        "pipeline_tag": "text-to-image",
+        "cardData": {
+          "license": "other"
+        },
+        "gguf": {
+          "total": 12700000000,
+          "architecture": "flux",
+          "context_length": null,
+          "totalFileSize": 12700000000
+        },
+        "siblings": [
+          {
+            "rfilename": "flux1-dev.gguf",
+            "size": 12700000000
+          }
+        ]
+      },
+      {
+        "_id": "665020716311",
+        "id": "someone/sdxl-pixel-art",
+        "modelId": "someone/sdxl-pixel-art",
+        "author": "someone",
+        "sha": "00000000000000000000000016bfd212492a9df2",
+        "lastModified": "2026-09-01T10:00:00.000Z",
+        "createdAt": "2025-03-01T10:00:00.000Z",
+        "private": false,
+        "downloads": 3402,
+        "likes": 51,
+        "tags": [
+          "diffusers",
+          "lora",
+          "text-to-image",
+          "base_model:adapter:stabilityai/stable-diffusion-xl-base-1.0"
+        ],
+        "library_name": "diffusers",
+        "pipeline_tag": "text-to-image",
+        "siblings": [
+          {
+            "rfilename": "pixel-art.safetensors",
+            "size": 170543052
+          }
+        ]
+      },
+      {
+        "_id": "665082858090",
+        "id": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+        "modelId": "Shakker-Labs/FLUX.1-dev-LoRA-AntiBlur",
+        "author": "Shakker-Labs",
+        "sha": "00000000000000000000000056855bc0ede7010c",
+        "lastModified": "2026-09-01T10:00:00.000Z",
+        "createdAt": "2025-03-01T10:00:00.000Z",
+        "private": false,
+        "downloads": 9870,
+        "likes": 412,
+        "tags": [
+          "diffusers",
+          "text-to-image",
+          "stable-diffusion",
+          "image-generation",
+          "flux",
+          "safetensors",
+          "en",
+          "license:other",
+          "region:us"
+        ],
+        "library_name": "diffusers",
+        "pipeline_tag": "text-to-image",
+        "cardData": {
+          "license": "other",
+          "base_model": [
+            "black-forest-labs/FLUX.1-dev"
+          ]
+        },
+        "siblings": [
+          {
+            "rfilename": "FLUX-dev-lora-AntiBlur.safetensors",
+            "size": 685290000
+          }
+        ]
+      }
+    ],
+    "black-forest-labs/FLUX.1-schnell": [
+      {
+        "_id": "665024974128",
+        "id": "hugovntr/flux-schnell-realism",
+        "modelId": "hugovntr/flux-schnell-realism",
+        "author": "hugovntr",
+        "sha": "0000000000000000000000005d79e5a57f81c3b9",
+        "lastModified": "2026-09-01T10:00:00.000Z",
+        "createdAt": "2025-03-01T10:00:00.000Z",
+        "private": false,
+        "downloads": 2260,
+        "likes": 46,
+        "tags": [
+          "diffusers",
+          "flux",
+          "text-to-image",
+          "lora",
+          "base_model:black-forest-labs/FLUX.1-schnell",
+          "base_model:adapter:black-forest-labs/FLUX.1-schnell",
+          "license:apache-2.0",
+          "region:us"
+        ],
+        "library_name": "diffusers",
+        "pipeline_tag": "text-to-image",
+        "cardData": {
+          "license": "apache-2.0",
+          "base_model": "black-forest-labs/FLUX.1-schnell"
+        },
+        "siblings": [
+          {
+            "rfilename": "schnell-realism_v2.3.safetensors",
+            "size": 171969408
+          }
+        ]
+      }
+    ]
+  }
+}

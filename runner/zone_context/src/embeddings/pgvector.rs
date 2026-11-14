@@ -7,7 +7,10 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::content::{ContentChunk, ContentItem};
+use crate::content::ContentChunk;
+use crate::content::ContentItem;
+use crate::content::Retention;
+use crate::content::UriNamespace;
 use crate::error::{ContextError, Result};
 
 use super::{Embedding, SearchFilters, SearchResult, VectorStore};
@@ -39,6 +42,8 @@ pub fn align_vector(vector: &[f32]) -> Result<Vec<f32>> {
 
 /// Maximum search limit to prevent excessive resource usage
 const MAX_SEARCH_LIMIT: usize = 1000;
+
+const LIKE_ESCAPE: char = '\\';
 
 /// PostgreSQL vector store using pgvector extension
 pub struct PgVectorStore {
@@ -270,6 +275,16 @@ impl PgVectorStore {
         Ok(())
     }
 
+    /// Drop the source's indexed files that `retention` does not keep
+    pub async fn retain(&self, source_id: Uuid, retention: &Retention) -> Result<usize> {
+        match retention {
+            Retention::Exact(uris) => self.retain_content_uris(source_id, uris).await,
+            Retention::Namespace(namespace) => {
+                self.retain_content_namespace(source_id, namespace).await
+            }
+        }
+    }
+
     /// Drop indexed files that were not present in the latest successful fetch
     pub async fn retain_content_uris(&self, source_id: Uuid, uris: &[String]) -> Result<usize> {
         let result = if uris.is_empty() {
@@ -285,6 +300,39 @@ impl PgVectorStore {
                 .await?
         };
         Ok(result.rows_affected() as usize)
+    }
+
+    /// Drop indexed files outside `namespace`, keeping every file inside it
+    pub async fn retain_content_namespace(
+        &self,
+        source_id: Uuid,
+        namespace: &UriNamespace,
+    ) -> Result<usize> {
+        let pattern = format!(
+            "{}%{}",
+            Self::like_literal(&namespace.prefix),
+            Self::like_literal(&namespace.suffix)
+        );
+        let result = sqlx::query(
+            "DELETE FROM content_items WHERE source_id = $1 AND uri NOT LIKE $2 ESCAPE $3",
+        )
+        .bind(source_id)
+        .bind(pattern)
+        .bind(LIKE_ESCAPE.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    fn like_literal(text: &str) -> String {
+        let mut literal = String::with_capacity(text.len());
+        for character in text.chars() {
+            if matches!(character, LIKE_ESCAPE | '%' | '_') {
+                literal.push(LIKE_ESCAPE);
+            }
+            literal.push(character);
+        }
+        literal
     }
 
     /// Blob SHAs and embedding coverage for incremental Git fetches
@@ -660,6 +708,18 @@ impl VectorStore for PgVectorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_like_literal_matches_its_wildcards_and_escape_only_as_themselves() {
+        assert_eq!(
+            PgVectorStore::like_literal("plain/text@main"),
+            "plain/text@main"
+        );
+        assert_eq!(
+            PgVectorStore::like_literal(r"50%_off\branch"),
+            r"50\%\_off\\branch"
+        );
+    }
 
     #[test]
     fn test_vector_to_pg_string() {

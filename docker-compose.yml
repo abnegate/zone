@@ -311,7 +311,6 @@ services:
       - LITELLM_HOST=http://litellm:4000
       - ZONE_CHAT_ROUNDS=${ZONE_CHAT_ROUNDS:-64}
       - ZONE_CHAT_CALLS=${ZONE_CHAT_CALLS:-256}
-      - ZONE_CHAT_TIMEOUT_SECONDS=${ZONE_CHAT_TIMEOUT_SECONDS:-1800}
       - ZONE_CHAT_OUTPUT_TOKENS=${ZONE_CHAT_OUTPUT_TOKENS:-4096}
       - ZONE_CHAT_CONTEXT_TOKENS=${ZONE_CHAT_CONTEXT_TOKENS:-32768}
       - ZONE_CHAT_AGENT_CWD=${ZONE_CHAT_AGENT_CWD:-/app/workspace}
@@ -327,6 +326,7 @@ services:
       - ZONE_CLAUDE_API_URL=${ZONE_CLAUDE_API_URL:-https://api.anthropic.com}
       - ZONE_CODEX_API_URL=${ZONE_CODEX_API_URL:-https://chatgpt.com}
       - ZONE_AGENT_USAGE_TTL_SECONDS=${ZONE_AGENT_USAGE_TTL_SECONDS:-60}
+      - ZONE_AGENT_NICENESS=${ZONE_AGENT_NICENESS:-}
       - ZONE_ENDPOINT_HOSTS=${ZONE_ENDPOINT_HOSTS:-}
       # claude.com sends a browser on this machine back to
       # http://localhost:${ZONE_AGENT_CALLBACK_PORT}/callback with a sign-in's
@@ -370,6 +370,10 @@ services:
       - SMTP_FROM=${SMTP_FROM:-}
       - SMTP_FROM_NAME=${SMTP_FROM_NAME:-Zone}
       - DOMAIN_HOST_WEBUI=${DOMAIN_HOST_WEBUI}
+      # The origin GitHub and mailed links send a browser back to. Traefik
+      # always answers http on this host, and upgrades it itself when
+      # SECURITY_HTTP_REDIRECT is on; https needs a certificate first.
+      - APP_BASE_URL=${APP_BASE_URL:-http://manager.${DOMAIN_HOST_WEBUI}}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
       - LITELLM_KEY=${SECURITY_LITELLM_MASTER_KEY}
       - SECURITY_LITELLM_MASTER_KEY=${SECURITY_LITELLM_MASTER_KEY}
@@ -401,6 +405,7 @@ services:
       - MODEL_SEARCH_PROXY_URL=${MODEL_SEARCH_PROXY_URL:-}
       - GITHUB_API_URL=${GITHUB_API_URL:-}
       - GITHUB_API_ALLOW_HTTP=${GITHUB_API_ALLOW_HTTP:-false}
+      - GITHUB_WEB_URL=${GITHUB_WEB_URL:-}
       - TOOL_RUNNER_PROXY_URL=${TOOL_RUNNER_PROXY_URL:-}
       - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_BASE_URL=${COMFYUI_BASE_URL:-http://host.docker.internal:8188}
@@ -438,7 +443,9 @@ services:
       - ZONE_VISION_MODEL=${ZONE_VISION_MODEL:-}
       - COMFYUI_ARTIFACT_ROOT=${COMFYUI_ARTIFACT_ROOT:-/app/artifacts}
       - ZONE_MCP_ENABLED=${ZONE_MCP_ENABLED:-true}
+      - ZONE_MCP_AUTO_CONNECT=${ZONE_MCP_AUTO_CONNECT:-true}
       - ZONE_MCP_AUTO_MAGENTS=${ZONE_MCP_AUTO_MAGENTS:-true}
+      - ZONE_MCP_COMMANDS=${ZONE_MCP_COMMANDS:-false}
       - ZONE_MCP_CONFIG=${ZONE_MCP_CONFIG:-}
       - ZONE_MCP_SERVERS=${ZONE_MCP_SERVERS:-}
       - MONITORING_ENABLED=${MONITORING_ENABLED:-true}

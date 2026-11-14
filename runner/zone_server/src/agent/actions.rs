@@ -1,18 +1,23 @@
 //! Authenticated workspace mutations and durable reminders.
 use super::tools::WorkspaceScope;
-use crate::db::{actions, reminders};
+use crate::db::{actions, reminders, tasks};
 use crate::workers::titles;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::{Arc, LazyLock};
 use uuid::Uuid;
-use zone_core::tools::{
-    REASON_PARAM, Tier, Tool, ToolContext, ToolError, ToolRegistry, ToolResult, WaitFor, excerpt,
-    reason_property,
-};
 
-use super::PREVIEW_BODY_CHARS;
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::tool::REASON_PARAMETER;
+use abnegate_agent::tool::Rendering;
+use abnegate_agent::tool::Tier;
+use abnegate_agent::tool::WaitFor;
+use abnegate_agent::tool::reason_property;
 
 /// What `create_reminder` offers and what it refuses, in the tool's own words.
 ///
@@ -74,6 +79,17 @@ pub(crate) const FROM_RUN: &str = "from inside a run";
 pub(crate) const TAIL_TASK_LOG_DESCRIPTION: &str = "Fetch new runner log lines since a previous log ID. Read a run's progress with it once rather than calling it again: from a chat, find out when the run finishes by waiting for it with wait_for kind=task_run; from inside a run, finish and let whoever started it coordinate.";
 
 const GENERATED_TITLE_HINT: &str = "Omit to have one generated from the description.";
+
+/// The schema of a task's priority, wherever a model sets one.
+pub(crate) fn priority_property() -> Value {
+    let (least, most) = (*tasks::PRIORITIES.start(), *tasks::PRIORITIES.end());
+    json!({
+        "type": "integer",
+        "minimum": least,
+        "maximum": most,
+        "description": format!("{most} is the most urgent, {least} the least."),
+    })
+}
 
 /// Where each text an action hands the model sends it to wait_for: the end of
 /// every instruction in it to call the tool.
@@ -281,8 +297,8 @@ impl Tool for WorkspaceAction {
         }
     }
 
-    fn preview(&self, params: &Value) -> Option<String> {
-        let content = excerpt(params["content"].as_str()?, PREVIEW_BODY_CHARS);
+    fn preview(&self, params: &Value) -> Option<Rendering> {
+        let content = params["content"].as_str()?;
         match self.action {
             Action::SendMessage => {
                 let mentioned = params["mentions"].as_array().map_or(0, Vec::len);
@@ -290,15 +306,15 @@ impl Tool for WorkspaceAction {
                     0 => String::new(),
                     named => format!(", mentioning {named}"),
                 };
-                Some(format!(
+                Some(Rendering::from(format!(
                     "Post to chat {}{mentions}: \"{content}\"",
                     params["chat_id"].as_str().unwrap_or("unnamed")
-                ))
+                )))
             }
-            Action::CreateReminder => Some(format!(
+            Action::CreateReminder => Some(Rendering::from(format!(
                 "Message this chat at {}: \"{content}\"",
                 params["due_at"].as_str().unwrap_or("an unstated time")
-            )),
+            ))),
             _ => None,
         }
     }
@@ -306,7 +322,7 @@ impl Tool for WorkspaceAction {
         let identifier = json!({"type":"string","format":"uuid"});
         let (properties, required) = match self.action {
             Action::ListTasks => (
-                json!({"status":{"type":"string","enum":["created","queued","in_progress","review","complete","blocked"]}}),
+                json!({"status":{"type":"string","enum":tasks::STATUSES}}),
                 json!([]),
             ),
             Action::CreateTask => (
@@ -314,12 +330,12 @@ impl Tool for WorkspaceAction {
                 json!([]),
             ),
             Action::UpdateTask => (
-                json!({"task_id":identifier,"title":{"type":"string","minLength":1},"description":{"type":"string"},"status":{"type":"string","enum":["created","in_progress","review","complete","blocked"]},"priority":{"type":"integer","minimum":1,"maximum":5,"description":"1 is the most urgent, 5 the least."},"assignee_id":{"type":["string","null"],"format":"uuid"}}),
+                json!({"task_id":identifier,"title":{"type":"string","minLength":1},"description":{"type":"string"},"status":{"type":"string","enum":actions::Status::ALL.map(actions::Status::as_str)},"priority":priority_property(),"assignee_id":{"type":["string","null"],"format":"uuid"}}),
                 json!(["task_id"]),
             ),
             Action::SendMessage => (
-                json!({"chat_id":identifier,"content":{"type":"string","minLength":1},"mentions":{"type":"array","items":identifier},REASON_PARAM: reason_property()}),
-                json!(["chat_id", "content", REASON_PARAM]),
+                json!({"chat_id":identifier,"content":{"type":"string","minLength":1},"mentions":{"type":"array","items":identifier},REASON_PARAMETER: reason_property()}),
+                json!(["chat_id", "content", REASON_PARAMETER]),
             ),
             Action::CreateReminder => (
                 json!({
@@ -340,7 +356,7 @@ impl Tool for WorkspaceAction {
                     "acceptance_criteria":{"type":"string"},
                     "project_ids":{"type":"array","items":identifier},
                     "source_id":{"type":"string","format":"uuid"},
-                    "priority":{"type":"integer","minimum":1,"maximum":5}
+                    "priority":priority_property()
                 }),
                 json!(["description"]),
             ),
@@ -378,8 +394,8 @@ impl WorkspaceAction {
     /// `offered` for a turn that has wait_for, `withheld` for one that does not.
     fn told(&self, offered: &'static str, withheld: &'static str) -> &'static str {
         match self.wait_for {
-            WaitFor::Offered => offered,
             WaitFor::Withheld => withheld,
+            _ => offered,
         }
     }
 
@@ -402,6 +418,7 @@ impl WorkspaceAction {
                     scope.workspace_id,
                     scope.user_id,
                     scope.chat_id,
+                    scope.origin,
                     decode(params)?,
                 )
                 .await?;
@@ -462,6 +479,7 @@ impl WorkspaceAction {
                     scope.workspace_id,
                     scope.user_id,
                     scope.chat_id,
+                    scope.origin,
                     decode(params)?,
                 )
                 .await?;
@@ -516,7 +534,7 @@ mod tests {
     use super::*;
     use crate::agent::wait::WAIT_FOR;
     use crate::state::AppState;
-    use zone_core::tools::REASON_DESCRIPTION;
+    use abnegate_agent::tool::REASON_DESCRIPTION;
 
     const WHY: &str = "The user asked for the team to be told.";
 
@@ -528,6 +546,7 @@ mod tests {
                 chat_id: Some(Uuid::new_v4()),
                 user_id: Uuid::new_v4(),
                 offline: false,
+                origin: crate::db::tasks::Origin::Member,
             },
             action,
             wait_for: WaitFor::Offered,
@@ -587,21 +606,21 @@ mod tests {
     async fn send_message_asks_for_a_reason_the_message_accepts() {
         let schema = tool(Action::SendMessage).parameters_schema();
         assert_eq!(
-            schema["properties"][REASON_PARAM]["description"],
+            schema["properties"][REASON_PARAMETER]["description"],
             REASON_DESCRIPTION
         );
         assert!(
             schema["required"]
                 .as_array()
                 .expect("required is a list")
-                .contains(&json!(REASON_PARAM)),
+                .contains(&json!(REASON_PARAMETER)),
             "reason must be advertised as required: {schema}"
         );
         let message: actions::Message = serde_json::from_value(json!({
             "chat_id": Uuid::new_v4(),
             "content": "Shipped",
             "mentions": [],
-            REASON_PARAM: WHY,
+            REASON_PARAMETER: WHY,
         }))
         .expect("deny_unknown_fields must accept every property the schema advertises");
         assert_eq!(message.reason.as_deref(), Some(WHY));
@@ -618,6 +637,53 @@ mod tests {
             serde_json::from_value(json!({"task_id": Uuid::new_v4(), "priority": 2}))
                 .expect("deny_unknown_fields must accept every property the schema advertises");
         assert_eq!(update.priority, Some(2));
+    }
+
+    #[tokio::test]
+    async fn every_task_tool_says_the_highest_priority_is_the_most_urgent() {
+        for action in [Action::UpdateTask, Action::StartTask] {
+            let schema = tool(action).parameters_schema();
+            assert_eq!(
+                schema["properties"]["priority"]["description"],
+                "5 is the most urgent, 1 the least.",
+                "{schema}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_task_tools_offer_paused_and_cancelled() {
+        let listed = tool(Action::ListTasks).parameters_schema();
+        let updated = tool(Action::UpdateTask).parameters_schema();
+        for schema in [&listed, &updated] {
+            let offered = schema["properties"]["status"]["enum"]
+                .as_array()
+                .expect("status is an enumeration");
+            assert!(offered.contains(&json!(tasks::PAUSED)), "{schema}");
+            assert!(offered.contains(&json!(tasks::CANCELLED)), "{schema}");
+        }
+        assert!(
+            listed["properties"]["status"]["enum"]
+                .as_array()
+                .expect("status is an enumeration")
+                .contains(&json!(tasks::QUEUED)),
+            "{listed}"
+        );
+        assert!(
+            !updated["properties"]["status"]["enum"]
+                .as_array()
+                .expect("status is an enumeration")
+                .contains(&json!(tasks::QUEUED)),
+            "only a run queues a task: {updated}"
+        );
+        for offered in updated["properties"]["status"]["enum"]
+            .as_array()
+            .expect("status is an enumeration")
+        {
+            let update: Result<actions::Update, _> =
+                serde_json::from_value(json!({"task_id": Uuid::new_v4(), "status": offered}));
+            assert!(update.is_ok(), "{offered} is advertised and must decode");
+        }
     }
 
     #[tokio::test]
@@ -682,7 +748,7 @@ mod tests {
             let tool = tool(action);
             let schema = tool.parameters_schema();
             assert!(
-                schema["properties"].get(REASON_PARAM).is_none(),
+                schema["properties"].get(REASON_PARAMETER).is_none(),
                 "{} must not ask for a reason: {schema}",
                 tool.name()
             );

@@ -464,16 +464,36 @@ pub async fn list_user_workspaces(
         .collect())
 }
 
-/// List workspaces in a specific organization that a user is a member of
+/// A workspace the user is an active member of, with their role in it.
+#[derive(Debug, Clone)]
+pub struct UserWorkspace {
+    pub workspace: super::workspaces::WorkspaceRow,
+    pub role: WorkspaceRole,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct UserWorkspaceRow {
+    id: Uuid,
+    organization_id: Uuid,
+    name: String,
+    slug: String,
+    description: Option<String>,
+    is_active: Option<bool>,
+    created_at: Option<chrono::NaiveDateTime>,
+    updated_at: Option<chrono::NaiveDateTime>,
+    role: String,
+}
+
+/// List the workspaces of an organization a user is an active member of, with their role.
 pub async fn list_user_workspaces_in_org(
     pool: &PgPool,
     user_id: Uuid,
     organization_id: Uuid,
-) -> DbResult<Vec<super::workspaces::WorkspaceRow>> {
-    let rows = sqlx::query!(
+) -> DbResult<Vec<UserWorkspace>> {
+    let rows: Vec<UserWorkspaceRow> = sqlx::query_as(
         r#"
         SELECT w.id, w.organization_id, w.name, w.slug, w.description,
-               w.is_active, w.created_at, w.updated_at
+               w.is_active, w.created_at, w.updated_at, wm.role
         FROM workspaces w
         INNER JOIN workspace_members wm ON w.id = wm.workspace_id
         WHERE wm.user_id = $1
@@ -481,23 +501,26 @@ pub async fn list_user_workspaces_in_org(
           AND wm.is_active = TRUE
         ORDER BY w.created_at DESC
         "#,
-        user_id,
-        organization_id
     )
+    .bind(user_id)
+    .bind(organization_id)
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|r| super::workspaces::WorkspaceRow {
-            id: r.id,
-            organization_id: r.organization_id,
-            name: r.name,
-            slug: r.slug,
-            description: r.description,
-            is_active: r.is_active,
-            created_at: r.created_at,
-            updated_at: r.updated_at,
+        .map(|row| UserWorkspace {
+            workspace: super::workspaces::WorkspaceRow {
+                id: row.id,
+                organization_id: row.organization_id,
+                name: row.name,
+                slug: row.slug,
+                description: row.description,
+                is_active: row.is_active,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            },
+            role: row.role.parse().unwrap_or(WorkspaceRole::Viewer),
         })
         .collect())
 }

@@ -758,8 +758,37 @@ describe('Client', () => {
 
       expect(mockFetch).toHaveBeenCalledWith(
         '/api/projects/1/github',
-        expect.objectContaining({ method: 'PUT' })
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({ repo_url: 'https://github.com/test' }),
+        })
       );
+    });
+
+    it('linkGitHub sends the GitHub installation when one is given', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          project: {
+            ...mockProject,
+            github_repo_url: 'https://github.com/test',
+            github_installation_id: 'installation-1',
+            github_installation_status: 'active',
+            github_account_login: 'acme',
+          },
+        }),
+      });
+
+      const project = await client.linkGitHub('1', 'https://github.com/test', 'installation-1');
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        '/api/projects/1/github',
+        expect.objectContaining({
+          method: 'POST',
+          body: '{"repo_url":"https://github.com/test","github_installation_id":"installation-1"}',
+        })
+      );
+      expect(project.github_installation_status).toBe('active');
     });
 
     it('unlinkGitHub unlinks GitHub repo', async () => {
@@ -838,18 +867,27 @@ describe('Client', () => {
       expect(result).toHaveLength(1);
     });
 
-    it('getTasks with filters', async () => {
+    it('getTasks filters by project and by nothing else', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ tasks: [] }),
       });
 
-      await client.getTasks(testWorkspaceId, 'project-1', 'pending');
+      await client.getTasks(testWorkspaceId, 'project 1');
 
       const url = mockFetch.mock.calls[0][0];
-      expect(url).toContain(`/api/workspaces/${testWorkspaceId}/tasks`);
-      expect(url).toContain('project_id=project-1');
-      expect(url).toContain('status=pending');
+      expect(url).toEndWith(`/api/workspaces/${testWorkspaceId}/tasks?project_id=project+1`);
+    });
+
+    it('getTasks asks for every task without a query when no project is given', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ tasks: [] }),
+      });
+
+      await client.getTasks(testWorkspaceId);
+
+      expect(mockFetch.mock.calls[0][0]).toEndWith(`/api/workspaces/${testWorkspaceId}/tasks`);
     });
 
     it('createTask creates task', async () => {
@@ -1100,6 +1138,17 @@ describe('Client', () => {
         '/api/organizations/org-1/workspaces',
         expect.any(Object)
       );
+    });
+
+    it("getWorkspaces keeps the caller's role in each workspace", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ workspaces: [{ ...mockWorkspace, role: 'viewer' }] }),
+      });
+
+      const [workspace] = await client.getWorkspaces('org-1');
+
+      expect(workspace.role).toBe('viewer');
     });
 
     it('createWorkspace creates workspace', async () => {
@@ -1561,6 +1610,7 @@ describe('Client', () => {
     const mockWorkspaceAiSettings = {
       ...mockAiSettings,
       overrides: true,
+      inherits_provider: false,
       organization_keys: { litellm: false, openai: false, anthropic: false },
     };
 
@@ -2177,10 +2227,6 @@ describe('Client', () => {
     });
   });
 
-  // =============================================================================
-  // Organization Member Management Tests
-  // =============================================================================
-
   describe('Organization Member Management', () => {
     const orgId = 'org-123';
     const userId = 'user-456';
@@ -2686,10 +2732,6 @@ describe('Client', () => {
     });
   });
 
-  // =============================================================================
-  // Workspace Member Management Tests
-  // =============================================================================
-
   describe('Workspace Member Management', () => {
     const orgId = 'org-123';
     const workspaceId = 'ws-456';
@@ -3154,10 +3196,6 @@ describe('Client', () => {
     });
   });
 
-  // =============================================================================
-  // Invitation Management Tests
-  // =============================================================================
-
   describe('Invitation Management', () => {
     const orgId = 'org-123';
     const invitationId = 'inv-456';
@@ -3596,10 +3634,6 @@ describe('Client', () => {
       });
     });
   });
-
-  // =============================================================================
-  // Billing & Usage API Tests
-  // =============================================================================
 
   describe('Billing & Usage API', () => {
     const orgId = 'org-123';

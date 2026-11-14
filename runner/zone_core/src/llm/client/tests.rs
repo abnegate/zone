@@ -1,15 +1,35 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
+use abnegate_agent_cli::{
+    AgentEvent, AgentStream, CREDITS_REQUIRED, CUT_SHORT, Output, STDERR_HEADING, StepStatus,
+    Subagent, SubagentStatus, SubagentStep,
+};
+use abnegate_llm::finish_reason::STOP;
 use abnegate_llm::{
     ChatResponse, ChatStreamChunk, Credential, Effort, Error, Limit, LlmConfig, Message,
-    ProviderError, RequestOptions, ToolCall, ToolDefinition, Trust, Usage, Window,
+    ProviderError, RequestOptions, ToolCall, ToolDefinition, Trust, Usage, Window, WindowKind,
 };
 use futures::{Stream, StreamExt};
 use tempfile::TempDir;
 
 use super::*;
-use crate::llm::provider::{STDERR_HEADING, UNFUNDED};
+use crate::llm::cli::{SignIn, settings};
+use crate::llm::window::FIVE_HOURS;
+use stand_in::StandIn;
+
+mod buffered;
+mod environment;
+mod images;
+mod isolation;
+mod logs;
+mod models;
+mod occupancy;
+mod stand_in;
+mod stream;
+mod toolset;
+mod wording;
 
 const COMPLETION: &str = r#"{
     "id": "completion",
@@ -1013,7 +1033,7 @@ mod failure {
         for message in [
             SESSION_LIMIT.to_string(),
             format!(
-                "{UNFUNDED}: Fable 5.1 requires usage credits. Switch to another model to continue."
+                "{CREDITS_REQUIRED}: Fable 5.1 requires usage credits. Switch to another model to continue."
             ),
             format!("You have hit your usage limit.{STDERR_HEADING}warning: the plan is spent"),
         ] {
@@ -1063,7 +1083,7 @@ fn fake(directory: &TempDir, script: &str) -> PathBuf {
 }
 
 fn agent_client(executable: PathBuf) -> LlmClient {
-    let settings = CliSettings::default()
+    let settings = settings()
         .with_executable(executable)
         .with_timeout(Duration::from_secs(20));
     LlmClient::new(LlmConfig::default()).with_backend(LlmBackend::cli(AgentKind::Claude, settings))
@@ -1071,6 +1091,14 @@ fn agent_client(executable: PathBuf) -> LlmClient {
 
 fn agent_events(events: Vec<Result<AgentEvent, ProviderError>>) -> AgentStream {
     Box::pin(futures::stream::iter(events))
+}
+
+fn turn(reported: Reported) -> Turn {
+    Turn::new(AgentKind::Claude, SignIn::Instance, None, None, reported)
+}
+
+fn occupancy() -> Occupancy {
+    Occupancy::reported(200_000, Some(16_632)).expect("a reported window")
 }
 
 async fn collected(
@@ -1178,8 +1206,7 @@ fn a_client_never_prints_its_key() {
     let client = client
         .with_backend(LlmBackend::cli(
             AgentKind::Claude,
-            CliSettings::default()
-                .with_credential(Credential::key("ANTHROPIC_API_KEY", CREDENTIAL)),
+            settings().with_credential(Credential::key("ANTHROPIC_API_KEY", CREDENTIAL)),
         ))
         .with_toolset(
             Toolset::new("http://127.0.0.1:8421/mcp", TOKEN, ["read_file"]),
@@ -1203,7 +1230,7 @@ fn completions_come_from_the_endpoint_unless_a_backend_says_otherwise() {
     assert!(matches!(client.backend(), LlmBackend::Http));
     assert!(matches!(
         client
-            .with_backend(LlmBackend::cli(AgentKind::Codex, CliSettings::default()))
+            .with_backend(LlmBackend::cli(AgentKind::Codex, settings()))
             .backend(),
         LlmBackend::Cli {
             agent: AgentKind::Codex,
@@ -1221,16 +1248,13 @@ fn a_turns_toolset_reaches_the_agent_the_backend_spawns() {
     );
 
     let client = LlmClient::new(LlmConfig::default())
-        .with_backend(LlmBackend::cli(AgentKind::Claude, CliSettings::default()))
-        .with_toolset(toolset, BuiltinTools::Withheld);
+        .with_backend(LlmBackend::cli(AgentKind::Claude, settings()))
+        .with_toolset(toolset, BuiltinTools::Granted);
 
-    let LlmBackend::Cli { settings, .. } = client.backend() else {
-        panic!("the backend stayed on the endpoint");
-    };
-    let attached = settings.toolset.as_ref().expect("the turn's toolset");
+    let attached = client.toolset().expect("the turn's toolset");
     assert_eq!(attached.endpoint, "http://127.0.0.1:8421/mcp");
     assert_eq!(attached.tools, ["read_file"]);
-    assert_eq!(settings.builtin_tools, BuiltinTools::Withheld);
+    assert_eq!(client.builtin_tools(), BuiltinTools::Granted);
 }
 
 /// An HTTP backend spawns nothing to configure and carries its tools in
@@ -1243,6 +1267,15 @@ fn a_toolset_leaves_an_http_backend_exactly_as_it_was() {
     );
 
     assert!(matches!(client.backend(), LlmBackend::Http));
+    assert!(client.toolset().is_none());
+    assert_eq!(client.builtin_tools(), BuiltinTools::Withheld);
+}
+
+#[derive(Debug)]
+struct Watching;
+
+impl Observer for Watching {
+    fn observe(&self, _output: &Output) {}
 }
 
 /// The builder replaces what a turn decides and nothing else: the executable
@@ -1250,40 +1283,47 @@ fn a_toolset_leaves_an_http_backend_exactly_as_it_was() {
 #[test]
 fn with_backend_replaces_the_backend_and_drops_its_toolset() {
     let client = LlmClient::new(LlmConfig::default())
-        .with_backend(LlmBackend::cli(AgentKind::Claude, CliSettings::default()))
+        .with_backend(LlmBackend::cli(AgentKind::Claude, settings()))
         .with_toolset(
             Toolset::new(
                 "http://127.0.0.1:8421/mcp",
                 "zone-turn-notarealtoken",
                 ["read_file"],
             ),
-            BuiltinTools::Withheld,
+            BuiltinTools::Granted,
         )
+        .with_observer(Arc::new(Watching))
         .with_temperature(0.25);
+    assert!(client.observer().is_some());
 
     let moved = client.with_backend(LlmBackend::cli(
         AgentKind::Codex,
-        CliSettings::default().with_timeout(Duration::from_secs(42)),
+        settings().with_timeout(Duration::from_secs(42)),
     ));
 
-    let LlmBackend::Cli { agent, settings } = moved.backend() else {
+    let LlmBackend::Cli {
+        agent, settings, ..
+    } = moved.backend()
+    else {
         panic!("the backend stayed on the endpoint");
     };
     assert_eq!(*agent, AgentKind::Codex);
     assert!(
-        settings.toolset.is_none(),
+        moved.toolset().is_none(),
         "the old agent's toolset reached the new one"
     );
+    assert!(moved.observer().is_none());
+    assert_eq!(moved.builtin_tools(), BuiltinTools::Withheld);
     assert_eq!(settings.timeout, Duration::from_secs(42));
     assert_eq!(moved.config().temperature, 0.25);
 }
 
 #[test]
-fn attaching_a_toolset_keeps_the_rest_of_the_settings() {
+fn attaching_a_toolset_keeps_the_backends_settings() {
     let client = LlmClient::new(LlmConfig::default())
         .with_backend(LlmBackend::cli(
             AgentKind::Claude,
-            CliSettings::default().with_executable("/opt/bin/claude"),
+            settings().with_executable("/opt/bin/claude"),
         ))
         .with_toolset(
             Toolset::new("http://127.0.0.1:8421/mcp", "token", ["read_file"]),
@@ -1297,7 +1337,50 @@ fn attaching_a_toolset_keeps_the_rest_of_the_settings() {
         settings.executable,
         Some(std::path::PathBuf::from("/opt/bin/claude"))
     );
-    assert_eq!(settings.builtin_tools, BuiltinTools::Granted);
+    assert_eq!(client.builtin_tools(), BuiltinTools::Granted);
+}
+
+#[test]
+fn a_backend_runs_on_the_servers_sign_in_until_told_whose() {
+    let backend = LlmBackend::cli(AgentKind::Claude, settings());
+    assert_eq!(backend.sign_in(), Some(SignIn::Instance));
+    assert_eq!(LlmBackend::Http.sign_in(), None);
+
+    for sign_in in [SignIn::Organization, SignIn::Host] {
+        assert_eq!(
+            backend.clone().with_sign_in(sign_in).sign_in(),
+            Some(sign_in)
+        );
+    }
+    assert_eq!(LlmBackend::Http.with_sign_in(SignIn::Host).sign_in(), None);
+}
+
+/// Bounding a backend, moving it into a directory or setting its effort
+/// changes its settings alone, so whose sign-in it runs under survives.
+#[test]
+fn configuring_a_backend_keeps_its_agent_and_its_sign_in() {
+    let configured = LlmBackend::cli(AgentKind::Codex, settings())
+        .with_sign_in(SignIn::Organization)
+        .configured(|settings| settings.with_working_directory("/w"));
+
+    let LlmBackend::Cli {
+        agent,
+        settings,
+        sign_in,
+    } = &configured
+    else {
+        panic!("the backend stayed on the endpoint");
+    };
+    assert_eq!(*agent, AgentKind::Codex);
+    assert_eq!(*sign_in, SignIn::Organization);
+    assert_eq!(
+        settings.working_directory,
+        Some(std::path::PathBuf::from("/w"))
+    );
+    assert!(matches!(
+        LlmBackend::Http.configured(|settings| settings.with_executable("/x")),
+        LlmBackend::Http
+    ));
 }
 
 #[tokio::test]
@@ -1305,13 +1388,10 @@ async fn an_agents_successful_ending_becomes_the_one_the_loop_accepts() {
     let events = agent_events(vec![
         Ok(AgentEvent::Text("The suite passes.".to_string())),
         Ok(AgentEvent::Usage(Usage::new(40, 8))),
-        Ok(AgentEvent::Finished {
-            finish_reason: Some("success".to_string()),
-        }),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
     ]);
 
-    let (delivered, failure) =
-        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
 
     assert!(failure.is_none(), "a finished turn failed: {failure:?}");
     assert_eq!(spoken(&delivered), "The suite passes.");
@@ -1337,13 +1417,10 @@ async fn an_agents_tool_use_is_shown_as_reasoning_rather_than_replayed() {
             "Read",
             r#"{"file_path":"/w/a.rs"}"#,
         ))),
-        Ok(AgentEvent::Finished {
-            finish_reason: Some("success".to_string()),
-        }),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
     ]);
 
-    let (delivered, failure) =
-        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
 
     assert!(failure.is_none(), "a finished turn failed: {failure:?}");
     assert!(
@@ -1377,13 +1454,10 @@ async fn an_agents_own_tools_are_listed_and_zones_are_left_to_their_cards() {
             "ToolSearch",
             r#"{"query":"select:Read"}"#,
         ))),
-        Ok(AgentEvent::Finished {
-            finish_reason: Some("success".to_string()),
-        }),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
     ]);
 
-    let (delivered, failure) =
-        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
 
     assert!(failure.is_none(), "a finished turn failed: {failure:?}");
     assert_eq!(
@@ -1414,10 +1488,9 @@ async fn a_host_agents_answer_keeps_its_blocks_apart() {
 
 #[tokio::test]
 async fn a_refusing_agent_ends_the_stream_in_its_own_words() {
-    let events = agent_events(vec![Ok(AgentEvent::Failed(REFUSAL.to_string()))]);
+    let events = agent_events(vec![Err(ProviderError::agent("claude", REFUSAL))]);
 
-    let (delivered, failure) =
-        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
 
     let failure = failure.expect("a refused turn to fail");
     assert!(
@@ -1438,8 +1511,7 @@ async fn a_limited_agent_stream_ends_in_a_limited_error_not_an_agent_one() {
         Ok(AgentEvent::Text("never read".to_string())),
     ]);
 
-    let (delivered, failure) =
-        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
 
     assert_eq!(spoken(&delivered), "Halfway there.");
     let failure = failure.expect("a limited turn to fail");
@@ -1458,13 +1530,10 @@ async fn a_window_rides_the_chunk_it_arrived_on() {
     let events = agent_events(vec![
         Ok(AgentEvent::Window(five_hours_at(43.0))),
         Ok(AgentEvent::Text("Done.".to_string())),
-        Ok(AgentEvent::Finished {
-            finish_reason: Some("success".to_string()),
-        }),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
     ]);
 
-    let (delivered, failure) =
-        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
 
     assert!(failure.is_none(), "a window failed the turn: {failure:?}");
     let windows: Vec<Option<&Window>> = delivered
@@ -1480,44 +1549,84 @@ async fn a_window_rides_the_chunk_it_arrived_on() {
 async fn the_context_an_agent_reports_is_kept_on_the_client_not_chunked() {
     let events = agent_events(vec![
         Ok(AgentEvent::Text("Done.".to_string())),
-        Ok(AgentEvent::Finished {
-            finish_reason: Some("success".to_string()),
-        }),
-        Ok(AgentEvent::Occupancy(Occupancy {
-            window: 200_000,
-            used: Some(16_632),
-        })),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
+        Ok(AgentEvent::Occupancy(occupancy())),
     ]);
     let reported = Reported::default();
 
-    let (delivered, failure) = collected(chunks(events, AgentKind::Claude, reported.clone())).await;
+    let (delivered, failure) = collected(turn(reported.clone()).chunks(events)).await;
 
     assert!(failure.is_none(), "a report failed the turn: {failure:?}");
     assert_eq!(delivered.len(), 2, "no chunk carries the report");
+    assert_eq!(reported.latest(), Some((AgentKind::Claude, occupancy())));
+}
+
+#[tokio::test]
+async fn news_of_a_subagent_never_reaches_the_reader_as_a_chunk() {
+    let events = agent_events(vec![
+        Ok(AgentEvent::Subagent(
+            Subagent::new("toolu_01Agent")
+                .with_description("Ask for a review")
+                .with_status(SubagentStatus::Running),
+        )),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
+    ]);
+
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
+
+    assert!(failure.is_none(), "a subagent failed the turn: {failure:?}");
     assert_eq!(
-        reported.latest(),
-        Some((
-            AgentKind::Claude,
-            Occupancy {
-                window: 200_000,
-                used: Some(16_632),
-            }
-        ))
+        delivered.len(),
+        1,
+        "only the finish is chunked: {delivered:?}"
     );
+    assert_eq!(spoken(&delivered), "");
+    assert_eq!(reasoned(&delivered), "");
+    assert_eq!(reasons(&delivered), [STOP]);
+}
+
+fn step(name: &str, subject: Option<&str>, status: StepStatus) -> AgentEvent {
+    let step = SubagentStep::new(format!("toolu_{name}"), name, status);
+    let step = match subject {
+        Some(subject) => step.with_subject(subject),
+        None => step,
+    };
+    AgentEvent::Subagent(Subagent::new("toolu_01Agent").with_step(step))
+}
+
+#[tokio::test]
+async fn a_subagents_call_just_made_is_reasoned_as_the_main_agents_are() {
+    let events = agent_events(vec![
+        Ok(step("Grep", Some("pub mod"), StepStatus::Running)),
+        Ok(step("Grep", Some("pub mod"), StepStatus::Succeeded)),
+        Ok(step("TodoWrite", None, StepStatus::Running)),
+        Ok(step("Read", Some("/w/a.rs"), StepStatus::Failed)),
+        Ok(step(
+            "mcp__zone__search_code",
+            Some("x"),
+            StepStatus::Running,
+        )),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
+    ]);
+
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
+
+    assert!(failure.is_none(), "a subagent failed the turn: {failure:?}");
+    assert_eq!(delivered.len(), 3, "{delivered:?}");
+    assert_eq!(reasoned(&delivered), "- Grep `pub mod`\n- TodoWrite\n");
+    assert_eq!(spoken(&delivered), "");
+    assert_eq!(reasons(&delivered), [STOP]);
 }
 
 #[test]
 fn a_client_reports_only_what_the_agent_it_now_runs_on_reported() {
-    let occupancy = Occupancy {
-        window: 200_000,
-        used: Some(16_632),
-    };
+    let occupancy = occupancy();
     let client = LlmClient::new(LlmConfig::new("http://localhost:4000", "sonnet", "key"))
-        .with_backend(LlmBackend::cli(AgentKind::Claude, CliSettings::default()));
+        .with_backend(LlmBackend::cli(AgentKind::Claude, settings()));
     client.reported.record(AgentKind::Claude, occupancy);
     assert_eq!(client.occupancy(), Some(occupancy));
 
-    let handed = client.with_backend(LlmBackend::cli(AgentKind::Codex, CliSettings::default()));
+    let handed = client.with_backend(LlmBackend::cli(AgentKind::Codex, settings()));
     assert_eq!(
         handed.occupancy(),
         None,
@@ -1533,13 +1642,10 @@ async fn the_session_an_agent_announces_rides_the_chunk_it_arrived_on() {
     let events = agent_events(vec![
         Ok(AgentEvent::Session("6f1".to_string())),
         Ok(AgentEvent::Text("Done.".to_string())),
-        Ok(AgentEvent::Finished {
-            finish_reason: Some("success".to_string()),
-        }),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
     ]);
 
-    let (delivered, failure) =
-        collected(chunks(events, AgentKind::Claude, Reported::default())).await;
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
 
     assert!(failure.is_none(), "a session failed the turn: {failure:?}");
     let sessions: Vec<Option<&str>> = delivered
@@ -1549,6 +1655,88 @@ async fn the_session_an_agent_announces_rides_the_chunk_it_arrived_on() {
     assert_eq!(sessions, [Some("6f1"), None, None]);
     assert_eq!(spoken(&delivered), "Done.");
     assert_eq!(reasons(&delivered), [STOP]);
+}
+
+#[tokio::test]
+async fn a_turn_the_crate_cut_short_ends_cut_short_rather_than_stopped() {
+    let events = agent_events(vec![
+        Ok(AgentEvent::Text("First.".to_string())),
+        Ok(AgentEvent::finished(Some(CUT_SHORT.to_string()))),
+    ]);
+
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
+
+    assert!(failure.is_none(), "a cut-short turn failed: {failure:?}");
+    assert_eq!(spoken(&delivered), "First.");
+    assert_eq!(reasons(&delivered), [CUT_SHORT]);
+}
+
+#[tokio::test]
+async fn a_later_turn_that_only_reports_its_answer_still_streams_it() {
+    let events = agent_events(vec![
+        Ok(AgentEvent::Text("First.".to_string())),
+        Ok(AgentEvent::Answer("First.".to_string())),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
+        Ok(AgentEvent::Answer("Second.".to_string())),
+        Ok(AgentEvent::finished(Some("success".to_string()))),
+    ]);
+
+    let (delivered, failure) = collected(turn(Reported::default()).chunks(events)).await;
+
+    assert!(failure.is_none(), "{failure:?}");
+    assert_eq!(
+        spoken(&delivered),
+        "First.\n\nSecond.",
+        "the later turn's answer was dropped as a repeat of the first's"
+    );
+}
+
+#[tokio::test]
+async fn a_host_agent_that_exits_mid_turn_answers_cut_short() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let script = r#"
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"First."}'
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Still writ"}]}}'
+"#;
+    let client = agent_client(fake(&directory, script));
+
+    let response = client
+        .chat(&[Message::user("What does a.rs do?")], None)
+        .await
+        .expect("the answer the agent kept");
+
+    let choice = response.choices.first().expect("a choice");
+    assert_eq!(choice.message.content.as_deref(), Some("First."));
+    assert_eq!(
+        choice.finish_reason.as_deref(),
+        Some(CUT_SHORT),
+        "an answer cut short read as finished"
+    );
+}
+
+#[tokio::test]
+async fn a_host_agent_that_exits_mid_turn_streams_its_answer_cut_short() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let script = r#"
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"result","subtype":"success","is_error":false,"result":"First."}'
+echo '{"type":"system","subtype":"init","session_id":"s"}'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Still writ"}]}}'
+"#;
+    let client = agent_client(fake(&directory, script));
+
+    let stream = stream_turn(&client, None).await.expect("a running agent");
+    let (delivered, failure) = collected(stream).await;
+
+    assert!(failure.is_none(), "the turn failed: {failure:?}");
+    assert!(spoken(&delivered).starts_with("First."), "{delivered:?}");
+    assert_eq!(
+        reasons(&delivered).last().map(String::as_str),
+        Some(CUT_SHORT),
+        "a turn whose later answer was cut off read as finished"
+    );
 }
 
 #[tokio::test]
@@ -1680,4 +1868,156 @@ echo '{"type":"result","subtype":"success","is_error":false}'
     let choice = response.choices.first().expect("one choice");
     assert_eq!(choice.message.content.as_deref(), Some("Two."));
     assert_eq!(choice.finish_reason.as_deref(), Some(STOP));
+}
+
+#[derive(Debug, Default)]
+struct Recording {
+    outputs: Mutex<Vec<String>>,
+    subagents: Mutex<Vec<String>>,
+}
+
+impl Observer for Recording {
+    fn observe(&self, output: &Output) {
+        self.outputs
+            .lock()
+            .expect("outputs")
+            .push(output.text.clone());
+    }
+
+    fn track(&self, subagent: &Subagent) {
+        self.subagents
+            .lock()
+            .expect("subagents")
+            .push(subagent.id.clone());
+    }
+}
+
+#[tokio::test]
+async fn a_limit_ends_the_stream_on_zones_name_for_its_window() {
+    let refused = Window::new(WindowKind::FiveHours.streamed()).with_kind(WindowKind::FiveHours);
+    let events = agent_events(vec![Err(ProviderError::limited(
+        "claude",
+        session_limit().with_window(refused),
+    ))]);
+
+    let (_, failure) = collected(turn(Reported::default()).chunks(events)).await;
+
+    let Some(Error::Limited { limit, .. }) = failure else {
+        panic!("expected a limit, got {failure:?}");
+    };
+    assert_eq!(
+        limit.window.map(|window| window.name).as_deref(),
+        Some(FIVE_HOURS)
+    );
+}
+
+/// How long a stand-in's turn may run before the test gives up on it.
+const PATIENCE: Duration = Duration::from_secs(20);
+
+/// Set on the copy of this binary a test re-runs itself in, naming the test.
+const COPY: &str = "ZONE_CORE_CLIENT_COPY";
+
+/// A Claude stand-in's reply to a turn that goes as planned.
+const CLAUDE_ANSWER: &str = r#"
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}'
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#;
+
+/// A Codex stand-in's reply to a turn that goes as planned.
+const CODEX_ANSWER: &str = r#"
+echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Done."}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":4,"output_tokens":1}}'
+"#;
+
+/// The model each agent is asked for, one it knows.
+fn model(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Codex => "gpt-5.5",
+        _ => "sonnet",
+    }
+}
+
+/// A stand-in for `agent` that answers its turn as planned.
+fn answering(agent: AgentKind) -> StandIn {
+    StandIn::new(match agent {
+        AgentKind::Codex => CODEX_ANSWER,
+        _ => CLAUDE_ANSWER,
+    })
+}
+
+/// Zone's settings for a run of `stand_in`, which may take [`PATIENCE`].
+fn standing_in(stand_in: &StandIn) -> CliSettings {
+    settings()
+        .with_executable(stand_in.executable())
+        .with_timeout(PATIENCE)
+}
+
+/// A client that runs `agent` under `settings`.
+fn running(agent: AgentKind, settings: CliSettings) -> LlmClient {
+    LlmClient::new(LlmConfig::default()).with_backend(LlmBackend::cli(agent, settings))
+}
+
+/// Every chunk of a turn on `model` asking `messages`, and the error it
+/// ended in, whether the stream failed to open or failed on the way.
+async fn streamed(
+    client: &LlmClient,
+    model: &str,
+    messages: &[Message],
+) -> (Vec<ChatStreamChunk>, Option<Error>) {
+    match client
+        .chat_stream_with_options(model, messages, None, RequestOptions::new(512))
+        .await
+    {
+        Ok(stream) => collected(stream).await,
+        Err(error) => (Vec::new(), Some(error)),
+    }
+}
+
+/// A turn on the agent's own [`model`] asking what a file does.
+async fn asked(client: &LlmClient, agent: AgentKind) -> (Vec<ChatStreamChunk>, Option<Error>) {
+    streamed(client, model(agent), &[Message::user("What does a.rs do?")]).await
+}
+
+/// Re-run `test` of `module` in a copy of this binary whose environment
+/// also holds `environment`, unless this is that copy. Returns whether this
+/// call was the original, which has nothing left to do once the copy passed.
+///
+/// Setting the variables in this process would race every other test that
+/// starts a child.
+async fn delegated(module: &str, test: &str, environment: &[(&str, &str)]) -> bool {
+    let module = module.split_once("::").map_or(module, |(_, path)| path);
+    let test = format!("{module}::{test}");
+    if std::env::var(COPY).as_deref() == Ok(test.as_str()) {
+        return false;
+    }
+    let output = tokio::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", &test, "--nocapture"])
+        .env(COPY, &test)
+        .env_remove(crate::llm::cli::PASSTHROUGH)
+        .envs(environment.iter().copied())
+        .output()
+        .await
+        .expect("a copy of this test binary");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(output.status.success(), "{printed}");
+    assert!(
+        printed.contains("1 passed"),
+        "the copy ran no test: {printed}"
+    );
+    true
+}
+
+/// The `-c` override attaching zone's MCP server among Codex's `arguments`.
+fn zones_server(arguments: &[String]) -> String {
+    let attached = format!("mcp_servers.{}=", Toolset::SERVER);
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == "-c" && pair[1].starts_with(&attached))
+        .map(|pair| pair[1].clone())
+        .unwrap_or_else(|| panic!("zone's server among codex's overrides: {arguments:?}"))
 }

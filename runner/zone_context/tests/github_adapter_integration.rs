@@ -1,14 +1,26 @@
-//! Integration tests for GitHub adapter using wiremock
-
+use abnegate_vcs::PullRequestService;
 use base64::Engine;
 use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
-use wiremock::matchers::{method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-use zone_context::adapters::{GitHubAdapter, NoOpProgress, SourceAdapter};
-use zone_context::content::{FetchConfig, FetchStrategy};
-use zone_core::{Source, SourceCategory, SourceType};
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+use wiremock::matchers::query_param;
+use zone_context::adapters::GitHubAdapter;
+use zone_context::adapters::NoOpProgress;
+use zone_context::adapters::SourceAdapter;
+use zone_context::content::FetchConfig;
+use zone_context::content::FetchStrategy;
+use zone_core::Source;
+use zone_core::SourceCategory;
+use zone_core::SourceType;
+
+const GITHUB_HOST: &str = "github.com";
+
+const LARGE_CONTENTS_ROUTE: &str = "/repos/testowner/testrepo/contents/large.rs";
 
 fn create_test_source(
     owner: &str,
@@ -22,16 +34,16 @@ fn create_test_source(
         "repo": repo,
     });
 
-    if let Some(t) = token {
-        config["token"] = json!(t);
+    if let Some(token) = token {
+        config["token"] = json!(token);
     }
 
-    if let Some(b) = branch {
-        config["branch"] = json!(b);
+    if let Some(branch) = branch {
+        config["branch"] = json!(branch);
     }
 
-    if let Some(p) = path_filter {
-        config["path"] = json!(p);
+    if let Some(path_filter) = path_filter {
+        config["path"] = json!(path_filter);
     }
 
     Source {
@@ -47,11 +59,18 @@ fn create_test_source(
     }
 }
 
+fn served(server: &MockServer) -> GitHubAdapter {
+    GitHubAdapter::with_service(
+        PullRequestService::standing_in_for(GITHUB_HOST, &server.uri())
+            .unwrap()
+            .with_anonymous_reads(),
+    )
+}
+
 #[tokio::test]
 async fn test_github_fetch_mocked_repo() {
     let mock_server = MockServer::start().await;
 
-    // Mock repository info endpoint
     Mock::given(method("GET"))
         .and(path("/repos/testowner/testrepo"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -61,30 +80,32 @@ async fn test_github_fetch_mocked_repo() {
         .mount(&mock_server)
         .await;
 
-    // Mock tree endpoint
     Mock::given(method("GET"))
         .and(path("/repos/testowner/testrepo/git/trees/main"))
         .and(query_param("recursive", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sha": "abc123",
+            "sha": "6367c48dd193d56ea7b0baad25b19455e529f5ee",
             "tree": [
                 {
                     "path": "README.md",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 100,
-                    "sha": "def456"
+                    "sha": "0b3d8b29493059afd7f9912106279c4643ac4939"
                 },
                 {
                     "path": "src/lib.rs",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 500,
-                    "sha": "ghi789"
+                    "sha": "ffcb2deee9131e6cda4faa78bb40423c9b847ff0"
                 },
                 {
                     "path": "image.png",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 1000,
-                    "sha": "jkl012"
+                    "sha": "b1597a1f329363e1f3c131fce8810d4b3515cc97"
                 }
             ],
             "truncated": false
@@ -92,14 +113,13 @@ async fn test_github_fetch_mocked_repo() {
         .mount(&mock_server)
         .await;
 
-    // Mock contents endpoints
     Mock::given(method("GET"))
-        .and(path("/repos/testowner/testrepo/contents/README%2Emd"))
+        .and(path("/repos/testowner/testrepo/contents/README.md"))
         .and(query_param("ref", "main"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": "README.md",
             "path": "README.md",
-            "sha": "def456",
+            "sha": "0b3d8b29493059afd7f9912106279c4643ac4939",
             "size": 100,
             "type": "file",
             "content": base64::engine::general_purpose::STANDARD.encode("# Test Repo\n\nThis is a test repository."),
@@ -109,12 +129,12 @@ async fn test_github_fetch_mocked_repo() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/repos/testowner/testrepo/contents/src%2Flib%2Ers"))
+        .and(path("/repos/testowner/testrepo/contents/src/lib.rs"))
         .and(query_param("ref", "main"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": "lib.rs",
             "path": "src/lib.rs",
-            "sha": "ghi789",
+            "sha": "ffcb2deee9131e6cda4faa78bb40423c9b847ff0",
             "size": 500,
             "type": "file",
             "content": base64::engine::general_purpose::STANDARD.encode("pub fn hello() -> &'static str {\n    \"Hello, world!\"\n}"),
@@ -124,7 +144,7 @@ async fn test_github_fetch_mocked_repo() {
         .await;
 
     let source = create_test_source("testowner", "testrepo", None, None, None);
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
     let config = FetchConfig::default();
     let progress = NoOpProgress;
 
@@ -132,14 +152,11 @@ async fn test_github_fetch_mocked_repo() {
         .fetch(&source, &config, FetchStrategy::Full, &progress)
         .await;
 
-    // Should now succeed with the mock server
     assert!(result.is_ok());
     let fetch_result = result.unwrap();
 
-    // Should have 2 files (README.md and lib.rs, not the PNG)
     assert_eq!(fetch_result.items.len(), 2);
 
-    // Verify the files
     let readme = fetch_result.items.iter().find(|i| i.title == "README.md");
     assert!(readme.is_some());
     assert!(readme.unwrap().content.is_some());
@@ -153,7 +170,6 @@ async fn test_github_fetch_mocked_repo() {
 async fn test_github_fetch_with_branch() {
     let mock_server = MockServer::start().await;
 
-    // Mock repository info endpoint
     Mock::given(method("GET"))
         .and(path("/repos/testowner/testrepo"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -163,18 +179,18 @@ async fn test_github_fetch_with_branch() {
         .mount(&mock_server)
         .await;
 
-    // Mock tree endpoint for develop branch
     Mock::given(method("GET"))
         .and(path("/repos/testowner/testrepo/git/trees/develop"))
         .and(query_param("recursive", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sha": "xyz789",
+            "sha": "f04a07abc612388d70e270d19f9f5db7a27290fc",
             "tree": [
                 {
                     "path": "dev.md",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 50,
-                    "sha": "dev123"
+                    "sha": "0dbfb112168528b103b4f0993ba2b9ed76a877a6"
                 }
             ],
             "truncated": false
@@ -183,12 +199,12 @@ async fn test_github_fetch_with_branch() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/repos/testowner/testrepo/contents/dev%2Emd"))
+        .and(path("/repos/testowner/testrepo/contents/dev.md"))
         .and(query_param("ref", "develop"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": "dev.md",
             "path": "dev.md",
-            "sha": "dev123",
+            "sha": "0dbfb112168528b103b4f0993ba2b9ed76a877a6",
             "size": 50,
             "type": "file",
             "content": base64::engine::general_purpose::STANDARD.encode("# Dev Branch"),
@@ -198,7 +214,7 @@ async fn test_github_fetch_with_branch() {
         .await;
 
     let source = create_test_source("testowner", "testrepo", None, Some("develop"), None);
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
     let config = FetchConfig::default();
     let progress = NoOpProgress;
 
@@ -216,7 +232,6 @@ async fn test_github_fetch_with_branch() {
 async fn test_github_fetch_with_path() {
     let mock_server = MockServer::start().await;
 
-    // Mock repository info endpoint
     Mock::given(method("GET"))
         .and(path("/repos/testowner/testrepo"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -226,30 +241,32 @@ async fn test_github_fetch_with_path() {
         .mount(&mock_server)
         .await;
 
-    // Mock tree endpoint
     Mock::given(method("GET"))
         .and(path("/repos/testowner/testrepo/git/trees/main"))
         .and(query_param("recursive", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sha": "abc123",
+            "sha": "6367c48dd193d56ea7b0baad25b19455e529f5ee",
             "tree": [
                 {
                     "path": "README.md",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 100,
-                    "sha": "def456"
+                    "sha": "0b3d8b29493059afd7f9912106279c4643ac4939"
                 },
                 {
                     "path": "src/lib.rs",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 500,
-                    "sha": "ghi789"
+                    "sha": "ffcb2deee9131e6cda4faa78bb40423c9b847ff0"
                 },
                 {
                     "path": "docs/guide.md",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 200,
-                    "sha": "doc123"
+                    "sha": "cd3f81d5e8926fc6bef450b843fe07c4bf447009"
                 }
             ],
             "truncated": false
@@ -258,7 +275,7 @@ async fn test_github_fetch_with_path() {
         .await;
 
     let source = create_test_source("testowner", "testrepo", None, None, Some("src"));
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
     let config = FetchConfig::default();
     let progress = NoOpProgress;
 
@@ -268,7 +285,6 @@ async fn test_github_fetch_with_path() {
 
     assert!(result.is_ok());
     let fetch_result = result.unwrap();
-    // Only src/lib.rs should be included
     assert_eq!(fetch_result.items.len(), 1);
     assert_eq!(fetch_result.items[0].title, "lib.rs");
 }
@@ -304,11 +320,10 @@ async fn test_github_verify_repository_not_found() {
         None,
         None,
     );
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
 
     let result = adapter.verify(&source).await;
 
-    // Should fail with 404
     assert!(result.is_err());
 }
 
@@ -329,13 +344,14 @@ async fn test_github_estimate_tokens_structure() {
         .and(path("/repos/testowner/testrepo/git/trees/main"))
         .and(query_param("recursive", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sha": "abc123",
+            "sha": "6367c48dd193d56ea7b0baad25b19455e529f5ee",
             "tree": [
                 {
                     "path": "README.md",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 1000,
-                    "sha": "def456"
+                    "sha": "0b3d8b29493059afd7f9912106279c4643ac4939"
                 }
             ],
             "truncated": false
@@ -344,7 +360,7 @@ async fn test_github_estimate_tokens_structure() {
         .await;
 
     let source = create_test_source("testowner", "testrepo", None, None, None);
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
 
     let result = adapter.estimate_tokens(&source).await;
 
@@ -369,7 +385,7 @@ async fn test_github_sync_state() {
         .and(path("/repos/testowner/testrepo/git/trees/main"))
         .and(query_param("recursive", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sha": "abc123",
+            "sha": "6367c48dd193d56ea7b0baad25b19455e529f5ee",
             "tree": [],
             "truncated": false
         })))
@@ -377,13 +393,16 @@ async fn test_github_sync_state() {
         .await;
 
     let source = create_test_source("testowner", "testrepo", None, None, None);
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
 
     let result = adapter.get_sync_state(&source).await;
 
     assert!(result.is_ok());
     let sync_state = result.unwrap();
-    assert_eq!(sync_state.version, Some("abc123".to_string()));
+    assert_eq!(
+        sync_state.version,
+        Some("6367c48dd193d56ea7b0baad25b19455e529f5ee".to_string())
+    );
 }
 
 #[tokio::test]
@@ -403,13 +422,14 @@ async fn test_github_metadata_only_strategy() {
         .and(path("/repos/testowner/testrepo/git/trees/main"))
         .and(query_param("recursive", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sha": "abc123",
+            "sha": "6367c48dd193d56ea7b0baad25b19455e529f5ee",
             "tree": [
                 {
                     "path": "file.rs",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 100,
-                    "sha": "def456"
+                    "sha": "0b3d8b29493059afd7f9912106279c4643ac4939"
                 }
             ],
             "truncated": false
@@ -418,7 +438,7 @@ async fn test_github_metadata_only_strategy() {
         .await;
 
     let source = create_test_source("testowner", "testrepo", None, None, None);
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
     let config = FetchConfig::default();
     let progress = NoOpProgress;
 
@@ -429,7 +449,6 @@ async fn test_github_metadata_only_strategy() {
     assert!(result.is_ok());
     let fetch_result = result.unwrap();
     assert_eq!(fetch_result.items.len(), 1);
-    // Metadata only should not have content
     assert!(fetch_result.items[0].content.is_none());
 }
 
@@ -450,19 +469,21 @@ async fn test_github_partial_strategy() {
         .and(path("/repos/testowner/testrepo/git/trees/main"))
         .and(query_param("recursive", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sha": "abc123",
+            "sha": "6367c48dd193d56ea7b0baad25b19455e529f5ee",
             "tree": [
                 {
                     "path": "small.rs",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 50,
-                    "sha": "def456"
+                    "sha": "0b3d8b29493059afd7f9912106279c4643ac4939"
                 },
                 {
                     "path": "large.rs",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 50000,
-                    "sha": "ghi789"
+                    "sha": "ffcb2deee9131e6cda4faa78bb40423c9b847ff0"
                 }
             ],
             "truncated": false
@@ -471,12 +492,12 @@ async fn test_github_partial_strategy() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/repos/testowner/testrepo/contents/small%2Ers"))
+        .and(path("/repos/testowner/testrepo/contents/small.rs"))
         .and(query_param("ref", "main"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": "small.rs",
             "path": "small.rs",
-            "sha": "def456",
+            "sha": "0b3d8b29493059afd7f9912106279c4643ac4939",
             "size": 50,
             "type": "file",
             "content": base64::engine::general_purpose::STANDARD.encode("fn main() {}"),
@@ -486,7 +507,7 @@ async fn test_github_partial_strategy() {
         .await;
 
     let source = create_test_source("testowner", "testrepo", None, None, None);
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
     let config = FetchConfig::default();
     let progress = NoOpProgress;
 
@@ -501,7 +522,6 @@ async fn test_github_partial_strategy() {
 
     assert!(result.is_ok());
     let fetch_result = result.unwrap();
-    // Should only get the small file within budget
     assert_eq!(fetch_result.items.len(), 1);
     assert_eq!(fetch_result.items[0].title, "small.rs");
 }
@@ -523,19 +543,21 @@ async fn test_github_progressive_strategy() {
         .and(path("/repos/testowner/testrepo/git/trees/main"))
         .and(query_param("recursive", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sha": "abc123",
+            "sha": "6367c48dd193d56ea7b0baad25b19455e529f5ee",
             "tree": [
                 {
                     "path": "README.md",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 100,
-                    "sha": "def456"
+                    "sha": "0b3d8b29493059afd7f9912106279c4643ac4939"
                 },
                 {
                     "path": "src/lib.rs",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 200,
-                    "sha": "ghi789"
+                    "sha": "ffcb2deee9131e6cda4faa78bb40423c9b847ff0"
                 }
             ],
             "truncated": false
@@ -544,12 +566,12 @@ async fn test_github_progressive_strategy() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/repos/testowner/testrepo/contents/README%2Emd"))
+        .and(path("/repos/testowner/testrepo/contents/README.md"))
         .and(query_param("ref", "main"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": "README.md",
             "path": "README.md",
-            "sha": "def456",
+            "sha": "0b3d8b29493059afd7f9912106279c4643ac4939",
             "size": 100,
             "type": "file",
             "content": base64::engine::general_purpose::STANDARD.encode("# README"),
@@ -559,12 +581,12 @@ async fn test_github_progressive_strategy() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/repos/testowner/testrepo/contents/src%2Flib%2Ers"))
+        .and(path("/repos/testowner/testrepo/contents/src/lib.rs"))
         .and(query_param("ref", "main"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": "lib.rs",
             "path": "src/lib.rs",
-            "sha": "ghi789",
+            "sha": "ffcb2deee9131e6cda4faa78bb40423c9b847ff0",
             "size": 200,
             "type": "file",
             "content": base64::engine::general_purpose::STANDARD.encode("fn lib() {}"),
@@ -574,7 +596,7 @@ async fn test_github_progressive_strategy() {
         .await;
 
     let source = create_test_source("testowner", "testrepo", None, None, None);
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
     let config = FetchConfig::default();
     let progress = NoOpProgress;
 
@@ -593,8 +615,6 @@ async fn test_github_progressive_strategy() {
     let fetch_result = result.unwrap();
     assert_eq!(fetch_result.items.len(), 2);
 }
-
-// Security validation tests
 
 #[tokio::test]
 async fn test_github_adapter_validates_owner() {
@@ -654,26 +674,27 @@ async fn test_github_adapter_max_file_size() {
         .mount(&mock_server)
         .await;
 
-    // File larger than 10MB
     let large_file_size = 11 * 1024 * 1024;
 
     Mock::given(method("GET"))
         .and(path("/repos/testowner/testrepo/git/trees/main"))
         .and(query_param("recursive", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "sha": "abc123",
+            "sha": "6367c48dd193d56ea7b0baad25b19455e529f5ee",
             "tree": [
                 {
                     "path": "small.rs",
                     "type": "blob",
+                    "mode": "100644",
                     "size": 100,
-                    "sha": "def456"
+                    "sha": "0b3d8b29493059afd7f9912106279c4643ac4939"
                 },
                 {
-                    "path": "large.bin",
+                    "path": "large.rs",
                     "type": "blob",
+                    "mode": "100644",
                     "size": large_file_size,
-                    "sha": "ghi789"
+                    "sha": "ffcb2deee9131e6cda4faa78bb40423c9b847ff0"
                 }
             ],
             "truncated": false
@@ -682,12 +703,12 @@ async fn test_github_adapter_max_file_size() {
         .await;
 
     Mock::given(method("GET"))
-        .and(path("/repos/testowner/testrepo/contents/small%2Ers"))
+        .and(path("/repos/testowner/testrepo/contents/small.rs"))
         .and(query_param("ref", "main"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "name": "small.rs",
             "path": "small.rs",
-            "sha": "def456",
+            "sha": "0b3d8b29493059afd7f9912106279c4643ac4939",
             "size": 100,
             "type": "file",
             "content": base64::engine::general_purpose::STANDARD.encode("fn main() {}"),
@@ -696,8 +717,18 @@ async fn test_github_adapter_max_file_size() {
         .mount(&mock_server)
         .await;
 
+    Mock::given(method("GET"))
+        .and(path(LARGE_CONTENTS_ROUTE))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "type": "file",
+            "content": base64::engine::general_purpose::STANDARD.encode("fn large() {}"),
+            "encoding": "base64"
+        })))
+        .mount(&mock_server)
+        .await;
+
     let source = create_test_source("testowner", "testrepo", None, None, None);
-    let adapter = GitHubAdapter::with_base_url(mock_server.uri());
+    let adapter = served(&mock_server);
     let config = FetchConfig::default();
     let progress = NoOpProgress;
 
@@ -707,7 +738,13 @@ async fn test_github_adapter_max_file_size() {
 
     assert!(result.is_ok());
     let fetch_result = result.unwrap();
-    // Should only get small.rs, large file should be skipped
     assert_eq!(fetch_result.items.len(), 1);
     assert_eq!(fetch_result.items[0].title, "small.rs");
+    let requested = mock_server.received_requests().await.unwrap();
+    assert!(
+        !requested
+            .iter()
+            .any(|request| request.url.path() == LARGE_CONTENTS_ROUTE),
+        "a file the tree lists past the size limit is never read"
+    );
 }

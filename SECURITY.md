@@ -167,6 +167,26 @@ clients that honor the proxy environment, not raw sockets or clients that ignore
 it. SearXNG handles chat search queries; generic tool HTTP requests use Gluetun's
 proxy directly.
 
+HTTP MCP servers are not subprocesses: Zone connects to them from its own
+process. Those connections go through the same proxy, reach loopback and
+internal service destinations directly, and never use `HTTP_PROXY`,
+`HTTPS_PROXY` or the system proxy. Private and loopback hosts stay reachable on
+purpose, so an organization admin can point a server at any host the Zone
+server can reach. Link-local and cloud metadata addresses are refused, both as
+written in a server's URL and as any address its host name resolves to; behind
+the proxy, which resolves names itself, only an address or metadata host written
+in the URL is refused. Only a same-origin 307 or 308 redirect is followed. A
+server that fails shows a sentence chosen by two typed values the MCP client
+records: the kind of failure, and the status of the HTTP answer that failed it.
+No text of the answer or of the error is read to choose the sentence or copied
+into it, so a server pointed at an internal host does not read that host's
+answer back to a tenant.
+
+A chat's Offline switch keeps the chat off public web search, page fetch and
+`curl` / `wget`. It does not remove MCP tools. An HTTP MCP server on a public
+host, or any MCP server that reaches the internet itself, is egress the switch
+does not close: turn the server off for the workspace, or disable it.
+
 ## Privacy Considerations
 
 ### Prompt Logging

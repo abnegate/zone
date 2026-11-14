@@ -1,0 +1,21 @@
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Entry {
+    About,
+    ChangeServer,
+    Hide,
+    HideOthers,
+    Quit,
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    ZoomIn,
+    ZoomOut,
+    ActualSize,
+    Minimize,
+    Maximize,
+    CloseWindow,
+    Separator,
+}

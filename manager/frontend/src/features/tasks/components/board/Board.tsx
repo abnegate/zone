@@ -1,0 +1,226 @@
+import {
+  type Announcements,
+  DndContext,
+  type DragCancelEvent,
+  type DragEndEvent,
+  type DragOverEvent,
+  DragOverlay,
+  type DragStartEvent,
+  KeyboardSensor,
+  type UniqueIdentifier,
+  useSensor,
+  useSensors,
+} from '@dnd-kit/core';
+import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useMediaQuery } from '../../../../shared/hooks';
+import { relate, UNRELATED } from '../../relations';
+import { groupByStage, STAGES, type StageId, stageOf } from '../../status';
+import type { BoardActions, Renaming, Task } from '../../types';
+import { Card } from './Card';
+import { CardBody } from './CardBody';
+import { CardSensor } from './CardSensor';
+import { Column } from './Column';
+import { destination, keyboardOptions, stageUnder } from './drop';
+import { useCardFocus } from './useCardFocus';
+import { useNow } from './useNow';
+import type { View } from './View';
+import './Board.css';
+
+export interface BoardProps {
+  tasks: readonly Task[];
+  known?: readonly Task[];
+  projects: ReadonlyMap<string, string>;
+  renaming: Renaming | null;
+  removed: string | null;
+  view: View;
+  selected?: ReadonlySet<string>;
+  writable?: boolean;
+  actions: BoardActions;
+}
+
+const NONE: ReadonlySet<string> = new Set();
+
+const POINTER = { activationConstraint: { distance: 5 } };
+
+const REDUCED_MOTION = '(prefers-reduced-motion: reduce)';
+
+const UNKNOWN_PROJECT = 'Unknown';
+
+const INSTRUCTIONS =
+  'To move a task, press space to pick it up, the left and right arrow keys to move it to another column, ' +
+  'then space or enter to drop it, or escape to put it back.';
+
+const SILENT: Announcements = {
+  onDragStart: () => undefined,
+  onDragOver: () => undefined,
+  onDragEnd: () => undefined,
+  onDragCancel: () => undefined,
+};
+
+function projectNames(task: Task, projects: ReadonlyMap<string, string>): string {
+  return task.project_ids.map((id) => projects.get(id) ?? UNKNOWN_PROJECT).join(', ');
+}
+
+function stageNamed(id: UniqueIdentifier | undefined) {
+  return STAGES.find((stage) => stage.id === id);
+}
+
+function carried(data: { current?: { task?: Task } } | undefined): Task | undefined {
+  return data?.current?.task;
+}
+
+export function Board({
+  tasks,
+  known = tasks,
+  projects,
+  renaming,
+  removed,
+  view,
+  selected = NONE,
+  writable = true,
+  actions,
+}: BoardProps) {
+  const groups = useMemo(() => groupByStage(tasks), [tasks]);
+  const relations = useMemo(() => relate(known), [known]);
+  const [active, setActive] = useState<UniqueIdentifier | null>(null);
+  const [announcement, setAnnouncement] = useState('');
+  const announcedOver = useRef<UniqueIdentifier | null>(null);
+  const instructions = useId();
+  const unrendered = useMemo(() => document.createElement('div'), []);
+  const root = useRef<HTMLElement>(null);
+  const focus = useCardFocus(root, groups, removed);
+  const now = useNow(active !== null);
+  const reducedMotion = useMediaQuery(REDUCED_MOTION);
+  const heading = useRef<StageId | null>(null);
+  const keyboard = useMemo(() => keyboardOptions(reducedMotion, heading), [reducedMotion]);
+  const sensors = useSensors(useSensor(CardSensor, POINTER), useSensor(KeyboardSensor, keyboard));
+
+  const start = (event: DragStartEvent) => {
+    const task = carried(event.active.data);
+    setActive(event.active.id);
+    if (!task) return;
+    const own = stageOf(task.status);
+    announcedOver.current = own.id;
+    heading.current = own.id;
+    setAnnouncement(`Picked up ${task.title}, in ${own.label}.`);
+  };
+
+  const over = (event: DragOverEvent) => {
+    const task = carried(event.active.data);
+    const target = event.over?.id ?? null;
+    if (!task || target === announcedOver.current) return;
+    announcedOver.current = target;
+    const stage = stageNamed(target ?? undefined);
+    setAnnouncement(
+      stage ? `${task.title} is over ${stage.label}.` : `${task.title} is not over a column.`
+    );
+  };
+
+  const end = (event: DragEndEvent) => {
+    setActive(null);
+    const task = carried(event.active.data);
+    if (!task) return;
+    const own = stageOf(task.status);
+    const stage = stageNamed(event.over?.id);
+    if (!stage) {
+      setAnnouncement(`${task.title} put back in ${own.label}.`);
+      return;
+    }
+    const status = destination(task, stage.id);
+    if (status === null) {
+      setAnnouncement(`${task.title} stays in ${own.label}.`);
+      return;
+    }
+    setAnnouncement(`${task.title} moved to ${stage.label}.`);
+    if (!(event.activatorEvent instanceof KeyboardEvent)) focus.release();
+    void actions.move(task, status).then((moved) => {
+      if (!moved) setAnnouncement(`${task.title} could not be moved; back in ${own.label}.`);
+    });
+  };
+
+  const cancel = (event: DragCancelEvent) => {
+    setActive(null);
+    const task = carried(event.active.data);
+    if (!task) return;
+    setAnnouncement(`Moving ${task.title} cancelled. It stays in ${stageOf(task.status).label}.`);
+  };
+
+  useLayoutEffect(() => {
+    const scroller = root.current;
+    if (!scroller) return undefined;
+    scroller.scrollLeft = view.left;
+    [...view.trail].reverse().some(focus.title);
+    view.trail.length = 0;
+    return () => {
+      view.left = scroller.scrollLeft;
+    };
+  }, [view, focus]);
+
+  const dragged = tasks.find((task) => task.id === active);
+
+  return (
+    <section
+      ref={root}
+      className="board"
+      aria-label="Tasks"
+      data-dragging={active !== null || undefined}
+      data-selecting={selected.size > 0 || undefined}
+    >
+      <DndContext
+        id={instructions}
+        sensors={sensors}
+        collisionDetection={stageUnder}
+        accessibility={{ announcements: SILENT, container: unrendered }}
+        onDragStart={start}
+        onDragOver={over}
+        onDragEnd={end}
+        onDragCancel={cancel}
+      >
+        {STAGES.map((stage) => {
+          const cards = groups.get(stage.id) ?? [];
+          return (
+            <Column key={stage.id} stage={stage} count={cards.length} view={view}>
+              {cards.map((task) => (
+                <Card
+                  key={task.id}
+                  task={task}
+                  projects={projectNames(task, projects)}
+                  relations={relations.get(task.id) ?? UNRELATED}
+                  now={now}
+                  renaming={renaming?.id === task.id ? renaming.draft : null}
+                  selected={selected.has(task.id)}
+                  writable={writable}
+                  actions={actions}
+                />
+              ))}
+            </Column>
+          );
+        })}
+        <p id={instructions} hidden>
+          {INSTRUCTIONS}
+        </p>
+        <div className="sr-only" aria-live="assertive" aria-atomic="true">
+          {announcement}
+        </div>
+        {createPortal(
+          <DragOverlay dropAnimation={null} style={{ zIndex: 'var(--ui-layer-popover)' }}>
+            {dragged && (
+              <div className="task-card task-card-overlay">
+                <CardBody
+                  task={dragged}
+                  projects={projectNames(dragged, projects)}
+                  relations={relations.get(dragged.id) ?? UNRELATED}
+                  now={now}
+                  title={<span className="task-card-title">{dragged.title}</span>}
+                  onOpen={actions.open}
+                />
+              </div>
+            )}
+          </DragOverlay>,
+          document.body
+        )}
+      </DndContext>
+    </section>
+  );
+}

@@ -9,48 +9,42 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use abnegate_agent_cli::login::claude::LOOPBACK_HOST;
+use abnegate_agent_cli::login::claude::LOOPBACK_SCHEME;
+use abnegate_agent_cli::{AgentKind, CodexSandbox};
+use abnegate_exec::Niceness;
 use abnegate_vcs::pull_request::PullRequestResult;
 use abnegate_vcs::{PullRequestError, PullRequestService};
 use uuid::Uuid;
-use zone_core::llm::{AgentKind, CodexSandbox};
+use zone_core::servers;
 
 use crate::services::hosts::Hosts;
-use crate::services::login::claude::{LOOPBACK_HOST, LOOPBACK_SCHEME, ROOT_PATH};
+use crate::services::login::claude::ROOT_PATH;
 
 pub use abnegate_comfy::Config as ComfyUiConfig;
+pub use abnegate_llm::catalog::DEFAULT_GPT4ALL_MODELS_URL;
+pub use abnegate_llm::catalog::DEFAULT_HUGGINGFACE_MODELS_URL;
 pub use abnegate_search::WebSearchConfig;
-
-/// Upstream GPT4All model catalog. Tests should override `Config::gpt4all_models_url`.
-pub const DEFAULT_GPT4ALL_MODELS_URL: &str =
-    "https://raw.githubusercontent.com/nomic-ai/gpt4all/main/gpt4all-chat/metadata/models3.json";
-
-/// Upstream HuggingFace models API. Tests should override `Config::huggingface_models_url`.
-pub const DEFAULT_HUGGINGFACE_MODELS_URL: &str = "https://huggingface.co/api/models";
 
 /// GitHub's own REST origin, which `GITHUB_API_URL` overrides for GitHub
 /// Enterprise. The origin answers only for repositories on the host it names,
 /// so pointing it elsewhere does not redirect github.com repositories to it.
 pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
+/// GitHub's own web origin, where Apps are registered and installed.
+/// `GITHUB_WEB_URL` overrides it; unset, it follows `GITHUB_API_URL`.
+pub const DEFAULT_GITHUB_WEB_URL: &str = "https://github.com";
+
+const GITHUB_API_HOST: &str = "api.github.com";
+
 /// The path GitHub Enterprise serves its REST API under.
 const GITHUB_VERSIONED_REST: [&str; 2] = ["api", "v3"];
 
-/// Where GitHub's GraphQL API answers for the REST `origin`: beside REST on
-/// GitHub, and at `api/graphql` on an Enterprise install that serves REST
-/// under `api/v3`.
-pub fn github_graphql_url(origin: &reqwest::Url) -> Option<reqwest::Url> {
-    let segments: Vec<&str> = origin
-        .path_segments()
-        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
-        .unwrap_or_default();
-    let versioned = segments.ends_with(&GITHUB_VERSIONED_REST);
-    let base = match origin.path().ends_with('/') {
-        true => origin.clone(),
-        false => reqwest::Url::parse(&format!("{origin}/")).ok()?,
-    };
-    base.join(if versioned { "../graphql" } else { "graphql" })
-        .ok()
-}
+/// The fewest bytes an `ENCRYPTION_KEY` may hold.
+pub const MINIMUM_ENCRYPTION_KEY_BYTES: usize = 32;
+
+/// The fewest bytes a `JWT_SECRET` may hold.
+pub const MINIMUM_JWT_SECRET_BYTES: usize = 32;
 
 /// Where a Claude authorization code is exchanged and its tokens renewed.
 pub const DEFAULT_CLAUDE_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -72,7 +66,7 @@ pub struct Config {
     pub database_url: String,
     /// Redis URL
     pub redis_url: String,
-    /// JWT secret (must be at least 32 characters)
+    /// JWT secret, at least [`MINIMUM_JWT_SECRET_BYTES`] long
     pub jwt_secret: String,
     /// JWT access token lifetime in seconds (default: 900 = 15 minutes)
     pub jwt_access_lifetime: u64,
@@ -98,7 +92,7 @@ pub struct Config {
     pub huggingface_models_url: String,
     /// Optional HTTP proxy for remote model catalog searches.
     pub model_search_proxy_url: Option<String>,
-    /// Encryption key for source credentials (must be at least 32 characters)
+    /// Encryption key for source credentials, at least [`MINIMUM_ENCRYPTION_KEY_BYTES`] long
     pub encryption_key: String,
     /// Browser origins allowed to call the API, comma-separated. Entries may be
     /// full origins or bare hosts; a host also covers its subdomains.
@@ -114,6 +108,9 @@ pub struct Config {
     /// Whether `github_api_url` may be plain HTTP. Off unless the operator
     /// opts in, because the token then crosses the network in the clear.
     pub github_api_allows_http: bool,
+    /// Origin of the GitHub web UI that App registration and installation
+    /// pages are served from.
+    pub github_web_url: String,
     /// Live web search via SearXNG (through Gluetun when the VPN profile is up)
     pub web_search: WebSearchConfig,
     /// Direct ComfyUI image generation and artifact storage.
@@ -138,6 +135,10 @@ pub struct Config {
     pub host_mounts: crate::host_mounts::HostMounts,
     /// Origins a phone can type into the Zone app (`ZONE_CONNECT_URL`).
     pub connect_urls: Vec<String>,
+    /// Whether any MCP server is connected (`ZONE_MCP_ENABLED`).
+    pub mcp_enabled: bool,
+    /// Whether the API may create stdio MCP servers (`ZONE_MCP_COMMANDS`).
+    pub mcp_commands: bool,
 }
 
 /// The instance-wide default backend.
@@ -241,6 +242,9 @@ const USAGE_TTL: &str = "ZONE_AGENT_USAGE_TTL_SECONDS";
 /// Where codex runs the tools of a turn that grants them.
 const CODEX_SANDBOX: &str = "ZONE_CODEX_SANDBOX";
 
+/// The nice value agents start at.
+const NICENESS: &str = "ZONE_AGENT_NICENESS";
+
 /// `http://localhost:<port>`, or the port alone, where claude.com sends a browser back with a
 /// Claude sign-in's code.
 const AGENT_CALLBACK: &str = "ZONE_AGENT_CALLBACK";
@@ -253,6 +257,12 @@ const CONSOLE_ORIGINS: &str = "ZONE_CONSOLE_ORIGINS";
 
 /// Origins a phone should type into the Zone app.
 const CONNECT_URLS: &str = "ZONE_CONNECT_URL";
+
+/// The master switch for MCP servers, the instance's and every organization's.
+const MCP_ENABLED: &str = "ZONE_MCP_ENABLED";
+
+/// Whether the API may create MCP servers that run a host command.
+const MCP_COMMANDS: &str = "ZONE_MCP_COMMANDS";
 
 const DEFAULT_CALLBACK_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -281,6 +291,19 @@ const DEFAULT_USAGE_TTL: Duration = Duration::from_secs(60);
 
 const DEFAULT_HOST_LOGIN: bool = true;
 
+/// The nice value agents start at unless the operator names another: the lowest priority, so
+/// the builds and tests agents run yield the CPU to the server they share it with.
+const DEFAULT_NICENESS: Niceness = Niceness::LOWEST;
+
+/// The sandbox codex runs its own tools in on a turn that grants them, unless the operator names
+/// another.
+const DEFAULT_CODEX_SANDBOX: CodexSandbox = CodexSandbox::WorkspaceWrite;
+
+/// The sandboxes codex may run granted tools in. A turn that withholds them already runs
+/// read-only, so `read-only` names no choice an operator could make.
+pub(crate) const GRANTED_SANDBOXES: [CodexSandbox; 2] =
+    [CodexSandbox::WorkspaceWrite, CodexSandbox::DangerFullAccess];
+
 /// Owner-only access, for directories holding an agent's credentials and
 /// transcripts.
 #[cfg(unix)]
@@ -293,8 +316,8 @@ const FALSE: &[&str] = &["0", "false", "no", "off"];
 /// The coding agent CLIs organizations sign in to, from
 /// `ZONE_AGENT_STATE_DIR`, `ZONE_AGENT_HOST_LOGIN`, `ZONE_CLAUDE_TOKEN_URL`,
 /// `ZONE_CODEX_SANDBOX`, `ZONE_AGENT_CALLBACK`, `ZONE_AGENT_CALLBACK_BIND`,
-/// `ZONE_CONSOLE_ORIGINS`, `ZONE_AGENT_USAGE_TTL_SECONDS`, `ZONE_CLAUDE_API_URL`
-/// and `ZONE_CODEX_API_URL`.
+/// `ZONE_CONSOLE_ORIGINS`, `ZONE_AGENT_USAGE_TTL_SECONDS`, `ZONE_CLAUDE_API_URL`,
+/// `ZONE_CODEX_API_URL` and `ZONE_AGENT_NICENESS`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentConfig {
     /// Root of every organization's agent homes.
@@ -319,6 +342,9 @@ pub struct AgentConfig {
     pub claude_api_url: String,
     /// Where a Codex login's usage is read.
     pub codex_api_url: String,
+    /// The nice value every agent run starts at, which the builds and tests
+    /// it runs inherit, so the server keeps its share of the CPU.
+    pub niceness: Niceness,
 }
 
 /// The loopback address a browser returns a Claude sign-in to,
@@ -340,12 +366,13 @@ impl Default for AgentConfig {
             state: env::temp_dir().join(TEMPORARY_STATE_ROOT),
             host_login: DEFAULT_HOST_LOGIN,
             claude_token_url: DEFAULT_CLAUDE_TOKEN_URL.to_string(),
-            codex_sandbox: CodexSandbox::default(),
+            codex_sandbox: DEFAULT_CODEX_SANDBOX,
             callback: None,
             consoles: Vec::new(),
             usage_ttl: DEFAULT_USAGE_TTL,
             claude_api_url: DEFAULT_CLAUDE_API_URL.to_string(),
             codex_api_url: DEFAULT_CODEX_API_URL.to_string(),
+            niceness: DEFAULT_NICENESS,
         }
     }
 }
@@ -382,6 +409,7 @@ impl AgentConfig {
                 "ZONE_CODEX_API_URL must be an absolute http or https URL with a host",
                 "ZONE_CODEX_API_URL must not carry credentials, a query or a fragment",
             )?,
+            niceness: niceness(env::var(NICENESS).ok())?,
         })
     }
 
@@ -564,10 +592,13 @@ fn codex_sandbox(value: Option<String>) -> Result<CodexSandbox, ConfigError> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        None => Ok(CodexSandbox::default()),
-        Some(value) => CodexSandbox::named(value).ok_or(ConfigError::Invalid(
-            "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access",
-        )),
+        None => Ok(DEFAULT_CODEX_SANDBOX),
+        Some(value) => GRANTED_SANDBOXES
+            .into_iter()
+            .find(|sandbox| sandbox.as_str() == value)
+            .ok_or(ConfigError::Invalid(
+                "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access",
+            )),
     }
 }
 
@@ -611,6 +642,19 @@ fn usage_ttl(value: Option<String>) -> Result<Duration, ConfigError> {
         None => Ok(DEFAULT_USAGE_TTL),
         Some(value) => value.parse().map(Duration::from_secs).map_err(|_| {
             ConfigError::Invalid("ZONE_AGENT_USAGE_TTL_SECONDS must be a whole number of seconds")
+        }),
+    }
+}
+
+fn niceness(value: Option<String>) -> Result<Niceness, ConfigError> {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(DEFAULT_NICENESS),
+        Some(value) => value.parse().map_err(|_| {
+            ConfigError::Invalid("ZONE_AGENT_NICENESS must be a whole number from 0 to 19")
         }),
     }
 }
@@ -1062,6 +1106,85 @@ fn within(host: &str, allowed: &str) -> bool {
         })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OriginFault {
+    Malformed,
+    Credentials,
+    NotOrigin,
+    PlainHttp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GithubOrigin {
+    Api,
+    Web,
+}
+
+impl GithubOrigin {
+    fn refusal(self, fault: OriginFault) -> &'static str {
+        match (self, fault) {
+            (Self::Api, OriginFault::Malformed) => {
+                "GITHUB_API_URL must be an absolute http or https URL with a host"
+            }
+            (Self::Api, OriginFault::Credentials) => {
+                "GITHUB_API_URL must not carry credentials; set GITHUB_TOKEN instead"
+            }
+            (Self::Api, OriginFault::NotOrigin) => {
+                "GITHUB_API_URL must be an origin, without a query or fragment"
+            }
+            (Self::Api, OriginFault::PlainHttp) => {
+                "GITHUB_API_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to send the repository token over it"
+            }
+            (Self::Web, OriginFault::Malformed) => {
+                "GITHUB_WEB_URL must be an absolute http or https URL with a host"
+            }
+            (Self::Web, OriginFault::Credentials) => "GITHUB_WEB_URL must not carry credentials",
+            (Self::Web, OriginFault::NotOrigin) => {
+                "GITHUB_WEB_URL must be an origin, without a query or fragment"
+            }
+            (Self::Web, OriginFault::PlainHttp) => {
+                "GITHUB_WEB_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to allow it"
+            }
+        }
+    }
+}
+
+/// Private and LAN hosts pass on purpose: the origin is operator
+/// configuration, routinely a loopback or LAN GitHub Enterprise host.
+fn validate_github_origin(value: &str, allows_http: bool) -> Result<(), OriginFault> {
+    let url = reqwest::Url::parse(value).map_err(|_| OriginFault::Malformed)?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.host_str().is_some_and(|host| !host.is_empty())
+    {
+        return Err(OriginFault::Malformed);
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(OriginFault::Credentials);
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(OriginFault::NotOrigin);
+    }
+    if url.scheme() == "http" && !allows_http {
+        return Err(OriginFault::PlainHttp);
+    }
+    Ok(())
+}
+
+fn github_web_default(api: &str) -> String {
+    let hosted = reqwest::Url::parse(api)
+        .ok()
+        .and_then(|url| {
+            url.host_str()
+                .map(|host| host.eq_ignore_ascii_case(GITHUB_API_HOST))
+        })
+        .unwrap_or(false);
+    let versioned = format!("/{}", GITHUB_VERSIONED_REST.join("/"));
+    match hosted {
+        true => DEFAULT_GITHUB_WEB_URL.to_string(),
+        false => api.strip_suffix(&versioned).unwrap_or(api).to_string(),
+    }
+}
+
 fn env_truthy(name: &str, default: bool) -> bool {
     match env::var(name) {
         Ok(value) => TRUE.contains(&value.to_ascii_lowercase().as_str()),
@@ -1125,28 +1248,31 @@ impl Config {
         }
     }
 
-    /// The configured GitHub REST origin, ending in a slash so that a
-    /// relative path joins beneath it instead of replacing its last segment.
-    pub fn github_rest_origin(&self) -> Option<reqwest::Url> {
-        reqwest::Url::parse(&format!("{}/", self.github_api_url.trim_end_matches('/'))).ok()
+    /// The `ENCRYPTION_KEY` the server seals credentials under, refused when shorter than
+    /// [`MINIMUM_ENCRYPTION_KEY_BYTES`].
+    pub fn encryption_key_from_env() -> Result<String, ConfigError> {
+        let encryption_key =
+            env::var("ENCRYPTION_KEY").map_err(|_| ConfigError::Missing("ENCRYPTION_KEY"))?;
+        if encryption_key.len() < MINIMUM_ENCRYPTION_KEY_BYTES {
+            return Err(ConfigError::TooShort {
+                name: "ENCRYPTION_KEY",
+                minimum: MINIMUM_ENCRYPTION_KEY_BYTES,
+            });
+        }
+        Ok(encryption_key)
     }
 
     /// Load configuration from environment variables
     pub fn from_env() -> Result<Self, ConfigError> {
         let jwt_secret = env::var("JWT_SECRET").map_err(|_| ConfigError::Missing("JWT_SECRET"))?;
-        if jwt_secret.len() < 32 {
-            return Err(ConfigError::Invalid(
-                "JWT_SECRET must be at least 32 characters",
-            ));
+        if jwt_secret.len() < MINIMUM_JWT_SECRET_BYTES {
+            return Err(ConfigError::TooShort {
+                name: "JWT_SECRET",
+                minimum: MINIMUM_JWT_SECRET_BYTES,
+            });
         }
 
-        let encryption_key =
-            env::var("ENCRYPTION_KEY").map_err(|_| ConfigError::Missing("ENCRYPTION_KEY"))?;
-        if encryption_key.len() < 32 {
-            return Err(ConfigError::Invalid(
-                "ENCRYPTION_KEY must be at least 32 characters",
-            ));
-        }
+        let encryption_key = Self::encryption_key_from_env()?;
 
         let cors_origins = env::var("CORS_ORIGINS")
             .ok()
@@ -1173,39 +1299,15 @@ impl Config {
             .filter(|url| !url.is_empty())
             .unwrap_or_else(|| DEFAULT_GITHUB_API_URL.to_string());
         let github_api_allows_http = env_truthy("GITHUB_API_ALLOW_HTTP", false);
-        // A prefix is not an origin: `https:///api/v3` passes one and leaves
-        // PullRequestService building request URLs with no host to send them to. Parsing
-        // also refuses embedded credentials, which would otherwise reach any
-        // log that prints this config.
-        match reqwest::Url::parse(&github_api_url) {
-            Ok(url)
-                if matches!(url.scheme(), "http" | "https")
-                    && url.host_str().is_some_and(|host| !host.is_empty()) =>
-            {
-                if !url.username().is_empty() || url.password().is_some() {
-                    return Err(ConfigError::Invalid(
-                        "GITHUB_API_URL must not carry credentials; set GITHUB_TOKEN instead",
-                    ));
-                }
-                // An origin every caller joins a rooted path onto has no use
-                // for either, and both are places a token gets written down.
-                if url.query().is_some() || url.fragment().is_some() {
-                    return Err(ConfigError::Invalid(
-                        "GITHUB_API_URL must be an origin, without a query or fragment",
-                    ));
-                }
-                if url.scheme() == "http" && !github_api_allows_http {
-                    return Err(ConfigError::Invalid(
-                        "GITHUB_API_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to send the repository token over it",
-                    ));
-                }
-            }
-            _ => {
-                return Err(ConfigError::Invalid(
-                    "GITHUB_API_URL must be an absolute http or https URL with a host",
-                ));
-            }
-        }
+        validate_github_origin(&github_api_url, github_api_allows_http)
+            .map_err(|fault| ConfigError::Invalid(GithubOrigin::Api.refusal(fault)))?;
+        let github_web_url = env::var("GITHUB_WEB_URL")
+            .ok()
+            .map(|url| url.trim().trim_end_matches('/').to_string())
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| github_web_default(&github_api_url));
+        validate_github_origin(&github_web_url, github_api_allows_http)
+            .map_err(|fault| ConfigError::Invalid(GithubOrigin::Web.refusal(fault)))?;
 
         let agents = AgentConfig::from_env()?;
         let clones = clone_root(env_path(CLONE_ROOT), &agents.state)?;
@@ -1260,6 +1362,7 @@ impl Config {
             app_base_url,
             github_api_url,
             github_api_allows_http,
+            github_web_url,
             web_search: crate::services::search::from_environment(),
             comfyui: crate::services::comfy::settings::load()
                 .map_err(|error| ConfigError::Invalid(error.message()))?,
@@ -1270,6 +1373,8 @@ impl Config {
             endpoint_hosts: Hosts::from_env(),
             host_mounts: crate::host_mounts::HostMounts::from_env(),
             connect_urls: connect_urls(env::var(CONNECT_URLS).ok())?,
+            mcp_enabled: servers::flag(MCP_ENABLED, true),
+            mcp_commands: servers::flag(MCP_COMMANDS, false),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1309,6 +1414,7 @@ impl std::fmt::Debug for Config {
             .field("app_base_url", &self.app_base_url)
             .field("github_api_url", &self.github_api_url)
             .field("github_api_allows_http", &self.github_api_allows_http)
+            .field("github_web_url", &self.github_web_url)
             .field("web_search", &self.web_search)
             .field("comfyui", &self.comfyui)
             .field("source_index", &self.source_index)
@@ -1318,6 +1424,8 @@ impl std::fmt::Debug for Config {
             .field("host_mounts", &self.host_mounts)
             .field("clones", &self.clones)
             .field("connect_urls", &self.connect_urls)
+            .field("mcp_enabled", &self.mcp_enabled)
+            .field("mcp_commands", &self.mcp_commands)
             .finish()
     }
 }
@@ -1329,6 +1437,8 @@ pub enum ConfigError {
     Missing(&'static str),
     #[error("Invalid configuration: {0}")]
     Invalid(&'static str),
+    #[error("Invalid configuration: {name} must be at least {minimum} bytes")]
+    TooShort { name: &'static str, minimum: usize },
     #[error("Invalid configuration: GITHUB_API_URL is not a GitHub origin: {0}")]
     GitHubOrigin(PullRequestError),
 }
@@ -1336,8 +1446,96 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use abnegate_secret::SecretValue;
+    use serde_json::json;
     use std::net::Ipv6Addr;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
     use zone_core::variables::Variables;
+
+    const ENVIRONMENT: &[&str] = &[
+        "APP_BASE_URL",
+        "GITHUB_API_URL",
+        "GITHUB_WEB_URL",
+        "CORS_ALLOW_CREDENTIALS",
+        "CORS_ORIGINS",
+        CONNECT_URLS,
+        MCP_ENABLED,
+        MCP_COMMANDS,
+        "DATABASE_URL",
+        "ENCRYPTION_KEY",
+        "GPT4ALL_MODELS_URL",
+        "HOST",
+        "HUGGINGFACE_MODELS_URL",
+        "JWT_ACCESS_LIFETIME",
+        "JWT_REFRESH_LIFETIME",
+        "JWT_SECRET",
+        "LITELLM_HOST",
+        "LITELLM_KEY",
+        "MODEL_SEARCH_PROXY_URL",
+        "MONITORING_ENABLED",
+        "MONITORING_GRAFANA_ADMIN_PASSWORD",
+        "MONITORING_GRAFANA_ADMIN_USER",
+        "MONITORING_GRAFANA_TOKEN",
+        "MONITORING_GRAFANA_URL",
+        "MONITORING_PROMETHEUS_URL",
+        "OLLAMA_HOST",
+        "PORT",
+        "PROMETHEUS_URL",
+        "REDIS_URL",
+        "SEARCH_TIMEOUT_SECONDS",
+        "SEARCH_TIMEOUT_SECS",
+        "SOURCE_RESYNC_ENABLED",
+        "SOURCE_RESYNC_INTERVAL_SECS",
+        "SOURCE_RESYNC_POLL_SECS",
+        "TRAIN_UPLOAD_LIMIT_MB",
+        MODEL_BACKEND,
+        MODEL_BACKEND_EXECUTABLE,
+        AGENT_STATE,
+        AGENT_HOST_LOGIN,
+        CLAUDE_TOKEN_URL,
+        USAGE_TTL,
+        CLAUDE_API_URL,
+        CODEX_API_URL,
+        CODEX_SANDBOX,
+    ];
+    const INSTANCE_SERVERS: &str = "ZONE_MCP_SERVERS";
+    const INSTANCE_CONFIGURATION: &str = "ZONE_MCP_CONFIG";
+    const INSTANCE_AUTO_CONNECT: &str = "ZONE_MCP_AUTO_CONNECT";
+    const INSTANCE_AUTO_MAGENTS: &str = "ZONE_MCP_AUTO_MAGENTS";
+    const INSTANCE_DOCUMENT: &str = r#"{"mcpServers":{"docs":{"url":"http://127.0.0.1:1/mcp"}}}"#;
+
+    /// abnegate-agent-cli adds a read-only sandbox, which a turn that withholds codex's tools
+    /// already runs in. An operator naming it for granted tools gets an error, not a codex that
+    /// cannot write what it was granted tools to write.
+    #[test]
+    fn zone_codex_sandbox_refuses_read_only() {
+        assert!(
+            matches!(
+                codex_sandbox(Some(CodexSandbox::ReadOnly.as_str().to_string())),
+                Err(ConfigError::Invalid(
+                    "ZONE_CODEX_SANDBOX must be workspace-write or danger-full-access"
+                ))
+            ),
+            "read-only is not a sandbox for granted tools"
+        );
+        assert!(!GRANTED_SANDBOXES.contains(&CodexSandbox::ReadOnly));
+        for value in [None, Some(String::new()), Some("  ".to_string())] {
+            assert_eq!(
+                codex_sandbox(value).expect("the default sandbox"),
+                CodexSandbox::WorkspaceWrite
+            );
+        }
+        for sandbox in [CodexSandbox::WorkspaceWrite, CodexSandbox::DangerFullAccess] {
+            assert_eq!(
+                codex_sandbox(Some(format!(" {} ", sandbox.as_str()))).expect("a granted sandbox"),
+                sandbox
+            );
+        }
+    }
 
     fn create_test_config() -> Config {
         Config {
@@ -1363,6 +1561,7 @@ mod tests {
             app_base_url: "http://localhost:3000".to_string(),
             github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
             github_api_allows_http: false,
+            github_web_url: DEFAULT_GITHUB_WEB_URL.to_string(),
             web_search: crate::services::search::defaults(),
             comfyui: crate::services::comfy::settings::development(),
             source_index: SourceIndexConfig::default(),
@@ -1373,45 +1572,72 @@ mod tests {
             auto: Default::default(),
             host_mounts: Default::default(),
             connect_urls: Vec::new(),
+            mcp_enabled: true,
+            mcp_commands: false,
         }
     }
 
-    #[test]
-    fn github_graphql_answers_beside_rest_or_under_an_enterprise_api() {
-        for (configured, rest, graphql) in [
-            (
-                DEFAULT_GITHUB_API_URL,
-                "https://api.github.com/",
-                "https://api.github.com/graphql",
-            ),
-            (
-                "https://github.example.com/api/v3",
-                "https://github.example.com/api/v3/",
-                "https://github.example.com/api/graphql",
-            ),
-            (
-                "http://127.0.0.1:9000",
-                "http://127.0.0.1:9000/",
-                "http://127.0.0.1:9000/graphql",
-            ),
+    #[tokio::test]
+    async fn github_graphql_answers_beside_rest_or_under_an_enterprise_api() {
+        const DEFAULT_GITHUB_GRAPHQL_URL: &str = "https://api.github.com/graphql";
+        const GITHUB_PULL_REQUEST_URL: &str = "https://github.com/owner/repository/pull/7";
+
+        let default = reqwest::Url::parse(DEFAULT_GITHUB_API_URL).unwrap();
+        let mut answered = Vec::new();
+        for (prefix, graphql) in [
+            ("", "/graphql"),
+            (default.path(), "/graphql"),
+            ("/api/v3", "/api/graphql"),
         ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path(graphql))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {"repository": {"pullRequest": {"number": 7, "reviewThreads": {
+                        "pageInfo": {"hasNextPage": false, "endCursor": null},
+                        "nodes": [],
+                    }}}}
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
             let config = Config {
-                github_api_url: configured.to_string(),
+                github_api_url: format!("{}{prefix}", server.uri()),
+                github_api_allows_http: true,
                 ..crate::state::test_config()
             };
-            assert_eq!(
-                config.github_rest_origin().map(String::from).as_deref(),
-                Some(rest)
-            );
-            assert_eq!(
-                config
-                    .github_rest_origin()
-                    .and_then(|origin| github_graphql_url(&origin))
-                    .map(String::from)
-                    .as_deref(),
-                Some(graphql)
-            );
+            let service = config.pull_requests().unwrap();
+            let reference = service
+                .pull_request(&format!("{}/owner/repository/pull/7", server.uri()))
+                .unwrap();
+
+            service
+                .fetch_review_thread_counts(&reference, &SecretValue::new("token"))
+                .await
+                .unwrap_or_else(|error| panic!("{prefix:?}: {error:?}"));
+            if prefix == default.path() {
+                answered = server.received_requests().await.unwrap();
+            }
         }
+
+        let [request] = answered.as_slice() else {
+            panic!("the default origin's path must send one GraphQL request: {answered:?}");
+        };
+        assert_eq!(
+            default.join(request.url.path()).unwrap().as_str(),
+            DEFAULT_GITHUB_GRAPHQL_URL,
+            "GraphQL must answer beside REST on GitHub's own API"
+        );
+        let config = Config {
+            github_api_url: DEFAULT_GITHUB_API_URL.to_string(),
+            github_api_allows_http: false,
+            ..crate::state::test_config()
+        };
+        config
+            .pull_requests()
+            .expect("the default origin is GitHub's own HTTPS API")
+            .pull_request(GITHUB_PULL_REQUEST_URL)
+            .expect("the default origin answers for github.com pull requests");
     }
 
     #[test]
@@ -1602,6 +1828,7 @@ mod tests {
             "ENCRYPTION_KEY",
             "GITHUB_API_ALLOW_HTTP",
             "GITHUB_API_URL",
+            "GITHUB_WEB_URL",
             "JWT_SECRET",
             "LITELLM_HOST",
             "LITELLM_KEY",
@@ -1745,6 +1972,114 @@ mod tests {
     }
 
     #[test]
+    fn the_github_web_origin_follows_the_api_origin_unless_set() {
+        let names = [
+            "DATABASE_URL",
+            "ENCRYPTION_KEY",
+            "GITHUB_API_ALLOW_HTTP",
+            "GITHUB_API_URL",
+            "GITHUB_WEB_URL",
+            "JWT_SECRET",
+            "LITELLM_HOST",
+            "LITELLM_KEY",
+            "REDIS_URL",
+            MODEL_BACKEND,
+            MODEL_BACKEND_EXECUTABLE,
+            AGENT_STATE,
+            AGENT_HOST_LOGIN,
+            CLAUDE_TOKEN_URL,
+            USAGE_TTL,
+            CLAUDE_API_URL,
+            CODEX_API_URL,
+            CODEX_SANDBOX,
+        ];
+        let mut environment = Variables::isolated(&names);
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "12345678901234567890123456789012");
+        environment.set("DATABASE_URL", "postgres://localhost/zone");
+        environment.set("REDIS_URL", "redis://localhost");
+        environment.set("LITELLM_HOST", "http://localhost:4000");
+        environment.set("LITELLM_KEY", "key");
+
+        assert_eq!(
+            Config::from_env().expect("unset is valid").github_web_url,
+            DEFAULT_GITHUB_WEB_URL,
+            "api.github.com is served from github.com"
+        );
+
+        environment.set("GITHUB_API_URL", "https://ghe.local/api/v3");
+        assert_eq!(
+            Config::from_env()
+                .expect("an enterprise origin is valid")
+                .github_web_url,
+            "https://ghe.local",
+            "an enterprise web UI is its REST origin without /api/v3"
+        );
+
+        environment.set("GITHUB_WEB_URL", "  https://github.internal.example/  ");
+        assert_eq!(
+            Config::from_env()
+                .expect("an explicit web origin is valid")
+                .github_web_url,
+            "https://github.internal.example",
+            "an explicit setting wins, trimmed and without its trailing slash"
+        );
+
+        environment.set("GITHUB_WEB_URL", "https://someone:t0ken@ghe.local");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid(
+                "GITHUB_WEB_URL must not carry credentials"
+            ))
+        ));
+
+        environment.set("GITHUB_WEB_URL", "https://ghe.local?state=t0ken");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid(
+                "GITHUB_WEB_URL must be an origin, without a query or fragment"
+            ))
+        ));
+
+        environment.set("GITHUB_WEB_URL", "ghe.local");
+        assert!(matches!(
+            Config::from_env(),
+            Err(ConfigError::Invalid(
+                "GITHUB_WEB_URL must be an absolute http or https URL with a host"
+            ))
+        ));
+
+        environment.set("GITHUB_WEB_URL", "http://192.168.1.5");
+        assert!(
+            matches!(
+                Config::from_env(),
+                Err(ConfigError::Invalid(
+                    "GITHUB_WEB_URL is plain http; set GITHUB_API_ALLOW_HTTP=true to allow it"
+                ))
+            ),
+            "plain http needs the same opt-in as the API origin"
+        );
+
+        environment.set("GITHUB_API_ALLOW_HTTP", "true");
+        assert_eq!(
+            Config::from_env()
+                .expect("a LAN host over http is allowed once opted in")
+                .github_web_url,
+            "http://192.168.1.5"
+        );
+
+        environment.remove("GITHUB_WEB_URL");
+        environment.set("GITHUB_API_URL", "http://127.0.0.1:9000");
+        assert_eq!(
+            Config::from_env()
+                .expect("a loopback API origin is allowed once opted in")
+                .github_web_url,
+            "http://127.0.0.1:9000",
+            "an origin without /api/v3 is its own web origin"
+        );
+    }
+
+    #[test]
     fn a_subdomain_prefix_must_be_whole_labels() {
         let origins = allowed(&["https://zone.example.com"]);
         for origin in [
@@ -1859,6 +2194,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn zone_mcp_commands_is_off_unless_the_operator_turns_it_on() {
+        let mut environment = Variables::isolated(&[MCP_COMMANDS]);
+
+        assert!(
+            !servers::flag(MCP_COMMANDS, false),
+            "an unset ZONE_MCP_COMMANDS must keep stdio MCP servers off"
+        );
+
+        for value in ["1", "true", " true ", "YES", "on"] {
+            environment.set(MCP_COMMANDS, value);
+            assert!(
+                servers::flag(MCP_COMMANDS, false),
+                "{value} turns ZONE_MCP_COMMANDS on"
+            );
+        }
+
+        for value in ["0", "off", "", "garbage"] {
+            environment.set(MCP_COMMANDS, value);
+            assert!(
+                !servers::flag(MCP_COMMANDS, false),
+                "{value} keeps ZONE_MCP_COMMANDS off"
+            );
+        }
+    }
+
+    /// The instance layer reads `ZONE_MCP_ENABLED` through abnegate-agent-cli, so the
+    /// organization layer has to read it the same way: one value never leaves one layer on and
+    /// the other off.
+    #[test]
+    fn zone_mcp_enabled_reads_the_same_in_both_layers() {
+        let mut environment = Variables::isolated(ENVIRONMENT);
+        environment.clear(&[INSTANCE_CONFIGURATION, INSTANCE_AUTO_MAGENTS]);
+        environment.set(INSTANCE_SERVERS, INSTANCE_DOCUMENT);
+        environment.set(INSTANCE_AUTO_CONNECT, "false");
+        environment.set("JWT_SECRET", "12345678901234567890123456789012");
+        environment.set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
+        environment.set("DATABASE_URL", "postgres://database/zone");
+        environment.set("REDIS_URL", "redis://cache:6379");
+        environment.set("LITELLM_HOST", "http://models:4000");
+        environment.set("LITELLM_KEY", "models-key");
+
+        for (value, enabled) in [
+            (None, true),
+            (Some("1"), true),
+            (Some("true"), true),
+            (Some(" true "), true),
+            (Some("YES"), true),
+            (Some("on"), true),
+            (Some(""), true),
+            (Some("  "), true),
+            (Some("garbage"), true),
+            (Some("0"), false),
+            (Some("false"), false),
+            (Some(" false "), false),
+            (Some("Off"), false),
+            (Some("no"), false),
+        ] {
+            match value {
+                Some(value) => environment.set(MCP_ENABLED, value),
+                None => environment.remove(MCP_ENABLED),
+            }
+
+            let organization = Config::from_env()
+                .expect("required values are present")
+                .mcp_enabled;
+            let instance = !servers::config().servers.is_empty();
+
+            assert_eq!(
+                (organization, instance),
+                (enabled, enabled),
+                "ZONE_MCP_ENABLED={value:?}"
+            );
+        }
+    }
+
     /// The environment picks the default every organization without an agent
     /// provider of its own falls back to.
     #[test]
@@ -1946,6 +2357,7 @@ mod tests {
             "DATABASE_URL",
             "ENCRYPTION_KEY",
             "GITHUB_API_URL",
+            "GITHUB_WEB_URL",
             "JWT_SECRET",
             "LITELLM_HOST",
             "LITELLM_KEY",
@@ -2034,74 +2446,31 @@ mod tests {
 
     #[test]
     fn environment_matrix_validates_secrets_and_loads_server_settings() {
-        let names = [
-            "APP_BASE_URL",
-            "GITHUB_API_URL",
-            "CORS_ALLOW_CREDENTIALS",
-            "CORS_ORIGINS",
-            CONNECT_URLS,
-            "DATABASE_URL",
-            "ENCRYPTION_KEY",
-            "GPT4ALL_MODELS_URL",
-            "HOST",
-            "HUGGINGFACE_MODELS_URL",
-            "JWT_ACCESS_LIFETIME",
-            "JWT_REFRESH_LIFETIME",
-            "JWT_SECRET",
-            "LITELLM_HOST",
-            "LITELLM_KEY",
-            "MODEL_SEARCH_PROXY_URL",
-            "MONITORING_ENABLED",
-            "MONITORING_GRAFANA_ADMIN_PASSWORD",
-            "MONITORING_GRAFANA_ADMIN_USER",
-            "MONITORING_GRAFANA_TOKEN",
-            "MONITORING_GRAFANA_URL",
-            "MONITORING_PROMETHEUS_URL",
-            "OLLAMA_HOST",
-            "PORT",
-            "PROMETHEUS_URL",
-            "REDIS_URL",
-            "SEARCH_TIMEOUT_SECONDS",
-            "SEARCH_TIMEOUT_SECS",
-            "SOURCE_RESYNC_ENABLED",
-            "SOURCE_RESYNC_INTERVAL_SECS",
-            "SOURCE_RESYNC_POLL_SECS",
-            "TRAIN_UPLOAD_LIMIT_MB",
-            MODEL_BACKEND,
-            MODEL_BACKEND_EXECUTABLE,
-            AGENT_STATE,
-            AGENT_HOST_LOGIN,
-            CLAUDE_TOKEN_URL,
-            USAGE_TTL,
-            CLAUDE_API_URL,
-            CODEX_API_URL,
-            CODEX_SANDBOX,
-        ];
-        let mut environment = Variables::isolated(&names);
+        let mut environment = Variables::isolated(ENVIRONMENT);
 
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Missing("JWT_SECRET"))
         ));
         environment.set("JWT_SECRET", "short");
-        assert!(matches!(
-            Config::from_env(),
-            Err(ConfigError::Invalid(
-                "JWT_SECRET must be at least 32 characters"
-            ))
-        ));
+        assert_eq!(
+            Config::from_env()
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Err("Invalid configuration: JWT_SECRET must be at least 32 bytes".to_string())
+        );
         environment.set("JWT_SECRET", "12345678901234567890123456789012");
         assert!(matches!(
             Config::from_env(),
             Err(ConfigError::Missing("ENCRYPTION_KEY"))
         ));
         environment.set("ENCRYPTION_KEY", "short");
-        assert!(matches!(
-            Config::from_env(),
-            Err(ConfigError::Invalid(
-                "ENCRYPTION_KEY must be at least 32 characters"
-            ))
-        ));
+        assert_eq!(
+            Config::from_env()
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Err("Invalid configuration: ENCRYPTION_KEY must be at least 32 bytes".to_string())
+        );
 
         environment.set("ENCRYPTION_KEY", "abcdefghijklmnopqrstuvwxyz123456");
         environment.set("DATABASE_URL", "postgres://database/zone");
@@ -2129,10 +2498,19 @@ mod tests {
         assert!(!defaults.cors_allow_credentials);
         assert_eq!(defaults.app_base_url, "http://localhost:3000");
         assert_eq!(defaults.github_api_url, DEFAULT_GITHUB_API_URL);
+        assert_eq!(defaults.github_web_url, DEFAULT_GITHUB_WEB_URL);
         assert_eq!(defaults.source_index, SourceIndexConfig::default());
         assert_eq!(defaults.monitoring, MonitoringConfig::from_env());
         assert_eq!(defaults.train_upload_limit_mb, 4096);
         assert!(defaults.connect_urls.is_empty());
+        assert!(
+            defaults.mcp_enabled,
+            "MCP servers stay on until the operator turns them off"
+        );
+        assert!(
+            !defaults.mcp_commands,
+            "API-created stdio MCP servers stay off until the operator opts in"
+        );
 
         environment.set("HOST", "127.0.0.1");
         environment.set("PORT", "9001");
@@ -2148,6 +2526,8 @@ mod tests {
             " http://192.168.1.10/, ,http://100.64.1.2 ",
         );
         environment.set("CORS_ALLOW_CREDENTIALS", "true");
+        environment.set(MCP_ENABLED, "off");
+        environment.set(MCP_COMMANDS, "true");
         environment.set("APP_BASE_URL", "https://zone.test");
         environment.set("GITHUB_API_URL", "https://github.example.com/api/v3/");
         environment.set("SOURCE_RESYNC_ENABLED", "off");
@@ -2187,12 +2567,21 @@ mod tests {
             ["http://192.168.1.10", "http://100.64.1.2"]
         );
         assert!(configured.cors_allow_credentials);
+        assert!(
+            !configured.mcp_enabled,
+            "ZONE_MCP_ENABLED=off connects no MCP server"
+        );
+        assert!(
+            configured.mcp_commands,
+            "ZONE_MCP_COMMANDS=true lets the API create stdio MCP servers"
+        );
         assert_eq!(configured.app_base_url, "https://zone.test");
         // The trailing slash goes, because every caller joins a rooted path.
         assert_eq!(
             configured.github_api_url,
             "https://github.example.com/api/v3"
         );
+        assert_eq!(configured.github_web_url, "https://github.example.com");
         assert_eq!(
             configured.source_index,
             SourceIndexConfig {
@@ -2246,7 +2635,7 @@ mod tests {
         ));
     }
 
-    const AGENT_SETTINGS: [&str; 10] = [
+    const AGENT_SETTINGS: [&str; 11] = [
         AGENT_STATE,
         AGENT_HOST_LOGIN,
         CLAUDE_TOKEN_URL,
@@ -2257,6 +2646,7 @@ mod tests {
         USAGE_TTL,
         CLAUDE_API_URL,
         CODEX_API_URL,
+        NICENESS,
     ];
     const NOT_AN_ORIGIN: &str = "ZONE_CONSOLE_ORIGINS must list http or https origins, such as \
                                  http://manager.localhost, with no credentials, path, query or \
@@ -2311,7 +2701,7 @@ mod tests {
             "a loopback token endpoint stays configurable: it is operator configuration"
         );
 
-        for sandbox in CodexSandbox::ALL {
+        for sandbox in GRANTED_SANDBOXES {
             environment.set(CODEX_SANDBOX, sandbox.as_str());
             assert_eq!(
                 AgentConfig::from_env()
@@ -2658,7 +3048,7 @@ mod tests {
         let organization = Uuid::new_v4();
         let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
 
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             let root = agents.home(organization, agent);
             let home = agents.login_home(organization, agent, first);
             assert_eq!(home, root.join("logins").join(first.to_string()));
@@ -2737,6 +3127,39 @@ mod tests {
                     ))
                 ),
                 "{value} was read as a number of seconds"
+            );
+        }
+    }
+
+    #[test]
+    fn agents_start_at_the_lowest_priority_unless_the_operator_names_another() {
+        let mut environment = Variables::isolated(&AGENT_SETTINGS);
+
+        assert_eq!(
+            AgentConfig::from_env().expect("unset falls back").niceness,
+            Niceness::LOWEST
+        );
+        for (value, niceness) in [("0", 0), (" 10 ", 10), ("19", 19), ("   ", 19)] {
+            environment.set(NICENESS, value);
+            assert_eq!(
+                AgentConfig::from_env()
+                    .expect("a nice value from 0 to 19")
+                    .niceness
+                    .get(),
+                niceness,
+                "{value:?}"
+            );
+        }
+        for value in ["20", "-1", "low", "1.5", "256"] {
+            environment.set(NICENESS, value);
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(
+                        "ZONE_AGENT_NICENESS must be a whole number from 0 to 19"
+                    ))
+                ),
+                "{value} was read as a nice value"
             );
         }
     }
@@ -2881,7 +3304,7 @@ mod tests {
     #[test]
     fn a_configured_binary_runs_only_the_agent_it_was_configured_for() {
         let mut config = create_test_config();
-        for agent in AgentKind::ALL {
+        for &agent in AgentKind::ALL {
             assert_eq!(
                 config.agent_executable(agent),
                 PathBuf::from(agent.executable())
@@ -2918,6 +3341,7 @@ mod tests {
             "DATABASE_URL",
             "ENCRYPTION_KEY",
             "GITHUB_API_URL",
+            "GITHUB_WEB_URL",
             "JWT_SECRET",
             "LITELLM_HOST",
             "LITELLM_KEY",
@@ -2974,7 +3398,7 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(
             debug.contains(
-                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }), consoles: ["http://manager.localhost", "https://manager.localhost"], usage_ttl: 60s, claude_api_url: "https://api.anthropic.com", codex_api_url: "https://chatgpt.com" }"#
+                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }), consoles: ["http://manager.localhost", "https://manager.localhost"], usage_ttl: 60s, claude_api_url: "https://api.anthropic.com", codex_api_url: "https://chatgpt.com", niceness: Niceness(19) }"#
             ),
             "{debug}"
         );

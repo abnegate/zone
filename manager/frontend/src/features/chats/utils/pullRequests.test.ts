@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import type { ChatPullRequest, PullRequestStatus } from '../types';
-import { mergeReading, pullRequestKind, pullRequestName, pullRequestTitle } from './pullRequests';
+import {
+  mergeReading,
+  pullRequestKind,
+  pullRequestName,
+  pullRequestTitle,
+  threadsLabel,
+} from './pullRequests';
 
 const STATUS: PullRequestStatus = {
   title: 'Add widgets',
@@ -13,6 +19,7 @@ const STATUS: PullRequestStatus = {
   mergeable: 'clean',
   auto_merge: { enabled: false, unavailable: null },
   draft_unavailable: null,
+  threads: null,
   observed_at: '2026-11-05T10:00:00Z',
 };
 
@@ -45,6 +52,19 @@ describe('pull request kinds', () => {
     expect(pullRequestKind(pullRequest({ checks: 'none' }))).toBe('open');
   });
 
+  it('marks a conflicted branch as conflicted whatever its checks say', () => {
+    expect(pullRequestKind(pullRequest({ mergeable: 'conflicted', checks: 'passing' }))).toBe(
+      'conflicted'
+    );
+    expect(pullRequestKind(pullRequest({ mergeable: 'conflicted', checks: 'failing' }))).toBe(
+      'conflicted'
+    );
+    expect(pullRequestKind(pullRequest({ mergeable: 'conflicted', draft: true }))).toBe('draft');
+    expect(pullRequestKind(pullRequest({ mergeable: 'conflicted', state: 'merged' }))).toBe(
+      'merged'
+    );
+  });
+
   it('dots only an open, ready pull request whose mergeability is known', () => {
     expect(mergeReading(pullRequest({ mergeable: 'clean' }).status)?.signal).toBe('ready');
     expect(mergeReading(pullRequest({ mergeable: 'behind' }).status)?.signal).toBe('waiting');
@@ -60,5 +80,19 @@ describe('pull request kinds', () => {
   it('names one by its repository and number when GitHub gave no title', () => {
     expect(pullRequestTitle(pullRequest(null))).toBe('Pull request #12');
     expect(pullRequestName(pullRequest(null))).toBe('widgets #12');
+  });
+});
+
+describe('threadsLabel', () => {
+  it('names open and resolved review threads apart', () => {
+    expect(threadsLabel({ open: 2, resolved: 3 })).toBe('2 open review threads, 3 resolved');
+  });
+
+  it('names a lone open review thread in the singular', () => {
+    expect(threadsLabel({ open: 1, resolved: 4 })).toBe('1 open review thread, 4 resolved');
+  });
+
+  it('names no open review threads in the plural', () => {
+    expect(threadsLabel({ open: 0, resolved: 1 })).toBe('0 open review threads, 1 resolved');
   });
 });

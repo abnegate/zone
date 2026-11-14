@@ -52,11 +52,28 @@ const mockAiSettings: AiSettings = {
   completions_routed: true,
 };
 
-const mockWorkspaceAiSettings: WorkspaceAiSettings = {
-  ...mockAiSettings,
-  overrides: false,
-  organization_keys: { litellm: false, openai: false, anthropic: false },
-};
+const workspaceAiSettingsPath = /\/workspaces\/[^/]+\/settings\/ai$/;
+
+export function workspaceAiSettingsResponse(
+  settings: AiSettings = mockAiSettings,
+): WorkspaceAiSettings {
+  return {
+    ...settings,
+    bedrock_use_iam_role: null,
+    overrides: false,
+    inherits_provider: true,
+    organization_keys: { litellm: false, openai: false, anthropic: false },
+  };
+}
+
+export function aiSettingsResponse(
+  path: string,
+  settings: AiSettings = mockAiSettings,
+): AiSettings | WorkspaceAiSettings {
+  return workspaceAiSettingsPath.test(path)
+    ? workspaceAiSettingsResponse(settings)
+    : settings;
+}
 
 const mockMembers = [
   {
@@ -132,7 +149,6 @@ export const mockChats = [
   },
 ];
 
-// Projects - matching Project interface
 export const mockProjects = [
   {
     id: 'proj-1',
@@ -156,7 +172,28 @@ export const mockProjects = [
   },
 ];
 
-// Tasks - matching Task interface with ALL required fields
+export const tasksNow = new Date('2024-01-16T12:00:00Z');
+
+const taskDefaults = {
+  workspace_id: 'ws-1',
+  acceptance_criteria: null,
+  priority: null,
+  model_name: null,
+  dependencies: [] as string[],
+  started_at: null,
+  completed_at: null,
+  is_agentic: false,
+  github_repo_url: null,
+  source_id: null,
+  source_ids: [],
+  queued_at: null,
+  worker_id: null,
+  pr_url: null,
+  branch_name: null,
+  pr_status: null,
+  pr_created_at: null,
+};
+
 export const mockTasks = [
   {
     id: 'task-1',
@@ -168,7 +205,7 @@ export const mockTasks = [
     status: 'in_progress',
     priority: 1,
     model_name: 'llama3.2:latest',
-    dependencies: [],
+    dependencies: ['task-2'],
     created_at: '2024-01-10T00:00:00Z',
     updated_at: '2024-01-15T08:00:00Z',
     started_at: '2024-01-12T09:00:00Z',
@@ -179,10 +216,10 @@ export const mockTasks = [
     source_ids: [],
     queued_at: '2024-01-12T08:30:00Z',
     worker_id: 'worker-1',
-    pr_url: null,
+    pr_url: 'https://github.com/example/repo/pull/61',
     branch_name: 'feature/auth',
-    pr_status: null,
-    pr_created_at: null,
+    pr_status: 'open',
+    pr_created_at: '2024-01-15T08:00:00Z',
   },
   {
     id: 'task-2',
@@ -210,9 +247,90 @@ export const mockTasks = [
     pr_status: 'merged',
     pr_created_at: '2024-01-11T14:00:00Z',
   },
+  {
+    ...taskDefaults,
+    id: 'task-3',
+    project_ids: ['proj-2'],
+    title: 'Ship offline mode for the mobile app',
+    description: 'Cache the last synced workspace so the app opens without a connection',
+    status: 'queued',
+    priority: 2,
+    is_agentic: true,
+    dependencies: ['task-1', 'task-7', 'task-5', 'task-6', 'task-archived'],
+    created_at: '2024-01-15T09:00:00Z',
+    updated_at: '2024-01-16T09:30:00Z',
+    queued_at: '2024-01-16T09:30:00Z',
+  },
+  {
+    ...taskDefaults,
+    id: 'task-4',
+    project_ids: ['proj-1'],
+    title: 'Users on Safari are sent back to the login page every time they sign in',
+    title_pending: true,
+    description: 'Users on Safari are sent back to the login page every time they sign in.',
+    status: 'created',
+    created_at: '2024-01-16T11:59:30Z',
+    updated_at: '2024-01-16T11:59:30Z',
+  },
+  {
+    ...taskDefaults,
+    id: 'task-5',
+    project_ids: ['proj-1', 'proj-2'],
+    title:
+      'Migrate the notification service from the legacy queue to the event bus without dropping in-flight messages',
+    description: 'Move every producer and consumer to the event bus',
+    status: 'blocked',
+    priority: 1,
+    is_agentic: true,
+    dependencies: ['task-2'],
+    created_at: '2024-01-11T00:00:00Z',
+    updated_at: '2024-01-15T17:00:00Z',
+    started_at: '2024-01-13T10:00:00Z',
+    branch_name: 'feature/event-bus',
+    pr_status: 'pending',
+  },
+  {
+    ...taskDefaults,
+    id: 'task-6',
+    project_ids: ['proj-2'],
+    title: 'Redesign the onboarding flow',
+    description: 'Shorten sign-up to two screens',
+    status: 'paused',
+    priority: 3,
+    created_at: '2024-01-09T00:00:00Z',
+    updated_at: '2024-01-14T11:00:00Z',
+    started_at: '2024-01-10T10:00:00Z',
+  },
+  {
+    ...taskDefaults,
+    id: 'task-7',
+    project_ids: ['proj-1'],
+    title: 'Rate limit the public API',
+    description: 'Add per-key token buckets to every public endpoint',
+    status: 'review',
+    priority: 1,
+    is_agentic: true,
+    dependencies: ['task-1', 'task-2'],
+    created_at: '2024-01-12T00:00:00Z',
+    updated_at: '2024-01-16T10:00:00Z',
+    started_at: '2024-01-14T09:00:00Z',
+    branch_name: 'feature/rate-limit',
+    pr_url: 'https://github.com/example/repo/pull/57',
+    pr_status: 'open',
+    pr_created_at: '2024-01-16T10:00:00Z',
+  },
+  {
+    ...taskDefaults,
+    id: 'task-8',
+    project_ids: [],
+    title: 'Evaluate a second vector database',
+    description: 'Superseded by the decision to stay on pgvector',
+    status: 'cancelled',
+    created_at: '2024-01-05T00:00:00Z',
+    updated_at: '2024-01-13T15:00:00Z',
+  },
 ];
 
-// Sources - matching Source interface with ALL required fields
 export const mockSources = [
   {
     id: 'src-1',
@@ -256,7 +374,6 @@ const sourceTypes = [
   { id: 'discord', name: 'Discord', category: 'chat', description: 'Discord server', enabled: false },
 ];
 
-// Sessions - matching expected session fields
 const mockSessions = [
   {
     id: 'sess-1',
@@ -284,7 +401,6 @@ const mockSessions = [
   },
 ];
 
-// Knowledge entries - matching KnowledgeEntry interface
 export const mockKnowledge = [
   {
     id: 'kb-1',
@@ -316,7 +432,6 @@ export const mockKnowledge = [
   },
 ];
 
-// Setup admin auth with all permissions
 export async function setupAdminAuth(page: Page) {
   const fullAdminPermissions = [
     ...adminPermissions,
@@ -336,7 +451,6 @@ export async function setupAdminAuth(page: Page) {
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
 
-  // Set auth tokens in localStorage
   await page.evaluate(
     ({ token, user }) => {
       localStorage.setItem('manager_access_token', token);
@@ -386,16 +500,8 @@ export async function setupCommonRoutes(
       body = { members: populated ? mockMembers : [] };
     else if (path.endsWith('/devices')) body = { devices: [] };
     else if (path.endsWith('/device-policy')) body = { mode: 'open' };
-    else if (/\/organizations\/[^/]+\/settings\/ai$/.test(path))
-      body = mockAiSettings;
-    else if (
-      /\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/ai$/.test(path)
-    )
-      body = mockWorkspaceAiSettings;
-    else if (
-      /\/organizations\/[^/]+\/workspaces\/[^/]+\/settings\/ai\/effective$/.test(path)
-    )
-      body = mockAiSettings;
+    else if (/\/settings\/ai(?:\/effective)?$/.test(path))
+      body = aiSettingsResponse(path);
     else if (path === '/api/organizations')
       body = { organizations: [mockOrganization] };
     else if (/\/organizations\/[^/]+\/workspaces$/.test(path))

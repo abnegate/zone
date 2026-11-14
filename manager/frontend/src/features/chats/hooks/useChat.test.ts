@@ -12,6 +12,7 @@ import {
   type Waiting,
 } from '../types';
 import { renderAnswers } from '../utils/answers';
+import { subscribeFrames } from '../utils/frames';
 
 const mockGetChat = mock();
 const mockPreviewContext = mock();
@@ -212,6 +213,7 @@ describe('useChat', () => {
     expect(mockSendMessage).not.toHaveBeenCalled();
     expect(JSON.parse(lastSocket?.sent.at(-1) ?? '{}')).toEqual({
       type: 'send',
+      id: expect.any(String),
       content: 'New message',
     });
 
@@ -364,6 +366,56 @@ describe('useChat', () => {
     expect(result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.[0]?.reason).toBe(
       'The user asked which tests fail.'
     );
+  });
+
+  it('carries what refused a call from its result frame onto the call', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+
+    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+    await waitFor(() => {
+      expect(lastSocket).not.toBeNull();
+    });
+
+    lastSocket?.emit({ type: 'message_start', message_id: 'm5', role: 'assistant' });
+    for (const id of ['refused', 'ran']) {
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'm5',
+        tool_call_id: id,
+        name: 'run_shell',
+        arguments: '{"command":"ls"}',
+      });
+    }
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm5',
+      tool_call_id: 'refused',
+      name: 'run_shell',
+      success: false,
+      detail: 'Refused',
+      duration_ms: 1,
+      refusal: 'timed_out',
+    });
+    lastSocket?.emit({
+      type: 'tool_result',
+      message_id: 'm5',
+      tool_call_id: 'ran',
+      name: 'run_shell',
+      success: false,
+      detail: 'Error: exit 1',
+      duration_ms: 1,
+      refusal: null,
+    });
+
+    await waitFor(() => {
+      expect(
+        result.current.chat?.messages.at(-1)?.metadata?.tool_calls?.map((call) => call.refusal)
+      ).toEqual(['timed_out', null]);
+    });
   });
 
   it('carries the observed preview from the approval frame onto the call', async () => {
@@ -1258,6 +1310,7 @@ describe('useChat', () => {
 
     expect(JSON.parse(lastSocket?.sent.at(-1) ?? '{}')).toEqual({
       type: 'send',
+      id: expect.any(String),
       content: 'see this',
       metadata,
     });
@@ -1425,23 +1478,288 @@ describe('useChat', () => {
     });
   });
 
-  it('serializes sends until the current response completes', async () => {
-    mockGetChat.mockResolvedValue(mockChat);
-    const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
-    await waitFor(() => {
-      expect(result.current.loading).toBe(false);
-      expect(lastSocket).not.toBeNull();
+  describe('queue', () => {
+    const sent = () => lastSocket?.sent.map((frame) => JSON.parse(frame)) ?? [];
+
+    const running = async () => {
+      mockGetChat.mockResolvedValue(mockChat);
+      const hook = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+      await waitFor(() => {
+        expect(hook.result.current.loading).toBe(false);
+        expect(lastSocket).not.toBeNull();
+      });
+      await act(async () => {
+        await hook.result.current.sendMessage({ content: 'first' });
+      });
+      act(() => {
+        lastSocket?.emit({
+          type: 'message_saved',
+          message_id: 'u-first',
+          role: 'user',
+          content: 'first',
+        });
+        lastSocket?.emit({ type: 'message_start', message_id: 'a-first', role: 'assistant' });
+      });
+      return hook;
+    };
+
+    it('sends a message typed during a turn for the server to queue, without a pending row', async () => {
+      const { result } = await running();
+
+      await act(async () => {
+        await result.current.sendMessage({ content: 'second' });
+      });
+
+      expect(sent().at(-1)).toEqual({ type: 'send', id: expect.any(String), content: 'second' });
+      expect(result.current.chat?.messages.map((message) => message.content)).not.toContain(
+        'second'
+      );
+      expect(result.current.streaming).toBe(true);
     });
 
-    await result.current.sendMessage({ content: 'first' });
-    await expect(result.current.sendMessage({ content: 'second' })).rejects.toThrow(
-      'Wait for the current response to finish'
-    );
+    it('shows what the server queued, and sends it as the next turn when the turn ends', async () => {
+      const { result } = await running();
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second' }],
+          held: false,
+        })
+      );
+      expect(result.current.queue).toEqual([{ id: 'q-second', content: 'second' }]);
 
-    lastSocket?.emit({ type: 'message_start', message_id: 'a-first', role: 'assistant' });
-    lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
-    await waitFor(() => expect(result.current.streaming).toBe(false));
-    await expect(result.current.sendMessage({ content: 'second' })).resolves.toBeUndefined();
+      act(() => {
+        lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [],
+          held: false,
+          started: { id: 'q-second', content: 'second' },
+        });
+      });
+
+      expect(result.current.queue).toEqual([]);
+      expect(result.current.streaming).toBe(true);
+      expect(result.current.chat?.messages.at(-1)).toMatchObject({
+        id: 'pending-q-second',
+        role: 'user',
+        content: 'second',
+      });
+
+      act(() =>
+        lastSocket?.emit({
+          type: 'message_saved',
+          message_id: 'u-second',
+          role: 'user',
+          content: 'second',
+        })
+      );
+      const contents = result.current.chat?.messages.map((message) => message.id);
+      expect(contents?.slice(-3)).toEqual(['u-first', 'a-first', 'u-second']);
+    });
+
+    it('asks the server to interrupt the turn for a queued message', async () => {
+      const { result } = await running();
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second' }],
+          held: false,
+        })
+      );
+
+      act(() => result.current.interruptQueued('q-second'));
+      expect(sent().at(-1)).toEqual({ type: 'interrupt', id: 'q-second' });
+
+      act(() => {
+        lastSocket?.emit({ type: 'cancelled', message_id: 'a-first' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [],
+          held: false,
+          started: { id: 'q-second', content: 'second' },
+        });
+      });
+      expect(result.current.streaming).toBe(true);
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('second');
+    });
+
+    it('edits and removes a queued message through the server', async () => {
+      const { result } = await running();
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [
+            { id: 'q-second', content: 'second' },
+            { id: 'q-third', content: 'third' },
+          ],
+          held: false,
+        })
+      );
+
+      act(() => result.current.editQueued('q-second', 'second, edited'));
+      act(() => result.current.removeQueued('q-third'));
+      expect(sent().slice(-2)).toEqual([
+        { type: 'edit_queued', id: 'q-second', content: 'second, edited' },
+        { type: 'remove_queued', id: 'q-third' },
+      ]);
+
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second, edited' }],
+          held: false,
+        })
+      );
+      expect(result.current.queue).toEqual([{ id: 'q-second', content: 'second, edited' }]);
+    });
+
+    it('keeps a queue a stopped turn held, and says so', async () => {
+      const { result } = await running();
+      act(() => {
+        lastSocket?.emit({ type: 'cancelled', message_id: 'a-first' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second' }],
+          held: true,
+        });
+      });
+
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.held).toBe(true);
+      expect(result.current.queue).toHaveLength(1);
+    });
+
+    it('drops the pending row of a send the server queued behind a turn this window had not seen', async () => {
+      mockGetChat.mockResolvedValue(mockChat);
+      const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+      await waitFor(() => {
+        expect(result.current.loading).toBe(false);
+        expect(lastSocket).not.toBeNull();
+      });
+      await act(async () => {
+        await result.current.sendMessage({ content: 'raced' });
+      });
+      const { id } = sent().at(-1);
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('raced');
+
+      act(() =>
+        lastSocket?.emit({ type: 'queue', messages: [{ id, content: 'raced' }], held: false })
+      );
+
+      expect(result.current.chat?.messages.map((message) => message.content)).not.toContain(
+        'raced'
+      );
+      expect(result.current.queue).toEqual([{ id, content: 'raced' }]);
+    });
+
+    it('starts a message from the queue frame alone, even one this window never saw queued', async () => {
+      const { result } = await running();
+      act(() => {
+        lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [],
+          held: false,
+          started: { id: 'q-other-tab', content: 'from another tab' },
+        });
+      });
+      expect(result.current.streaming).toBe(true);
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('from another tab');
+    });
+
+    it('reuses the row a failed queued turn left behind instead of orphaning it', async () => {
+      const { result } = await running();
+      act(() => {
+        lastSocket?.emit({ type: 'message_end', message_id: 'a-first', content: 'done' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-third', content: 'third' }],
+          held: false,
+          started: { id: 'q-second', content: 'second' },
+        });
+        lastSocket?.emit({ type: 'error', message: 'Workspace access denied' });
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [],
+          held: false,
+          started: { id: 'q-third', content: 'third' },
+        });
+      });
+
+      const pending = result.current.chat?.messages.filter((message) =>
+        message.id.startsWith('pending-')
+      );
+      expect(pending?.map((message) => message.content)).toEqual(['third']);
+    });
+
+    it('lets an automation turn end the stream once a raced send was queued behind it', async () => {
+      mockGetChat.mockResolvedValue(mockChat);
+      const { result } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+      await waitFor(() => {
+        expect(result.current.loading).toBe(false);
+        expect(lastSocket).not.toBeNull();
+      });
+      act(() =>
+        lastSocket?.emit({
+          type: 'message_saved',
+          message_id: 'u-auto',
+          role: 'user',
+          content: 'Daily summary',
+          metadata: { source: 'reminder' },
+        })
+      );
+      await act(async () => {
+        await result.current.sendMessage({ content: 'raced' });
+      });
+      const { id } = sent().at(-1);
+      act(() => {
+        lastSocket?.emit({ type: 'queue', messages: [{ id, content: 'raced' }], held: false });
+        lastSocket?.emit({ type: 'message_start', message_id: 'a-auto', role: 'assistant' });
+        lastSocket?.emit({ type: 'queue', messages: [], held: false });
+        lastSocket?.emit({ type: 'message_end', message_id: 'a-auto', content: 'Summary' });
+      });
+
+      expect(result.current.streaming).toBe(false);
+    });
+
+    it('goes back to idle when a send right after Stop is held by the server', async () => {
+      const { result } = await running();
+      act(() => lastSocket?.emit({ type: 'cancelled', message_id: 'a-first' }));
+      expect(result.current.streaming).toBe(false);
+
+      await act(async () => {
+        await result.current.sendMessage({ content: 'right after stop' });
+      });
+      expect(result.current.streaming).toBe(true);
+      const { id } = sent().at(-1);
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id, content: 'right after stop' }],
+          held: true,
+        })
+      );
+
+      expect(result.current.streaming).toBe(false);
+      expect(result.current.held).toBe(true);
+      expect(result.current.chat?.messages.map((message) => message.content)).not.toContain(
+        'right after stop'
+      );
+    });
+
+    it('forgets the queue when the socket reconnects, until the server replays it', async () => {
+      const { result } = await running();
+      act(() =>
+        lastSocket?.emit({
+          type: 'queue',
+          messages: [{ id: 'q-second', content: 'second' }],
+          held: false,
+        })
+      );
+      act(() => lastSocket?.onclose?.());
+      await waitFor(() => expect(result.current.queue).toEqual([]));
+    });
   });
 
   it('removes an unsaved user message when generation is cancelled', async () => {
@@ -1747,6 +2065,43 @@ describe('useChat', () => {
     await waitFor(() => {
       expect(result.current.chat?.messages.at(-1)?.content).toBe('The whole reply');
     });
+    unmount();
+  });
+
+  it('hands subagent frames to subscribers without holding them for the loading chat', async () => {
+    let resolve: (chat: ChatWithMessages) => void = () => {};
+    mockGetChat.mockImplementation(
+      () =>
+        new Promise<ChatWithMessages>((done) => {
+          resolve = done;
+        })
+    );
+    const published: unknown[] = [];
+    const unsubscribe = subscribeFrames('1', (frame) => published.push(frame));
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    const subagent = { type: 'subagent', chat_id: '1', subagent: { id: 'agent-1' } };
+    const chunks = 999;
+
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'live', role: 'assistant' });
+      for (let index = 0; index < chunks; index += 1) {
+        lastSocket?.emit({ type: 'chunk', content: 'x', index });
+        if (index % 10 === 0) lastSocket?.emit(subagent);
+      }
+    });
+
+    await act(async () => {
+      resolve(mockChat);
+    });
+
+    await waitFor(() => {
+      const live = result.current.chat?.messages.find((message) => message.id === 'live');
+      expect(live?.content).toBe('x'.repeat(chunks));
+    });
+    expect(published.filter((frame) => (frame as { type?: unknown }).type === 'subagent')).toEqual(
+      Array.from({ length: 100 }, () => subagent)
+    );
+    unsubscribe();
     unmount();
   });
 
@@ -2640,9 +2995,11 @@ describe('useChat', () => {
       await result.current.sendMessage({ content });
     });
 
-    expect(lastSocket?.sent).toContain(
-      JSON.stringify({ type: 'send', content: 'Scope: Other: Only the backlog' })
-    );
+    expect(lastSocket?.sent.map((frame) => JSON.parse(frame))).toContainEqual({
+      type: 'send',
+      id: expect.any(String),
+      content: 'Scope: Other: Only the backlog',
+    });
   });
 
   it('leaves an unanswered question standing when the reader stops the reply', async () => {
@@ -2953,6 +3310,80 @@ describe('context freshness', () => {
     unmount();
   });
 
+  it("keeps a stopped turn's calls ahead of its placeholder rather than inside it", async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'blank', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: '\n\n', index: 0 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'blank',
+        tool_call_id: 'tool',
+        name: 'read_file',
+        arguments: '{}',
+        at: 2,
+      });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'blank' });
+    });
+    const stopped = result.current.chat?.messages.find((message) => message.id === 'blank');
+    expect(stopped?.content).toBe('[Stopped before answering]');
+    expect(stopped?.metadata?.tool_calls?.[0]?.at).toBe(0);
+    unmount();
+  });
+
+  it("keeps a stopped turn's thinking ahead of its placeholder rather than inside it", async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'blank', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: '\n\n', index: 0 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'blank',
+        tool_call_id: 'tool',
+        name: 'read_file',
+        arguments: '{}',
+        at: 2,
+      });
+      lastSocket?.emit({ type: 'reasoning', content: 'Next, the tests.' });
+      lastSocket?.emit({ type: 'cancelled', message_id: 'blank' });
+    });
+    const stopped = result.current.chat?.messages.find((message) => message.id === 'blank');
+    expect(stopped?.content).toBe('[Stopped before answering]');
+    expect(stopped?.metadata?.reasoning_at).toBe(0);
+    unmount();
+  });
+
+  it('moves the thinking of the login being left onto its handover', async () => {
+    const { result, unmount } = renderHook(() => useChat('context'));
+    await waitFor(() => expect(result.current.chat).not.toBeNull());
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'moved', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: 'Hello', index: 0 });
+      lastSocket?.emit({ type: 'reasoning', content: 'Out of room.' });
+      lastSocket?.emit({
+        type: 'handover',
+        message_id: 'moved',
+        from: 'a@example.com',
+        to: 'c@example.com',
+        from_agent: 'claude',
+        agent: 'codex',
+        reason: 'limit',
+        carried: false,
+        at: 5,
+        calls: 0,
+        reasoning: 'Out of room.',
+      });
+      lastSocket?.emit({ type: 'reasoning', content: 'Fresh start.' });
+    });
+    const moved = result.current.chat?.messages.find((message) => message.id === 'moved');
+    expect(moved?.metadata?.handovers?.[0]?.reasoning).toBe('Out of room.');
+    expect(moved?.metadata?.reasoning).toBe('Fresh start.');
+    expect(moved?.metadata?.reasoning_at).toBe(5);
+    unmount();
+  });
+
   it('reuses the pending user row when a send fails before it is saved', async () => {
     const { result, unmount } = renderHook(() => useChat('context'), { wrapper: createWrapper() });
     await waitFor(() => {
@@ -3077,6 +3508,204 @@ describe('context freshness', () => {
     });
     await waitFor(() => expect(mockPreviewContext).toHaveBeenCalled());
     await waitFor(() => expect(result.current.context?.limit).toBe(131072));
+    unmount();
+  });
+});
+
+describe('revisiting a chat', () => {
+  const message = (id: string, chatId: string, content: string): Message => ({
+    id,
+    chat_id: chatId,
+    role: id.startsWith('u') ? 'user' : 'assistant',
+    content,
+    created_at: '2024-01-01T00:00:00Z',
+  });
+  const chatOf = (id: string, messages: Message[]): ChatWithMessages => ({
+    id,
+    title: `Chat ${id}`,
+    model_name: 'gpt-4',
+    created_at: '2024-01-01T00:00:00Z',
+    updated_at: '2024-01-01T00:00:00Z',
+    archived: false,
+    agent_enabled: false,
+    messages,
+  });
+  const first = chatOf('first', [message('u1', 'first', 'Hello'), message('a1', 'first', 'Hi')]);
+  const second = chatOf('second', [message('u2', 'second', 'Other')]);
+
+  let pending: ((chat: ChatWithMessages) => void) | null = null;
+  const holdNextFetch = () =>
+    mockGetChat.mockImplementationOnce(
+      () =>
+        new Promise<ChatWithMessages>((resolve) => {
+          pending = resolve;
+        })
+    );
+
+  beforeEach(() => {
+    lastSocket = null;
+    pending = null;
+    mockGetChat.mockReset();
+    mockDeleteMessage.mockReset();
+    mockGetChat.mockImplementation(async (id: string) => (id === 'first' ? first : second));
+  });
+
+  const openFirstThenSecond = async () => {
+    const hook = renderHook(({ id }) => useChat(id), {
+      initialProps: { id: 'first' as string | null },
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(hook.result.current.chat?.id).toBe('first'));
+    hook.rerender({ id: 'second' });
+    await waitFor(() => expect(hook.result.current.chat?.id).toBe('second'));
+    return hook;
+  };
+
+  it('draws the remembered history at once, before the server answers', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    holdNextFetch();
+    rerender({ id: 'first' });
+    expect(result.current.chat?.id).toBe('first');
+    expect(result.current.chat?.messages).toEqual(first.messages);
+    expect(result.current.loading).toBe(false);
+    expect(mockGetChat).toHaveBeenLastCalledWith('first');
+    unmount();
+  });
+
+  it('reconciles the remembered history with what arrived while away', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    holdNextFetch();
+    rerender({ id: 'first' });
+    const finished = message('a2', 'first', 'Finished while you were away');
+    await act(async () => {
+      pending?.({ ...first, messages: [...first.messages, finished] });
+    });
+    expect(result.current.chat?.messages.at(-1)).toEqual(finished);
+    expect(result.current.loading).toBe(false);
+    unmount();
+  });
+
+  it('keeps what streamed in while it was open', async () => {
+    const { result, rerender, unmount } = renderHook(({ id }) => useChat(id), {
+      initialProps: { id: 'first' as string | null },
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current.chat?.id).toBe('first'));
+    act(() => {
+      lastSocket?.emit({ type: 'message_start', message_id: 'a2', role: 'assistant' });
+      lastSocket?.emit({ type: 'chunk', content: 'Streamed ', index: 0 });
+      lastSocket?.emit({ type: 'chunk', content: 'reply', index: 1 });
+      lastSocket?.emit({
+        type: 'tool_call',
+        message_id: 'a2',
+        tool_call_id: 'call',
+        name: 'search',
+        arguments: '{}',
+      });
+      lastSocket?.emit({ type: 'message_end', message_id: 'a2', content: 'Streamed reply' });
+    });
+    await waitFor(() =>
+      expect(result.current.chat?.messages.at(-1)?.content).toBe('Streamed reply')
+    );
+    rerender({ id: 'second' });
+    await waitFor(() => expect(result.current.chat?.id).toBe('second'));
+    holdNextFetch();
+    rerender({ id: 'first' });
+    const streamed = result.current.chat?.messages.at(-1);
+    expect(streamed?.content).toBe('Streamed reply');
+    expect(streamed?.metadata?.tool_calls?.map((call) => call.id)).toEqual(['call']);
+    unmount();
+  });
+
+  it('remembers a deleted message as gone', async () => {
+    mockDeleteMessage.mockResolvedValue(undefined);
+    const { result, rerender, unmount } = renderHook(({ id }) => useChat(id), {
+      initialProps: { id: 'first' as string | null },
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current.chat?.id).toBe('first'));
+    await act(async () => {
+      await result.current.deleteMessage('a1');
+    });
+    rerender({ id: 'second' });
+    await waitFor(() => expect(result.current.chat?.id).toBe('second'));
+    holdNextFetch();
+    rerender({ id: 'first' });
+    expect(result.current.chat?.messages.map((item) => item.id)).toEqual(['u1']);
+    unmount();
+  });
+
+  it('holds a turn still running until the reconcile lands, then plays it on top', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    holdNextFetch();
+    rerender({ id: 'first' });
+    act(() => {
+      lastSocket?.emit({ type: 'init', chat_id: 'first', status: 'ok' });
+      lastSocket?.emit({
+        type: 'message_start',
+        message_id: 'a3',
+        role: 'assistant',
+        resumed: true,
+      });
+      lastSocket?.emit({ type: 'chunk', content: 'Still going', index: 0 });
+    });
+    expect(result.current.chat?.messages.map((item) => item.id)).toEqual(['u1', 'a1']);
+    const asked = message('u3', 'first', 'Asked while away');
+    await act(async () => {
+      pending?.({ ...first, messages: [...first.messages, asked] });
+    });
+    await waitFor(() =>
+      expect(result.current.chat?.messages.map((item) => item.id)).toEqual(['u1', 'a1', 'u3', 'a3'])
+    );
+    await waitFor(() => expect(result.current.chat?.messages.at(-1)?.content).toBe('Still going'));
+    expect(result.current.streaming).toBe(true);
+    unmount();
+  });
+
+  it('keeps a message sent before the reconcile lands', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    holdNextFetch();
+    rerender({ id: 'first' });
+    await act(async () => {
+      await result.current.sendMessage({ content: 'Sent early' });
+    });
+    expect(result.current.chat?.messages.at(-1)?.content).toBe('Sent early');
+    await act(async () => {
+      pending?.(first);
+    });
+    expect(result.current.chat?.messages.map((item) => item.content)).toEqual([
+      'Hello',
+      'Hi',
+      'Sent early',
+    ]);
+    unmount();
+  });
+
+  it('opens a remembered chat on a fresh mount without a loading state', async () => {
+    const { unmount } = await openFirstThenSecond();
+    unmount();
+    holdNextFetch();
+    const { result, unmount: unmountAgain } = renderHook(() => useChat('first'), {
+      wrapper: createWrapper(),
+    });
+    expect(result.current.chat?.messages).toEqual(first.messages);
+    expect(result.current.loading).toBe(false);
+    unmountAgain();
+  });
+
+  it('forgets a chat the server no longer returns', async () => {
+    const { result, rerender, unmount } = await openFirstThenSecond();
+    mockGetChat.mockRejectedValueOnce(new Error('Chat not found'));
+    rerender({ id: 'first' });
+    await waitFor(() => expect(result.current.error).toBe('Chat not found'));
+    rerender({ id: 'second' });
+    holdNextFetch();
+    const { result: fresh, unmount: unmountFresh } = renderHook(() => useChat('first'), {
+      wrapper: createWrapper(),
+    });
+    expect(fresh.current.chat).toBeNull();
+    expect(fresh.current.loading).toBe(true);
+    unmountFresh();
     unmount();
   });
 });

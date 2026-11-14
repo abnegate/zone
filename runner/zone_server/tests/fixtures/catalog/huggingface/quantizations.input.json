@@ -1,0 +1,70 @@
+{
+  "pages": {
+    "": {
+      "models": [
+        {
+          "_id": "665065253423",
+          "id": "TheBloke/Llama-2-7B-Chat-GGUF",
+          "modelId": "TheBloke/Llama-2-7B-Chat-GGUF",
+          "author": "TheBloke",
+          "sha": "00000000000000000000000030afb18dfd117a16",
+          "lastModified": "2023-10-14T21:36:33.000Z",
+          "createdAt": "2025-03-01T10:00:00.000Z",
+          "private": false,
+          "downloads": 152004,
+          "likes": 466,
+          "tags": [
+            "transformers",
+            "gguf",
+            "llama",
+            "facebook",
+            "meta",
+            "pytorch",
+            "llama-2",
+            "text-generation",
+            "en",
+            "arxiv:2307.09288",
+            "base_model:meta-llama/Llama-2-7b-chat-hf",
+            "license:llama2",
+            "region:us"
+          ],
+          "library_name": "gguf",
+          "pipeline_tag": "text-generation",
+          "cardData": {
+            "license": "llama2"
+          },
+          "gguf": {
+            "total": 3825807040,
+            "architecture": "llama",
+            "context_length": 4096,
+            "totalFileSize": 3825807040
+          },
+          "siblings": [
+            {
+              "rfilename": "README.md",
+              "size": 22180
+            },
+            {
+              "rfilename": "config.json",
+              "size": 31
+            },
+            {
+              "rfilename": "llama-2-7b-chat.Q8_0.gguf",
+              "size": 7161089728
+            },
+            {
+              "rfilename": "llama-2-7b-chat.Q4_0.gguf",
+              "size": 3825807040
+            },
+            {
+              "rfilename": "llama-2-7b-chat.Q5_K_M.gguf",
+              "size": 4783156928
+            }
+          ]
+        }
+      ],
+      "next": null
+    }
+  },
+  "adapters": {}
+}

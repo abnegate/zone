@@ -1,14 +1,8 @@
 import { z } from 'zod';
 import { ActionReceiptSchema, QuestionSchema, WaitingSchema } from '../chats/schemas';
+import { TASK_STATUSES } from './status';
 
-export const TaskStatusSchema = z.enum([
-  'created',
-  'queued',
-  'in_progress',
-  'blocked',
-  'review',
-  'complete',
-]);
+export const TaskStatusSchema = z.enum(TASK_STATUSES);
 
 export const RunStatusSchema = z.enum([
   'pending',
@@ -146,6 +140,21 @@ export const UpdateTaskRequestSchema = z.object({
   source_ids: z.array(z.string()).optional(),
 });
 
+export const UpdateTasksRequestSchema = z.object({
+  ids: z.array(z.string()).min(1),
+  status: TaskStatusSchema.optional(),
+  priority: z.number().int().min(1).max(5).optional(),
+  add_project_ids: z.array(z.string()).optional(),
+  remove_project_ids: z.array(z.string()).optional(),
+  is_agentic: z.boolean().optional(),
+  require_plan_approval: z.boolean().optional(),
+});
+
+export const ActiveRunRefusalSchema = z.object({
+  error: z.string(),
+  ids: z.array(z.string()),
+});
+
 export const TasksResponseSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),
@@ -210,6 +219,17 @@ export const TaskProgressMessageSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('completed'), status: RunStatusSchema }),
   z.object({ type: z.literal('failed'), error: z.string() }),
+  z
+    .object({
+      type: z.literal('cancelled'),
+      error: z.string().optional(),
+      message: z.string().optional(),
+    })
+    .transform(({ type, error, message }) => ({
+      type,
+      status: RunStatusSchema.enum.cancelled,
+      reason: error ?? message ?? null,
+    })),
   z.object({ type: z.literal('error'), message: z.string() }),
 ]);
 

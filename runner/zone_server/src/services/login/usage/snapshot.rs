@@ -6,6 +6,11 @@ use super::availability::Availability;
 
 const EXHAUSTED_PERCENT: f64 = 100.0;
 
+/// What the agent names a window scoped to a model it does not name.
+const UNNAMED_SCOPE: &str = "scoped";
+
+const PERIOD_UNITS: [char; 3] = ['m', 'h', 'd'];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub windows: Vec<Window>,
@@ -57,6 +62,22 @@ impl Snapshot {
         self
     }
 
+    /// This reading as it limits a session on `model`: without the windows that limit only
+    /// another model, such as `7d Fable` for a session on Opus. A session on a model it does not
+    /// know is limited by every window.
+    pub fn on(&self, model: Option<&str>) -> Self {
+        let windows: Vec<Window> = self
+            .windows
+            .iter()
+            .filter(|window| limits(window, model))
+            .cloned()
+            .collect();
+        if windows.len() == self.windows.len() {
+            return self.clone();
+        }
+        Self::new(windows, self.fetched_at)
+    }
+
     /// This reading, which began after `prior` was stored, with every window of `stored` that
     /// changed since then in place of its namesake: a turn observed it while the reading ran,
     /// and it is newer than anything the reading says of that window.
@@ -76,6 +97,28 @@ fn headroom(windows: &[Window]) -> Option<f64> {
         .filter_map(|window| window.used_percent)
         .max_by(f64::total_cmp)
         .map(|used| EXHAUSTED_PERCENT - used)
+}
+
+fn limits(window: &Window, model: Option<&str>) -> bool {
+    match (scope(&window.name), model) {
+        (Some(scope), Some(model)) => model
+            .to_ascii_lowercase()
+            .contains(&scope.to_ascii_lowercase()),
+        _ => true,
+    }
+}
+
+/// The model a window named as the agent's usage names a scoped window, its period then its
+/// model as in `7d Fable`, limits alone.
+fn scope(name: &str) -> Option<&str> {
+    let (period, scope) = name.split_once(' ')?;
+    (is_period(period) && scope != UNNAMED_SCOPE).then_some(scope)
+}
+
+fn is_period(token: &str) -> bool {
+    token
+        .strip_suffix(PERIOD_UNITS)
+        .is_some_and(|count| !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn exhausted(window: &Window) -> bool {
@@ -237,6 +280,61 @@ mod tests {
                 window("7d", Some(30.0), Some(1_790_400_000)),
             ],
             "with nothing stored when the reading began, every stored window was observed since"
+        );
+    }
+
+    #[test]
+    fn a_window_scoped_to_another_model_never_limits_a_session() {
+        let read = Snapshot::new(
+            vec![
+                window("7d", Some(71.0), Some(1_790_400_000)),
+                window("7d Fable", Some(100.0), Some(1_790_500_000)),
+                window("Extra usage", Some(100.0), None),
+            ],
+            at(1_790_000_000),
+        );
+
+        let opus = read.on(Some("opus"));
+        let fable = read.on(Some("claude-fable-5-2"));
+        let unknown = read.on(None);
+
+        assert_eq!(
+            opus.headroom,
+            Some(0.0),
+            "an unscoped window limits every model"
+        );
+        assert_eq!(
+            opus.windows,
+            [
+                window("7d", Some(71.0), Some(1_790_400_000)),
+                window("Extra usage", Some(100.0), None),
+            ]
+        );
+        assert_eq!(fable, read);
+        assert_eq!(unknown, read);
+    }
+
+    #[test]
+    fn a_session_on_one_model_keeps_the_headroom_its_own_windows_leave() {
+        let read = Snapshot::new(
+            vec![
+                window("5h", Some(20.0), Some(1_790_010_000)),
+                window("7d", Some(86.0), Some(1_790_400_000)),
+                window("7d Fable", Some(100.0), Some(1_790_500_000)),
+                window("7d scoped", Some(30.0), None),
+            ],
+            at(1_790_000_000),
+        );
+
+        let opus = read.on(Some("opus"));
+
+        assert_eq!(read.availability(), Availability::At(at(1_790_500_000)));
+        assert_eq!(opus.headroom.map(f64::round), Some(14.0));
+        assert_eq!(opus.availability(), Availability::Now);
+        assert_eq!(opus.fetched_at, read.fetched_at);
+        assert!(
+            opus.windows.iter().any(|window| window.name == "7d scoped"),
+            "a window scoped to a model the agent did not name limits every session"
         );
     }
 

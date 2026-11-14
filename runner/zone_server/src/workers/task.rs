@@ -3,65 +3,100 @@
 //! Executes agentic tasks in the background using the same streaming agent
 //! loop as chat, with a task budget and a sandboxed tool context.
 
-use abnegate_llm::{Limit, Message as LlmMessage};
+use abnegate_agent::AgentPhase;
+use abnegate_agent::ToolResult;
+use abnegate_agent::chat::ReplayMessage;
+use abnegate_agent::context::Entry;
+use abnegate_agent::tool::MAXIMUM_SLEEP;
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::job::Jobs;
+use abnegate_agent_cli::CREDITS_REQUIRED;
+use abnegate_agent_cli::LONG_CONTEXT_CREDITS_REQUIRED;
+use abnegate_agent_cli::PROSE_EXCEEDED;
+use abnegate_http::Backoff;
+use abnegate_http::RetryAfter;
+use abnegate_http::contains_standalone_status;
+use abnegate_llm::Limit;
+use abnegate_llm::Message as LlmMessage;
 use futures::StreamExt;
+use reqwest::StatusCode;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::AcquireError;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
+use tokio::sync::mpsc;
 use uuid::Uuid;
-use zone_core::agent::AgentPhase;
-use zone_core::context::Entry;
-use zone_core::llm::provider::{OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT};
-use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient};
-use zone_core::tools::Session;
-use zone_core::tools::ToolResult;
-use zone_core::tools::job::Jobs;
+use zone_core::llm::BuiltinTools;
+use zone_core::llm::LlmBackend;
+use zone_core::llm::LlmClient;
 
+use crate::agent;
+use crate::agent::AgentEvent;
+use crate::agent::AgentRun;
+use crate::agent::ApprovalPolicy;
+use crate::agent::ChatTools;
+use crate::agent::LoopBudget;
+use crate::agent::Spend;
 use crate::agent::plan;
-use crate::agent::prompt::{self, Environment, Vcs};
-use crate::agent::question::{self, Question};
-use crate::agent::wait::{self, Waited, Waiting};
-use crate::agent::{self, AgentEvent, AgentRun, ApprovalPolicy, ChatTools, LoopBudget, Spend};
+use crate::agent::prompt;
+use crate::agent::prompt::Environment;
+use crate::agent::prompt::Vcs;
+use crate::agent::question;
+use crate::agent::question::Question;
+use crate::agent::wait;
+use crate::agent::wait::Waited;
+use crate::agent::wait::Waiting;
 use crate::config::ModelBackend;
-use crate::db::{task_tool_calls, tasks};
-use crate::services::backend::{self, Resolved};
-use crate::services::chat::session::{self, RunContext};
+use crate::db::task_tool_calls;
+use crate::db::tasks;
+use crate::services::backend;
+use crate::services::backend::Resolved;
+use crate::services::chat::session;
+use crate::services::chat::session::RunContext;
 use crate::services::endpoint::Endpoint;
 use crate::services::failure::unreachable;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
-use crate::services::route::{Reason, Route, Unusable};
+use crate::services::route::Reason;
+use crate::services::route::Route;
+use crate::services::route::Unusable;
 use crate::services::stages;
 use crate::state::AppState;
-use crate::workers::evaluation::{EvaluationSettings, Evaluator, Verdict};
+use crate::workers::evaluation::EvaluationSettings;
+use crate::workers::evaluation::Evaluator;
+use crate::workers::evaluation::Verdict;
 use crate::workers::instructions;
-use crate::workers::pr::{PrCreationResult, create_pr_for_task};
+use crate::workers::pr::PrCreationResult;
+use crate::workers::pr::create_pr_for_task;
 use zone_context::context::SearchResultWithAnalysis;
 
 mod halt;
 mod handover;
 mod meter;
 mod seat;
+pub(crate) mod stop;
 mod unprepared;
 
 use halt::Halt;
 use handover::Handover;
 use meter::Meter;
-use seat::{Seat, Seated};
+use seat::Seat;
+use seat::Seated;
 use unprepared::Unprepared;
 
 // Max concurrent task executions
 const MAX_CONCURRENT_TASKS: usize = 5;
 
-// Timeout for task execution (1 hour)
-const TASK_TIMEOUT_SECS: u64 = 3600;
-const TASK_TIMEOUT: Duration = Duration::from_secs(TASK_TIMEOUT_SECS);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const CHECKOUT_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a run parked on questions it can proceed without waits before it
 /// proceeds on the option it recommended.
@@ -79,7 +114,7 @@ const OPTIONAL_ANSWER_WINDOW: Duration = Duration::from_secs(30);
 /// This is the other half: a run that has stopped producing events looks from
 /// outside exactly like one that is working, so the silence gets a line of its
 /// own. Any event resets it, because any event is the run still moving.
-const STALL_AFTER: Duration = Duration::from_secs(zone_core::tools::MAX_SLEEP_SECS);
+const STALL_AFTER: Duration = MAXIMUM_SLEEP;
 
 /// Matches the sampling temperature `session::build` gives an interactive chat.
 const TASK_TEMPERATURE: f32 = 0.7;
@@ -92,6 +127,10 @@ const WAITING_ON_ANSWER: &str = "Task run is waiting on a question";
 const WAITING_ON_OUTCOME: &str = "Task run is waiting on something outside its loop";
 const RESUMED_ON_ANSWER: &str = "Task run resumed on an answer";
 const LOST_LEASE: &str = "Task execution lost its lease";
+const LOST_LEASE_OR_ACCESS: &str = "Task execution lost its lease or writer access";
+/// Why an attempt whose coding agent ended partway through a later turn failed. An agent that
+/// runs out of the attempt's time fails as a timeout instead, since its time is the attempt's.
+const AGENT_CUT_SHORT: &str = "The coding agent ended before it finished the task";
 const ANSWER_WITHDRAWN: &str = "The claim on the answer was withdrawn before one arrived";
 
 /// Between what one turn said and what the turn after the question said.
@@ -132,8 +171,8 @@ static EXECUTION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// it belongs to is parked on a question.
 ///
 /// A run waiting on a person is not executing. Held through the wait, five runs
-/// parked on required questions take every slot in the deployment for the hour
-/// a question is allowed to go unanswered, and `required` is the model's to set.
+/// parked on required questions take every slot in the deployment for as long
+/// as their questions go unanswered, and `required` is the model's to set.
 struct Permit(std::sync::Mutex<Option<OwnedSemaphorePermit>>);
 
 impl Permit {
@@ -346,17 +385,6 @@ impl Fault {
         }
     }
 
-    fn timeout() -> Self {
-        Self::new(
-            Failure::Terminal,
-            "timeout",
-            format!(
-                "Task execution timed out after {} seconds",
-                TASK_TIMEOUT.as_secs()
-            ),
-        )
-    }
-
     fn overloaded() -> Self {
         Self::new(
             Failure::Terminal,
@@ -422,30 +450,36 @@ impl Decision {
     }
 }
 
+const FACTOR: u32 = 2;
+
+const JITTER: f64 = 0.25;
+
 /// Bounded exponential backoff for a background task run.
 ///
 /// `attempts` counts the initial attempt, so three retries follow the first
-/// try. Rate limits start from their own base because a provider window
+/// try. Rate limits follow their own curve because a provider window
 /// outlasts a network blip, and a provider hint replaces the curve entirely.
 #[derive(Debug, Clone, Copy)]
 struct RetryPolicy {
     attempts: u32,
-    base: Duration,
-    ceiling: Duration,
-    rate_limit_base: Duration,
-    rate_limit_ceiling: Duration,
-    jitter: f64,
+    transient: Backoff,
+    rate_limit: Backoff,
 }
 
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
             attempts: 4,
-            base: Duration::from_secs(2),
-            ceiling: Duration::from_secs(60),
-            rate_limit_base: Duration::from_secs(15),
-            rate_limit_ceiling: Duration::from_secs(300),
-            jitter: 0.25,
+            transient: Backoff::default()
+                .with_base(Duration::from_secs(2))
+                .with_maximum(Duration::from_secs(60))
+                .with_factor(FACTOR)
+                .with_jitter(JITTER),
+            rate_limit: Backoff::default()
+                .with_base(Duration::from_secs(15))
+                .with_maximum(Duration::from_secs(300))
+                .with_factor(FACTOR)
+                .with_jitter(JITTER),
         }
     }
 }
@@ -464,24 +498,18 @@ impl RetryPolicy {
         Decision::Retry(self.delay(attempt, failure, sample))
     }
 
-    /// Jitter only ever subtracts, so `ceiling` stays a true upper bound and a
-    /// provider's own hint is never shortened into another rejection.
+    /// A provider's own hint is never shortened by jitter into another
+    /// rejection.
     fn delay(&self, attempt: u32, failure: Failure, sample: f64) -> Duration {
         if let Some(hint) = failure.retry_after() {
-            return hint.min(self.rate_limit_ceiling);
+            return hint.min(self.rate_limit.maximum);
         }
-        let (base, ceiling) = match failure {
-            Failure::RateLimited { .. } => (self.rate_limit_base, self.rate_limit_ceiling),
-            Failure::Terminal | Failure::Transient | Failure::Rerouted => (self.base, self.ceiling),
+        let backoff = match failure {
+            Failure::RateLimited { .. } => self.rate_limit,
+            Failure::Terminal | Failure::Transient | Failure::Rerouted => self.transient,
         };
-        let span = backoff(base, ceiling, attempt);
-        span.mul_f64(1.0 - self.jitter.clamp(0.0, 1.0) * sample.clamp(0.0, 1.0))
+        backoff.delay_with(attempt.saturating_sub(1), sample)
     }
-}
-
-fn backoff(base: Duration, ceiling: Duration, attempt: u32) -> Duration {
-    base.saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
-        .min(ceiling)
 }
 
 fn sample() -> f64 {
@@ -595,10 +623,14 @@ const RATE_LIMIT_MARKERS: &[&str] = &[
     "too many requests",
 ];
 
-/// How zone_core words a coding agent's failure that a retry of the same
-/// prompt meets again: an answer past the output cap, and a model or a
+/// How abnegate-agent-cli begins a coding agent's failure that a retry of the
+/// same prompt meets again: prose past the output limit, and a model or a
 /// context the signed-in account cannot spend usage credits on.
-const AGENT_TERMINAL_MARKERS: &[&str] = &[OUTGROWN, UNFUNDED, UNFUNDED_CONTEXT];
+const AGENT_TERMINAL_MARKERS: &[&str] = &[
+    PROSE_EXCEEDED,
+    CREDITS_REQUIRED,
+    LONG_CONTEXT_CREDITS_REQUIRED,
+];
 
 const TERMINAL_MARKERS: &[&str] = &[
     "access denied",
@@ -628,14 +660,12 @@ const TERMINAL_MARKERS: &[&str] = &[
     "unsupported",
 ];
 
-const TERMINAL_STATUSES: &[u16] = &[400, 401, 403, 404, 422];
-
-const RETRY_AFTER_LABELS: &[&str] = &[
-    "retry-after",
-    "retry_after",
-    "retry after",
-    "retry in",
-    "try again in",
+const TERMINAL_STATUSES: &[StatusCode] = &[
+    StatusCode::BAD_REQUEST,
+    StatusCode::UNAUTHORIZED,
+    StatusCode::FORBIDDEN,
+    StatusCode::NOT_FOUND,
+    StatusCode::UNPROCESSABLE_ENTITY,
 ];
 
 /// Rate limits are matched first: a throttled request is recoverable even when
@@ -645,10 +675,10 @@ fn classify(message: &str) -> Failure {
     if RATE_LIMIT_MARKERS
         .iter()
         .any(|marker| lowered.contains(marker))
-        || standalone_status(&lowered, 429)
+        || contains_standalone_status(&lowered, StatusCode::TOO_MANY_REQUESTS.as_u16())
     {
         return Failure::RateLimited {
-            retry_after: retry_after(&lowered),
+            retry_after: hint(&lowered),
         };
     }
     if TERMINAL_MARKERS
@@ -656,11 +686,17 @@ fn classify(message: &str) -> Failure {
         .any(|marker| lowered.contains(marker))
         || TERMINAL_STATUSES
             .iter()
-            .any(|status| standalone_status(&lowered, *status))
+            .any(|status| contains_standalone_status(&lowered, status.as_u16()))
     {
         return Failure::Terminal;
     }
     Failure::Transient
+}
+
+/// The wait `text` asks for. A zero wait is still a rate limit, so it takes
+/// the rate-limit curve rather than retrying at once.
+fn hint(text: &str) -> Option<Duration> {
+    RetryAfter::from_text(text).filter(|delay| !delay.is_zero())
 }
 
 /// [`classify`] for a coding agent's own words, where a failure no retry
@@ -677,64 +713,10 @@ fn classify_agent(words: &str) -> Failure {
     }
     if Limit::worded(words) {
         return Failure::RateLimited {
-            retry_after: retry_after(&words.to_ascii_lowercase()),
+            retry_after: hint(words),
         };
     }
     classify(words)
-}
-
-/// A status code only counts when it stands alone: not inside a longer number,
-/// a request id, or a JSON value such as `"tokens":429`.
-fn standalone_status(lowered: &str, status: u16) -> bool {
-    let needle = status.to_string();
-    let bytes = lowered.as_bytes();
-    let mut from = 0;
-    while let Some(offset) = lowered[from..].find(needle.as_str()) {
-        let start = from + offset;
-        let end = start + needle.len();
-        let bounded = (start == 0 || !bytes[start - 1].is_ascii_alphanumeric())
-            && (end >= bytes.len() || !bytes[end].is_ascii_alphanumeric());
-        if bounded && !json_value(bytes, start) {
-            return true;
-        }
-        from = start + 1;
-    }
-    false
-}
-
-fn json_value(bytes: &[u8], start: usize) -> bool {
-    let colon = if start > 0 && bytes[start - 1] == b':' {
-        start - 1
-    } else if start > 1 && bytes[start - 1] == b' ' && bytes[start - 2] == b':' {
-        start - 2
-    } else {
-        return false;
-    };
-    colon > 0 && bytes[colon - 1] == b'"'
-}
-
-fn retry_after(lowered: &str) -> Option<Duration> {
-    RETRY_AFTER_LABELS
-        .iter()
-        .find_map(|label| lowered.split(label).nth(1).and_then(leading_duration))
-}
-
-fn leading_duration(tail: &str) -> Option<Duration> {
-    let tail = tail.trim_start_matches([':', '=', ' ', '"', '\t']);
-    let end = tail
-        .find(|character: char| !character.is_ascii_digit() && character != '.')
-        .unwrap_or(tail.len());
-    let value: f64 = tail[..end].parse().ok()?;
-    if !value.is_finite() || value <= 0.0 {
-        return None;
-    }
-    let unit = tail[end..].trim_start();
-    let seconds = if unit.starts_with("ms") || unit.starts_with("millis") {
-        value / 1000.0
-    } else {
-        value
-    };
-    Duration::try_from_secs_f64(seconds).ok()
 }
 
 /// Callback that persists task execution events to the database
@@ -832,10 +814,14 @@ impl DatabaseTaskCallback {
         });
     }
 
+    /// Recorded as the call starts, in a table and a log the workspace reads,
+    /// so a discovery its tool is about to refuse is reduced first: what it
+    /// is refused for may be the credential in it.
     fn on_tool_call(&self, id: &str, name: &str, arguments: &str) {
         let callback = self.clone();
         let name = name.to_string();
-        let arguments = arguments.to_string();
+        let arguments = crate::agent::discovery::trace_arguments(&name, arguments)
+            .unwrap_or_else(|| arguments.to_string());
         let (call_id, input) = self.open_call(id, &arguments);
         tokio::spawn(async move {
             if let Err(error) =
@@ -958,6 +944,7 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
             return;
         }
     }
+    let signal = stop::register(run_id);
     if !matches!(
         tasks::claim_task_run(state.db(), run.id, owner).await,
         Ok(true)
@@ -985,32 +972,173 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
                 tokio::time::timeout(HEARTBEAT_TIMEOUT, refresh).await,
                 Ok(Ok(true))
             ) {
-                tracing::warn!(%run_id, "Task execution lost its lease or writer access; cancelling pipeline");
                 return;
             }
         }
     };
-    let cancelled = tokio::select! {
+    let mut obs = crate::metrics::TaskObs::new();
+    let usage = Usage::default();
+    let mut checkout = None;
+    let ending = tokio::select! {
         biased;
-        () = heartbeat => true,
-        () = execute_owned_task_run(state, execution) => false,
+        () = signal.requested() => Ending::Stopped,
+        () = heartbeat => Ending::LeaseLost,
+        () = execute_in_checkout(state, execution, &mut checkout, &mut obs, &usage) => Ending::Finished,
     };
-    if cancelled {
-        let _ = tokio::time::timeout(
+    drop(signal);
+    match ending {
+        Ending::Stopped => {
+            tracing::info!(%run_id, "Task execution was stopped by request; cancelled its pipeline");
+            obs.set_status(tasks::CANCELLED);
+        }
+        Ending::LeaseLost => match lose_lease(state, run_id, owner).await {
+            Lapse::Stopped => {
+                tracing::info!(%run_id, "Task execution was stopped elsewhere; cancelled its pipeline");
+                obs.set_status(tasks::CANCELLED);
+            }
+            Lapse::Lost => {
+                tracing::warn!(%run_id, "Task execution lost its lease or writer access; cancelled its pipeline");
+            }
+        },
+        Ending::Finished => {}
+    }
+    let teardown = async {
+        crate::mcp::settle(run_id).await;
+        reap(run_id).await;
+        if let Some(checkout) = checkout.take()
+            && tokio::time::timeout(CHECKOUT_FINISH_TIMEOUT, checkout.finish())
+                .await
+                .is_err()
+        {
+            tracing::warn!(%run_id, "The run's checkout removal outlasted its bound; recovery reclaims what is left");
+        }
+    };
+    tokio::select! {
+        () = teardown => {}
+        () = drain(state, run_id, owner) => {}
+    }
+    release(state, run_id, owner).await;
+    usage.settle(state).await;
+    crate::workers::auto_project::poke_task(state, task_id);
+}
+
+/// Hold a stopped run's reservation of its task for as long as its teardown
+/// lasts. Never ends: once nothing is reserved it waits for the teardown.
+async fn drain(state: &AppState, run_id: Uuid, owner: Uuid) {
+    let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        let drained = tokio::time::timeout(
             HEARTBEAT_TIMEOUT,
-            tasks::complete_owned_task_run(
-                state.db(),
-                run_id,
-                Some(owner),
-                "failed",
-                Some("Task execution lost its lease or writer access"),
-                None,
-            ),
+            tasks::drain_task_run(state.db(), run_id, owner),
         )
         .await;
+        if matches!(drained, Ok(Ok(false))) {
+            return std::future::pending().await;
+        }
     }
-    crate::workers::auto_project::poke_task(state, task_id);
-    reap(run_id).await;
+}
+
+/// Free a stopped run's task for the next run once nothing of it is left.
+async fn release(state: &AppState, run_id: Uuid, owner: Uuid) {
+    let released = tokio::time::timeout(
+        HEARTBEAT_TIMEOUT,
+        tasks::release_task_run(state.db(), run_id, owner),
+    )
+    .await;
+    match released {
+        Ok(Ok(true)) => tracing::info!(%run_id, "Released the stopped run's task"),
+        Ok(Ok(false)) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%run_id, %error, "Could not release the stopped run's task; recovery will")
+        }
+        Err(_) => {
+            tracing::warn!(%run_id, "Releasing the stopped run's task timed out; recovery will")
+        }
+    }
+}
+
+/// Fail a run whose heartbeat lapsed, and say why it lapsed: a stop taken on
+/// another replica cancels the run without reaching this one's signal, and
+/// leaves nothing here to fail.
+async fn lose_lease(state: &AppState, run_id: Uuid, owner: Uuid) -> Lapse {
+    let failed = tokio::time::timeout(
+        HEARTBEAT_TIMEOUT,
+        tasks::complete_owned_task_run(
+            state.db(),
+            run_id,
+            Some(owner),
+            RUN_FAILED,
+            Some(LOST_LEASE_OR_ACCESS),
+            None,
+        ),
+    )
+    .await;
+    if !matches!(failed, Ok(Ok(None))) {
+        return Lapse::Lost;
+    }
+    match tokio::time::timeout(HEARTBEAT_TIMEOUT, tasks::get_task_run(state.db(), run_id)).await {
+        Ok(Ok(Some(run))) if run.status == tasks::CANCELLED => Lapse::Stopped,
+        _ => Lapse::Lost,
+    }
+}
+
+/// Why a run's heartbeat lapsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lapse {
+    /// Someone stopped the run where its signal could not reach.
+    Stopped,
+    /// The lease or the writer's access is gone.
+    Lost,
+}
+
+/// Which of a claimed run's three races ended it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// Someone stopped it; the stop already wrote the run's status.
+    Stopped,
+    /// Its heartbeat could no longer prove the lease or the writer's access,
+    /// which a stop taken on another replica also ends in.
+    LeaseLost,
+    /// The pipeline ran to its own end and wrote the run's status itself.
+    Finished,
+}
+
+/// The usage an attempt's agent reported on its login, held outside the
+/// attempt so one stopped or cut off mid-attempt still records it.
+#[derive(Default)]
+struct Usage<'a>(tokio::sync::Mutex<Option<Metered<'a>>>);
+
+struct Metered<'a> {
+    login: Uuid,
+    meter: Meter<'a>,
+}
+
+impl<'a> Usage<'a> {
+    /// Hold a meter for the attempt on `login` for as long as the guard lives.
+    async fn begin(
+        &self,
+        state: &'a AppState,
+        login: Option<Uuid>,
+    ) -> tokio::sync::MutexGuard<'_, Option<Metered<'a>>> {
+        let mut metered = self.0.lock().await;
+        *metered = login.map(|login| Metered {
+            login,
+            meter: Meter::new(state, login),
+        });
+        metered
+    }
+
+    /// Record and settle what an attempt that never reached its own end left
+    /// on its login.
+    async fn settle(&self, state: &AppState) {
+        let Some(mut metered) = self.0.lock().await.take() else {
+            return;
+        };
+        metered.meter.record().await;
+        settle(state, metered.login);
+    }
 }
 
 /// Release what the run's session still owns, once its status is terminal.
@@ -1018,7 +1146,8 @@ pub async fn execute_task_run(state: &AppState, run_id: Uuid, task_id: Uuid) {
 /// One point rather than one per exit: every path that executed anything
 /// passes through the select above, the cancelled one included. A backgrounded
 /// job outlives the tool call that started it and nothing drops its child, so
-/// killing what the run left running is the run's own last act.
+/// what the run left running is killed once no call of the run can start
+/// another, and before the checkout it works in is removed under it.
 async fn reap(run_id: Uuid) {
     let session = Session::Task(run_id);
     let killed = Jobs::kill_session(session).await;
@@ -1028,20 +1157,15 @@ async fn reap(run_id: Uuid) {
     wait::reset_session(session);
 }
 
-async fn execute_owned_task_run(state: &AppState, execution: tasks::Execution) {
-    let mut checkout = None;
-    execute_in_checkout(state, execution, &mut checkout).await;
-    if let Some(checkout) = checkout {
-        checkout.finish().await;
-    }
-}
-
 /// Run the task in a checkout left in `slot`, for the caller to finish once
-/// the run is over however it ended; a run cancelled meanwhile drops it.
-async fn execute_in_checkout(
-    state: &AppState,
+/// the run is over however it ended, stopped or cut off mid-way included: off
+/// the runtime's threads, once the pipeline that worked in it is gone.
+async fn execute_in_checkout<'a>(
+    state: &'a AppState,
     execution: tasks::Execution,
     slot: &mut Option<crate::services::checkout::Checkout>,
+    obs: &mut crate::metrics::TaskObs,
+    usage: &Usage<'a>,
 ) {
     let tasks::Execution {
         task: task_id,
@@ -1049,7 +1173,6 @@ async fn execute_in_checkout(
         owner,
         ..
     } = execution;
-    let mut obs = crate::metrics::TaskObs::new();
 
     let permit = match Permit::acquire().await {
         Ok(permit) => permit,
@@ -1191,7 +1314,7 @@ async fn execute_in_checkout(
     let checkout = &*slot.insert(
         match crate::services::checkout::Checkout::prepare(
             state.db(),
-            state.encryption_key(),
+            state.github(),
             &task,
             execution,
         )
@@ -1306,6 +1429,7 @@ async fn execute_in_checkout(
                 actor,
                 &backend,
                 login.as_ref().map(|login| login.id),
+                usage,
                 endpoint,
                 &model,
                 task_prompt,
@@ -1316,7 +1440,7 @@ async fn execute_in_checkout(
                 plan_approval,
                 unattended,
                 approval,
-                tokio::time::Instant::now() + TASK_TIMEOUT,
+                LoopBudget::task(),
             )
             .await;
             let outcome = match outcome {
@@ -1584,8 +1708,8 @@ struct Guidance<'a> {
     review: &'a str,
     instructions: &'a str,
     facts: &'a str,
-    /// What the person who started this run asked to have remembered. A run
-    /// reads it and writes none of it, so it arrives as an index-free block.
+    /// What is remembered about the person who started this run. A run reads
+    /// it and writes none of it, so it arrives as an index-free block.
     memory: &'a str,
     /// The workspace's written procedures, by name and trigger. Operator text,
     /// so it sits before the repository block like the rest of it.
@@ -1636,17 +1760,12 @@ impl Guidance<'_> {
 
 /// Appends one guidance block, which owns the blank line that opens it.
 ///
-/// Trimming what is already there rather than adding a separator is what keeps
-/// adjacent blocks exactly one blank line apart: the knowledge renderers close
-/// with a newline and the next block opens with two, which would otherwise run
-/// the appended guidance past the blank line the prompt is assembled with.
+/// The join is the knowledge store's own, the one a chat's learned block is
+/// assembled with: what is already there gives up its closing newline rather
+/// than gaining a separator, which keeps adjacent blocks exactly one blank
+/// line apart and a run and a chat reading the same bytes.
 fn push_block(guidance: &mut String, block: &str) {
-    let block = block.trim_end();
-    if block.is_empty() {
-        return;
-    }
-    guidance.truncate(guidance.trim_end().len());
-    guidance.push_str(block);
+    *guidance = crate::db::knowledge::join_blocks(&[guidance.as_str(), block.trim_end()]);
 }
 
 /// The remembered block follows `actor`, whoever started this run, rather than
@@ -1676,18 +1795,7 @@ async fn guidance(
             }
         };
 
-    let facts =
-        match crate::db::knowledge::learned_facts_prompt(state.db(), task.workspace_id).await {
-            Ok(facts) => facts,
-            Err(error) => {
-                tracing::warn!(
-                    task_id = %task.id,
-                    %error,
-                    "Failed to load learned facts; continuing without them"
-                );
-                String::new()
-            }
-        };
+    let facts = crate::db::knowledge::learned_facts_prompt(state.db(), task.workspace_id).await;
 
     let memory = match actor {
         Some(user) => {
@@ -1915,6 +2023,7 @@ mod guidance_tests {
                 "Answer with the command first and the reasoning after it.",
             )),
             &[],
+            crate::agent::memory::render::MAX_RENDERED_BYTES,
         )
     }
 
@@ -1927,6 +2036,7 @@ mod guidance_tests {
                 head: "---\ndescription: Use when shipping to production.\n---\n".into(),
             }],
             1,
+            crate::agent::skills::MAX_RENDERED_BYTES,
         )
     }
 
@@ -2257,14 +2367,15 @@ where
 
 /// One attempt at the agent loop, scoped and lease-fenced like the owned run.
 #[allow(clippy::too_many_arguments)]
-async fn attempt_run(
-    state: &AppState,
+async fn attempt_run<'a>(
+    state: &'a AppState,
     run_id: Uuid,
     owner: Uuid,
     workspace_id: Uuid,
     actor: Option<Uuid>,
     backend: &LlmBackend,
     login: Option<Uuid>,
+    usage: &Usage<'a>,
     endpoint: &Endpoint,
     model: &str,
     task_prompt: &str,
@@ -2275,7 +2386,7 @@ async fn attempt_run(
     plan_approval: bool,
     unattended: bool,
     approval: &plan::Approval,
-    deadline: tokio::time::Instant,
+    budget: LoopBudget,
 ) -> Result<TaskOutcome, Fault> {
     // A task that requires its plan approved changes nothing until it is:
     // every tool that would is refused, turn after turn, until the answer
@@ -2284,10 +2395,6 @@ async fn attempt_run(
     // with the approved plan in hand and no plan phase to go through again.
     let approved = approval.approved();
     let mut plan_held = plan_approval && approved.is_none();
-    let backend = &backend::bounded(
-        backend.clone(),
-        deadline.saturating_duration_since(tokio::time::Instant::now()),
-    );
     let mut tools = crate::mcp::offered(
         backend,
         task_tools(
@@ -2328,7 +2435,8 @@ async fn attempt_run(
             chat: run_id,
             user: actor,
             approval: ApprovalPolicy::auto(),
-            calls: LoopBudget::task().max_tool_calls,
+            calls: budget.max_tool_calls,
+            builtin: BuiltinTools::Withheld,
         },
         &crate::mcp::local_endpoint(state.config()),
     );
@@ -2355,17 +2463,16 @@ async fn attempt_run(
     context.vision = session::sees_images(model, capacity.vision);
     context.reason = capacity.reason;
 
-    // One timeout covers every turn of the attempt, waiting included: a run
-    // parked on a required question is spending the same budget a wedged one
-    // would, and a second timer around the wait would end it on different terms.
-    let mut meter = login.map(|login| Meter::new(state, login));
+    let mut metered = usage.begin(state, login).await;
     let turns = async {
         let mut tools = tools;
         let mut context = context;
         // One budget covers every turn of the attempt. A fresh one per park is
         // no ceiling at all: a model looping on `ask_user` restarts it as often
         // as it likes, and an all-optional card answers itself in 30 seconds.
-        let mut budget = LoopBudget::task();
+        // Unlimited by default: a parking model runs until it finishes, is
+        // stopped, or loses its lease.
+        let mut budget = budget;
         // The wait allowance shares that lifetime, so a retried attempt starts
         // at zero and the waits of one attempt cap only its own park churn.
         wait::reset_session(Session::Task(run_id));
@@ -2381,7 +2488,7 @@ async fn attempt_run(
                 budget,
                 &callback,
                 agent_tools.as_mut().map(|served| &mut served.calls),
-                meter.as_mut(),
+                metered.as_mut().map(|metered| &mut metered.meter),
             )
             .await
             {
@@ -2460,17 +2567,160 @@ async fn attempt_run(
         }
     };
 
-    // The agent's own timeout is the budget left at `deadline`, so a turn it
-    // ended reaches this point no earlier than the deadline itself.
-    let outcome = match tokio::time::timeout_at(deadline, turns).await {
-        Ok(Err(_)) if tokio::time::Instant::now() >= deadline => Err(Fault::timeout()),
-        Ok(outcome) => outcome,
-        Err(_) => Err(Fault::timeout()),
-    };
-    if let Some(meter) = meter.as_mut() {
-        meter.record().await;
-    }
+    let outcome = turns.await;
+    record_usage(&mut metered).await;
     outcome
+}
+
+/// Records what the attempt metered, and lets the meter go only once that returns: a stop that
+/// lands while it records leaves the meter for [`Usage::settle`] to record and settle.
+async fn record_usage(metered: &mut Option<Metered<'_>>) {
+    if let Some(finished) = metered.as_mut() {
+        finished.meter.record().await;
+    }
+    *metered = None;
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use abnegate_agent_cli::AgentKind;
+    use abnegate_llm::Window;
+    use zone_core::llm::window;
+
+    use super::*;
+    use crate::db::agent_logins::{self, Insert};
+
+    const STOPPED_WITHIN: Duration = Duration::from_millis(200);
+
+    struct Fixture {
+        pool: PgPool,
+        organization: Uuid,
+        login: Uuid,
+        state: AppState,
+    }
+
+    impl Fixture {
+        async fn new() -> Self {
+            let pool = PgPool::connect(
+                &std::env::var("TEST_DATABASE_URL").expect("disposable TEST_DATABASE_URL"),
+            )
+            .await
+            .expect("the test database");
+            let organization = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO organizations (id, name, slug) VALUES ($1, 'Usage', $1::text)",
+            )
+            .bind(organization)
+            .execute(&pool)
+            .await
+            .expect("an organization");
+            let login = agent_logins::insert(
+                &pool,
+                &Insert {
+                    organization_id: organization,
+                    agent: AgentKind::Claude.as_str(),
+                    account: Some("usage"),
+                    credential: None,
+                    label: Some("usage"),
+                    expires_at: None,
+                },
+            )
+            .await
+            .expect("a login")
+            .id;
+            let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+            Self {
+                pool,
+                organization,
+                login,
+                state,
+            }
+        }
+
+        async fn recorded(&self) -> Option<Vec<Window>> {
+            agent_logins::get(&self.pool, self.login)
+                .await
+                .expect("the login to be readable")
+                .expect("the login")
+                .snapshot()
+                .map(|snapshot| snapshot.windows)
+        }
+
+        async fn remove(self) {
+            sqlx::query("DELETE FROM organizations WHERE id = $1")
+                .bind(self.organization)
+                .execute(&self.pool)
+                .await
+                .expect("the organization to be removed");
+        }
+    }
+
+    fn measured(name: &str, used_percent: f64) -> Window {
+        Window::new(name).with_used_percent(used_percent)
+    }
+
+    #[tokio::test]
+    async fn an_attempt_stopped_while_it_records_its_usage_still_settles_it() {
+        let fixture = Fixture::new().await;
+        let usage = Usage::default();
+        let mut metered = usage.begin(&fixture.state, Some(fixture.login)).await;
+        metered
+            .as_mut()
+            .expect("a meter for the login")
+            .meter
+            .observe(measured(window::FIVE_HOURS, 40.0));
+
+        let mut locking = fixture.pool.begin().await.expect("a transaction");
+        sqlx::query("SELECT 1 FROM agent_logins WHERE id = $1 FOR UPDATE")
+            .bind(fixture.login)
+            .execute(&mut *locking)
+            .await
+            .expect("the login's row held");
+        let stopped = tokio::time::timeout(STOPPED_WITHIN, record_usage(&mut metered)).await;
+        locking.rollback().await.expect("the row released");
+        drop(metered);
+        usage.settle(&fixture.state).await;
+        let recorded = fixture.recorded().await;
+        let left = usage.0.lock().await.is_some();
+        drop(usage);
+        fixture.remove().await;
+
+        assert!(
+            stopped.is_err(),
+            "the record waits on the held row until the stop drops it"
+        );
+        assert_eq!(
+            recorded,
+            Some(vec![measured(window::FIVE_HOURS, 40.0)]),
+            "settling records what the stopped record left"
+        );
+        assert!(!left, "settling lets the meter go");
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_recorded_its_usage_leaves_nothing_to_settle() {
+        let fixture = Fixture::new().await;
+        let usage = Usage::default();
+        let mut metered = usage.begin(&fixture.state, Some(fixture.login)).await;
+        metered
+            .as_mut()
+            .expect("a meter for the login")
+            .meter
+            .observe(measured(window::FIVE_HOURS, 40.0));
+
+        record_usage(&mut metered).await;
+        let left = metered.is_some();
+        drop(metered);
+        drop(usage);
+        let recorded = fixture.recorded().await;
+        fixture.remove().await;
+
+        assert_eq!(recorded, Some(vec![measured(window::FIVE_HOURS, 40.0)]));
+        assert!(
+            !left,
+            "a finished record lets the meter go, so settling cannot record it again"
+        );
+    }
 }
 
 /// Build the tool set one turn will consume.
@@ -2548,9 +2798,11 @@ fn proceeding_on_defaults(questions: &[Question]) -> String {
 
 /// Park the run on its questions and come back with the message that resumes it.
 ///
-/// The run keeps its lease and its admission slot throughout: the heartbeat
-/// future outside this call is what proves the process is still alive, and the
-/// widened status predicates are what let it keep proving it while parked.
+/// The run keeps its lease throughout: the heartbeat future outside this call
+/// is what proves the process is still alive, and the widened status
+/// predicates are what let it keep proving it while parked. Its admission slot
+/// it hands back for the length of the wait and queues for again before it
+/// resumes, since a run waiting on a person is not executing.
 async fn park_for_answer(
     state: &AppState,
     run_id: Uuid,
@@ -2566,7 +2818,7 @@ async fn park_for_answer(
     });
     // Registration precedes visibility: an answer posted the instant the row
     // reads 'waiting' has to find a claim already standing, or it resolves
-    // nothing and the run waits out the whole timeout.
+    // nothing and the run waits on an answer that was already given.
     let waiter = question::expect(run_id);
     // A plan outlives the question that carried it: once approval is asked
     // for, the row keeps what was asked about, so a reviewer can read it after
@@ -2639,10 +2891,10 @@ async fn park_for_answer(
 /// Symmetric with [`park_for_answer`] and for the same reasons, with one
 /// difference: the wait was registered by the call that opened it, strictly
 /// before its own receipt was streamed, so nothing can settle unobserved
-/// between the registration and the park. The admission slot is the one thing
-/// this park does not keep — a run waiting on a build is not executing, and
-/// [`MAX_CONCURRENT_TASKS`] runs holding slots through a half-hour wait would
-/// take the deployment's task throughput to zero.
+/// between the registration and the park. Like it, this park keeps the lease
+/// and hands the admission slot back for the length of the wait: a run waiting
+/// on a build is not executing, and [`MAX_CONCURRENT_TASKS`] runs holding slots
+/// through a half-hour wait would take the deployment's task throughput to zero.
 async fn park_for_wait(
     state: &AppState,
     run_id: Uuid,
@@ -2779,12 +3031,11 @@ fn resume_with(context: &mut RunContext, answered: String, answers: &mut Vec<Str
         }
     }
     let id = Uuid::new_v4().to_string();
-    context.entries.push(Entry {
-        id: id.clone(),
-        message: LlmMessage::user(answered),
-        preserve: true,
-        consumed: true,
-    });
+    context.entries.push(
+        Entry::new(id.clone(), LlmMessage::user(answered))
+            .with_preserve(true)
+            .with_consumed(true),
+    );
     answers.push(id);
 }
 
@@ -2949,8 +3200,8 @@ pub(super) async fn complete_publication(
 /// Wait for the next event, announcing every [`STALL_AFTER`] of silence.
 ///
 /// A run that has gone quiet looks exactly like one that is working: both
-/// produce nothing. The announcement is what tells them apart while the run is
-/// still going, rather than an hour later when the timeout ends it.
+/// produce nothing, and nothing but a Stop or a lost lease ends either. The
+/// announcement is what tells them apart while the run is still going.
 ///
 /// A failed announcement ends the wait rather than being swallowed. The only
 /// way to write that line is through the run's own log, so losing it means the
@@ -2974,6 +3225,25 @@ where
             }
         }
     }
+}
+
+/// A canonical message as the run's log keeps it.
+///
+/// The log is streamed whole to whoever watches the run, and an assistant
+/// message carries the calls it made with their arguments, so a discovery its
+/// tool is about to refuse is reduced in this copy as
+/// [`DatabaseTaskCallback::on_tool_call`] reduces it. The replay the next turn
+/// is handed is [`accumulate`]'s, which is never this copy and stays whole.
+fn logged(message: &ReplayMessage) -> ReplayMessage {
+    let mut logged = message.clone();
+    for call in logged.tool_calls.iter_mut().flatten() {
+        if let Some(shown) =
+            crate::agent::discovery::trace_arguments(&call.function.name, &call.function.arguments)
+        {
+            call.function.arguments = shown;
+        }
+    }
+    logged
 }
 
 /// Keep a consumer-side replay in step with the context the generator owns.
@@ -3093,7 +3363,7 @@ async fn run_task_loop(
                 callback.on_phase_change(AgentPhase::Observing, None);
             }
             AgentEvent::Canonical(entry) => {
-                callback.log("acting","agent","info","Canonical conversation event",Some(serde_json::json!({"entry_id":entry.id,"message":entry.message,"mutations":entry.mutations}))).await.map_err(|error|error.to_string())?;
+                callback.log("acting","agent","info","Canonical conversation event",Some(serde_json::json!({"entry_id":entry.id,"message":logged(&entry.message),"mutations":entry.mutations}))).await.map_err(|error|error.to_string())?;
             }
             AgentEvent::Checkpoint { summary, .. } => {
                 callback
@@ -3146,6 +3416,7 @@ async fn run_task_loop(
             }
             AgentEvent::Limited(limit) => return Err(Halt::Limited(Box::new(limit))),
             AgentEvent::Failed(error) => return Err(Halt::Failed(error)),
+            AgentEvent::CutShort => return Err(Halt::Failed(AGENT_CUT_SHORT.to_string())),
         }
     }
     if let Some(park) = parked {
@@ -3304,8 +3575,8 @@ mod tests {
 
     fn claude() -> LlmBackend {
         LlmBackend::cli(
-            zone_core::llm::AgentKind::Claude,
-            zone_core::llm::CliSettings::default(),
+            abnegate_agent_cli::AgentKind::Claude,
+            abnegate_agent_cli::CliSettings::default(),
         )
     }
 
@@ -3358,7 +3629,7 @@ mod tests {
         assert!(matches!(
             backend,
             LlmBackend::Cli {
-                agent: zone_core::llm::AgentKind::Claude,
+                agent: abnegate_agent_cli::AgentKind::Claude,
                 ..
             }
         ));
@@ -3368,7 +3639,7 @@ mod tests {
     async fn a_run_whose_backend_cannot_be_resolved_does_not_start() {
         let fixture = AgentTask::new("haiku", "opus", "Rename the settings page").await;
         let signed_out = || backend::Error::SignedOut {
-            agent: zone_core::llm::AgentKind::Claude,
+            agent: abnegate_agent_cli::AgentKind::Claude,
         };
 
         let route = fixture.route().await;
@@ -3386,7 +3657,7 @@ mod tests {
             matches!(
                 prepared.as_ref().err(),
                 Some(Unprepared::Backend(backend::Error::SignedOut {
-                    agent: zone_core::llm::AgentKind::Claude
+                    agent: abnegate_agent_cli::AgentKind::Claude
                 }))
             ),
             "{:?}",
@@ -3576,6 +3847,384 @@ mod tests {
             .unwrap();
     }
 
+    #[tokio::test]
+    async fn a_run_stopped_while_queued_for_a_slot_ends_and_frees_nothing_it_never_held() {
+        use crate::db::{organizations, users, workspace_members};
+
+        let _execution = EXECUTION.lock().await;
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("isolated TEST_DATABASE_URL"),
+        )
+        .await
+        .unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Stop test",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Stop test",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Stopper"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Queued",
+            "Must not run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let held = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+            .await
+            .unwrap();
+        let outcomes = Outcomes::default();
+        let _counting = metrics::set_default_local_recorder(&outcomes);
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+        let execution = tokio::spawn(async move {
+            execute_task_run(&state, run.id, task.id).await;
+        });
+        let lease = async || -> (bool, chrono::DateTime<chrono::Utc>) {
+            sqlx::query_as("SELECT owner IS NOT NULL, heartbeat_at FROM task_runs WHERE id = $1")
+                .bind(run.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let (true, beat) = lease().await {
+                    return beat;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker claimed the run");
+        tokio::time::timeout(HEARTBEAT_INTERVAL + Duration::from_secs(5), async {
+            while lease().await.1 <= claimed {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker beat after its claim, so its next beat is a whole interval away");
+        assert!(
+            stop::listening(run.id),
+            "the claimed run listens for a stop"
+        );
+        assert!(
+            matches!(
+                tasks::stop_task_run_authorized(&pool, user.id, run.id)
+                    .await
+                    .unwrap(),
+                tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+            ),
+            "the queued run was live to stop"
+        );
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            Some(run.id),
+            "the stopped run keeps its task while its worker tears down"
+        );
+        assert!(stop::request(run.id), "the stop reached the worker");
+        tokio::time::timeout(Duration::from_secs(5), execution)
+            .await
+            .expect("a stop ends the run long before its next heartbeat")
+            .unwrap();
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            None,
+            "the stopped worker frees its task once it has torn down"
+        );
+        let stopped = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
+        assert_eq!(stopped.status, tasks::CANCELLED);
+        assert_eq!(stopped.error_message.as_deref(), Some(tasks::STOPPED));
+        assert!(
+            !stop::request(run.id),
+            "the finished run no longer listens for a stop"
+        );
+        assert_eq!(
+            outcomes.counted(),
+            [tasks::CANCELLED],
+            "a stopped run is counted as cancelled, not as an error"
+        );
+        assert_eq!(
+            get_semaphore().available_permits(),
+            0,
+            "the stopped run handed back no slot it never took"
+        );
+        drop(held);
+        organizations::delete_organization(&pool, organization.id)
+            .await
+            .unwrap();
+    }
+
+    /// A stop another replica takes never reaches this one's signal: the run
+    /// ends when its heartbeat finds it cancelled, and is counted as the
+    /// cancelled run it is, not as an error.
+    #[tokio::test]
+    async fn a_run_stopped_on_another_replica_is_counted_as_cancelled() {
+        use crate::db::{organizations, users, workspace_members};
+
+        let _execution = EXECUTION.lock().await;
+        let pool = PgPool::connect(
+            &std::env::var("TEST_DATABASE_URL").expect("isolated TEST_DATABASE_URL"),
+        )
+        .await
+        .unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Remote stop test",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Remote stop test",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Stopper"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Queued",
+            "Must not run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let held = get_semaphore()
+            .clone()
+            .acquire_many_owned(MAX_CONCURRENT_TASKS as u32)
+            .await
+            .unwrap();
+        let outcomes = Outcomes::default();
+        let _counting = metrics::set_default_local_recorder(&outcomes);
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+        let execution = tokio::spawn(async move {
+            execute_task_run(&state, run.id, task.id).await;
+        });
+        let lease = async || -> (bool, chrono::DateTime<chrono::Utc>) {
+            sqlx::query_as("SELECT owner IS NOT NULL, heartbeat_at FROM task_runs WHERE id = $1")
+                .bind(run.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+        let claimed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let (true, beat) = lease().await {
+                    return beat;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker claimed the run");
+        tokio::time::timeout(HEARTBEAT_INTERVAL + Duration::from_secs(5), async {
+            while lease().await.1 <= claimed {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker beat after its claim, so its next beat is a whole interval away");
+        assert!(
+            matches!(
+                tasks::stop_task_run_authorized(&pool, user.id, run.id)
+                    .await
+                    .unwrap(),
+                tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+            ),
+            "the queued run was live to stop"
+        );
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            Some(run.id),
+            "the run stopped elsewhere keeps its task until its next heartbeat finds it stopped"
+        );
+        tokio::time::timeout(HEARTBEAT_INTERVAL + Duration::from_secs(5), execution)
+            .await
+            .expect("the run's next heartbeat finds it stopped and ends it")
+            .unwrap();
+        assert_eq!(
+            reserved(&pool, task.id).await,
+            None,
+            "the worker frees its task once it has torn down"
+        );
+        let stopped = tasks::get_task_run(&pool, run.id).await.unwrap().unwrap();
+        drop(held);
+        organizations::delete_organization(&pool, organization.id)
+            .await
+            .unwrap();
+        assert_eq!(stopped.status, tasks::CANCELLED);
+        assert_eq!(stopped.error_message.as_deref(), Some(tasks::STOPPED));
+        assert_eq!(
+            outcomes.counted(),
+            [tasks::CANCELLED],
+            "a run stopped on another replica is counted as cancelled, not as an error"
+        );
+    }
+
+    /// The run a task is held for.
+    async fn reserved(pool: &PgPool, task: Uuid) -> Option<Uuid> {
+        sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id = $1")
+            .bind(task)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The task-run outcomes counted on the thread it is installed on.
+    #[derive(Default)]
+    struct Outcomes(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Outcomes {
+        fn counted(&self) -> Vec<String> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    struct Outcome {
+        status: String,
+        counted: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl metrics::CounterFn for Outcome {
+        fn increment(&self, _: u64) {
+            self.counted
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(self.status.clone());
+        }
+
+        fn absolute(&self, _: u64) {}
+    }
+
+    const TASK_RUNS: &str = "zone_task_run_total";
+    const STATUS: &str = "status";
+
+    impl metrics::Recorder for Outcomes {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            let status = key
+                .labels()
+                .find(|label| label.key() == STATUS)
+                .map(|label| label.value().to_string());
+            match status {
+                Some(status) if key.name() == TASK_RUNS => {
+                    metrics::Counter::from_arc(Arc::new(Outcome {
+                        status,
+                        counted: self.0.clone(),
+                    }))
+                }
+                _ => metrics::Counter::noop(),
+            }
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
     // Integration tests are in zone_server/tests/integration/task_execution.rs
 
     #[tokio::test]
@@ -3697,6 +4346,289 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    /// What a run keeps of a call is its `task_tool_calls` row and its log,
+    /// which is streamed whole to whoever watches the run: the call's start,
+    /// its receipt, its result, and the model's own message that made it. All
+    /// but the result are written before the tool has refused anything, so a
+    /// discovery refused for the credential in it must leave that credential
+    /// in none of them.
+    #[tokio::test]
+    async fn a_refused_discovery_leaves_none_of_its_text_in_what_a_run_keeps() {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use crate::db::{organizations, users, workspace_members, workspaces};
+        use serde_json::{Value, json};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        const SECRET: &str = "ghp_abcdefgh1234";
+        const SUBJECT: &str = "The deploy token";
+        const WAIT: Duration = Duration::from_secs(60);
+
+        let database =
+            std::env::var("TEST_DATABASE_URL").expect("explicit disposable TEST_DATABASE_URL");
+        let pool = PgPool::connect(&database).await.unwrap();
+        let organization = organizations::create_organization(
+            &pool,
+            "Refused discovery",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let workspace = workspaces::create_workspace(
+            &pool,
+            organization.id,
+            "Refused discovery",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+        .await
+        .unwrap();
+        let user = users::create_user(
+            &pool,
+            &format!("{}@example.com", Uuid::new_v4()),
+            "unused",
+            Some("Task actor"),
+            false,
+        )
+        .await
+        .unwrap();
+        workspace_members::add_member(
+            &pool,
+            workspace.id,
+            user.id,
+            workspace_members::WorkspaceRole::Member,
+            None,
+        )
+        .await
+        .unwrap();
+        let task = tasks::create_task(
+            &pool,
+            workspace.id,
+            &[],
+            "Records what it verifies",
+            "Run",
+            None,
+            None,
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let run = tasks::create_task_run(&pool, task.id).await.unwrap();
+        let state = AppState::new(crate::state::test_config(), pool.clone(), None);
+        let provider = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let refused = [
+            json!({"kind": "lesson", "subject": format!("{SUBJECT} is {SECRET}"),
+                "statement": "Kept in the vault."}),
+            json!({"kind": "lesson", "subject": SUBJECT, "statement": format!("It is {SECRET}")}),
+            json!({"kind": "lesson", "subject": SUBJECT, "statement": "Kept in the vault.",
+                "reason": format!("So the next run knows it is {SECRET}")}),
+        ];
+        let calls: Vec<Value> = refused
+            .iter()
+            .enumerate()
+            .map(|(index, arguments)| {
+                json!({"index": index, "id": format!("discovery-call-{index}"),
+                    "type": "function",
+                    "function": {"name": RECORD_DISCOVERY, "arguments": arguments.to_string()}})
+            })
+            .collect();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |_: &Request| {
+                let delta = if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    json!({"tool_calls": calls})
+                } else {
+                    json!({"content": "Nothing was recorded."})
+                };
+                let chunk = json!({"id": "completion", "object": "chat.completion.chunk",
+                    "created": 0, "model": "test",
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": null}]});
+                let end = json!({"id": "completion", "object": "chat.completion.chunk",
+                    "created": 0, "model": "test",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]});
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(format!("data: {chunk}\n\ndata: {end}\n\ndata: [DONE]\n\n"))
+            })
+            .mount(&provider)
+            .await;
+        let tools =
+            ChatTools::for_task(&state, std::env::temp_dir(), workspace.id, Some(user.id)).await;
+        let callback = DatabaseTaskCallback::new(pool.clone(), run.id);
+
+        let outcome = tokio::time::timeout(
+            WAIT,
+            run_task_loop(
+                LlmClient::new(LlmConfig::new(provider.uri(), "gpt-4", "")),
+                "test".into(),
+                tools,
+                RunContext::from_messages(vec![LlmMessage::user("Write down what you verified.")]),
+                LoopBudget::task(),
+                &callback,
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("the turn ends")
+        .expect("the turn finishes");
+        let TurnOutcome::Finished(outcome) = outcome else {
+            panic!("a run that asked nothing finishes its turn");
+        };
+        assert_eq!(outcome.tool_calls, refused.len());
+
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let recorded = loop {
+            let finished: Vec<(Value, Option<String>)> = sqlx::query_as(
+                "SELECT tool_input, error_message FROM task_tool_calls \
+                 WHERE task_run_id = $1 AND tool_name = $2 AND completed_at IS NOT NULL",
+            )
+            .bind(run.id)
+            .bind(RECORD_DISCOVERY)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            if finished.len() == refused.len() {
+                break finished;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the calls were never all recorded: {finished:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        for (input, failure) in recorded {
+            assert_eq!(input, json!({"kind": "lesson"}));
+            assert!(
+                failure
+                    .as_deref()
+                    .is_some_and(|failure| failure.contains("Not recorded: ")),
+                "the call was refused: {failure:?}"
+            );
+        }
+
+        let logged: Vec<(String, String, Value)> = loop {
+            let rows: Vec<(String, String, Value)> = sqlx::query_as(
+                "SELECT agent_type, message, COALESCE(metadata, '{}'::jsonb) \
+                 FROM task_run_logs WHERE task_run_id = $1 ORDER BY created_at",
+            )
+            .bind(run.id)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let traced = rows.iter().filter(|(agent, ..)| agent == "tool").count();
+            if traced == refused.len() * 3 {
+                break rows;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "each call's start, receipt and result were never all logged: {rows:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        for (_, message, metadata) in &logged {
+            let written = metadata.to_string();
+            for carried in [SECRET, SUBJECT, "Kept in the vault."] {
+                assert!(
+                    !written.contains(carried),
+                    "{carried} in {message}: {written}"
+                );
+            }
+        }
+        let receipts: Vec<&Value> = logged
+            .iter()
+            .filter_map(|(.., metadata)| metadata.get("action_receipt"))
+            .collect();
+        assert_eq!(receipts.len(), refused.len());
+        for receipt in receipts {
+            assert_eq!(receipt["action"], RECORD_DISCOVERY);
+            assert_eq!(receipt["success"], false);
+            assert_eq!(receipt.get("reason"), None);
+        }
+        let started: Vec<&str> = logged
+            .iter()
+            .filter_map(|(.., metadata)| metadata.get("args")?.as_str())
+            .collect();
+        assert_eq!(started, [r#"{"kind":"lesson"}"#; 3]);
+        let conversed: Vec<&str> = logged
+            .iter()
+            .filter_map(|(.., metadata)| metadata["message"]["tool_calls"].as_array())
+            .flatten()
+            .filter_map(|call| call["function"]["arguments"].as_str())
+            .collect();
+        assert_eq!(
+            conversed, [r#"{"kind":"lesson"}"#; 3],
+            "the logged copy of the model's own message carries its calls too"
+        );
+
+        sqlx::query("DELETE FROM organizations WHERE id=$1")
+            .bind(organization.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// The tool reads a field written twice by its last copy, so a discovery
+    /// whose earlier copy carries a credential is taken. Its tool-call record
+    /// and the logged copy of the model's message keep the entry it stores,
+    /// and not the copy no screen read.
+    #[tokio::test]
+    async fn a_discovery_with_a_field_written_twice_leaves_the_unread_copy_out_of_what_a_run_keeps()
+    {
+        use crate::agent::discovery::RECORD_DISCOVERY;
+        use serde_json::json;
+        const SECRET: &str = "ghp_abcdefgh1234";
+        let arguments = format!(
+            r#"{{"kind":"lesson","subject":"The deploy token","statement":"It is {SECRET}","statement":"Kept in the vault."}}"#
+        );
+        let stored = json!({
+            "kind": "lesson",
+            "subject": "The deploy token",
+            "statement": "Kept in the vault.",
+        });
+        let pool =
+            PgPool::connect_lazy("postgres://zone@127.0.0.1:1/unreachable").expect("a lazy pool");
+        let callback = DatabaseTaskCallback::new(pool, Uuid::new_v4());
+
+        callback.on_tool_call("call_1", RECORD_DISCOVERY, &arguments);
+        let (_, recorded) = callback.close_call("call_1");
+        let message: ReplayMessage = serde_json::from_value(json!({
+            "version": 1,
+            "role": "assistant",
+            "content": null,
+            "name": null,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": RECORD_DISCOVERY, "arguments": arguments},
+            }],
+            "tool_call_id": null,
+            "images": [],
+            "generated_images": [],
+        }))
+        .expect("an assistant message that made one call");
+        let conversed = logged(&message);
+
+        assert_eq!(recorded, stored);
+        let conversed = conversed
+            .tool_calls
+            .expect("the logged copy keeps its calls")
+            .remove(0)
+            .function
+            .arguments;
+        assert_eq!(conversed, stored.to_string());
+        assert!(!conversed.contains(SECRET), "{conversed}");
     }
 
     #[tokio::test]
@@ -4033,12 +4965,12 @@ mod tests {
 #[cfg(test)]
 mod retry_tests {
     use super::*;
+    use abnegate_agent_cli::{
+        AgentEvent, AgentKind, CREDITS_UNCONFIRMED, DEFAULT_OUTPUT_LIMIT, STDERR_HEADING,
+    };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use zone_core::llm::AgentKind;
-    use zone_core::llm::provider::{
-        STDERR_HEADING, SignIn, UNCONFIRMED, UNFUNDED, UNFUNDED_CONTEXT,
-    };
+    use zone_core::llm::SignIn;
 
     const FABLE_REFUSAL: &str =
         "Fable 5.1 requires usage credits. Switch to another model to continue.";
@@ -4094,16 +5026,13 @@ mod retry_tests {
         }
     }
 
-    fn agent(agent: zone_core::llm::AgentKind, sign_in: SignIn) -> LlmBackend {
-        LlmBackend::cli(
-            agent,
-            zone_core::llm::CliSettings::default().with_sign_in(sign_in),
-        )
+    fn agent(agent: AgentKind, sign_in: SignIn) -> LlmBackend {
+        LlmBackend::cli(agent, abnegate_agent_cli::CliSettings::default()).with_sign_in(sign_in)
     }
 
     #[test]
     fn a_coding_agent_that_has_to_be_signed_in_again_is_not_retried() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
             let fault = Fault::agent(
@@ -4119,7 +5048,7 @@ mod retry_tests {
     /// is the operator's, and no organization setting can renew it.
     #[test]
     fn the_servers_own_sign_in_failing_is_not_sent_to_the_organizations_settings() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         let fault = Fault::agent(
             &agent(AgentKind::Claude, SignIn::Instance),
@@ -4153,19 +5082,20 @@ mod retry_tests {
     /// from an endpoint are judged the way an endpoint's always were.
     #[test]
     fn only_a_coding_agent_stopped_at_the_output_cap_is_not_retried() {
-        let stopped = "Stream error: claude: the agent's answer grew past 4194304 bytes";
+        let stopped =
+            format!("Stream error: claude: {PROSE_EXCEEDED} {DEFAULT_OUTPUT_LIMIT} bytes");
 
         assert_eq!(
             Fault::agent(
                 &agent(AgentKind::Claude, SignIn::Organization),
-                stopped.to_string()
+                stopped.clone()
             )
             .failure,
             Failure::Terminal
         );
         assert_eq!(
-            Fault::agent(&LlmBackend::Http, stopped.to_string()).failure,
-            classify(stopped)
+            Fault::agent(&LlmBackend::Http, stopped.clone()).failure,
+            classify(&stopped)
         );
     }
 
@@ -4176,8 +5106,10 @@ mod retry_tests {
     fn a_coding_agent_refused_for_want_of_usage_credits_is_not_retried() {
         for sign_in in [SignIn::Organization, SignIn::Host, SignIn::Instance] {
             for message in [
-                format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}"),
-                format!("Stream error: claude: {UNFUNDED_CONTEXT}: {LONG_CONTEXT_REFUSAL}"),
+                format!("Stream error: claude: {CREDITS_REQUIRED}: {FABLE_REFUSAL}"),
+                format!(
+                    "Stream error: claude: {LONG_CONTEXT_CREDITS_REQUIRED}: {LONG_CONTEXT_REFUSAL}"
+                ),
             ] {
                 let fault = Fault::agent(&agent(AgentKind::Claude, sign_in), message.clone());
 
@@ -4195,7 +5127,7 @@ mod retry_tests {
             &agent(AgentKind::Claude, SignIn::Organization),
             format!(
                 "Stream error: claude: the agent exited without completing its event stream\
-                 {STDERR_HEADING}{UNFUNDED}: {FABLE_REFUSAL}"
+                 {STDERR_HEADING}{CREDITS_REQUIRED}: {FABLE_REFUSAL}"
             ),
         );
 
@@ -4213,7 +5145,8 @@ mod retry_tests {
                 Failure::RateLimited { retry_after: None },
             ),
         ] {
-            let message = format!("Stream error: claude: {UNCONFIRMED} (fetch_error): {words}");
+            let message =
+                format!("Stream error: claude: {CREDITS_UNCONFIRMED} (fetch_error): {words}");
             let fault = Fault::agent(&agent(AgentKind::Claude, SignIn::Organization), message);
 
             assert_eq!(fault.failure, judged, "{}", fault.message);
@@ -4231,7 +5164,7 @@ mod retry_tests {
             "You're out of usage credits · resets 5pm",
             "Your usage allocation has been disabled by your admin · ask your admin for a higher limit",
         ] {
-            let mut reader = AgentKind::Claude.reader();
+            let mut reader = AgentKind::Claude.turn();
             let mut events = Vec::new();
             for line in [
                 serde_json::json!({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected", "resetsAt": 1_790_208_000, "rateLimitType": "five_hour", "isUsingOverage": false}}),
@@ -4243,11 +5176,8 @@ mod retry_tests {
             let failure = events
                 .iter()
                 .find_map(|event| match event {
-                    zone_core::llm::provider::AgentEvent::Failed(message)
-                    | zone_core::llm::provider::AgentEvent::Limited(abnegate_llm::Limit {
-                        message,
-                        ..
-                    }) => Some(message),
+                    AgentEvent::Failed(message)
+                    | AgentEvent::Limited(abnegate_llm::Limit { message, .. }) => Some(message),
                     _ => None,
                 })
                 .expect("the refusal fails the turn");
@@ -4287,11 +5217,11 @@ mod retry_tests {
             .expect("the stand-in agent to be executable");
         LlmBackend::cli(
             AgentKind::Claude,
-            zone_core::llm::CliSettings::default()
-                .with_sign_in(SignIn::Organization)
+            abnegate_agent_cli::CliSettings::default()
                 .with_executable(executable)
                 .with_timeout(Duration::from_secs(20)),
         )
+        .with_sign_in(SignIn::Organization)
     }
 
     /// How a task's turn on `backend` stopped. Nothing it reaches for needs a
@@ -4393,6 +5323,134 @@ mod retry_tests {
         assert_eq!(fault.status, before.status);
     }
 
+    /// Prose small enough for a test to pass the output limit with.
+    const OUTPUT_LIMIT: usize = 64;
+
+    /// claude refusing its turn in `words`, typed as a refusal for usage
+    /// credits when `api_error` names one.
+    fn refusal(words: &str, api_error: Option<&str>) -> [serde_json::Value; 2] {
+        let mut assistant = serde_json::json!({"type": "assistant", "message": {"model": "<synthetic>", "content": [{"type": "text", "text": words}]}, "parent_tool_use_id": null, "is_api_error_message": true});
+        if let Some(api_error) = api_error {
+            assistant["api_error"] = api_error.into();
+        }
+        [
+            assistant,
+            serde_json::json!({"type": "result", "subtype": "success", "is_error": true, "api_error_status": 400, "result": words}),
+        ]
+    }
+
+    /// A failure no retry gets past is read on the words the crate begins it
+    /// with, as the crate itself reports each one.
+    #[tokio::test]
+    async fn agent_terminal_markers_are_the_crates() {
+        assert_eq!(
+            AGENT_TERMINAL_MARKERS,
+            [
+                PROSE_EXCEEDED,
+                CREDITS_REQUIRED,
+                LONG_CONTEXT_CREDITS_REQUIRED
+            ]
+        );
+
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let outgrown = replaying(
+            &directory,
+            &[
+                serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "a".repeat(OUTPUT_LIMIT * 2)}]}, "parent_tool_use_id": null}),
+            ],
+        )
+        .configured(|settings| settings.with_output_limit(OUTPUT_LIMIT));
+        let Halt::Failed(message) = halt(&outgrown).await else {
+            panic!("prose past the output limit was expected to fail the turn");
+        };
+        assert!(message.contains(PROSE_EXCEEDED), "{message}");
+        assert_eq!(
+            Fault::agent(&outgrown, message.clone()).failure,
+            Failure::Terminal,
+            "{message}"
+        );
+
+        for (api_error, words) in [
+            ("model_requires_usage_credits", FABLE_REFUSAL),
+            ("long_context_credits_required", LONG_CONTEXT_REFUSAL),
+        ] {
+            let mut turn = AgentKind::Claude.turn();
+            let mut events = Vec::new();
+            for line in refusal(words, Some(api_error)) {
+                turn.interpret(&line.to_string(), &mut events);
+            }
+            let refused = events
+                .iter()
+                .find_map(|event| match event {
+                    AgentEvent::Failed(message)
+                    | AgentEvent::Limited(abnegate_llm::Limit { message, .. }) => Some(message),
+                    _ => None,
+                })
+                .expect("the refusal fails the turn");
+
+            let fault = Fault::agent(
+                &agent(AgentKind::Claude, SignIn::Organization),
+                format!("Stream error: claude: {refused}"),
+            );
+
+            assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        }
+    }
+
+    /// A refusal for usage credits is known only by the `api_error` claude
+    /// types it with. A Fable refusal in claude's words alone is a failure the
+    /// next attempt may get past.
+    #[tokio::test]
+    async fn a_fable_refusal_without_its_api_error_is_retried() {
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let worded = replaying(&directory, &refusal(FABLE_REFUSAL, None));
+        let Halt::Failed(message) = halt(&worded).await else {
+            panic!("an untyped refusal was expected to fail the turn in its words");
+        };
+        assert!(!message.contains(CREDITS_REQUIRED), "{message}");
+        assert!(message.ends_with(FABLE_REFUSAL), "{message}");
+        assert_eq!(
+            Fault::agent(&worded, message.clone()).failure,
+            Failure::Transient,
+            "{message}"
+        );
+
+        let directory = tempfile::TempDir::new().expect("a directory for the stand-in agent");
+        let typed = replaying(
+            &directory,
+            &refusal(FABLE_REFUSAL, Some("model_requires_usage_credits")),
+        );
+        let Halt::Limited(limit) = halt(&typed).await else {
+            panic!("a typed refusal was expected to halt the turn as a credits limit");
+        };
+        let fault = Fault::limited(&typed, limit);
+        assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
+        assert_eq!(
+            fault.message,
+            format!("Stream error: claude: {CREDITS_REQUIRED}: {FABLE_REFUSAL}")
+        );
+    }
+
+    /// A context the account cannot fund is worded "usage credits required
+    /// for this context length", and a context length is what an endpoint's
+    /// failure is terminal for, so an endpoint failure in those words is
+    /// terminal like a coding agent's.
+    #[test]
+    fn an_endpoint_failure_in_the_crates_long_context_words_is_terminal_for_naming_a_context_length()
+     {
+        let fault = Fault::agent(&LlmBackend::Http, LONG_CONTEXT_CREDITS_REQUIRED.to_string());
+
+        assert_eq!(fault.failure, Failure::Terminal);
+        assert_eq!(
+            classify(LONG_CONTEXT_CREDITS_REQUIRED),
+            classify("the request exceeds the model's context length")
+        );
+        assert_eq!(
+            classify_agent(LONG_CONTEXT_CREDITS_REQUIRED),
+            Failure::Terminal
+        );
+    }
+
     /// A model the signed-in account cannot spend usage credits on refuses
     /// every retry alike, so a credits limit ends the run as the unfunded
     /// failure did.
@@ -4417,7 +5475,7 @@ mod retry_tests {
         assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
         assert_eq!(
             fault.message,
-            format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}")
+            format!("Stream error: claude: {CREDITS_REQUIRED}: {FABLE_REFUSAL}")
         );
     }
 
@@ -4441,8 +5499,7 @@ mod retry_tests {
                 Failure::RateLimited { retry_after: None },
             ),
             ("400 Bad Request: credits_required", Failure::Terminal),
-            (UNFUNDED, Failure::Transient),
-            (UNFUNDED_CONTEXT, Failure::Transient),
+            (CREDITS_REQUIRED, Failure::Transient),
             (SESSION_LIMIT, Failure::Transient),
         ] {
             let fault = Fault::agent(&LlmBackend::Http, message.to_string());
@@ -4451,7 +5508,7 @@ mod retry_tests {
             assert_eq!(fault.failure, classify(message), "{message}");
             assert_eq!(fault.message, message);
         }
-        for message in [UNFUNDED, UNFUNDED_CONTEXT, SESSION_LIMIT] {
+        for message in [CREDITS_REQUIRED, SESSION_LIMIT] {
             assert_ne!(
                 classify_agent(message),
                 classify(message),
@@ -4460,13 +5517,13 @@ mod retry_tests {
         }
     }
 
-    /// zone_core follows a coding agent's failure with the tail of its stderr,
-    /// which is where codex alone reports a renewal it could not make. Nothing
+    /// A coding agent's failure is followed by the tail of its stderr, which
+    /// is where codex alone reports a renewal it could not make. Nothing
     /// else there is the agent's verdict on its own turn: a retry log, or a
     /// warning about some other server, must not decide whether it retries.
     #[test]
     fn a_coding_agents_stderr_does_not_decide_whether_its_turn_is_retried() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         for stderr in [
             "2026-09-23T07:43:43Z WARN codex_api: retrying after 429 Too Many Requests",
@@ -4490,7 +5547,7 @@ mod retry_tests {
     /// is not retried, whatever throttling its stderr logged after it.
     #[test]
     fn every_line_of_a_coding_agents_own_words_decides_whether_it_is_retried() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         let fault = Fault::agent(
             &agent(AgentKind::Codex, SignIn::Organization),
@@ -4509,7 +5566,7 @@ mod retry_tests {
     /// only a database read may succeed on the next attempt.
     #[test]
     fn a_backend_that_cannot_be_resolved_is_retried_only_for_a_database_read() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         let agent = AgentKind::Claude;
         assert_eq!(
@@ -4540,7 +5597,7 @@ mod retry_tests {
 
     #[test]
     fn a_renewal_codex_reports_only_on_stderr_is_still_not_retried() {
-        use zone_core::llm::AgentKind;
+        use abnegate_agent_cli::AgentKind;
 
         let fault = Fault::agent(
             &agent(AgentKind::Codex, SignIn::Organization),
@@ -4698,23 +5755,12 @@ mod retry_tests {
     }
 
     #[test]
-    fn run_timeouts_are_terminal() {
-        let fault = Fault::timeout();
-        assert_eq!(fault.failure, Failure::Terminal);
-        assert_eq!(fault.status, "timeout");
-        assert_eq!(
-            RetryPolicy::default().decide(1, fault.failure, 0.0),
-            Decision::Terminal
-        );
-    }
-
-    #[test]
     fn rate_limits_back_off_further_than_transient_failures() {
         let policy = RetryPolicy::default();
         let throttled = classify("HTTP 429 Too Many Requests");
         assert_eq!(throttled, Failure::RateLimited { retry_after: None });
         let delay = retry_delay(&policy, 1, throttled, 0.0);
-        assert_eq!(delay, policy.rate_limit_base);
+        assert_eq!(delay, policy.rate_limit.base);
         assert!(delay > retry_delay(&policy, 1, Failure::Transient, 0.0));
     }
 
@@ -4746,7 +5792,7 @@ mod retry_tests {
                 classify("rate limit hit, retry-after: 86400"),
                 0.0
             ),
-            policy.rate_limit_ceiling
+            policy.rate_limit.maximum
         );
         assert_eq!(
             classify("rate limit hit, retry-after: 500ms"),
@@ -4757,16 +5803,139 @@ mod retry_tests {
     }
 
     #[test]
+    fn a_hint_ending_a_sentence_is_honoured() {
+        assert_eq!(
+            classify("rate limited, retry in 1.5."),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_millis(1_500)),
+            }
+        );
+        assert_eq!(
+            classify("rate limit hit, retry-after: 0.5."),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_millis(500)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_hint_too_long_to_hold_waits_the_rate_limit_maximum() {
+        let policy = RetryPolicy::default();
+        let overflowing = classify("rate limit hit, retry-after: 18446744073709551616");
+        assert_eq!(
+            overflowing,
+            Failure::RateLimited {
+                retry_after: Some(Duration::MAX),
+            }
+        );
+        assert_eq!(
+            retry_delay(&policy, 1, overflowing, 0.0),
+            policy.rate_limit.maximum
+        );
+        let attempt = Attempt {
+            number: 1,
+            failure: overflowing,
+            decision: policy.decide(1, overflowing, 0.0),
+            message: String::new(),
+            handover: None,
+        };
+        assert_eq!(
+            attempt.metadata(policy.attempts)["retry_after_ms"],
+            u64::MAX
+        );
+        assert_eq!(
+            classify(&format!("rate limit hit, retry-after: {}", "9".repeat(400))),
+            Failure::RateLimited {
+                retry_after: Some(Duration::MAX),
+            }
+        );
+    }
+
+    #[test]
+    fn a_hint_too_small_to_hold_takes_the_rate_limit_curve() {
+        let policy = RetryPolicy::default();
+        let unhinted = Failure::RateLimited { retry_after: None };
+        let hints = [
+            (
+                "underflowing",
+                classify(&format!("rate limited, retry in 0.{}1", "0".repeat(400))),
+            ),
+            (
+                "sub-nanosecond",
+                classify("rate limited, retry in 0.0000000001"),
+            ),
+            (
+                "an agent's sub-nanosecond",
+                classify_agent(&format!("{SESSION_LIMIT} · retry in 0.0000000001")),
+            ),
+        ];
+        let held: Vec<_> = hints
+            .iter()
+            .filter(|(_, failure)| *failure != unhinted)
+            .collect();
+        assert!(held.is_empty(), "zero hints held the retry: {held:?}");
+        for (hint, failure) in hints {
+            assert_eq!(
+                retry_delay(&policy, 1, failure, 0.0),
+                policy.rate_limit.base,
+                "{hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_undelayed_fault_still_retries_at_once() {
+        let policy = RetryPolicy::default();
+        let fault = Fault::reported("rate limited, retry in 0.0000000001".to_string()).undelayed();
+        assert_eq!(retry_delay(&policy, 1, fault.failure, 0.0), Duration::ZERO);
+    }
+
+    #[test]
+    fn fractional_and_millisecond_hints_parse() {
+        assert_eq!(
+            classify("429 slow down, try again in 1.5s"),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_millis(1_500)),
+            }
+        );
+        assert_eq!(
+            classify("retry_after: 200ms"),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_millis(200)),
+            }
+        );
+    }
+
+    #[test]
+    fn a_sample_that_is_not_a_number_takes_no_jitter() {
+        let policy = RetryPolicy::default();
+        assert_eq!(
+            policy.decide(1, Failure::Transient, f64::NAN),
+            Decision::Retry(policy.transient.base)
+        );
+    }
+
+    #[test]
+    fn an_agents_hint_is_read_from_its_own_words() {
+        assert_eq!(
+            classify_agent(&format!("{SESSION_LIMIT} · retry in 30s")),
+            Failure::RateLimited {
+                retry_after: Some(Duration::from_secs(30)),
+            }
+        );
+    }
+
+    #[test]
     fn backoff_grows_exponentially_within_its_bounds() {
         let policy = RetryPolicy::default();
-        let floor = policy.base.mul_f64(1.0 - policy.jitter);
+        let floor = policy.transient.base.mul_f64(1.0 - policy.transient.jitter);
         for sample in [0.0, 0.5, 1.0] {
             let mut previous = Duration::ZERO;
             for attempt in 1..policy.attempts {
                 let delay = retry_delay(&policy, attempt, Failure::Transient, sample);
                 assert!(delay >= floor, "attempt {attempt} fell below the floor");
                 assert!(
-                    delay <= policy.ceiling,
+                    delay <= policy.transient.maximum,
                     "attempt {attempt} broke the ceiling"
                 );
                 assert!(delay >= previous, "attempt {attempt} did not grow");
@@ -4775,15 +5944,15 @@ mod retry_tests {
         }
         assert_eq!(
             retry_delay(&policy, 1, Failure::Transient, 0.0),
-            policy.base
+            policy.transient.base
         );
         assert_eq!(
             retry_delay(&policy, 2, Failure::Transient, 0.0),
-            policy.base * 2
+            policy.transient.base * 2
         );
         assert_eq!(
             retry_delay(&policy, 1, Failure::Transient, 1.0),
-            policy.base.mul_f64(1.0 - policy.jitter)
+            policy.transient.base.mul_f64(1.0 - policy.transient.jitter)
         );
         let long = RetryPolicy {
             attempts: 32,
@@ -4791,7 +5960,7 @@ mod retry_tests {
         };
         assert_eq!(
             retry_delay(&long, 31, Failure::Transient, 0.0),
-            long.ceiling,
+            long.transient.maximum,
             "an unbounded curve must still be capped"
         );
     }
@@ -5053,7 +6222,7 @@ mod retry_tests {
         assert_eq!(unknown.failure, Failure::RateLimited { retry_after: None });
         assert_eq!(
             policy.decide(1, unknown.failure, 0.0),
-            Decision::Retry(policy.rate_limit_base)
+            Decision::Retry(policy.rate_limit.base)
         );
 
         let unfunded = Fault::limited(&backend, limit(None, true))
@@ -5065,8 +6234,13 @@ mod retry_tests {
 #[cfg(test)]
 mod watchdog_tests {
     use super::*;
+    use abnegate_agent::chat::NewEntry;
     use abnegate_llm::Role as LlmRole;
     use std::sync::Mutex;
+
+    /// The ceiling a task carried before it was unbounded, for the tests of
+    /// behaviour only a budget that runs out can show.
+    pub(super) const PARKING_CEILING: LoopBudget = LoopBudget::bounded(50, 100);
 
     /// A run that is working announces nothing: the watchdog is there for the
     /// silence, and firing on a busy run would bury the log it writes to.
@@ -5096,8 +6270,8 @@ mod watchdog_tests {
     }
 
     /// The stall is announced while the run is still going, and keeps being
-    /// announced: one line an hour before the timeout would be a line nobody
-    /// sees the end of.
+    /// announced: one line, however long the silence lasts after it, would be
+    /// a line nobody sees the end of.
     #[tokio::test(start_paused = true)]
     async fn silence_is_announced_every_interval_until_an_event_arrives() {
         let announced = Arc::new(Mutex::new(Vec::new()));
@@ -5229,7 +6403,7 @@ mod watchdog_tests {
     }
 
     /// Nobody answers an unattended run, so a required question is given the
-    /// same window an optional one gets rather than the run's whole timeout.
+    /// same window an optional one gets rather than waiting on nobody forever.
     #[test]
     fn an_unattended_run_keeps_the_window_even_for_a_required_question() {
         assert_eq!(
@@ -5348,6 +6522,28 @@ mod watchdog_tests {
         assert!(tasks::claim_task_run(&pool, run.id, owner).await.unwrap());
         let state = AppState::new(crate::state::test_config(), pool.clone(), None);
         (pool, observed, state, run.id, owner)
+    }
+
+    async fn workspace_of(pool: &PgPool, run: Uuid) -> Uuid {
+        sqlx::query_scalar(
+            "SELECT tasks.workspace_id FROM tasks \
+             JOIN task_runs ON task_runs.task_id = tasks.id WHERE task_runs.id = $1",
+        )
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn remove_organization_of(pool: &PgPool, workspace: Uuid) {
+        sqlx::query(
+            "DELETE FROM organizations \
+             WHERE id = (SELECT organization_id FROM workspaces WHERE id = $1)",
+        )
+        .bind(workspace)
+        .execute(pool)
+        .await
+        .unwrap();
     }
 
     async fn parked_row(pool: &PgPool, run: Uuid) -> (String, Option<serde_json::Value>) {
@@ -5742,10 +6938,10 @@ mod watchdog_tests {
     }
 
     /// A park is not a new run. A budget minted per turn makes every ceiling a
-    /// per-question allowance: a model that keeps calling `ask_user` is handed
-    /// a fresh 50 rounds and 100 calls after each card, so the only thing that
-    /// ends it is [`TASK_TIMEOUT`] -- thousands of tool executions later, under
-    /// a ceiling of 100.
+    /// per-question allowance: a model that keeps calling `ask_user` would be
+    /// handed a fresh allowance after each card. A task's own budget is
+    /// unlimited, so this holds an attempt to an explicit ceiling and proves
+    /// that ceiling spans every park.
     #[tokio::test]
     async fn a_park_carries_its_budget_into_the_turn_that_resumes_it() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5754,7 +6950,7 @@ mod watchdog_tests {
 
         let _execution = EXECUTION.lock().await;
         let (pool, _observed, _state, run, owner) = parked_fixture().await;
-        let workspace_id: Uuid = sqlx::query_scalar("SELECT tasks.workspace_id FROM tasks JOIN task_runs ON task_runs.task_id=tasks.id WHERE task_runs.id=$1").bind(run).fetch_one(&pool).await.unwrap();
+        let workspace_id = workspace_of(&pool, run).await;
 
         let provider = MockServer::start().await;
         let cards = Arc::new(AtomicUsize::new(0));
@@ -5807,6 +7003,7 @@ mod watchdog_tests {
                 None,
                 &LlmBackend::Http,
                 None,
+                &Usage::default(),
                 &Endpoint::instance(state.config()),
                 "gpt-4",
                 "# Task: Budget\n\nKeep asking until something stops you",
@@ -5817,7 +7014,7 @@ mod watchdog_tests {
                 false,
                 false,
                 &plan::Approval::default(),
-                tokio::time::Instant::now() + TASK_TIMEOUT,
+                PARKING_CEILING,
             ),
         )
         .await
@@ -5825,7 +7022,7 @@ mod watchdog_tests {
         .unwrap();
         answering.abort();
 
-        let ceiling = LoopBudget::task();
+        let ceiling = PARKING_CEILING;
         assert!(
             outcome.tool_calls <= ceiling.max_tool_calls,
             "{} tool calls ran across the parks, under a ceiling of {}",
@@ -5849,14 +7046,14 @@ mod watchdog_tests {
             outcome.summary, "The budget for this run is spent.",
             "an exhausted budget must end the run the way any exhausted budget does"
         );
-        sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
+        remove_organization_of(&pool, workspace_id).await;
     }
 
     /// A parked run holds no work, only an answer it is waiting for. Holding
     /// its execution slot through that wait lets [`MAX_CONCURRENT_TASKS`] runs
     /// parked on required questions take the whole deployment's task throughput
-    /// to zero for the hour a question may go unanswered -- and `required` is
-    /// the model's to set.
+    /// to zero for as long as their questions go unanswered -- and `required`
+    /// is the model's to set.
     #[tokio::test]
     async fn a_parked_run_gives_its_execution_slot_back_while_it_waits() {
         use crate::db::{organizations, users, workspace_members, workspaces};
@@ -6021,7 +7218,7 @@ mod watchdog_tests {
 
     #[test]
     fn a_spent_budget_never_goes_below_nothing_left() {
-        let ceiling = LoopBudget::task();
+        let ceiling = PARKING_CEILING;
         assert_eq!(
             ceiling.less(Spend {
                 iterations: 2,
@@ -6042,21 +7239,6 @@ mod watchdog_tests {
                 max_tool_calls: 0,
             },
             "an overspent budget is exhausted, not wrapped around to a fresh one"
-        );
-    }
-
-    #[test]
-    fn an_unanswered_required_question_ends_the_run_without_a_retry() {
-        let fault = Fault::timeout();
-        assert!(matches!(fault.failure, Failure::Terminal));
-        assert_eq!(
-            RetryPolicy::default().decide(1, fault.failure, 0.0),
-            Decision::Terminal,
-            "a run that timed out waiting has nothing different to try"
-        );
-        assert_eq!(
-            fault.message,
-            format!("Task execution timed out after {TASK_TIMEOUT_SECS} seconds")
         );
     }
 
@@ -6121,12 +7303,8 @@ mod watchdog_tests {
         );
     }
 
-    fn canonical(id: &str, message: LlmMessage) -> zone_chat::history::NewEntry {
-        zone_chat::history::NewEntry {
-            id: id.to_string(),
-            message: (&message).into(),
-            mutations: Vec::new(),
-        }
+    fn canonical(id: &str, message: LlmMessage) -> NewEntry {
+        NewEntry::new(id, (&message).into())
     }
 
     #[test]
@@ -6159,12 +7337,11 @@ mod watchdog_tests {
             "a consumed entry is eligible for the checkpoint that replaces it"
         );
 
-        let summary = zone_core::context::Summary {
-            content: "The ledger was read".to_string(),
-            coverage: zone_core::context::coverage(&replay.entries, &["older".to_string()])
-                .unwrap(),
-            revision: 1,
-        };
+        let summary = abnegate_agent::context::Summary::new(
+            "The ledger was read",
+            abnegate_agent::context::coverage(&replay.entries, &["older".to_string()]).unwrap(),
+            1,
+        );
         accumulate(
             &mut replay,
             &AgentEvent::Checkpoint {
@@ -6177,13 +7354,15 @@ mod watchdog_tests {
             Some(&summary.content)
         );
 
-        replay.entries.push(Entry {
-            id: Uuid::new_v4().to_string(),
-            message: LlmMessage::user("Scope: Backfill"),
-            preserve: true,
-            consumed: true,
-        });
-        let projected = zone_core::context::project(&replay.entries, replay.summary.as_ref())
+        replay.entries.push(
+            Entry::new(
+                Uuid::new_v4().to_string(),
+                LlmMessage::user("Scope: Backfill"),
+            )
+            .with_preserve(true)
+            .with_consumed(true),
+        );
+        let projected = abnegate_agent::context::project(&replay.entries, replay.summary.as_ref())
             .expect("the resumed turn projects");
         let carried: Vec<&str> = projected
             .iter()
@@ -6221,6 +7400,10 @@ mod watchdog_tests {
 
     /// A wait short enough to sit out in real time.
     const WAIT_TICK: Duration = Duration::from_secs(3);
+
+    /// An hour, far longer than any test runs: a park or a job lasting it is
+    /// still going when the test looks.
+    const LONG_PARK: Duration = Duration::from_secs(3_600);
 
     /// A wait on a background job, ending `seconds` from now.
     ///
@@ -6628,77 +7811,109 @@ mod watchdog_tests {
         );
     }
 
-    /// The wait sits inside the attempt's own timeout and gets no second one.
-    /// A wait that outlives it ends the run rather than the attempt being run
-    /// again: the retry would re-open the same wait on the same subject.
+    /// Nothing but an answer, a Stop or a lost lease ends a run parked on a
+    /// required question: one left unanswered for [`LONG_PARK`] still resumes
+    /// the run once it is answered.
     #[tokio::test]
-    async fn a_wait_that_outlives_the_attempt_timeout_ends_the_run_without_a_retry() {
+    async fn an_attempt_parked_past_an_hour_still_completes_when_answered() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const FINISHED: &str = "Backfilled the ledger.";
+
         let _execution = EXECUTION.lock().await;
-        let (_pool, observed, state, run, owner) = parked_fixture().await;
-        let permit = Arc::new(Permit::acquire().await.unwrap());
-        assert!(
-            Duration::from_secs(wait::MAX_WAIT_SECS) < TASK_TIMEOUT,
-            "one clamped wait can never reach the attempt timeout on its own"
-        );
-        let waited = claimed_wait(run, TASK_TIMEOUT.as_secs() as i64 * 2);
-
-        let mut parking = {
-            let state = state.clone();
-            let permit = permit.clone();
-            let waited = waited.clone();
-            tokio::spawn(async move { park_for_wait(&state, run, owner, &waited, &permit).await })
+        let (pool, observed, _state, run, owner) = parked_fixture().await;
+        let workspace_id = workspace_of(&pool, run).await;
+        let provider = MockServer::start().await;
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(move |_: &wiremock::Request| {
+                let delta = if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                    serde_json::json!({"tool_calls":[{"index":0,"id":"ask-scope","type":"function","function":{"name":crate::agent::ASK_USER,"arguments":ASK_SCOPE}}]})
+                } else {
+                    serde_json::json!({"content": FINISHED})
+                };
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/event-stream")
+                    .set_body_string(streamed(delta))
+            })
+            .mount(&provider)
+            .await;
+        let mut config = crate::state::test_config();
+        config.litellm_host = provider.uri();
+        config.ollama_host = provider.uri();
+        let state = AppState::new(config, pool.clone(), None);
+        let permit = Permit::acquire().await.unwrap();
+        let workspace = std::env::temp_dir();
+        let environment = Environment {
+            directory: workspace.clone(),
+            ..Environment::here()
         };
-        // The park writes the row before it awaits anything, and a paused clock
-        // auto-advances straight through that write to the only timer left --
-        // the attempt timeout below, which would then elapse against a row
-        // still reading 'running'. So the park lands on the real clock first.
-        tokio::time::timeout(WAIT_TICK, async {
-            loop {
-                let (status, _, _, phase) = waiting_state(&observed, run).await;
-                if (status.as_str(), phase.as_deref()) == (PHASE_WAITING, Some(PHASE_WAITING)) {
-                    break;
+
+        let endpoint = Endpoint::instance(state.config());
+        let approval = plan::Approval::default();
+        let usage = Usage::default();
+        let attempt = attempt_run(
+            &state,
+            run,
+            owner,
+            workspace_id,
+            None,
+            &LlmBackend::Http,
+            None,
+            &usage,
+            &endpoint,
+            "gpt-4",
+            "# Task: Backfill\n\nAsk which scope, then do it",
+            "",
+            &workspace,
+            &environment,
+            &permit,
+            false,
+            false,
+            &approval,
+            LoopBudget::task(),
+        );
+        // The row is watched on the real clock: a paused one jumps to the next
+        // timer while a query is in flight. Only once the run is parked, with
+        // no I/O of its own outstanding, is `LONG_PARK` run out on a paused clock,
+        // and the clock resumed before the answer sends the run back to the
+        // database and the endpoint.
+        let answering = async {
+            tokio::time::timeout(HUNG_AFTER, async {
+                loop {
+                    let (status, pending, _) = parked_state(&observed, run).await;
+                    if status == PHASE_WAITING && pending.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(POLL).await;
                 }
-                tokio::time::sleep(POLL).await;
-            }
-        })
-        .await
-        .expect("the run never read as parked on its wait");
+            })
+            .await
+            .expect("the run never parked on its question");
+            tokio::time::pause();
+            tokio::time::advance(LONG_PARK + Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            tokio::time::resume();
+            question::answer(run, chose_backfill())
+        };
+        let (outcome, answered) = within(HUNG_AFTER, futures::future::join(attempt, answering))
+            .await
+            .expect("the answered run never finished");
 
-        tokio::time::pause();
-        // The wrapper the attempt puts around every turn of the run, waiting
-        // included. Nothing inside the park may bound the wait more tightly or
-        // survive this elapsing, so the clock has only one timer to reach.
-        let attempt = tokio::time::timeout(TASK_TIMEOUT, &mut parking).await;
-
-        assert!(
-            attempt.is_err(),
-            "the wait outlived the attempt and kept the run alive anyway"
-        );
-        // What the attempt's own wrapper does to the park it is holding: drop
-        // it where the elapsed timeout found it, mid-wait.
-        parking.abort();
-        assert!(
-            parking.await.unwrap_err().is_cancelled(),
-            "the park ended on its own rather than being cancelled mid-wait"
-        );
-        tokio::time::resume();
-        let (status, _, _, phase) = waiting_state(&observed, run).await;
-        assert_eq!(
-            (status.as_str(), phase.as_deref()),
-            (PHASE_WAITING, Some(PHASE_WAITING)),
-            "the attempt was cancelled mid-wait, and the terminal completion is what clears \
-             the row it left parked"
-        );
-        let fault = Fault::timeout();
-        assert!(
-            matches!(fault.failure, Failure::Terminal),
-            "an elapsed attempt was classified {}",
-            fault.failure.label()
-        );
-        assert_eq!(
-            RetryPolicy::default().decide(1, fault.failure, 0.0),
-            Decision::Terminal
-        );
+        let outcome = outcome.unwrap_or_else(|fault| {
+            panic!(
+                "a run parked past an hour ended before its answer: {}",
+                fault.message
+            )
+        });
+        assert!(answered, "nothing was waiting on the answer an hour in");
+        assert_eq!(outcome.summary, FINISHED);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        remove_organization_of(&pool, workspace_id).await;
     }
 
     /// A background job outlives the tool call that started it, and nothing
@@ -6712,14 +7927,18 @@ mod watchdog_tests {
         // A program rather than a shell line: a job runs with a cleared
         // environment, and this way the pid the registry reports is the
         // long-running process itself rather than a shell in front of it.
+        let context = abnegate_agent::ToolContext::default()
+            .within(checkout.path())
+            .with_session(session)
+            .with_application(zone_core::application::application())
+            .with_environment(abnegate_agent::tool::EnvironmentPolicy::empty())
+            .with_proxy(abnegate_agent::tool::Proxy::default());
         let started = Jobs::spawn(
-            session,
-            &zone_core::tools::job::JobCommand::new(
+            &abnegate_agent::tool::job::JobCommand::new(
                 "/bin/sleep",
-                vec![TASK_TIMEOUT.as_secs().to_string()],
+                vec![LONG_PARK.as_secs().to_string()],
             ),
-            checkout.path(),
-            &std::collections::HashMap::new(),
+            &context,
         )
         .await
         .expect("the job starts");
@@ -6755,7 +7974,7 @@ mod watchdog_tests {
 
         let _execution = EXECUTION.lock().await;
         let (pool, _observed, _state, run, owner) = parked_fixture().await;
-        let workspace_id: Uuid = sqlx::query_scalar("SELECT tasks.workspace_id FROM tasks JOIN task_runs ON task_runs.task_id=tasks.id WHERE task_runs.id=$1").bind(run).fetch_one(&pool).await.unwrap();
+        let workspace_id = workspace_of(&pool, run).await;
         let provider = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -6775,7 +7994,7 @@ mod watchdog_tests {
 
         // What the attempt before this one left behind, still registered under
         // the run's session because its own park never consumed it.
-        let waited = claimed_wait(run, TASK_TIMEOUT.as_secs() as i64);
+        let waited = claimed_wait(run, LONG_PARK.as_secs() as i64);
         let workspace = std::env::temp_dir();
         let environment = Environment {
             directory: workspace.clone(),
@@ -6789,6 +8008,7 @@ mod watchdog_tests {
             None,
             &LlmBackend::Http,
             None,
+            &Usage::default(),
             &Endpoint::instance(state.config()),
             "gpt-4",
             "# Task: Retry\n\nFinish without waiting",
@@ -6799,7 +8019,7 @@ mod watchdog_tests {
             false,
             false,
             &plan::Approval::default(),
-            tokio::time::Instant::now() + TASK_TIMEOUT,
+            LoopBudget::task(),
         )
         .await
         .expect("an attempt that waits on nothing finishes");
@@ -6824,18 +8044,22 @@ mod watchdog_tests {
             0,
             "the allowance the refused eleventh wait is counted against has to start empty"
         );
-        sqlx::query("DELETE FROM organizations WHERE id=(SELECT organization_id FROM workspaces WHERE id=$1)").bind(workspace_id).execute(&pool).await.unwrap();
+        remove_organization_of(&pool, workspace_id).await;
     }
 }
 
 #[cfg(test)]
 mod cli_tests {
+    use super::watchdog_tests::PARKING_CEILING;
     use super::*;
     use crate::config::{AgentConfig, Config, ModelBackend};
     use crate::db::agent_logins::{self, Insert};
     use crate::db::ai_settings::{PROVIDER_CLAUDE_CODE, PROVIDER_CODEX};
     use crate::db::{organizations, users, workspace_members, workspaces};
-    use crate::services::login::claude::Tokens;
+    use crate::services::agent::home::CLAUDE_CODE_OAUTH_TOKEN;
+    use crate::services::login::claude::Sealed;
+    use abnegate_agent_cli::login::claude::Tokens;
+    use abnegate_agent_cli::{AgentKind, CliSettings};
     use abnegate_llm::{Credential, LlmConfig};
     use abnegate_secret::SecretValue;
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -6845,18 +8069,27 @@ mod cli_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
     use wiremock::MockServer;
-    use zone_core::llm::provider::SignIn;
-    use zone_core::llm::{AgentKind, CliSettings, Toolset};
+    use zone_core::llm::SignIn;
+    use zone_core::llm::Toolset;
 
     const ANSWER: &str = "Wrote it.";
     const EXECUTABLE: &str = "claude";
     const ARGUMENTS: &str = "arguments";
     const PROMPT: &str = "prompt";
     const TOKEN: &str = "token";
+    /// The file a run under [`Agent::lingering`] is served a write of.
+    const SERVED: &str = "served.txt";
+
+    /// Prints the bearer token the stand-in was handed for Zone's MCP server. It arrives as the
+    /// whole `Authorization` header, in a variable abnegate-agent-cli generates and the agent's
+    /// MCP configuration names.
+    const MCP_TOKEN: &str =
+        "$(env | sed -n 's/^ABNEGATE_MCP_[A-Za-z0-9_]*=Bearer //p' | head -n 1)";
     const TOKENS: &str = "tokens";
     const INVOCATIONS: &str = "invocations";
     const FAILED: &str = "failed";
     const RELEASE: &str = "release";
+    const CHILD: &str = "child";
     const REFUSALS: &str = "refusals";
     /// Where a refusal [`Agent::limited`] prints names the second its window
     /// resets at.
@@ -6903,7 +8136,7 @@ mod cli_tests {
         fn write() -> Self {
             Self::with(|agent| {
                 format!(
-                    "printf '%s' \"$ZONE_MCP_TOKEN\" > '{token}'\nfor argument in \"$@\"; do \
+                    "printf '%s' \"{MCP_TOKEN}\" > '{token}'\nfor argument in \"$@\"; do \
                      printf '%s\\n' \"$argument\"; done > '{arguments}.partial'\nmv \
                      '{arguments}.partial' '{arguments}'\nwhile [ ! -f '{release}' ]; do sleep \
                      0.05; done\n{answer}",
@@ -6915,9 +8148,22 @@ mod cli_tests {
             })
         }
 
-        /// It answers once `seconds` have passed.
-        fn slow(seconds: u64) -> Self {
-            Self::with(|_| format!("sleep {seconds}\n{}", answer()))
+        /// It leaves a long sleep running behind it, recording its pid,
+        /// reports half its five-hour window used, then records its MCP token
+        /// and holds the turn open until released.
+        fn lingering() -> Self {
+            Self::with(|agent| {
+                format!(
+                    "sleep 600 > /dev/null 2>&1 &\nprintf '%s' \"$!\" > '{child}'\necho \
+                     '{window}'\nprintf '%s' \"{MCP_TOKEN}\" > '{token}'\nwhile [ ! -f \
+                     '{release}' ]; do sleep 0.05; done\n{answer}",
+                    child = agent.path(CHILD).display(),
+                    window = json!({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "rateLimitType": "five_hour", "utilization": 0.5, "isUsingOverage": false}}),
+                    token = agent.path(TOKEN).display(),
+                    release = agent.path(RELEASE).display(),
+                    answer = answer(),
+                )
+            })
         }
 
         /// It records the claude token and the arguments of each invocation.
@@ -7019,7 +8265,10 @@ mod cli_tests {
         }
 
         fn prompt(&self) -> String {
-            std::fs::read_to_string(self.path(PROMPT)).expect("the prompt the agent was handed")
+            zone_core::llm::cli::prompt(
+                &std::fs::read_to_string(self.path(PROMPT))
+                    .expect("the prompt the agent was handed"),
+            )
         }
 
         /// What the agent has written to `name` so far, a line at a time.
@@ -7364,8 +8613,11 @@ mod cli_tests {
 
         let (arguments, token) = agent.spawned().await;
         let definition: Value = serde_json::from_str(
-            flag(&arguments, "--mcp-config")
-                .expect("the agent is told where zone serves the run's tools"),
+            &std::fs::read_to_string(
+                flag(&arguments, "--mcp-config")
+                    .expect("the agent is told where zone serves the run's tools"),
+            )
+            .expect("the server definition the agent is pointed at"),
         )
         .expect("the server definition is JSON");
         assert_eq!(
@@ -7400,10 +8652,10 @@ mod cli_tests {
             .filter(|name| turn.serves(name))
             .map(|name| format!("mcp__{}__{name}", Toolset::SERVER))
             .collect();
-        let allowed: Vec<String> = flag(&arguments, "--allowedTools")
-            .expect("the agent is allowed the run's tools")
-            .split(',')
-            .map(str::to_string)
+        let allowed: Vec<String> = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--allowedTools")
+            .map(|pair| pair[1].clone())
             .collect();
         assert_eq!(allowed, served);
         for tool in [
@@ -7707,15 +8959,15 @@ mod cli_tests {
 
     /// Claude tokens on `access`, sealed as zone stores a sign-in.
     fn sealed(state: &AppState, access: &str) -> String {
-        Tokens {
-            access: SecretValue::new(access),
-            refresh: None,
-            expires_at: Utc::now() + TimeDelta::hours(8),
-            issued_at: None,
-            scope: "user:inference".to_string(),
-            subscription: None,
-        }
-        .seal(state.encryption_key())
+        Tokens::new(
+            SecretValue::new(access),
+            None,
+            Utc::now() + TimeDelta::hours(8),
+            None,
+            "user:inference",
+            None,
+        )
+        .seal(state.master_key())
         .expect("the tokens to seal")
     }
 
@@ -7723,10 +8975,9 @@ mod cli_tests {
     fn signed_in(token: &str) -> LlmBackend {
         LlmBackend::cli(
             AgentKind::Claude,
-            CliSettings::default()
-                .with_sign_in(SignIn::Organization)
-                .with_credential(Credential::key("CLAUDE_CODE_OAUTH_TOKEN", token)),
+            CliSettings::default().with_credential(Credential::key(CLAUDE_CODE_OAUTH_TOKEN, token)),
         )
+        .with_sign_in(SignIn::Organization)
     }
 
     /// A login that cannot be read may since have been renewed or signed out,
@@ -7797,7 +9048,10 @@ mod cli_tests {
         fixture.remove().await;
 
         assert_eq!(kept.login.as_ref(), Some(&login));
-        let LlmBackend::Cli { agent, settings } = kept.backend else {
+        let LlmBackend::Cli {
+            agent, settings, ..
+        } = kept.backend
+        else {
             panic!("the run left its coding agent");
         };
         assert_eq!(agent, AgentKind::Claude);
@@ -7931,13 +9185,12 @@ mod cli_tests {
         fixture.remove().await;
     }
 
-    /// One attempt of the fixture's run on `backend`, given until `deadline`.
+    /// One attempt of the fixture's run on `backend`.
     async fn attempt(
         state: &AppState,
         fixture: &Fixture,
         owner: Uuid,
         backend: &LlmBackend,
-        deadline: tokio::time::Instant,
     ) -> Result<TaskOutcome, Fault> {
         let workspace = std::env::temp_dir();
         let environment = Environment {
@@ -7952,6 +9205,7 @@ mod cli_tests {
             None,
             backend,
             None,
+            &Usage::default(),
             &Endpoint::instance(state.config()),
             "sonnet",
             "# Task: Agent run\n\nWrite the file",
@@ -7962,74 +9216,9 @@ mod cli_tests {
             false,
             false,
             &plan::Approval::default(),
-            deadline,
+            LoopBudget::task(),
         )
         .await
-    }
-
-    /// An agent whose own default timeout is shorter than the attempt it
-    /// serves: the chat turn's thirty minutes, inside a task's hour.
-    fn impatient(agent: &Agent) -> LlmBackend {
-        LlmBackend::cli(
-            AgentKind::Claude,
-            CliSettings::default()
-                .with_executable(agent.path(EXECUTABLE))
-                .with_timeout(Duration::from_secs(1)),
-        )
-    }
-
-    #[tokio::test]
-    async fn an_attempts_agent_may_run_for_the_rest_of_the_attempt() {
-        let _execution = EXECUTION.lock().await;
-        let fixture = Fixture::new(false).await;
-        let owner = fixture.claim().await;
-        let agent = Agent::slow(2);
-        let provider = MockServer::start().await;
-        let state = fixture.state(config(&agent, &provider));
-
-        let outcome = attempt(
-            &state,
-            &fixture,
-            owner,
-            &impatient(&agent),
-            tokio::time::Instant::now() + SPAWN_TIMEOUT,
-        )
-        .await;
-
-        let outcome =
-            outcome.unwrap_or_else(|fault| panic!("the attempt still had time: {}", fault.message));
-        assert_eq!(outcome.summary, ANSWER);
-        fixture.remove().await;
-    }
-
-    /// The attempt's deadline ends the agent's turn whichever clock sees it
-    /// first, and a run that spent its budget is not given it again.
-    #[tokio::test]
-    async fn an_attempt_whose_agent_outruns_its_budget_is_not_retried() {
-        let _execution = EXECUTION.lock().await;
-        let fixture = Fixture::new(false).await;
-        let owner = fixture.claim().await;
-        let agent = Agent::slow(30);
-        let provider = MockServer::start().await;
-        let state = fixture.state(config(&agent, &provider));
-
-        let fault = attempt(
-            &state,
-            &fixture,
-            owner,
-            &impatient(&agent),
-            tokio::time::Instant::now() + Duration::from_secs(3),
-        )
-        .await
-        .expect_err("an agent still running at the attempt's deadline");
-
-        assert_eq!(
-            (fault.failure, fault.status),
-            (Failure::Terminal, "timeout"),
-            "{}",
-            fault.message
-        );
-        fixture.remove().await;
     }
 
     /// An answer stopped at the output cap is stopped there again by a retry,
@@ -8057,26 +9246,58 @@ mod cli_tests {
                 .with_output_limit(4 * 1024),
         );
 
-        let fault = attempt(
-            &state,
-            &fixture,
-            owner,
-            &capped,
-            tokio::time::Instant::now() + SPAWN_TIMEOUT,
-        )
-        .await
-        .expect_err("an answer that outgrew the cap");
+        let fault = attempt(&state, &fixture, owner, &capped)
+            .await
+            .expect_err("an answer that outgrew the cap");
 
         assert!(fault.message.contains("4096"), "{}", fault.message);
         assert_eq!(fault.failure, Failure::Terminal, "{}", fault.message);
         fixture.remove().await;
     }
 
-    /// Over MCP the agent runs the loop, so zone counts its calls where they
-    /// arrive: an attempt makes as many as zone's own loop would have made, and
-    /// the next is refused without running.
+    /// An agent that ended partway through a later turn has not done what the task asked, so the
+    /// attempt fails, and is tried again, rather than handing on the answer it gave first.
     #[tokio::test]
-    async fn a_run_on_a_coding_agent_is_held_to_the_tasks_tool_budget() {
+    async fn an_attempt_whose_agent_was_cut_short_has_not_finished() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let owner = fixture.claim().await;
+        let agent = Agent::with(|_| {
+            [
+                json!({"type": "system", "subtype": "init", "session_id": "s"}),
+                json!({"type": "result", "subtype": "success", "is_error": false, "result": "Planned."}),
+                json!({"type": "system", "subtype": "init", "session_id": "s"}),
+                json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Writing the fi"}]}}),
+            ]
+            .map(|line| format!("echo '{line}'"))
+            .join("\n")
+        });
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let backend = LlmBackend::cli(
+            AgentKind::Claude,
+            CliSettings::default().with_executable(agent.path(EXECUTABLE)),
+        );
+
+        let fault = attempt(&state, &fixture, owner, &backend)
+            .await
+            .expect_err("an attempt its agent was cut short in");
+
+        assert_eq!(fault.message, AGENT_CUT_SHORT);
+        assert_eq!(
+            fault.failure,
+            Failure::Transient,
+            "an agent that ended early is tried again"
+        );
+        fixture.remove().await;
+    }
+
+    /// Over MCP the agent runs the loop, so zone counts its calls where they
+    /// arrive. A task's budget is unlimited, so those calls are not cut off:
+    /// an attempt keeps working past any number zone's own loop once stopped
+    /// at, and what ends a runaway attempt is a Stop or a lost lease instead.
+    #[tokio::test]
+    async fn a_run_on_a_coding_agent_is_not_cut_off_by_a_tool_budget() {
         let _execution = EXECUTION.lock().await;
         let fixture = Fixture::new(false).await;
         let agent = Agent::write();
@@ -8093,15 +9314,15 @@ mod cli_tests {
             "content": "written",
             "reason": "The task asked for this file.",
         }});
-        let budget = LoopBudget::task().max_tool_calls;
+        const PAST_THE_OLD_CEILING: usize = PARKING_CEILING.max_tool_calls + 50;
 
-        for _ in 0..budget {
+        for attempt in 0..PAST_THE_OLD_CEILING {
             let answer = rpc(&token, "tools/call", call.clone()).await;
-            assert_eq!(answer["result"]["isError"], false, "{answer}");
+            assert_eq!(
+                answer["result"]["isError"], false,
+                "call {attempt} was refused: {answer}"
+            );
         }
-        let refused = rpc(&token, "tools/call", call).await;
-
-        assert_eq!(refused["result"]["isError"], true, "{refused}");
         agent.release();
         tokio::time::timeout(SPAWN_TIMEOUT, running)
             .await
@@ -8118,8 +9339,8 @@ mod cli_tests {
                 .artifacts
                 .as_ref()
                 .expect("a finished run's artifacts")["tool_calls"],
-            budget,
-            "a refused call ran"
+            PAST_THE_OLD_CEILING,
+            "a call was refused, so something is still bounding the attempt"
         );
         fixture.remove().await;
     }
@@ -8162,6 +9383,7 @@ mod cli_tests {
             duration_ms: 1,
             citations: Vec::new(),
             receipt: None,
+            refusal: None,
         };
         let (sender, mut calls) = mpsc::unbounded_channel();
         for event in [
@@ -8342,6 +9564,415 @@ mod cli_tests {
         assert_eq!(window.used_percent, Some(50.0));
     }
 
+    /// Start the fixture's run on `state` under [`Agent::lingering`], wait
+    /// until the run has read the usage the agent reported and served it a
+    /// tool call, then stop it and wait for the run to end.
+    async fn stop_mid_attempt(state: &AppState, fixture: &Fixture, agent: &Agent) {
+        let running = start_mid_attempt(state, fixture, agent).await;
+        stop_running(fixture, running).await;
+    }
+
+    /// Start the fixture's run on `state` under [`Agent::lingering`] and wait
+    /// until the run has read the usage the agent reported and served it a
+    /// `write_file` of [`SERVED`] in its checkout.
+    async fn start_mid_attempt(
+        state: &AppState,
+        fixture: &Fixture,
+        agent: &Agent,
+    ) -> tokio::task::JoinHandle<()> {
+        let running = {
+            let state = state.clone();
+            let (run, task) = (fixture.run, fixture.task);
+            tokio::spawn(async move { execute_task_run(&state, run, task).await })
+        };
+        let token = tokio::time::timeout(SPAWN_TIMEOUT, async {
+            loop {
+                match std::fs::read_to_string(agent.path(TOKEN)) {
+                    Ok(token) if !token.is_empty() => return token,
+                    _ => tokio::time::sleep(POLL).await,
+                }
+            }
+        })
+        .await
+        .expect("the agent reported its usage and was served zone's tools");
+        let answer = rpc(
+            &token,
+            "tools/call",
+            json!({"name": "write_file", "arguments": {
+                "path": SERVED,
+                "content": "written",
+                "reason": "The task asked for this file.",
+            }}),
+        )
+        .await;
+        assert_eq!(answer["result"]["isError"], false, "{answer}");
+        tokio::time::timeout(SPAWN_TIMEOUT, async {
+            while !tasks::get_task_run_logs(&fixture.pool, fixture.run)
+                .await
+                .unwrap()
+                .iter()
+                .any(|log| log.message == "Executing tool: write_file")
+            {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the run read the call the agent made after its usage");
+        running
+    }
+
+    /// Stop the fixture's run and wait for `running` to end it.
+    async fn stop_running(fixture: &Fixture, running: tokio::task::JoinHandle<()>) {
+        assert!(matches!(
+            tasks::stop_task_run_authorized(&fixture.pool, fixture.user, fixture.run)
+                .await
+                .unwrap(),
+            tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+        ));
+        assert!(
+            stop::request(fixture.run),
+            "the running run listens for a stop"
+        );
+        tokio::time::timeout(SPAWN_TIMEOUT, running)
+            .await
+            .expect("a stop ends the run")
+            .unwrap();
+        assert_eq!(fixture.finished().await.status, tasks::CANCELLED);
+    }
+
+    /// A run stopped mid-attempt still records the usage its agent reported,
+    /// so the next run is routed on what this one spent.
+    #[tokio::test]
+    async fn a_stopped_run_records_the_usage_its_agent_reported_on_its_login() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let agents = TempDir::new().expect("an agent state root");
+        let state = fixture.state(routing(&agent, &provider, &agents));
+        fixture.choose(PROVIDER_CLAUDE_CODE).await;
+        let login = fixture.add(&state, "first-access", "a@example.com").await;
+
+        stop_mid_attempt(&state, &fixture, &agent).await;
+
+        let snapshot = agent_logins::get(&fixture.pool, login.id)
+            .await
+            .unwrap()
+            .expect("the run's login")
+            .snapshot();
+        fixture.remove().await;
+        let windows = snapshot
+            .expect("a snapshot of the usage the stopped attempt reported")
+            .windows;
+        let window = windows
+            .iter()
+            .find(|window| window.name == zone_core::llm::window::FIVE_HOURS)
+            .unwrap_or_else(|| panic!("no five-hour window in {windows:?}"));
+        assert_eq!(window.used_percent, Some(50.0));
+    }
+
+    /// A stopped run releases its checkout once the pipeline it cut off is
+    /// gone and off the runtime's threads, not in the middle of dropping that
+    /// pipeline on the thread that runs it. A file left where the directory
+    /// was makes the release fail, which it reports from the thread it ran on.
+    #[tokio::test]
+    async fn a_stopped_run_releases_its_checkout_off_the_runtime_thread() {
+        let _execution = EXECUTION.lock().await;
+        let failures = ReleaseFailures::capture();
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = start_mid_attempt(&state, &fixture, &agent).await;
+        let checkout = checkout_of(fixture.run);
+        assert!(
+            checkout.join(SERVED).is_file(),
+            "the run wrote in {}",
+            checkout.display()
+        );
+        let moved = TempDir::new().expect("a directory to move the checkout to");
+        std::fs::rename(&checkout, moved.path().join(fixture.run.to_string()))
+            .expect("the checkout moves");
+        std::fs::write(&checkout, b"").expect("a file stands where the checkout was");
+
+        stop_running(&fixture, running).await;
+
+        let threads = failures.of(&checkout);
+        std::fs::remove_file(&checkout).expect("the file left in the checkout's place");
+        fixture.remove().await;
+        assert_eq!(
+            threads.len(),
+            1,
+            "the stopped run released its checkout once: {threads:?}"
+        );
+        assert_ne!(
+            threads[0],
+            std::thread::current().id(),
+            "the stopped run released its checkout on the runtime's own thread"
+        );
+    }
+
+    /// A background job the run started keeps its own process group, so the
+    /// stop that kills the agent leaves it running. It dies before the
+    /// checkout it works in is removed, never with that checkout vanishing
+    /// under it: the job watches the file the run wrote and records, outside
+    /// the checkout, the moment it disappears.
+    #[tokio::test]
+    async fn a_stopped_run_kills_its_background_jobs_before_removing_its_checkout() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = start_mid_attempt(&state, &fixture, &agent).await;
+        let checkout = checkout_of(fixture.run);
+        let witness = TempDir::new().expect("a directory outside the checkout");
+        let started = witness.path().join("started");
+        let outlived = witness.path().join("outlived");
+        let context = abnegate_agent::ToolContext::default()
+            .within(&checkout)
+            .with_session(Session::Task(fixture.run))
+            .with_application(zone_core::application::application())
+            .with_environment(abnegate_agent::tool::EnvironmentPolicy::empty())
+            .with_proxy(abnegate_agent::tool::Proxy::default());
+        let job = Jobs::spawn(
+            &abnegate_agent::tool::job::JobCommand::new(
+                "/bin/sh",
+                vec![
+                    "-c".to_string(),
+                    format!(
+                        ": > '{}'; while [ -e '{SERVED}' ]; do :; done; : > '{}'",
+                        started.display(),
+                        outlived.display()
+                    ),
+                ],
+            ),
+            &context,
+        )
+        .await
+        .expect("the job starts");
+        tokio::time::timeout(SPAWN_TIMEOUT, async {
+            while !started.exists() {
+                tokio::time::sleep(POLL).await;
+            }
+        })
+        .await
+        .expect("the job is watching the checkout");
+
+        stop_running(&fixture, running).await;
+
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &job.pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill to run")
+            .success();
+        let removed = !checkout.exists();
+        fixture.remove().await;
+        assert!(
+            !outlived.exists(),
+            "the job saw {} removed while it was still running",
+            checkout.display()
+        );
+        assert!(!alive, "job {} outlived the stopped run", job.pid);
+        assert!(removed, "the stopped run removed {}", checkout.display());
+    }
+
+    /// A stopped run whose checkout removal never returns still frees its
+    /// task once the removal has had its bound, so Run Again is not refused
+    /// for as long as the process lives.
+    #[tokio::test]
+    async fn a_stopped_run_whose_checkout_removal_hangs_still_frees_its_task() {
+        const SLACK: Duration = Duration::from_secs(15);
+
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+        let running = start_mid_attempt(&state, &fixture, &agent).await;
+        let checkout = checkout_of(fixture.run);
+        let held = crate::services::checkout::hold::block(checkout.clone());
+
+        assert!(matches!(
+            tasks::stop_task_run_authorized(&fixture.pool, fixture.user, fixture.run)
+                .await
+                .unwrap(),
+            tasks::Mutation::Applied(tasks::Stop::Stopped(_))
+        ));
+        assert!(
+            stop::request(fixture.run),
+            "the running run listens for a stop"
+        );
+        let ended = tokio::time::timeout(CHECKOUT_FINISH_TIMEOUT + SLACK, running).await;
+        let reserved: Option<Uuid> =
+            sqlx::query_scalar("SELECT active_run_id FROM tasks WHERE id = $1")
+                .bind(fixture.task)
+                .fetch_one(&fixture.pool)
+                .await
+                .unwrap();
+        let removing = checkout.exists();
+        drop(held);
+        fixture.remove().await;
+        ended
+            .expect("the worker ended once its checkout removal had its bound")
+            .unwrap();
+        assert!(removing, "the held removal had not removed the checkout");
+        assert_eq!(reserved, None, "the stopped run freed its task");
+    }
+
+    /// The checkout the run `run` works in.
+    fn checkout_of(run: Uuid) -> PathBuf {
+        let prefix = format!("{run}.");
+        std::fs::read_dir(std::env::temp_dir())
+            .expect("the temporary directory")
+            .filter_map(Result::ok)
+            .filter(|root| {
+                root.file_name()
+                    .to_string_lossy()
+                    .starts_with(CHECKOUT_ROOT)
+            })
+            .filter_map(|root| std::fs::read_dir(root.path()).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .unwrap_or_else(|| panic!("no checkout for run {run}"))
+            .path()
+    }
+
+    const CHECKOUT_ROOT: &str = "zone-checkouts-v1-";
+    const CHECKOUT_TARGET: &str = "zone_server::services::checkout";
+    const RELEASE_FAILURE: &str = "Failed to remove task checkout";
+    const MESSAGE: &str = "message";
+    const PATH: &str = "path";
+
+    /// The threads every failed checkout release in the process reported
+    /// from, by the checkout's path. A release runs on whichever thread a
+    /// run's code puts it, which only a process-wide subscriber sees.
+    #[derive(Clone)]
+    struct ReleaseFailures(Arc<Mutex<Vec<(PathBuf, std::thread::ThreadId)>>>);
+
+    impl ReleaseFailures {
+        fn capture() -> Self {
+            static INSTALLED: OnceLock<ReleaseFailures> = OnceLock::new();
+            INSTALLED
+                .get_or_init(|| {
+                    use tracing_subscriber::layer::SubscriberExt;
+                    let failures = Self(Arc::default());
+                    tracing::subscriber::set_global_default(
+                        tracing_subscriber::registry().with(failures.clone()),
+                    )
+                    .expect("no other process-wide subscriber");
+                    failures
+                })
+                .clone()
+        }
+
+        fn watches(metadata: &tracing::Metadata<'_>) -> bool {
+            metadata.target() == CHECKOUT_TARGET && *metadata.level() == tracing::Level::ERROR
+        }
+
+        fn of(&self, checkout: &Path) -> Vec<std::thread::ThreadId> {
+            self.0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .filter(|(path, _)| path.file_name() == checkout.file_name())
+                .map(|(_, thread)| *thread)
+                .collect()
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ReleaseFailures {
+        fn register_callsite(
+            &self,
+            metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            if Self::watches(metadata) {
+                tracing::subscriber::Interest::always()
+            } else {
+                tracing::subscriber::Interest::never()
+            }
+        }
+
+        fn enabled(
+            &self,
+            metadata: &tracing::Metadata<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) -> bool {
+            Self::watches(metadata)
+        }
+
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = ReleaseFields::default();
+            event.record(&mut fields);
+            if fields.message == RELEASE_FAILURE {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((PathBuf::from(fields.path), std::thread::current().id()));
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct ReleaseFields {
+        message: String,
+        path: String,
+    }
+
+    impl tracing::field::Visit for ReleaseFields {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            match field.name() {
+                MESSAGE => self.message = format!("{value:?}"),
+                PATH => self.path = format!("{value:?}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// A stop kills the agent and everything it left running in its process
+    /// group, not only the agent itself.
+    #[tokio::test]
+    async fn a_stopped_run_kills_what_its_agent_left_running() {
+        let _execution = EXECUTION.lock().await;
+        let fixture = Fixture::new(false).await;
+        let agent = Agent::lingering();
+        let provider = MockServer::start().await;
+        let state = fixture.state(config(&agent, &provider));
+
+        stop_mid_attempt(&state, &fixture, &agent).await;
+
+        let child = std::fs::read_to_string(agent.path(CHILD)).expect("the agent's child pid");
+        let alive = || {
+            std::process::Command::new("kill")
+                .args(["-0", child.trim()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("kill to run")
+                .success()
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while alive() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(POLL).await;
+        }
+        let survived = alive();
+        if survived {
+            let _ = std::process::Command::new("kill")
+                .arg(child.trim())
+                .status();
+        }
+        fixture.remove().await;
+        assert!(
+            !survived,
+            "the sleep the agent left running outlived the stop"
+        );
+    }
+
     /// A login past its limit hands the run over to another of the
     /// organization's at once: the same attempt runs again on the other
     /// login, nothing waits for the limit to reset, and the login that hit it
@@ -8381,7 +10012,7 @@ mod cli_tests {
         );
         assert_eq!(agent.lines(TOKENS), ["first-access", "second-access"]);
         assert!(
-            elapsed < RetryPolicy::default().rate_limit_base,
+            elapsed < RetryPolicy::default().rate_limit.base,
             "the run backed off for {elapsed:?}"
         );
         let [rerouted] = logs.as_slice() else {
@@ -8491,7 +10122,11 @@ mod cli_tests {
         );
         assert_eq!(outcomes(&logs), ["reroute", "retry"]);
         let tokens = agent.lines(TOKENS);
-        assert_eq!(tokens.len(), 3, "{tokens:?}");
+        assert_eq!(
+            tokens.len(),
+            3,
+            "three agent runs must each present a token"
+        );
         assert_eq!(tokens[..2], ["first-access", "second-access"]);
         let backoff = logs[1].metadata.as_ref().expect("the backoff's metadata");
         assert_eq!(backoff["attempt"], 1);
@@ -8571,7 +10206,9 @@ mod cli_tests {
         assert_eq!(failed.status, RUN_FAILED, "{:?}", failed.error_message);
         assert_eq!(
             failed.error_message,
-            Some(format!("Stream error: claude: {UNFUNDED}: {FABLE_REFUSAL}"))
+            Some(format!(
+                "Stream error: claude: {CREDITS_REQUIRED}: {FABLE_REFUSAL}"
+            ))
         );
         let artifacts = failed.artifacts.expect("a failed run's artifacts");
         assert_eq!(
@@ -8663,7 +10300,7 @@ mod cli_tests {
         let retried = logs[1].metadata.as_ref().expect("the retry's metadata");
         assert_eq!(retried["delay_ms"], 0);
         assert!(
-            elapsed < RetryPolicy::default().rate_limit_base * 2,
+            elapsed < RetryPolicy::default().rate_limit.base * 2,
             "the run waited out the second login's limit: {elapsed:?}"
         );
     }

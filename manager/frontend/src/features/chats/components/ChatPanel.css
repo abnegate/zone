@@ -344,6 +344,7 @@
   color: var(--chat-change-added);
 }
 
+.chat-change-icon.is-conflicted,
 .chat-change-icon.is-failing,
 .chat-change-icon.is-closed {
   color: var(--chat-change-removed);
@@ -409,6 +410,30 @@
   color: var(--chat-change-removed);
 }
 
+.chat-change-threads {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: var(--ui-space-1-5);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-change-threads > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ui-space-0-5);
+}
+
+.chat-change-threads-icon {
+  width: 0.75rem;
+  height: 0.75rem;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-change-threads-open {
+  color: var(--chat-change-pending);
+}
+
 .chat-change-auto {
   flex-shrink: 0;
   padding: 0 var(--ui-space-1);
@@ -416,6 +441,11 @@
   border-radius: var(--ui-radius-full);
   color: var(--chat-change-added);
   line-height: 1.4;
+}
+
+.chat-change-auto.is-fixing {
+  border-color: var(--chat-change-pending);
+  color: var(--chat-change-pending);
 }
 
 .chat-change-dot {

@@ -1,4 +1,5 @@
 import {
+  ChatIndicatorsResponseSchema,
   ChatProvidersSchema,
   ChatPullRequestSchema,
   ChatPullRequestsResponseSchema,
@@ -13,8 +14,18 @@ import {
   PullRequestDiffSchema,
   WorkspaceChatProvidersSchema,
 } from '../features/chats/schemas';
+import {
+  ChatSubagentsResponseSchema,
+  STEPS_LOAD_FAILED,
+  SUBAGENTS_LOAD_FAILED,
+  SubagentStepsResponseSchema,
+} from '../features/chats/subagentSchemas';
+import type { SubagentList, SubagentStep } from '../features/chats/subagentTypes';
 import type {
   Chat,
+  ChatIndicator,
+  ChatPage,
+  ChatPageRequest,
   ChatProviders,
   ChatPullRequest,
   ChatSearchOptions,
@@ -32,11 +43,18 @@ import type {
   UpdateChatRequest,
   WorkspaceChatProviders,
 } from '../features/chats/types';
+import type { ServerChatSort } from '../features/chats/utils/arrange';
 import { parse } from '../validation';
 import { ApiError } from './ApiError';
 import { API_BASE } from './client';
 import { deviceHeaders } from './device';
 import { session } from './session';
+
+/**
+ * The most rows one indicator read asks for, matching `MAX_LIST_LIMIT` in
+ * routes/chats.rs, which refuses anything larger.
+ */
+const INDICATOR_BATCH = 100;
 
 class ChatsApi {
   private getAccessToken: () => string | null = () => session.getAccessToken();
@@ -77,10 +95,10 @@ class ChatsApi {
     return parse(ContextResponseSchema, await response.json()).context;
   }
 
-  async getChats(workspaceId: string, archived?: boolean): Promise<Chat[]> {
+  async getChats(workspaceId: string, request: ChatPageRequest = {}): Promise<ChatPage> {
     const params = new URLSearchParams({ workspace_id: workspaceId });
-    if (archived !== undefined) {
-      params.set('archived', String(archived));
+    for (const [name, value] of Object.entries(request)) {
+      if (value !== undefined) params.set(name, String(value));
     }
     const response = await fetch(`${API_BASE}/api/chats?${params}`, {
       headers: this.getHeaders(),
@@ -89,7 +107,65 @@ class ChatsApi {
       throw await ApiError.from(response, 'Failed to fetch chats');
     }
     const data = parse(ChatsResponseSchema, await response.json());
-    return data.chats;
+    return { chats: data.chats, total: data.total ?? (request.offset ?? 0) + data.chats.length };
+  }
+
+  /**
+   * What each chat in the workspace is doing, and what became of the pull
+   * request its work opened. Read apart from the list so a list stays quick.
+   */
+  async getChatIndicators(
+    workspaceId: string,
+    archived?: boolean,
+    listed?: number,
+    sort?: ServerChatSort
+  ): Promise<ChatIndicator[]> {
+    // The list is paged, so the rows the console holds are the only ones worth
+    // a reading: anything further is a GitHub request spent on a row nobody
+    // has scrolled to. Those rows are read in the list's own order, because
+    // the endpoint pages by it and another order would describe a different
+    // set of chats.
+    if (listed === undefined) {
+      return this.readChatIndicators(workspaceId, archived, sort);
+    }
+    const readings: ChatIndicator[] = [];
+    // One request per INDICATOR_BATCH rows: the endpoint refuses a larger
+    // limit, and the rows past it are loaded rows that still need readings.
+    for (let offset = 0; offset < listed; offset += INDICATOR_BATCH) {
+      readings.push(
+        ...(await this.readChatIndicators(workspaceId, archived, sort, {
+          limit: Math.min(INDICATOR_BATCH, listed - offset),
+          offset,
+        }))
+      );
+    }
+    return readings;
+  }
+
+  private async readChatIndicators(
+    workspaceId: string,
+    archived?: boolean,
+    sort?: ServerChatSort,
+    page?: { limit: number; offset: number }
+  ): Promise<ChatIndicator[]> {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (archived !== undefined) {
+      params.set('archived', String(archived));
+    }
+    if (sort !== undefined) {
+      params.set('sort', sort);
+    }
+    if (page) {
+      params.set('limit', String(page.limit));
+      params.set('offset', String(page.offset));
+    }
+    const response = await fetch(`${API_BASE}/api/chats/indicators?${params}`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load chat indicators');
+    }
+    return parse(ChatIndicatorsResponseSchema, await response.json()).chats;
   }
 
   async getChat(id: string): Promise<ChatWithMessages> {
@@ -254,6 +330,27 @@ class ChatsApi {
       throw await ApiError.from(response, 'Failed to load tasks');
     }
     return parse(ChatTasksResponseSchema, await response.json()).tasks;
+  }
+
+  async getChatSubagents(chatId: string): Promise<SubagentList> {
+    const response = await fetch(`${API_BASE}/api/chats/${encodeURIComponent(chatId)}/subagents`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, SUBAGENTS_LOAD_FAILED);
+    }
+    return parse(ChatSubagentsResponseSchema, await response.json());
+  }
+
+  async getChatSubagentSteps(chatId: string, subagentId: string): Promise<SubagentStep[]> {
+    const response = await fetch(
+      `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/subagents/${encodeURIComponent(subagentId)}/steps`,
+      { headers: this.getHeaders() }
+    );
+    if (!response.ok) {
+      throw await ApiError.from(response, STEPS_LOAD_FAILED);
+    }
+    return parse(SubagentStepsResponseSchema, await response.json()).steps;
   }
 
   async updateChatPullRequest(

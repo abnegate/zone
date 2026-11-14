@@ -11,21 +11,23 @@
 //!   first of the two, and the second is not fired as well.
 //!
 //! An hourly rule counts elapsed hours, which no clock change moves.
-use super::reminder_turn::dispatching;
 use crate::common::context::Harness;
 use crate::common::{TestClient, test_email, test_password};
+use abnegate_agent::context;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, FixedOffset, NaiveTime, Timelike, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zone_core::context;
-use zone_server::db::reminders::{self, Delivered, Reminder};
+use zone_server::db::reminders;
+use zone_server::db::reminders::Delivered;
+use zone_server::db::reminders::Reminder;
+use zone_server::db::reminders::Sweep;
 use zone_server::db::{chats, users};
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;
-use zone_server::services::schedule::{self, Recurrence};
-use zone_server::services::time_zone::TimeZone;
+use zone_server::services::schedule;
+use zone_server::services::time_zone::{self, TimeZone};
 
 fn at(text: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(text)
@@ -34,12 +36,12 @@ fn at(text: &str) -> DateTime<Utc> {
 }
 
 fn zone(name: &str) -> TimeZone {
-    TimeZone::parse(name).expect("the fixture is an IANA zone")
+    time_zone::parse(name).expect("the fixture is an IANA zone")
 }
 
 /// Each firing after `anchor`, in order, as `rule` reads in `zone`.
 fn firings(rule: &str, anchor: &str, zone_name: &str, count: u32) -> Vec<DateTime<Utc>> {
-    let rule = Recurrence::parse(rule).expect("the rule is accepted");
+    let rule = schedule::parse(rule).expect("the rule is accepted");
     let anchor = at(anchor);
     let mut fired = Vec::new();
     let mut after = anchor;
@@ -220,7 +222,7 @@ fn a_monthly_first_at_plus_twelve_stays_on_the_first_there() {
 
 #[test]
 fn until_is_an_instant_however_the_zone_reads_it() {
-    let rule = Recurrence::parse("FREQ=DAILY;BYHOUR=9;UNTIL=20270706T210000Z").unwrap();
+    let rule = schedule::parse("FREQ=DAILY;BYHOUR=9;UNTIL=20270706T210000Z").unwrap();
     let anchor = at("2027-07-05T09:00:00+12:00");
     let auckland = zone("Pacific/Auckland");
     let second = rule.next_after(anchor, anchor, 1, auckland);
@@ -274,42 +276,35 @@ fn refusal(error: sqlx::Error) -> String {
 }
 
 /// Fires one due reminder and returns where it was moved to.
-///
-/// The claim takes the oldest due row in the whole database, so it is retried
-/// until it has taken this one, under the dispatch lock every test that fires
-/// a reminder holds.
 async fn fire(harness: &Harness, reminder: Uuid) -> DateTime<Utc> {
     sqlx::query("UPDATE reminders SET due_at = NOW() - INTERVAL '1 second' WHERE id = $1")
         .bind(reminder)
         .execute(&harness.pool)
         .await
         .expect("the reminder is due");
-    for _ in 0..50 {
-        let (fired, due_at): (i32, DateTime<Utc>) =
-            sqlx::query_as("SELECT fired_count, due_at FROM reminders WHERE id = $1")
-                .bind(reminder)
-                .fetch_one(&harness.pool)
-                .await
-                .expect("the reminder is readable");
-        if fired > 0 {
-            return due_at;
-        }
-        assert_eq!(
-            reminders::deliver_next(&harness.pool).await.unwrap(),
-            Delivered::Settled,
-            "a due reminder is waiting to be claimed"
-        );
-    }
-    panic!("the reminder was never claimed");
+    assert_eq!(
+        reminders::deliver_next(&harness.pool, Sweep::Workspace(harness.workspace))
+            .await
+            .unwrap(),
+        Delivered::Settled,
+        "a due reminder is waiting to be claimed"
+    );
+    let (fired, due_at): (i32, DateTime<Utc>) =
+        sqlx::query_as("SELECT fired_count, due_at FROM reminders WHERE id = $1")
+            .bind(reminder)
+            .fetch_one(&harness.pool)
+            .await
+            .expect("the reminder is readable");
+    assert_eq!(fired, 1, "the workspace's only due reminder fired once");
+    due_at
 }
 
 fn unjittered(reminder: Uuid, rule: &str, next: DateTime<Utc>) -> DateTime<Utc> {
-    next - schedule::jitter(reminder, Recurrence::parse(rule).unwrap().period())
+    next - schedule::jitter(reminder, schedule::parse(rule).unwrap().period())
 }
 
 #[tokio::test]
 async fn a_stored_repeat_fires_next_at_nine_on_its_own_clock() {
-    let _dispatch = dispatching().await;
     let harness = Harness::new(Some(32_768), false, Vec::new()).await;
     let berlin = zone("Europe/Berlin");
 
@@ -428,7 +423,6 @@ async fn a_repeat_with_no_zone_known_is_read_in_utc_and_says_so() {
 
 #[tokio::test]
 async fn a_reminder_stored_before_zones_keeps_firing_in_utc() {
-    let _dispatch = dispatching().await;
     let harness = Harness::new(Some(32_768), false, Vec::new()).await;
     let user = owner(&harness).await;
     let rule = "FREQ=DAILY;BYHOUR=9";

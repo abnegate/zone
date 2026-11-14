@@ -1,22 +1,45 @@
 import type { WizardStep } from '@zone/ui';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { type ReactElement, useCallback, useMemo, useRef, useState } from 'react';
 import { Wizard } from '../../../components';
 import { getErrors } from '../../../validation';
-import { getSourceById, initializeFormState, sourceRegistry } from '../config';
+import type { GitHubRepository } from '../../github';
+import { GITHUB_SOURCE_TYPE, getSourceById, initializeFormState, sourceRegistry } from '../config';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 import { useSourceKinds } from '../hooks/useSourceKinds';
 import { CreateSourceRequestSchema } from '../schemas';
 import type { CreateSourceRequest, Source, SourceType } from '../types';
 import { FormFieldsRenderer, withCredentialField } from './FormFields';
+import { GitHubConfiguration } from './GitHubConfiguration';
+import { GitHubConnectionMode } from './GitHubConnectionMode';
 
 interface CreateSourceWizardProps {
   isOpen: boolean;
   onClose: () => void;
-  onCreated: (source: Source) => void;
+  onCreated?: (source: Source) => void;
   createSource: (request: CreateSourceRequest) => Promise<Source>;
 }
 
 function keepOpen(): void {}
+
+function buildAppRequest(
+  repository: GitHubRepository,
+  branch: string,
+  name: string,
+  description: string
+): CreateSourceRequest {
+  return {
+    name: name || repository.full_name,
+    source_type: GITHUB_SOURCE_TYPE,
+    config: {
+      owner: repository.owner,
+      repo: repository.name,
+      branch: branch.trim() || repository.default_branch,
+    },
+    github_installation_id: repository.installation_id,
+    url: repository.html_url,
+    ...(description ? { description } : {}),
+  };
+}
 
 const WIZARD_STEPS: WizardStep[] = [
   {
@@ -41,15 +64,20 @@ export function CreateSourceWizard({
   onClose,
   onCreated,
   createSource,
-}: CreateSourceWizardProps) {
+}: CreateSourceWizardProps): ReactElement {
   const [currentStep, setCurrentStep] = useState(0);
-  const [sourceType, setSourceType] = useState<SourceType>('github');
+  const [sourceType, setSourceType] = useState<SourceType>(GITHUB_SOURCE_TYPE);
   const [formState, setFormState] = useState<Record<string, unknown>>(() =>
-    initializeFormState('github')
+    initializeFormState(GITHUB_SOURCE_TYPE)
   );
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [credentials, setCredentials] = useState('');
+  const [connectionMode, setConnectionMode] = useState<GitHubConnectionMode>(
+    GitHubConnectionMode.App
+  );
+  const [repository, setRepository] = useState<GitHubRepository | null>(null);
+  const [branch, setBranch] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -57,6 +85,7 @@ export function CreateSourceWizard({
   useFocusTrap(dialog, isOpen);
 
   const currentSource = getSourceById(sourceType);
+  const appMode = sourceType === GITHUB_SOURCE_TYPE && connectionMode === GitHubConnectionMode.App;
   const serverKinds = useSourceKinds(isOpen);
   const enabledSources = useMemo(
     () =>
@@ -70,7 +99,15 @@ export function CreateSourceWizard({
     setSourceType(newType);
     setFormState(initializeFormState(newType));
     setCredentials('');
+    setConnectionMode(GitHubConnectionMode.App);
+    setRepository(null);
+    setBranch('');
     setFieldErrors({});
+  }, []);
+
+  const handleRepositoryChange = useCallback((selected: GitHubRepository | null) => {
+    setRepository(selected);
+    setBranch(selected?.default_branch ?? '');
   }, []);
 
   const handleFieldChange = useCallback((id: string, value: unknown) => {
@@ -96,7 +133,7 @@ export function CreateSourceWizard({
     }
     if (currentStep === 1) {
       if (!currentSource) return false;
-      // Check required fields
+      if (appMode) return repository !== null;
       for (const item of currentSource.formFields) {
         if ('fields' in item) {
           for (const field of item.fields) {
@@ -109,15 +146,18 @@ export function CreateSourceWizard({
       return true;
     }
     return true;
-  }, [currentStep, sourceType, currentSource, formState]);
+  }, [currentStep, sourceType, currentSource, formState, appMode, repository]);
 
   const handleClose = useCallback(() => {
     setCurrentStep(0);
-    setSourceType('github');
-    setFormState(initializeFormState('github'));
+    setSourceType(GITHUB_SOURCE_TYPE);
+    setFormState(initializeFormState(GITHUB_SOURCE_TYPE));
     setName('');
     setDescription('');
     setCredentials('');
+    setConnectionMode(GitHubConnectionMode.App);
+    setRepository(null);
+    setBranch('');
     setError(null);
     setFieldErrors({});
     onClose();
@@ -126,17 +166,17 @@ export function CreateSourceWizard({
   const handleComplete = useCallback(async () => {
     if (!currentSource) return;
 
-    const config = currentSource.buildConfig(formState);
-    const defaultName = currentSource.getDefaultName(formState);
-
-    const request: CreateSourceRequest = {
-      name: name || defaultName,
-      source_type: sourceType,
-      config,
-      description: description || undefined,
-      credentials: credentials || undefined,
-      url: currentSource.getUrl?.(formState) || undefined,
-    };
+    const request: CreateSourceRequest | null = appMode
+      ? repository && buildAppRequest(repository, branch, name, description)
+      : {
+          name: name || currentSource.getDefaultName(formState),
+          source_type: sourceType,
+          config: currentSource.buildConfig(formState),
+          description: description || undefined,
+          credentials: credentials || undefined,
+          url: currentSource.getUrl?.(formState) || undefined,
+        };
+    if (!request) return;
 
     const errors = getErrors(CreateSourceRequestSchema, request);
     if (Object.keys(errors).length > 0) {
@@ -150,10 +190,10 @@ export function CreateSourceWizard({
 
     try {
       const source = await createSource(request);
-      onCreated(source);
+      onCreated?.(source);
       handleClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create source');
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : 'Failed to create source');
     } finally {
       setLoading(false);
     }
@@ -164,10 +204,32 @@ export function CreateSourceWizard({
     description,
     credentials,
     sourceType,
+    appMode,
+    repository,
+    branch,
     createSource,
     onCreated,
     handleClose,
   ]);
+
+  const credentialFields = currentSource && (
+    <>
+      <FormFieldsRenderer
+        fields={withCredentialField(currentSource.formFields, currentSource.credentialField)}
+        state={
+          currentSource.credentialField
+            ? { ...formState, [currentSource.credentialField.id]: credentials }
+            : formState
+        }
+        onChange={(id, value) =>
+          id === currentSource.credentialField?.id
+            ? setCredentials(value as string)
+            : handleFieldChange(id, value)
+        }
+      />
+      {currentSource.formHint && <p className="form-hint">{currentSource.formHint}</p>}
+    </>
+  );
 
   const renderStepContent = () => {
     switch (currentStep) {
@@ -207,23 +269,20 @@ export function CreateSourceWizard({
                 <p className="wizard-step-intro">
                   Configure the connection settings for your {currentSource.name} source.
                 </p>
-                <FormFieldsRenderer
-                  fields={withCredentialField(
-                    currentSource.formFields,
-                    currentSource.credentialField
-                  )}
-                  state={
-                    currentSource.credentialField
-                      ? { ...formState, [currentSource.credentialField.id]: credentials }
-                      : formState
-                  }
-                  onChange={(id, value) =>
-                    id === currentSource.credentialField?.id
-                      ? setCredentials(value as string)
-                      : handleFieldChange(id, value)
-                  }
-                />
-                {currentSource.formHint && <p className="form-hint">{currentSource.formHint}</p>}
+                {sourceType === GITHUB_SOURCE_TYPE ? (
+                  <GitHubConfiguration
+                    mode={connectionMode}
+                    onModeChange={setConnectionMode}
+                    repository={repository}
+                    onRepositoryChange={handleRepositoryChange}
+                    branch={branch}
+                    onBranchChange={setBranch}
+                  >
+                    {credentialFields}
+                  </GitHubConfiguration>
+                ) : (
+                  credentialFields
+                )}
               </>
             ) : (
               <p className="wizard-step-intro">{currentSource?.name} integration is coming soon.</p>
@@ -247,7 +306,10 @@ export function CreateSourceWizard({
                 id="name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder={currentSource?.getDefaultName(formState) || 'Auto-generated if empty'}
+                placeholder={
+                  (appMode ? repository?.full_name : currentSource?.getDefaultName(formState)) ||
+                  'Auto-generated if empty'
+                }
               />
               <span className="form-hint">Leave empty to auto-generate based on configuration</span>
             </div>

@@ -2,9 +2,10 @@
 //!
 //! The rules that decide whether an unattended run can be trusted. Each
 //! paragraph is a named constant so a test can pin it on its own. Who may open
-//! a pull request is not decided here: `workspace` gates `create_pull_request`
-//! on the user having asked for one, `files` says git pushes wait for the same
-//! ask, and `task` says Zone opens the run's own pull request.
+//! a pull request is not decided here: `workspace` says a chat ends work on a
+//! connected repository in one and gates `create_pull_request` on the user
+//! having asked wherever it cannot, `files` says the push it needs is Zone's
+//! to make, and `task` says Zone opens the run's own pull request.
 
 use crate::agent::prompt::{Context, Surface};
 use crate::agent::question::ASK_USER;
@@ -51,8 +52,8 @@ const ASSESSMENT: &str = "Reading the request: when the user describes a problem
      loud instead of asking for a change, report your assessment and stop there. Do not apply \
      a fix nobody asked for.";
 
-const FAILURE: &str = "When something fails: a denied tool call means the user declined it, so adjust rather \
-     than retrying it verbatim. Once the same action has failed two or three times, stop and \
+const FAILURE: &str = "When something fails: a denied or timed-out call is not allowed, so adjust rather \
+     than retry it verbatim. Once the same action has failed two or three times, stop and \
      report what you tried and what came back instead of looping on it. Try three \
      meaningfully different approaches before escalating; a retry of the same thing is not \
      one of them. If a tool built for the job errors, debug it or report it, never fall back \
@@ -309,7 +310,7 @@ mod tests {
         let rendered = render(&chat_context(&tools, false, &environment)).unwrap();
 
         assert!(
-            rendered.contains("a denied tool call means the user declined it"),
+            rendered.contains("a denied or timed-out call is not allowed"),
             "{rendered}"
         );
         assert!(

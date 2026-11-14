@@ -14,6 +14,7 @@ export interface Automation {
 
 const BELL = 'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0';
 const BOLT = 'M13 2 3 14h9l-1 8 10-12h-9l1-8z';
+const WRENCH = 'M14.7 6.3a4 4 0 0 1-5 5L5 16v3h3l4.7-4.7a4 4 0 0 0 5-5l-2.4 2.4-2.1-2.1Z';
 
 function reminderDetail(metadata: MessageMetadata): string | undefined {
   const id = metadata.reminder_id;
@@ -36,6 +37,14 @@ const AUTOMATION_KINDS: ReadonlyMap<string, AutomationKind> = new Map([
       label: 'Auto project',
       description: 'Sent by an auto project, not typed in this chat.',
       icon: BOLT,
+    },
+  ],
+  [
+    'pull_request_fix',
+    {
+      label: 'Auto-fix',
+      description: 'Written by auto-fix as it worked on a pull request of this chat.',
+      icon: WRENCH,
     },
   ],
 ]);

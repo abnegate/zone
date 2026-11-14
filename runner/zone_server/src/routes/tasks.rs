@@ -1,5 +1,7 @@
 //! Task endpoints
 
+use std::collections::HashSet;
+
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -272,6 +274,61 @@ pub struct UpdateTaskRequest {
     model_name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateTasksRequest {
+    ids: Vec<Uuid>,
+    status: Option<String>,
+    priority: Option<i32>,
+    add_project_ids: Option<Vec<Uuid>>,
+    remove_project_ids: Option<Vec<Uuid>>,
+    is_agentic: Option<bool>,
+    require_plan_approval: Option<bool>,
+}
+
+impl UpdateTasksRequest {
+    fn added(&self) -> &[Uuid] {
+        self.add_project_ids.as_deref().unwrap_or_default()
+    }
+
+    fn removed(&self) -> &[Uuid] {
+        self.remove_project_ids.as_deref().unwrap_or_default()
+    }
+
+    fn changes_nothing(&self) -> bool {
+        self.status.is_none()
+            && self.priority.is_none()
+            && self.added().is_empty()
+            && self.removed().is_empty()
+            && self.is_agentic.is_none()
+            && self.require_plan_approval.is_none()
+    }
+
+    fn adds_a_removed_project(&self) -> bool {
+        let removed: HashSet<&Uuid> = self.removed().iter().collect();
+        self.added().iter().any(|project| removed.contains(project))
+    }
+}
+
+/// A bulk edit refused because live runs own the status of these tasks.
+#[derive(Debug, Serialize)]
+struct RunningResponse {
+    error: &'static str,
+    ids: Vec<Uuid>,
+}
+
+const TASK_NOT_FOUND: &str = "Task not found";
+
+const NO_TASKS: &str = "Choose at least one task";
+
+const NO_CHANGES: &str = "Choose something to change";
+
+const ADDED_AND_REMOVED: &str = "A project cannot be both added and removed";
+
+const ACTIVE_RUN_CONFLICT: &str = "Task has an active run or is no longer available";
+
+const BLANK_TITLE: &str = "Title must not be blank";
+
 fn denied(status: StatusCode, message: &str) -> Box<Response> {
     Box::new((status, Json(ErrorResponse::new(message))).into_response())
 }
@@ -286,6 +343,25 @@ fn user_id(auth: &AuthUser) -> Result<Uuid, Box<Response>> {
         .map_err(|_| denied(StatusCode::UNAUTHORIZED, "Invalid user ID in token"))
 }
 
+fn check_priority(priority: Option<i32>) -> Result<(), Box<Response>> {
+    match priority {
+        Some(priority) if !tasks::PRIORITIES.contains(&priority) => Err(denied(
+            StatusCode::BAD_REQUEST,
+            tasks::PRIORITY_OUT_OF_RANGE,
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn parse_status(status: Option<&str>) -> Result<Option<tasks::Status>, Box<Response>> {
+    status
+        .map(|status| {
+            tasks::Status::parse(status)
+                .ok_or_else(|| denied(StatusCode::BAD_REQUEST, tasks::UNKNOWN_STATUS))
+        })
+        .transpose()
+}
+
 fn mutation_error(error: tasks::MutationError) -> Box<Response> {
     match error {
         tasks::MutationError::Project => denied(
@@ -296,10 +372,7 @@ fn mutation_error(error: tasks::MutationError) -> Box<Response> {
             StatusCode::BAD_REQUEST,
             "Source is not available in this workspace",
         ),
-        tasks::MutationError::ActiveRun => denied(
-            StatusCode::CONFLICT,
-            "Task has an active run or is no longer available",
-        ),
+        tasks::MutationError::ActiveRun => denied(StatusCode::CONFLICT, ACTIVE_RUN_CONFLICT),
         tasks::MutationError::Database(error) => database_error(error),
     }
 }
@@ -338,9 +411,9 @@ async fn authorize_task(
     let task = tasks::get_task(state.db(), task_id)
         .await
         .map_err(database_error)?
-        .ok_or_else(|| denied(StatusCode::NOT_FOUND, "Task not found"))?;
+        .ok_or_else(|| denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND))?;
 
-    authorize_workspace(state, auth, task.workspace_id, "Task not found").await
+    authorize_workspace(state, auth, task.workspace_id, TASK_NOT_FOUND).await
 }
 
 /// Authorize a run and read it in the same transaction.
@@ -368,6 +441,13 @@ pub async fn list(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<ListTasksQuery>,
 ) -> impl IntoResponse {
+    if query
+        .status
+        .as_deref()
+        .is_some_and(|status| tasks::Status::parse(status).is_none())
+    {
+        return *denied(StatusCode::BAD_REQUEST, tasks::UNKNOWN_STATUS);
+    }
     if let Err(response) =
         authorize_workspace(&state, &auth, workspace_id, "Workspace not found").await
     {
@@ -404,6 +484,9 @@ pub async fn create(
     if title.is_none() && request.description.trim().is_empty() {
         return *denied(StatusCode::BAD_REQUEST, tasks::UNTITLED_AND_UNDESCRIBED);
     }
+    if let Err(response) = check_priority(request.priority) {
+        return *response;
+    }
     match tasks::create_task_authorized(
         state.db(),
         user_id,
@@ -419,6 +502,7 @@ pub async fn create(
             source_id: request.source_id,
             created_by: Some(user_id),
             chat_id: None,
+            origin: tasks::Origin::Member,
         },
     )
     .await
@@ -448,19 +532,8 @@ pub async fn get(
     }
     match tasks::get_task(state.db(), id).await {
         Ok(Some(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(None) => (
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse::new("Task not found")),
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(None) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Err(error) => *database_error(error),
     }
 }
 
@@ -480,7 +553,14 @@ pub async fn update(
         .as_deref()
         .is_some_and(|title| title.trim().is_empty())
     {
-        return *denied(StatusCode::BAD_REQUEST, "Title must not be blank");
+        return *denied(StatusCode::BAD_REQUEST, BLANK_TITLE);
+    }
+    let status = match parse_status(request.status.as_deref()) {
+        Ok(status) => status,
+        Err(response) => return *response,
+    };
+    if let Err(response) = check_priority(request.priority) {
+        return *response;
     }
     match tasks::update_task_authorized(
         state.db(),
@@ -490,7 +570,7 @@ pub async fn update(
             title: request.title.as_deref().map(str::trim),
             description: request.description.as_deref(),
             acceptance_criteria: request.acceptance_criteria.as_deref(),
-            status: request.status.as_deref(),
+            status,
             priority: request.priority,
             project_ids: request.project_ids.as_deref(),
             require_plan_approval: request.require_plan_approval,
@@ -501,9 +581,87 @@ pub async fn update(
     )
     .await
     {
-        Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
+        Ok(tasks::Mutation::Applied(task)) => {
+            if status.is_some() {
+                poke_projects(&task);
+            }
+            Json(TaskResponse::from(task)).into_response()
+        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(error) => *mutation_error(error),
+    }
+}
+
+/// PATCH /api/workspaces/:workspace_id/tasks
+pub async fn update_many(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(workspace_id): Path<Uuid>,
+    Json(request): Json<UpdateTasksRequest>,
+) -> impl IntoResponse {
+    let user_id = match user_id(&auth) {
+        Ok(user_id) => user_id,
+        Err(response) => return *response,
+    };
+    if request.ids.is_empty() {
+        return *denied(StatusCode::BAD_REQUEST, NO_TASKS);
+    }
+    if request.changes_nothing() {
+        return *denied(StatusCode::BAD_REQUEST, NO_CHANGES);
+    }
+    if request.adds_a_removed_project() {
+        return *denied(StatusCode::BAD_REQUEST, ADDED_AND_REMOVED);
+    }
+    let status = match parse_status(request.status.as_deref()) {
+        Ok(status) => status,
+        Err(response) => return *response,
+    };
+    if let Err(response) = check_priority(request.priority) {
+        return *response;
+    }
+    match tasks::update_tasks_authorized(
+        state.db(),
+        user_id,
+        workspace_id,
+        &request.ids,
+        tasks::Changes {
+            status,
+            priority: request.priority,
+            add_projects: request.added(),
+            remove_projects: request.removed(),
+            is_agentic: request.is_agentic,
+            require_plan_approval: request.require_plan_approval,
+        },
+    )
+    .await
+    {
+        Ok(tasks::Edit::Applied(updated)) => {
+            if status.is_some() {
+                updated.iter().for_each(poke_projects);
+            }
+            Json(TasksListResponse {
+                tasks: updated.into_iter().map(TaskData::from).collect(),
+            })
+            .into_response()
+        }
+        Ok(tasks::Edit::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Ok(tasks::Edit::Running(ids)) => (
+            StatusCode::CONFLICT,
+            Json(RunningResponse {
+                error: ACTIVE_RUN_CONFLICT,
+                ids,
+            }),
+        )
+            .into_response(),
+        Err(error) => *mutation_error(error),
+    }
+}
+
+/// A status a person set is one the driver acts on: it parks a task they
+/// withheld and takes up one they gave back, without waiting out its tick.
+fn poke_projects(task: &tasks::TaskRow) {
+    for project in &task.project_ids {
+        crate::workers::auto_project::poke(*project);
     }
 }
 
@@ -519,15 +677,8 @@ pub async fn delete(
     };
     match tasks::delete_task_authorized(state.db(), user_id, id).await {
         Ok(tasks::Mutation::Applied(())) => StatusCode::NO_CONTENT.into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
-        Err(e) => {
-            tracing::error!("Database error: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse::new("Internal server error")),
-            )
-                .into_response()
-        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Err(error) => *database_error(error),
     }
 }
 
@@ -542,8 +693,11 @@ pub async fn queue(
         Err(response) => return *response,
     };
     match tasks::queue_task_authorized(state.db(), user_id, id).await {
-        Ok(tasks::Mutation::Applied(task)) => Json(TaskResponse::from(task)).into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
+        Ok(tasks::Mutation::Applied(task)) => {
+            poke_projects(&task);
+            Json(TaskResponse::from(task)).into_response()
+        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
         Err(error) => *mutation_error(error),
     }
 }
@@ -597,10 +751,14 @@ pub async fn create_run(
             ))),
         )
             .into_response(),
-        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, "Task not found"),
-        Err(e) => {
-            if e.as_database_error()
-                .is_some_and(|error| error.is_unique_violation())
+        Ok(tasks::Mutation::Applied(tasks::RunMutation::Stopping)) => {
+            *denied(StatusCode::CONFLICT, tasks::STOPPING)
+        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND),
+        Err(error) => {
+            if error
+                .as_database_error()
+                .is_some_and(|violation| violation.is_unique_violation())
             {
                 return (
                     StatusCode::CONFLICT,
@@ -609,7 +767,7 @@ pub async fn create_run(
                     .into_response();
             }
 
-            *database_error(e)
+            *database_error(error)
         }
     }
 }
@@ -651,6 +809,7 @@ pub struct AnswersResponse {
 const WAITING: &str = "waiting";
 const NOT_WAITING: &str = "Task run is not waiting on a question";
 const NOT_FOUND: &str = "Task run not found";
+const NOT_ACTIVE: &str = "Task run is not active";
 const NOTHING_CHOSEN: &str = "Choose an option for at least one question";
 
 /// POST /api/tasks/runs/:run_id/answers
@@ -703,6 +862,30 @@ pub async fn answer_run(
         Json(AnswersResponse { run_id, answered }),
     )
         .into_response()
+}
+
+/// POST /api/tasks/runs/:run_id/stop
+pub async fn stop_run(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(run_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let actor = match user_id(&auth) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match tasks::stop_task_run_authorized(state.db(), actor, run_id).await {
+        Ok(tasks::Mutation::Applied(tasks::Stop::Stopped(run))) => {
+            crate::workers::task::stop::request(run.id);
+            crate::workers::auto_project::poke_task(&state, run.task_id);
+            Json(TaskRunResponse::from(*run)).into_response()
+        }
+        Ok(tasks::Mutation::Applied(tasks::Stop::Finished)) => {
+            *denied(StatusCode::CONFLICT, NOT_ACTIVE)
+        }
+        Ok(tasks::Mutation::NotFound) => *denied(StatusCode::NOT_FOUND, NOT_FOUND),
+        Err(error) => *database_error(error),
+    }
 }
 
 /// GET /api/tasks/runs/:run_id/logs
@@ -908,5 +1091,193 @@ mod tests {
             "a run that has not started sends the key as null, as a task does"
         );
         assert_eq!(running["run"]["completed_at"], Value::Null);
+    }
+
+    fn member() -> AuthUser {
+        AuthUser(crate::auth::jwt::Claims {
+            sub: Uuid::from_u128(7).to_string(),
+            email: "member@example.com".into(),
+            roles: vec![],
+            permissions: vec![],
+            exp: 0,
+            iat: 0,
+            jti: Uuid::from_u128(8).to_string(),
+            is_admin: false,
+        })
+    }
+
+    async fn refused_with(response: Response, message: &str) {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"],
+            message
+        );
+    }
+
+    async fn update_many_with(body: Value) -> Response {
+        update_many(
+            State(AppState::for_tests()),
+            member(),
+            Path(Uuid::from_u128(2)),
+            Json(serde_json::from_value(body).unwrap()),
+        )
+        .await
+        .into_response()
+    }
+
+    /// The state's pool is lazy and points at nothing, so a status that got as
+    /// far as the database would fail here as a 500 instead.
+    #[tokio::test]
+    async fn an_unknown_status_is_refused_before_the_database() {
+        let request = serde_json::from_value(serde_json::json!({ "status": "archived" })).unwrap();
+
+        let response = update(
+            State(AppState::for_tests()),
+            member(),
+            Path(Uuid::from_u128(1)),
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        refused_with(response, tasks::UNKNOWN_STATUS).await;
+    }
+
+    #[tokio::test]
+    async fn an_unknown_status_is_refused_for_many_tasks_before_the_database() {
+        let response = update_many_with(serde_json::json!({
+            "ids": [Uuid::from_u128(1)],
+            "status": "archived",
+        }))
+        .await;
+
+        refused_with(response, tasks::UNKNOWN_STATUS).await;
+    }
+
+    #[tokio::test]
+    async fn an_empty_selection_is_refused_before_the_database() {
+        let response = update_many_with(serde_json::json!({ "ids": [], "priority": 3 })).await;
+
+        refused_with(response, NO_TASKS).await;
+    }
+
+    #[tokio::test]
+    async fn editing_many_tasks_without_a_change_is_refused_before_the_database() {
+        let response = update_many_with(serde_json::json!({ "ids": [Uuid::from_u128(1)] })).await;
+
+        refused_with(response, NO_CHANGES).await;
+    }
+
+    #[tokio::test]
+    async fn empty_project_lists_are_no_change_to_many_tasks() {
+        let response = update_many_with(serde_json::json!({
+            "ids": [Uuid::from_u128(1)],
+            "add_project_ids": [],
+            "remove_project_ids": [],
+        }))
+        .await;
+
+        refused_with(response, NO_CHANGES).await;
+    }
+
+    #[tokio::test]
+    async fn a_project_both_added_and_removed_is_refused_before_the_database() {
+        let response = update_many_with(serde_json::json!({
+            "ids": [Uuid::from_u128(1)],
+            "add_project_ids": [Uuid::from_u128(3), Uuid::from_u128(4)],
+            "remove_project_ids": [Uuid::from_u128(4)],
+        }))
+        .await;
+
+        refused_with(response, ADDED_AND_REMOVED).await;
+    }
+
+    #[tokio::test]
+    async fn a_priority_out_of_range_is_refused_for_many_tasks_before_the_database() {
+        let response = update_many_with(serde_json::json!({
+            "ids": [Uuid::from_u128(1)],
+            "priority": 9,
+        }))
+        .await;
+
+        refused_with(response, tasks::PRIORITY_OUT_OF_RANGE).await;
+    }
+
+    #[tokio::test]
+    async fn a_priority_out_of_range_is_refused_before_the_database() {
+        let request = serde_json::from_value(serde_json::json!({ "priority": 0 })).unwrap();
+
+        let response = update(
+            State(AppState::for_tests()),
+            member(),
+            Path(Uuid::from_u128(1)),
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        refused_with(response, tasks::PRIORITY_OUT_OF_RANGE).await;
+    }
+
+    #[tokio::test]
+    async fn creating_a_task_with_a_priority_out_of_range_is_refused_before_the_database() {
+        let request = serde_json::from_value(serde_json::json!({
+            "description": "Ship it",
+            "priority": 6,
+        }))
+        .unwrap();
+
+        let response = create(
+            State(AppState::for_tests()),
+            member(),
+            Path(Uuid::from_u128(2)),
+            Json(request),
+        )
+        .await
+        .into_response();
+
+        refused_with(response, tasks::PRIORITY_OUT_OF_RANGE).await;
+    }
+
+    #[tokio::test]
+    async fn editing_many_tasks_refuses_a_field_it_does_not_apply() {
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::PATCH)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "ids": [Uuid::from_u128(1)], "title": "Renamed" }).to_string(),
+            ))
+            .unwrap();
+
+        let rejection = <Json<UpdateTasksRequest> as axum::extract::FromRequest<()>>::from_request(
+            request,
+            &(),
+        )
+        .await
+        .expect_err("a title cannot be set on many tasks at once");
+
+        assert_eq!(
+            rejection.into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
+    async fn listing_by_an_unknown_status_is_refused_before_the_database() {
+        let query = serde_json::from_value(serde_json::json!({ "status": "archived" })).unwrap();
+
+        let response = list(
+            State(AppState::for_tests()),
+            member(),
+            Path(Uuid::from_u128(1)),
+            Query(query),
+        )
+        .await
+        .into_response();
+
+        refused_with(response, tasks::UNKNOWN_STATUS).await;
     }
 }

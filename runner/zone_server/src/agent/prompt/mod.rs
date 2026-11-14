@@ -62,18 +62,30 @@ const PLAIN: &[Section] = &[
     ("session", section::session::render),
 ];
 
-/// Raised by measurement rather than by guess, the way every section that has
-/// widened this has raised it: the chat prompt in a workspace with a GitHub
-/// source, whose bullets send a pull request to zone's own tool, is 24,129
-/// characters, so the ceiling is the next round number above that and the
-/// next section to grow has to measure itself too. The image section's
-/// negative_prompt line previously measured 23,377.
-pub const CHAT_MAX_CHARS: usize = 24_200;
-/// A planner chat adds the interview section to the chat prompt; measured
-/// the same way and rounded up the same way.
-pub const PLANNER_MAX_CHARS: usize = 26_500;
-pub const PLAIN_MAX_CHARS: usize = 6_000;
-pub const TASK_MAX_CHARS: usize = 14_000;
+/// Bounds the prompt of a member's chat over everything production assembles
+/// for one: every optional tool group on, an MCP server attached, the tools
+/// whose schemas are held back listed, a GitHub source, a stated effort and
+/// the server's own zone. It measured 29,803 characters auto-approved in
+/// zone's own loop, and 27,902 offered to a coding agent, which is offered no
+/// tool that ends zone's turn. Telling that chat to open the pull request its
+/// work needs rather than ask for one adds 257 to each, counted over the
+/// sentences that changed; `every_prompt_stays_inside_its_budget` is what
+/// measures it again.
+pub const CHAT_MAX_CHARS: usize = 30_100;
+/// Bounds the prompt of a planner chat, which adds the interview section and
+/// its two tools to the chat prompt: 32,163 characters, and 30,170 offered to
+/// a coding agent, each carrying the same 257.
+pub const PLANNER_MAX_CHARS: usize = 32_500;
+/// Bounds the prompt of a chat that offers no tools: 4,740 characters.
+pub const PLAIN_MAX_CHARS: usize = 4_800;
+/// Bounds the task prompt over everything production assembles for a run its
+/// writer started: the same tool groups, server and listing, the checkout's
+/// branch and head, and a stated effort. It measured 23,678 characters for an
+/// unattended run that requires its plan approved, 584 of them added by the
+/// plan paragraph, and 20,756 offered to a coding agent. Splitting the rule
+/// about the pull request from the rule about the comment adds at most 48 to
+/// each, less whatever the outward tier drops by no longer naming one.
+pub const TASK_MAX_CHARS: usize = 23_800;
 
 fn assemble(order: &[Section], context: &Context<'_>) -> String {
     order
@@ -173,20 +185,33 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::discovery::RECORD_DISCOVERY;
+    use crate::agent::plan::SUBMIT_PLAN;
     use crate::agent::question::ASK_USER;
     use crate::agent::{ToolProfile, WorkspaceScope};
     use crate::state::AppState;
+    use abnegate_agent::mcp;
+    use abnegate_agent::mcp::McpConfig;
+    use abnegate_agent::mcp::McpHub;
+    use abnegate_agent::mcp::McpServer;
+    use abnegate_agent::tool::Tier;
+    use abnegate_agent_cli::AgentKind;
+    use abnegate_agent_cli::CliSettings;
+    use abnegate_llm::Effort;
     use std::collections::HashMap;
     use std::sync::LazyLock;
     use test_support::{chat_context, environment, task_context};
     use uuid::Uuid;
-    use zone_core::tools::{Tier, ToolRegistry};
+    use zone_core::commands;
+    use zone_core::commands::Shell;
+    use zone_core::llm::LlmBackend;
+    use zone_core::servers;
 
-    /// The one catalog name production registers no tool for: an MCP tool
-    /// arrives from a server no prompt test starts.
-    const MCP_TOOL: &str = "magents_spawn_session";
+    /// The one tool of the stand-in server [`fully_configured`] attaches under
+    /// magents' name.
+    const MCP_TOOL: &str = "magents__delegate";
 
-    /// Every chat tool loaded today, plus one MCP tool, as a worst-case catalog.
+    /// Every tool a member's chat assembles, the stand-in MCP tool included.
     const CHAT_CATALOG: &[&str] = &[
         "apply_patch",
         "ask_user",
@@ -238,6 +263,8 @@ mod tests {
         "read_document",
         "read_file",
         "read_repository_file",
+        "read_review_threads",
+        RECORD_DISCOVERY,
         "run_command",
         "run_shell",
         "search_chat_history",
@@ -247,6 +274,54 @@ mod tests {
         "send_message",
         "start_task",
         "start_train",
+        "tail_job",
+        "tail_task_log",
+        "update_document",
+        "update_task",
+        "wait_for",
+        "web_search",
+        "write_file",
+    ];
+
+    /// Every tool a run assembles for the writer who started it, the stand-in
+    /// MCP tool included.
+    const TASK_CATALOG: &[&str] = &[
+        "apply_patch",
+        "ask_user",
+        "assess_pull_requests",
+        "assess_release_pipelines",
+        "comment_on_issue",
+        "create_document",
+        "create_pull_request",
+        "create_task",
+        "fetch_url",
+        "get_build_status",
+        "get_issue",
+        "get_task_run",
+        "list_chats",
+        "list_deployments",
+        "list_documents",
+        "list_files",
+        "list_grafana_dashboards",
+        "list_issues",
+        "list_members",
+        "list_projects",
+        "list_sources",
+        "list_tasks",
+        "load_tools",
+        MCP_TOOL,
+        "query_prometheus",
+        "read_check_logs",
+        "read_document",
+        "read_file",
+        "read_repository_file",
+        "read_review_threads",
+        RECORD_DISCOVERY,
+        "run_command",
+        "search_chat_history",
+        "search_code",
+        "search_knowledge",
+        "search_tools",
         "tail_job",
         "tail_task_log",
         "update_document",
@@ -275,6 +350,7 @@ mod tests {
         "create_document",
         "list_documents",
         "read_document",
+        RECORD_DISCOVERY,
         "update_document",
     ];
 
@@ -307,25 +383,18 @@ mod tests {
     ///
     /// A catalog built from names has no tool to ask its tier. Defaulting the
     /// answer to `Tier::Write` put all six outward tools at a tier none of them
-    /// declares, so the prompts measured below lost the paragraph saying an
-    /// outward action cannot be recalled and nothing failed. `preview` is the
-    /// assembly that starts no MCP child, and nothing it registers reaches the
-    /// database, so the declarations are readable from here and a retiered or
-    /// newly registered tool arrives without anyone editing a table.
+    /// declares, so the prompts built from one lost the paragraph saying an
+    /// outward action cannot be recalled and nothing failed. Nothing an
+    /// assembly registers reaches the database, so the declarations are
+    /// readable from here and a retiered or newly registered tool arrives
+    /// without anyone editing a table.
     static DECLARED: LazyLock<HashMap<String, Tier>> = LazyLock::new(|| {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("a catalog assembles on a bare runtime")
             .block_on(async {
-                let catalog = ChatTools::preview(WorkspaceScope {
-                    state: fully_configured(),
-                    workspace_id: Uuid::nil(),
-                    chat_id: Some(Uuid::nil()),
-                    user_id: Uuid::nil(),
-                    offline: false,
-                })
-                .await;
+                let catalog = ChatTools::build(member(&fully_configured().await)).await;
                 catalog
                     .names()
                     .iter()
@@ -334,13 +403,17 @@ mod tests {
             })
     });
 
-    /// Server state with every optional tool group switched on.
+    /// Server state as the largest prompt finds it: every optional tool group
+    /// switched on and one MCP server attached.
     ///
     /// Images, audio, monitoring and web search each register nothing unless
-    /// their config is enabled, and a catalog assembled with them off leaves
-    /// those tools without a declared tier. The pool is lazy and no tool is
-    /// called, so nothing dials it.
-    fn fully_configured() -> AppState {
+    /// their config is enabled, so a group gated on a setting this leaves off
+    /// is neither tiered nor measured. The server is the stub fixture under
+    /// magents' name, which earns the guidance zone writes for magents and
+    /// the half of the tool listing that says a server wrote it; the tools a
+    /// real server lists are that server's text and no ceiling here counts
+    /// them. The pool is lazy and no tool is called, so nothing dials it.
+    async fn fully_configured() -> AppState {
         let mut config = crate::state::test_config();
         config.comfyui.enabled = true;
         config.monitoring.enabled = true;
@@ -351,8 +424,141 @@ mod tests {
             sqlx::PgPool::connect_lazy(&database).expect("a lazy pool needs no server"),
             None,
         );
-        state.disable_mcp();
+        let stub = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("stub_mcp_server.py");
+        let hub = McpHub::connect(&McpConfig::default().with_server(
+            servers::MAGENTS,
+            McpServer::command("python3", [stub.to_string_lossy().into_owned()]),
+        ))
+        .await;
+        assert_eq!(hub.server_count(), 1, "the stub server has to connect");
+        state.install_mcp(hub);
         state
+    }
+
+    /// A member's chat in a workspace of `state`.
+    fn member(state: &AppState) -> WorkspaceScope {
+        WorkspaceScope {
+            state: state.clone(),
+            workspace_id: Uuid::nil(),
+            chat_id: Some(Uuid::nil()),
+            user_id: Uuid::nil(),
+            offline: false,
+            origin: crate::db::tasks::Origin::Member,
+        }
+    }
+
+    /// One prompt a surface sends, the catalog it was rendered from and what
+    /// set it apart from the surface's others.
+    struct Sent {
+        variant: String,
+        tools: ChatTools,
+        prompt: String,
+    }
+
+    /// Zone's own loop, then every coding agent a turn can be handed to.
+    fn backends() -> Vec<(String, LlmBackend)> {
+        let mut backends = vec![("in zone's own loop".to_string(), LlmBackend::Http)];
+        backends.extend(AgentKind::ALL.iter().map(|&agent| {
+            (
+                format!("offered to {agent}"),
+                LlmBackend::cli(agent, CliSettings::default()),
+            )
+        }));
+        backends
+    }
+
+    /// The longest session block a chat renders: the server's own zone, which
+    /// the block qualifies, a stated effort and a GitHub source.
+    fn fullest_chat() -> Environment {
+        let mut environment = github().with_effort(Effort::Medium);
+        environment.reported = false;
+        environment
+    }
+
+    /// The longest session block a run renders: the server's own zone, the
+    /// checkout's branch and head, and a stated effort.
+    fn fullest_run() -> Environment {
+        let mut environment = environment().with_effort(Effort::Medium).with_vcs(Vcs {
+            branch: "main".to_string(),
+            head: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        });
+        environment.reported = false;
+        environment
+    }
+
+    /// Every prompt a member's chat is sent, a planner chat's when `planner`.
+    async fn chats(state: &AppState, planner: bool) -> Vec<Sent> {
+        let environment = fullest_chat();
+        let mut sent = Vec::new();
+        for auto_approve in [false, true] {
+            for (label, backend) in backends() {
+                let tools = ChatTools::build(member(state)).await;
+                let tools = if planner { tools.with_planner() } else { tools };
+                let tools = crate::mcp::offered(&backend, tools);
+                let approval = if auto_approve {
+                    "auto-approved"
+                } else {
+                    "awaiting approval"
+                };
+                sent.push(Sent {
+                    variant: format!("{approval} {label}"),
+                    prompt: chat(&tools, auto_approve, &environment),
+                    tools,
+                });
+            }
+        }
+        sent
+    }
+
+    /// Every prompt a run started by a writer is sent, one that requires its
+    /// plan approved when `plan`.
+    async fn runs(state: &AppState, plan: bool) -> Vec<Sent> {
+        let environment = fullest_run();
+        let mut sent = Vec::new();
+        for unattended in [false, true] {
+            for (label, backend) in backends() {
+                let tools = ChatTools::for_task_writer(
+                    state,
+                    environment.directory.clone(),
+                    Uuid::nil(),
+                    Uuid::nil(),
+                )
+                .await;
+                let tools = if unattended {
+                    tools.unattended()
+                } else {
+                    tools
+                };
+                let tools = if plan {
+                    tools.with_plan_approval()
+                } else {
+                    tools
+                };
+                let tools = crate::mcp::offered(&backend, tools);
+                let watched = if unattended { "unattended" } else { "attended" };
+                sent.push(Sent {
+                    variant: format!("{watched} {label}"),
+                    prompt: task(&tools, &environment),
+                    tools,
+                });
+            }
+        }
+        sent
+    }
+
+    fn longest(sent: &[Sent]) -> &Sent {
+        sent.iter()
+            .max_by_key(|sent| sent.prompt.len())
+            .expect("a surface sends at least one prompt")
+    }
+
+    fn sorted(names: &[&str]) -> Vec<String> {
+        let mut names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+        names.sort();
+        names
     }
 
     /// Every catalog name with the tier its tool declares, taken from the host
@@ -360,8 +566,8 @@ mod tests {
     /// assembles. Only a tool neither of them registers falls back to a write.
     fn tiered(profile: ToolProfile, catalog: &[&'static str]) -> Vec<(&'static str, Tier)> {
         let host = match profile {
-            ToolProfile::Chat => ToolRegistry::with_host_tools(),
-            ToolProfile::Task => ToolRegistry::with_defaults(),
+            ToolProfile::Chat => commands::registry(Shell::Included),
+            ToolProfile::Task => commands::registry(Shell::Excluded),
         };
         catalog
             .iter()
@@ -379,18 +585,18 @@ mod tests {
         ChatTools::with_tiers(
             ToolProfile::Chat,
             &tiered(ToolProfile::Chat, CHAT_CATALOG),
-            zone_core::mcp::guidance_for_tools(&[MCP_TOOL]),
+            mcp::guidance_for_tools(&[MCP_TOOL], &servers::guidance()),
         )
     }
 
-    fn task_tools() -> ChatTools {
+    fn task_catalog() -> Vec<(&'static str, Tier)> {
         let mut catalog = TASK_HOST.to_vec();
         catalog.extend_from_slice(TASK_DOCUMENTS);
-        ChatTools::with_tiers(
-            ToolProfile::Task,
-            &tiered(ToolProfile::Task, &catalog),
-            None,
-        )
+        tiered(ToolProfile::Task, &catalog)
+    }
+
+    fn task_tools() -> ChatTools {
+        ChatTools::with_tiers(ToolProfile::Task, &task_catalog(), None)
     }
 
     #[test]
@@ -578,7 +784,7 @@ mod tests {
             ),
             chat(
                 &ChatTools::with_names(ToolProfile::Chat, CHAT_CATALOG, None)
-                    .served_to(zone_core::llm::AgentKind::Codex),
+                    .served_to(abnegate_agent_cli::AgentKind::Codex),
                 false,
                 &environment,
             ),
@@ -646,11 +852,13 @@ mod tests {
     }
 
     /// `conduct` told a chat turn to take a draft pull request rather than ask,
-    /// while `workspace` lets `create_pull_request` run only when the user asked
-    /// for a pull request and `files` lets the push it needs run only on the
+    /// while `workspace` let `create_pull_request` run only when the user asked
+    /// for a pull request and `files` let the commit it needs run only on the
     /// same ask, so the assembled chat prompt both ordered and forbade the same
-    /// action. On the task surface `task` says Zone opens the run's pull request
-    /// itself. Counting on each surface is what keeps one section deciding.
+    /// action. `workspace` now owns it on the chat surface and says work on a
+    /// connected repository ends in a pull request; on the task surface `task`
+    /// says Zone opens the run's pull request itself. Counting on each surface
+    /// is what keeps one section deciding.
     #[test]
     fn one_section_decides_who_opens_a_pull_request_on_each_surface() {
         let task_prompt = task(&task_tools(), &github());
@@ -672,15 +880,18 @@ mod tests {
         }
 
         assert_eq!(
-            occurrences(
-                &chat_prompt,
-                "Only use them when the user asked to open a PR"
-            ),
+            occurrences(&chat_prompt, "ends in a pull request"),
             1,
             "{chat_prompt}"
         );
         assert_eq!(
-            occurrences(&chat_prompt, "Commit or push only when the user asks"),
+            occurrences(&chat_prompt, "Only use it when the user asked to open a PR"),
+            0,
+            "a chat that opens the pull request its work needs is not also told to wait to be \
+             asked for one: {chat_prompt}"
+        );
+        assert_eq!(
+            occurrences(&chat_prompt, "push only when the user asks"),
             1,
             "{chat_prompt}"
         );
@@ -711,7 +922,7 @@ mod tests {
         );
         assert!(native.contains("or use gh pr create, hub"), "{native}");
 
-        for agent in zone_core::llm::AgentKind::ALL {
+        for &agent in abnegate_agent_cli::AgentKind::ALL {
             let served = chat(&chat_tools().served_to(agent), false, &source);
             assert!(
                 served.contains("then calling mcp__zone__create_pull_request so Zone can track it"),
@@ -828,8 +1039,8 @@ mod tests {
 
     /// `with_tiers` states every name outright, where `with_names` keeps only
     /// the few a host registry knows. Building the worst case out of those
-    /// would leave every budget and ownership test below measuring a prompt no
-    /// user is ever served.
+    /// would leave every ownership test below reading a prompt no user is ever
+    /// served.
     #[test]
     fn the_test_catalogs_carry_every_name_they_list() {
         assert_eq!(chat_tools().names().len(), CHAT_CATALOG.len());
@@ -862,10 +1073,7 @@ mod tests {
         }
 
         for (name, tier) in tiered(ToolProfile::Chat, CHAT_CATALOG) {
-            match DECLARED.get(name) {
-                Some(declared) => assert_eq!(tier, *declared, "{name}"),
-                None => assert_eq!(name, MCP_TOOL, "{name} is not registered for a chat"),
-            }
+            assert_eq!(Some(&tier), DECLARED.get(name), "{name}");
         }
 
         assert_eq!(DECLARED[ASK_USER], Tier::Read, "a question is a read");
@@ -943,49 +1151,127 @@ mod tests {
         assert!(task_prompt.contains(&for_task), "{task_prompt}");
     }
 
-    #[test]
-    fn a_planner_chat_prompt_stays_inside_its_own_budget() {
-        // The planner tools are workspace tools the host registry does not
-        // know, so their production tiers are stated outright: the outward
-        // tier adds its own paragraph, and the budget has to hold with it.
-        let mut tiers = tiered(ToolProfile::Chat, CHAT_CATALOG);
-        tiers.push((crate::agent::planner::FINALIZE_PROJECT, Tier::Write));
-        tiers.push((crate::agent::planner::CREATE_REPOSITORY, Tier::Outward));
-        let tools = ChatTools::with_tiers(
-            ToolProfile::Chat,
-            &tiers,
-            zone_core::mcp::guidance_for_tools(&[MCP_TOOL]),
+    /// The ceilings are measured over what production assembles, so a tool
+    /// registered tomorrow is measured without anyone listing it. These lists
+    /// are what make the registration visible here: a name a surface gains or
+    /// loses fails until its list says so, which keeps the catalogs the other
+    /// prompt tests state by name the ones a turn is handed.
+    #[tokio::test]
+    async fn every_tool_a_surface_registers_is_one_its_budget_measures() {
+        let state = fully_configured().await;
+        let chat = ChatTools::build(member(&state)).await;
+        let run = || {
+            ChatTools::for_task_writer(
+                &state,
+                std::path::PathBuf::from("/srv/zone"),
+                Uuid::nil(),
+                Uuid::nil(),
+            )
+        };
+
+        assert_eq!(chat.names(), sorted(CHAT_CATALOG));
+        assert_eq!(
+            chat.with_planner().names(),
+            sorted(
+                &[
+                    CHAT_CATALOG,
+                    &[
+                        crate::agent::planner::CREATE_REPOSITORY,
+                        crate::agent::planner::FINALIZE_PROJECT,
+                    ],
+                ]
+                .concat()
+            )
         );
-        let prompt = chat(&tools, false, &github());
-        assert!(prompt.contains("Planning a project:"), "{prompt}");
-        assert!(
-            prompt.len() <= PLANNER_MAX_CHARS,
-            "planner prompt is {} chars",
-            prompt.len()
+        assert_eq!(run().await.names(), sorted(TASK_CATALOG));
+        assert_eq!(
+            run().await.with_plan_approval().names(),
+            sorted(&[TASK_CATALOG, &[SUBMIT_PLAN]].concat())
         );
+
+        for name in [TASK_HOST, TASK_DOCUMENTS].concat() {
+            assert!(
+                TASK_CATALOG.contains(&name),
+                "the task tests state {name} and no run registers it"
+            );
+        }
     }
 
-    #[test]
-    fn every_prompt_stays_inside_its_budget() {
-        let chat_prompt = chat(&chat_tools(), false, &github());
-        let plain_prompt = plain(&environment());
-        let task_prompt = task(&task_tools(), &environment());
+    /// A deferred tool costs its line in the listing, and a catalog stated by
+    /// name defers nothing, so the listing never rendered in a prompt a
+    /// ceiling was measured over. Every tool a measured prompt's catalog holds
+    /// is either sent as a schema or named on a line of that prompt.
+    #[tokio::test]
+    async fn every_measured_prompt_lists_the_tools_whose_schemas_it_holds_back() {
+        let state = fully_configured().await;
+        let mut sent = chats(&state, false).await;
+        sent.extend(chats(&state, true).await);
+        sent.extend(runs(&state, false).await);
+        sent.extend(runs(&state, true).await);
 
-        for prompt in [&chat_prompt, &task_prompt] {
-            assert!(prompt.contains("Asking the user:"), "{prompt}");
-        }
-
-        assert!(
-            chat_prompt.len() <= CHAT_MAX_CHARS,
-            "chat prompt is {} chars",
-            chat_prompt.len()
-        );
-        for agent in zone_core::llm::AgentKind::ALL {
-            let served = chat(&chat_tools().served_to(agent), false, &github());
+        for Sent {
+            variant,
+            tools,
+            prompt,
+        } in &sent
+        {
+            let handed: Vec<String> = tools
+                .definitions()
+                .into_iter()
+                .map(|definition| definition.function.name)
+                .collect();
             assert!(
-                served.len() <= CHAT_MAX_CHARS,
-                "{agent}'s chat prompt is {} chars",
-                served.len()
+                handed.len() < tools.names().len(),
+                "{variant} defers nothing, so its listing is not measured"
+            );
+            for name in tools.names() {
+                assert!(
+                    handed.contains(name) || prompt.contains(&format!("\n- {name}: ")),
+                    "{name} is neither sent nor listed {variant}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn every_prompt_stays_inside_its_budget() {
+        let state = fully_configured().await;
+        let chats_sent = chats(&state, false).await;
+        let planners_sent = chats(&state, true).await;
+        let runs_sent = runs(&state, false).await;
+        let approving_sent = runs(&state, true).await;
+        let chat_prompt = longest(&chats_sent);
+        let planner_prompt = longest(&planners_sent);
+        let task_prompt = longest(&runs_sent);
+        let approving_prompt = longest(&approving_sent);
+        let plain_prompt = plain(&fullest_chat());
+
+        for sent in [chat_prompt, planner_prompt, task_prompt, approving_prompt] {
+            assert!(sent.prompt.contains("Asking the user:"), "{}", sent.prompt);
+        }
+        assert!(
+            planner_prompt.prompt.contains("Planning a project:"),
+            "{}",
+            planner_prompt.prompt
+        );
+        assert!(
+            approving_prompt.prompt.len() > task_prompt.prompt.len(),
+            "the plan paragraph adds nothing: {} chars against {}",
+            approving_prompt.prompt.len(),
+            task_prompt.prompt.len()
+        );
+
+        for (surface, sent, ceiling) in [
+            ("chat", chat_prompt, CHAT_MAX_CHARS),
+            ("planner", planner_prompt, PLANNER_MAX_CHARS),
+            ("task", task_prompt, TASK_MAX_CHARS),
+            ("plan-approved task", approving_prompt, TASK_MAX_CHARS),
+        ] {
+            assert!(
+                sent.prompt.len() <= ceiling,
+                "the {surface} prompt {} is {} chars",
+                sent.variant,
+                sent.prompt.len()
             );
         }
         assert!(
@@ -993,17 +1279,21 @@ mod tests {
             "plain prompt is {} chars",
             plain_prompt.len()
         );
-        assert!(
-            task_prompt.len() <= TASK_MAX_CHARS,
-            "task prompt is {} chars",
-            task_prompt.len()
-        );
-        // A run that requires its plan approved carries one more paragraph.
-        let approving_task_prompt = task(&task_tools().with_plan_approval(), &environment());
-        assert!(
-            approving_task_prompt.len() <= TASK_MAX_CHARS,
-            "plan-approved task prompt is {} chars",
-            approving_task_prompt.len()
+    }
+
+    /// A chat holds both rules that have it write without being asked, so the
+    /// workspace's may not read as the only one.
+    #[test]
+    fn a_chat_told_to_write_memory_unasked_is_told_discovery_is_only_the_workspaces_exception() {
+        let prompt = chat(&chat_tools(), false, &github());
+
+        assert_eq!(occurrences(&prompt, "- Do not wait to be asked: "), 1);
+        assert_eq!(
+            occurrences(
+                &prompt,
+                "- record_discovery is the one workspace write you make unasked: "
+            ),
+            1
         );
     }
 

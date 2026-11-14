@@ -1,0 +1,54 @@
+{
+  "browse": {
+    "ok": {
+      "models": [
+        {
+          "capabilities": [
+            "image_generation"
+          ],
+          "completion": false,
+          "description": "FLUX.1 Dev + LoRA · studio-style.safetensors",
+          "details": {
+            "family": "flux-dev-adapter",
+            "format": "lora"
+          },
+          "modified_at": "2026-01-01T00:00:00+00:00",
+          "name": "studio-style.safetensors",
+          "ready": false,
+          "recipe_id": "flux-dev-adapter",
+          "required_files": [
+            "flux1-dev-fp8.safetensors",
+            "flux-uncensored.safetensors"
+          ],
+          "size": 25
+        }
+      ],
+      "next_cursor": null
+    }
+  },
+  "list": {
+    "body": [
+      {
+        "capabilities": [
+          "image_generation"
+        ],
+        "completion": false,
+        "description": "FLUX.1 Dev + LoRA · studio-style.safetensors",
+        "details": {
+          "family": "flux-dev-adapter",
+          "format": "lora"
+        },
+        "modified_at": "2026-01-01T00:00:00+00:00",
+        "name": "studio-style.safetensors",
+        "ready": false,
+        "recipe_id": "flux-dev-adapter",
+        "required_files": [
+          "flux1-dev-fp8.safetensors",
+          "flux-uncensored.safetensors"
+        ],
+        "size": 25
+      }
+    ],
+    "status": 200
+  }
+}

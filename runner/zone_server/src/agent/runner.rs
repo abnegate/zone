@@ -1,11 +1,16 @@
 //! The chat agent's reason/act loop, expressed as a stream of events.
 //!
-//! `zone_core::agent::Agent` runs the same pattern for tasks, but it blocks on
+//! `abnegate_agent::Agent` runs the same pattern for tasks, but it blocks on
 //! whole completions and reports progress through a callback. A chat has to
 //! render tokens as they arrive and stay cancellable mid-tool, so this loop
 //! streams every completion and yields events instead. The websocket handler
 //! consumes the result exactly like the plain completion stream it replaces.
 
+use abnegate_agent::ToolResult;
+use abnegate_agent::chat::{NewEntry, ReplayMessage};
+use abnegate_agent::context::{self, ContextStatus, ContextUsage, Entry, Summary};
+use abnegate_agent::tool::{Session, is_vision_url};
+use abnegate_agent_cli::CUT_SHORT;
 use abnegate_llm::{
     Error, Limit, Message as LlmMessage, RequestOptions, Role as LlmRole, StreamToolCall,
     ToolCall as LlmToolCall, Usage, Window,
@@ -13,22 +18,20 @@ use abnegate_llm::{
 use futures::{Stream, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
-use zone_core::llm::{AgentKind, BuiltinTools, LlmBackend, LlmClient};
+use zone_core::llm::{LlmBackend, LlmClient};
 
 use super::Citation;
-use super::approval::ApprovalPolicy;
+use super::approval::{ApprovalPolicy, Refusal};
 use super::citations;
 use super::plan;
 use super::question::{self, Question};
 use super::receipts::ActionReceipt;
 use super::tools::ChatTools;
+use super::trace::content_lines;
 use super::wait::{self, Waiting};
 use crate::services::chat::session::RunContext;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zone_chat::history::{NewEntry, ReplayMessage};
-use zone_core::context::{self, ContextStatus, ContextUsage, Entry, Summary};
-use zone_core::tools::{Session, is_vision_url};
 
 /// What the calls queued behind a turn-ending question are told.
 ///
@@ -68,10 +71,24 @@ impl LoopBudget {
         }
     }
 
+    /// A task runs until it is done. Rounds and tool calls are left unbounded
+    /// because a ceiling here stops the work mid-way and reports success, and
+    /// a half-built feature reads the same as a finished one to everything
+    /// downstream. What ends a runaway attempt is its deadline, which the
+    /// caller already passes, plus the no-progress guard in the loop itself.
     pub const fn task() -> Self {
         Self {
-            max_iterations: 50,
-            max_tool_calls: 100,
+            max_iterations: usize::MAX,
+            max_tool_calls: usize::MAX,
+        }
+    }
+
+    /// A budget with an explicit ceiling, for a caller that wants one and for
+    /// the tests that prove a ceiling still ends a run that will not stop.
+    pub const fn bounded(max_iterations: usize, max_tool_calls: usize) -> Self {
+        Self {
+            max_iterations,
+            max_tool_calls,
         }
     }
 
@@ -130,6 +147,7 @@ pub enum AgentEvent {
         duration_ms: u64,
         citations: Vec<Citation>,
         receipt: Option<ActionReceipt>,
+        refusal: Option<Refusal>,
     },
     /// The model produced an image. Carries the raw URL from the provider;
     /// the consumer decides how to store it and whether it is a duplicate.
@@ -158,7 +176,7 @@ pub enum AgentEvent {
     },
     /// The model asked to wait for something outside the loop. The wait itself is
     /// the consumer's: a task run parks and gives up its admission slot, and a chat
-    /// awaits inside the turn's own deadline. `spent` refunds the round, which is
+    /// turn awaits it in place. `spent` refunds the round, which is
     /// what "without consuming an iteration" means.
     WaitRequired {
         tool_call_id: String,
@@ -177,6 +195,11 @@ pub enum AgentEvent {
     Limited(Limit),
     /// The turn could not continue. Anything already streamed still stands.
     Failed(String),
+    /// A coding agent was stopped before it finished, by its timeout or by
+    /// exiting mid-way through a later turn. The answer it gave before that is
+    /// already streamed and kept, so this is the turn's last event, and it is
+    /// no failure.
+    CutShort,
 }
 
 /// Everything one agent turn needs.
@@ -230,15 +253,7 @@ pub fn run_with_context(
             approval,
             ..
         } = run;
-        let host_agent = HostAgent::of(&llm);
-        if agentic
-            && let Some(note) = host_agent
-                .as_ref()
-                .and_then(|host| host.note(!tools.is_empty()))
-        {
-            yield AgentEvent::Finalizing(note);
-        }
-        let agentic = agentic && host_agent.is_none();
+        let agentic = agentic && !runs_own_loop(&llm);
         let mut used = 0usize;
         let mut identifiers: BTreeSet<String> = context
             .entries
@@ -282,7 +297,7 @@ pub fn run_with_context(
             }
             yield AgentEvent::Context(usage);
             let mut prepared = match context::prepare(
-                &llm,
+                &llm.summarizer(),
                 &model,
                 &context.entries,
                 definitions,
@@ -347,6 +362,7 @@ pub fn run_with_context(
             let mut thinking_blocks = Vec::new();
             let mut pending = ToolCallAccumulator::default();
             let mut images = Vec::new();
+            let mut cut_short = false;
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
                     Ok(chunk) => chunk,
@@ -367,6 +383,9 @@ pub fn run_with_context(
                 let Some(choice) = chunk.choices.first() else {
                     continue;
                 };
+                if let Some(reason) = &choice.finish_reason {
+                    cut_short = reason == CUT_SHORT;
+                }
                 if let Some(content) = &choice.delta.content {
                     text.push_str(content);
                     if (!agentic || pending.is_empty() && !might_be_tool_text(&text))
@@ -405,7 +424,8 @@ pub fn run_with_context(
                 if let Some(deltas) = &choice.delta.tool_calls {
                     pending.merge(deltas);
                 }
-                // A usage-only SSE frame may follow finish_reason; drain through [DONE].
+                // A usage-only SSE frame, or the window a coding agent reports once it has
+                // exited, may follow finish_reason; drain through the stream's end.
             }
             let mut requested = pending.finish();
             let parsed = if agentic && !text.is_empty() {
@@ -453,6 +473,9 @@ pub fn run_with_context(
                 let id = entry.id.clone();
                 yield AgentEvent::Canonical(entry);
                 yield AgentEvent::Consumed(vec![id]);
+                if cut_short {
+                    yield AgentEvent::CutShort;
+                }
                 return;
             }
             if finalizing {
@@ -536,7 +559,7 @@ pub fn run_with_context(
                     };
                 }
                 let call = &batch[0];
-                let denied = if approval.confirms(tier) {
+                let refusal = if approval.confirms(tier) {
                     // Register before the request goes out: a client that
                     // answers immediately would otherwise be told the call
                     // is not waiting for approval.
@@ -548,9 +571,9 @@ pub fn run_with_context(
                         reason: super::reason(&call.function.arguments),
                         preview: tools.effect(&call.function.name, &call.function.arguments),
                     };
-                    !approval.awaited_decision(&call.id, pending).await
+                    approval.awaited_decision(&call.id, pending).await.refusal()
                 } else {
-                    false
+                    None
                 };
                 // A fresh acknowledgement boundary after potentially long approval waits.
                 yield AgentEvent::Context(context.usage(&model, definitions));
@@ -567,16 +590,23 @@ pub fn run_with_context(
                     async move {
                         let signature = signature(&call);
                         let started = Instant::now();
-                        let result = if denied {
-                            zone_core::tools::ToolResult::error("The user denied this tool call.")
-                        } else {
-                            tools
-                                .execute(&call.function.name, &call.function.arguments)
-                                .await
+                        let result = match refusal {
+                            Some(refusal) => ToolResult::error(refusal.message()),
+                            None => {
+                                tools
+                                    .execute(&call.function.name, &call.function.arguments)
+                                    .await
+                            }
                         };
                         (
                             signature,
-                            finish_tool(tools, call, result, started.elapsed().as_millis() as u64)
+                            finish_tool(
+                                tools,
+                                call,
+                                result,
+                                started.elapsed().as_millis() as u64,
+                                refusal,
+                            )
                                 .await,
                         )
                     }
@@ -629,6 +659,7 @@ pub fn run_with_context(
                         duration_ms: finished.duration_ms,
                         citations: finished.citations,
                         receipt: finished.receipt,
+                        refusal: finished.refusal,
                     };
                     if let Some((tool_call_id, park)) = park {
                         let queued = park.queued();
@@ -749,59 +780,9 @@ impl Park {
     }
 }
 
-/// The coding agent CLI serving this turn, when the configured backend is one,
-/// and what it was told about tools before the turn started.
-///
-/// Such an agent runs its own tool loop, so zone's loop runs a single round
-/// and offers no definitions over the completions API -- [`LlmClient`] refuses
-/// a request that carries them rather than dropping them. Reading the backend
-/// here is what keeps every agentic turn from being refused for offering tools
-/// that could never have been called.
-///
-/// Whether the agent can call zone's tools at all is decided before the turn
-/// runs, by whether a [`zone_core::llm::Toolset`] was attached for it to reach
-/// them through.
-struct HostAgent {
-    kind: AgentKind,
-    /// Zone's tools, served to this agent over MCP for the life of the turn.
-    toolset: bool,
-    builtin_tools: BuiltinTools,
-}
-
-impl HostAgent {
-    fn of(llm: &LlmClient) -> Option<Self> {
-        match llm.backend() {
-            LlmBackend::Cli { agent, settings } => Some(Self {
-                kind: *agent,
-                toolset: settings.toolset.is_some(),
-                builtin_tools: settings.builtin_tools,
-            }),
-            LlmBackend::Http => None,
-        }
-    }
-
-    /// What the reader is told about this turn's tools, said once and only
-    /// where it changes what they can expect to see.
-    ///
-    /// An agent serving zone's tools and none of its own behaves as any other
-    /// turn does, and its cards say so themselves. The two cases worth a line
-    /// are an agent also working with tools zone never shows or gates, and a
-    /// turn whose tools were never on the table at all -- without which a
-    /// reader who asked for one sees only a reply that ignored them.
-    fn note(&self, offered: bool) -> Option<String> {
-        let agent = self.kind;
-        match (self.toolset, self.builtin_tools) {
-            (true, BuiltinTools::Granted) => Some(format!(
-                "The {agent} CLI backend also runs its own file and shell tools on this turn, \
-                 which zone neither shows nor approves."
-            )),
-            (false, _) if offered => Some(format!(
-                "The {agent} CLI backend runs its own tools, so zone's are not offered on this \
-                 turn."
-            )),
-            _ => None,
-        }
-    }
+/// [`LlmClient`] refuses tool definitions for a CLI backend, which runs its own loop.
+fn runs_own_loop(llm: &LlmClient) -> bool {
+    matches!(llm.backend(), LlmBackend::Cli { .. })
 }
 
 /// Steer the model for the rest of this turn, and this turn only.
@@ -814,20 +795,16 @@ impl HostAgent {
 /// never about. A consumer that rebuilds a turn from the events therefore does
 /// not see these, and [`workers::task::accumulate`] says so.
 fn nudge(context: &mut RunContext, instruction: String) {
-    context.entries.push(Entry {
-        id: Uuid::new_v4().to_string(),
-        message: LlmMessage::system(instruction),
-        preserve: true,
-        consumed: true,
-    });
+    context.entries.push(
+        Entry::new(Uuid::new_v4().to_string(), LlmMessage::system(instruction))
+            .with_preserve(true)
+            .with_consumed(true),
+    );
 }
 
 fn canonical(message: LlmMessage, mutations: Vec<String>) -> NewEntry {
-    NewEntry {
-        id: Uuid::new_v4().to_string(),
-        message: ReplayMessage::from(&message),
-        mutations,
-    }
+    NewEntry::new(Uuid::new_v4().to_string(), ReplayMessage::from(&message))
+        .with_mutations(mutations)
 }
 
 struct FinishedTool {
@@ -840,13 +817,15 @@ struct FinishedTool {
     receipt: Option<ActionReceipt>,
     images: Vec<String>,
     output: String,
+    refusal: Option<Refusal>,
 }
 
 async fn finish_tool(
     tools: &ChatTools,
     call: LlmToolCall,
-    result: zone_core::tools::ToolResult,
+    result: ToolResult,
     duration_ms: u64,
+    refusal: Option<Refusal>,
 ) -> FinishedTool {
     let receipt = tools
         .write_receipt(
@@ -857,6 +836,7 @@ async fn finish_tool(
         )
         .await;
     let output = result.to_message();
+    let detail = summarize(&call.function.name, &result, &output);
     let citations = if result.success {
         citations::from_tool(&call.function.name, &output)
     } else {
@@ -866,12 +846,13 @@ async fn finish_tool(
         id: call.id,
         name: call.function.name,
         success: result.success,
-        detail: summarize(&result, &output),
+        detail,
         duration_ms,
         citations,
         receipt,
         images: result.images,
         output,
+        refusal,
     }
 }
 
@@ -912,34 +893,37 @@ fn might_be_tool_text(text: &str) -> bool {
         || after.starts_with('[')
 }
 
-/// Match semantic arguments even when a provider changes JSON key ordering.
 fn signature(call: &LlmToolCall) -> (String, String) {
-    let arguments = serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+    call_signature(&call.function.name, &call.function.arguments)
+}
+
+/// Match semantic arguments even when a provider changes JSON key ordering.
+pub(crate) fn call_signature(name: &str, arguments: &str) -> (String, String) {
+    let arguments = serde_json::from_str::<serde_json::Value>(arguments)
         .map(|mut value| {
             value.sort_all_objects();
             value.to_string()
         })
-        .unwrap_or_else(|_| call.function.arguments.clone());
-    (call.function.name.clone(), arguments)
+        .unwrap_or_else(|_| arguments.to_string());
+    (name.to_string(), arguments)
 }
 
 /// Longest tool outcome we show in the UI trace.
 const DETAIL_CHARS: usize = 240;
 
 /// One line describing how a tool call went, for the UI rather than the model.
-fn summarize(result: &zone_core::tools::ToolResult, output: &str) -> String {
+fn summarize(tool: &str, result: &ToolResult, output: &str) -> String {
     if !result.success {
         return output.lines().next().unwrap_or("Failed").to_string();
     }
-    let line_count = output.lines().filter(|l| !l.trim().is_empty()).count();
-    let first = output.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let summary = match line_count {
-        0 => "No output".to_string(),
-        1 => first.to_string(),
-        n => format!("{} ({} lines)", first, n),
+    let lines: Vec<&str> = content_lines(tool, output).collect();
+    let summary = match lines.as_slice() {
+        [] => "No output".to_string(),
+        [only] => only.to_string(),
+        [first, ..] => format!("{first} ({} lines)", lines.len()),
     };
     match summary.char_indices().nth(DETAIL_CHARS) {
-        Some((byte_idx, _)) => format!("{}…", &summary[..byte_idx]),
+        Some((cut, _)) => format!("{}…", &summary[..cut]),
         None => summary,
     }
 }
@@ -1293,7 +1277,6 @@ fn complete_ident(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zone_core::tools::ToolResult;
 
     fn parse_text_tool_calls(text: &str) -> Vec<LlmToolCall> {
         match super::parse_text_tool_calls(text, &["run_shell".into(), "list_projects".into()]) {
@@ -1621,7 +1604,7 @@ mod tests {
         let result = ToolResult::error("The knowledge base search failed.");
         let output = result.to_message();
         assert_eq!(
-            summarize(&result, &output),
+            summarize("search_knowledge", &result, &output),
             "Error: The knowledge base search failed."
         );
     }
@@ -1630,14 +1613,51 @@ mod tests {
     fn summarize_counts_multi_line_output() {
         let result = ToolResult::success("first hit\nsecond hit\nthird hit");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "first hit (3 lines)");
+        assert_eq!(
+            summarize("search_knowledge", &result, &output),
+            "first hit (3 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_shows_a_command_output_rather_than_its_stream_label() {
+        let result = ToolResult::success("stdout:\nhello");
+        let output = result.to_message();
+        assert_eq!(summarize("run_shell", &result, &output), "hello");
+
+        let result = ToolResult::success("stdout:\nfirst\nsecond\n\nstderr:\nwarning");
+        let output = result.to_message();
+        assert_eq!(
+            summarize("run_command", &result, &output),
+            "first (3 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_keeps_a_stream_label_another_tool_returned() {
+        let result = ToolResult::success("stdout:\nreal");
+        let output = result.to_message();
+        assert_eq!(
+            summarize("read_file", &result, &output),
+            "stdout: (2 lines)"
+        );
+    }
+
+    #[test]
+    fn summarize_shows_no_bare_label_when_a_stream_held_only_whitespace() {
+        let result = ToolResult::success("stdout:\n\n");
+        let output = result.to_message();
+        assert_eq!(summarize("run_shell", &result, &output), "No output");
     }
 
     #[test]
     fn summarize_passes_through_single_lines() {
         let result = ToolResult::success("This workspace has no tasks.");
         let output = result.to_message();
-        assert_eq!(summarize(&result, &output), "This workspace has no tasks.");
+        assert_eq!(
+            summarize("search_knowledge", &result, &output),
+            "This workspace has no tasks."
+        );
     }
 
     #[test]
@@ -1663,7 +1683,9 @@ mod tests {
         let result = ToolResult::success("x".repeat(DETAIL_CHARS * 2));
         let output = result.to_message();
         assert_eq!(
-            summarize(&result, &output).chars().count(),
+            summarize("search_knowledge", &result, &output)
+                .chars()
+                .count(),
             DETAIL_CHARS + 1
         );
     }
@@ -1907,8 +1929,9 @@ mod tests {
     /// A coding agent CLI backend cannot be offered zone's tools: `LlmClient`
     /// refuses such a request outright, so a loop that kept offering them would
     /// fail every agentic turn instead of answering it.
-    mod host_agent_backend {
+    mod cli_backend {
         use super::*;
+        use abnegate_agent_cli::{AgentKind, CliSettings};
         use abnegate_llm::LlmConfig;
         use serde_json::{Value, json};
         use std::path::PathBuf;
@@ -1917,7 +1940,7 @@ mod tests {
         use tempfile::TempDir;
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, Request, ResponseTemplate};
-        use zone_core::llm::{CliSettings, Toolset};
+        use zone_core::llm::{BuiltinTools, Toolset};
 
         const ANSWER: &str = "Ready.";
         const SESSION: &str = "6f1c2d3e-4b5a-4c6d-8e7f-9a0b1c2d3e4f";
@@ -2006,6 +2029,35 @@ mod tests {
             path
         }
 
+        /// A stand-in agent that answers, begins a later turn and exits while it is still
+        /// writing it, which the crate ends cut short with the answer it kept.
+        fn exiting_mid_turn(directory: &TempDir) -> PathBuf {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+
+            let recording = directory.path().join("recording.jsonl");
+            let lines = [
+                json!({"type": "system", "subtype": "init", "session_id": SESSION}),
+                json!({"type": "result", "subtype": "success", "is_error": false, "result": ANSWER, "session_id": SESSION}),
+                json!({"type": "system", "subtype": "init", "session_id": SESSION}),
+                json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "Still writ"}]}, "parent_tool_use_id": null}),
+            ]
+            .map(|line| line.to_string());
+            std::fs::write(&recording, format!("{}\n", lines.join("\n"))).expect("the recording");
+            let path = directory.path().join("agent");
+            let mut file = std::fs::File::create(&path).expect("the fake agent");
+            writeln!(
+                file,
+                "#!/bin/sh\ncat > /dev/null\ncat '{}'",
+                recording.display()
+            )
+            .expect("the fake agent body");
+            drop(file);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the fake agent to be executable");
+            path
+        }
+
         fn cli(executable: PathBuf) -> LlmClient {
             LlmClient::new(LlmConfig::default()).with_backend(LlmBackend::cli(
                 AgentKind::Claude,
@@ -2027,22 +2079,6 @@ mod tests {
         /// the tools it ships with.
         fn served(executable: PathBuf, builtin_tools: BuiltinTools) -> LlmClient {
             cli(executable).with_toolset(toolset(), builtin_tools)
-        }
-
-        fn host(
-            agent: AgentKind,
-            toolset: Option<Toolset>,
-            builtin_tools: BuiltinTools,
-        ) -> HostAgent {
-            let mut settings = CliSettings::default().with_builtin_tools(builtin_tools);
-            if let Some(toolset) = toolset {
-                settings = settings.with_toolset(toolset);
-            }
-            HostAgent::of(
-                &LlmClient::new(LlmConfig::default())
-                    .with_backend(LlmBackend::cli(agent, settings)),
-            )
-            .expect("a CLI backend is a host agent")
         }
 
         async fn turn(llm: LlmClient, tools: ChatTools) -> Vec<AgentEvent> {
@@ -2115,11 +2151,55 @@ mod tests {
 
             assert!(failures(&events).is_empty(), "{:?}", failures(&events));
             assert_eq!(spoken(&events), ANSWER);
+            assert!(
+                announcements(&events).is_empty(),
+                "{:?}",
+                announcements(&events)
+            );
             assert_eq!(
                 rounds(&calls),
                 1,
                 "a text-only turn spent more than the round it needed"
             );
+        }
+
+        fn cut_short(events: &[AgentEvent]) -> usize {
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::CutShort))
+                .count()
+        }
+
+        #[tokio::test]
+        async fn an_answer_the_agent_was_cut_short_after_is_kept_and_said_to_be() {
+            let directory = TempDir::new().expect("a temporary directory");
+
+            let events = turn(cli(exiting_mid_turn(&directory)), ChatTools::empty()).await;
+
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert!(spoken(&events).starts_with(ANSWER), "{events:?}");
+            assert_eq!(cut_short(&events), 1, "{events:?}");
+            assert!(
+                matches!(events.last(), Some(AgentEvent::CutShort)),
+                "the answer was not kept before the turn said it was cut short: {events:?}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AgentEvent::Canonical(_))),
+                "{events:?}"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_answer_the_agent_finished_is_not_cut_short() {
+            let directory = TempDir::new().expect("a temporary directory");
+            let calls = directory.path().join("calls");
+
+            let events = turn(cli(agent(&directory, &calls)), ChatTools::empty()).await;
+
+            assert_eq!(spoken(&events), ANSWER);
+            assert_eq!(cut_short(&events), 0, "{events:?}");
         }
 
         #[tokio::test]
@@ -2182,27 +2262,6 @@ mod tests {
             assert!(session < chunk, "{events:?}");
         }
 
-        /// The turn answers, so nothing else reports that the tools the reader
-        /// asked for were never on the table.
-        #[tokio::test]
-        async fn a_cli_backend_says_why_zone_tools_went_unused() {
-            let directory = TempDir::new().expect("a temporary directory");
-            let calls = directory.path().join("calls");
-
-            let events = turn(
-                cli(agent(&directory, &calls)),
-                ChatTools::empty().with_plan_approval(),
-            )
-            .await;
-
-            let announced = announcements(&events);
-            assert_eq!(announced.len(), 1, "{announced:?}");
-            assert!(
-                announced[0].contains("claude") && announced[0].contains("not offered"),
-                "the reader is not told which backend declined zone's tools: {announced:?}"
-            );
-        }
-
         /// A chat that was never going to call anything has nothing to explain.
         #[tokio::test]
         async fn a_turn_with_no_tools_announces_nothing() {
@@ -2247,10 +2306,8 @@ mod tests {
             );
         }
 
-        /// The one thing the reader cannot see for themselves: work done with
-        /// tools that never reach zone, and so never reach an approval card.
         #[tokio::test]
-        async fn a_turn_that_kept_the_agents_own_tools_says_so() {
+        async fn a_turn_that_kept_the_agents_own_tools_announces_nothing() {
             let directory = TempDir::new().expect("a temporary directory");
             let calls = directory.path().join("calls");
 
@@ -2260,60 +2317,12 @@ mod tests {
             )
             .await;
 
-            let announced = announcements(&events);
-            assert_eq!(announced.len(), 1, "{announced:?}");
+            assert!(failures(&events).is_empty(), "{:?}", failures(&events));
+            assert_eq!(spoken(&events), ANSWER);
             assert!(
-                announced[0].contains("claude") && announced[0].contains("own file and shell"),
-                "the reader is not told the agent is working with tools zone cannot gate: \
-                 {announced:?}"
-            );
-        }
-
-        #[test]
-        fn a_codex_turn_is_described_by_what_it_was_actually_given() {
-            assert_eq!(
-                host(AgentKind::Codex, Some(toolset()), BuiltinTools::Withheld).note(true),
-                None,
-                "codex serving zone's tools alone reads as claude's turn does"
-            );
-
-            let granted = host(AgentKind::Codex, Some(toolset()), BuiltinTools::Granted)
-                .note(true)
-                .expect("a turn that kept codex's own tools says so");
-            assert!(
-                granted.contains("codex") && granted.contains("own file and shell"),
-                "{granted}"
-            );
-
-            let unserved = host(AgentKind::Codex, None, BuiltinTools::Granted);
-            let note = unserved
-                .note(true)
-                .expect("a turn with tools explains them");
-            assert!(
-                note.contains("codex") && note.contains("not offered"),
-                "{note}"
-            );
-            assert_eq!(
-                unserved.note(false),
-                None,
-                "a chat that was never going to call anything has nothing to explain"
-            );
-        }
-
-        #[test]
-        fn a_turn_is_described_by_what_its_agent_was_actually_given() {
-            assert_eq!(
-                host(AgentKind::Claude, Some(toolset()), BuiltinTools::Withheld).note(true),
-                None
-            );
-            assert_eq!(
-                host(AgentKind::Claude, None, BuiltinTools::Withheld)
-                    .note(true)
-                    .as_deref(),
-                Some(
-                    "The claude CLI backend runs its own tools, so zone's are not offered on this \
-                     turn."
-                )
+                announcements(&events).is_empty(),
+                "{:?}",
+                announcements(&events)
             );
         }
 

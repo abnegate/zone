@@ -43,7 +43,6 @@ services:
       - ZONE_PROJECT_CLONE_DIR=/app/clones
       - ZONE_CHAT_ROUNDS=${ZONE_CHAT_ROUNDS:-64}
       - ZONE_CHAT_CALLS=${ZONE_CHAT_CALLS:-256}
-      - ZONE_CHAT_TIMEOUT_SECONDS=${ZONE_CHAT_TIMEOUT_SECONDS:-1800}
       - ZONE_CHAT_OUTPUT_TOKENS=${ZONE_CHAT_OUTPUT_TOKENS:-4096}
       - ZONE_CHAT_CONTEXT_TOKENS=${ZONE_CHAT_CONTEXT_TOKENS:-32768}
       - ZONE_CHAT_AGENT_CWD=${ZONE_CHAT_AGENT_CWD:-/app/runner}
@@ -58,10 +57,11 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - CORS_ORIGINS=http://localhost:3001,http://console:3001
+      - APP_BASE_URL=${APP_BASE_URL:-http://localhost:3001}
       # Traefik's consoles, plus the Vite server published on localhost:3001.
       - ZONE_CONSOLE_ORIGINS=${ZONE_CONSOLE_ORIGINS-http://localhost:3001,http://manager.localhost,https://manager.localhost,http://manager.${DOMAIN_HOST_WEBUI},https://manager.${DOMAIN_HOST_WEBUI}}
       - SQLX_OFFLINE=true
-      - RUST_LOG=zone_server=debug,zone_core=debug,zone_context=debug
+      - RUST_LOG=zone_server=debug,zone_core=debug,abnegate_agent=debug,zone_context=debug
       - RUST_BACKTRACE=1
       - SEARCH_ENABLE_WEB_SEARCH=${SEARCH_ENABLE_WEB_SEARCH:-true}
       - ZONE_VPN=${ZONE_VPN:-}
@@ -74,9 +74,12 @@ services:
       - MODEL_SEARCH_PROXY_URL=${MODEL_SEARCH_PROXY_URL:-}
       - GITHUB_API_URL=${GITHUB_API_URL:-}
       - GITHUB_API_ALLOW_HTTP=${GITHUB_API_ALLOW_HTTP:-false}
+      - GITHUB_WEB_URL=${GITHUB_WEB_URL:-}
       - TOOL_RUNNER_PROXY_URL=${TOOL_RUNNER_PROXY_URL:-}
       - ZONE_MCP_ENABLED=${ZONE_MCP_ENABLED:-true}
+      - ZONE_MCP_AUTO_CONNECT=${ZONE_MCP_AUTO_CONNECT:-true}
       - ZONE_MCP_AUTO_MAGENTS=${ZONE_MCP_AUTO_MAGENTS:-true}
+      - ZONE_MCP_COMMANDS=${ZONE_MCP_COMMANDS:-false}
       - ZONE_MCP_CONFIG=${ZONE_MCP_CONFIG:-}
       - ZONE_MCP_SERVERS=${ZONE_MCP_SERVERS:-}
       - MONITORING_ENABLED=${MONITORING_ENABLED:-true}
