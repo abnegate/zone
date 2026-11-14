@@ -345,10 +345,12 @@ describe('Sidebar', () => {
       expect(screen.getByText('Test Workspace')).toBeInTheDocument();
     });
 
-    it('leaves the drawer trigger to the page bar and closes from inside', () => {
+    it('leaves the drawer trigger to the page bar and shuts a closed drawer up', () => {
       renderSidebar();
       expect(screen.queryByLabelText('Toggle menu')).not.toBeInTheDocument();
-      expect(screen.getByLabelText('Close navigation')).toBeInTheDocument();
+      // A closed drawer is off-screen rather than hidden, so a close control
+      // left in it would answer to that name from every page.
+      expect(screen.queryByLabelText('Close navigation')).not.toBeInTheDocument();
     });
   });
 

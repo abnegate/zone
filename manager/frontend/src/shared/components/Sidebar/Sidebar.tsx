@@ -98,23 +98,27 @@ export default function Sidebar({ dock }: { dock?: ReactNode }) {
     <>
       <aside className={`sidebar ${mobileOpen ? 'open' : ''} ${collapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
-          <button
-            className="sidebar-close"
-            onClick={closeDrawer}
-            type="button"
-            aria-label="Close navigation"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              aria-hidden="true"
+          {/* Only while the drawer is open: a closed drawer is off-screen, and
+              a control for closing it would still answer to a name there. */}
+          {mobileOpen && (
+            <button
+              className="sidebar-close"
+              onClick={closeDrawer}
+              type="button"
+              aria-label="Close navigation"
             >
-              <path d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                aria-hidden="true"
+              >
+                <path d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
           <ZoneLogo size="sm" showText={!collapsed} />
           <button
             className="theme-toggle"

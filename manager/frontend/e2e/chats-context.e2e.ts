@@ -18,10 +18,22 @@ const initial = ContextUsageSchema.parse(
 
 async function setTheme(page: Page, theme: 'dark' | 'light'): Promise<void> {
   const toggle = page.getByRole('button', { name: `Switch to ${theme} mode` });
-  const opened = (page.viewportSize()?.width ?? 1280) <= 768;
-  if (opened) await page.getByRole('button', { name: 'Toggle menu' }).click();
+  const drawer = page.getByRole('button', { name: 'Toggle menu' });
+  const narrow = (page.viewportSize()?.width ?? 1280) <= 768;
+  if (!narrow) {
+    await toggle.click();
+    return;
+  }
+  // A phone reaches the theme toggle through the drawer. An open chat leads
+  // its bar with Back instead of the drawer trigger, so there is nothing to
+  // open there and the toggle is pressed where it stands.
+  if ((await drawer.count()) === 0) {
+    await toggle.evaluate((element: HTMLElement) => element.click());
+    return;
+  }
+  await drawer.click();
   await toggle.click();
-  if (opened) await page.getByRole('button', { name: 'Close navigation' }).click();
+  await page.getByRole('button', { name: 'Close navigation' }).click();
 }
 
 const chat = {
