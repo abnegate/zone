@@ -1,4 +1,20 @@
 import type { Page } from '@playwright/test';
+import type { SourceStatus } from '../src/features/github/sourceStatus';
+import {
+  wireCommits,
+  wireDetail,
+  wireDiff,
+  wireLog,
+  wirePullRequest,
+} from '../src/test/pullRequests';
+import type { PullRequest } from '../src/features/pull-requests/types';
+import type {
+  OptionsResponse,
+  PipelineRun,
+  Release,
+  ReleasesResponse,
+  SourceOptions,
+} from '../src/features/releases/types';
 import type {
   AiSettings,
   WorkspaceAiSettings,
@@ -432,7 +448,437 @@ export const mockKnowledge = [
   },
 ];
 
-export async function setupAdminAuth(page: Page) {
+export const githubNow = new Date('2026-11-10T12:00:00Z');
+
+const MINUTE = 60_000;
+
+const MINUTES_IN_HOUR = 60;
+
+function minutesBefore(minutes: number): string {
+  return new Date(githubNow.getTime() - minutes * MINUTE).toISOString();
+}
+
+const GITHUB = 'https://github.com';
+
+const zoneRepository = {
+  source_id: wirePullRequest.source_id,
+  name: 'Zone',
+  repository: 'acme/zone',
+  repository_url: `${GITHUB}/acme/zone`,
+};
+
+const consoleRepository = {
+  source_id: '9b8c7d6e-5f4a-4b3c-8d2e-1f0a9b8c7d6e',
+  name: 'Console',
+  repository: 'acme/console',
+  repository_url: `${GITHUB}/acme/console`,
+};
+
+const cratesRepository = {
+  source_id: '4d5e6f70-8192-4a3b-9c4d-5e6f708192a3',
+  name: 'Crates',
+  repository: 'acme/crates',
+  repository_url: `${GITHUB}/acme/crates`,
+};
+
+type Repository = typeof zoneRepository;
+
+function sourceStatus(repository: Repository): SourceStatus {
+  return {
+    ...repository,
+    freshness: 'cached',
+    generated_at: minutesBefore(1),
+    warning: null,
+  };
+}
+
+const checkCounts = {
+  total: 3,
+  passed: 3,
+  failed: 0,
+  running: 0,
+  queued: 0,
+  in_progress: 0,
+  unknown: 0,
+};
+
+export const readyPullRequest: PullRequest = {
+  ...wirePullRequest,
+  source_id: consoleRepository.source_id,
+  repository: consoleRepository.repository,
+  repository_url: consoleRepository.repository_url,
+  number: 18,
+  title: 'Add the release wizard',
+  url: `${consoleRepository.repository_url}/pull/18`,
+  author: 'hubot',
+  updated_at: minutesBefore(25),
+  head: 'd'.repeat(40),
+  head_ref: 'feat/release-wizard',
+  readiness: 'ready',
+  blockers: [],
+  checks: { state: 'success', complete: true, counts: checkCounts },
+  check_details: [],
+  reviews: [],
+  review_current: true,
+  assessed_at: minutesBefore(1),
+  rank: 0,
+};
+
+export const inProgressPullRequest: PullRequest = {
+  ...wirePullRequest,
+  number: 57,
+  title: 'Rate limit the public API',
+  url: `${zoneRepository.repository_url}/pull/57`,
+  updated_at: minutesBefore(40),
+  head: 'e'.repeat(40),
+  head_ref: 'feat/rate-limit',
+  readiness: 'in_progress',
+  blockers: [{ code: 'checks_running', detail: '1 check is still running' }],
+  checks: {
+    state: 'pending',
+    complete: true,
+    counts: { ...checkCounts, passed: 2, running: 1 },
+  },
+  check_details: [],
+  reviews: [],
+  assessed_at: minutesBefore(1),
+  rank: 1,
+};
+
+export const notReadyPullRequest: PullRequest = {
+  ...wirePullRequest,
+  updated_at: minutesBefore(70),
+  readiness: 'not_ready',
+  blockers: [
+    { code: 'checks_failed', detail: '1 check failed' },
+    { code: 'threads_unresolved', detail: '1 review thread is unresolved' },
+  ],
+  checks: {
+    state: 'failure',
+    complete: true,
+    counts: { ...checkCounts, passed: 2, failed: 1 },
+  },
+  check_details: wirePullRequest.check_details.map((check) => ({
+    ...check,
+    kind: 'check_run',
+    state: 'failure',
+  })),
+  reviews: wirePullRequest.reviews.map((review) => ({
+    ...review,
+    created_at: minutesBefore(80),
+  })),
+  unresolved_threads: 1,
+  assessed_at: minutesBefore(1),
+  rank: 2,
+};
+
+const mockPullRequests = [readyPullRequest, inProgressPullRequest, notReadyPullRequest];
+
+function pullRequestListing(pullRequests: readonly PullRequest[], sources: Repository[]) {
+  return {
+    generated_at: minutesBefore(1),
+    stale: false,
+    partial: false,
+    ttl_secs: 60,
+    refresh_floor_secs: 10,
+    counts: {
+      ready: pullRequests.filter((pullRequest) => pullRequest.readiness === 'ready').length,
+      in_progress: pullRequests.filter((pullRequest) => pullRequest.readiness === 'in_progress')
+        .length,
+      not_ready: pullRequests.filter((pullRequest) => pullRequest.readiness === 'not_ready').length,
+      total: pullRequests.length,
+    },
+    sources: sources.map(sourceStatus),
+    pull_requests: pullRequests,
+    warnings: [],
+  };
+}
+
+export const emptyPullRequests = pullRequestListing([], []);
+
+export const populatedPullRequests = pullRequestListing(mockPullRequests, [
+  zoneRepository,
+  consoleRepository,
+]);
+
+function pullRequestDetail(pullRequest: PullRequest) {
+  const blocked = pullRequest.readiness === 'not_ready';
+  return {
+    pull_request: pullRequest,
+    threads: blocked ? wireDetail.threads : [],
+    comments: blocked ? wireDetail.comments : [],
+  };
+}
+
+function pullRequestDiff(pullRequest: PullRequest) {
+  return { diff: { ...wireDiff, number: pullRequest.number, head: pullRequest.head } };
+}
+
+function pullRequestCommits(pullRequest: PullRequest) {
+  return { commits: { ...wireCommits, number: pullRequest.number, head: pullRequest.head } };
+}
+
+export const checkLog = { log: wireLog };
+
+function pipelineRun(
+  repository: Repository,
+  id: number,
+  name: string,
+  state: PipelineRun['state'],
+  minutes: number
+): PipelineRun {
+  return {
+    id,
+    workflow_id: id,
+    attempt: 1,
+    name,
+    path: `.github/workflows/${name.toLowerCase()}.yml`,
+    state,
+    head_sha: 'a'.repeat(40),
+    created_at: minutesBefore(minutes),
+    started_at: minutesBefore(minutes),
+    updated_at: minutesBefore(minutes - 1),
+    url: `${repository.repository_url}/actions/runs/${id}`,
+  };
+}
+
+interface ReleaseShape {
+  repository: Repository;
+  id: number;
+  tag: string;
+  name?: string;
+  minutes: number;
+  prerelease?: boolean;
+  runs: PipelineRun[];
+  state: Release['state'];
+  blockers?: Release['blockers'];
+  pulls?: { number: number; title: string }[];
+}
+
+function release(shape: ReleaseShape): Release {
+  const { repository } = shape;
+  const url = `${repository.repository_url}/releases/tag/${shape.tag}`;
+  const published = minutesBefore(shape.minutes);
+  const succeeded = shape.state === 'succeeded';
+  return {
+    source_id: repository.source_id,
+    repository: repository.repository,
+    repository_url: repository.repository_url,
+    id: shape.id,
+    tag: shape.tag,
+    name: shape.name ?? shape.tag,
+    url,
+    published_at: published,
+    prerelease: shape.prerelease ?? false,
+    pulls: (shape.pulls ?? []).map((pull) => ({
+      ...pull,
+      url: `${repository.repository_url}/pull/${pull.number}`,
+    })),
+    pipeline: {
+      release: {
+        repository: repository.repository,
+        id: shape.id,
+        tag: shape.tag,
+        published_at: published,
+        url,
+      },
+      lookup: 'complete',
+      runs: shape.runs,
+      checked_at: minutesBefore(1),
+    },
+    state: shape.state,
+    succeeded,
+    complete: shape.state !== 'running',
+    blockers: shape.blockers ?? [],
+  };
+}
+
+export const runningRelease = release({
+  repository: zoneRepository,
+  id: 1,
+  tag: 'v1.4.0',
+  minutes: 20,
+  runs: [
+    pipelineRun(zoneRepository, 11, 'Release', 'running', 20),
+    pipelineRun(zoneRepository, 12, 'Docker', 'queued', 20),
+  ],
+  state: 'running',
+  blockers: [{ code: 'runs_active', detail: '2 release runs are still going' }],
+  pulls: [
+    { number: 812, title: 'Add the Releases page with day groups and pipeline chips' },
+    { number: 809, title: 'Poll release pipelines while a run is active' },
+    { number: 805, title: 'Fix a crash when a source has no default branch' },
+  ],
+});
+
+export const prerelease = release({
+  repository: consoleRepository,
+  id: 2,
+  tag: 'v0.9.0-beta.1',
+  name: 'Console beta with the new navigation',
+  minutes: 3 * MINUTES_IN_HOUR,
+  prerelease: true,
+  runs: [pipelineRun(consoleRepository, 21, 'Release', 'succeeded', 3 * MINUTES_IN_HOUR)],
+  state: 'succeeded',
+  pulls: [{ number: 41, title: 'Ship the beta navigation' }],
+});
+
+export const yesterdayRelease = release({
+  repository: zoneRepository,
+  id: 3,
+  tag: 'v1.3.2',
+  minutes: 26 * MINUTES_IN_HOUR,
+  runs: ['Release', 'Docker', 'Docs', 'Homebrew'].map((name, index) =>
+    pipelineRun(zoneRepository, 31 + index, name, 'succeeded', 26 * MINUTES_IN_HOUR)
+  ),
+  state: 'succeeded',
+  pulls: [{ number: 790, title: 'Harden the merge guard' }],
+});
+
+export const failedRelease = release({
+  repository: consoleRepository,
+  id: 4,
+  tag: 'v0.8.4',
+  minutes: 50 * MINUTES_IN_HOUR,
+  runs: [pipelineRun(consoleRepository, 41, 'Release', 'failed', 50 * MINUTES_IN_HOUR)],
+  state: 'failed',
+  blockers: [{ code: 'runs_failed', detail: 'Release failed on the publish step' }],
+});
+
+const mockReleases = [runningRelease, prerelease, yesterdayRelease, failedRelease];
+
+function releaseListing(releases: Release[], sources: Repository[]): ReleasesResponse {
+  return {
+    generated_at: minutesBefore(1),
+    stale: false,
+    partial: false,
+    window_days: 7,
+    ttl_secs: 120,
+    sources: sources.map(sourceStatus),
+    releases,
+    warnings: [],
+  };
+}
+
+export const emptyReleases = releaseListing([], []);
+
+const populatedReleases = releaseListing(mockReleases, [zoneRepository, consoleRepository]);
+
+type TagLine = SourceOptions['lines'][number];
+
+function sourceOptions(repository: Repository, lines: [TagLine, ...TagLine[]]): SourceOptions {
+  const [dominant] = lines;
+  return {
+    source_id: repository.source_id,
+    repository: repository.repository,
+    repository_url: repository.repository_url,
+    default_branch: 'main',
+    latest_tag: dominant.latest_tag,
+    next_tag: dominant.next_tag,
+    previous_tags: dominant.previous_tags,
+    lines,
+  };
+}
+
+export const cratesLines: [TagLine, TagLine] = [
+  {
+    prefix: 'abnegate-vcs',
+    latest_tag: 'abnegate-vcs/v0.2.1',
+    next_tag: 'abnegate-vcs/v0.2.2',
+    previous_tags: ['abnegate-vcs/v0.3.0-rc.1', 'abnegate-vcs/v0.2.1', 'abnegate-vcs/v0.2.0'],
+  },
+  {
+    prefix: 'abnegate-llm',
+    latest_tag: 'abnegate-llm/v1.0.0',
+    next_tag: 'abnegate-llm/v1.0.1',
+    previous_tags: ['abnegate-llm/v1.0.0', 'abnegate-llm/v0.9.2'],
+  },
+];
+
+export const releaseOptions: OptionsResponse = {
+  generated_at: minutesBefore(1),
+  sources: [
+    sourceOptions(zoneRepository, [
+      {
+        prefix: null,
+        latest_tag: runningRelease.tag,
+        next_tag: 'v1.4.1',
+        previous_tags: [runningRelease.tag, yesterdayRelease.tag, 'v1.3.1'],
+      },
+    ]),
+    sourceOptions(consoleRepository, [
+      {
+        prefix: null,
+        latest_tag: failedRelease.tag,
+        next_tag: 'v0.8.5',
+        previous_tags: [prerelease.tag, failedRelease.tag],
+      },
+    ]),
+    sourceOptions(cratesRepository, cratesLines),
+  ],
+  warnings: [],
+};
+
+export function releaseVerdict(subject: Release) {
+  const { pipeline, state, succeeded, complete, blockers } = subject;
+  return { pipeline, state, succeeded, complete, blockers };
+}
+
+const pullRequestsPath = /\/workspaces\/[^/]+\/pull-requests$/;
+const pullRequestPath =
+  /\/workspaces\/[^/]+\/pull-requests\/([^/]+)\/(\d+)(?:\/(diff|commits|jobs\/\d+\/log))?$/;
+const releasesPath = /\/workspaces\/[^/]+\/releases$/;
+const releaseOptionsPath = /\/workspaces\/[^/]+\/releases\/options$/;
+const releasePipelinePath = /\/workspaces\/[^/]+\/releases\/([^/]+)\/(\d+)\/pipeline$/;
+
+const PullRequestArtifact = {
+  diff: 'diff',
+  commits: 'commits',
+} as const;
+
+function pullRequestBody(sourceId: string, number: number, artifact: string | undefined) {
+  const pullRequest = mockPullRequests.find(
+    (candidate) => candidate.source_id === sourceId && candidate.number === number
+  );
+  if (!pullRequest) return undefined;
+  if (artifact === undefined) return pullRequestDetail(pullRequest);
+  if (artifact === PullRequestArtifact.diff) return pullRequestDiff(pullRequest);
+  if (artifact === PullRequestArtifact.commits) return pullRequestCommits(pullRequest);
+  return checkLog;
+}
+
+function githubBody(path: string, populated: boolean): unknown {
+  if (pullRequestsPath.test(path))
+    return populated ? populatedPullRequests : emptyPullRequests;
+  const pullRequest = pullRequestPath.exec(path);
+  if (pullRequest)
+    return pullRequestBody(
+      decodeURIComponent(pullRequest[1]),
+      Number(pullRequest[2]),
+      pullRequest[3]
+    );
+  if (releasesPath.test(path)) return populated ? populatedReleases : emptyReleases;
+  if (releaseOptionsPath.test(path))
+    return populated ? releaseOptions : { ...releaseOptions, sources: [] };
+  const pipeline = releasePipelinePath.exec(path);
+  if (pipeline) {
+    const sourceId = decodeURIComponent(pipeline[1]);
+    const id = Number(pipeline[2]);
+    const found = mockReleases.find(
+      (candidate) => candidate.source_id === sourceId && candidate.id === id
+    );
+    return found && releaseVerdict(found);
+  }
+  return undefined;
+}
+
+export async function routeWorkspaceRole(page: Page, role: string): Promise<void> {
+  await routeApi(page, /\/api\/organizations\/[^/]+\/workspaces(\?|$)/, (route) =>
+    route.fulfill({ status: 200, json: { workspaces: [{ ...mockWorkspace, role }] } })
+  );
+}
+
+export async function setupAdminAuth(page: Page, withheld: readonly string[] = []) {
   const fullAdminPermissions = [
     ...adminPermissions,
     'organizations:read',
@@ -441,7 +887,7 @@ export async function setupAdminAuth(page: Page) {
     'workspaces:read',
     'workspaces:update',
     'workspaces:delete',
-  ];
+  ].filter((permission) => !withheld.includes(permission));
 
   const token = createMockJwt({
     sub: mockAdminUser.id,
@@ -470,6 +916,13 @@ export async function setupCommonRoutes(
     const url = new URL(route.request().url());
     const path = url.pathname;
     let body: unknown;
+    if (route.request().method() === 'GET') {
+      const github = githubBody(path, populated);
+      if (github !== undefined) {
+        await route.fulfill({ status: 200, json: github });
+        return;
+      }
+    }
     if (path.endsWith('/theme')) {
       await route.fulfill({ status: 404, json: { error: 'Theme not found' } });
       return;

@@ -38,6 +38,10 @@ function buildAuthState(isAdmin: boolean) {
         'users:create',
         'users:update',
         'users:delete',
+        'pull_requests:read',
+        'pull_requests:update',
+        'releases:read',
+        'releases:create',
       ]
     : [
         'models:read',
@@ -63,6 +67,10 @@ function buildAuthState(isAdmin: boolean) {
         'wiki:update',
         'workspaces:read',
         'workspaces:update',
+        'pull_requests:read',
+        'pull_requests:update',
+        'releases:read',
+        'releases:create',
       ];
 
   const now = Math.floor(Date.now() / 1000);
