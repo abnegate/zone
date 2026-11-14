@@ -16,6 +16,12 @@ const SHAPES: Record<PullRequestKind, ReactNode> = {
       <path d="m8.5 12 2.5 2.5 4.5-5" />
     </>
   ),
+  conflicted: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8 8 3 4-3 4M16 8l-3 4 3 4" />
+    </>
+  ),
   failing: (
     <>
       <circle cx="12" cy="12" r="9" />

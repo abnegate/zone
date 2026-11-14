@@ -47,17 +47,14 @@ use zone_server::db::chats::occupancy;
 use zone_server::services::chat::session::{self, Mode};
 use zone_server::services::route::Route;
 
-/// Longer than the thirty minutes a coding agent's turn gets by default.
-const CHAT_TIMEOUT: Duration = Duration::from_secs(3600);
-
-/// A chat's whole time, short enough for a test to outlast.
-const SHORT_CHAT_TIMEOUT: Duration = Duration::from_secs(20);
-
 /// How long the test waits for the spawned agent to report how it was invoked.
 const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long Stop has to end a turn, far past what a turn at rest takes.
 const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// What a Zone tool call answers when Stop cancels it mid-run.
+const CANCELLED_CALL: &str = "This turn ended while the call ran, so it was cancelled.";
 
 const ANSWER: &str = "Written.";
 
@@ -434,16 +431,6 @@ impl Harness {
     }
 
     async fn start_on(kind: AgentKind, agent_enabled: bool, sandboxed: bool) -> Self {
-        Self::start_within(kind, agent_enabled, sandboxed, None).await
-    }
-
-    /// A harness whose chats get `timeout`, in place of the configured default.
-    async fn start_within(
-        kind: AgentKind,
-        agent_enabled: bool,
-        sandboxed: bool,
-        timeout: Option<Duration>,
-    ) -> Self {
         let provider = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/v2/model/info"))
@@ -484,9 +471,6 @@ impl Harness {
             agent: kind,
             executable: Some(agent.executable.clone()),
         };
-        if let Some(timeout) = timeout {
-            config.chat.timeout = timeout;
-        }
         config.agents = AgentConfig {
             state: directory.path().join(AGENTS),
             codex_api_url: provider.uri(),
@@ -915,14 +899,17 @@ async fn stop_reaches_a_cli_turn_while_a_tool_it_called_still_runs() {
         Some(json!("cancelled")),
         "the console must be told the turn stopped: {frames:?}"
     );
+    let (_, answer) = tokio::time::timeout(STOP_TIMEOUT, call)
+        .await
+        .expect("Stop must cancel the call it interrupted")
+        .expect("the call's request completes");
     assert!(
-        !call.is_finished(),
-        "Stop was only read once the call had finished"
+        answer.to_string().contains(CANCELLED_CALL),
+        "Stop must cancel the running call rather than wait for it to finish: {answer}"
     );
     assert!(gone(&leader).await, "the agent outlived Stop");
     assert!(gone(&forked).await, "the agent's child outlived Stop");
     drop(release);
-    let _ = tokio::time::timeout(STOP_TIMEOUT, call).await;
 }
 
 /// A chat whose agent the reader turned off gets no tools, and neither does
@@ -985,17 +972,14 @@ fn system_prompt(preparation: &session::Preparation) -> String {
         .expect("the turn's system prompt")
 }
 
-/// A chat turn on a coding agent gets the chat's whole time budget on the
-/// agent's own clock too, which the operator may set past the thirty minutes
-/// an agent's turn has by default. And it is prepared with no tool that would
-/// park zone's own loop, in its catalog or in its prompt, where a turn on an
-/// endpoint keeps both.
+/// A chat turn on a coding agent runs until the agent is done: nothing puts a
+/// clock on the agent for the chat's sake. And it is prepared with no tool
+/// that would park zone's own loop, in its catalog or in its prompt, where a
+/// turn on an endpoint keeps both.
 #[tokio::test]
-async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
+async fn a_cli_turn_is_prepared_with_no_deadline_and_nothing_that_parks() {
     let harness = common::context::Harness::new(None, true, Vec::new()).await;
-    let mut config = harness.config.clone();
-    config.chat.timeout = CHAT_TIMEOUT;
-    let state = create_test_state(config, harness.pool.clone());
+    let state = create_test_state(harness.config.clone(), harness.pool.clone());
     let chat = chats::get_chat(&harness.pool, harness.chat)
         .await
         .unwrap()
@@ -1009,7 +993,7 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         None,
         Mode::Generation(session::Generation::unrouted(LlmBackend::cli(
             AgentKind::Claude,
-            CliSettings::default(),
+            zone_core::llm::cli::settings(),
         ))),
         route.endpoint().expect("a usable route").clone(),
         None,
@@ -1047,9 +1031,8 @@ async fn a_cli_turn_is_prepared_for_the_chats_budget_with_nothing_that_parks() {
         panic!("the turn was moved off its agent");
     };
     assert!(
-        settings.timeout < CHAT_TIMEOUT
-            && settings.timeout >= CHAT_TIMEOUT - Duration::from_secs(60),
-        "the agent's clock {:?} must stop it shortly before the chat's {CHAT_TIMEOUT:?}",
+        Instant::now().checked_add(settings.timeout).is_none(),
+        "the agent's clock stops it after {:?}",
         settings.timeout
     );
 }
@@ -1313,29 +1296,59 @@ async fn an_answer_the_agent_was_cut_short_after_is_kept_and_marked_cut_short() 
     assert_eq!(stored, shown, "a reload reads the answer differently");
 }
 
-/// A claude whose background work outlasts the chat's time still keeps the answer it gave: its
-/// own clock stops it before the chat's does, so the answer ends cut short rather than lost to
-/// the chat timing out.
+/// A claude that answers and leaves background work running for ever has no clock to stop it,
+/// so the reader does: Stop keeps the answer it gave, recorded as a turn that was stopped rather
+/// than one that finished.
 #[tokio::test]
-async fn an_answer_given_before_background_work_outlasted_the_turn_is_kept_cut_short() {
-    let harness =
-        Harness::start_within(AgentKind::Claude, false, true, Some(SHORT_CHAT_TIMEOUT)).await;
+async fn an_answer_given_before_endless_background_work_is_kept_when_the_reader_stops() {
+    let harness = Harness::start(false, true).await;
     harness.agent.answering_over_endless_background_work();
+    let mut socket = harness.socket().await;
+    send(
+        &mut socket,
+        json!({"type": "send", "content": "Start the server and tell me when it is up."}),
+    )
+    .await;
 
-    let frames = harness
-        .turn("Start the server and tell me when it is up.")
-        .await
-        .await
-        .expect("the turn ends");
+    let mut frames = Vec::new();
+    let mut shown = String::new();
+    while !shown.contains(ANSWER) {
+        let frame = next(&mut socket).await;
+        if frame["type"] == "chunk" {
+            shown.push_str(frame["content"].as_str().unwrap_or_default());
+        }
+        assert_ne!(
+            frame["type"], "message_end",
+            "the turn ended on its own: {frame}"
+        );
+        frames.push(frame);
+    }
+    send(&mut socket, json!({"type": "cancel"})).await;
+    frames.extend(
+        tokio::time::timeout(STOP_TIMEOUT, finish(&mut socket))
+            .await
+            .expect("Stop must end the turn promptly"),
+    );
 
-    successful(&frames);
-    let ended = frames
-        .iter()
-        .find(|frame| frame["type"] == "message_end")
-        .expect("a message_end");
     assert_eq!(
-        ended["content"],
-        format!("{ANSWER}\n\n[Cut short: the agent was stopped before it finished]"),
+        frames.last().map(|frame| frame["type"].clone()),
+        Some(json!("cancelled")),
         "{frames:?}"
     );
+    let stored: String = sqlx::query_scalar(
+        "SELECT content FROM messages WHERE chat_id = $1 AND role = 'assistant' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(harness.chat)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the stored answer");
+    assert_eq!(stored, ANSWER, "the answer given before Stop was lost");
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM chat_turns WHERE chat_id = $1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(harness.chat)
+    .fetch_one(&harness.pool)
+    .await
+    .expect("the turn");
+    assert_eq!(status, "interrupted", "a stopped turn reads as finished");
 }

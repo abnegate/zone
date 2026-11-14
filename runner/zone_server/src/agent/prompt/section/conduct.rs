@@ -2,9 +2,10 @@
 //!
 //! The rules that decide whether an unattended run can be trusted. Each
 //! paragraph is a named constant so a test can pin it on its own. Who may open
-//! a pull request is not decided here: `workspace` gates `create_pull_request`
-//! on the user having asked for one, `files` says git pushes wait for the same
-//! ask, and `task` says Zone opens the run's own pull request.
+//! a pull request is not decided here: `workspace` says a chat ends work on a
+//! connected repository in one and gates `create_pull_request` on the user
+//! having asked wherever it cannot, `files` says the push it needs is Zone's
+//! to make, and `task` says Zone opens the run's own pull request.
 
 use crate::agent::prompt::{Context, Surface};
 use crate::agent::question::ASK_USER;

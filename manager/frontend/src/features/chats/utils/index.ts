@@ -9,6 +9,7 @@ export * from './diff';
 export { formatDate } from './formatters';
 export * from './gallery';
 export * from './handover';
+export * from './indicators';
 export * from './links';
 export * from './modelOptions';
 export * from './newChatSettings';

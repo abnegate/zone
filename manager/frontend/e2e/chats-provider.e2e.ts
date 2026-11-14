@@ -254,7 +254,7 @@ for (const width of [1280, 1024, 900, 390]) {
       await installChatSocketMock(page);
       await mockCommonEndpoints(page);
       const captured = await mockChats(page);
-      await page.addInitScript((value) => localStorage.setItem('manager_theme', value), theme);
+      await page.emulateMedia({ colorScheme: theme });
       await setupAuth(page);
 
       const shoot = async (name: string) => {

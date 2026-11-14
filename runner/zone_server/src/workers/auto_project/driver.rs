@@ -10,9 +10,9 @@ use abnegate_notify::Notifier;
 use uuid::Uuid;
 
 use crate::config::AutoProjectConfig;
-use crate::db::DbResult;
 use crate::db::auto_projects::{
-    self, Kind, ProjectAutomation, ProjectTask, SettledRun, Stage, TaskAutomation,
+    self, Claim, Kind, ProjectAutomation, ProjectTask, SettledRun, Stage, TaskAutomation,
+    WriteResult,
 };
 use crate::db::chats::{self, ChatPurpose};
 use crate::db::tasks::{self, Unattended};
@@ -20,6 +20,7 @@ use crate::db::workspace_members;
 use crate::state::AppState;
 use crate::workers::notify::{self, ChatNotifier};
 
+use super::lease::Lease;
 use super::{Services, notification, pipeline};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +28,7 @@ pub enum Admission {
     Started,
     Active,
     Withheld,
+    Lost,
 }
 
 /// What the driver has to hand a pipeline step.
@@ -37,9 +39,25 @@ pub struct Drive<'a> {
     pub project: &'a ProjectAutomation,
     pub workspace_id: Uuid,
     pub actor: Uuid,
+    pub lease: &'a Lease,
 }
 
 impl Drive<'_> {
+    /// The claim every write of this drive is fenced on.
+    pub fn claim(&self) -> Option<Claim> {
+        self.lease.claim()
+    }
+
+    /// Whether the drive must stop here, at a boundary between its steps,
+    /// because another instance took the project over.
+    pub fn superseded(&self) -> bool {
+        let lost = self.lease.lost();
+        if lost {
+            tracing::debug!(project_id = %self.project.project_id, "Auto project drive stopping: its claim was taken over");
+        }
+        lost
+    }
+
     /// Deliver a notice everywhere the operator configured, and into the
     /// project's updates chat whatever they configured.
     pub async fn notify(&self, kind: &'static str, notification: Notification) {
@@ -79,7 +97,13 @@ impl Drive<'_> {
 
     /// Stop the whole project and say why, once.
     pub async fn pause_project(&self, reason: &str) {
-        let paused = auto_projects::pause(self.state.db(), self.project.project_id, reason).await;
+        let paused = auto_projects::pause(
+            self.state.db(),
+            self.claim(),
+            self.project.project_id,
+            reason,
+        )
+        .await;
         self.announce_pause(paused, reason).await;
     }
 
@@ -87,12 +111,17 @@ impl Drive<'_> {
     /// can start after all by the time the pause is written: the next pass
     /// starts it.
     async fn pause_stalled_project(&self, reason: &str) {
-        let paused =
-            auto_projects::pause_stalled(self.state.db(), self.project.project_id, reason).await;
+        let paused = auto_projects::pause_stalled(
+            self.state.db(),
+            self.claim(),
+            self.project.project_id,
+            reason,
+        )
+        .await;
         self.announce_pause(paused, reason).await;
     }
 
-    async fn announce_pause(&self, paused: DbResult<bool>, reason: &str) {
+    async fn announce_pause(&self, paused: WriteResult<bool>, reason: &str) {
         match paused {
             Ok(true) => {
                 tracing::warn!(project_id = %self.project.project_id, reason, "Auto project paused");
@@ -112,7 +141,7 @@ impl Drive<'_> {
     }
 
     pub async fn park(&self) -> Result<(), String> {
-        auto_projects::park(self.state.db(), self.project.project_id)
+        auto_projects::park(self.state.db(), self.claim(), self.project.project_id)
             .await
             .map_err(|error| error.to_string())
     }
@@ -120,10 +149,13 @@ impl Drive<'_> {
     /// Start a run of a task, as the person automation runs as. A task a
     /// person paused or cancelled since the pass began is parked instead.
     pub async fn admit(&self, task_id: Uuid, reason: Option<&str>) -> Result<Admission, String> {
-        match tasks::create_unattended_task_run(self.state.db(), task_id, self.actor).await {
+        match tasks::create_unattended_task_run(self.state.db(), task_id, self.actor, self.claim())
+            .await
+        {
             Ok(Unattended::Created(run_id)) => {
                 auto_projects::record_admission(
                     self.state.db(),
+                    self.claim(),
                     task_id,
                     self.project.project_id,
                     run_id,
@@ -133,6 +165,7 @@ impl Drive<'_> {
                 if let Some(reason) = reason {
                     auto_projects::set_stage(
                         self.state.db(),
+                        self.claim(),
                         task_id,
                         self.project.project_id,
                         Stage::Running,
@@ -149,6 +182,10 @@ impl Drive<'_> {
                 Ok(Admission::Started)
             }
             Ok(Unattended::Active) => Ok(Admission::Active),
+            Ok(Unattended::Lost) => {
+                self.lease.lose();
+                Ok(Admission::Lost)
+            }
             Ok(Unattended::Withheld) => {
                 self.park().await?;
                 tracing::info!(project_id = %self.project.project_id, %task_id, "Auto project left a paused or cancelled task alone");
@@ -169,6 +206,7 @@ impl Drive<'_> {
     ) -> Result<Uuid, String> {
         let id = auto_projects::insert_auto_task(
             self.state.db(),
+            self.claim(),
             self.project.project_id,
             self.workspace_id,
             self.actor,
@@ -194,6 +232,7 @@ pub async fn drive_project(
     services: &Services,
     config: &AutoProjectConfig,
     project_id: Uuid,
+    lease: &Lease,
 ) -> Result<(), String> {
     let pool = state.db();
     let Some(project) = auto_projects::automation(pool, project_id)
@@ -215,7 +254,11 @@ pub async fn drive_project(
         project: &project,
         workspace_id,
         actor: project.actor_id.unwrap_or(Uuid::nil()),
+        lease,
     };
+    if drive.superseded() {
+        return Ok(());
+    }
     let Some(actor) = project.actor_id else {
         drive
             .pause_project("nobody is recorded as having turned automation on")
@@ -235,7 +278,7 @@ pub async fn drive_project(
     }
 
     drive.park().await?;
-    auto_projects::unpark(pool, project_id)
+    auto_projects::unpark(pool, drive.claim(), project_id)
         .await
         .map_err(|error| error.to_string())?;
     let mut settled = auto_projects::enrollable(pool, project_id)
@@ -247,6 +290,9 @@ pub async fn drive_project(
             .map_err(|error| error.to_string())?,
     );
     for run in settled {
+        if drive.superseded() {
+            return Ok(());
+        }
         settle(&drive, &run).await?;
     }
 
@@ -255,18 +301,24 @@ pub async fn drive_project(
         .map_err(|error| error.to_string())?;
     services.outages.retain(project_id, &reviewing(&changes));
     for task in changes {
+        if drive.superseded() {
+            return Ok(());
+        }
         if let Err(error) = pipeline::advance(&drive, &task).await {
             tracing::warn!(%project_id, task_id = %task.task_id, %error, "Pipeline step failed; retrying next tick");
         }
     }
 
     admit_runnable(&drive).await?;
+    if drive.superseded() {
+        return Ok(());
+    }
 
     let remaining = auto_projects::remaining(pool, project_id)
         .await
         .map_err(|error| error.to_string())?;
     if remaining == 0 {
-        if auto_projects::complete(pool, project_id)
+        if auto_projects::complete(pool, drive.claim(), project_id)
             .await
             .map_err(|error| error.to_string())?
         {
@@ -392,14 +444,28 @@ async fn settle(drive: &Drive<'_>, run: &SettledRun) -> Result<(), String> {
     let runs = stage.as_ref().map_or(0, |row| row.runs);
     match (run.status.as_str(), run.pr_url.as_deref()) {
         (tasks::REVIEW, Some(_)) => {
-            auto_projects::set_stage(pool, run.task_id, project_id, Stage::AwaitingChecks, None)
-                .await
-                .map_err(|error| error.to_string())?;
+            auto_projects::set_stage(
+                pool,
+                drive.claim(),
+                run.task_id,
+                project_id,
+                Stage::AwaitingChecks,
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         }
         (tasks::COMPLETE, _) => {
-            auto_projects::set_stage(pool, run.task_id, project_id, Stage::Merged, None)
-                .await
-                .map_err(|error| error.to_string())?;
+            auto_projects::set_stage(
+                pool,
+                drive.claim(),
+                run.task_id,
+                project_id,
+                Stage::Merged,
+                None,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         }
         (tasks::REVIEW, None) => {
             retry(
@@ -447,9 +513,16 @@ async fn retry(drive: &Drive<'_>, task_id: Uuid, runs: i32, reason: &str) -> Res
             .map(|task| task.title)
             .unwrap_or_else(|| task_id.to_string());
         let why = format!("task \"{title}\" used its {runs} runs; {reason}");
-        auto_projects::set_stage(pool, task_id, project_id, Stage::Paused, Some(&why))
-            .await
-            .map_err(|error| error.to_string())?;
+        auto_projects::set_stage(
+            pool,
+            drive.claim(),
+            task_id,
+            project_id,
+            Stage::Paused,
+            Some(&why),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         drive
             .notify(
                 "paused",
@@ -459,13 +532,27 @@ async fn retry(drive: &Drive<'_>, task_id: Uuid, runs: i32, reason: &str) -> Res
         return Ok(());
     }
     // The reason rides on the row so the run's guidance can quote it.
-    auto_projects::set_stage(pool, task_id, project_id, Stage::Idle, Some(reason))
+    auto_projects::set_stage(
+        pool,
+        drive.claim(),
+        task_id,
+        project_id,
+        Stage::Idle,
+        Some(reason),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if drive.admit(task_id, Some(reason)).await? == Admission::Active {
+        auto_projects::set_stage(
+            pool,
+            drive.claim(),
+            task_id,
+            project_id,
+            Stage::Running,
+            Some(reason),
+        )
         .await
         .map_err(|error| error.to_string())?;
-    if drive.admit(task_id, Some(reason)).await? == Admission::Active {
-        auto_projects::set_stage(pool, task_id, project_id, Stage::Running, Some(reason))
-            .await
-            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
@@ -476,6 +563,9 @@ async fn admit_runnable(drive: &Drive<'_>) -> Result<(), String> {
     let project_id = drive.project.project_id;
     let mut admitted: Vec<Uuid> = Vec::new();
     loop {
+        if drive.superseded() {
+            break;
+        }
         let in_flight = auto_projects::in_flight(pool, project_id)
             .await
             .map_err(|error| error.to_string())?;
@@ -545,7 +635,14 @@ mod tests {
         }
 
         async fn drive(&self, project: &Project) -> Result<(), String> {
-            drive_project(&self.state, &self.services, &self.config, project.id).await
+            drive_project(
+                &self.state,
+                &self.services,
+                &self.config,
+                project.id,
+                &Lease::unclaimed(),
+            )
+            .await
         }
     }
 
@@ -578,7 +675,7 @@ mod tests {
         let after = automation(&project).await;
         let unparked = project.automation(task).await;
         let next = runnable(&project).await;
-        let admitted = tasks::create_unattended_task_run(&project.pool, task, project.actor)
+        let admitted = tasks::create_unattended_task_run(&project.pool, task, project.actor, None)
             .await
             .expect("the admission");
         project.remove().await;
@@ -906,6 +1003,7 @@ mod tests {
             project: &driven_project,
             workspace_id: project.workspace,
             actor: project.actor,
+            lease: &Lease::unclaimed(),
         };
         let spent = i32::try_from(driven.config.max_runs_per_task).expect("a small cap");
 
@@ -978,6 +1076,7 @@ mod tests {
             project: &automation,
             workspace_id: project.workspace,
             actor: project.actor,
+            lease: &Lease::unclaimed(),
         };
 
         let retried = retry(&drive, task, 1, "the last run failed: boom").await;
@@ -1015,6 +1114,7 @@ mod tests {
             project: &automation,
             workspace_id: project.workspace,
             actor: project.actor,
+            lease: &Lease::unclaimed(),
         };
         let spent = i32::try_from(driven.config.max_runs_per_task).expect("a small cap");
 

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import created from '../../../../runner/zone_server/tests/fixtures/task-created.json';
+import { ActiveRunError } from '../features/tasks/ActiveRunError';
 import { TaskProgressMessageSchema } from '../features/tasks/schemas';
 import { tasksApi } from './tasks';
 
@@ -153,6 +155,37 @@ describe('task runner contract', () => {
     await expect(tasksApi.answerRun('run-1', [])).rejects.toThrow('Answer a required question');
   });
 
+  it('stops a run at the registered route and reads the stopped run back', async () => {
+    const stopped = { ...run, status: 'cancelled', error_message: 'Task run was stopped' };
+    const controller = new AbortController();
+    fetch.mockResolvedValueOnce(Response.json({ run: stopped }));
+
+    expect(await tasksApi.stopRun('run/1', controller.signal)).toEqual(stopped);
+    expect(fetch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/tasks/runs/run%2F1/stop'),
+      expect.objectContaining({
+        method: 'POST',
+        signal: controller.signal,
+        headers: expect.objectContaining({ Authorization: 'Bearer test-token' }),
+      })
+    );
+    expect(fetch.mock.calls[0][1]?.body).toBeUndefined();
+  });
+
+  it('surfaces the server refusal to stop a run that is no longer active', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json({ error: 'Task run is not active' }, { status: 409 })
+    );
+
+    await expect(tasksApi.stopRun('run-1')).rejects.toThrow('Task run is not active');
+  });
+
+  it('reports a bare status when a stop is refused without a message', async () => {
+    fetch.mockResolvedValueOnce(new Response('', { status: 502 }));
+
+    await expect(tasksApi.stopRun('run-1')).rejects.toThrow('Failed to stop task run: 502');
+  });
+
   it('preserves runner rejection messages', async () => {
     fetch.mockResolvedValueOnce(
       Response.json({ error: 'Task already has an active run' }, { status: 409 })
@@ -194,9 +227,137 @@ describe('task runner contract', () => {
       },
       { type: 'completed', status: 'completed' },
       { type: 'failed', error: 'Model unavailable' },
+      { type: 'cancelled', error: 'Task run was stopped' },
+      { type: 'cancelled', message: 'Task run was stopped' },
       { type: 'error', message: 'Authentication failed' },
     ];
     for (const message of messages)
       expect(TaskProgressMessageSchema.safeParse(message).success).toBe(true);
+  });
+});
+
+describe('editing many tasks at once', () => {
+  const first = { ...created.task, id: 'task-1' };
+  const second = { ...created.task, id: 'task-2' };
+  const ids = ['task-1', 'task-2'];
+
+  let fetch: ReturnType<typeof spyOn>;
+  beforeEach(() => {
+    fetch = spyOn(globalThis, 'fetch');
+    tasksApi.setGetAccessToken(() => 'test-token');
+  });
+  afterEach(() => {
+    fetch.mockRestore();
+    tasksApi.setGetAccessToken(() => null);
+  });
+
+  it('patches the workspace task list with the ids and only the changes given', async () => {
+    fetch.mockResolvedValueOnce(Response.json({ tasks: [first, second] }));
+
+    await tasksApi.updateTasks('workspace/1', ids, { status: 'paused' });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = fetch.mock.calls[0];
+    expect(url).toEndWith('/api/workspaces/workspace%2F1/tasks');
+    expect(init).toMatchObject({
+      method: 'PATCH',
+      headers: expect.objectContaining({ Authorization: 'Bearer test-token' }),
+    });
+    expect(JSON.parse(init.body)).toEqual({ ids, status: 'paused' });
+  });
+
+  it('returns every task the server sent back, parsed', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json({
+        tasks: [
+          { ...first, priority: 5 },
+          { ...second, priority: 5 },
+        ],
+      })
+    );
+
+    const tasks = await tasksApi.updateTasks('workspace-1', ids, { priority: 5 });
+
+    expect(tasks.map((task) => [task.id, task.priority])).toEqual([
+      ['task-1', 5],
+      ['task-2', 5],
+    ]);
+  });
+
+  it('sends the projects to add and remove, never a replacement list', async () => {
+    fetch.mockResolvedValueOnce(Response.json({ tasks: [first, second] }));
+
+    await tasksApi.updateTasks('workspace-1', ids, {
+      add_project_ids: ['project-3'],
+      remove_project_ids: ['project-1'],
+    });
+
+    const [, init] = fetch.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({
+      ids,
+      add_project_ids: ['project-3'],
+      remove_project_ids: ['project-1'],
+    });
+  });
+
+  it('names the tasks a live run holds when the server refuses for them', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json(
+        { error: 'Task has an active run or is no longer available', ids: ['task-2'] },
+        { status: 409 }
+      )
+    );
+
+    const failure = await tasksApi
+      .updateTasks('workspace-1', ids, { status: 'paused' })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(ActiveRunError);
+    expect((failure as ActiveRunError).name).toBe('ActiveRunError');
+    expect((failure as ActiveRunError).message).toBe(
+      'Task has an active run or is no longer available'
+    );
+    expect((failure as ActiveRunError).ids).toEqual(['task-2']);
+  });
+
+  it('surfaces a refusal without ids as a plain error', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json({ error: 'Task has an active run or is no longer available' }, { status: 409 })
+    );
+
+    const failure = await tasksApi
+      .updateTasks('workspace-1', ids, { status: 'paused' })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(ActiveRunError);
+    expect((failure as Error).message).toBe('Task has an active run or is no longer available');
+  });
+
+  it('surfaces any other refusal with its message', async () => {
+    fetch.mockResolvedValueOnce(
+      Response.json({ error: 'A project cannot be both added and removed' }, { status: 400 })
+    );
+
+    const failure = await tasksApi
+      .updateTasks('workspace-1', ids, { add_project_ids: ['project-1'] })
+      .catch((error: unknown) => error);
+
+    expect(failure).not.toBeInstanceOf(ActiveRunError);
+    expect((failure as Error).message).toBe('A project cannot be both added and removed');
+  });
+
+  it('names the status when the refusal has no message', async () => {
+    fetch.mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }));
+
+    await expect(tasksApi.updateTasks('workspace-1', ids, { priority: 1 })).rejects.toThrow(
+      'Failed to update tasks: 502'
+    );
+  });
+
+  it('rejects a reply that is not a task list', async () => {
+    fetch.mockResolvedValueOnce(Response.json({ task: first }));
+
+    await expect(tasksApi.updateTasks('workspace-1', ids, { priority: 1 })).rejects.toThrow();
   });
 });

@@ -12,6 +12,7 @@ use std::time::Duration;
 use abnegate_agent_cli::login::claude::LOOPBACK_HOST;
 use abnegate_agent_cli::login::claude::LOOPBACK_SCHEME;
 use abnegate_agent_cli::{AgentKind, CodexSandbox};
+use abnegate_exec::Niceness;
 use abnegate_vcs::pull_request::PullRequestResult;
 use abnegate_vcs::{PullRequestError, PullRequestService};
 use uuid::Uuid;
@@ -241,6 +242,9 @@ const USAGE_TTL: &str = "ZONE_AGENT_USAGE_TTL_SECONDS";
 /// Where codex runs the tools of a turn that grants them.
 const CODEX_SANDBOX: &str = "ZONE_CODEX_SANDBOX";
 
+/// The nice value agents start at.
+const NICENESS: &str = "ZONE_AGENT_NICENESS";
+
 /// `http://localhost:<port>`, or the port alone, where claude.com sends a browser back with a
 /// Claude sign-in's code.
 const AGENT_CALLBACK: &str = "ZONE_AGENT_CALLBACK";
@@ -287,6 +291,10 @@ const DEFAULT_USAGE_TTL: Duration = Duration::from_secs(60);
 
 const DEFAULT_HOST_LOGIN: bool = true;
 
+/// The nice value agents start at unless the operator names another: the lowest priority, so
+/// the builds and tests agents run yield the CPU to the server they share it with.
+const DEFAULT_NICENESS: Niceness = Niceness::LOWEST;
+
 /// The sandbox codex runs its own tools in on a turn that grants them, unless the operator names
 /// another.
 const DEFAULT_CODEX_SANDBOX: CodexSandbox = CodexSandbox::WorkspaceWrite;
@@ -308,8 +316,8 @@ const FALSE: &[&str] = &["0", "false", "no", "off"];
 /// The coding agent CLIs organizations sign in to, from
 /// `ZONE_AGENT_STATE_DIR`, `ZONE_AGENT_HOST_LOGIN`, `ZONE_CLAUDE_TOKEN_URL`,
 /// `ZONE_CODEX_SANDBOX`, `ZONE_AGENT_CALLBACK`, `ZONE_AGENT_CALLBACK_BIND`,
-/// `ZONE_CONSOLE_ORIGINS`, `ZONE_AGENT_USAGE_TTL_SECONDS`, `ZONE_CLAUDE_API_URL`
-/// and `ZONE_CODEX_API_URL`.
+/// `ZONE_CONSOLE_ORIGINS`, `ZONE_AGENT_USAGE_TTL_SECONDS`, `ZONE_CLAUDE_API_URL`,
+/// `ZONE_CODEX_API_URL` and `ZONE_AGENT_NICENESS`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentConfig {
     /// Root of every organization's agent homes.
@@ -334,6 +342,9 @@ pub struct AgentConfig {
     pub claude_api_url: String,
     /// Where a Codex login's usage is read.
     pub codex_api_url: String,
+    /// The nice value every agent run starts at, which the builds and tests
+    /// it runs inherit, so the server keeps its share of the CPU.
+    pub niceness: Niceness,
 }
 
 /// The loopback address a browser returns a Claude sign-in to,
@@ -361,6 +372,7 @@ impl Default for AgentConfig {
             usage_ttl: DEFAULT_USAGE_TTL,
             claude_api_url: DEFAULT_CLAUDE_API_URL.to_string(),
             codex_api_url: DEFAULT_CODEX_API_URL.to_string(),
+            niceness: DEFAULT_NICENESS,
         }
     }
 }
@@ -397,6 +409,7 @@ impl AgentConfig {
                 "ZONE_CODEX_API_URL must be an absolute http or https URL with a host",
                 "ZONE_CODEX_API_URL must not carry credentials, a query or a fragment",
             )?,
+            niceness: niceness(env::var(NICENESS).ok())?,
         })
     }
 
@@ -629,6 +642,19 @@ fn usage_ttl(value: Option<String>) -> Result<Duration, ConfigError> {
         None => Ok(DEFAULT_USAGE_TTL),
         Some(value) => value.parse().map(Duration::from_secs).map_err(|_| {
             ConfigError::Invalid("ZONE_AGENT_USAGE_TTL_SECONDS must be a whole number of seconds")
+        }),
+    }
+}
+
+fn niceness(value: Option<String>) -> Result<Niceness, ConfigError> {
+    match value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(DEFAULT_NICENESS),
+        Some(value) => value.parse().map_err(|_| {
+            ConfigError::Invalid("ZONE_AGENT_NICENESS must be a whole number from 0 to 19")
         }),
     }
 }
@@ -2609,7 +2635,7 @@ mod tests {
         ));
     }
 
-    const AGENT_SETTINGS: [&str; 10] = [
+    const AGENT_SETTINGS: [&str; 11] = [
         AGENT_STATE,
         AGENT_HOST_LOGIN,
         CLAUDE_TOKEN_URL,
@@ -2620,6 +2646,7 @@ mod tests {
         USAGE_TTL,
         CLAUDE_API_URL,
         CODEX_API_URL,
+        NICENESS,
     ];
     const NOT_AN_ORIGIN: &str = "ZONE_CONSOLE_ORIGINS must list http or https origins, such as \
                                  http://manager.localhost, with no credentials, path, query or \
@@ -3105,6 +3132,39 @@ mod tests {
     }
 
     #[test]
+    fn agents_start_at_the_lowest_priority_unless_the_operator_names_another() {
+        let mut environment = Variables::isolated(&AGENT_SETTINGS);
+
+        assert_eq!(
+            AgentConfig::from_env().expect("unset falls back").niceness,
+            Niceness::LOWEST
+        );
+        for (value, niceness) in [("0", 0), (" 10 ", 10), ("19", 19), ("   ", 19)] {
+            environment.set(NICENESS, value);
+            assert_eq!(
+                AgentConfig::from_env()
+                    .expect("a nice value from 0 to 19")
+                    .niceness
+                    .get(),
+                niceness,
+                "{value:?}"
+            );
+        }
+        for value in ["20", "-1", "low", "1.5", "256"] {
+            environment.set(NICENESS, value);
+            assert!(
+                matches!(
+                    AgentConfig::from_env(),
+                    Err(ConfigError::Invalid(
+                        "ZONE_AGENT_NICENESS must be a whole number from 0 to 19"
+                    ))
+                ),
+                "{value} was read as a nice value"
+            );
+        }
+    }
+
+    #[test]
     fn the_usage_endpoints_default_to_the_providers_and_follow_the_environment() {
         let mut environment = Variables::isolated(&AGENT_SETTINGS);
 
@@ -3338,7 +3398,7 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(
             debug.contains(
-                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }), consoles: ["http://manager.localhost", "https://manager.localhost"], usage_ttl: 60s, claude_api_url: "https://api.anthropic.com", codex_api_url: "https://chatgpt.com" }"#
+                r#"agents: AgentConfig { state: "/app/agent-state", host_login: false, claude_token_url: "https://platform.claude.com/v1/oauth/token", codex_sandbox: DangerFullAccess, callback: Some(Callback { port: 60000, bind: 0.0.0.0:54545 }), consoles: ["http://manager.localhost", "https://manager.localhost"], usage_ttl: 60s, claude_api_url: "https://api.anthropic.com", codex_api_url: "https://chatgpt.com", niceness: Niceness(19) }"#
             ),
             "{debug}"
         );

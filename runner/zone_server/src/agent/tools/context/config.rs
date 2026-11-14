@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use abnegate_agent::tool::Session;
+use abnegate_exec::Niceness;
 
 /// What a server tool context is built from.
 #[derive(Debug, Clone)]
@@ -17,4 +18,7 @@ pub struct Config {
     /// Whether the chat opted out of the public web, refusing `curl` and
     /// `wget` outright.
     pub chat_offline: bool,
+    /// The nice value every command a tool starts runs at, and so
+    /// everything that command starts in turn.
+    pub niceness: Niceness,
 }

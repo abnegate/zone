@@ -14,6 +14,7 @@ import { BrowserRouter } from 'react-router-dom';
 import { chooseMenuItem } from '../../../test/menu';
 import { chooseSelect } from '../../../test/select';
 import { RESPONDING } from '../components/Generation';
+import { LOAD_MORE_CHATS } from '../components/MoreChats';
 import type {
   Chat,
   ChatProviderOffer,
@@ -27,6 +28,7 @@ import type {
   UpdateChatRequest,
 } from '../types';
 import { CHAT_GROUP_STORAGE_KEY, CHAT_SORT_STORAGE_KEY } from '../utils/arrange';
+import { CHAT_FILTER_STORAGE_KEY } from '../utils/indicators';
 
 // Create mock functions
 const mockGetChats = mock();
@@ -40,6 +42,7 @@ const mockSearchChatMessages = mock();
 const mockUpdateChat = mock();
 const mockGetChatSources = mock();
 const mockGetChatPullRequests = mock();
+const mockGetChatIndicators = mock();
 const mockGetChatTasks = mock();
 const mockGetChatSubagents = mock();
 const mockSetChatSources = mock();
@@ -67,12 +70,18 @@ class FakeSocket {
 let socket: FakeSocket;
 
 // Mock scrollIntoView
-Element.prototype.scrollIntoView = mock();
+const mockScrollIntoView = mock();
+Element.prototype.scrollIntoView = mockScrollIntoView;
 
 // Mock the chatsApi
+mock.module('../hooks/usePreloadChats', () => ({ usePreloadChats: () => {} }));
+
 mock.module('../../../api/chats', () => ({
   chatsApi: {
-    getChats: mockGetChats,
+    getChats: async (...args: unknown[]) => {
+      const listed = await mockGetChats(...args);
+      return Array.isArray(listed) ? { chats: listed, total: listed.length } : listed;
+    },
     getChat: mockGetChat,
     createChat: mockCreateChat,
     sendMessage: mockSendMessage,
@@ -82,6 +91,7 @@ mock.module('../../../api/chats', () => ({
     searchChatMessages: mockSearchChatMessages,
     getChatSources: mockGetChatSources,
     getChatPullRequests: mockGetChatPullRequests,
+    getChatIndicators: mockGetChatIndicators,
     getChatTasks: mockGetChatTasks,
     getChatSubagents: mockGetChatSubagents,
     setChatSources: mockSetChatSources,
@@ -472,11 +482,14 @@ describe('ChatsPage', () => {
   beforeEach(() => {
     localStorage.removeItem(CHAT_GROUP_STORAGE_KEY);
     localStorage.removeItem(CHAT_SORT_STORAGE_KEY);
+    localStorage.removeItem(CHAT_FILTER_STORAGE_KEY);
     mockGetChatSources.mockReset();
     mockSetChatSources.mockReset();
     mockGetChatSources.mockResolvedValue([]);
     mockGetChatPullRequests.mockReset();
     mockGetChatPullRequests.mockResolvedValue([]);
+    mockGetChatIndicators.mockReset();
+    mockGetChatIndicators.mockResolvedValue([]);
     mockGetChatTasks.mockReset();
     mockGetChatTasks.mockResolvedValue([]);
     mockGetChatSubagents.mockReset();
@@ -1088,7 +1101,10 @@ describe('ChatsPage', () => {
       fireEvent.click(archivedTab);
 
       await waitFor(() => {
-        expect(mockClient.getChats).toHaveBeenCalledWith('ws-1', true);
+        expect(mockClient.getChats).toHaveBeenCalledWith(
+          'ws-1',
+          expect.objectContaining({ archived: true })
+        );
       });
     });
 
@@ -1103,7 +1119,10 @@ describe('ChatsPage', () => {
       fireEvent.click(screen.getByRole('tab', { name: 'Active' }));
 
       await waitFor(() => {
-        expect(mockClient.getChats).toHaveBeenLastCalledWith('ws-1', false);
+        expect(mockClient.getChats).toHaveBeenLastCalledWith(
+          'ws-1',
+          expect.objectContaining({ archived: false })
+        );
       });
     });
   });
@@ -1710,10 +1729,13 @@ describe('ChatsPage', () => {
       restoreClock = undefined;
     });
 
-    function controlClock(): (elapsed: number) => Promise<void> {
+    function controlClock(): {
+      advance: (elapsed: number) => Promise<void>;
+      jump: (elapsed: number) => void;
+    } {
       const ticks = new Map<number, () => void>();
       let nextIntervalId = 1;
-      const now = spyOn(performance, 'now').mockReturnValue(0);
+      const now = spyOn(Date, 'now').mockReturnValue(0);
       const interval = spyOn(window, 'setInterval').mockImplementation((callback: TimerHandler) => {
         const id = nextIntervalId++;
         ticks.set(id, () => {
@@ -1729,22 +1751,29 @@ describe('ChatsPage', () => {
         interval.mockRestore();
         clear.mockRestore();
       };
-      return async (elapsed: number): Promise<void> => {
-        // Drain the pending send before touching the clock: `started` and the
-        // interval are captured in an effect, and advancing first makes that
-        // effect read the moved clock, so elapsed never leaves 0. A sync
-        // act() is not enough — the update is still queued in a microtask.
-        // waitFor cannot help here either, since it polls on the setInterval
-        // this test has stubbed out.
-        await act(async () => {});
-        // Advancing a clock nothing is subscribed to reports the timer's
-        // starting text back as if it never moved, which reads as a broken
-        // component rather than a test that measured nothing.
-        expect(ticks.size).toBeGreaterThan(0);
-        now.mockReturnValue(elapsed);
-        act(() => {
-          for (const tick of ticks.values()) tick();
-        });
+      return {
+        advance: async (elapsed: number): Promise<void> => {
+          // Drain the pending send before touching the clock: the turn's start
+          // is read when it begins, and advancing first makes it begin at the
+          // moved reading, so elapsed never leaves 0. A sync act() is not
+          // enough — the update is still queued in a microtask. waitFor cannot
+          // help here either, since it polls on the setInterval this test has
+          // stubbed out.
+          await act(async () => {});
+          // Advancing a clock nothing is subscribed to reports the timer's
+          // starting text back as if it never moved, which reads as a broken
+          // component rather than a test that measured nothing.
+          expect(ticks.size).toBeGreaterThan(0);
+          now.mockReturnValue(elapsed);
+          act(() => {
+            for (const tick of ticks.values()) tick();
+          });
+        },
+        // Moves the clock with nothing subscribed to it, which is where a chat
+        // whose turn runs on while another one is open leaves the counter.
+        jump: (elapsed: number): void => {
+          now.mockReturnValue(elapsed);
+        },
       };
     }
 
@@ -1765,7 +1794,7 @@ describe('ChatsPage', () => {
     }
 
     it('keeps elapsed time through status changes and resets it for the next request', async () => {
-      const advance = controlClock();
+      const { advance } = controlClock();
       const input = await sendPrompt();
       expect(screen.getByRole('timer')).toHaveTextContent('0:00');
       expect(screen.getByRole('status').contains(screen.getByRole('timer'))).toBe(false);
@@ -1784,8 +1813,8 @@ describe('ChatsPage', () => {
       expect(screen.queryByRole('timer')).not.toBeInTheDocument();
     });
 
-    it('removes elapsed feedback when switching chats and starts fresh on return', async () => {
-      const advance = controlClock();
+    it('removes elapsed feedback when switching chats and starts a new request fresh', async () => {
+      const { advance } = controlClock();
       await sendPrompt();
       expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
       await advance(1000);
@@ -1797,6 +1826,32 @@ describe('ChatsPage', () => {
       fireEvent.change(input, { target: { value: 'New image' } });
       fireEvent.click(screen.getByRole('button', { name: 'Send' }));
       expect(await screen.findByRole('timer')).toHaveTextContent('0:00');
+    });
+
+    it('counts a turn from when it started when its chat is returned to mid-reply', async () => {
+      const { advance, jump } = controlClock();
+      await sendPrompt();
+      act(() => socket.emit({ type: 'message_start', message_id: 'reply', role: 'assistant' }));
+      await advance(1000);
+      expect(screen.getByRole('timer')).toHaveTextContent('0:01');
+
+      fireEvent.click(screen.getByText('Chat 2'));
+      expect(screen.queryByRole('timer')).not.toBeInTheDocument();
+      // The turn goes on being written while the reader is in another chat.
+      jump(96_000);
+
+      fireEvent.click(screen.getByText('Chat 1'));
+      await screen.findByPlaceholderText('Type a message, or drop a file...');
+      await act(async () => {});
+      act(() =>
+        socket.emit({
+          type: 'message_start',
+          message_id: 'reply',
+          role: 'assistant',
+          resumed: true,
+        })
+      );
+      expect(await screen.findByRole('timer')).toHaveTextContent('1:36');
     });
 
     it('keeps pending feedback while the response runs', async () => {
@@ -1848,6 +1903,60 @@ describe('ChatsPage', () => {
         expect(within(item).getByText('and make it blue')).toBeInTheDocument();
         expect(within(item).getByRole('button', { name: 'Interrupt' })).toBeInTheDocument();
         expect(screen.getByRole('status')).toHaveTextContent(RESPONDING);
+      });
+
+      it('scrolls to the end when the message joins the queue', async () => {
+        const input = await sendPrompt();
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        // The queued row renders below the running turn, so only the frame
+        // that adds it can bring the transcript down to it.
+        mockScrollIntoView.mockClear();
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+
+        expect(screen.getByTestId('queued-message')).toBeInTheDocument();
+        expect(mockScrollIntoView).toHaveBeenCalled();
+      });
+
+      it('scrolls a queued message into view when it was sent from a linked one', async () => {
+        mockGetChat.mockResolvedValue(mockChatWithMessages);
+        window.history.pushState({}, '', '/chats?id=chat-1&message=msg-2');
+        renderChatsPage();
+        const input = await screen.findByPlaceholderText<HTMLTextAreaElement>(
+          'Type a message, or drop a file...'
+        );
+        fireEvent.change(input, { target: { value: 'Generate an image of a rooster' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+        await waitFor(() => expect(input.value).toBe(''));
+        // Writing into the chat is leaving the message it was parked on, which
+        // is what frees the scroll below.
+        expect(new URLSearchParams(window.location.search).get('message')).toBeNull();
+
+        fireEvent.change(input, { target: { value: 'and make it blue' } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+        await waitFor(() => expect(input.value).toBe(''));
+        const queued = frames().at(-1);
+        mockScrollIntoView.mockClear();
+
+        act(() =>
+          socket.emit({
+            type: 'queue',
+            messages: [{ id: queued.id, content: 'and make it blue' }],
+            held: false,
+          })
+        );
+
+        expect(screen.getByTestId('queued-message')).toBeInTheDocument();
+        expect(mockScrollIntoView).toHaveBeenCalled();
       });
 
       it('offers Queue beside Stop once something is typed', async () => {
@@ -5815,6 +5924,24 @@ describe('ChatsPage', () => {
     });
   });
 
+  describe('paging', () => {
+    it('loads the next page of chats from the end of the list', async () => {
+      mockClient.getChats
+        .mockResolvedValueOnce({ chats: [mockChats[0]], total: 2 })
+        .mockResolvedValueOnce({ chats: [mockChats[1]], total: 2 });
+
+      renderChatsPage();
+      fireEvent.click(await screen.findByRole('button', { name: `${LOAD_MORE_CHATS} (1)` }));
+
+      expect(await screen.findByText(mockChats[1].title)).toBeInTheDocument();
+      expect(mockClient.getChats).toHaveBeenLastCalledWith(
+        'ws-1',
+        expect.objectContaining({ offset: 1 })
+      );
+      expect(screen.queryByRole('button', { name: /Load more chats/ })).not.toBeInTheDocument();
+    });
+  });
+
   describe('grouping and sorting', () => {
     it('groups chats by project and sorts titles inside each group', async () => {
       mockClient.getChats.mockResolvedValue([
@@ -5891,6 +6018,174 @@ describe('ChatsPage', () => {
       renderChatsPage();
       expect(await screen.findByText('No chats yet')).toBeInTheDocument();
       expect(screen.queryByRole('combobox', { name: 'Group chats' })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('combobox', { name: 'Filter chats by status' })
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe('status indicators', () => {
+    const indicator = (
+      chat_id: string,
+      overrides: Partial<import('../types').ChatIndicator> = {}
+    ) => ({
+      chat_id,
+      activity: 'idle' as const,
+      pull_request: null,
+      pull_requests: 0,
+      ...overrides,
+    });
+
+    const openPull = (overrides: Record<string, unknown> = {}) => ({
+      id: 'pr-1',
+      number: 12,
+      url: 'https://github.com/acme/widgets/pull/12',
+      title: 'Add widgets',
+      status: {
+        title: 'Add widgets',
+        state: 'open' as const,
+        draft: false,
+        additions: 1,
+        deletions: 1,
+        changed_files: 1,
+        checks: 'passing' as const,
+        mergeable: 'clean' as const,
+        auto_merge: { enabled: false, unavailable: null },
+        threads: { open: 0, resolved: 0 },
+        draft_unavailable: null,
+        observed_at: '2026-11-13T10:00:00Z',
+        ...(overrides.status as Record<string, unknown> | undefined),
+      },
+      ready: false,
+      ...overrides,
+    });
+
+    it('marks the rows that are busy, waiting, failing or ready', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'writing' }),
+        indicator('chat-2', { activity: 'awaiting_answer' }),
+        indicator('chat-3', {
+          pull_request: openPull({ status: { checks: 'failing' } }),
+          pull_requests: 1,
+        }),
+        indicator('chat-4', { pull_request: openPull({ ready: true }), pull_requests: 1 }),
+      ]);
+
+      renderChatsPage();
+
+      expect(await screen.findByLabelText('Writing a reply')).toBeInTheDocument();
+      expect(screen.getByLabelText('Waiting for your answer')).toBeInTheDocument();
+      expect(screen.getByLabelText('Pull request #12: Checks failing')).toBeInTheDocument();
+      expect(screen.getByLabelText('Pull request #12: Ready to merge')).toBeInTheDocument();
+    });
+
+    it('sorts the chats that want attention to the top', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'idle' }),
+        indicator('chat-3', { activity: 'awaiting_approval' }),
+      ]);
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Sort chats' });
+      await waitFor(() =>
+        expect(screen.getByLabelText('Waiting for you to approve a tool call')).toBeInTheDocument()
+      );
+      chooseSelect('Sort chats', 'Needs attention');
+
+      const titles = [...document.querySelectorAll('.chat-title')].map((node) => node.textContent);
+      expect(titles[0]).toBe('Chat 3');
+      expect(localStorage.getItem(CHAT_SORT_STORAGE_KEY)).toBe('status');
+    });
+
+    it('narrows the list to one facet and offers a way back', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'writing' }),
+        indicator('chat-2', {
+          pull_request: openPull({ status: { checks: 'failing' } }),
+          pull_requests: 1,
+        }),
+      ]);
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Filter chats by status' });
+      await waitFor(() => expect(screen.getByLabelText('Writing a reply')).toBeInTheDocument());
+
+      chooseSelect('Filter chats by status', 'Checks failing');
+      await waitFor(() => expect(screen.queryByText('Chat 1')).not.toBeInTheDocument());
+      expect(screen.getByText('Chat 2')).toBeInTheDocument();
+      expect(localStorage.getItem(CHAT_FILTER_STORAGE_KEY)).toBe('failing');
+
+      chooseSelect('Filter chats by status', 'Ready to merge');
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Show all chats' }));
+      expect(await screen.findByText('Chat 1')).toBeInTheDocument();
+      expect(localStorage.getItem(CHAT_FILTER_STORAGE_KEY)).toBe('all');
+    });
+
+    it('keeps the open chat marked as waiting while its parked turn still streams', async () => {
+      mockGetChatIndicators.mockResolvedValue([
+        indicator('chat-1', { activity: 'awaiting_approval' }),
+      ]);
+
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      act(() => {
+        socket.emit({ type: 'message_start', message_id: 'stream', role: 'assistant' });
+        socket.emit({ type: 'chunk', content: 'Working', index: 0 });
+      });
+
+      await waitFor(() =>
+        expect(screen.getByLabelText('Waiting for you to approve a tool call')).toBeInTheDocument()
+      );
+      expect(screen.queryByTestId('chat-status-writing')).toBeNull();
+    });
+
+    it('waits for the first reading before telling a saved filter that nothing matches', async () => {
+      localStorage.setItem(CHAT_FILTER_STORAGE_KEY, 'ready');
+      let answer: (indicators: unknown[]) => void = () => undefined;
+      mockGetChatIndicators.mockImplementationOnce(
+        () => new Promise((resolve) => (answer = resolve))
+      );
+
+      renderChatsPage();
+
+      expect(await screen.findByText('Reading chat statuses...')).toBeInTheDocument();
+      expect(screen.queryByText('No loaded chats match this filter')).toBeNull();
+
+      await act(async () => {
+        answer([]);
+      });
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+    });
+
+    it('still offers the next page when nothing loaded matches the filter', async () => {
+      mockGetChats.mockResolvedValue({ chats: mockChats, total: mockChats.length + 25 });
+      mockGetChatIndicators.mockResolvedValue(
+        mockChats.map((chat) => indicator(chat.id, { activity: 'idle' }))
+      );
+
+      renderChatsPage();
+      await screen.findByRole('combobox', { name: 'Filter chats by status' });
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: /Load more chats/ })).toBeInTheDocument()
+      );
+
+      chooseSelect('Filter chats by status', 'Ready to merge');
+
+      expect(await screen.findByText('No loaded chats match this filter')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Load more chats/ })).toBeInTheDocument();
+    });
+
+    it('says the statuses are stale when the reading fails, and still lists the chats', async () => {
+      mockGetChatIndicators.mockRejectedValue(new Error('GitHub is unreachable'));
+
+      renderChatsPage();
+
+      expect(await screen.findByText(/Statuses are out of date/)).toHaveTextContent(
+        'GitHub is unreachable'
+      );
+      expect(screen.getByText('Chat 1')).toBeInTheDocument();
     });
   });
 });

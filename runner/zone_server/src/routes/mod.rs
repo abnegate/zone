@@ -298,7 +298,9 @@ pub fn create_router(state: AppState) -> Router {
         // Tasks (workspace-scoped)
         .route(
             "/api/workspaces/{workspace_id}/tasks",
-            get(tasks::list).post(tasks::create),
+            get(tasks::list)
+                .post(tasks::create)
+                .patch(tasks::update_many),
         )
         .route(
             "/api/tasks/{id}",
@@ -312,6 +314,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/tasks/runs/{run_id}", get(tasks::get_run))
         .route("/api/tasks/runs/{run_id}/logs", get(tasks::get_run_logs))
         .route("/api/tasks/runs/{run_id}/answers", post(tasks::answer_run))
+        .route("/api/tasks/runs/{run_id}/stop", post(tasks::stop_run))
         // Chats
         .route(
             "/api/artifacts/{workspace_id}/{chat_id}/{owner_id}/{filename}/signature",
@@ -319,6 +322,7 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/chats", get(chats::list).post(chats::create))
         .route("/api/chats/search", get(chats::search_messages))
+        .route("/api/chats/indicators", get(chats::indicators))
         .route(
             "/api/chats/{id}",
             get(chats::get).put(chats::update).delete(chats::delete),

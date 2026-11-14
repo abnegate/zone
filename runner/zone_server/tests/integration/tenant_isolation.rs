@@ -170,16 +170,28 @@ async fn test_user_cannot_see_other_workspace_chats() {
         .expect("Failed to create chat 2");
 
     // List chats for workspace 1 - should only see chat1
-    let ws1_chats = chats::list_chats(&pool, Some(ws1.id), None)
-        .await
-        .expect("Failed to list ws1 chats");
+    let ws1_chats = chats::list_chats(
+        &pool,
+        ws1.id,
+        None,
+        chats::Sort::default(),
+        chats::Page::default(),
+    )
+    .await
+    .expect("Failed to list ws1 chats");
     assert_eq!(ws1_chats.len(), 1);
     assert_eq!(ws1_chats[0].id, chat1.id);
 
     // List chats for workspace 2 - should only see chat2
-    let ws2_chats = chats::list_chats(&pool, Some(ws2.id), None)
-        .await
-        .expect("Failed to list ws2 chats");
+    let ws2_chats = chats::list_chats(
+        &pool,
+        ws2.id,
+        None,
+        chats::Sort::default(),
+        chats::Page::default(),
+    )
+    .await
+    .expect("Failed to list ws2 chats");
     assert_eq!(ws2_chats.len(), 1);
     assert_eq!(ws2_chats[0].id, chat2.id);
 }
@@ -396,8 +408,8 @@ async fn test_organization_admin_can_see_all_workspaces() {
         .expect("Failed to list workspaces");
 
     assert_eq!(workspaces.len(), 2);
-    assert!(workspaces.iter().any(|w| w.id == ws1.id));
-    assert!(workspaces.iter().any(|w| w.id == ws2.id));
+    assert!(workspaces.iter().any(|w| w.workspace.id == ws1.id));
+    assert!(workspaces.iter().any(|w| w.workspace.id == ws2.id));
 }
 
 #[tokio::test]
@@ -495,7 +507,7 @@ async fn test_organization_member_only_sees_assigned_workspaces() {
         .expect("Failed to list workspaces");
 
     assert_eq!(workspaces.len(), 2);
-    assert!(workspaces.iter().any(|w| w.id == ws1.id));
-    assert!(workspaces.iter().any(|w| w.id == ws2.id));
-    assert!(!workspaces.iter().any(|w| w.id == ws3.id));
+    assert!(workspaces.iter().any(|w| w.workspace.id == ws1.id));
+    assert!(workspaces.iter().any(|w| w.workspace.id == ws2.id));
+    assert!(!workspaces.iter().any(|w| w.workspace.id == ws3.id));
 }

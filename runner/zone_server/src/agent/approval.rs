@@ -151,6 +151,11 @@ impl ApprovalPolicy {
         self.gate.cancel_all();
     }
 
+    /// Whether a call is parked on a decision nobody has made yet.
+    pub fn waiting(&self) -> bool {
+        self.gate.waiting()
+    }
+
     pub fn register(chat_id: Uuid, policy: Self) {
         LIVE.insert(chat_id, policy);
     }
@@ -173,6 +178,13 @@ impl ApprovalPolicy {
         if let Some(policy) = LIVE.get(&chat_id) {
             policy.deny_all();
         }
+    }
+
+    /// Whether this chat's live turn is waiting for the reader to approve a
+    /// call. A chat with no registered policy has no turn in flight, so it is
+    /// waiting for nothing.
+    pub fn chat_waiting(chat_id: Uuid) -> bool {
+        LIVE.get(&chat_id).is_some_and(|policy| policy.waiting())
     }
 
     pub fn set_chat_auto(chat_id: Uuid, auto: bool) {
@@ -200,6 +212,11 @@ impl ApprovalGate {
     /// Block until the user decides, the turn stops, or the wait runs out.
     pub async fn await_decision(&self, id: &str) -> Decision {
         self.await_decision_with_timeout(id, APPROVAL_TIMEOUT).await
+    }
+
+    /// Whether anything is still parked here.
+    pub fn waiting(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     fn begin(&self, id: &str) -> oneshot::Receiver<Decision> {
@@ -283,6 +300,45 @@ mod tests {
     #[test]
     fn unknown_ids_are_not_decisions() {
         assert!(!ApprovalGate::new().decide("missing", true));
+    }
+
+    #[test]
+    fn a_parked_call_reads_as_waiting_until_it_is_decided() {
+        let policy = ApprovalPolicy::required(ApprovalGate::new());
+        assert!(!policy.waiting(), "nothing was asked yet");
+
+        let _pending = policy.expect_decision("call_1");
+        assert!(policy.waiting());
+
+        policy.decide("call_1", true);
+        assert!(!policy.waiting());
+    }
+
+    /// Auto-approve parks nothing, so it never reads as waiting for a reader.
+    #[test]
+    fn auto_approve_never_waits() {
+        let policy = ApprovalPolicy::auto();
+        let _pending = policy.expect_decision("call_1");
+        assert!(!policy.waiting());
+    }
+
+    #[test]
+    fn only_a_registered_chat_with_a_parked_call_is_waiting() {
+        let chat = Uuid::new_v4();
+        assert!(
+            !ApprovalPolicy::chat_waiting(chat),
+            "a chat with no turn in flight was reported as waiting"
+        );
+
+        let policy = ApprovalPolicy::required(ApprovalGate::new());
+        ApprovalPolicy::register(chat, policy.clone());
+        assert!(!ApprovalPolicy::chat_waiting(chat));
+
+        let _pending = policy.expect_decision("call_1");
+        assert!(ApprovalPolicy::chat_waiting(chat));
+
+        ApprovalPolicy::unregister(chat, &policy);
+        assert!(!ApprovalPolicy::chat_waiting(chat));
     }
 
     #[test]

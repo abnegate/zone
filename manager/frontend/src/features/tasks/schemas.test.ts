@@ -8,6 +8,7 @@ import {
   TaskRunSchema,
   TaskStatusSchema,
   TasksResponseSchema,
+  UpdateTasksRequestSchema,
 } from './schemas';
 
 describe('server task response contract', () => {
@@ -33,6 +34,55 @@ describe('task status', () => {
 
   it('rejects a status the server never writes', () => {
     expect(TaskStatusSchema.safeParse('archived').success).toBe(false);
+  });
+});
+
+describe('an edit of many tasks', () => {
+  const ids = ['task-1', 'task-2'];
+
+  it('needs at least one task to edit', () => {
+    expect(UpdateTasksRequestSchema.safeParse({ ids: [], status: 'paused' }).success).toBe(false);
+    expect(UpdateTasksRequestSchema.safeParse({ status: 'paused' }).success).toBe(false);
+  });
+
+  it.each([
+    { status: 'paused' },
+    { priority: 5 },
+    { add_project_ids: ['project-1'] },
+    { remove_project_ids: ['project-2'] },
+    { add_project_ids: ['project-1'], remove_project_ids: ['project-2'] },
+    { is_agentic: false },
+    { require_plan_approval: true },
+    {
+      status: 'blocked',
+      priority: 1,
+      add_project_ids: ['project-1'],
+      remove_project_ids: ['project-2'],
+      is_agentic: true,
+      require_plan_approval: false,
+    },
+  ])('carries only the changes it was given: %p', (changes) => {
+    expect(UpdateTasksRequestSchema.parse({ ids, ...changes })).toEqual({ ids, ...changes });
+  });
+
+  it('rejects a status the server never writes', () => {
+    expect(UpdateTasksRequestSchema.safeParse({ ids, status: 'archived' }).success).toBe(false);
+  });
+
+  it.each([0, 6, 2.5])('rejects priority %p outside the one to five scale', (priority) => {
+    expect(UpdateTasksRequestSchema.safeParse({ ids, priority }).success).toBe(false);
+  });
+
+  it('never replaces the project list of every task', () => {
+    expect(Object.keys(UpdateTasksRequestSchema.shape)).not.toContain('project_ids');
+  });
+
+  it('requires only the ids, so every change may be left out', () => {
+    const required = Object.entries(UpdateTasksRequestSchema.shape)
+      .filter(([, field]) => !field.isOptional())
+      .map(([name]) => name);
+
+    expect(required).toEqual(['ids']);
   });
 });
 
@@ -123,5 +173,28 @@ describe('a run that parked on a wait', () => {
 
     expect(parsed.waiting_on).toBeUndefined();
     expect(parsed).toMatchObject({ id: 'run-1', status: 'waiting', progress_percent: 40 });
+  });
+});
+
+describe('a task run stopped over the run socket', () => {
+  const STOPPED_MESSAGE = 'Task run was stopped';
+
+  for (const field of ['error', 'message']) {
+    it(`ends the stream as cancelled with the reason sent as ${field}`, () => {
+      const frame = TaskProgressMessageSchema.parse({
+        type: 'cancelled',
+        [field]: STOPPED_MESSAGE,
+      });
+
+      expect(frame).toEqual({ type: 'cancelled', status: 'cancelled', reason: STOPPED_MESSAGE });
+    });
+  }
+
+  it('ends the stream as cancelled when no reason was sent', () => {
+    expect(TaskProgressMessageSchema.parse({ type: 'cancelled' })).toEqual({
+      type: 'cancelled',
+      status: 'cancelled',
+      reason: null,
+    });
   });
 });

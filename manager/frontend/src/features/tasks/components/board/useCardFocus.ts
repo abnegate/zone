@@ -25,6 +25,7 @@ const MENU = '.task-card-menu button';
 
 const CONTROLS = [
   '.task-card-handle',
+  '.task-card-select',
   TITLE,
   '.task-card-pull-request',
   '.task-relation-open',

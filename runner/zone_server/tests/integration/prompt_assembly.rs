@@ -420,7 +420,7 @@ async fn both_surfaces_read_the_waiting_rules_and_no_surviving_poll_instruction(
         }
     }
 
-    assert!(chat.contains("this turn's own deadline"), "{chat}");
+    assert!(!chat.contains("this turn's own deadline"), "{chat}");
     assert!(
         task.contains("parks this run and hands its slot back"),
         "{task}"
@@ -826,6 +826,7 @@ async fn a_chat_is_prepared_with_what_its_workspace_learned_agent_on_or_off() {
             provenance: discovery::Provenance {
                 kind: discovery::Kind::Lesson,
                 source: discovery::Source::Chat(Uuid::new_v4()),
+                project: None,
                 last_confirmed: confirmed,
             },
         },
@@ -1179,6 +1180,7 @@ async fn a_chat_is_told_how_many_discoveries_it_is_not_shown() {
                 provenance: discovery::Provenance {
                     kind: discovery::Kind::Lesson,
                     source: discovery::Source::Chat(chats[index % chats.len()]),
+                    project: None,
                     last_confirmed: confirmed(),
                 },
             },
@@ -1297,6 +1299,7 @@ async fn the_learned_count_is_of_active_pass_derived_entries_by_category() {
             provenance: discovery::Provenance {
                 kind: discovery::Kind::Lesson,
                 source: discovery::Source::Chat(Uuid::new_v4()),
+                project: None,
                 last_confirmed: confirmed(),
             },
         },

@@ -73,9 +73,14 @@ export function structFields(source: string, structName: string): RustField[] {
 export function rustVariants(source: string, enumName: string): string[] {
   const body = source.match(new RegExp(`pub enum ${enumName} \\{([^}]*)\\}`))?.[1];
   if (!body) throw new Error(`${enumName} not found in the Rust source`);
-  return body
-    .split('\n')
-    .map((line) => line.trim().replace(/,$/, ''))
-    .filter((line) => line.length > 0 && !line.startsWith('//'))
-    .map((variant) => variant.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase());
+  return (
+    body
+      .split('\n')
+      .map((line) => line.trim().replace(/,$/, ''))
+      // An attribute sits on its own line inside the enum — `#[default]` on the
+      // variant below it — and naming one as a variant would read a contract the
+      // two sides agree on as a mismatch.
+      .filter((line) => line.length > 0 && !line.startsWith('//') && !line.startsWith('#['))
+      .map((variant) => variant.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase())
+  );
 }

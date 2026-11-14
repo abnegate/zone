@@ -4,6 +4,7 @@ import { TASK_STATUSES } from '../tasks/status';
 import { REASONING_EFFORT_LABELS, type ReasoningEffort } from './provider';
 import {
   ACTION_TARGETS,
+  CHAT_ACTIVITIES,
   CHAT_TASK_RUN_STATUSES,
   HANDOVER_AGENTS,
   HANDOVER_REASONS,
@@ -423,6 +424,7 @@ export const ChatsResponseSchema = z.object({
   success: z.boolean().optional(),
   error: z.string().optional(),
   chats: z.array(ChatSchema).default([]),
+  total: z.number().int().nonnegative().optional(),
 });
 
 export const ChatResponseSchema = z.object({
@@ -517,6 +519,26 @@ export const ChatPullRequestSchema = z.object({
   connection: z.enum(PULL_REQUEST_CONNECTIONS).catch('uncredentialed'),
   auto_fix: z.boolean().catch(false),
   auto_fixing: z.boolean().catch(false),
+});
+
+export const ChatPullIndicatorSchema = z.object({
+  id: z.string(),
+  number: z.number(),
+  url: z.string(),
+  title: z.string().nullable().catch(null),
+  status: PullRequestStatusSchema.nullable().catch(null),
+  ready: z.boolean().catch(false),
+});
+
+export const ChatIndicatorSchema = z.object({
+  chat_id: z.string(),
+  activity: z.enum(CHAT_ACTIVITIES).catch('idle'),
+  pull_request: ChatPullIndicatorSchema.nullable().catch(null),
+  pull_requests: z.number().catch(0),
+});
+
+export const ChatIndicatorsResponseSchema = z.object({
+  chats: tolerantArray(ChatIndicatorSchema).default([]),
 });
 
 export const ChatPullRequestsResponseSchema = z.object({

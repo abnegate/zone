@@ -216,6 +216,33 @@ describe('ChangesBox', () => {
     expect(menuItem('Fix automatically')).toBeInTheDocument();
   });
 
+  it('says on the row that auto-fix is watching it', async () => {
+    await shown([{ ...OPEN, auto_fix: true }]);
+
+    expect(screen.getByText('Auto-fix')).toHaveAttribute(
+      'title',
+      'Zone starts a run to fix it whenever GitHub reports failing checks or a conflict with its base branch.'
+    );
+    expect(screen.queryByText('Fixing')).toBeNull();
+  });
+
+  it('says on the row when a fix run is working, in place of the standing badge', async () => {
+    await shown([{ ...OPEN, auto_fix: true, auto_fixing: true }]);
+
+    expect(screen.getByText('Fixing')).toHaveAttribute(
+      'title',
+      'A run is working on its branch now, and pushes what it changes when it finishes.'
+    );
+    expect(screen.queryByText('Auto-fix')).toBeNull();
+  });
+
+  it('says nothing about auto-fix on a row it is off for', async () => {
+    await shown([OPEN]);
+
+    expect(screen.queryByText('Auto-fix')).toBeNull();
+    expect(screen.queryByText('Fixing')).toBeNull();
+  });
+
   it('still lets a writer stop auto-fix once no source or status can be read', async () => {
     mockUpdateChatPullRequest.mockResolvedValue({ ...OPEN, auto_fix: false });
     await shown([

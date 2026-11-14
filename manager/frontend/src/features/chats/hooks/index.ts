@@ -1,4 +1,6 @@
 export { useChat } from './useChat';
+export type { ChatIndicators } from './useChatIndicators';
+export { useChatIndicators } from './useChatIndicators';
 export { useChatProviders } from './useChatProviders';
 export type { ChatPullRequests } from './useChatPullRequests';
 export { useChatPullRequests } from './useChatPullRequests';
@@ -10,4 +12,5 @@ export type { UseChatsOptions } from './useChats';
 export { useChats } from './useChats';
 export type { ChatTasks } from './useChatTasks';
 export { useChatTasks } from './useChatTasks';
+export { usePreloadChats } from './usePreloadChats';
 export { useWorkspaceChatProviders } from './useWorkspaceChatProviders';

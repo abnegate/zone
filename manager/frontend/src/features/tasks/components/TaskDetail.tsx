@@ -1,8 +1,10 @@
 import { Button, Select } from '@zone/ui';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import PencilIcon from '../../../shared/components/PencilIcon/PencilIcon';
 import type { Source } from '../../../types';
 import type { Project } from '../../projects/types';
+import { READ_ONLY } from '../access';
+import { PRIORITIES } from '../priority';
 import { relationsOf } from '../relations';
 import { STATUS_OPTIONS } from '../status';
 import { awaitsTitle } from '../title';
@@ -33,17 +35,10 @@ type TaskDetailProps = {
   onClose: () => void;
   onExecute: () => void;
   onSave: (request: UpdateTaskRequest) => Promise<void>;
+  writable?: boolean;
 };
 
 const SAVE_FAILED = 'Failed to save task';
-
-const PRIORITIES: { value: number; label: string }[] = [
-  { value: 1, label: 'Lowest' },
-  { value: 2, label: 'Low' },
-  { value: 3, label: 'Medium' },
-  { value: 4, label: 'High' },
-  { value: 5, label: 'Highest' },
-];
 
 function sameIds(left: string[], right: string[]): boolean {
   if (left.length !== right.length) return false;
@@ -110,6 +105,7 @@ export function TaskDetail({
   onClose,
   onExecute,
   onSave,
+  writable = true,
 }: TaskDetailProps) {
   const [draft, setDraft] = useState<Draft>(() => hydrate(task));
   const [saving, setSaving] = useState(false);
@@ -118,10 +114,11 @@ export function TaskDetail({
   const [leaving, setLeaving] = useState<Task | null>(null);
   const hydrated = useRef(task);
   const renameButton = useRef<HTMLButtonElement>(null);
+  const titleText = useRef<HTMLSpanElement>(null);
   const wasRenaming = useRef(false);
 
   useEffect(() => {
-    if (focusTitle) renameButton.current?.focus();
+    if (focusTitle) (renameButton.current ?? titleText.current)?.focus();
   }, [focusTitle]);
 
   useEffect(() => {
@@ -145,7 +142,8 @@ export function TaskDetail({
   const request = useMemo(() => changed(task, draft), [task, draft]);
   const relations = useMemo(() => relationsOf(task, tasks), [task, tasks]);
   const edited = Object.keys(request).length > 0;
-  const canSave = edited && draft.description.trim().length > 0 && !saving;
+  const canSave = writable && edited && draft.description.trim().length > 0 && !saving;
+  const access = useId();
 
   const openRelated = (related: Task) => {
     if (edited) setLeaving(related);
@@ -177,7 +175,7 @@ export function TaskDetail({
   return (
     <section className="task-details">
       <header className="task-details-header">
-        {renaming ? (
+        {renaming && writable ? (
           <TaskTitleInput
             title={task.title}
             className="task-details-title"
@@ -186,17 +184,23 @@ export function TaskDetail({
           />
         ) : (
           <h2 className="task-details-title" aria-busy={awaitsTitle(task) || undefined}>
-            <button
-              ref={renameButton}
-              type="button"
-              className={`task-title-button${awaitsTitle(task) ? ' task-title-pending' : ''}`}
-              aria-label={`Rename ${task.title}`}
-              title="Rename"
-              onClick={() => setRenaming(true)}
-            >
-              <span className="task-title-text">{task.title}</span>
-              <PencilIcon />
-            </button>
+            {writable ? (
+              <button
+                ref={renameButton}
+                type="button"
+                className={`task-title-button${awaitsTitle(task) ? ' task-title-pending' : ''}`}
+                aria-label={`Rename ${task.title}`}
+                title="Rename"
+                onClick={() => setRenaming(true)}
+              >
+                <span className="task-title-text">{task.title}</span>
+                <PencilIcon />
+              </button>
+            ) : (
+              <span ref={titleText} className="task-title-text" tabIndex={-1}>
+                {task.title}
+              </span>
+            )}
           </h2>
         )}
         <Button variant="ghost" onClick={onClose}>
@@ -218,6 +222,7 @@ export function TaskDetail({
           <textarea
             id="task-detail-description"
             rows={4}
+            readOnly={!writable}
             value={draft.description}
             onChange={(event) =>
               setDraft((current) => ({ ...current, description: event.target.value }))
@@ -233,6 +238,7 @@ export function TaskDetail({
           <textarea
             id="task-detail-criteria"
             rows={3}
+            readOnly={!writable}
             value={draft.acceptance_criteria}
             onChange={(event) =>
               setDraft((current) => ({ ...current, acceptance_criteria: event.target.value }))
@@ -240,143 +246,156 @@ export function TaskDetail({
           />
         </div>
 
-        <div className="form-row">
-          <Select
-            id="task-detail-status"
-            label="Status"
-            value={draft.status}
-            onValueChange={(next) =>
-              setDraft((current) => ({ ...current, status: next as TaskStatus }))
-            }
-            wrapperClassName="form-group"
-            options={[...STATUS_OPTIONS]}
-          />
+        <fieldset className="task-details-fields" disabled={!writable}>
+          <div className="form-row">
+            <Select
+              id="task-detail-status"
+              label="Status"
+              value={draft.status}
+              onValueChange={(next) =>
+                setDraft((current) => ({ ...current, status: next as TaskStatus }))
+              }
+              wrapperClassName="form-group"
+              options={[...STATUS_OPTIONS]}
+            />
 
-          <div className="form-group">
-            <span id="task-detail-priority-label" className="form-label">
-              Priority
-            </span>
-            <div
-              className="priority-selector"
-              role="group"
-              aria-labelledby="task-detail-priority-label"
-            >
-              {PRIORITIES.map((priority) => (
-                <button
-                  key={priority.value}
-                  type="button"
-                  className={`priority-option ${draft.priority === priority.value ? 'selected' : ''}`}
-                  onClick={() => setDraft((current) => ({ ...current, priority: priority.value }))}
-                >
-                  <span className="priority-number">{priority.value}</span>
-                  <span className="priority-label">{priority.label}</span>
-                </button>
-              ))}
+            <div className="form-group">
+              <span id="task-detail-priority-label" className="form-label">
+                Priority
+              </span>
+              <div
+                className="priority-selector"
+                role="group"
+                aria-labelledby="task-detail-priority-label"
+              >
+                {PRIORITIES.map((priority) => (
+                  <button
+                    key={priority.value}
+                    type="button"
+                    className={`priority-option ${draft.priority === priority.value ? 'selected' : ''}`}
+                    onClick={() =>
+                      setDraft((current) => ({ ...current, priority: priority.value }))
+                    }
+                  >
+                    <span className="priority-number">{priority.value}</span>
+                    <span className="priority-label">{priority.label}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
 
-        <fieldset className="form-group">
-          <legend className="form-label">Projects</legend>
-          <div className="task-details-projects">
-            {projects.map((project) => (
-              <label key={project.id}>
-                <input
-                  type="checkbox"
-                  checked={draft.project_ids.includes(project.id)}
-                  onChange={() => toggleProject(project.id)}
-                />
-                {project.name}
-              </label>
-            ))}
-          </div>
-        </fieldset>
-
-        <div className="form-group">
-          <label htmlFor="task-detail-model">Model</label>
-          <input
-            id="task-detail-model"
-            type="text"
-            value={draft.model_name}
-            onChange={(event) =>
-              setDraft((current) => ({ ...current, model_name: event.target.value }))
-            }
-          />
-        </div>
-
-        <div className="form-group">
-          <label className="toggle-label">
-            <span className="toggle-wrapper">
-              <input
-                type="checkbox"
-                checked={draft.is_agentic}
-                onChange={(event) =>
-                  setDraft((current) => ({ ...current, is_agentic: event.target.checked }))
-                }
-              />
-              <span className="toggle-slider" />
-            </span>
-            <span className="toggle-text">
-              <span className="toggle-title">Enable Agentic Mode</span>
-              <span className="toggle-desc">
-                Allow this task to autonomously read/write code and query the knowledge base
-              </span>
-            </span>
-          </label>
-        </div>
-
-        {draft.is_agentic && (
-          <>
-            <div className="form-group">
-              <label className="toggle-label">
-                <span className="toggle-wrapper">
+          <fieldset className="form-group">
+            <legend className="form-label">Projects</legend>
+            <div className="task-details-projects">
+              {projects.map((project) => (
+                <label key={project.id}>
                   <input
                     type="checkbox"
-                    checked={draft.require_plan_approval}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        require_plan_approval: event.target.checked,
-                      }))
-                    }
+                    checked={draft.project_ids.includes(project.id)}
+                    onChange={() => toggleProject(project.id)}
                   />
-                  <span className="toggle-slider" />
-                </span>
-                <span className="toggle-text">
-                  <span className="toggle-title">Require plan approval</span>
-                  <span className="toggle-desc">
-                    A run writes its plan and waits for you to approve it before changing anything
-                  </span>
-                </span>
-              </label>
+                  {project.name}
+                </label>
+              ))}
             </div>
+          </fieldset>
 
-            <Select
-              id="task-detail-source"
-              label="Code Source"
-              value={draft.source_id}
-              onValueChange={(next) => setDraft((current) => ({ ...current, source_id: next }))}
-              wrapperClassName="form-group"
-              options={[
-                { value: '', label: 'Select a source...' },
-                ...sources.map((source) => ({
-                  value: source.id,
-                  label: `${source.name} (${source.source_type})`,
-                })),
-              ]}
+          <div className="form-group">
+            <label htmlFor="task-detail-model">Model</label>
+            <input
+              id="task-detail-model"
+              type="text"
+              value={draft.model_name}
+              onChange={(event) =>
+                setDraft((current) => ({ ...current, model_name: event.target.value }))
+              }
             />
-          </>
-        )}
+          </div>
+
+          <div className="form-group">
+            <label className="toggle-label">
+              <span className="toggle-wrapper">
+                <input
+                  type="checkbox"
+                  checked={draft.is_agentic}
+                  onChange={(event) =>
+                    setDraft((current) => ({ ...current, is_agentic: event.target.checked }))
+                  }
+                />
+                <span className="toggle-slider" />
+              </span>
+              <span className="toggle-text">
+                <span className="toggle-title">Enable Agentic Mode</span>
+                <span className="toggle-desc">
+                  Allow this task to autonomously read/write code and query the knowledge base
+                </span>
+              </span>
+            </label>
+          </div>
+
+          {draft.is_agentic && (
+            <>
+              <div className="form-group">
+                <label className="toggle-label">
+                  <span className="toggle-wrapper">
+                    <input
+                      type="checkbox"
+                      checked={draft.require_plan_approval}
+                      onChange={(event) =>
+                        setDraft((current) => ({
+                          ...current,
+                          require_plan_approval: event.target.checked,
+                        }))
+                      }
+                    />
+                    <span className="toggle-slider" />
+                  </span>
+                  <span className="toggle-text">
+                    <span className="toggle-title">Require plan approval</span>
+                    <span className="toggle-desc">
+                      A run writes its plan and waits for you to approve it before changing anything
+                    </span>
+                  </span>
+                </label>
+              </div>
+
+              <Select
+                id="task-detail-source"
+                label="Code Source"
+                value={draft.source_id}
+                onValueChange={(next) => setDraft((current) => ({ ...current, source_id: next }))}
+                wrapperClassName="form-group"
+                options={[
+                  { value: '', label: 'Select a source...' },
+                  ...sources.map((source) => ({
+                    value: source.id,
+                    label: `${source.name} (${source.source_type})`,
+                  })),
+                ]}
+              />
+            </>
+          )}
+        </fieldset>
       </div>
 
       <footer className="task-details-actions">
+        {!writable && (
+          <p id={access} className="task-details-access">
+            {READ_ONLY}
+          </p>
+        )}
         <Button variant="secondary" onClick={onExecute}>
-          Execute
+          {writable ? 'Execute' : 'Runs'}
         </Button>
         <Button variant="ghost" onClick={onClose}>
           Cancel
         </Button>
-        <Button onClick={handleSave} disabled={!canSave}>
+        <Button
+          onClick={handleSave}
+          disabled={!canSave}
+          aria-describedby={writable ? undefined : access}
+        >
           Save
         </Button>
       </footer>

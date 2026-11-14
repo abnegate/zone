@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "abnegate-agent"
-version = "0.2.2"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e355ab64e546011103e527d27979ff624153030c4591c57c575221ad85759316"
+checksum = "10e45912e24342273e65601f5cb0bc3a9659132bf9880646be9e13d700506085"
 dependencies = [
  "abnegate-agent-cli",
  "abnegate-config",
@@ -39,9 +39,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-agent-cli"
-version = "0.2.1"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb5a06d9abeafc3b54591af14e4450d503aacd9806c64b3406451b2a375f5d11"
+checksum = "83bd2ce0124050cca4a033854c62e98662ec7fe7aeb653fca039775e40cfdeec"
 dependencies = [
  "abnegate-exec",
  "abnegate-http",
@@ -114,9 +114,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-exec"
-version = "0.2.1"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afdef19b064937b532c5073a1a18146a6e330fb3207abe0913d662f637ff5610"
+checksum = "70ab7a18648a5aa01e5a977b97868476eadd331cf84a5825e3c8e20d75f10cf8"
 dependencies = [
  "abnegate-secret",
  "base64 0.23.1",
@@ -3554,6 +3554,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
 
 [[package]]
+name = "is-docker"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928bae27f42bc99b60d9ac7334e3a21d10ad8f1835a4e12ec3ec0464765ed1b3"
+dependencies = [
+ "once_cell",
+]
+
+[[package]]
+name = "is-wsl"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "173609498df190136aa7dea1a91db051746d339e18476eed5ca40521f02d7aa5"
+dependencies = [
+ "is-docker",
+ "once_cell",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4765,6 +4784,17 @@ checksum = "1e68317604e77e53b85896388e1a803c1d21b74c899ec9e5e1112db90735edd7"
 dependencies = [
  "cc",
  "pkg-config",
+]
+
+[[package]]
+name = "open"
+version = "5.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d8c8b8e725ad26404d6896eb2f064294a0a7b4f1d9120210d85544684c4ca95"
+dependencies = [
+ "dunce",
+ "is-wsl",
+ "libc",
 ]
 
 [[package]]
@@ -7103,6 +7133,44 @@ dependencies = [
  "syn 2.0.119",
  "tauri-codegen",
  "tauri-utils",
+]
+
+[[package]]
+name = "tauri-plugin"
+version = "2.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74be5dd4bed9afbd145e5716b5fa2ec28cbc29c34ffa61c258c9273d896c8020"
+dependencies = [
+ "anyhow",
+ "glob",
+ "plist",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tauri-utils",
+ "walkdir",
+]
+
+[[package]]
+name = "tauri-plugin-opener"
+version = "2.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60d60366174b745b4ef5824b8bbc1c457fd08f0ce101ff643c0a49181a9f4e91"
+dependencies = [
+ "dunce",
+ "glob",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "open",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.20",
+ "url",
+ "windows",
+ "zbus",
 ]
 
 [[package]]
@@ -9461,6 +9529,7 @@ version = "0.1.0"
 dependencies = [
  "tauri",
  "tauri-build",
+ "tauri-plugin-opener",
  "tokio",
  "tracing",
  "tracing-subscriber",

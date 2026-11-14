@@ -65,22 +65,27 @@ const PLAIN: &[Section] = &[
 /// Bounds the prompt of a member's chat over everything production assembles
 /// for one: every optional tool group on, an MCP server attached, the tools
 /// whose schemas are held back listed, a GitHub source, a stated effort and
-/// the server's own zone. It measures 29,803 characters auto-approved in
+/// the server's own zone. It measured 29,803 characters auto-approved in
 /// zone's own loop, and 27,902 offered to a coding agent, which is offered no
-/// tool that ends zone's turn.
-pub const CHAT_MAX_CHARS: usize = 29_900;
+/// tool that ends zone's turn. Telling that chat to open the pull request its
+/// work needs rather than ask for one adds 257 to each, counted over the
+/// sentences that changed; `every_prompt_stays_inside_its_budget` is what
+/// measures it again.
+pub const CHAT_MAX_CHARS: usize = 30_100;
 /// Bounds the prompt of a planner chat, which adds the interview section and
 /// its two tools to the chat prompt: 32,163 characters, and 30,170 offered to
-/// a coding agent.
-pub const PLANNER_MAX_CHARS: usize = 32_200;
+/// a coding agent, each carrying the same 257.
+pub const PLANNER_MAX_CHARS: usize = 32_500;
 /// Bounds the prompt of a chat that offers no tools: 4,740 characters.
 pub const PLAIN_MAX_CHARS: usize = 4_800;
 /// Bounds the task prompt over everything production assembles for a run its
 /// writer started: the same tool groups, server and listing, the checkout's
-/// branch and head, and a stated effort. It measures 23,678 characters for an
+/// branch and head, and a stated effort. It measured 23,678 characters for an
 /// unattended run that requires its plan approved, 584 of them added by the
-/// plan paragraph, and 20,756 offered to a coding agent.
-pub const TASK_MAX_CHARS: usize = 23_700;
+/// plan paragraph, and 20,756 offered to a coding agent. Splitting the rule
+/// about the pull request from the rule about the comment adds at most 48 to
+/// each, less whatever the outward tier drops by no longer naming one.
+pub const TASK_MAX_CHARS: usize = 23_800;
 
 fn assemble(order: &[Section], context: &Context<'_>) -> String {
     order
@@ -847,11 +852,13 @@ mod tests {
     }
 
     /// `conduct` told a chat turn to take a draft pull request rather than ask,
-    /// while `workspace` lets `create_pull_request` run only when the user asked
-    /// for a pull request and `files` lets the push it needs run only on the
+    /// while `workspace` let `create_pull_request` run only when the user asked
+    /// for a pull request and `files` let the commit it needs run only on the
     /// same ask, so the assembled chat prompt both ordered and forbade the same
-    /// action. On the task surface `task` says Zone opens the run's pull request
-    /// itself. Counting on each surface is what keeps one section deciding.
+    /// action. `workspace` now owns it on the chat surface and says work on a
+    /// connected repository ends in a pull request; on the task surface `task`
+    /// says Zone opens the run's pull request itself. Counting on each surface
+    /// is what keeps one section deciding.
     #[test]
     fn one_section_decides_who_opens_a_pull_request_on_each_surface() {
         let task_prompt = task(&task_tools(), &github());
@@ -873,15 +880,18 @@ mod tests {
         }
 
         assert_eq!(
-            occurrences(
-                &chat_prompt,
-                "Only use them when the user asked to open a PR"
-            ),
+            occurrences(&chat_prompt, "ends in a pull request"),
             1,
             "{chat_prompt}"
         );
         assert_eq!(
-            occurrences(&chat_prompt, "Commit or push only when the user asks"),
+            occurrences(&chat_prompt, "Only use it when the user asked to open a PR"),
+            0,
+            "a chat that opens the pull request its work needs is not also told to wait to be \
+             asked for one: {chat_prompt}"
+        );
+        assert_eq!(
+            occurrences(&chat_prompt, "push only when the user asks"),
             1,
             "{chat_prompt}"
         );

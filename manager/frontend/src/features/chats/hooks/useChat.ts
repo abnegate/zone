@@ -36,8 +36,15 @@ import {
   type WaitSettled,
 } from '../types';
 import { automated } from '../utils/automation';
+import { cached } from '../utils/cached';
 import { mergeCitations } from '../utils/citations';
 import { publishFrame } from '../utils/frames';
+import {
+  beginGeneration,
+  rememberedGeneration,
+  resumeGeneration,
+  settleGeneration,
+} from '../utils/generation';
 import { appendHandover } from '../utils/handover';
 import { requestedModel } from '../utils/providerOptions';
 
@@ -241,10 +248,18 @@ export function useChat(
   onTitleUpdated?: (id: string, title: string) => void,
   draft?: SendMessageRequest
 ) {
-  const [chat, setChat] = useState<ChatWithMessages | null>(null);
-  const [loading, setLoading] = useState(Boolean(chatId));
+  const [chat, setChat] = useState<ChatWithMessages | null>(() =>
+    chatId ? (cached.histories.recall(chatId) ?? null) : null
+  );
+  const [loading, setLoading] = useState(Boolean(chatId) && chat === null);
   const [error, setError] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
+  // When the turn being written started, read back from the cache on every
+  // selection: a chat swapped away from and returned to is still running the
+  // turn it was running, and its counter must say so.
+  const [generationStarted, setGenerationStarted] = useState<number | null>(() =>
+    chatId ? rememberedGeneration(chatId) : null
+  );
   const [status, setStatus] = useState<string | null>(null);
   const [queue, setQueue] = useState<QueuedMessage[]>([]);
   const [held, setHeld] = useState(false);
@@ -257,10 +272,12 @@ export function useChat(
   contextModel.current = chat?.id === chatId ? requestedModel(chat) : null;
   const previewSequence = useRef(0);
   const socketRef = useRef<WebSocket | null>(null);
-  // The chat the socket handlers have to write into. Until the fetch lands
-  // there is nowhere to put a frame, so the socket effect holds them.
+  // The chat the socket handlers write into. A remembered history is drawn
+  // before the fetch lands, but frames are held until it does: the fetch
+  // replaces the whole history, and would drop anything applied before it.
+  const [synced, setSynced] = useState<string | null>(null);
   const loadedChat = useRef<string | null>(null);
-  loadedChat.current = chat?.id ?? null;
+  loadedChat.current = chat?.id === synced ? synced : null;
   const drainFrames = useRef<(() => void) | null>(null);
   const requestIdRef = useRef(0);
   const pendingUserIdRef = useRef<string | null>(null);
@@ -280,6 +297,7 @@ export function useChat(
 
   const applyTitle = useCallback((id: string, title: string): void => {
     titles.current.set(id, { title, revision: ++revision.current });
+    cached.histories.update(id, (remembered) => ({ ...remembered, title }));
     setChat((previous) => (previous?.id === id ? { ...previous, title } : previous));
   }, []);
 
@@ -313,7 +331,14 @@ export function useChat(
         const title = titles.current.get(data.id);
         const updated =
           title && title.revision > currentRevision ? { ...data, title: title.title } : data;
-        setChat(updated);
+        const pendingId = pendingUserIdRef.current;
+        setChat((previous) => {
+          const pending = previous?.messages.find((message) => message.id === pendingId);
+          return pending && previous?.id === updated.id
+            ? { ...updated, messages: [...updated.messages, pending] }
+            : updated;
+        });
+        setSynced(chatId);
         if (epoch === contextEpoch.current) {
           setContext(
             data.context ? (ContextUsageSchema.safeParse(data.context).data ?? null) : null
@@ -324,6 +349,8 @@ export function useChat(
         titleCallback.current?.(updated.id, updated.title);
       } catch (err) {
         if (requestId !== requestIdRef.current) return;
+        cached.histories.forget(chatId);
+        setSynced(chatId);
         setError(err instanceof Error ? err.message : 'Failed to fetch chat');
       } finally {
         if (requestId === requestIdRef.current) {
@@ -335,15 +362,24 @@ export function useChat(
   );
 
   useEffect(() => {
-    // Drop the previous conversation as soon as the selection changes so the
-    // UI never keeps rendering chat A under chat B's selection.
-    setChat(null);
+    // Swap the previous conversation out as soon as the selection changes so
+    // the UI never keeps rendering chat A under chat B's selection.
+    const remembered = chatId ? (cached.histories.recall(chatId) ?? null) : null;
+    setChat(remembered);
+    setSynced(null);
+    if (remembered) setLoading(false);
     contextEpoch.current += 1;
     previewSequence.current += 1;
-    setContext(null);
+    setContext(
+      remembered?.context ? (ContextUsageSchema.safeParse(remembered.context).data ?? null) : null
+    );
     setContextError(null);
-    fetchChat();
-  }, [fetchChat]);
+    fetchChat({ silent: remembered !== null });
+  }, [chatId, fetchChat]);
+
+  useEffect(() => {
+    if (chat) cached.histories.remember(chat.id, chat);
+  }, [chat]);
 
   const draftKey = draft === undefined ? null : JSON.stringify(draft);
   const settingsKey = chat
@@ -616,9 +652,24 @@ export function useChat(
     setStatus(null);
     setQueue([]);
     setHeld(false);
+    setGenerationStarted(chatId ? rememberedGeneration(chatId) : null);
     if (!chatId) {
       return;
     }
+
+    // The selection these handlers belong to, narrowed once: they run long
+    // after the guard above, and a parameter widens again inside a closure.
+    const selected: string = chatId;
+    /** A turn starting here, which never inherits an earlier turn's reading. */
+    const begun = (): void => setGenerationStarted(beginGeneration(selected));
+    /** A turn a frame says is running, counted from when it started. */
+    const running = (messageId: string | null): void =>
+      setGenerationStarted(resumeGeneration(selected, messageId));
+    /** A turn that ended. A dropped socket does not come through here. */
+    const ended = (): void => {
+      settleGeneration(selected);
+      setGenerationStarted(null);
+    };
 
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -766,6 +817,7 @@ export function useChat(
       contextEpoch.current += 1;
       upsertMessage(pendingId, 'user', message.content, message.metadata);
       setStreaming(true);
+      begun();
     };
 
     // Frames can beat the chat they belong to onto the wire, and every
@@ -812,6 +864,9 @@ export function useChat(
           break;
         case 'status':
           setStatus(payload.message);
+          // Feedback can arrive before any message_start, and is drawn with the
+          // same counter, so it anchors the clock when nothing else has.
+          running(assistantId);
           break;
         case 'message_start': {
           // A dropped socket settles the turn locally, because from here it
@@ -822,6 +877,7 @@ export function useChat(
           else if (settled || assistantId === payload.message_id) break;
           activeGenerationRef.current = true;
           setStreaming(true);
+          running(payload.message_id);
           generationSeen = true;
           contextEpoch.current += 1;
           setStatus(null);
@@ -1013,6 +1069,7 @@ export function useChat(
           activeGenerationRef.current = false;
           sendInFlightRef.current = false;
           setStreaming(false);
+          ended();
           break;
         case 'cancelled': {
           if (
@@ -1032,6 +1089,7 @@ export function useChat(
           activeGenerationRef.current = false;
           sendInFlightRef.current = false;
           setStreaming(false);
+          ended();
           break;
         }
         case 'queue': {
@@ -1047,6 +1105,7 @@ export function useChat(
             sendInFlightRef.current = false;
             activeGenerationRef.current = false;
             setStreaming(false);
+            ended();
           }
           if (payload.started) beginQueued(payload.started);
           break;
@@ -1062,6 +1121,7 @@ export function useChat(
           activeGenerationRef.current = false;
           sendInFlightRef.current = false;
           setStreaming(false);
+          ended();
           break;
         default:
           break;
@@ -1246,9 +1306,9 @@ export function useChat(
   // The socket can connect, and the server can replay a turn already in
   // flight, before the chat those frames belong to has finished loading.
   useEffect(() => {
-    if (!chat?.id) return;
+    if (!synced || chat?.id !== synced) return;
     drainFrames.current?.();
-  }, [chat?.id]);
+  }, [chat?.id, synced]);
 
   const waitForOpen = (socket: WebSocket, timeoutMs = 5000): Promise<void> => {
     // Numeric readyState values stay valid for test doubles that do not
@@ -1307,6 +1367,7 @@ export function useChat(
     contextEpoch.current += 1;
     upsertMessage(pendingId, 'user', request.content, request.metadata);
     setStreaming(true);
+    setGenerationStarted(beginGeneration(chatId));
     try {
       socket.send(frame);
     } catch (err) {
@@ -1318,6 +1379,8 @@ export function useChat(
         prev ? { ...prev, messages: prev.messages.filter((m) => m.id !== pendingId) } : prev
       );
       setStreaming(false);
+      settleGeneration(chatId);
+      setGenerationStarted(null);
       throw err;
     }
   };
@@ -1475,6 +1538,7 @@ export function useChat(
     error,
     streaming,
     status,
+    generationStarted,
     queue,
     held,
     sendMessage,

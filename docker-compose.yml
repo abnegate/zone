@@ -311,7 +311,6 @@ services:
       - LITELLM_HOST=http://litellm:4000
       - ZONE_CHAT_ROUNDS=${ZONE_CHAT_ROUNDS:-64}
       - ZONE_CHAT_CALLS=${ZONE_CHAT_CALLS:-256}
-      - ZONE_CHAT_TIMEOUT_SECONDS=${ZONE_CHAT_TIMEOUT_SECONDS:-1800}
       - ZONE_CHAT_OUTPUT_TOKENS=${ZONE_CHAT_OUTPUT_TOKENS:-4096}
       - ZONE_CHAT_CONTEXT_TOKENS=${ZONE_CHAT_CONTEXT_TOKENS:-32768}
       - ZONE_CHAT_AGENT_CWD=${ZONE_CHAT_AGENT_CWD:-/app/workspace}
@@ -330,6 +329,7 @@ services:
       - ZONE_CLAUDE_API_URL=${ZONE_CLAUDE_API_URL:-https://api.anthropic.com}
       - ZONE_CODEX_API_URL=${ZONE_CODEX_API_URL:-https://chatgpt.com}
       - ZONE_AGENT_USAGE_TTL_SECONDS=${ZONE_AGENT_USAGE_TTL_SECONDS:-60}
+      - ZONE_AGENT_NICENESS=${ZONE_AGENT_NICENESS:-}
       - ZONE_ENDPOINT_HOSTS=${ZONE_ENDPOINT_HOSTS:-}
       # claude.com sends a browser on this machine back to
       # http://localhost:${ZONE_AGENT_CALLBACK_PORT}/callback with a sign-in's

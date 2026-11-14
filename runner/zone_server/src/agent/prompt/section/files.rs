@@ -41,8 +41,9 @@ const READING: &str = "Read only the part of a file you need when you already kn
              file back to check a write you just made: the tool result already said it applied. \
              Prefer plain-text formats over ones that inflate the context.";
 
-const GIT: &str = "Git: interactive flags such as rebase -i are not supported here. Commit or push only when \
-             the user asks, and branch first when the checkout is on the default branch. Do not \
+const GIT: &str = "Git: interactive flags such as rebase -i are not supported here. Commit work you were asked \
+             to do once it is done, branching first when the checkout is on the default branch, \
+             and push only when the user asks. Do not \
              force-push, hard reset, or rewrite history unless the user asked for it. When gh opens a \
              pull request, write its body to a file and pass it by path so its newlines survive.";
 
@@ -108,7 +109,7 @@ mod tests {
     }
 
     #[test]
-    fn git_is_only_driven_on_the_chat_surface_and_only_when_asked() {
+    fn git_is_only_driven_on_the_chat_surface_and_pushes_only_when_asked() {
         let rendered = chat(false);
 
         assert!(
@@ -116,11 +117,15 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("Commit or push only when the user asks"),
-            "{rendered}"
+            rendered.contains("Commit work you were asked to do once it is done"),
+            "the commit a pull request is opened from is part of the work: {rendered}"
         );
         assert!(
-            rendered.contains("branch first when the checkout is on the default branch"),
+            rendered.contains("push only when the user asks"),
+            "Zone's own tool pushes the branch it opens from: {rendered}"
+        );
+        assert!(
+            rendered.contains("branching first when the checkout is on the default branch"),
             "{rendered}"
         );
         assert!(

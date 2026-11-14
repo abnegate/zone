@@ -19,10 +19,7 @@ const scenarios = [
 
 async function prepare(page: Page, mode: 'light' | 'dark'): Promise<void> {
   await blockServiceWorker(page.context());
-  await page.addInitScript(
-    (value) => localStorage.setItem('manager_theme', value),
-    mode,
-  );
+  await page.emulateMedia({ colorScheme: mode });
   await setupCommonRoutes(page, true);
   await routeApi(
     page,

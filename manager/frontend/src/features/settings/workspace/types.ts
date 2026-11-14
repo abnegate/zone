@@ -10,6 +10,7 @@ export interface Workspace {
   slug: string;
   description: string | null;
   is_active: boolean;
+  role?: WorkspaceRole;
   created_at: string;
   updated_at: string;
 }

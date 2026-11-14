@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { join } from 'node:path';
-import { media, read, rule } from '../test/css';
+import { media, read, rule, token } from '../test/css';
 
 const features = join(import.meta.dir, '..', 'features');
 
@@ -334,6 +334,11 @@ describe('tasks page layout', () => {
   const board = read(join(boardStyles, 'Board.css'));
   const columns = read(join(boardStyles, 'Column.css'));
   const cards = read(join(boardStyles, 'Card.css'));
+  const SELECTING_SELECTOR =
+    '.board[data-selecting] .task-card-selector, .task-card[data-selected] .task-card-selector';
+  const SELECTING_CARD = '.board[data-selecting] .task-card, .task-card[data-selected]';
+  const SELECTING_GRIP =
+    '.board[data-selecting] .task-card-handle::after, .task-card[data-selected] .task-card-handle::after';
 
   it('scrolls the board sideways in its own row of fixed-width columns', () => {
     expect(rule(board, '.board')).toContain('overflow-x: auto');
@@ -376,7 +381,44 @@ describe('tasks page layout', () => {
   it('shows the grip and the menu wherever any pointer is coarse, not only without hover', () => {
     expect(cards).not.toContain('(hover: none)');
     const touch = media(cards, '(any-pointer: coarse)');
-    expect(rule(touch, '.task-card-handle,\n  .task-card-menu')).toContain('opacity: 1');
+    expect(rule(touch, '.task-card-handle, .task-card-menu')).toContain('opacity: 1');
+  });
+
+  it('shows the card checkboxes only while selecting, never on hover or focus', () => {
+    const selector = rule(cards, '.task-card-selector');
+    expect(selector).toContain('display: none');
+    expect(selector).not.toContain('opacity');
+    expect(rule(cards, SELECTING_SELECTOR)).toBe('display: flex;');
+    expect(cards).not.toMatch(/:(hover|focus-within) \.task-card-selector/);
+    expect(media(cards, '(any-pointer: coarse)')).not.toContain('.task-card-selector');
+  });
+
+  it('indents the title and everything under it together, and only while selecting', () => {
+    expect(rule(cards, '.task-card-heading')).not.toContain('padding-left');
+    expect(rule(cards, SELECTING_CARD)).toBe(
+      'padding-left: calc( var(--task-card-select-left) + var(--task-card-select-size) + var(--task-card-select-gap) );'
+    );
+  });
+
+  it('gives the grip its whole 44px square on a touch screen until selecting shares it with the checkbox', () => {
+    const touch = media(cards, '(any-pointer: coarse)');
+    expect(rule(touch, '.task-card-handle::after')).not.toContain('width');
+    expect(rule(touch, SELECTING_GRIP)).toBe(
+      'width: calc(var(--task-card-select-left) + var(--ui-space-2));'
+    );
+    const card = rule(touch, '.task-card');
+    expect(card).toContain('--task-card-select-above: var(--ui-space-3)');
+    expect(card).toContain('--task-card-select-below: var(--ui-space-4)');
+  });
+
+  it('stretches the checkbox hit area from its outer edge to the title, whatever its border', () => {
+    const target = rule(cards, '.task-card-select::after');
+    expect(target).toContain('left: 50%');
+    expect(target).toContain(
+      'width: calc(var(--task-card-select-size) + var(--task-card-select-gap))'
+    );
+    expect(target).toContain('translate( calc(var(--task-card-select-size) / -2)');
+    expect(target).not.toContain('inset');
   });
 
   it('keeps the drag placeholder muted and dashed in the dark theme and under the pointer', () => {
@@ -561,6 +603,47 @@ describe('tasks page layout', () => {
   it('sizes the editor chrome to the header', () => {
     expect(rule(css, '.task-details-header')).toContain('height: var(--ui-header-height)');
     expect(rule(css, '.task-details-actions')).toContain('height: var(--ui-header-height)');
+  });
+});
+
+describe('bulk edit dialog', () => {
+  const kit = join(import.meta.dir, '..', '..', '..', '..', 'packages', 'ui', 'src', 'styles');
+  const globals = read(join(kit, 'globals.css'));
+  const variables = read(join(kit, 'variables.css'));
+  const dialog = read(join(features, 'tasks', 'components', 'EditTasksDialog.css'));
+  const ROOT_FONT_SIZE = 16;
+
+  function pixels(length: string): number {
+    const value = Number.parseFloat(length);
+    return length.endsWith('rem') ? value * ROOT_FONT_SIZE : value;
+  }
+
+  function declaration(block: string, property: string): string {
+    const match = block.match(new RegExp(`(?:^|; )${property}: ([^;]+)`));
+    if (!match) throw new Error(`${property} is not declared`);
+    return match[1].trim();
+  }
+
+  const focus = rule(globals, '.ui-checkbox:focus-visible');
+  const ring =
+    pixels(declaration(focus, 'outline').split(' ')[0]) +
+    pixels(declaration(focus, 'outline-offset'));
+
+  it('pads the scrolling project list sideways so a focused checkbox shows its whole ring', () => {
+    const list = rule(dialog, '.edit-tasks-project-list');
+    expect(list).toContain('overflow-y: auto');
+    expect(declaration(list, 'padding-inline')).toBe('var(--ui-space-1)');
+    expect(declaration(list, 'margin-inline')).toBe('calc(var(--ui-space-1) * -1)');
+    expect(pixels(token(variables, 'ui-space-1'))).toBeGreaterThanOrEqual(ring);
+  });
+
+  it('leaves room above and below a centred checkbox for its ring', () => {
+    expect(rule(dialog, '.edit-tasks-project-list .ui-checkbox-wrapper')).toContain(
+      'align-items: center'
+    );
+    const row = pixels(token(variables, 'ui-control-height-sm'));
+    const box = pixels(declaration(rule(globals, '.ui-checkbox'), 'height'));
+    expect((row - box) / 2).toBeGreaterThanOrEqual(ring);
   });
 });
 

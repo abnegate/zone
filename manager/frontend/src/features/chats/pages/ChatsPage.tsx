@@ -34,6 +34,7 @@ import {
   ChatMenu,
   ChatPanel,
   ChatSources,
+  ChatStatusIndicator,
   Generation,
   HandoverNotice,
   HeaderPopover,
@@ -48,8 +49,10 @@ import {
 } from '../components';
 import { Activity } from '../components/Activity';
 import { ContextUsage } from '../components/ContextUsage';
+import { MoreChats } from '../components/MoreChats';
 import {
   useChat,
+  useChatIndicators,
   useChatProviders,
   useChatPullRequests,
   useChatSearch,
@@ -57,11 +60,13 @@ import {
   useChatSubagents,
   useChats,
   useChatTasks,
+  usePreloadChats,
   useWorkspaceChatProviders,
 } from '../hooks';
 import type { SubagentRequest } from '../subagentTypes';
 import {
   type Chat,
+  type ChatIndicator,
   type ChatProviderOffer,
   type ChatSearchResult,
   REASONING_EFFORT_LABELS,
@@ -79,6 +84,7 @@ import {
   audioAttachments,
   automated,
   buildMessageWithAttachments,
+  CHAT_FILTER_OPTIONS,
   CHAT_GROUP_OPTIONS,
   CHAT_SORT_OPTIONS,
   chatModelName,
@@ -99,13 +105,17 @@ import {
   galleryItems,
   imageAttachments,
   isAgentOffer,
+  isChatFilter,
   isChatGroupBy,
   isChatSort,
   isSendable,
   isStartingImage,
+  isWaiting,
   keepEffort,
+  listSort,
   MODEL_NAME_PLACEHOLDER,
   MODEL_PLACEHOLDER,
+  matchesFilter,
   modelLabel,
   modelSelectOptions,
   type NewChatSettings,
@@ -118,6 +128,7 @@ import {
   parseCharacterText,
   providerChoices,
   readAttachment,
+  readChatFilter,
   readChatGroupBy,
   readChatSort,
   reasoningOptions,
@@ -129,6 +140,7 @@ import {
   splitTurn,
   toPlainText,
   videoAttachments,
+  writeChatFilter,
   writeChatGroupBy,
   writeChatSort,
 } from '../utils';
@@ -179,6 +191,7 @@ export default function ChatsPage() {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [groupBy, setGroupBy] = useState(readChatGroupBy);
   const [sort, setSort] = useState(readChatSort);
+  const [filter, setFilter] = useState(readChatFilter);
   const [messageInput, setMessageInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -213,7 +226,11 @@ export default function ChatsPage() {
 
   const {
     chats,
+    total: chatsTotal,
+    hasMore: moreChats,
     loading: chatsLoading,
+    loadingMore: chatsLoadingMore,
+    loadMore: loadMoreChats,
     error: chatsError,
     createChat,
     deleteChat: deleteChatFn,
@@ -222,17 +239,13 @@ export default function ChatsPage() {
     refresh: refreshChats,
     renameChat,
     updateTitle: updateListTitle,
-  } = useChats({ archived: showArchived });
+  } = useChats({ archived: showArchived, sort: listSort(sort) });
+  usePreloadChats(chats);
   const { projects } = useProjects('all');
   const projectNames = useMemo(
     () => Object.fromEntries(projects.map((project) => [project.id, project.name])),
     [projects]
   );
-  const arranged = useMemo(
-    () => arrangeChats(chats, { groupBy, sort, projectNames }),
-    [chats, groupBy, sort, projectNames]
-  );
-
   const {
     chat: activeChat,
     context,
@@ -241,6 +254,7 @@ export default function ChatsPage() {
     error: chatError,
     streaming,
     status: chatStatus,
+    generationStarted,
     queue,
     held,
     sendMessage: sendMessageFn,
@@ -263,6 +277,50 @@ export default function ChatsPage() {
     content: messageInput,
     metadata: attachmentMetadata(attachments.filter(isSendable)),
   });
+
+  const {
+    indicators,
+    loaded: indicatorsLoaded,
+    error: indicatorsError,
+  } = useChatIndicators(
+    currentWorkspace?.id,
+    showArchived,
+    streaming,
+    chats.length,
+    listSort(sort)
+  );
+  // The open chat's own socket knows it is writing before the next poll does,
+  // and only ever adds that: a reading the server made stands until it is read
+  // again, because this socket cannot see a turn somebody else's can.
+  //
+  // A turn parked on an approval is still streaming, so waiting for a person
+  // outlives the socket's reading of it. Overwriting that with "writing" would
+  // drop the one row the feature exists for out of the waiting filter.
+  const liveIndicators = useMemo((): Record<string, ChatIndicator> => {
+    if (!streaming || !selectedChatId) return indicators;
+    const current = indicators[selectedChatId];
+    return {
+      ...indicators,
+      [selectedChatId]: {
+        chat_id: selectedChatId,
+        activity: current && isWaiting(current.activity) ? current.activity : 'writing',
+        pull_request: current?.pull_request ?? null,
+        pull_requests: current?.pull_requests ?? 0,
+      },
+    };
+  }, [indicators, selectedChatId, streaming]);
+  const matching = useMemo(
+    () => chats.filter((chat) => matchesFilter(liveIndicators[chat.id], filter)),
+    [chats, liveIndicators, filter]
+  );
+  // A filter judges chats on readings that have not arrived yet. A read that
+  // failed is not one still coming, so that falls through to the empty state,
+  // which carries the way back out of the filter.
+  const waitingForStatuses = filter !== 'all' && !indicatorsLoaded && indicatorsError === null;
+  const arranged = useMemo(
+    () => arrangeChats(matching, { groupBy, sort, projectNames, indicators: liveIndicators }),
+    [matching, groupBy, sort, projectNames, liveIndicators]
+  );
 
   const {
     results: searchResults,
@@ -481,13 +539,21 @@ export default function ChatsPage() {
     stickToBottom.current = true;
   }, [selectedChatId]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages and generation feedback visible
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keep new messages, queued ones and generation feedback visible
   useEffect(() => {
     if (linkedMessageId) {
       return;
     }
     scrollToBottom();
-  }, [activeChat?.messages, chatError, chatStatus, streaming, linkedMessageId, scrollToBottom]);
+  }, [
+    activeChat?.messages,
+    chatError,
+    chatStatus,
+    streaming,
+    queue,
+    linkedMessageId,
+    scrollToBottom,
+  ]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: the scroller mounts with the displayed chat
   useEffect(() => {
@@ -529,6 +595,17 @@ export default function ChatsPage() {
   const clearSelectedChat = () => {
     setSelectedChatId(null);
     setSearchParams({}, { replace: true });
+  };
+
+  // Arriving from a search result or a source link parks the transcript on that
+  // message and holds the auto-scroll off it. Writing a new one is leaving it.
+  const clearLinkedMessage = () => {
+    if (!searchParams.get('message')) {
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('message');
+    setSearchParams(next, { replace: true });
   };
 
   const applyNewChat = (settings: NewChatSettings) => {
@@ -954,6 +1031,7 @@ export default function ChatsPage() {
     setSending(true);
     setChatOperationError(null);
     stickToBottom.current = true;
+    clearLinkedMessage();
     try {
       await sendMessageFn({
         content: buildMessageWithAttachments(messageInput.trim(), sendable),
@@ -980,6 +1058,7 @@ export default function ChatsPage() {
     setSending(true);
     setChatOperationError(null);
     stickToBottom.current = true;
+    clearLinkedMessage();
     try {
       await sendMessageFn({ content });
     } catch (error) {
@@ -1067,6 +1146,14 @@ export default function ChatsPage() {
     writeChatSort(value);
   };
 
+  const handleFilter = (value: string) => {
+    if (!isChatFilter(value)) return;
+    setFilter(value);
+    writeChatFilter(value);
+  };
+
+  const clearFilter = () => handleFilter('all');
+
   const openRename = (chat: Chat) => {
     setRenameId(chat.id);
     setTitle(chat.title);
@@ -1082,6 +1169,7 @@ export default function ChatsPage() {
       role="button"
       tabIndex={0}
     >
+      <ChatStatusIndicator indicator={liveIndicators[chat.id]} />
       <div className="chat-item-content">
         <span className="chat-title">{chat.title}</span>
         <span className="chat-meta">
@@ -1199,6 +1287,24 @@ export default function ChatsPage() {
           </div>
         )}
 
+        {!showSearchResults && chats.length > 0 && (
+          <div className="chats-arrange chats-arrange-status">
+            <Select
+              compact
+              value={filter}
+              onValueChange={handleFilter}
+              aria-label="Filter chats by status"
+              options={[...CHAT_FILTER_OPTIONS]}
+            />
+          </div>
+        )}
+
+        {indicatorsError && !showSearchResults && (
+          <div className="chats-notice" role="status">
+            Statuses are out of date: {indicatorsError}
+          </div>
+        )}
+
         {operationError && !showNewChatModal && (
           <div className="chats-error" role="alert">
             {operationError}
@@ -1272,17 +1378,53 @@ export default function ChatsPage() {
           />
         ) : (
           <div className="chats-list">
-            {arranged.map((group) => (
-              <div
-                key={group.key}
-                className="chat-group"
-                role="group"
-                aria-label={group.label ?? undefined}
-              >
-                {group.label ? <h2 className="chat-group-header">{group.label}</h2> : null}
-                {group.chats.map(renderChatItem)}
+            {matching.length === 0 && waitingForStatuses ? (
+              // A saved filter starts with no readings, so every chat is
+              // filtered out until the first one lands. Saying nothing matches
+              // before then would answer a question nobody has read yet.
+              <div className="chats-loading">
+                <span className="spinner" /> Reading chat statuses...
               </div>
-            ))}
+            ) : matching.length === 0 ? (
+              // Nothing loaded matches, which is not the same as nothing
+              // matching: the pagination below stays, so the next page can be
+              // loaded without clearing the filter first.
+              <EmptyState
+                icon={
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M4 5h16M7 12h10M10 19h4" />
+                  </svg>
+                }
+                title="No loaded chats match this filter"
+                description={
+                  CHAT_FILTER_OPTIONS.find((option) => option.value === filter)?.label ?? filter
+                }
+                action={
+                  <Button variant="secondary" onClick={clearFilter}>
+                    Show all chats
+                  </Button>
+                }
+              />
+            ) : (
+              arranged.map((group) => (
+                <div
+                  key={group.key}
+                  className="chat-group"
+                  role="group"
+                  aria-label={group.label ?? undefined}
+                >
+                  {group.label ? <h2 className="chat-group-header">{group.label}</h2> : null}
+                  {group.chats.map(renderChatItem)}
+                </div>
+              ))
+            )}
+            {moreChats ? (
+              <MoreChats
+                remaining={chatsTotal - chats.length}
+                loading={chatsLoadingMore}
+                onLoad={loadMoreChats}
+              />
+            ) : null}
           </div>
         )}
       </SubNav>
@@ -1743,7 +1885,11 @@ export default function ChatsPage() {
                     </div>
                   ) : null}
                   {streaming || chatStatus ? (
-                    <Generation key={selectedChatId} status={chatStatus} />
+                    <Generation
+                      key={selectedChatId}
+                      status={chatStatus}
+                      started={generationStarted}
+                    />
                   ) : null}
                   {queue.map((message) => (
                     <QueueItem

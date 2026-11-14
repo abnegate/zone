@@ -29,10 +29,9 @@ pub use settings::settings;
 pub use sign_in::SignIn;
 pub use toolset::Toolset;
 
-/// Thirty minutes is the chat turn's own budget, which a coding agent driven
-/// as a provider has to fit inside, and the longest a call to Zone's tools
-/// may wait on an approval.
-pub const TURN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long an agent waits on one call to Zone's tools, an approval the call
+/// is held for included.
+pub const TOOL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// How long Codex waits for Zone's MCP server to start.
 pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);

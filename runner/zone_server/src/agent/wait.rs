@@ -12,32 +12,50 @@
 //! timeout and a commit nothing is reporting on both have to be unphrasable as
 //! a pass, or a model reads "no news" as "green".
 
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
 use abnegate_agent::chat::NewEntry;
 use abnegate_agent::context::Entry;
-use abnegate_agent::tool::job::{JobExited, Jobs};
-use abnegate_agent::tool::{Session, Tier};
-use abnegate_agent::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
-use abnegate_llm::{Message as LlmMessage, ToolCall};
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::Tier;
+use abnegate_agent::tool::job::JobExited;
+use abnegate_agent::tool::job::Jobs;
+use abnegate_llm::Message as LlmMessage;
+use abnegate_llm::ToolCall;
 use async_trait::async_trait;
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::DateTime;
+use chrono::SecondsFormat;
+use chrono::Utc;
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::integrations::{Configuration, SETTLED_ASSESSMENTS, authenticated};
 use super::tools::WorkspaceScope;
-use crate::db::sources::{self, SourceRow};
-use crate::db::{task_access, tasks, workspace_members};
+use crate::db::sources::SourceRow;
+use crate::db::task_access;
+use crate::db::tasks;
+use crate::db::workspace_members;
 use crate::services::chat::session::RunContext;
+use crate::services::github::authentication::authenticated;
+use crate::services::github::client::SETTLED_ASSESSMENTS;
+use crate::services::github::configuration::Configuration;
+use crate::services::github::connection::connect;
 use crate::services::task_progress::ProgressMessage;
+use crate::services::task_progress::UNKNOWN_ERROR;
 use crate::state::AppState;
 
 pub use abnegate_agent::tool::job::WAIT_FOR;
@@ -54,8 +72,8 @@ pub const MIN_WAIT_SECS: u64 = 15;
 /// command runs under.
 pub const DEFAULT_WAIT_SECS: u64 = 300;
 
-/// Half the task timeout. On chat it is the whole turn, so the clamp there is
-/// against whatever remains of the stream deadline.
+/// The longest one wait parks for. Something that takes longer is waited on
+/// again, inside [`MAX_WAITS_PER_ATTEMPT`].
 pub const MAX_WAIT_SECS: u64 = 1_800;
 
 /// The default has to sit inside the window the schema advertises, or the tool
@@ -207,6 +225,16 @@ pub fn task_run_failed(run: Uuid, elapsed: Duration, error: &str) -> Outcome {
     ))
 }
 
+/// A run a person stopped. Says so rather than calling it a failure, because a
+/// model told the run failed would go looking for what broke.
+pub fn task_run_cancelled(run: Uuid, elapsed: Duration) -> Outcome {
+    Outcome::settled(format!(
+        "Task run {run} was stopped by a person after {}s, so it did not finish. Nothing \
+         in the run broke; ask before starting it again.",
+        elapsed.as_secs()
+    ))
+}
+
 pub fn checks_settled(reference: &str, sha: &str, assessment: &str, elapsed: Duration) -> Outcome {
     Outcome::settled(format!(
         "Checks on {reference} ({}) settled to {assessment} after {}s.",
@@ -258,16 +286,6 @@ pub fn too_many_waits() -> String {
     )
 }
 
-/// Returned as a tool error for the same reason as [`too_many_waits`]: a
-/// window the surface cannot hold would be acknowledged with a receipt, time
-/// out the moment it was awaited, and spend one of the allowances on nothing.
-pub fn no_window_left() -> String {
-    format!(
-        "Less than {MIN_WAIT_SECS}s of this turn remains, which is too little to wait in. \
-         Act on what you already have."
-    )
-}
-
 pub fn task_run_wait_unavailable() -> String {
     format!(
         "Waiting on another task run is not available from a task run. Use kind={KIND_JOB} or \
@@ -289,14 +307,9 @@ const DESCRIPTION: &str = "Wait for something outside this loop to finish: a bac
     resumes with the outcome, so call it alone, size the timeout to what you are waiting for, \
     and do not use it to re-read something that has not changed.";
 
-/// The two statuses a run that has not finished can hold, and the one that says
-/// it finished well.
+/// The two statuses a run that has not finished can hold.
 const RUN_RUNNING: &str = "running";
 const RUN_WAITING: &str = "waiting";
-const RUN_COMPLETED: &str = "completed";
-
-/// What a failed run is called when it recorded no message of its own.
-const RUN_UNKNOWN_ERROR: &str = "Unknown error";
 
 /// A commit GitHub has registered no run for at all. Never a settle on its own:
 /// right after a push it is indistinguishable from a repository with no CI.
@@ -319,11 +332,8 @@ const RUN_ID_INVALID: &str = "id must be a task run id for kind=task_run.";
 const SOURCE_ID_INVALID: &str = "id must be a source id for kind=check.";
 const RUN_UNREADABLE: &str = "Could not read the task run.";
 const RUN_FOREIGN: &str = "Task run not found in this workspace.";
-const SOURCE_UNREADABLE: &str = "Could not read the source.";
-const SOURCE_FOREIGN: &str = "Source not found in this workspace or inactive.";
 const SOURCE_NOT_GITHUB: &str = "Waiting on checks currently supports connected GitHub sources \
     only.";
-const SOURCE_CONFIGURATION_INVALID: &str = "The GitHub source configuration is invalid.";
 const WORKSPACE_UNREADABLE: &str = "You cannot read this workspace.";
 
 /// What a wait nobody registered is called, so even that reads as a timeout
@@ -404,31 +414,30 @@ impl Checks for Watched {
 }
 
 /// A task run that already reached a terminal status.
-struct Finished {
-    completed: bool,
-    error: Option<String>,
+#[derive(Debug, PartialEq)]
+enum Finished {
+    Completed,
+    Cancelled,
+    Failed(Option<String>),
 }
 
 impl Finished {
     fn read(row: &tasks::TaskRunRow) -> Option<Self> {
-        if matches!(row.status.as_str(), RUN_RUNNING | RUN_WAITING) {
-            return None;
+        match row.status.as_str() {
+            RUN_RUNNING | RUN_WAITING => None,
+            tasks::COMPLETED => Some(Self::Completed),
+            tasks::CANCELLED => Some(Self::Cancelled),
+            _ => Some(Self::Failed(row.error_message.clone())),
         }
-        Some(Self {
-            completed: row.status == RUN_COMPLETED,
-            error: row.error_message.clone(),
-        })
     }
 
     fn outcome(&self, run: Uuid, elapsed: Duration) -> Outcome {
-        if self.completed {
-            task_run_completed(run, elapsed)
-        } else {
-            task_run_failed(
-                run,
-                elapsed,
-                self.error.as_deref().unwrap_or(RUN_UNKNOWN_ERROR),
-            )
+        match self {
+            Self::Completed => task_run_completed(run, elapsed),
+            Self::Cancelled => task_run_cancelled(run, elapsed),
+            Self::Failed(error) => {
+                task_run_failed(run, elapsed, error.as_deref().unwrap_or(UNKNOWN_ERROR))
+            }
         }
     }
 }
@@ -452,6 +461,9 @@ impl Run {
                 }
                 Ok(ProgressMessage::Failed { error }) => {
                     return task_run_failed(self.run, started.elapsed(), &error);
+                }
+                Ok(ProgressMessage::Cancelled { .. }) => {
+                    return task_run_cancelled(self.run, started.elapsed());
                 }
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
@@ -592,14 +604,8 @@ static REGISTERED: Lazy<DashMap<Key, Registration>> = Lazy::new(DashMap::new);
 /// moment one completes.
 static PENDING: Lazy<DashMap<Session, Registration>> = Lazy::new(DashMap::new);
 
-/// How many waits a session has opened, and how far out any of them may reach.
-#[derive(Default)]
-struct Allowance {
-    taken: usize,
-    ceiling: Option<Instant>,
-}
-
-static SESSIONS: Lazy<DashMap<Session, Allowance>> = Lazy::new(DashMap::new);
+/// How many waits each session has opened.
+static TAKEN: Lazy<DashMap<Session, usize>> = Lazy::new(DashMap::new);
 
 /// Claim the wait before the receipt is written.
 ///
@@ -660,51 +666,28 @@ pub fn bind(session: Session, tool_call_id: &str) -> Option<Waiting> {
 
 /// How many waits this session has already opened.
 pub fn waits_taken(session: Session) -> usize {
-    SESSIONS.get(&session).map_or(0, |entry| entry.taken)
+    TAKEN.get(&session).map_or(0, |taken| *taken)
 }
 
-/// Hold this session's waits inside a deadline the surface owns.
-///
-/// Chat's whole turn is bounded by its stream deadline, which is computed after
-/// the tool set exists, so it reaches the tool here rather than through the
-/// context the tool set already froze. Tasks set none: the attempt timeout
-/// already covers every wait inside it.
-pub fn set_ceiling(session: Session, ceiling: Instant) {
-    SESSIONS.entry(session).or_default().ceiling = Some(ceiling);
-}
-
-fn ceiling(session: Session) -> Option<Instant> {
-    SESSIONS.get(&session).and_then(|entry| entry.ceiling)
-}
-
-/// Forget what a session spent and how far it could reach.
+/// Forget what a session spent.
 ///
 /// Called once per chat turn and at the top of each pass of a task's attempt
 /// loop, so a retried attempt does not inherit a spent counter. Unclaimed waits
 /// go with it: a turn cancelled between the receipt and the park would
 /// otherwise leave its subscription open for the life of the process.
 pub fn reset_session(session: Session) {
-    SESSIONS.remove(&session);
+    TAKEN.remove(&session);
     PENDING.remove(&session);
     REGISTERED.retain(|(owner, _), _| *owner != session);
 }
 
-/// How long a wait may run, clamped to what the schema advertises and then to
-/// whatever the surface still has left.
-///
-/// Nothing when what the surface has left is under the floor: clamping to it
-/// would mint a window that expires the moment it is awaited, and a wait
-/// shorter than [`MIN_WAIT_SECS`] is what this tool exists to replace.
-fn window(requested: Option<u64>, session: Session) -> Option<Duration> {
-    let seconds = requested
-        .unwrap_or(DEFAULT_WAIT_SECS)
-        .clamp(MIN_WAIT_SECS, MAX_WAIT_SECS);
-    let window = Duration::from_secs(seconds);
-    let Some(ceiling) = ceiling(session) else {
-        return Some(window);
-    };
-    let remaining = ceiling.saturating_duration_since(Instant::now());
-    (remaining >= Duration::from_secs(MIN_WAIT_SECS)).then(|| window.min(remaining))
+/// How long a wait may run, clamped to what the schema advertises.
+fn window(requested: Option<u64>) -> Duration {
+    Duration::from_secs(
+        requested
+            .unwrap_or(DEFAULT_WAIT_SECS)
+            .clamp(MIN_WAIT_SECS, MAX_WAIT_SECS),
+    )
 }
 
 /// When a registered wait runs out, as a deadline this process can sleep to.
@@ -870,9 +853,7 @@ impl WaitForTool {
         if waits_taken(context.session) >= MAX_WAITS_PER_ATTEMPT {
             return Err(too_many_waits());
         }
-        let Some(window) = window(request.timeout_secs, context.session) else {
-            return Err(no_window_left());
-        };
+        let window = window(request.timeout_secs);
         let started = Instant::now();
 
         let (subject, reference, subscription) = match request.kind.as_str() {
@@ -898,7 +879,7 @@ impl WaitForTool {
                 subscription: Mutex::new(subscription),
             },
         );
-        SESSIONS.entry(context.session).or_default().taken += 1;
+        *TAKEN.entry(context.session).or_default() += 1;
         Ok(receipt)
     }
 
@@ -995,20 +976,13 @@ impl WaitForTool {
         {
             return Err(WORKSPACE_UNREADABLE.to_string());
         }
-        let source = sources::get_source(database, source, scope.workspace_id)
+        let connection = connect(&scope.state, scope.workspace_id, source)
             .await
-            .map_err(|_| SOURCE_UNREADABLE.to_string())?
-            .filter(|source| source.is_active.unwrap_or(true))
-            .ok_or(SOURCE_FOREIGN)?;
-        if source.source_type != sources::GITHUB {
-            return Err(SOURCE_NOT_GITHUB.to_string());
-        }
-        let configuration = Configuration::deserialize(&source.config)
-            .map_err(|_| SOURCE_CONFIGURATION_INVALID.to_string())?;
+            .map_err(|unconnected| unconnected.message(SOURCE_NOT_GITHUB).to_string())?;
         Ok(Watched {
             state: scope.state.clone(),
-            source,
-            configuration,
+            source: connection.source,
+            configuration: connection.configuration,
         })
     }
 }
@@ -1017,16 +991,19 @@ impl WaitForTool {
 mod tests {
     use super::*;
 
-    use crate::agent::integrations::Github;
-    use crate::agent::integrations::PENDING_ASSESSMENT;
-    use crate::agent::integrations::SOURCE_DISCONNECTED;
-    use crate::agent::integrations::SUCCESS_ASSESSMENT;
-    use crate::agent::testing::Connected;
-    use crate::agent::testing::MINTED_TOKEN;
-    use crate::agent::testing::OWNER;
-    use crate::agent::testing::REPOSITORY;
-    use crate::agent::testing::STORED_TOKEN;
-    use crate::agent::testing::number;
+    use crate::db::sources;
+    use crate::services::github::authentication::SOURCE_DISCONNECTED;
+    use crate::services::github::client::Github;
+    use crate::services::github::client::PENDING_ASSESSMENT;
+    use crate::services::github::client::SUCCESS_ASSESSMENT;
+    use crate::services::github::testing::MINTED_TOKEN;
+    use crate::services::github::testing::OWNER;
+    use crate::services::github::testing::REPOSITORY;
+    use crate::services::github::testing::STORED_TOKEN;
+    use crate::services::github::testing::connected::Connected;
+    use crate::services::github::testing::number;
+    use crate::services::github::unavailable::Unavailable;
+    use crate::services::github::unconnected::Unconnected;
     use crate::services::github_app::testing::issuing;
     use crate::services::github_app::testing::uninstalled;
     use crate::state::AppState;
@@ -1194,7 +1171,7 @@ mod tests {
         let github = Github::new(
             Configuration {
                 owner: "owner".into(),
-                repo: "repository".into(),
+                repository: "repository".into(),
                 branch: None,
                 path: None,
                 token: None,
@@ -1324,6 +1301,66 @@ mod tests {
             task_run_failed(run, Duration::from_secs(512), "the build broke").text,
             "Task run 2f1c9e8a-0b44-4d7e-9c31-5a6b7c8d9e0f failed after 512s: the build broke"
         );
+    }
+
+    #[test]
+    fn a_stopped_task_run_is_reported_as_stopped_by_a_person_not_as_failed() {
+        let run = Uuid::parse_str("2f1c9e8a-0b44-4d7e-9c31-5a6b7c8d9e0f").unwrap();
+        let outcome = task_run_cancelled(run, Duration::from_secs(512));
+        assert_eq!(outcome.verdict, Verdict::Settled);
+        assert_eq!(
+            outcome.text,
+            "Task run 2f1c9e8a-0b44-4d7e-9c31-5a6b7c8d9e0f was stopped by a person after 512s, \
+             so it did not finish. Nothing in the run broke; ask before starting it again."
+        );
+        assert!(
+            !outcome.text.contains("failed"),
+            "a stop must not read as a failure: {:?}",
+            outcome.text
+        );
+        assert_unphrasable_as_success(&outcome.text);
+    }
+
+    #[test]
+    fn a_cancelled_row_reads_as_cancelled_whatever_its_message() {
+        for error in [Some(tasks::STOPPED), None] {
+            let row = task_run_row(tasks::CANCELLED, error);
+            assert_eq!(Finished::read(&row), Some(Finished::Cancelled));
+        }
+    }
+
+    #[test]
+    fn a_failed_row_reads_as_failed_with_its_error() {
+        let row = task_run_row(tasks::FAILED, Some("the build broke"));
+        assert_eq!(
+            Finished::read(&row),
+            Some(Finished::Failed(Some("the build broke".to_string())))
+        );
+    }
+
+    #[test]
+    fn an_active_row_has_not_finished() {
+        for status in [RUN_RUNNING, RUN_WAITING] {
+            assert_eq!(Finished::read(&task_run_row(status, None)), None);
+        }
+    }
+
+    fn task_run_row(status: &str, error_message: Option<&str>) -> tasks::TaskRunRow {
+        tasks::TaskRunRow {
+            id: Uuid::new_v4(),
+            task_id: Uuid::new_v4(),
+            triggered_by: None,
+            status: status.to_string(),
+            current_phase: None,
+            progress_percent: None,
+            started_at: None,
+            completed_at: None,
+            error_message: error_message.map(str::to_string),
+            artifacts: None,
+            pending_question: None,
+            pending_wait: None,
+            plan: None,
+        }
     }
 
     #[test]
@@ -1486,46 +1523,10 @@ mod tests {
 
     #[test]
     fn a_requested_window_is_clamped_to_what_the_schema_advertises() {
-        let session = chat();
-        assert_eq!(
-            window(None, session),
-            Some(Duration::from_secs(DEFAULT_WAIT_SECS))
-        );
-        assert_eq!(
-            window(Some(1), session),
-            Some(Duration::from_secs(MIN_WAIT_SECS))
-        );
-        assert_eq!(
-            window(Some(u64::MAX), session),
-            Some(Duration::from_secs(MAX_WAIT_SECS))
-        );
-        assert_eq!(window(Some(900), session), Some(Duration::from_secs(900)));
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_window_is_clamped_again_to_the_ceiling_the_surface_owns() {
-        let session = chat();
-        set_ceiling(session, Instant::now() + Duration::from_secs(60));
-        assert_eq!(
-            window(None, session),
-            Some(Duration::from_secs(60)),
-            "a chat turn cannot outlast its own stream deadline"
-        );
-        set_ceiling(
-            session,
-            Instant::now() + Duration::from_secs(MIN_WAIT_SECS - 1),
-        );
-        assert_eq!(
-            window(None, session),
-            None,
-            "a window under the floor is refused rather than clamped to nothing"
-        );
-        reset_session(session);
-        assert_eq!(
-            window(None, session),
-            Some(Duration::from_secs(DEFAULT_WAIT_SECS)),
-            "resetting clears the ceiling with the counter"
-        );
+        assert_eq!(window(None), Duration::from_secs(DEFAULT_WAIT_SECS));
+        assert_eq!(window(Some(1)), Duration::from_secs(MIN_WAIT_SECS));
+        assert_eq!(window(Some(u64::MAX)), Duration::from_secs(MAX_WAIT_SECS));
+        assert_eq!(window(Some(900)), Duration::from_secs(900));
     }
 
     #[tokio::test]
@@ -1807,40 +1808,6 @@ mod tests {
         reset_session(session);
     }
 
-    /// A surface whose own deadline has all but elapsed leaves no window to
-    /// wait in. Clamping to what is left would mint one that expires the
-    /// moment it is awaited, and the receipt acknowledging it reads as a
-    /// success while spending one of the ten allowances.
-    #[tokio::test]
-    async fn a_wait_the_surface_has_no_window_left_for_is_refused() {
-        let directory = TempDir::new().expect("a temporary working directory");
-        let session = chat();
-        let job = spawned(session, "exit 0", directory.path()).await;
-        settles(session, &job.id).await;
-        set_ceiling(
-            session,
-            Instant::now() + Duration::from_secs(MIN_WAIT_SECS - 1),
-        );
-
-        let refusal = tool()
-            .execute(json!({"kind": KIND_JOB, "id": &job.id}), &context(session))
-            .await
-            .expect("wait_for reports refusals as tool errors");
-
-        assert_eq!(refused(&refusal), no_window_left());
-        assert_eq!(
-            waits_taken(session),
-            0,
-            "a refused wait must not spend an allowance"
-        );
-        assert_eq!(
-            bind(session, CALL),
-            None,
-            "a refused wait must leave nothing staged for the loop to park on"
-        );
-        reset_session(session);
-    }
-
     /// Nothing makes a tool-call id unique across sessions: a local model emits
     /// `call_1` for the first call of every turn, so two concurrent sessions
     /// hand the registry one id and each must still settle its own subject.
@@ -2074,7 +2041,7 @@ mod tests {
 
         tokio::spawn(async move {
             tokio::time::sleep(POLL).await;
-            crate::services::task_progress::publish_terminal(run, "completed", None);
+            crate::services::task_progress::publish_terminal(run, tasks::COMPLETED, None);
         });
         let outcome = await_outcome(session, CALL, Instant::now() + FAR).await;
         assert_eq!(outcome, task_run_completed(run, Duration::ZERO));
@@ -2105,6 +2072,53 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "a run that ended before the wait was issued must not wait out its deadline"
         );
+        reset_session(session);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated PostgreSQL via TEST_DATABASE_URL"]
+    async fn a_task_run_a_person_stops_settles_as_stopped() {
+        let fixture = Fixture::create().await;
+        let run = fixture.run(fixture.workspace).await;
+        let session = chat();
+
+        opened(
+            &fixture.tool(),
+            session,
+            json!({"kind": KIND_TASK_RUN, "id": run.to_string()}),
+        )
+        .await;
+        tokio::spawn(async move {
+            tokio::time::sleep(POLL).await;
+            crate::services::task_progress::publish_terminal(
+                run,
+                tasks::CANCELLED,
+                Some(tasks::STOPPED),
+            );
+        });
+        let outcome = await_outcome(session, CALL, Instant::now() + FAR).await;
+        assert_eq!(outcome, task_run_cancelled(run, Duration::ZERO));
+        reset_session(session);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated PostgreSQL via TEST_DATABASE_URL"]
+    async fn a_task_run_already_stopped_is_reported_as_stopped_at_once() {
+        let fixture = Fixture::create().await;
+        let run = fixture.run(fixture.workspace).await;
+        fixture
+            .finish(run, tasks::CANCELLED, Some(tasks::STOPPED))
+            .await;
+        let session = chat();
+
+        opened(
+            &fixture.tool(),
+            session,
+            json!({"kind": KIND_TASK_RUN, "id": run.to_string()}),
+        )
+        .await;
+        let outcome = await_outcome(session, CALL, Instant::now() + FAR).await;
+        assert_eq!(outcome, task_run_cancelled(run, Duration::ZERO));
         reset_session(session);
     }
 
@@ -2154,7 +2168,9 @@ mod tests {
 
     impl Fixture {
         async fn create() -> Self {
-            use crate::db::{organizations, users, workspaces};
+            use crate::db::organizations;
+            use crate::db::users;
+            use crate::db::workspaces;
             let pool = PgPool::connect(
                 &std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL required"),
             )
@@ -2279,6 +2295,47 @@ mod tests {
         source: Uuid,
     ) -> Result<(String, String, &'static str), String> {
         tool.watched(scope, source).await?.settled(None).await
+    }
+
+    #[tokio::test]
+    async fn a_source_a_check_wait_cannot_connect_to_says_why_in_the_waits_words() {
+        let connected = Connected::new().await;
+        let web = connected
+            .source_of(sources::WEB, json!({"url": "https://example.com"}))
+            .await;
+        let inactive = connected.source(None, None).await;
+        connected.deactivate(&inactive).await;
+        let unconfigured = connected.source_of(sources::GITHUB, json!({})).await;
+        let tool = scoped(connected.state.clone(), connected.workspace, connected.user);
+        let scope = tool.scope.as_ref().expect("a workspace scope");
+
+        for (source, expected) in [
+            (
+                web.id,
+                "Waiting on checks currently supports connected GitHub sources only.",
+            ),
+            (
+                inactive.id,
+                "Source not found in this workspace or inactive.",
+            ),
+            (
+                Uuid::new_v4(),
+                "Source not found in this workspace or inactive.",
+            ),
+            (
+                unconfigured.id,
+                "The GitHub source configuration is invalid.",
+            ),
+        ] {
+            assert_eq!(
+                tool.watched(scope, source).await.err().as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            Unconnected::Unavailable(Unavailable::Unreadable).message(SOURCE_NOT_GITHUB),
+            "Could not read the source."
+        );
     }
 
     #[tokio::test]

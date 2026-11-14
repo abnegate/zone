@@ -18,6 +18,7 @@ import {
   REFRESH_TOKEN_KEY,
   session,
 } from '../../../api/session';
+import { clearChatCaches } from '../../chats/utils/cache';
 import type { AuthResponse, JwtPayload, LoginRequest, RegisterRequest, User } from '../types';
 
 interface AuthState {
@@ -135,6 +136,7 @@ export function AuthProvider({
     }
 
     apiClient.setAccessToken(null);
+    clearChatCaches();
 
     storage.removeItem(ACCESS_TOKEN_KEY);
     storage.removeItem(REFRESH_TOKEN_KEY);

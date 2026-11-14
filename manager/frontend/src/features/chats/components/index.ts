@@ -8,6 +8,7 @@ export { AutomationBadge } from './AutomationBadge';
 export { ChatMenu } from './ChatMenu';
 export { ChatPanel } from './ChatPanel';
 export { ChatSources } from './ChatSources';
+export { ChatStatusIndicator } from './ChatStatusIndicator';
 export { Generation } from './Generation';
 export { HandoverNotice } from './HandoverNotice';
 export { HeaderPopover } from './HeaderPopover';

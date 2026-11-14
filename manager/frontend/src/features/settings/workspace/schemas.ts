@@ -8,6 +8,7 @@ export const WorkspaceSchema = z.object({
   slug: z.string(),
   description: z.string().nullable(),
   is_active: z.boolean(),
+  role: WorkspaceRoleSchema.optional(),
   created_at: z.string(),
   updated_at: z.string(),
 });

@@ -13,37 +13,61 @@
 pub mod context;
 pub mod environment;
 
-use abnegate_agent::mcp::{self, McpHub};
-use abnegate_agent::tool::{Session, Tier};
-use abnegate_agent::{Tool, ToolContext, ToolError, ToolRegistry, ToolResult};
+use abnegate_agent::Tool;
+use abnegate_agent::ToolContext;
+use abnegate_agent::ToolError;
+use abnegate_agent::ToolRegistry;
+use abnegate_agent::ToolResult;
+use abnegate_agent::mcp;
+use abnegate_agent::mcp::McpHub;
+use abnegate_agent::tool::Session;
+use abnegate_agent::tool::Tier;
 use abnegate_agent_cli::AgentKind;
+use abnegate_exec::Niceness;
 use abnegate_llm::ToolDefinition;
 use async_trait::async_trait;
-use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashSet};
+use serde_json::Value;
+use serde_json::json;
+use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
-use zone_core::commands::{self, Shell};
+use zone_core::commands;
+use zone_core::commands::Shell;
 use zone_core::llm::Toolset;
 use zone_core::servers;
 
-use super::toolbox::{
-    LOAD_TOOLS, Listed, LoadToolsTool, SEARCH_TOOLS, SearchToolsTool, Toolbox, purpose,
-};
-
-use super::citations::{self, Citation};
-use super::identifier::{self, Kind};
-use super::receipts::{self, ActionReceipt};
-use crate::db::{
-    DbResult, chat_attached_sources, chat_sources, knowledge, mcp_servers, message_embeddings,
-    projects, sources, tasks::Origin, users, workspace_members,
-};
+use super::citations;
+use super::citations::Citation;
+use super::identifier;
+use super::identifier::Kind;
+use super::receipts;
+use super::receipts::ActionReceipt;
+use super::toolbox::LOAD_TOOLS;
+use super::toolbox::Listed;
+use super::toolbox::LoadToolsTool;
+use super::toolbox::SEARCH_TOOLS;
+use super::toolbox::SearchToolsTool;
+use super::toolbox::Toolbox;
+use super::toolbox::purpose;
+use crate::db::DbResult;
+use crate::db::chat_attached_sources;
+use crate::db::chat_sources;
+use crate::db::knowledge;
+use crate::db::mcp_servers;
+use crate::db::message_embeddings;
+use crate::db::projects;
+use crate::db::sources;
+use crate::db::tasks::Origin;
+use crate::db::users;
+use crate::db::workspace_members;
 use crate::services::mcp_servers::load;
 use crate::services::mcp_servers::organization::OrganizationHub;
 use crate::state::AppState;
+use crate::utils::text::truncate;
 
 /// Bound legacy search snippets and inventory summaries; full document reads are preserved.
 const MAX_TOOL_OUTPUT_CHARS: usize = 8_000;
@@ -194,11 +218,13 @@ fn context(
     session: Session,
     denied: Vec<PathBuf>,
     chat_offline: bool,
+    niceness: Niceness,
 ) -> ToolContext {
     context::build(context::Config {
         working_directory,
         session,
         denied,
+        niceness,
         unrestricted: profile == ToolProfile::Chat,
         maximum_file_size: MAX_TOOL_FILE_BYTES,
         command_timeout: Duration::from_secs(TOOL_COMMAND_TIMEOUT_SECS),
@@ -335,14 +361,24 @@ impl ChatTools {
     /// Search tools stay registered and degrade to keyword search when
     /// embeddings are unavailable, so the model can still look things up.
     pub async fn build(scope: WorkspaceScope) -> Self {
-        let denied = scope.state.config().agents.state.clone();
-        Self::assemble(Some(scope), ToolProfile::Chat, None, true, denied).await
+        let agents = &scope.state.config().agents;
+        let (denied, niceness) = (agents.state.clone(), agents.niceness);
+        Self::assemble(Some(scope), ToolProfile::Chat, None, true, denied, niceness).await
     }
 
     /// Preview only the known catalog; never start MCP processes while drafting.
     pub async fn preview(scope: WorkspaceScope) -> Self {
-        let denied = scope.state.config().agents.state.clone();
-        Self::assemble(Some(scope), ToolProfile::Chat, None, false, denied).await
+        let agents = &scope.state.config().agents;
+        let (denied, niceness) = (agents.state.clone(), agents.niceness);
+        Self::assemble(
+            Some(scope),
+            ToolProfile::Chat,
+            None,
+            false,
+            denied,
+            niceness,
+        )
+        .await
     }
 
     /// Point relative paths at `directory`, which a chat's project gave it, or
@@ -410,6 +446,7 @@ impl ChatTools {
                 Session::Detached,
                 Vec::new(),
                 false,
+                Niceness::DEFAULT,
             ),
             scope: None,
             workspace: Vec::new(),
@@ -481,7 +518,14 @@ impl ChatTools {
         let mut sorted: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
         sorted.sort();
         Self {
-            context: context(profile, host_root(), Session::Detached, Vec::new(), false),
+            context: context(
+                profile,
+                host_root(),
+                Session::Detached,
+                Vec::new(),
+                false,
+                Niceness::DEFAULT,
+            ),
             profile,
             name_set: sorted.iter().cloned().collect(),
             // A catalog stated by name is stated in full: nothing is deferred
@@ -571,8 +615,16 @@ impl ChatTools {
             offline: false,
             origin: Origin::Automation,
         });
-        let denied = state.config().agents.state.clone();
-        Self::assemble(scope, ToolProfile::Task, Some(cwd), true, denied).await
+        let agents = &state.config().agents;
+        Self::assemble(
+            scope,
+            ToolProfile::Task,
+            Some(cwd),
+            true,
+            agents.state.clone(),
+            agents.niceness,
+        )
+        .await
     }
 
     /// A task that requires its plan approved is handed `submit_plan`, and
@@ -682,6 +734,7 @@ impl ChatTools {
         task_cwd: Option<PathBuf>,
         connect: bool,
         denied: PathBuf,
+        niceness: Niceness,
     ) -> Self {
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
@@ -835,7 +888,7 @@ impl ChatTools {
             .and_then(|scope| scope.chat_id)
             .map_or(Session::Detached, Session::Chat);
         let offline = scope.as_ref().is_some_and(|scope| scope.offline);
-        let context = context(profile, cwd, session, vec![denied], offline);
+        let context = context(profile, cwd, session, vec![denied], offline, niceness);
         let mcp_guidance = servers::prompt(connected_servers, &registry.names());
 
         let mut assembled = Self {
@@ -1182,14 +1235,6 @@ pub(super) fn optional_string_arg<'a>(params: &'a Value, key: &str) -> Option<&'
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-}
-
-/// Truncate on a character boundary, marking that we cut.
-pub(crate) fn truncate(text: &str, maximum_characters: usize) -> String {
-    match text.char_indices().nth(maximum_characters) {
-        Some((byte_index, _)) => format!("{}…", &text[..byte_index]),
-        None => text.to_string(),
-    }
 }
 
 /// Collapse whitespace so a chunk of prose costs one line of prompt.
@@ -2071,9 +2116,14 @@ mod tests {
     }
     use super::*;
     use crate::services::mcp_servers::testing;
-    use crate::state::{lazy_pool, test_config};
-    use abnegate_agent::tool::job::{JobCommand, Jobs};
-    use abnegate_agent::tool::{OFF_LIMITS, Preview, REASON_DESCRIPTION, REASON_PARAMETER};
+    use crate::state::lazy_pool;
+    use crate::state::test_config;
+    use abnegate_agent::tool::OFF_LIMITS;
+    use abnegate_agent::tool::Preview;
+    use abnegate_agent::tool::REASON_DESCRIPTION;
+    use abnegate_agent::tool::REASON_PARAMETER;
+    use abnegate_agent::tool::job::JobCommand;
+    use abnegate_agent::tool::job::Jobs;
     use sqlx::postgres::PgPoolOptions;
     use std::time::Duration;
     use tokio::net::TcpListener;
@@ -2149,20 +2199,6 @@ mod tests {
             assert!(!result.success && refused, "{call}: {result:?}");
             assert!(!format!("{result:?}").contains(TURN), "{call}: {result:?}");
         }
-    }
-
-    #[test]
-    fn truncate_marks_cut_text() {
-        assert_eq!(truncate("hello", 10), "hello");
-        assert_eq!(truncate("hello", 3), "hel…");
-    }
-
-    #[test]
-    fn truncate_respects_char_boundaries() {
-        // Multi-byte characters must not be split, which byte slicing would do.
-        let text = "αβγδε";
-        assert_eq!(truncate(text, 3), "αβγ…");
-        assert_eq!(truncate(text, 99), text);
     }
 
     #[test]
@@ -2987,9 +3023,11 @@ mod tests {
     }
 
     fn memory_tools() -> [&'static str; 5] {
-        use crate::agent::memory::{
-            MEMORY_APPEND, MEMORY_DELETE, MEMORY_LIST, MEMORY_READ, MEMORY_WRITE,
-        };
+        use crate::agent::memory::MEMORY_APPEND;
+        use crate::agent::memory::MEMORY_DELETE;
+        use crate::agent::memory::MEMORY_LIST;
+        use crate::agent::memory::MEMORY_READ;
+        use crate::agent::memory::MEMORY_WRITE;
         [
             MEMORY_LIST,
             MEMORY_READ,
@@ -3006,7 +3044,10 @@ mod tests {
     /// catalog, and memory has to stay out of it.
     #[tokio::test]
     async fn a_run_with_an_authorized_writer_still_gets_no_memory_tool() {
-        use crate::db::{organizations, users, workspace_members, workspaces};
+        use crate::db::organizations;
+        use crate::db::users;
+        use crate::db::workspace_members;
+        use crate::db::workspaces;
         use crate::state::test_config;
 
         let pool = sqlx::PgPool::connect(
@@ -3514,7 +3555,10 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_tools_recheck_actor_and_chat_scope() {
-        use crate::db::{organizations, users, workspace_members, workspaces};
+        use crate::db::organizations;
+        use crate::db::users;
+        use crate::db::workspace_members;
+        use crate::db::workspaces;
         use crate::state::test_config;
         let Ok(database_url) = std::env::var("DATABASE_URL") else {
             return;
@@ -3668,7 +3712,10 @@ mod tests {
     }
 
     fn assert_waits_with_zones_wait_for(tools: &ChatTools) {
-        use crate::agent::wait::{KIND_CHECK, KIND_JOB, KIND_TASK_RUN, WAIT_FOR};
+        use crate::agent::wait::KIND_CHECK;
+        use crate::agent::wait::KIND_JOB;
+        use crate::agent::wait::KIND_TASK_RUN;
+        use crate::agent::wait::WAIT_FOR;
 
         let definition = tools
             .all_definitions()
@@ -3768,7 +3815,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_mcp_server_is_offered_a_revision_that_has_a_handshake() {
-        use abnegate_agent::mcp::{McpConfig, McpServer};
+        use abnegate_agent::mcp::McpConfig;
+        use abnegate_agent::mcp::McpServer;
 
         let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -3797,7 +3845,8 @@ mod tests {
 
     #[tokio::test]
     async fn mcp_guidance_follows_the_connected_servers() {
-        use abnegate_agent::mcp::{McpConfig, McpServer};
+        use abnegate_agent::mcp::McpConfig;
+        use abnegate_agent::mcp::McpServer;
 
         let unconnected = ChatTools::preview(scope()).await;
         assert_eq!(unconnected.mcp_guidance(), None);

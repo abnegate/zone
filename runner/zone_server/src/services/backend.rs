@@ -9,7 +9,6 @@ pub use resolved::Resolved;
 pub use routing::Routing;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use abnegate_agent_cli::{AgentKind, CliSettings, STDERR_HEADING, Session};
 use abnegate_llm::{Credential, ReasoningEffort};
@@ -119,10 +118,6 @@ fn resetting(resets_at: Option<DateTime<Utc>>) -> String {
         None => "none reports when it resets".to_string(),
     }
 }
-
-/// How long the crate may take to stop a coding agent that ran out of time, drain what it wrote
-/// and hand back the answer it kept.
-const STOPPING: Duration = Duration::from_secs(30);
 
 /// The instance-wide default the environment selects, with every variable its
 /// agent runs with.
@@ -279,8 +274,10 @@ async fn touch(state: &AppState, login: Uuid) {
     }
 }
 
-/// `settings` running the binary the environment names for `agent`, when it names one.
+/// `settings` running the binary the environment names for `agent`, when it names one, at the
+/// nice value the operator chose.
 fn executed(config: &Config, agent: AgentKind, settings: CliSettings) -> CliSettings {
+    let settings = settings.with_niceness(config.agents.niceness);
     match overridden(config, agent) {
         Some(executable) => settings.with_executable(executable),
         None => settings,
@@ -352,22 +349,6 @@ pub fn remedied(backend: &LlmBackend, message: String) -> Remedied {
     }
 }
 
-/// `backend` with a coding agent's turn given `timeout`: the budget of what
-/// it runs for, a chat's or a task attempt's, rather than its own default.
-pub fn bounded(backend: LlmBackend, timeout: Duration) -> LlmBackend {
-    backend.configured(|settings| settings.with_timeout(timeout))
-}
-
-/// `backend` with a coding agent stopped far enough ahead of a deadline `remaining` away that
-/// the crate has stopped it, and handed back the answer it kept, before that deadline gives up
-/// on the turn. Stopping takes at most [`STOPPING`], and never more than a quarter of the time.
-pub fn ahead_of(backend: LlmBackend, remaining: Duration) -> LlmBackend {
-    bounded(
-        backend,
-        remaining.saturating_sub(STOPPING.min(remaining / 4)),
-    )
-}
-
 /// `backend` with a coding agent run in `directory`, where a chat's tools run, in place of the
 /// directory it was resolved with. An endpoint runs nowhere.
 pub fn in_directory(backend: LlmBackend, directory: &Path) -> LlmBackend {
@@ -415,6 +396,7 @@ mod tests {
     use abnegate_agent_cli::{
         CREDITS_REQUIRED, CREDITS_UNCONFIRMED, LONG_CONTEXT_CREDITS_REQUIRED,
     };
+    use abnegate_exec::Niceness;
     use abnegate_secret::{SecretValue, redact};
     use chrono::{TimeDelta, Utc};
     use sqlx::PgPool;
@@ -1405,27 +1387,6 @@ mod tests {
     }
 
     #[test]
-    fn a_bounded_agent_runs_for_the_budget_it_is_given_and_an_endpoint_is_left_alone() {
-        let budget = Duration::from_secs(3600);
-        let organizations = LlmBackend::cli(AgentKind::Codex, CliSettings::default())
-            .with_sign_in(SignIn::Organization);
-
-        let LlmBackend::Cli {
-            settings, sign_in, ..
-        } = bounded(organizations, budget)
-        else {
-            panic!("the agent was moved off its CLI");
-        };
-
-        assert_eq!(settings.timeout, budget);
-        assert_eq!(sign_in, SignIn::Organization, "only the timeout moves");
-        assert!(matches!(
-            bounded(LlmBackend::Http, budget),
-            LlmBackend::Http
-        ));
-    }
-
-    #[test]
     fn an_agent_is_told_the_chats_effort_and_an_endpoint_is_left_alone() {
         let organizations = LlmBackend::cli(AgentKind::Claude, CliSettings::default())
             .with_sign_in(SignIn::Organization);
@@ -1548,8 +1509,12 @@ mod tests {
         sandbox: CodexSandbox,
     ) -> Vec<(&'static str, LlmBackend)> {
         let state = TempDir::new().expect("an agent state root");
+        backends_under(&defaulting_to(agent, state.path(), sandbox), agent)
+    }
+
+    /// [`production_backends`] under `config`.
+    fn backends_under(config: &Config, agent: AgentKind) -> Vec<(&'static str, LlmBackend)> {
         let codex_home = TempDir::new().expect("a codex login's home");
-        let config = defaulting_to(agent, state.path(), sandbox);
         let organization = Uuid::new_v4();
         let chosen = picked(
             organization,
@@ -1557,60 +1522,59 @@ mod tests {
             resolved_login(agent, codex_home.path()),
         );
         vec![
-            ("the instance's default", instance(&config)),
+            ("the instance's default", instance(config)),
             (
                 "the host's sign-in",
-                host(&config, organization, agent)
+                host(config, organization, agent)
                     .expect("the host's backend")
                     .backend,
             ),
             (
                 "an organization's login",
-                on_login(&config, organization, &chosen, None)
+                on_login(config, organization, &chosen, None)
                     .expect("the login's backend")
                     .backend,
             ),
         ]
     }
 
-    /// Every backend Zone runs an agent on allows thirty minutes, not the crate's default
-    /// five, so a task or a review that never bounds its backend is not cut short.
+    /// An agent's builds and tests share the server's CPUs, so every backend Zone runs one on
+    /// starts it at the nice value the operator chose.
     #[test]
-    fn production_agent_backends_allow_thirty_minutes() {
+    fn production_agent_backends_start_at_the_configured_nice_value() {
+        let chosen = Niceness::try_from(7).expect("a nice value");
         for &agent in AgentKind::ALL {
-            for (reached, backend) in production_backends(agent, CodexSandbox::WorkspaceWrite) {
+            let state = TempDir::new().expect("an agent state root");
+            let mut config = defaulting_to(agent, state.path(), CodexSandbox::WorkspaceWrite);
+            config.agents.niceness = chosen;
+            for (reached, backend) in backends_under(&config, agent) {
                 let (_, settings, _) = cli(Ok(backend));
                 assert_eq!(
-                    settings.timeout,
-                    cli::TURN_TIMEOUT,
-                    "{agent} on {reached} kept the crate's {:?}",
-                    abnegate_agent_cli::DEFAULT_TIMEOUT
+                    settings.niceness,
+                    Some(chosen),
+                    "{agent} on {reached} ignored ZONE_AGENT_NICENESS"
                 );
             }
         }
     }
 
+    /// Every backend Zone runs an agent on has no deadline in place of the crate's default five
+    /// minutes, so whatever runs on it, a chat turn, a task attempt or a review, runs until its
+    /// agent is done.
     #[test]
-    fn an_agent_is_stopped_ahead_of_a_deadline_with_time_to_keep_its_answer() {
-        for (remaining, expected) in [
-            (
-                Duration::from_secs(30 * 60),
-                Duration::from_secs(30 * 60 - 30),
-            ),
-            (Duration::from_secs(20), Duration::from_secs(15)),
-            (Duration::ZERO, Duration::ZERO),
-        ] {
-            let (_, settings, _) = cli(Ok(ahead_of(
-                LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
-                remaining,
-            )));
-
-            assert_eq!(settings.timeout, expected, "{remaining:?}");
+    fn production_agent_backends_have_no_deadline() {
+        for &agent in AgentKind::ALL {
+            for (reached, backend) in production_backends(agent, CodexSandbox::WorkspaceWrite) {
+                let (_, settings, _) = cli(Ok(backend));
+                assert!(
+                    std::time::Instant::now()
+                        .checked_add(settings.timeout)
+                        .is_none(),
+                    "{agent} on {reached} is stopped after {:?}",
+                    settings.timeout
+                );
+            }
         }
-        assert!(matches!(
-            ahead_of(LlmBackend::Http, Duration::from_secs(60)),
-            LlmBackend::Http
-        ));
     }
 
     #[test]
@@ -1719,17 +1683,15 @@ mod tests {
         }
     }
 
-    /// `bounded`, `in_directory` and `effort` reconfigure a backend's agent and leave whose
-    /// sign-in it runs under alone, so a failed sign-in is still sent to whoever can renew it.
+    /// `in_directory` and `effort` reconfigure a backend's agent and leave whose sign-in it runs
+    /// under alone, so a failed sign-in is still sent to whoever can renew it.
     #[test]
-    fn bounding_a_backend_keeps_its_sign_in() {
+    fn reconfiguring_a_backend_keeps_its_sign_in() {
         let directory = TempDir::new().expect("a chat's directory");
-        let budget = Duration::from_secs(60);
         for &agent in AgentKind::ALL {
             for sign_in in SIGN_INS {
                 let backend = || LlmBackend::cli(agent, cli::settings()).with_sign_in(sign_in);
                 for (change, configured) in [
-                    ("bounded", bounded(backend(), budget)),
                     ("in_directory", in_directory(backend(), directory.path())),
                     ("effort", effort(backend(), ReasoningEffort::High)),
                 ] {

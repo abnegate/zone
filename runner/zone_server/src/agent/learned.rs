@@ -427,6 +427,7 @@ mod tests {
         let tags = discovery::Provenance {
             kind: discovery::Kind::Lesson,
             source: discovery::Source::Run(RUN),
+            project: None,
             last_confirmed: confirmed(),
         }
         .tags(&discovery::fingerprint(&subject));

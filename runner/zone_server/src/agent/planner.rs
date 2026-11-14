@@ -22,27 +22,35 @@ use abnegate_agent::tool::Rendering;
 use abnegate_agent::tool::Tier;
 use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
-use abnegate_vcs::{GitService, PullRequestError, RepositoryUrl};
+use abnegate_vcs::GitService;
+use abnegate_vcs::PullRequestError;
+use abnegate_vcs::RepositoryUrl;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use super::WorkspaceScope;
-use super::integrations::source_token;
-use crate::db::auto_projects::{self, Kind, PlannedRepository, PlannedTask, ProjectPlan};
-use crate::db::sources;
+use super::actions::priority_property;
+use crate::db::auto_projects;
+use crate::db::auto_projects::Kind;
+use crate::db::auto_projects::PlannedRepository;
+use crate::db::auto_projects::PlannedTask;
+use crate::db::auto_projects::ProjectPlan;
 use crate::db::sources::SourceRow;
+use crate::db::tasks;
 use crate::db::workspace_members;
-use crate::services::github::Refusal;
+use crate::services::github::authentication::source_token;
+use crate::services::github::connection::active_source;
+use crate::services::github::refusal::Refusal;
 use grant::Grant;
 
 pub const CREATE_REPOSITORY: &str = "create_repository";
 pub const FINALIZE_PROJECT: &str = "finalize_project";
 
-const SOURCE_UNREADABLE: &str = "Could not read the source.";
-const SOURCE_MISSING: &str = "Source not found in this workspace or inactive.";
 const SOURCE_NOT_GITHUB: &str = "The source is not a GitHub source.";
 pub(crate) const SOURCE_CREDENTIAL_MISSING: &str =
     "The GitHub source has no credential; connect GitHub or add a token to it first.";
@@ -201,10 +209,12 @@ impl Blueprint {
             }
             if task
                 .priority
-                .is_some_and(|priority| !(1..=5).contains(&priority))
+                .is_some_and(|priority| !tasks::PRIORITIES.contains(&priority))
             {
                 return Err(format!(
-                    "Task {position}'s priority must be between 1 and 5."
+                    "Task {position}'s priority must be between {} and {}.",
+                    tasks::PRIORITIES.start(),
+                    tasks::PRIORITIES.end()
                 ));
             }
             for dependency in &task.depends_on {
@@ -325,15 +335,9 @@ struct SourceCredential {
 
 /// The active GitHub source `source_id` names in this workspace.
 async fn github_source(scope: &WorkspaceScope, source_id: Uuid) -> Result<SourceRow, String> {
-    let source = sources::get_source(scope.state.db(), source_id, scope.workspace_id)
+    active_source(&scope.state, scope.workspace_id, source_id)
         .await
-        .map_err(|_| SOURCE_UNREADABLE.to_string())?
-        .filter(|source| source.is_active.unwrap_or(true))
-        .ok_or(SOURCE_MISSING)?;
-    if source.source_type != sources::GITHUB {
-        return Err(SOURCE_NOT_GITHUB.to_string());
-    }
-    Ok(source)
+        .map_err(|unavailable| unavailable.message(SOURCE_NOT_GITHUB).to_string())
 }
 
 /// The repository `url` names, in the one spelling every address of it shares.
@@ -598,7 +602,7 @@ impl Tool for FinalizeProjectTool {
                             "description": {"type": "string", "minLength": 1, "description": "What to build, precisely enough that a run needs no question answered."},
                             "acceptance_criteria": {"type": "string", "description": "How the run knows it is done."},
                             "depends_on": {"type": "array", "items": {"type": "integer", "minimum": 0}, "description": "Zero-based indices of earlier tasks this one needs merged first."},
-                            "priority": {"type": "integer", "minimum": 1, "maximum": 5}
+                            "priority": priority_property()
                         },
                         "required": ["kind", "title", "description"],
                         "additionalProperties": false
@@ -730,12 +734,59 @@ impl Tool for FinalizeProjectTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::integrations::SOURCE_DISCONNECTED;
-    use crate::agent::testing::{Connected, MINTED_TOKEN, OWNER, REPOSITORY, STORED_TOKEN, number};
+    use crate::db::sources;
     use crate::secret::Unseal;
+    use crate::services::github::authentication::SOURCE_DISCONNECTED;
+    use crate::services::github::testing::MINTED_TOKEN;
+    use crate::services::github::testing::OWNER;
+    use crate::services::github::testing::REPOSITORY;
+    use crate::services::github::testing::STORED_TOKEN;
+    use crate::services::github::testing::connected::Connected;
+    use crate::services::github::testing::number;
     use crate::services::github_app::testing::issuing;
-    use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, ResponseTemplate};
+    use wiremock::Mock;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::header;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
+
+    #[tokio::test]
+    async fn a_source_the_planner_cannot_use_says_why_in_the_planners_words() {
+        let connected = Connected::new().await;
+        let web = connected
+            .source_of(sources::WEB, json!({"url": "https://example.com"}))
+            .await;
+        let inactive = connected.source(None, None).await;
+        connected.deactivate(&inactive).await;
+        let unconfigured = connected.source_of(sources::GITHUB, json!({})).await;
+        let scope = connected.scope();
+
+        for (source, expected) in [
+            (
+                web.id,
+                Err("The source is not a GitHub source.".to_string()),
+            ),
+            (
+                inactive.id,
+                Err("Source not found in this workspace or inactive.".to_string()),
+            ),
+            (
+                Uuid::new_v4(),
+                Err("Source not found in this workspace or inactive.".to_string()),
+            ),
+            (unconfigured.id, Ok(unconfigured.id)),
+        ] {
+            assert_eq!(
+                github_source(&scope, source).await.map(|found| found.id),
+                expected
+            );
+        }
+        connected.pool.close().await;
+        assert_eq!(
+            github_source(&scope, web.id).await.err().as_deref(),
+            Some("Could not read the source.")
+        );
+    }
 
     #[test]
     fn a_github_refusal_to_create_a_repository_is_said_once_with_its_status() {
@@ -772,6 +823,35 @@ mod tests {
             ],
             json!({"deployment": {"target": "vercel"}}),
         )
+    }
+
+    #[test]
+    fn a_priority_outside_the_range_a_task_stores_is_refused() {
+        let mut outside = sound();
+        outside["tasks"][3]["priority"] = json!(*tasks::PRIORITIES.end() + 1);
+
+        assert_eq!(
+            Blueprint::parse(&outside).unwrap_err(),
+            "Task 4's priority must be between 1 and 5."
+        );
+    }
+
+    #[tokio::test]
+    async fn the_planner_is_told_the_highest_priority_is_the_most_urgent() {
+        let schema = FinalizeProjectTool(WorkspaceScope {
+            state: crate::state::AppState::for_tests(),
+            workspace_id: Uuid::new_v4(),
+            chat_id: None,
+            user_id: Uuid::new_v4(),
+            offline: false,
+            origin: tasks::Origin::Member,
+        })
+        .parameters_schema();
+
+        assert_eq!(
+            schema["properties"]["tasks"]["items"]["properties"]["priority"]["description"],
+            "5 is the most urgent, 1 the least."
+        );
     }
 
     #[test]

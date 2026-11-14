@@ -9,6 +9,10 @@ use super::tasks::{self, Create, TaskRow, TaskRunRow};
 
 pub const GITHUB: &str = "github";
 
+/// What a chat message auto-fix wrote itself says it came from, which is how
+/// the chat tells one from a turn somebody typed.
+pub const PULL_REQUEST_FIX: &str = "pull_request_fix";
+
 macro_rules! columns {
     () => {
         "id, chat_id, provider, owner, repo, number, url, title, source_id, dismissed_at, created_at, auto_fix, auto_fix_run_id, auto_fix_by, auto_fix_head,
@@ -66,18 +70,24 @@ pub struct NewPullRequest<'a> {
     pub url: &'a str,
     pub title: Option<&'a str>,
     pub source_id: Option<Uuid>,
+    /// Whoever's turn opened it, whom auto-fix then acts as. A pull request
+    /// recorded with someone to act as watches itself from the start; one
+    /// recorded with nobody cannot, since its runs would have no actor.
+    pub opened_by: Option<Uuid>,
 }
 
-/// Records that `opened.chat_id` opened this pull request. Recording one the
-/// chat already owns keeps the row, filling in what the new sighting knows and
-/// the old one did not.
+/// Records that `opened.chat_id` opened this pull request, with auto-fix on
+/// when the sighting knows whom it would act as. Recording one the chat
+/// already owns keeps the row, filling in what the new sighting knows and the
+/// old one did not, and never reopens an auto-fix preference somebody turned
+/// off: a row that exists answers for itself.
 pub async fn record<'e, E>(executor: E, opened: &NewPullRequest<'_>) -> DbResult<PullRequestRow>
 where
     E: Executor<'e, Database = Postgres>,
 {
     sqlx::query_as(concat!(
-        "INSERT INTO chat_pull_requests (chat_id, provider, owner, repo, number, url, title, source_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        "INSERT INTO chat_pull_requests (chat_id, provider, owner, repo, number, url, title, source_id, auto_fix, auto_fix_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid IS NOT NULL, $9::uuid)
          ON CONFLICT (chat_id, provider, lower(owner), lower(repo), number) DO UPDATE SET
              title = COALESCE(EXCLUDED.title, chat_pull_requests.title),
              source_id = COALESCE(EXCLUDED.source_id, chat_pull_requests.source_id)
@@ -92,6 +102,7 @@ where
     .bind(opened.url)
     .bind(opened.title)
     .bind(opened.source_id)
+    .bind(opened.opened_by)
     .fetch_one(executor)
     .await
 }
@@ -109,6 +120,27 @@ where
          ORDER BY created_at, id"
     ))
     .bind(chat_id)
+    .fetch_all(executor)
+    .await
+}
+
+/// The undismissed pull requests of every one of these chats, oldest first.
+/// Reading a list of chats takes one query rather than one each.
+pub async fn for_chats<'e, E>(executor: E, chat_ids: &[Uuid]) -> DbResult<Vec<PullRequestRow>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    if chat_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as(concat!(
+        "SELECT ",
+        columns!(),
+        " FROM chat_pull_requests
+         WHERE chat_id = ANY($1) AND dismissed_at IS NULL
+         ORDER BY created_at, id"
+    ))
+    .bind(chat_ids)
     .fetch_all(executor)
     .await
 }
@@ -185,8 +217,19 @@ where
     .await
 }
 
-/// Creates `task` with a run on the pull request's own branch, and claims
-/// the pull request for that run, all or nothing.
+/// What claiming a pull request for an auto-fix run created.
+#[derive(Debug, Clone)]
+pub struct Started {
+    pub task: TaskRow,
+    pub run: TaskRunRow,
+    /// The chat message announcing the run, as it was stored, for publishing
+    /// to whoever has the chat open. Absent only for a task with no chat.
+    pub notice: Option<serde_json::Value>,
+}
+
+/// Creates `task` with a run on the pull request's own branch, claims the
+/// pull request for that run, and says in the task's chat that it started,
+/// all or nothing.
 ///
 /// Nothing is created unless auto-fix is still on for the task's creator, the
 /// row still holds `claim.previous` and that run has settled, the head has
@@ -199,7 +242,8 @@ pub async fn start_auto_fix(
     pool: &PgPool,
     claim: &Claim<'_>,
     task: &Create<'_>,
-) -> DbResult<Option<(TaskRow, TaskRunRow)>> {
+    notice: &str,
+) -> DbResult<Option<Started>> {
     let Some(actor) = task.created_by else {
         return Ok(None);
     };
@@ -273,8 +317,61 @@ pub async fn start_auto_fix(
     .bind(claim.head)
     .execute(&mut *transaction)
     .await?;
+    let mut announced = None;
+    if let Some(chat_id) = task.chat_id {
+        let stored: serde_json::Value = sqlx::query_scalar(
+            "INSERT INTO messages (chat_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3)
+             RETURNING to_jsonb(messages.*)",
+        )
+        .bind(chat_id)
+        .bind(notice)
+        .bind(serde_json::json!({
+            "source": PULL_REQUEST_FIX,
+            "pull_request_id": claim.id,
+            "run_id": run.id,
+            "link": claim.url,
+        }))
+        .fetch_one(&mut *transaction)
+        .await?;
+        sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
+            .bind(chat_id)
+            .execute(&mut *transaction)
+            .await?;
+        announced = Some(stored);
+    }
     transaction.commit().await?;
-    Ok(Some((created, run)))
+    Ok(Some(Started {
+        task: created,
+        run,
+        notice: announced,
+    }))
+}
+
+/// Says something in `chat_id` as the assistant, marked as auto-fix's own
+/// word rather than a turn somebody typed, and answers with the stored
+/// message for publishing.
+pub async fn announce(
+    pool: &PgPool,
+    chat_id: Uuid,
+    content: &str,
+    metadata: serde_json::Value,
+) -> DbResult<serde_json::Value> {
+    let mut transaction = pool.begin().await?;
+    let stored: serde_json::Value = sqlx::query_scalar(
+        "INSERT INTO messages (chat_id, role, content, metadata) VALUES ($1, 'assistant', $2, $3)
+         RETURNING to_jsonb(messages.*)",
+    )
+    .bind(chat_id)
+    .bind(content)
+    .bind(metadata)
+    .fetch_one(&mut *transaction)
+    .await?;
+    sqlx::query("UPDATE chats SET updated_at = NOW() WHERE id = $1")
+        .bind(chat_id)
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(stored)
 }
 
 pub async fn retitle<'e, E>(executor: E, id: Uuid, title: &str) -> DbResult<()>
@@ -324,6 +421,7 @@ mod tests {
             url: "https://github.com/acme/widgets/pull/7",
             title,
             source_id: None,
+            opened_by: None,
         }
     }
 
@@ -342,6 +440,63 @@ mod tests {
         assert_eq!(first.id, second.id);
         assert_eq!(second.title.as_deref(), Some("Add widgets"));
         assert_eq!(list(&pool, chat_id).await.expect("the list"), [second]);
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_is_recorded_fixing_itself_for_whoever_opened_it() {
+        let pool = pool().await;
+        let (_, user) = member(&pool).await;
+        let chat_id = chat(&pool).await;
+
+        let row = record(
+            &pool,
+            &NewPullRequest {
+                opened_by: Some(user),
+                ..opened(chat_id, "acme", None)
+            },
+        )
+        .await
+        .expect("a pull request");
+
+        assert!(row.auto_fix, "a pull request watches itself from the start");
+        assert_eq!(row.auto_fix_by, Some(user));
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_nobody_opened_is_recorded_without_auto_fix() {
+        let pool = pool().await;
+        let chat_id = chat(&pool).await;
+
+        let row = record(&pool, &opened(chat_id, "acme", None))
+            .await
+            .expect("a pull request");
+
+        assert!(
+            !row.auto_fix,
+            "auto-fix with no one to act as starts nothing"
+        );
+        assert_eq!(row.auto_fix_by, None);
+    }
+
+    #[tokio::test]
+    async fn recording_a_pull_request_again_leaves_auto_fix_where_it_was_put() {
+        let pool = pool().await;
+        let (_, user) = member(&pool).await;
+        let chat_id = chat(&pool).await;
+        let sighting = NewPullRequest {
+            opened_by: Some(user),
+            ..opened(chat_id, "acme", None)
+        };
+        let row = record(&pool, &sighting).await.expect("the first sighting");
+        set_auto_fix(&pool, chat_id, row.id, false, user)
+            .await
+            .expect("turning it off")
+            .expect("the row");
+
+        let again = record(&pool, &sighting).await.expect("the second sighting");
+
+        assert!(!again.auto_fix, "what somebody turned off stays off");
+        assert_eq!(again.auto_fix_by, None);
     }
 
     #[tokio::test]
@@ -460,10 +615,10 @@ mod tests {
             head,
             url: &watched.row.url,
         };
-        start_auto_fix(pool, &claim, &fix(watched))
+        start_auto_fix(pool, &claim, &fix(watched), "Fixing acme/widgets#7.")
             .await
             .expect("the start")
-            .map(|(_, run)| run)
+            .map(|started| started.run)
     }
 
     async fn start(pool: &PgPool, watched: &Watched, previous: Option<Uuid>) -> Option<TaskRunRow> {
@@ -558,6 +713,44 @@ mod tests {
             !settled.auto_fixing,
             "a settled run no longer reads as working"
         );
+    }
+
+    #[tokio::test]
+    async fn a_claimed_run_says_in_its_chat_that_it_started() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+        let task = Create {
+            chat_id: Some(watched.row.chat_id),
+            ..fix(&watched)
+        };
+        let claim = Claim {
+            id: watched.row.id,
+            previous: None,
+            branch: BRANCH,
+            head: HEAD,
+            url: &watched.row.url,
+        };
+
+        let started = start_auto_fix(&pool, &claim, &task, "Fixing acme/widgets#7.")
+            .await
+            .expect("the start")
+            .expect("auto-fix is on and nothing is claimed");
+
+        let notice = started.notice.expect("the chat was told");
+        assert_eq!(notice["content"], "Fixing acme/widgets#7.");
+        assert_eq!(notice["role"], "assistant");
+        assert_eq!(notice["metadata"]["source"], PULL_REQUEST_FIX);
+        assert_eq!(
+            notice["metadata"]["run_id"],
+            started.run.id.to_string(),
+            "the notice names the run it announces"
+        );
+        let said: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = $1")
+            .bind(watched.row.chat_id)
+            .fetch_one(&pool)
+            .await
+            .expect("the count");
+        assert_eq!(said, 1, "one run is announced once");
     }
 
     #[tokio::test]

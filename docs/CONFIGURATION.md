@@ -502,6 +502,29 @@ setting a monthly cap, at claude.ai/settings/usage.
 - **Note**: Must be a whole number of seconds. Anything else, such as `1.5`,
   `-1` or `1m`, is refused at boot; an empty value keeps the default.
 
+### `ZONE_AGENT_NICENESS`
+- **Default**: `19`, the lowest CPU priority. Compose passes it through from
+  `.env`, empty unless `.env` sets it, and the Helm chart leaves it unset; an
+  empty value keeps the default.
+- **Description**: The nice value every claude and codex run starts at, and
+  every command, shell and background job Zone's own agent runs on an HTTP
+  provider. Every build, test and language server the agent starts inherits
+  it. The agents run where the server does, in the manager container under
+  compose, so at the default they get every CPU the server leaves idle. When the CPUs are
+  contended, the server goes first, so its API keeps answering while chats
+  build and test at once. On Linux, a process with no IO priority of its own
+  takes one from its nice value, so the agents also yield the disk, but only
+  under an IO scheduler that honours IO priority, such as BFQ. `0` leaves
+  agents at the usual priority, which is the server's own unless the server
+  was itself started niced.
+- **Note**: Must be a whole number from `0` to `19`. Anything else, `20` and
+  negative values included, is refused at boot: raising a priority needs
+  privilege the server does not have. For the same reason, an agent never
+  starts at a higher priority than the server's own, whatever this says.
+  Nice values order processes only against each other: they bound neither
+  memory nor the CPU a container or pod gets beside other workloads, which
+  its own limits set.
+
 ### `ZONE_CLAUDE_API_URL`
 - **Default**: `https://api.anthropic.com`. Compose passes it from `.env`
   with that default; the Helm chart leaves it unset.
@@ -947,14 +970,16 @@ over with the same access, beside **Try again with full access**. A sign-in in
 progress survives switching to another settings tab and back.
 
 When a refresh token came with it, Zone renews a Claude token before handing
-it to a turn if the token would expire within the longest turn it may be
-handed to: an hour, the longest a task attempt runs, or
-`ZONE_CHAT_TIMEOUT_SECONDS` when that is longer. A renewal lasts no longer
-than the lifetime Claude grants a token, so Zone never renews a token while
-more than half that lifetime is left. A chat allowed to run longer than half a
-token's lifetime can therefore outlive its token. A task run takes the token
-afresh for each attempt. Concurrent turns renew it once, and a renewal that
-fails before the token expires leaves the current token in use.
+it to a turn once less than half the lifetime Claude granted it is left, or
+within an hour of its expiry when that lifetime is unknown. Halfway is the
+earliest point that never counts a token renewed a moment ago as expiring.
+A turn is handed only the access token, as `CLAUDE_CODE_OAUTH_TOKEN`, so
+claude cannot renew it partway through: a turn that runs longer than what is
+left of its token, which can be as little as half its lifetime, about four
+hours for an eight-hour token, fails signed out once the token expires, and
+the turn moves to another login as any signed-out turn does, or ends when
+none is left. A task run takes the token afresh for each attempt. Concurrent turns renew it once, and a renewal that fails before the
+token expires leaves the current token in use.
 
 **Codex** uses codex's own device-code sign-in:
 
@@ -1066,25 +1091,31 @@ server runs:
   any directory above it, and with
   `--settings '{"crossSessionInbound":"refuse"}'`, a setting meant to refuse
   messages from other claude sessions of the same OS user;
-- for as long as the turn may take: `ZONE_CHAT_TIMEOUT_SECONDS` for a chat
-  turn, 30 minutes by default, what is left of its hour for a task attempt,
-  and 30 minutes for any other run, such as a review; the crate's own
-  five-minute default never applies. A task attempt whose CLI runs out of time
-  fails without a retry;
+- at the nice value `ZONE_AGENT_NICENESS` names, 19 unless set, which every
+  command the agent runs inherits, so its builds and tests yield the CPU to
+  the server;
+- with no time limit of the CLI's own, neither on the whole run nor on a
+  stretch with no output: a chat turn, a task attempt, an automated review or
+  a conflict repair lasts until the agent finishes, and the crate's own
+  five-minute default never applies. A chat turn also ends when you press
+  Stop, when its server loses the chat, or when `ZONE_CHAT_ROUNDS` or
+  `ZONE_CHAT_CALLS` runs out; a task attempt when someone stops the run or
+  its worker loses the run; a review or a repair after its twelfth turn. What
+  still bounds a run is
+  per call: the 30 minutes an agent waits on one call to Zone's tools, the
+  cap on a foreground shell command, an approval's own wait, and the agent's
+  own limits on its commands;
 - for claude, until the work it sent to the background has ended: a
   background command, a monitor, a subagent or a wakeup it scheduled holds the
   turn, and the later answer it leads to is part of the reply. Work that never
-  ends, such as a server left running, holds the turn until its time runs out.
-  A chat's agent is stopped up to 30 seconds, and at most a quarter of its
-  time, before the chat itself gives up, so that what it answered is kept.
+  ends, such as a server left running, holds the turn until it is stopped.
 
-A chat whose claude was stopped before it finished, by its time running out
-or by exiting partway through a later answer, keeps everything it showed,
-the unfinished part included, followed by *[Cut short: the agent was stopped
-before it finished]*, and reports no error. A task attempt whose claude
-exits partway through a later answer fails with *The coding agent ended
-before it finished the task* and is tried again; one whose claude runs out
-of time fails as any attempt that runs out of time does.
+A chat whose claude was stopped before it finished, by Stop or by exiting
+partway through a later answer, keeps everything it showed, the unfinished
+part included, followed by *[Cut short: the agent was stopped before it
+finished]*, and reports no error. A task attempt whose claude exits partway
+through a later answer fails with *The coding agent ended before it finished
+the task* and is tried again.
 
 A turn fails once its answer passes 4 MiB, with a failure that begins "the
 agent's prose exceeded"; what the agent's tools print does not count toward
@@ -1231,9 +1262,9 @@ already wrote as an assistant entry of its own, and then:
   home, on a model picked again from that agent's models.
 
 The turn keeps its Zone tools, its approval cards and its `ZONE_MCP_TOKEN`
-across the switch, and every switch counts against the turn's own
-`ZONE_CHAT_TIMEOUT_SECONDS`. The chat receives a `status` frame,
-"Switching to <account>…", then a `handover` frame:
+across the switch, and a switch sets no time limit of its own: the turn runs
+on the new account until it ends as any turn does. The chat receives a
+`status` frame, "Switching to <account>…", then a `handover` frame:
 
 ```json
 {"type":"handover","message_id":"…","from":"jake@example.com","to":"team@example.com","from_agent":"claude","agent":"claude","reason":"limit","resets_at":"2026-10-02T18:00:00Z","carried":true,"at":1834}

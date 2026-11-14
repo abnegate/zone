@@ -63,6 +63,8 @@ import '../features/tasks/components/board/Card.css';
 import '../features/tasks/components/board/PullRequestLink.css';
 import '../features/tasks/components/board/Relation.css';
 import '../features/tasks/components/Links.css';
+import '../features/tasks/components/EditTasksDialog.css';
+import '../features/tasks/components/SelectionBar.css';
 import '../features/github/components/RepositoryPicker.css';
 import '../App.css';
 import '@zone/ui/styles/globals.css';

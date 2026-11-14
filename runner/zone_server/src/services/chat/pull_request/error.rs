@@ -1,7 +1,7 @@
 use abnegate_vcs::PullRequestError;
 use abnegate_vcs::pull_request::ApplicationError;
 
-use crate::services::github::Refusal;
+use crate::services::github::refusal::Refusal;
 use crate::services::github_app;
 use crate::services::github_app::Unauthenticated;
 
