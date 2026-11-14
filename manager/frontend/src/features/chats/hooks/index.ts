@@ -13,4 +13,5 @@ export { useChats } from './useChats';
 export type { ChatTasks } from './useChatTasks';
 export { useChatTasks } from './useChatTasks';
 export { usePreloadChats } from './usePreloadChats';
+export { useWaitingNotifications } from './useWaitingNotifications';
 export { useWorkspaceChatProviders } from './useWorkspaceChatProviders';
