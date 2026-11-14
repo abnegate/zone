@@ -6,6 +6,7 @@ export * from './boxes';
 export * from './characterCard';
 export * from './citations';
 export * from './diff';
+export * from './drafts';
 export { formatDate } from './formatters';
 export * from './gallery';
 export * from './handover';

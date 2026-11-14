@@ -1,4 +1,6 @@
 export { useChat } from './useChat';
+export type { ChatDraft } from './useChatDraft';
+export { useChatDraft } from './useChatDraft';
 export type { ChatIndicators } from './useChatIndicators';
 export { useChatIndicators } from './useChatIndicators';
 export { useChatProviders } from './useChatProviders';
