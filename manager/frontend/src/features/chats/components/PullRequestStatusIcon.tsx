@@ -16,12 +16,10 @@ const SHAPES: Record<PullRequestKind, ReactNode> = {
       <path d="m8.5 12 2.5 2.5 4.5-5" />
     </>
   ),
-  conflicted: (
-    <>
-      <circle cx="12" cy="12" r="9" />
-      <path d="m8 8 3 4-3 4M16 8l-3 4 3 4" />
-    </>
-  ),
+  // The chat list shows a conflicted pull request as blocked, with the plain
+  // pull request glyph, so this panel shows the same state the same way. The
+  // label and the row's conflict dot are what say which blocker it is.
+  conflicted: PULL_REQUEST,
   failing: (
     <>
       <circle cx="12" cy="12" r="9" />
