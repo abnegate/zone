@@ -1061,7 +1061,9 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Chat not found')).toBeInTheDocument();
       });
-      expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      // The loading bar carries the title too, so the list row is the one
+      // this is about.
+      expect(screen.getByText('Chat 1', { selector: '.chat-title' })).toBeInTheDocument();
       expect(screen.getByText('Chat 2')).toBeInTheDocument();
     });
 
@@ -1075,7 +1077,7 @@ describe('ChatsPage', () => {
 
       fireEvent.click(screen.getByText('Chat 1'));
 
-      expect(screen.getByText('Chat 1')).toBeInTheDocument();
+      expect(screen.getByText('Chat 1', { selector: '.chat-title' })).toBeInTheDocument();
       expect(screen.getByText('Chat 2')).toBeInTheDocument();
       expect(screen.getByText('Chat 3')).toBeInTheDocument();
     });

@@ -13,6 +13,7 @@ import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useSearchParams } from 'react-router-dom';
 import { isProtectedArtifactUrl } from '../../../api/protectedImages';
 import { useAuth } from '../../../features/auth';
+import BarLead from '../../../shared/components/PageBar/BarLead';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import SubNav from '../../../shared/components/SubNav/SubNav';
@@ -1131,6 +1132,10 @@ export default function ChatsPage() {
     </div>
   );
 
+  // On a phone the chat fills the screen, so its bar leads with Back where
+  // every other screen leads with the drawer.
+  const backToChats = { label: 'Back to chats', onClick: clearSelectedChat };
+
   return (
     <div className={`page page--workspace chats-page ${selectedChatId ? 'has-chat' : ''}`}>
       <SubNav
@@ -1325,21 +1330,17 @@ export default function ChatsPage() {
 
       <div className="chats-main">
         {selectedChatId && !displayedChat && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="chat-back chat-back-state"
-            onClick={clearSelectedChat}
-          >
-            Back to chats
-          </Button>
+          <div className="chat-header">
+            <BarLead back={backToChats} />
+            <div className="chat-header-info">
+              <h3>{chats.find((chat) => chat.id === selectedChatId)?.title ?? 'Chat'}</h3>
+            </div>
+          </div>
         )}
         {displayedChat ? (
           <>
             <div className="chat-header">
-              <Button variant="ghost" size="sm" className="chat-back" onClick={clearSelectedChat}>
-                Back to chats
-              </Button>
+              <BarLead back={backToChats} />
               <div className="chat-header-info">
                 <h3>{displayedChat.title}</h3>
                 {displayedChat.purpose === 'project_planner' && (

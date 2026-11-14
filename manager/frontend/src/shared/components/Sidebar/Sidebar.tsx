@@ -1,6 +1,7 @@
 import { type ReactNode, useEffect, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../../../features/auth';
+import { useNavDrawer } from '../../context/NavDrawerContext';
 import { useTheme } from '../../context/ThemeContext';
 import ContextSwitcher from '../ContextSwitcher/ContextSwitcher';
 import ZoneLogo from '../ZoneLogo';
@@ -45,8 +46,13 @@ export default function Sidebar({ dock }: { dock?: ReactNode }) {
   const { logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const { pathname } = useLocation();
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === 'true');
+  const drawer = useNavDrawer();
+  const mobileOpen = drawer?.open ?? false;
+  const closeDrawer = drawer?.close ?? (() => {});
+  const [narrow, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === 'true');
+  // A phone opens the drawer at full width, so the desktop's collapsed choice
+  // never leaves it an icon rail with no labels.
+  const collapsed = narrow && !mobileOpen;
   const [zoneClient, setZoneClient] = useState(false);
 
   useEffect(() => {
@@ -85,30 +91,30 @@ export default function Sidebar({ dock }: { dock?: ReactNode }) {
   };
 
   if (typeof document !== 'undefined') {
-    document.documentElement.setAttribute('data-sidebar-collapsed', String(collapsed));
+    document.documentElement.setAttribute('data-sidebar-collapsed', String(narrow));
   }
 
   return (
     <>
-      <button
-        className="mobile-menu-btn"
-        onClick={() => setMobileOpen(!mobileOpen)}
-        aria-label="Toggle menu"
-        type="button"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          aria-hidden="true"
-        >
-          {mobileOpen ? <path d="M6 18L18 6M6 6l12 12" /> : <path d="M4 6h16M4 12h16M4 18h16" />}
-        </svg>
-      </button>
-
       <aside className={`sidebar ${mobileOpen ? 'open' : ''} ${collapsed ? 'collapsed' : ''}`}>
         <div className="sidebar-header">
+          <button
+            className="sidebar-close"
+            onClick={closeDrawer}
+            type="button"
+            aria-label="Close navigation"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              aria-hidden="true"
+            >
+              <path d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
           <ZoneLogo size="sm" showText={!collapsed} />
           <button
             className="theme-toggle"
@@ -148,7 +154,7 @@ export default function Sidebar({ dock }: { dock?: ReactNode }) {
               className={({ isActive }) =>
                 `nav-item ${isNavActive(item.path, isActive) ? 'active' : ''}`
               }
-              onClick={() => setMobileOpen(false)}
+              onClick={closeDrawer}
               title={collapsed ? item.label : undefined}
             >
               <svg
@@ -174,7 +180,7 @@ export default function Sidebar({ dock }: { dock?: ReactNode }) {
             className="collapse-btn"
             onClick={toggleCollapsed}
             type="button"
-            aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={narrow ? 'Expand sidebar' : 'Collapse sidebar'}
           >
             <svg
               viewBox="0 0 24 24"
@@ -185,7 +191,7 @@ export default function Sidebar({ dock }: { dock?: ReactNode }) {
               strokeLinejoin="round"
               aria-hidden="true"
             >
-              {collapsed ? (
+              {narrow ? (
                 <path d="M13 5l7 7-7 7M5 5l7 7-7 7" />
               ) : (
                 <path d="M11 19l-7-7 7-7M19 19l-7-7 7-7" />
@@ -197,7 +203,7 @@ export default function Sidebar({ dock }: { dock?: ReactNode }) {
               className="logout-btn change-server-btn"
               href="/__zone/change-server"
               title={collapsed ? 'Change Server' : undefined}
-              onClick={() => setMobileOpen(false)}
+              onClick={closeDrawer}
             >
               <svg
                 viewBox="0 0 24 24"
@@ -238,8 +244,8 @@ export default function Sidebar({ dock }: { dock?: ReactNode }) {
       {mobileOpen && (
         <div
           className="sidebar-overlay"
-          onClick={() => setMobileOpen(false)}
-          onKeyDown={(e) => e.key === 'Escape' && setMobileOpen(false)}
+          onClick={closeDrawer}
+          onKeyDown={(e) => e.key === 'Escape' && closeDrawer()}
           role="button"
           tabIndex={0}
           aria-label="Close menu"

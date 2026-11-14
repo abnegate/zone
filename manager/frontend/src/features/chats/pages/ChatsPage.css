@@ -1968,36 +1968,53 @@
   padding: var(--ui-panel-padding);
 }
 
-.chat-back {
-  display: none;
-}
-
-.chat-back-state {
-  align-self: flex-start;
-  margin: var(--ui-space-3) var(--ui-gutter);
-}
-
 @media (max-width: 768px) {
+  /* Both bars carry the status bar inset and the drawer-sized leading slot the
+     shared page bar sets up. */
   .chats-sidebar-header.page-bar {
-    padding: var(--ui-space-2) var(--ui-space-3);
+    padding: var(--ui-space-1-5) calc(var(--ui-space-4) + var(--ui-safe-right))
+      var(--ui-space-1-5) calc(var(--ui-space-4) + var(--ui-safe-left));
+    padding-top: calc(var(--ui-space-1-5) + var(--ui-safe-top));
   }
 
+  /* The chat's own app bar: Back and the title on the first row, the model and
+     agent chips on the row under them. */
   .chat-header {
     flex-wrap: wrap;
     height: auto;
-    min-height: var(--ui-header-height);
-    padding: var(--ui-space-2) var(--ui-space-4);
+    min-height: calc(var(--ui-header-height) + var(--ui-space-2));
+    gap: var(--ui-space-1) var(--ui-space-2);
+    padding: var(--ui-space-1-5) calc(var(--ui-space-4) + var(--ui-safe-right))
+      var(--ui-space-1-5) calc(var(--ui-space-4) + var(--ui-safe-left));
+    padding-top: calc(var(--ui-space-1-5) + var(--ui-safe-top));
   }
 
-  .chat-back {
-    display: inline-flex;
-    justify-content: flex-start;
+  .chat-header .page-bar-lead {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
   }
 
+  /* The title takes the row, and what the chat is for reads under it. */
   .chat-header-info {
-    flex: 1 1 100%;
-    flex-wrap: wrap;
+    flex: 1 1 0;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
     min-width: 0;
+  }
+
+  .chat-header-info h3 {
+    max-width: 100%;
+  }
+
+  .chat-purpose {
+    max-width: 100%;
+    padding: 0;
+    overflow: hidden;
+    background: none;
+    color: var(--ui-text-muted);
+    text-overflow: ellipsis;
   }
 
   .chat-header-actions {
@@ -2006,6 +2023,24 @@
     justify-content: flex-start;
     margin-left: 0;
     min-width: 0;
+  }
+
+  /* A chip keeps the state it reports and drops the words around it: the row
+     holds model, agent and permissions on one line that way. */
+  .chat-settings-provider,
+  .chat-settings-effort,
+  .chat-settings-trigger .chat-settings-separator {
+    display: none;
+  }
+
+  .chat-settings-trigger,
+  .agent-controls,
+  .agent-toggle {
+    height: var(--ui-control-height);
+  }
+
+  .chat-model {
+    max-width: 8rem;
   }
 
   .chats-sidebar {

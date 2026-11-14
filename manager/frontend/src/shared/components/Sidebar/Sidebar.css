@@ -251,26 +251,10 @@ a.change-server-btn:hover {
   background: var(--ui-bg-hover);
 }
 
-.mobile-menu-btn {
+/* The drawer closes from inside itself on a phone: its trigger in the page bar
+   is behind the overlay once the drawer is open. */
+.sidebar-close {
   display: none;
-  position: fixed;
-  top: calc(var(--ui-space-2) + var(--ui-safe-top));
-  left: calc(var(--ui-space-3) + var(--ui-safe-left));
-  z-index: 101;
-  width: var(--ui-control-height);
-  height: var(--ui-control-height);
-  padding: var(--ui-space-1-5);
-  background: var(--ui-bg-elevated);
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-md);
-  color: var(--ui-text-primary);
-  cursor: pointer;
-  box-shadow: var(--ui-shadow-md);
-}
-
-.mobile-menu-btn svg {
-  width: 100%;
-  height: 100%;
 }
 
 .sidebar-overlay {
@@ -278,10 +262,25 @@ a.change-server-btn:hover {
 }
 
 @media (max-width: 768px) {
-  .mobile-menu-btn {
+  .sidebar-close {
     display: flex;
     align-items: center;
     justify-content: center;
+    flex-shrink: 0;
+    width: var(--ui-space-10);
+    height: var(--ui-space-10);
+    margin-left: calc(-1 * var(--ui-space-2));
+    padding: 0;
+    border: none;
+    border-radius: var(--ui-radius-md);
+    background: transparent;
+    color: var(--ui-text-primary);
+    cursor: pointer;
+  }
+
+  .sidebar-close svg {
+    width: var(--ui-space-6);
+    height: var(--ui-space-6);
   }
 
   .sidebar {
@@ -295,14 +294,19 @@ a.change-server-btn:hover {
     transform: translateX(0);
   }
 
-  .sidebar.open .sidebar-header {
-    padding-left: calc(
-      var(--ui-space-3) + var(--ui-control-height) + var(--ui-space-2) + var(--ui-safe-left)
-    );
+  /* The header grows to hold the close control at a thumb-sized target. */
+  .sidebar-header {
+    height: calc(var(--ui-header-height) + var(--ui-space-2));
+    padding-left: var(--ui-space-4);
   }
 
   .sidebar.collapsed {
     width: var(--ui-sidebar-width);
+  }
+
+  /* Width is the drawer's own business on a phone. */
+  .collapse-btn {
+    display: none;
   }
 
   .sidebar-overlay {
