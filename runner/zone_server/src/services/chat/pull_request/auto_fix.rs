@@ -21,6 +21,7 @@ use super::mergeable::Mergeable;
 use super::status::Status;
 use crate::db::chat_pull_requests::{self, Claim, PullRequestRow};
 use crate::db::projects;
+use crate::db::sources;
 use crate::db::tasks::{Create, Origin};
 use crate::state::AppState;
 
@@ -73,23 +74,23 @@ pub async fn consider(
         tracing::warn!(pull_request = %row.id, "auto-fix is on with no one to act as");
         return;
     };
-    let project = match project(state, workspace_id, row).await {
-        Ok(Some(project)) => project,
+    let route = match route(state, workspace_id, row).await {
+        Ok(Some(route)) => route,
         Ok(None) => {
             tracing::warn!(
                 pull_request = %row.id,
-                "no project of the workspace can push to this pull request's repository"
+                "neither a project nor the source of this pull request can push to its repository"
             );
             return;
         }
         Err(error) => {
-            tracing::warn!(pull_request = %row.id, %error, "could not read the workspace's projects");
+            tracing::warn!(pull_request = %row.id, %error, "could not read what can push to this pull request");
             return;
         }
     };
     let fix = Fix {
         actor,
-        project,
+        route,
         branch,
         head,
         complaint,
@@ -122,24 +123,74 @@ async fn refresh(state: &AppState, row: &mut PullRequestRow) {
     }
 }
 
-/// The workspace project that holds a push credential for the pull request's
-/// repository. A task's checkout reaches a repository only through one.
-async fn project(
+/// How an auto-fix run reaches the pull request's repository. A run's
+/// checkout resolves one through a project that names the repository and
+/// holds a credential for it, or failing that through the task's own source,
+/// so a repository connected as a source alone is still reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// The workspace project that holds a push credential for it.
+    Project(Uuid),
+    /// The pull request's own source holds one, and no project names it.
+    Source,
+}
+
+impl Route {
+    /// The projects a task started on this route is scoped to.
+    fn projects(self) -> Vec<Uuid> {
+        match self {
+            Self::Project(id) => vec![id],
+            Self::Source => Vec::new(),
+        }
+    }
+}
+
+/// What can push to the pull request's repository: a project that names it
+/// and holds a credential, else its own source when that holds one. A
+/// repository neither reaches is left alone, since a run that cannot push
+/// would only spin.
+async fn route(
     state: &AppState,
     workspace_id: Uuid,
     row: &PullRequestRow,
-) -> Result<Option<Uuid>, sqlx::Error> {
+) -> Result<Option<Route>, sqlx::Error> {
     let Some(wanted) = repository(&format!("https://github.com/{}/{}", row.owner, row.repo)) else {
         return Ok(None);
     };
-    Ok(projects::list_projects(state.db(), workspace_id, None)
+    let project = projects::list_projects(state.db(), workspace_id, None)
         .await?
         .into_iter()
         .find(|project| {
             (project.github_access_token.is_some() || project.github_installation_id.is_some())
                 && project.github_repo_url.as_deref().and_then(repository) == Some(wanted.clone())
         })
-        .map(|project| project.id))
+        .map(|project| project.id);
+    if let Some(project) = project {
+        return Ok(Some(Route::Project(project)));
+    }
+    Ok(source(state, workspace_id, row, &wanted)
+        .await?
+        .then_some(Route::Source))
+}
+
+/// Whether the pull request's source names its repository and holds a
+/// credential for it. The name check is what keeps a source's credential from
+/// being offered for another repository.
+async fn source(
+    state: &AppState,
+    workspace_id: Uuid,
+    row: &PullRequestRow,
+    wanted: &str,
+) -> Result<bool, sqlx::Error> {
+    let Some(id) = row.source_id else {
+        return Ok(false);
+    };
+    let Some(source) = sources::get_source(state.db(), id, workspace_id).await? else {
+        return Ok(false);
+    };
+    let holds = source.source_type == sources::GITHUB
+        && (source.credentials_encrypted.is_some() || source.github_installation_id.is_some());
+    Ok(holds && source.url.as_deref().and_then(repository).as_deref() == Some(wanted))
 }
 
 fn repository(url: &str) -> Option<String> {
@@ -150,7 +201,7 @@ fn repository(url: &str) -> Option<String> {
 
 struct Fix<'a> {
     actor: Uuid,
-    project: Uuid,
+    route: Route,
     branch: &'a BranchName,
     head: &'a CommitSha,
     complaint: &'a str,
@@ -167,7 +218,7 @@ async fn start(
 ) -> Result<Option<Uuid>, sqlx::Error> {
     let title = format!("Fix {}/{} #{}", row.owner, row.repo, row.number);
     let description = prompt(row, status, fix.complaint);
-    let project_ids = [fix.project];
+    let project_ids = fix.route.projects();
     let task = Create {
         workspace_id,
         project_ids: &project_ids,
@@ -332,6 +383,7 @@ mod tests {
     use super::*;
     use crate::db::chat_pull_requests::NewPullRequest;
     use crate::db::chats::create_chat;
+    use crate::db::sources::testing::Installation;
     use chrono::Utc;
     use sqlx::PgPool;
     use std::time::Duration;
@@ -571,12 +623,110 @@ mod tests {
         let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
 
         assert_eq!(
-            super::project(&state, installation.workspace, &row)
+            super::route(&state, installation.workspace, &row)
                 .await
                 .expect("the projects"),
-            Some(project),
+            Some(Route::Project(project)),
             "a project the installation pushes for holds a push credential"
         );
+    }
+
+    /// A github source for `repository`, connected through `installation`.
+    async fn source(pool: &PgPool, installation: &Installation, repository: &str) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO sources (workspace_id, name, source_type, url, github_installation_id)
+             VALUES ($1, $2, 'github', $3, $4) RETURNING id",
+        )
+        .bind(installation.workspace)
+        .bind(Uuid::new_v4().to_string())
+        .bind(repository)
+        .bind(installation.id)
+        .fetch_one(pool)
+        .await
+        .expect("a source")
+    }
+
+    async fn recorded(pool: &PgPool, chat_id: Uuid, source_id: Option<Uuid>) -> PullRequestRow {
+        chat_pull_requests::record(
+            pool,
+            &NewPullRequest {
+                chat_id,
+                owner: "acme",
+                repo: "widgets",
+                number: 7,
+                url: "https://github.com/acme/widgets/pull/7",
+                title: None,
+                source_id,
+                opened_by: None,
+            },
+        )
+        .await
+        .expect("the pull request")
+    }
+
+    #[tokio::test]
+    async fn the_pull_requests_own_source_can_push_when_no_project_names_the_repository() {
+        let pool = crate::db::sources::testing::pool().await;
+        let installation = crate::db::sources::testing::installation(&pool).await;
+        let source = source(&pool, &installation, "https://github.com/acme/widgets").await;
+        let chat = create_chat(&pool, None, "Changes", "qwen3:8b", false, true)
+            .await
+            .expect("a chat");
+        let row = recorded(&pool, chat.id, Some(source)).await;
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+
+        assert_eq!(
+            super::route(&state, installation.workspace, &row)
+                .await
+                .expect("the route"),
+            Some(Route::Source),
+            "a repository connected as a source alone is still reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_of_another_repository_lends_its_credential_to_no_pull_request() {
+        let pool = crate::db::sources::testing::pool().await;
+        let installation = crate::db::sources::testing::installation(&pool).await;
+        let source = source(&pool, &installation, "https://github.com/acme/gadgets").await;
+        let chat = create_chat(&pool, None, "Changes", "qwen3:8b", false, true)
+            .await
+            .expect("a chat");
+        let row = recorded(&pool, chat.id, Some(source)).await;
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+
+        assert_eq!(
+            super::route(&state, installation.workspace, &row)
+                .await
+                .expect("the route"),
+            None,
+            "a source names another repository, so its credential is not offered for this one"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pull_request_with_no_source_and_no_project_has_no_route() {
+        let pool = crate::db::sources::testing::pool().await;
+        let installation = crate::db::sources::testing::installation(&pool).await;
+        let chat = create_chat(&pool, None, "Changes", "qwen3:8b", false, true)
+            .await
+            .expect("a chat");
+        let row = recorded(&pool, chat.id, None).await;
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+
+        assert_eq!(
+            super::route(&state, installation.workspace, &row)
+                .await
+                .expect("the route"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_run_on_the_source_route_is_scoped_to_no_project() {
+        assert!(Route::Source.projects().is_empty());
+        let project = Uuid::new_v4();
+        assert_eq!(Route::Project(project).projects(), vec![project]);
     }
 
     #[tokio::test]
