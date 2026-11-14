@@ -52,6 +52,7 @@ import { ContextUsage } from '../components/ContextUsage';
 import { MoreChats } from '../components/MoreChats';
 import {
   useChat,
+  useChatDraft,
   useChatIndicators,
   useChatProviders,
   useChatPullRequests,
@@ -192,8 +193,13 @@ export default function ChatsPage() {
   const [groupBy, setGroupBy] = useState(readChatGroupBy);
   const [sort, setSort] = useState(readChatSort);
   const [filter, setFilter] = useState(readChatFilter);
-  const [messageInput, setMessageInput] = useState('');
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const {
+    draft: messageInput,
+    setDraft: setMessageInput,
+    attachments,
+    setAttachments,
+    forgetDraft,
+  } = useChatDraft(selectedChatId, user?.id);
   const [isDragging, setIsDragging] = useState(false);
   const [showCharacterModal, setShowCharacterModal] = useState(false);
   const [characterDraft, setCharacterDraft] = useState('');
@@ -1099,6 +1105,7 @@ export default function ChatsPage() {
     setOperationError(null);
     try {
       await deleteChatFn(chatId);
+      forgetDraft(chatId);
       if (selectedChatId === chatId) {
         clearSelectedChat();
       }

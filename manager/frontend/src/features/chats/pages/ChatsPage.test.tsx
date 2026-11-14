@@ -28,6 +28,7 @@ import type {
   UpdateChatRequest,
 } from '../types';
 import { CHAT_GROUP_STORAGE_KEY, CHAT_SORT_STORAGE_KEY } from '../utils/arrange';
+import { draftKey } from '../utils/drafts';
 import { CHAT_FILTER_STORAGE_KEY } from '../utils/indicators';
 
 // Create mock functions
@@ -480,9 +481,8 @@ afterAll(() => {
 
 describe('ChatsPage', () => {
   beforeEach(() => {
-    localStorage.removeItem(CHAT_GROUP_STORAGE_KEY);
-    localStorage.removeItem(CHAT_SORT_STORAGE_KEY);
-    localStorage.removeItem(CHAT_FILTER_STORAGE_KEY);
+    // Clears the arrangement keys and any draft a previous test left behind.
+    localStorage.clear();
     mockGetChatSources.mockReset();
     mockSetChatSources.mockReset();
     mockGetChatSources.mockResolvedValue([]);
@@ -2257,6 +2257,72 @@ describe('ChatsPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Send failed')).toBeInTheDocument();
       });
+    });
+  });
+
+  describe('draft messages', () => {
+    const composer = () => screen.findByPlaceholderText('Type a message, or drop a file...');
+
+    beforeEach(() => {
+      mockClient.getChat.mockImplementation(async (chatId: string) =>
+        chatId === 'chat-2' ? mockChatEmpty : mockChatWithMessages
+      );
+    });
+
+    it('keeps the unsent text of each chat to that chat', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      fireEvent.change(await composer(), { target: { value: 'for the first chat' } });
+
+      fireEvent.click(screen.getByText('Chat 2'));
+      await screen.findByRole('heading', { name: 'No messages yet' });
+      expect(await composer()).toHaveValue('');
+      fireEvent.change(await composer(), { target: { value: 'for the second chat' } });
+
+      fireEvent.click(screen.getByText('Chat 1'));
+      await screen.findByText('Hi there!');
+      expect(await composer()).toHaveValue('for the first chat');
+
+      // Visiting chat-2 renamed its sidebar entry to the title that came back with it.
+      fireEvent.click(screen.getByText('Empty Chat'));
+      await screen.findByRole('heading', { name: 'No messages yet' });
+      expect(await composer()).toHaveValue('for the second chat');
+    });
+
+    it('brings the unsent text back when the page is loaded again', async () => {
+      const first = renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      fireEvent.change(await composer(), { target: { value: 'still unsent' } });
+      first.unmount();
+
+      renderChatsPage();
+      expect(await composer()).toHaveValue('still unsent');
+    });
+
+    it('stops holding the text once the message is sent', async () => {
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      const input = await composer();
+      fireEvent.change(input, { target: { value: 'Test message' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+      await waitFor(() => expect(input).toHaveValue(''));
+      expect(localStorage.getItem(draftKey('1', 'chat-1'))).toBeNull();
+    });
+
+    it('drops the draft of a chat that is deleted', async () => {
+      mockClient.deleteChat.mockResolvedValue(undefined);
+      renderChatsPage();
+      fireEvent.click(await screen.findByText('Chat 1'));
+      fireEvent.change(await composer(), { target: { value: 'never sent' } });
+      expect(localStorage.getItem(draftKey('1', 'chat-1'))).toBe('never sent');
+
+      await chooseMenuItem('Actions for Chat 1', 'Delete');
+      const confirmations = screen.getAllByRole('button', { name: 'Delete' });
+      fireEvent.click(confirmations[confirmations.length - 1]);
+
+      await waitFor(() => expect(mockClient.deleteChat).toHaveBeenCalledWith('chat-1'));
+      expect(localStorage.getItem(draftKey('1', 'chat-1'))).toBeNull();
     });
   });
 
