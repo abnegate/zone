@@ -400,17 +400,19 @@ for (const scenario of scenarios) {
       await expect
         .poll(async () => (await page.locator('.sidebar').boundingBox())?.x)
         .toBe(0);
+      // The open drawer carries its own close control, so the row to measure
+      // is close, logo, theme toggle inside the drawer's header.
       const header = await page.evaluate(() => {
         const bounds = (selector: string): DOMRect =>
           document.querySelector(selector)!.getBoundingClientRect();
         return {
-          menuRight: bounds('.mobile-menu-btn').right,
+          closeRight: bounds('.sidebar-header .sidebar-close').right,
           logoLeft: bounds('.sidebar-header .zone-logo').left,
           logoRight: bounds('.sidebar-header .zone-logo').right,
           themeLeft: bounds('.sidebar-header .theme-toggle').left,
         };
       });
-      expect(header.logoLeft - header.menuRight).toBeGreaterThanOrEqual(8);
+      expect(header.logoLeft - header.closeRight).toBeGreaterThanOrEqual(8);
       expect(header.themeLeft - header.logoRight).toBeGreaterThanOrEqual(8);
     }
     await expect(page.locator('.sidebar-nav')).toBeVisible();

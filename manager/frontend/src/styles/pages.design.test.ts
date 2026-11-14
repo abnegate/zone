@@ -160,16 +160,26 @@ describe('chats layout', () => {
     expect(rule(chats, '.chat-header-info h3')).toContain('white-space: nowrap');
   });
 
-  it('wraps the conversation header under the title on a phone', () => {
+  it('leads the phone conversation bar with Back and drops its chips below', () => {
     const phone = media(chats, '(max-width: 768px)');
-    expect(rule(phone, '.chat-header')).toContain('flex-wrap: wrap');
-    expect(rule(phone, '.chat-header')).toContain('height: auto');
-    expect(rule(phone, '.chat-back')).toContain('display: inline-flex');
-    expect(rule(phone, '.chat-header-info')).toContain('flex: 1 1 100%');
-    expect(rule(phone, '.chat-header-info')).toContain('flex-wrap: wrap');
-    expect(rule(phone, '.chat-header-actions')).toContain('flex-wrap: wrap');
+    const header = rule(phone, '.chat-header');
+    expect(header).toContain('min-height: calc(var(--ui-header-height) + var(--ui-space-2))');
+    expect(header).toContain('padding-top: calc(var(--ui-space-1-5) + var(--ui-safe-top))');
+    // Back rides the bar's own leading slot, so it never stacks under the
+    // drawer trigger the list screen shows there.
+    expect(rule(phone, '.chat-header .page-bar-lead')).toContain('display: flex');
+    expect(chats).not.toContain('.chat-back');
+    const info = rule(phone, '.chat-header-info');
+    expect(info).toContain('flex: 1 1 0');
+    expect(info).toContain('flex-direction: column');
     expect(rule(phone, '.chat-header-actions')).toContain('flex: 1 1 100%');
     expect(rule(phone, '.chat-header-actions')).toContain('justify-content: flex-start');
+    expect(
+      rule(
+        phone,
+        '.chat-settings-provider, .chat-settings-effort, .chat-settings-trigger .chat-settings-separator'
+      )
+    ).toContain('display: none');
   });
 
   it('draws the reader bubble at most 72% wide with the time outside it', () => {
@@ -585,7 +595,8 @@ describe('tasks page layout', () => {
 
   it('wraps the task filters instead of shrinking them off the page bar', () => {
     const phone = media(css, '(max-width: 768px)');
-    expect(rule(phone, '.tasks-filters')).toContain('flex-wrap: wrap');
+    expect(rule(phone, '.page-bar-actions > .tasks-filters')).toContain('flex-wrap: wrap');
+    expect(rule(phone, '.page-bar-actions > .tasks-filters')).toContain('order: 3');
     expect(rule(phone, '.tasks-filters .ui-select-trigger')).toContain('width: auto');
   });
 

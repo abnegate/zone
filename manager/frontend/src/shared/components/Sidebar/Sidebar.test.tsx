@@ -2,6 +2,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { clientModule } from '../../../test/client';
+import { NavDrawerProvider } from '../../context/NavDrawerContext';
+import PageBar from '../PageBar/PageBar';
 
 let currentPathname = '/';
 
@@ -120,6 +122,20 @@ const renderSidebar = () => {
   return render(
     <Wrapper>
       <Sidebar />
+    </Wrapper>
+  );
+};
+
+/// The app frame. The drawer's trigger sits in whichever page bar is on
+/// screen, so only the two together open it.
+const renderFrame = () => {
+  const Wrapper = createWrapper();
+  return render(
+    <Wrapper>
+      <NavDrawerProvider>
+        <PageBar title="Chats" />
+        <Sidebar />
+      </NavDrawerProvider>
     </Wrapper>
   );
 };
@@ -329,9 +345,12 @@ describe('Sidebar', () => {
       expect(screen.getByText('Test Workspace')).toBeInTheDocument();
     });
 
-    it('renders mobile menu button', () => {
+    it('leaves the drawer trigger to the page bar and shuts a closed drawer up', () => {
       renderSidebar();
-      expect(screen.getByLabelText('Toggle menu')).toBeInTheDocument();
+      expect(screen.queryByLabelText('Toggle menu')).not.toBeInTheDocument();
+      // A closed drawer is off-screen rather than hidden, so a close control
+      // left in it would answer to that name from every page.
+      expect(screen.queryByLabelText('Close navigation')).not.toBeInTheDocument();
     });
   });
 
@@ -459,7 +478,7 @@ describe('Sidebar', () => {
 
   describe('mobile menu', () => {
     it('toggles mobile menu open', async () => {
-      renderSidebar();
+      renderFrame();
 
       const menuButton = screen.getByLabelText('Toggle menu');
       fireEvent.click(menuButton);
@@ -470,7 +489,7 @@ describe('Sidebar', () => {
     });
 
     it('closes mobile menu when overlay clicked', async () => {
-      renderSidebar();
+      renderFrame();
 
       fireEvent.click(screen.getByLabelText('Toggle menu'));
 
@@ -487,7 +506,7 @@ describe('Sidebar', () => {
     });
 
     it('closes mobile menu when nav item clicked', async () => {
-      renderSidebar();
+      renderFrame();
 
       fireEvent.click(screen.getByLabelText('Toggle menu'));
 
@@ -503,7 +522,7 @@ describe('Sidebar', () => {
     });
 
     it('closes mobile menu when Escape key is pressed', async () => {
-      renderSidebar();
+      renderFrame();
 
       fireEvent.click(screen.getByLabelText('Toggle menu'));
 
@@ -520,7 +539,7 @@ describe('Sidebar', () => {
     });
 
     it('does not close mobile menu on other key press', async () => {
-      renderSidebar();
+      renderFrame();
 
       fireEvent.click(screen.getByLabelText('Toggle menu'));
 
@@ -532,6 +551,22 @@ describe('Sidebar', () => {
       fireEvent.keyDown(overlay, { key: 'Enter' });
 
       expect(screen.getByRole('button', { name: 'Close menu' })).toBeInTheDocument();
+    });
+
+    it('closes the open drawer from the control inside it', async () => {
+      renderFrame();
+
+      fireEvent.click(screen.getByLabelText('Toggle menu'));
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Close menu' })).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByLabelText('Close navigation'));
+
+      await waitFor(() => {
+        expect(screen.queryByRole('button', { name: 'Close menu' })).not.toBeInTheDocument();
+      });
     });
   });
 

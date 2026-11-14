@@ -746,17 +746,16 @@
 }
 
 @media (max-width: 768px) {
-  .wiki-page .page-bar-actions {
-    flex: 1 1 100%;
-    flex-wrap: wrap;
-    justify-content: space-between;
-  }
-
+  /* Search takes the bar's second row, under the title and Add knowledge. */
   .wiki-search.search-form {
-    order: 1;
+    order: 3;
     width: 100%;
     max-width: none;
     flex-basis: 100%;
+  }
+
+  .wiki-page .search-input {
+    height: var(--ui-control-height-lg);
   }
 
   .filter-group {
