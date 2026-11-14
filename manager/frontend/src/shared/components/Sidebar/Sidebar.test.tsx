@@ -272,6 +272,7 @@ describe('Sidebar', () => {
       expect(screen.getByText('Chats')).toBeInTheDocument();
       expect(screen.getByText('Projects')).toBeInTheDocument();
       expect(screen.getByText('Tasks')).toBeInTheDocument();
+      expect(screen.getByText('Pull Requests')).toBeInTheDocument();
       expect(screen.getByText('Models')).toBeInTheDocument();
       expect(screen.getByText('Wiki')).toBeInTheDocument();
       expect(screen.getByText('Settings')).toBeInTheDocument();
@@ -286,6 +287,7 @@ describe('Sidebar', () => {
         'Chats',
         'Projects',
         'Tasks',
+        'Pull Requests',
         'Models',
         'Wiki',
         'Settings',
@@ -342,6 +344,10 @@ describe('Sidebar', () => {
       expect(screen.getByText('Chats').closest('a')).toHaveAttribute('href', '/chats');
       expect(screen.getByText('Projects').closest('a')).toHaveAttribute('href', '/projects');
       expect(screen.getByText('Tasks').closest('a')).toHaveAttribute('href', '/tasks');
+      expect(screen.getByText('Pull Requests').closest('a')).toHaveAttribute(
+        'href',
+        '/pull-requests'
+      );
       expect(screen.getByText('Models').closest('a')).toHaveAttribute('href', '/models');
       expect(screen.getByText('Wiki').closest('a')).toHaveAttribute('href', '/wiki');
     });

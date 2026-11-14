@@ -1,0 +1,31 @@
+.source-notices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  flex-shrink: 0;
+}
+
+.source-notices .error-banner {
+  margin-bottom: 0;
+}
+
+.source-notice-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.source-notice {
+  margin: 0;
+  padding: var(--ui-space-1-5) var(--ui-space-2);
+  border: 1px solid color-mix(in srgb, var(--ui-warning) 35%, transparent);
+  border-radius: var(--ui-radius-sm);
+  background: color-mix(in srgb, var(--ui-warning) 12%, transparent);
+  color: var(--ui-text-primary);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-space-4);
+  overflow-wrap: anywhere;
+}

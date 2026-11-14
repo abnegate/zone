@@ -33,6 +33,7 @@ const ChatsPage = lazyRoute(loaders.chats);
 const Layout = lazyRoute(loaders.layout);
 const ModelsPage = lazyRoute(loaders.models);
 const ProjectsPage = lazyRoute(loaders.projects);
+const PullRequestsPage = lazyRoute(loaders.pullRequests);
 const SettingsPage = lazyRoute(loaders.settings);
 const SetupGate = lazyRoute(loaders.setupGate);
 const SetupPage = lazyRoute(loaders.setup);
@@ -173,6 +174,14 @@ function App({
                           element={
                             <ProtectedRoute requiredPermission={PERMISSIONS.TASKS.READ}>
                               <TasksPage />
+                            </ProtectedRoute>
+                          }
+                        />
+                        <Route
+                          path="pull-requests"
+                          element={
+                            <ProtectedRoute requiredPermission={PERMISSIONS.PULL_REQUESTS.READ}>
+                              <PullRequestsPage />
                             </ProtectedRoute>
                           }
                         />

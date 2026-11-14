@@ -41,6 +41,10 @@ describe('route preloading', () => {
 
   it('loads each signed in chunk once for later navigation', async () => {
     const settled = (await preloadSignedInRoutes(storageWith(ACCESS_TOKEN_KEY))) as unknown[];
-    expect(settled).toHaveLength(11);
+    expect(settled).toHaveLength(12);
+  });
+
+  it('loads the shell and the pull requests page for a pull request link', async () => {
+    expect(await preloadRoute('/pull-requests', storageWith(ACCESS_TOKEN_KEY))).toHaveLength(4);
   });
 });
