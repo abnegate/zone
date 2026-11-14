@@ -945,12 +945,18 @@ mod tests {
         let read = watching(&pool).await.expect("the watched pull requests");
 
         let ids: Vec<Uuid> = read.iter().map(|one| one.row.id).collect();
-        assert!(ids.contains(&watched), "auto-fix is on with someone to act as");
+        assert!(
+            ids.contains(&watched),
+            "auto-fix is on with someone to act as"
+        );
         assert!(
             !ids.contains(&unwatched),
             "auto-fix is off, so a read would start nothing"
         );
-        assert!(!ids.contains(&dismissed), "a dismissed pull request is gone");
+        assert!(
+            !ids.contains(&dismissed),
+            "a dismissed pull request is gone"
+        );
         assert!(
             !ids.contains(&orphan),
             "a chat with no workspace has no credential to read with"
