@@ -13,9 +13,6 @@ use crate::services::github::pull_requests;
 use crate::services::github::releases;
 use crate::services::github::releases::SourceOptions;
 
-const WINDOW: u32 = 7;
-const WIDER: u32 = 30;
-
 fn options(source_id: Uuid) -> SourceOptions {
     SourceOptions {
         source_id,
@@ -25,62 +22,28 @@ fn options(source_id: Uuid) -> SourceOptions {
         latest_tag: None,
         next_tag: "v0.1.0".into(),
         previous_tags: Vec::new(),
+        lines: Vec::new(),
     }
 }
 
-async fn fill(snapshots: &Snapshots, source_id: Uuid) {
+async fn freshness(snapshots: &Snapshots, source_id: Uuid) -> [Freshness; 3] {
     let now = Utc::now();
-    snapshots
-        .pulls
-        .read(source_id, false, now, |_| async {
-            Ok(pull_requests::Listing::default())
-        })
-        .await
-        .expect("seed the pull requests");
-    for days in [WINDOW, WIDER] {
-        snapshots
-            .releases
-            .read((source_id, days), false, now, |_| async {
-                Ok(releases::Listing::default())
-            })
-            .await
-            .expect("seed the releases");
-    }
-    snapshots
-        .options
-        .read(
-            source_id,
-            false,
-            now,
-            |_| async move { Ok(options(source_id)) },
-        )
-        .await
-        .expect("seed the options");
-}
-
-async fn freshness(snapshots: &Snapshots, source_id: Uuid) -> [Freshness; 4] {
-    let now = Utc::now();
-    let pulls = snapshots
-        .pulls
+    let pull_requests = snapshots
+        .pull_requests
         .read(source_id, false, now, |_| async {
             Ok(pull_requests::Listing::default())
         })
         .await
         .expect("read the pull requests")
         .1;
-    let mut windows = Vec::new();
-    for days in [WINDOW, WIDER] {
-        windows.push(
-            snapshots
-                .releases
-                .read((source_id, days), false, now, |_| async {
-                    Ok(releases::Listing::default())
-                })
-                .await
-                .expect("read the releases")
-                .1,
-        );
-    }
+    let releases = snapshots
+        .releases
+        .read(source_id, false, now, |_| async {
+            Ok(releases::Listing::default())
+        })
+        .await
+        .expect("read the releases")
+        .1;
     let options = snapshots
         .options
         .read(
@@ -92,7 +55,7 @@ async fn freshness(snapshots: &Snapshots, source_id: Uuid) -> [Freshness; 4] {
         .await
         .expect("read the options")
         .1;
-    [pulls, windows[0], windows[1], options]
+    [pull_requests, releases, options]
 }
 
 #[test]
@@ -105,12 +68,12 @@ fn each_cache_lives_as_long_as_its_setting_says() {
 
     let snapshots = Snapshots::new(&config);
 
-    assert_eq!(snapshots.pulls.ttl(), Duration::from_secs(60));
+    assert_eq!(snapshots.pull_requests.ttl(), Duration::from_secs(60));
     assert_eq!(snapshots.releases.ttl(), Duration::from_secs(600));
     assert_eq!(snapshots.options.ttl(), OPTIONS_TTL);
     assert_eq!(snapshots.pipelines.ttl(), PIPELINE_TTL);
     for floor in [
-        snapshots.pulls.floor(),
+        snapshots.pull_requests.floor(),
         snapshots.releases.floor(),
         snapshots.options.floor(),
         snapshots.pipelines.floor(),
@@ -127,18 +90,18 @@ async fn invalidating_a_source_expires_every_read_of_it_and_nothing_else() {
     let snapshots = Snapshots::new(&GithubConfig::default());
     let written = Uuid::new_v4();
     let untouched = Uuid::new_v4();
-    fill(&snapshots, written).await;
-    fill(&snapshots, untouched).await;
+    freshness(&snapshots, written).await;
+    freshness(&snapshots, untouched).await;
 
     snapshots.invalidate(written);
 
     assert_eq!(
         freshness(&snapshots, written).await,
-        [Freshness::Refreshed; 4]
+        [Freshness::Refreshed; 3]
     );
     assert_eq!(
         freshness(&snapshots, untouched).await,
-        [Freshness::Cached; 4]
+        [Freshness::Cached; 3]
     );
 }
 

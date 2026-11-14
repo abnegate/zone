@@ -2,6 +2,7 @@ use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 
 use abnegate_vcs::ChangedFile;
+use abnegate_vcs::Collected;
 use abnegate_vcs::CommitSha as Revision;
 use abnegate_vcs::Excerpt;
 use abnegate_vcs::ListedPullRequest;
@@ -20,22 +21,21 @@ use super::Log;
 use super::Repository;
 use super::Thread;
 use super::ThreadComment;
-use super::absolute;
 use crate::services::github::client::Github;
 use crate::services::github::client::PER_PAGE;
-use crate::services::github::client::described;
 use crate::services::github::diff;
 use crate::services::github::diff::Diff;
 use crate::services::github::diff::Entry;
+use crate::services::github::fault::Fault;
+use crate::services::github::link::absolute;
 
 pub(super) const NOT_ACCEPTABLE: u16 = 406;
-const COMMIT_PAGES: u32 = 3;
 
 impl Github {
     pub(crate) async fn open_pulls(
         &self,
         limit: u32,
-    ) -> Result<(Vec<ListedPullRequest>, bool), String> {
+    ) -> Result<(Vec<ListedPullRequest>, bool), Fault> {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut pulls = Vec::new();
         let mut page = NonZeroU32::MIN;
@@ -49,8 +49,7 @@ impl Github {
                     page,
                     PER_PAGE,
                 )
-                .await
-                .map_err(described)?;
+                .await?;
             pulls.extend(listed.items);
             match listed.next {
                 Some(next) if pulls.len() < limit => page = next,
@@ -68,15 +67,14 @@ impl Github {
         reference: &PullRequestReference,
         counted: u32,
         repository: &Repository,
-    ) -> Result<(Vec<Commit>, bool), String> {
+    ) -> Result<(Vec<Commit>, bool), Fault> {
         let mut commits = Vec::new();
         let mut page = NonZeroU32::MIN;
         loop {
             let listed = self
                 .service()
                 .list_commits(reference, self.token(), page, PER_PAGE)
-                .await
-                .map_err(described)?;
+                .await?;
             commits.extend(
                 listed
                     .items
@@ -84,25 +82,14 @@ impl Github {
                     .map(|commit| written(commit, repository)),
             );
             match listed.next {
-                Some(next) if next.get() <= COMMIT_PAGES => page = next,
-                next => {
+                Some(next) => page = next,
+                None => {
                     let counted = usize::try_from(counted).unwrap_or(usize::MAX);
-                    let complete = next.is_none() && commits.len() >= counted;
+                    let complete = commits.len() >= counted;
                     return Ok((commits, complete));
                 }
             }
         }
-    }
-
-    pub(crate) async fn unresolved_threads(&self, number: u64) -> Result<Vec<Thread>, String> {
-        Ok(self
-            .threads(number)
-            .await?
-            .items
-            .into_iter()
-            .filter(|thread| !thread.resolved && !thread.comments.is_empty())
-            .map(thread)
-            .collect())
     }
 
     pub(crate) async fn pull_diff(
@@ -121,7 +108,7 @@ impl Github {
                 ..
             }) => {
                 let files = self.service().fetch_files(reference, self.token()).await?;
-                Ok(diff::per_file(files.iter().map(entry), revision))
+                Ok(diff::per_file(budgeted(&files, budget()), revision))
             }
             Err(error) => Err(error),
         }
@@ -150,13 +137,14 @@ impl Github {
         job_id: NonZeroU64,
         head: &str,
         fetched_at: DateTime<Utc>,
-    ) -> Result<Log, String> {
+    ) -> Result<Log, Fault> {
         let job = self
             .service()
             .fetch_workflow_job(self.repository(), self.token(), job_id)
-            .await
-            .map_err(described)?;
-        let run_id = self.verify_job(&job, job_id.get(), head)?;
+            .await?;
+        let run_id = self
+            .verify_job(&job, job_id.get(), head)
+            .map_err(Fault::Missing)?;
         let downloaded = self
             .service()
             .fetch_job_log(
@@ -165,8 +153,7 @@ impl Github {
                 job_id,
                 usize::try_from(self.log_bytes()).unwrap_or(usize::MAX),
             )
-            .await
-            .map_err(described)?;
+            .await?;
         let text = String::from_utf8_lossy(&downloaded.content);
         let (kept, cut) = tail(&text, LOG_TAIL);
         Ok(Log {
@@ -192,19 +179,39 @@ pub(super) fn tail(text: &str, limit: u64) -> (&str, bool) {
     (&text[start..], true)
 }
 
-fn budget() -> usize {
-    usize::try_from(DIFF_BUDGET).unwrap_or(usize::MAX)
+pub(super) fn unresolved(threads: Collected<ReviewThreadRecord>) -> Vec<Thread> {
+    threads
+        .items
+        .into_iter()
+        .filter(|thread| !thread.resolved && !thread.comments.is_empty())
+        .map(thread)
+        .collect()
 }
 
-fn entry(file: &ChangedFile) -> Entry<'_> {
-    Entry {
-        path: &file.filename,
-        previous_path: file.previous_filename.as_deref(),
-        status: file.status.into(),
-        additions: file.additions,
-        deletions: file.deletions,
-        patch: file.patch.as_deref(),
-    }
+pub(super) fn budgeted(files: &[ChangedFile], budget: usize) -> Vec<Entry<'_>> {
+    let mut remaining = budget;
+    files
+        .iter()
+        .map(|file| {
+            let patch = file.patch.as_deref().filter(|patch| {
+                let fits = patch.len() <= remaining;
+                remaining = if fits { remaining - patch.len() } else { 0 };
+                fits
+            });
+            Entry {
+                path: &file.filename,
+                previous_path: file.previous_filename.as_deref(),
+                status: file.status.into(),
+                additions: file.additions,
+                deletions: file.deletions,
+                patch,
+            }
+        })
+        .collect()
+}
+
+fn budget() -> usize {
+    usize::try_from(DIFF_BUDGET).unwrap_or(usize::MAX)
 }
 
 fn written(commit: PullRequestCommit, repository: &Repository) -> Commit {

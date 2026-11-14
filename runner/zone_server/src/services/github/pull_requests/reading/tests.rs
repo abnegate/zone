@@ -285,6 +285,6 @@ async fn a_job_log_is_read_for_the_pull_requests_head_only() {
 
     assert_eq!(
         github.job_log_tail(job, COMMIT, now).await.unwrap_err(),
-        FOREIGN_JOB
+        Fault::missing(FOREIGN_JOB)
     );
 }

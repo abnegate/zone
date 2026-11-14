@@ -4,6 +4,13 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::*;
+use crate::services::github::client::FOREIGN_JOB;
+use crate::services::github::client::RATE_LIMIT_EXHAUSTED;
+use crate::services::github::client::UNAUTHORIZED;
+use crate::services::github::client::UNEXPECTED_RESPONSE;
+use crate::services::github::client::status_error;
+use crate::services::github::evidence::CheckDetail;
+use crate::services::github::evidence::CheckKind;
 use crate::services::github::readiness::BlockerCode;
 use crate::services::github::readiness::BlockerReport;
 use crate::services::github::readiness::CheckCounts;
@@ -12,6 +19,7 @@ use crate::services::github::readiness::CheckSummary;
 use crate::services::github::readiness::CommitSha;
 use crate::services::github::readiness::Confidence;
 use crate::services::github::readiness::ReviewSummary;
+use crate::services::github_app::Unauthenticated;
 
 const SOURCE: &str = "6f2c1f8e-0d55-4a3c-9a43-2f1d4c1e7b10";
 const HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -56,7 +64,7 @@ fn pull_request(number: u64, readiness: Readiness) -> PullRequest {
         },
         check_details: vec![CheckDetail {
             kind: CheckKind::CheckRun,
-            id: 77,
+            id: Some(77),
             name: "test".into(),
             state: CheckState::Pending,
             url: None,
@@ -141,15 +149,15 @@ fn a_pull_request_row_serialises_as_the_console_reads_it() {
 
 #[test]
 fn an_unknown_author_and_head_serialise_as_null() {
-    let encoded = serde_json::to_value(PullRequest {
-        author: None,
-        head: None,
-        ..pull_request(7, Readiness::NotReady)
-    })
-    .unwrap();
+    let mut unidentified = pull_request(7, Readiness::NotReady);
+    unidentified.author = None;
+    unidentified.head = None;
+    unidentified.check_details[0].id = None;
+    let encoded = serde_json::to_value(unidentified).unwrap();
 
     assert_eq!(encoded["author"], json!(null));
     assert_eq!(encoded["head"], json!(null));
+    assert_eq!(encoded["check_details"][0]["id"], json!(null));
     assert_eq!(encoded["readiness"], json!("not_ready"));
 }
 
@@ -338,9 +346,32 @@ fn a_merge_serialises_as_the_console_reads_it() {
 }
 
 #[test]
-fn the_diff_and_log_budgets_are_sixteen_and_one_mebibytes() {
-    assert_eq!(DIFF_BUDGET, 16 * 1024 * 1024);
+fn the_diff_and_log_budgets_are_four_and_one_mebibytes() {
+    assert_eq!(DIFF_BUDGET, 4 * 1024 * 1024);
     assert_eq!(LOG_TAIL, 1024 * 1024);
+}
+
+#[test]
+fn file_by_file_patches_stop_once_the_budget_is_spent() {
+    let file = |name: &str, patch: &str| {
+        abnegate_vcs::ChangedFile::new(name, abnegate_vcs::FileStatus::Modified, 1, 0)
+            .with_patch(patch)
+    };
+    let files = [
+        file("a.rs", "@@ -1 +1 @@\n+one"),
+        file("b.rs", "@@ -1 +1 @@\n+two two two"),
+        file("c.rs", "@@ -1 +1 @@\n+3"),
+    ];
+
+    let entries = reading::budgeted(&files, 30);
+
+    let patched: Vec<bool> = entries.iter().map(|entry| entry.patch.is_some()).collect();
+    assert_eq!(patched, [true, false, false]);
+    assert!(
+        reading::budgeted(&files, usize::MAX)
+            .iter()
+            .all(|entry| entry.patch.is_some())
+    );
 }
 
 const UPDATED_AT: &str = "2026-11-14T03:00:00Z";
@@ -414,7 +445,7 @@ fn a_settled_unchanged_pull_request_is_kept_and_everything_else_is_assessed_agai
         row(8, UPDATED_AT, HEAD),
     ];
 
-    let plan = refresh_plan(Some(&previous), &listed, now, false);
+    let plan = refresh_plan(Some(&previous), &listed, now);
 
     assert_eq!(
         kept(&plan),
@@ -432,7 +463,7 @@ fn a_failed_pull_request_is_assessed_again_once_its_verdict_is_two_minutes_old()
     for (elapsed, expected) in [(0, true), (120, true), (121, false)] {
         let now = assessed_at + TimeDelta::seconds(elapsed);
         assert_eq!(
-            kept(&refresh_plan(Some(&previous), &listed, now, false)),
+            kept(&refresh_plan(Some(&previous), &listed, now)),
             [expected],
             "{elapsed} s after it was assessed"
         );
@@ -440,16 +471,30 @@ fn a_failed_pull_request_is_assessed_again_once_its_verdict_is_two_minutes_old()
 }
 
 #[test]
-fn a_forced_refresh_or_a_first_read_assesses_every_pull_request() {
-    let previous = listing(vec![settled(1, CheckState::Success)]);
+fn any_kept_verdict_is_assessed_again_once_it_is_five_minutes_old() {
+    let assessed_at = moment(ASSESSED_AT);
+    for state in [CheckState::Success, CheckState::None] {
+        let previous = listing(vec![settled(1, state)]);
+        let listed = [row(1, UPDATED_AT, HEAD)];
+        for (elapsed, expected) in [(0, true), (300, true), (301, false)] {
+            let now = assessed_at + TimeDelta::seconds(elapsed);
+            assert_eq!(
+                kept(&refresh_plan(Some(&previous), &listed, now)),
+                [expected],
+                "{state:?} {elapsed} s after it was assessed"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_first_read_assesses_every_pull_request() {
     let listed = [row(1, UPDATED_AT, HEAD)];
-    let now = moment(ASSESSED_AT);
 
     assert_eq!(
-        kept(&refresh_plan(Some(&previous), &listed, now, true)),
+        kept(&refresh_plan(None, &listed, moment(ASSESSED_AT))),
         [false]
     );
-    assert_eq!(kept(&refresh_plan(None, &listed, now, false)), [false]);
 }
 
 #[test]
@@ -484,20 +529,6 @@ fn pull_requests_rank_ready_first_then_most_recently_updated() {
 }
 
 #[test]
-fn only_web_addresses_are_links() {
-    for (url, linked) in [
-        ("https://github.com/owner/repository/pull/7", true),
-        ("http://127.0.0.1:8080/owner/repository/pull/7", true),
-        ("javascript:alert(1)", false),
-        ("/owner/repository/pull/7", false),
-        ("mailto:octocat@example.com", false),
-        ("", false),
-    ] {
-        assert_eq!(absolute(url).is_some(), linked, "{url}");
-    }
-}
-
-#[test]
 fn a_log_keeps_its_end_and_never_splits_a_character() {
     assert_eq!(reading::tail("abc", 3), ("abc", false));
     assert_eq!(reading::tail("abcdef", 3), ("def", true));
@@ -518,37 +549,51 @@ fn github_failures_read_as_missing_or_upstream() {
         ),
         (
             PullRequestError::GitHubApi("test-secret".into()),
-            Error::Upstream(super::super::client::UNEXPECTED_RESPONSE.into()),
+            Error::Upstream(Fault::upstream(UNEXPECTED_RESPONSE)),
         ),
         (
             PullRequestError::refused(503, "test-secret"),
-            Error::Upstream(status_error(503)),
+            Error::Upstream(Fault::Upstream(status_error(503))),
         ),
         (
             PullRequestError::AuthenticationFailed,
-            Error::Upstream(status_error(UNAUTHORIZED)),
+            Error::Upstream(Fault::Unauthenticated),
+        ),
+        (
+            PullRequestError::RateLimited,
+            Error::Upstream(Fault::RateLimited {
+                retry_after: None,
+                exhausted: false,
+            }),
         ),
     ] {
         let read = Error::from(error);
         assert_eq!(read, expected);
         assert!(!format!("{read:?}").contains("test-secret"));
     }
+    assert!(Error::from(PullRequestError::AuthenticationFailed).unauthenticated());
+    assert!(!Error::Upstream(Fault::Upstream(status_error(UNAUTHORIZED))).unauthenticated());
     assert_eq!(
-        Error::from(PullRequestError::AuthenticationFailed).unauthenticated(),
-        Some(status_error(UNAUTHORIZED).as_str())
-    );
-    assert_eq!(Error::Upstream(status_error(503)).unauthenticated(), None);
-    assert_eq!(
-        Error::described(status_error(404)),
-        Error::Missing(status_error(404))
+        Error::from(Fault::missing(FOREIGN_JOB)),
+        Error::Missing(FOREIGN_JOB.into())
     );
     assert_eq!(
-        Error::described(super::super::client::FOREIGN_JOB.into()),
-        Error::Missing(super::super::client::FOREIGN_JOB.into())
+        Error::from(Fault::RateLimited {
+            retry_after: None,
+            exhausted: true,
+        }),
+        Error::Upstream(Fault::RateLimited {
+            retry_after: None,
+            exhausted: true,
+        })
     );
     assert_eq!(
-        Error::described(RATE_LIMIT_EXHAUSTED.into()),
-        Error::Upstream(RATE_LIMIT_EXHAUSTED.into())
+        Fault::RateLimited {
+            retry_after: None,
+            exhausted: true,
+        }
+        .to_string(),
+        RATE_LIMIT_EXHAUSTED
     );
 }
 
@@ -564,8 +609,29 @@ fn every_refusal_carries_the_code_the_console_reads() {
         (Refusal::NotReady { blockers: vec![] }, "not_ready"),
         (Refusal::Conflict, "conflict"),
         (Refusal::Protected, "protected"),
+        (Refusal::Merged, "merged"),
+        (Refusal::Closed, "closed"),
     ] {
         assert_eq!(refusal.code(), code);
         assert!(!refusal.message().is_empty());
+    }
+}
+
+#[test]
+fn only_a_refusal_about_what_changed_on_github_outdates_the_listing() {
+    for (refusal, outdates) in [
+        (
+            Refusal::HeadMoved {
+                current_head: HEAD.into(),
+            },
+            true,
+        ),
+        (Refusal::Conflict, true),
+        (Refusal::Merged, true),
+        (Refusal::Closed, true),
+        (Refusal::NotReady { blockers: vec![] }, false),
+        (Refusal::Protected, false),
+    ] {
+        assert_eq!(refusal.outdates(), outdates, "{refusal:?}");
     }
 }

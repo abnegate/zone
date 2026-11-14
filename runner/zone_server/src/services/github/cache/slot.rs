@@ -7,6 +7,7 @@ use std::time::Duration;
 use chrono::DateTime;
 use chrono::Utc;
 
+use super::super::fault::Fault;
 use super::super::freshness::Freshness;
 use super::super::snapshot::Snapshot;
 use super::decision::Decision;
@@ -47,15 +48,27 @@ impl<T> Slot<T> {
 
     pub(super) fn settle(
         &self,
-        fetched: Result<T, String>,
+        fetched: Result<T, Fault>,
         now: DateTime<Utc>,
         epoch: u64,
-    ) -> Result<(Snapshot<T>, Freshness), String> {
+    ) -> Result<(Snapshot<T>, Freshness), Fault> {
         self.entry().settle(fetched, now, epoch)
     }
 
     pub(super) fn expire(&self) {
         self.entry().expire();
+    }
+
+    pub(super) fn touch(&self, now: DateTime<Utc>) {
+        self.entry().touch(now);
+    }
+
+    pub(super) fn idle(&self, now: DateTime<Utc>, expiry: Duration) -> bool {
+        self.entry().idle(now, expiry)
+    }
+
+    pub(super) fn vacant(&self, now: DateTime<Utc>) -> bool {
+        self.entry().vacant(now)
     }
 
     pub(super) fn peek(&self) -> Option<Snapshot<T>> {

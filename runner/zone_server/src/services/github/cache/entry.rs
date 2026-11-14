@@ -2,19 +2,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::DateTime;
-use chrono::TimeDelta;
 use chrono::Utc;
 
-use super::super::client::RATE_LIMIT_EXHAUSTED;
+use super::super::fault::Fault;
 use super::super::freshness::Freshness;
 use super::super::snapshot::Snapshot;
 use super::RATE_LIMIT_BACKOFF;
 use super::decision::Decision;
+use super::delta;
 
 pub(super) struct Entry<T> {
     snapshot: Option<Snapshot<T>>,
-    failure: Option<String>,
+    failure: Option<Fault>,
     retry_after: Option<DateTime<Utc>>,
+    used_at: Option<DateTime<Utc>>,
     expired: bool,
     epoch: u64,
 }
@@ -25,6 +26,7 @@ impl<T> Default for Entry<T> {
             snapshot: None,
             failure: None,
             retry_after: None,
+            used_at: None,
             expired: false,
             epoch: 0,
         }
@@ -39,19 +41,16 @@ impl<T> Entry<T> {
         ttl: Duration,
         floor: Duration,
     ) -> Decision<T> {
-        if self
-            .retry_after
-            .is_some_and(|retry_after| now < retry_after)
-        {
+        if self.backing_off(now) {
+            let failure = self.failure.clone().unwrap_or(Fault::RateLimited {
+                retry_after: None,
+                exhausted: true,
+            });
             return match &self.snapshot {
                 Some(snapshot) => {
-                    Decision::Serve(snapshot.warned(self.failure.clone()), Freshness::Stale)
+                    Decision::Serve(snapshot.warned(Some(failure.to_string())), Freshness::Stale)
                 }
-                None => Decision::Refuse(
-                    self.failure
-                        .clone()
-                        .unwrap_or_else(|| RATE_LIMIT_EXHAUSTED.to_string()),
-                ),
+                None => Decision::Refuse(failure),
             };
         }
         let Some(snapshot) = self.snapshot.as_ref().filter(|_| !self.expired) else {
@@ -75,10 +74,10 @@ impl<T> Entry<T> {
 
     pub(super) fn settle(
         &mut self,
-        fetched: Result<T, String>,
+        fetched: Result<T, Fault>,
         now: DateTime<Utc>,
         epoch: u64,
-    ) -> Result<(Snapshot<T>, Freshness), String> {
+    ) -> Result<(Snapshot<T>, Freshness), Fault> {
         match fetched {
             Ok(value) => {
                 let snapshot = Snapshot::new(value, now);
@@ -88,14 +87,16 @@ impl<T> Entry<T> {
                 self.expired = self.epoch != epoch;
                 Ok((snapshot, Freshness::Refreshed))
             }
-            Err(error) => {
-                if error == RATE_LIMIT_EXHAUSTED {
-                    self.retry_after = Some(now + delta(RATE_LIMIT_BACKOFF));
-                }
-                self.failure = Some(error.clone());
+            Err(fault) => {
+                self.retry_after = fault
+                    .retry_after()
+                    .map(|wait| now + delta(wait.unwrap_or(RATE_LIMIT_BACKOFF)));
+                self.failure = Some(fault.clone());
                 match &self.snapshot {
-                    Some(snapshot) => Ok((snapshot.warned(Some(error)), Freshness::Stale)),
-                    None => Err(error),
+                    Some(snapshot) => {
+                        Ok((snapshot.warned(Some(fault.to_string())), Freshness::Stale))
+                    }
+                    None => Err(fault),
                 }
             }
         }
@@ -106,13 +107,27 @@ impl<T> Entry<T> {
         self.epoch += 1;
     }
 
+    pub(super) fn touch(&mut self, now: DateTime<Utc>) {
+        self.used_at = Some(self.used_at.map_or(now, |used_at| used_at.max(now)));
+    }
+
+    pub(super) fn idle(&self, now: DateTime<Utc>, expiry: Duration) -> bool {
+        self.used_at
+            .is_none_or(|used_at| now.signed_duration_since(used_at) >= delta(expiry))
+    }
+
+    pub(super) fn vacant(&self, now: DateTime<Utc>) -> bool {
+        self.snapshot.is_none() && !self.backing_off(now)
+    }
+
     pub(super) fn peek(&self) -> Option<Snapshot<T>> {
         self.snapshot
             .as_ref()
-            .map(|snapshot| snapshot.warned(self.failure.clone()))
+            .map(|snapshot| snapshot.warned(self.failure.as_ref().map(ToString::to_string)))
     }
-}
 
-fn delta(duration: Duration) -> TimeDelta {
-    TimeDelta::from_std(duration).unwrap_or(TimeDelta::MAX)
+    fn backing_off(&self, now: DateTime<Utc>) -> bool {
+        self.retry_after
+            .is_some_and(|retry_after| now < retry_after)
+    }
 }
