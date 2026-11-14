@@ -124,6 +124,42 @@ where
     .await
 }
 
+/// One watched pull request, with the workspace of the chat that owns it,
+/// which is what reading its status on GitHub needs.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct Watching {
+    pub workspace_id: Uuid,
+    #[sqlx(flatten)]
+    pub row: PullRequestRow,
+}
+
+/// Every undismissed pull request with auto-fix on and somebody to act as,
+/// oldest first, across all workspaces.
+///
+/// The sweep that keeps auto-fix working reads these. Without it a failing
+/// check or a new conflict reaches zone only when somebody opens the chat
+/// that owns the pull request, because GitHub pushes nothing to a deployment
+/// it cannot reach. A row whose run is still working is left in: deciding
+/// that is `consider`'s job, not this query's.
+pub async fn watching<'e, E>(executor: E) -> DbResult<Vec<Watching>>
+where
+    E: Executor<'e, Database = Postgres>,
+{
+    sqlx::query_as(concat!(
+        "SELECT chats.workspace_id, pull_requests.* FROM (
+             SELECT ",
+        columns!(),
+        "     FROM chat_pull_requests
+             WHERE dismissed_at IS NULL AND auto_fix AND auto_fix_by IS NOT NULL
+         ) AS pull_requests
+         JOIN chats ON chats.id = pull_requests.chat_id
+         WHERE chats.workspace_id IS NOT NULL
+         ORDER BY pull_requests.created_at, pull_requests.id"
+    ))
+    .fetch_all(executor)
+    .await
+}
+
 /// The undismissed pull requests of every one of these chats, oldest first.
 /// Reading a list of chats takes one query rather than one each.
 pub async fn for_chats<'e, E>(executor: E, chat_ids: &[Uuid]) -> DbResult<Vec<PullRequestRow>>
@@ -861,6 +897,71 @@ mod tests {
         assert!(
             again.is_none(),
             "turning it back on cannot start a second run beside the first"
+        );
+    }
+
+    /// Records a pull request numbered `number` in `chat_id`, auto-fixing for
+    /// `by` when a sighting knew whom to act as.
+    async fn numbered(pool: &PgPool, chat_id: Uuid, number: i64, by: Option<Uuid>) -> Uuid {
+        let url = format!("https://github.com/acme/widgets/pull/{number}");
+        record(
+            pool,
+            &NewPullRequest {
+                chat_id,
+                owner: "acme",
+                repo: "widgets",
+                number,
+                url: &url,
+                title: None,
+                source_id: None,
+                opened_by: by,
+            },
+        )
+        .await
+        .expect("the pull request")
+        .id
+    }
+
+    #[tokio::test]
+    async fn the_sweep_reads_only_pull_requests_it_could_act_on() {
+        let pool = pool().await;
+        let (workspace, user) = member(&pool).await;
+        let chat = create_chat(&pool, Some(workspace), "Changes", "qwen3:8b", false, true)
+            .await
+            .expect("a chat")
+            .id;
+        let watched = numbered(&pool, chat, 7, Some(user)).await;
+        let unwatched = numbered(&pool, chat, 8, None).await;
+        let dismissed = numbered(&pool, chat, 9, Some(user)).await;
+        dismiss(&pool, chat, dismissed, true)
+            .await
+            .expect("the dismissal");
+        let workspaceless = create_chat(&pool, None, "Changes", "qwen3:8b", false, true)
+            .await
+            .expect("a chat")
+            .id;
+        let orphan = numbered(&pool, workspaceless, 10, Some(user)).await;
+
+        let read = watching(&pool).await.expect("the watched pull requests");
+
+        let ids: Vec<Uuid> = read.iter().map(|one| one.row.id).collect();
+        assert!(ids.contains(&watched), "auto-fix is on with someone to act as");
+        assert!(
+            !ids.contains(&unwatched),
+            "auto-fix is off, so a read would start nothing"
+        );
+        assert!(!ids.contains(&dismissed), "a dismissed pull request is gone");
+        assert!(
+            !ids.contains(&orphan),
+            "a chat with no workspace has no credential to read with"
+        );
+        let found = read
+            .into_iter()
+            .find(|one| one.row.id == watched)
+            .expect("the watched row");
+        assert_eq!(
+            found.workspace_id, workspace,
+            "the sweep is told which workspace to read as"
         );
     }
 }

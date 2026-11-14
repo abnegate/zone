@@ -29,8 +29,8 @@ use crate::workers::promotion::PromotionPolicy;
 use crate::workers::regression::RegressionSettings;
 use crate::workers::reports::{Ledger, ReportSettings};
 use crate::workers::{
-    analytics, knowledge_refresh, learning, notify, promotion, reception, regression, reports,
-    source_resync, subagents,
+    analytics, knowledge_refresh, learning, notify, promotion, pull_requests, reception,
+    regression, reports, source_resync, subagents,
 };
 
 /// One named sweep on the server's schedule.
@@ -46,11 +46,12 @@ pub enum Periodic {
     ReceptionSync,
     SubagentRecovery,
     McpConvergence,
+    PullRequestWatch,
 }
 
 impl Periodic {
     /// Every sweep, in the order the server used to spawn them, then those added since.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::KnowledgeRefresh,
         Self::SourceResync,
         Self::AnswerPromotion,
@@ -61,6 +62,7 @@ impl Periodic {
         Self::ReceptionSync,
         Self::SubagentRecovery,
         Self::McpConvergence,
+        Self::PullRequestWatch,
     ];
 
     pub fn name(self) -> &'static str {
@@ -75,6 +77,7 @@ impl Periodic {
             Self::ReceptionSync => "reception-sync",
             Self::SubagentRecovery => "subagent-recovery",
             Self::McpConvergence => "mcp-convergence",
+            Self::PullRequestWatch => "pull-request-watch",
         }
     }
 
@@ -92,6 +95,7 @@ impl Periodic {
             Self::ReceptionSync => reception::SYNC_INTERVAL_SECONDS,
             Self::SubagentRecovery => subagents::SWEEP_INTERVAL_SECONDS,
             Self::McpConvergence => load::CONVERGENCE_INTERVAL_SECONDS,
+            Self::PullRequestWatch => pull_requests::WATCH_INTERVAL_SECONDS,
         };
         Duration::from_secs(seconds)
     }
@@ -110,6 +114,11 @@ impl Periodic {
             Self::SubagentRecovery => Warmup::Period,
             // A starting server holds no MCP connection, so there is nothing to bring level.
             Self::McpConvergence => Warmup::Period,
+            // Whatever broke while the server was down is still broken and
+            // will read the same a period from now. Reading every watched
+            // pull request is the last thing a starting server needs, and the
+            // run a pass starts outlasts the wait for it many times over.
+            Self::PullRequestWatch => Warmup::Period,
             // Long enough to be out of the way of start-up, short enough that a
             // server coming back up picks up files whose embeddings failed.
             Self::SourceResync => Warmup::After(source_resync::FIRST_POLL_DELAY),
@@ -142,7 +151,10 @@ impl Periodic {
             | Self::ScheduledReports
             | Self::ReceptionSync
             | Self::SubagentRecovery
-            | Self::McpConvergence => Catchup::Skip,
+            | Self::McpConvergence
+            // A pass that was skipped would have read what the next pass
+            // reads: the status GitHub reports now.
+            | Self::PullRequestWatch => Catchup::Skip,
             // These two never ticked on a grid at all. Both were `sleep` loops,
             // so the wait has always been measured from the end of the previous
             // pass rather than from a fixed alignment, and both queue work
@@ -196,6 +208,7 @@ pub fn periodic(state: AppState) -> Registry {
             Periodic::ReceptionSync => sync_reception(schedule, state.clone()),
             Periodic::SubagentRecovery => recover_subagents(schedule, state.clone()),
             Periodic::McpConvergence => converge_mcp_servers(schedule, state.clone()),
+            Periodic::PullRequestWatch => watch_pull_requests(schedule, state.clone()),
         };
         registry.register(Arc::new(sweep));
     }
@@ -366,6 +379,18 @@ fn converge_mcp_servers(schedule: Schedule, state: AppState) -> Sweep {
     })
 }
 
+fn watch_pull_requests(schedule: Schedule, state: AppState) -> Sweep {
+    Sweep::new(Periodic::PullRequestWatch.name(), schedule, move || {
+        let state = state.clone();
+        async move {
+            pull_requests::run_cycle(&state)
+                .await
+                .map(|_| ())
+                .map_err(Failure::new)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -391,10 +416,12 @@ mod tests {
                 "reception-sync",
                 "subagent-recovery",
                 "mcp-convergence",
+                "pull-request-watch",
             ],
             "main.rs spawned nine workers; eight of them are periodic sweeps and the ninth, \
-             reminders, is a dispatch loop that stayed where it was. MCP convergence joined \
-             them later. Dropping one here would silently stop that background work."
+             reminders, is a dispatch loop that stayed where it was. MCP convergence and the \
+             pull request watch joined them later. Dropping one here would silently stop that \
+             background work."
         );
     }
 
