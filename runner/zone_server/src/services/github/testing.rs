@@ -222,6 +222,7 @@ pub(crate) async fn mock_review(
 
 pub(crate) fn pull_detail(head: &str) -> Value {
     json!({"node_id": "PR_7", "number": 7, "draft": false, "state": "open",
+           "mergeable": true, "mergeable_state": "clean",
            "title": "Ship the billing export",
            "html_url": "https://github.com/owner/repository/pull/7",
            "updated_at": "2026-09-05T00:00:00Z",
