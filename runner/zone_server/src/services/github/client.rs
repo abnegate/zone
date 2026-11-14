@@ -10,6 +10,7 @@ use abnegate_vcs::IssueComment;
 use abnegate_vcs::IssueReference;
 use abnegate_vcs::JobLogError;
 use abnegate_vcs::ListedPullRequest;
+use abnegate_vcs::MergeableState;
 use abnegate_vcs::Page;
 use abnegate_vcs::ParseError;
 use abnegate_vcs::PullRequestDetail;
@@ -34,6 +35,7 @@ use super::readiness;
 use super::readiness::CheckEvidence;
 use super::readiness::CommentEvidence;
 use super::readiness::CommitSha;
+use super::readiness::Mergeability;
 use super::readiness::PullEvidence;
 use super::readiness::ReviewComment;
 use super::readiness::ReviewSignals;
@@ -351,6 +353,7 @@ impl Github {
                     updated_at: row.updated_at.clone().unwrap_or_default(),
                     draft: row.draft || review.draft,
                     head,
+                    mergeable: mergeability(detail.mergeable_state),
                     threads: review.threads,
                     comments: review.comments,
                     checks,
@@ -618,6 +621,21 @@ pub(crate) fn listed(
     match &detail.updated_at {
         Some(updated_at) => row.with_updated_at(updated_at.clone()),
         None => row,
+    }
+}
+
+/// What GitHub's `mergeable_state` means to a readiness verdict. A state the
+/// crate does not recognise arrives as `Unknown` and stays unknown here: a
+/// word nothing has read is not evidence that the branch merges.
+fn mergeability(state: MergeableState) -> Mergeability {
+    match state {
+        MergeableState::Clean | MergeableState::HasHooks => Mergeability::Clean,
+        MergeableState::Blocked => Mergeability::Blocked,
+        MergeableState::Behind => Mergeability::Behind,
+        MergeableState::Dirty => Mergeability::Conflicted,
+        MergeableState::Unstable => Mergeability::Unstable,
+        MergeableState::Draft => Mergeability::Draft,
+        _ => Mergeability::Unknown,
     }
 }
 

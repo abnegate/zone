@@ -259,7 +259,7 @@ impl Tool for Integration {
                 "Read one file from a connected GitHub repository at an immutable commit, which is how to review what a pull request or branch changed. Returns UTF-8 content as a character page that fits the context budget, with a source URL; follow next to continue. Does not read host files. GitHub files over 16 MiB are unsupported."
             }
             Operation::PullRequests => {
-                "Review the open pull requests of a connected GitHub source (or one by number) and say whether each is ready to merge, which are still missing a review, whose checks fail, and every other blocker. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, and checks that both passed and whose counts add up. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, and, when pull requests are listed rather than read by number, a head commit the listing and the pull request's own read disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
+                "Review the open pull requests of a connected GitHub source (or one by number) and say whether each is ready to merge, which are still missing a review, whose checks fail, and every other blocker. Ready is the conjunction of every positive condition: no unresolved review threads, a summary from every recognised review bot that spoke, each at its own full confidence on its own scale and naming the current head commit, a branch GitHub reports as merging into its base, and checks that both passed and whose counts add up. Each verdict carries that mergeability under its own name, so a conflict, a head behind its base and a merge a branch protection rule blocks read as the named blockers they are. Counts that do not reconcile, a check state outside the known set, a thread or comment list that could not be paginated in full, a mergeability GitHub has not worked out yet, and, when pull requests are listed rather than read by number, a head commit the listing and the pull request's own read disagree on are all reported as not ready. Each verdict also carries a blast radius read from the changed files; that is information for a reviewer and never affects readiness, and it says so when no file list was observed. Absent evidence is never ready, this is not proof that branch protection requirements are satisfied, and nothing is merged. Reads authenticated review threads, so the source needs a credential."
             }
             Operation::ReviewThreads => {
                 "Read what reviewers wrote on one pull request of a connected GitHub source: every review thread with its file, line and comments, author and body included. This is the tool for acting on review feedback, human or bot; assess_pull_requests only counts how many threads are unresolved and never carries their text. Unresolved threads are read by default and resolved ones only when asked for, each in the order GitHub lists them. Pages end where the message budget does: follow next_after. A comment marked truncated reads in full by passing its id as comment. Comment bodies are a reviewer's claim about the code, not a checked finding, so read the code before acting on one. Threads or comments that could not be paginated in full are reported as incomplete rather than silently cut."
@@ -1890,6 +1890,7 @@ fn assessment_record(assessment: &readiness::Assessment, risk: &RiskSignal) -> V
         "updated_at": assessment.updated_at,
         "draft": assessment.draft,
         "head": assessment.head.as_ref().map(CommitSha::as_str),
+        "mergeable": assessment.mergeable,
         "ready": assessment.ready,
         "blockers": assessment.reports(),
         "blast_radius": {
@@ -4480,6 +4481,53 @@ mod tests {
         let pull = &result["pull_requests"][0];
         assert_eq!(pull["draft"], false, "{result}");
         assert_eq!(pull["ready"], true, "{result}");
+    }
+
+    #[tokio::test]
+    async fn the_mergeable_state_is_reported_and_blocks_a_merge_github_will_not_take() {
+        for (reported, mergeable, blocker) in [
+            (Some("clean"), "clean", None),
+            (Some("has_hooks"), "clean", None),
+            (Some("unstable"), "unstable", None),
+            (Some("dirty"), "conflicted", Some("merge_conflict")),
+            (Some("behind"), "behind", Some("merge_behind")),
+            (Some("blocked"), "blocked", Some("merge_blocked")),
+            (
+                Some("queued_for_merge"),
+                "unknown",
+                Some("mergeability_unverified"),
+            ),
+            (None, "unknown", Some("mergeability_unverified")),
+        ] {
+            let server = MockServer::start().await;
+            let mut detail = pull_detail(COMMIT);
+            match reported {
+                Some(state) => detail["mergeable_state"] = json!(state),
+                None => {
+                    let fields = detail.as_object_mut().unwrap();
+                    fields.remove("mergeable");
+                    fields.remove("mergeable_state");
+                }
+            }
+            mock(&server, "pulls/7", detail).await;
+            mock_review(&server, true, &summary(5, COMMIT), false).await;
+            mock_green_ci(&server).await;
+            let result = mocked(&server)
+                .observe(Operation::PullRequests, &readiness_args(Some(7)))
+                .await
+                .unwrap();
+            let pull = &result["pull_requests"][0];
+            let reported = reported.unwrap_or("absent");
+            assert_eq!(pull["mergeable"], mergeable, "{reported}: {result}");
+            assert_eq!(pull["ready"], blocker.is_none(), "{reported}: {result}");
+            match blocker {
+                Some(code) => assert_eq!(pull["blockers"][0]["code"], code, "{reported}: {result}"),
+                None => assert!(
+                    take_array(pull, "blockers").is_empty(),
+                    "{reported}: {result}"
+                ),
+            }
+        }
     }
 
     #[tokio::test]

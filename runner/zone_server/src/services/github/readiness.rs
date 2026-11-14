@@ -8,6 +8,11 @@
 //! partially fetched thread or comment list is a named blocker on its own, and
 //! a review only counts when it names the current head commit.
 //!
+//! Mergeability is held to the same standard. A conflict, a head behind its
+//! base and a merge a branch protection rule blocks each read as their own
+//! blocker, and a state GitHub has not worked out yet is unknown rather than
+//! clean, because GitHub refuses the merge until it has.
+//!
 //! Which review bots are recognised is configuration, not a constant. Every
 //! bot states its own scale, and a score is only ever compared against the bar
 //! of the scale it was published on, so a perfect mark from one bot can never
@@ -534,6 +539,41 @@ pub struct CommentEvidence {
     pub comments: Vec<ReviewComment>,
 }
 
+/// What GitHub says stands between a pull request and its base.
+///
+/// `Unknown` is the honest answer to two different silences: GitHub has not
+/// worked the merge out yet, and GitHub named a state this does not know.
+/// Neither establishes that the branch merges, and a merge asked for while the
+/// answer is still unknown is refused, so neither can be read as mergeable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mergeability {
+    /// It merges into its base.
+    Clean,
+    /// A branch protection rule stands in the way.
+    Blocked,
+    /// The head is behind its base and has to be brought up to date first.
+    Behind,
+    /// The head conflicts with its base.
+    Conflicted,
+    /// It merges, but a check that is not required has failed.
+    Unstable,
+    /// It is a draft.
+    Draft,
+    /// GitHub has not worked it out, or named a state this does not know.
+    #[default]
+    Unknown,
+}
+
+impl Mergeability {
+    /// Whether GitHub has established that the branch merges into its base.
+    /// A failing check that nothing requires does not stand in the way of the
+    /// merge; every other state either blocks it or was never established.
+    pub fn merges(self) -> bool {
+        matches!(self, Self::Clean | Self::Unstable)
+    }
+}
+
 /// Everything observed about one pull request, before any judgement.
 #[derive(Debug, Clone)]
 pub struct PullEvidence {
@@ -543,6 +583,7 @@ pub struct PullEvidence {
     pub updated_at: String,
     pub draft: bool,
     pub head: Option<CommitSha>,
+    pub mergeable: Mergeability,
     pub threads: ThreadEvidence,
     pub comments: CommentEvidence,
     pub checks: CheckEvidence,
@@ -553,6 +594,10 @@ pub struct PullEvidence {
 pub enum BlockerCode {
     Draft,
     HeadCommitUnverified,
+    MergeConflict,
+    MergeBehind,
+    MergeBlocked,
+    MergeabilityUnverified,
     ThreadsIncomplete,
     CommentsIncomplete,
     UnresolvedThreads,
@@ -573,6 +618,10 @@ pub enum BlockerCode {
 pub enum Blocker {
     Draft,
     HeadCommitUnverified,
+    MergeConflict,
+    MergeBehind,
+    MergeBlocked,
+    MergeabilityUnverified,
     ThreadsIncomplete,
     CommentsIncomplete,
     UnresolvedThreads(u32),
@@ -609,6 +658,10 @@ impl Blocker {
         match self {
             Self::Draft => BlockerCode::Draft,
             Self::HeadCommitUnverified => BlockerCode::HeadCommitUnverified,
+            Self::MergeConflict => BlockerCode::MergeConflict,
+            Self::MergeBehind => BlockerCode::MergeBehind,
+            Self::MergeBlocked => BlockerCode::MergeBlocked,
+            Self::MergeabilityUnverified => BlockerCode::MergeabilityUnverified,
             Self::ThreadsIncomplete => BlockerCode::ThreadsIncomplete,
             Self::CommentsIncomplete => BlockerCode::CommentsIncomplete,
             Self::UnresolvedThreads(_) => BlockerCode::UnresolvedThreads,
@@ -640,6 +693,18 @@ impl fmt::Display for Blocker {
             Self::HeadCommitUnverified => {
                 formatter.write_str("Head commit could not be established from the observations")
             }
+            Self::MergeConflict => {
+                formatter.write_str("Head conflicts with its base branch")
+            }
+            Self::MergeBehind => formatter.write_str(
+                "Head is behind its base branch and has to be brought up to date first",
+            ),
+            Self::MergeBlocked => {
+                formatter.write_str("GitHub reports the merge blocked by a branch protection rule")
+            }
+            Self::MergeabilityUnverified => formatter.write_str(
+                "GitHub has not established whether the branch merges, and refuses a merge until it has",
+            ),
             Self::ThreadsIncomplete => {
                 formatter.write_str("Review threads could not be fully checked")
             }
@@ -718,6 +783,7 @@ pub struct Assessment {
     pub updated_at: String,
     pub draft: bool,
     pub head: Option<CommitSha>,
+    pub mergeable: Mergeability,
     pub ready: bool,
     pub blockers: Vec<Blocker>,
     pub checks: CheckSummary,
@@ -741,6 +807,10 @@ impl Assessment {
 /// summary has to clear the bar it declared, on the scale it declared, and at
 /// least one has to have spoken at all.
 pub fn assess(evidence: PullEvidence, signals: &ReviewSignals) -> Assessment {
+    // `draft` is the one state two observations report: the pull request's own
+    // flag, and the mergeability GitHub sums up as `draft`. Either of them is
+    // a draft, named once.
+    let draft = evidence.draft || evidence.mergeable == Mergeability::Draft;
     let checks = evidence.checks.normalize();
     let findings = signals.findings(&evidence.comments.comments);
     let unresolved = evidence.threads.unresolved();
@@ -763,11 +833,20 @@ pub fn assess(evidence: PullEvidence, signals: &ReviewSignals) -> Assessment {
         });
     let mut blockers = Vec::new();
 
-    if evidence.draft {
+    if draft {
         blockers.push(Blocker::Draft);
     }
     if evidence.head.is_none() {
         blockers.push(Blocker::HeadCommitUnverified);
+    }
+    // The draft blocker above has already named a draft, so it is not said
+    // twice here. It still never reads as merging.
+    match evidence.mergeable {
+        Mergeability::Conflicted => blockers.push(Blocker::MergeConflict),
+        Mergeability::Behind => blockers.push(Blocker::MergeBehind),
+        Mergeability::Blocked => blockers.push(Blocker::MergeBlocked),
+        Mergeability::Unknown => blockers.push(Blocker::MergeabilityUnverified),
+        Mergeability::Clean | Mergeability::Unstable | Mergeability::Draft => {}
     }
     if !threads_complete {
         blockers.push(Blocker::ThreadsIncomplete);
@@ -825,8 +904,9 @@ pub fn assess(evidence: PullEvidence, signals: &ReviewSignals) -> Assessment {
         CheckState::Success => {}
     }
 
-    let ready = !evidence.draft
+    let ready = !draft
         && evidence.head.is_some()
+        && evidence.mergeable.merges()
         && threads_complete
         && comments_complete
         && unresolved == 0
@@ -840,8 +920,9 @@ pub fn assess(evidence: PullEvidence, signals: &ReviewSignals) -> Assessment {
         title: evidence.title,
         url: evidence.url,
         updated_at: evidence.updated_at,
-        draft: evidence.draft,
+        draft,
         head: evidence.head,
+        mergeable: evidence.mergeable,
         ready,
         blockers,
         checks,
@@ -925,6 +1006,7 @@ mod tests {
             updated_at: "2026-09-05T00:00:00Z".into(),
             draft: false,
             head: CommitSha::parse(HEAD),
+            mergeable: Mergeability::Clean,
             threads: ThreadEvidence {
                 complete: true,
                 threads: vec![ReviewThread { resolved: true }],
@@ -1231,6 +1313,91 @@ mod tests {
     }
 
     #[test]
+    fn a_branch_github_does_not_report_as_merging_is_never_ready() {
+        for (mergeable, code) in [
+            (Mergeability::Conflicted, BlockerCode::MergeConflict),
+            (Mergeability::Behind, BlockerCode::MergeBehind),
+            (Mergeability::Blocked, BlockerCode::MergeBlocked),
+            (Mergeability::Unknown, BlockerCode::MergeabilityUnverified),
+        ] {
+            let assessment = assess(
+                PullEvidence {
+                    mergeable,
+                    ..green_pull()
+                },
+                &ReviewSignals::recognized(),
+            );
+            assert!(!assessment.ready, "{mergeable:?} read as ready");
+            assert_eq!(
+                assessment.reports()[0].code,
+                code,
+                "{mergeable:?} was not named"
+            );
+            assert_eq!(assessment.mergeable, mergeable);
+        }
+    }
+
+    /// A failing check nothing requires is what `unstable` means, and the
+    /// check evidence judges it on its own. The merge itself is not blocked,
+    /// so mergeability does not block it a second time.
+    #[test]
+    fn an_unstable_branch_merges_and_leaves_the_judgement_to_the_checks() {
+        let assessment = assess(
+            PullEvidence {
+                mergeable: Mergeability::Unstable,
+                ..green_pull()
+            },
+            &ReviewSignals::recognized(),
+        );
+        assert!(assessment.ready, "{:?}", assessment.blockers);
+        assert_eq!(assessment.mergeable, Mergeability::Unstable);
+
+        let failing = assess(
+            PullEvidence {
+                mergeable: Mergeability::Unstable,
+                checks: CheckEvidence {
+                    state: "failure".into(),
+                    failed: 1,
+                    passed: 3,
+                    ..green_checks()
+                },
+                ..green_pull()
+            },
+            &ReviewSignals::recognized(),
+        );
+        assert!(!failing.ready);
+        assert_eq!(failing.reports()[0].code, BlockerCode::ChecksFailed);
+    }
+
+    #[test]
+    fn a_draft_is_not_blocked_twice_for_being_one() {
+        let assessment = assess(
+            PullEvidence {
+                draft: true,
+                mergeable: Mergeability::Draft,
+                ..green_pull()
+            },
+            &ReviewSignals::recognized(),
+        );
+        assert!(!assessment.ready);
+        assert_eq!(assessment.blockers, vec![Blocker::Draft]);
+    }
+
+    #[test]
+    fn a_mergeability_nothing_observed_is_unknown_and_does_not_merge() {
+        assert_eq!(Mergeability::default(), Mergeability::Unknown);
+        assert!(!Mergeability::default().merges());
+        for state in [
+            Mergeability::Conflicted,
+            Mergeability::Behind,
+            Mergeability::Blocked,
+            Mergeability::Draft,
+        ] {
+            assert!(!state.merges(), "{state:?}");
+        }
+    }
+
+    #[test]
     fn every_failing_check_state_is_named() {
         for (state, code) in [
             ("failure", BlockerCode::ChecksFailed),
@@ -1303,6 +1470,15 @@ mod tests {
             "no summary here".to_string(),
             "Confidence Score: unreadable\nLast reviewed commit: none".to_string(),
         ];
+        let mergeabilities = [
+            Mergeability::Clean,
+            Mergeability::Unstable,
+            Mergeability::Blocked,
+            Mergeability::Behind,
+            Mergeability::Conflicted,
+            Mergeability::Draft,
+            Mergeability::Unknown,
+        ];
         let mut ready_cases = 0;
         for draft in [false, true] {
             for head in [CommitSha::parse(HEAD), None] {
@@ -1312,33 +1488,36 @@ mod tests {
                             for body in &bodies {
                                 for state in states {
                                     for total in [4, 5] {
-                                        let assessment = assess(
-                                            PullEvidence {
-                                                draft,
-                                                head: head.clone(),
-                                                threads: ThreadEvidence {
-                                                    complete: threads_complete,
-                                                    threads: vec![ReviewThread { resolved }],
+                                        for mergeable in mergeabilities {
+                                            let assessment = assess(
+                                                PullEvidence {
+                                                    draft,
+                                                    head: head.clone(),
+                                                    mergeable,
+                                                    threads: ThreadEvidence {
+                                                        complete: threads_complete,
+                                                        threads: vec![ReviewThread { resolved }],
+                                                    },
+                                                    comments: CommentEvidence {
+                                                        complete: comments_complete,
+                                                        comments: vec![comment(body)],
+                                                    },
+                                                    checks: CheckEvidence {
+                                                        state: state.into(),
+                                                        total,
+                                                        ..green_checks()
+                                                    },
+                                                    ..green_pull()
                                                 },
-                                                comments: CommentEvidence {
-                                                    complete: comments_complete,
-                                                    comments: vec![comment(body)],
-                                                },
-                                                checks: CheckEvidence {
-                                                    state: state.into(),
-                                                    total,
-                                                    ..green_checks()
-                                                },
-                                                ..green_pull()
-                                            },
-                                            &ReviewSignals::recognized(),
-                                        );
-                                        assert_eq!(
-                                            assessment.ready,
-                                            assessment.blockers.is_empty(),
-                                            "ready and blockers disagree for draft={draft} head={head:?} threads={threads_complete} comments={comments_complete} resolved={resolved} state={state} total={total} body={body:?}"
-                                        );
-                                        ready_cases += usize::from(assessment.ready);
+                                                &ReviewSignals::recognized(),
+                                            );
+                                            assert_eq!(
+                                                assessment.ready,
+                                                assessment.blockers.is_empty(),
+                                                "ready and blockers disagree for draft={draft} head={head:?} mergeable={mergeable:?} threads={threads_complete} comments={comments_complete} resolved={resolved} state={state} total={total} body={body:?}"
+                                            );
+                                            ready_cases += usize::from(assessment.ready);
+                                        }
                                     }
                                 }
                             }
@@ -1348,8 +1527,8 @@ mod tests {
             }
         }
         assert_eq!(
-            ready_cases, 1,
-            "exactly one combination should describe a ready pull request"
+            ready_cases, 2,
+            "only a clean and an unstable merge should describe a ready pull request"
         );
     }
 
