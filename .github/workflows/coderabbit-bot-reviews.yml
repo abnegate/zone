@@ -1,0 +1,263 @@
+# CodeRabbit's GitHub App refuses a pull request whose author GitHub reports as
+# a bot: its check ends "Review skipped: bot user not eligible for review",
+# because a GitHub App never holds a CodeRabbit seat. Every pull request Zone
+# opens is authored by its App installation, so none of them were being
+# reviewed. The CLI authenticates with an Agentic API key instead of the
+# author's seat, so it reviews the same branch and reports the findings here.
+#
+# Human-authored pull requests are left alone: the App reviews those itself.
+#
+# This runs on `pull_request`, never checks the branch out and never executes
+# code from it. A pull request from a fork gets no secret, so the run reports
+# that and stops rather than failing.
+name: CodeRabbit Bot PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: CodeRabbit CLI Review
+    runs-on: ubuntu-latest
+    # A review of a large diff can take 15 minutes or more, and the CLI keeps
+    # the connection alive with heartbeats until it finishes.
+    timeout-minutes: 30
+    if: >-
+      github.event.pull_request.user.type == 'Bot' &&
+      github.event.pull_request.draft == false
+
+    steps:
+      - name: Check for the API key
+        id: key
+        env:
+          CODERABBIT_API_KEY: ${{ secrets.CODERABBIT_API_KEY }}
+        run: |
+          if [ -n "${CODERABBIT_API_KEY}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CODERABBIT_API_KEY is not available to this run, so no CLI review ran. Fork pull requests never receive it; otherwise add an Agentic API key as a repository secret."
+          fi
+
+      - name: Install CodeRabbit CLI
+        if: steps.key.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          curl -fsSL https://cli.coderabbit.ai/install.sh | sh
+          # The installer prints a shell-specific reload command rather than
+          # touching this shell's PATH, so find the binary it just wrote.
+          for candidate in "$HOME/.local/bin" "$HOME/.coderabbit/bin" "/usr/local/bin"; do
+            if [ -x "$candidate/coderabbit" ]; then
+              echo "$candidate" >> "$GITHUB_PATH"
+              break
+            fi
+          done
+          export PATH="$HOME/.local/bin:$HOME/.coderabbit/bin:$PATH"
+          coderabbit --version
+
+      - name: Review the pull request branch
+        id: review
+        if: steps.key.outputs.present == 'true'
+        env:
+          CODERABBIT_API_KEY: ${{ secrets.CODERABBIT_API_KEY }}
+          REPOSITORY: ${{ github.repository }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -uo pipefail
+          coderabbit auth login --api-key "${CODERABBIT_API_KEY}"
+          # --remote reviews the branch on GitHub, so this job needs no
+          # checkout of the pull request it is reviewing.
+          set +e
+          coderabbit review \
+            --remote "${REPOSITORY}" \
+            --base "${BASE_REF}" \
+            --source-branch "${HEAD_REF}" \
+            --agent > review.ndjson
+          status=$?
+          set -e
+          echo "exit_code=${status}" >> "$GITHUB_OUTPUT"
+          echo "The CLI exited ${status} after writing $(wc -l < review.ndjson) event(s)."
+
+      - name: Report the findings on the pull request
+        if: always() && steps.key.outputs.present == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EXIT_CODE: ${{ steps.review.outputs.exit_code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            const TITLE = 'CodeRabbit CLI Review';
+            const ORDER = ['critical', 'major', 'minor', 'trivial', 'info', 'none'];
+            // GitHub rejects a comment body over 65536 characters, so the
+            // findings are capped well under it and the rest is pointed at.
+            const MAX_FINDINGS = 40;
+            const MAX_COMMENT = 1200;
+
+            const runUrl = process.env.RUN_URL;
+            const exitCode = process.env.EXIT_CODE ?? '';
+
+            let events = [];
+            try {
+              events = fs.readFileSync('review.ndjson', 'utf8')
+                .split('\n')
+                .filter((line) => line.trim() !== '')
+                .map((line) => {
+                  try {
+                    return JSON.parse(line);
+                  } catch {
+                    return null;
+                  }
+                })
+                .filter((event) => event !== null);
+            } catch {
+              events = [];
+            }
+
+            const findings = events.filter((event) => event.type === 'finding');
+            const errors = events.filter((event) => event.type === 'error');
+            const complete = events.filter((event) => event.type === 'complete').pop();
+
+            const severityRank = (finding) => {
+              const index = ORDER.indexOf((finding.severity || 'none').toLowerCase());
+              return index === -1 ? ORDER.length : index;
+            };
+            findings.sort((left, right) => severityRank(left) - severityRank(right));
+
+            const counts = new Map();
+            for (const finding of findings) {
+              const severity = (finding.severity || 'none').toLowerCase();
+              counts.set(severity, (counts.get(severity) || 0) + 1);
+            }
+            const tally = ORDER
+              .filter((severity) => counts.has(severity))
+              .map((severity) => `${counts.get(severity)} ${severity}`)
+              .join(', ');
+
+            const place = (finding) => {
+              const file = finding.fileName || 'the pull request';
+              if (!finding.startLine) return file;
+              if (!finding.endLine || finding.endLine === finding.startLine) {
+                return `${file}:${finding.startLine}`;
+              }
+              return `${file}:${finding.startLine}-${finding.endLine}`;
+            };
+
+            const trim = (text) => {
+              const body = (text || '').trim();
+              if (body.length <= MAX_COMMENT) return body;
+              return `${body.slice(0, MAX_COMMENT)}…`;
+            };
+
+            const lines = [`## ${TITLE}`, ''];
+
+            // Said first, so a reader never mistakes a partial review for a
+            // clean one.
+            const outcome = complete?.outcome;
+            const unreviewed = complete?.unreviewedFileCount;
+            const incomplete = exitCode !== '0' || outcome === 'failed' || (unreviewed ?? 0) > 0;
+
+            if (errors.length > 0 || incomplete) {
+              lines.push('> [!WARNING]');
+              lines.push('> This review did not complete, so treat it as partial.');
+              if (exitCode !== '0' && exitCode !== '') {
+                lines.push(`> The CLI exited \`${exitCode}\`.`);
+              }
+              if (outcome) lines.push(`> Outcome: \`${outcome}\`.`);
+              if (unreviewed) lines.push(`> Files left unreviewed: ${unreviewed}.`);
+              for (const error of errors.slice(0, 3)) {
+                const detail = error.message || error.errorType || 'no detail reported';
+                lines.push(`> ${detail}`);
+              }
+              lines.push(`> [Job log](${runUrl})`);
+              lines.push('');
+            }
+
+            if (complete?.reused) {
+              lines.push('_The server reused an earlier review of this branch rather than running a new one._');
+              lines.push('');
+            }
+
+            if (events.length === 0) {
+              // The CLI wrote nothing: it never ran, or it died before its
+              // first event. Saying "no findings" here would read as a clean
+              // review of a branch nobody looked at.
+              lines.push('The CLI produced no output, so this branch was not reviewed. The job log says why.');
+            } else if (findings.length === 0) {
+              const skipped = complete?.status === 'review_skipped';
+              lines.push(skipped
+                ? `No changes were in scope, so nothing was reviewed (${complete?.message || 'no detail reported'}).`
+                : 'No findings. CodeRabbit reviewed the branch and raised nothing.');
+            } else {
+              lines.push(`**${findings.length} finding(s)**: ${tally}.`);
+              lines.push('');
+              for (const finding of findings.slice(0, MAX_FINDINGS)) {
+                const severity = (finding.severity || 'none').toLowerCase();
+                const title = (finding.title || 'Finding').trim();
+                lines.push(`<details><summary><code>${severity}</code> — ${place(finding)} — ${title}</summary>`);
+                lines.push('');
+                const body = trim(finding.comment || finding.codegenInstructions);
+                if (body) {
+                  lines.push(body);
+                  lines.push('');
+                }
+                lines.push('</details>');
+                lines.push('');
+              }
+              if (findings.length > MAX_FINDINGS) {
+                lines.push(`_${findings.length - MAX_FINDINGS} further finding(s) are in the [job log](${runUrl})._`);
+                lines.push('');
+              }
+            }
+
+            lines.push('');
+            lines.push(`_CodeRabbit's App skips this pull request because its author is a bot, so the CLI reviewed it instead. [Job log](${runUrl})._`);
+
+            const body = lines.join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const previous = comments.find((comment) =>
+              comment.user.type === 'Bot' && comment.body.includes(TITLE)
+            );
+
+            if (previous) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: previous.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail when the review did not complete
+        if: steps.key.outputs.present == 'true'
+        env:
+          EXIT_CODE: ${{ steps.review.outputs.exit_code }}
+        run: |
+          if [ "${EXIT_CODE}" != "0" ]; then
+            echo "::error::The CodeRabbit CLI review did not complete (exit ${EXIT_CODE}). The pull request comment says what it managed to report."
+            exit 1
+          fi
+          echo "The review completed."
