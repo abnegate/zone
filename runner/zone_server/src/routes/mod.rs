@@ -22,6 +22,9 @@ pub mod mcp_servers;
 pub mod models;
 pub mod organizations;
 pub mod projects;
+pub mod pull_requests;
+pub mod refresh_query;
+pub mod releases;
 pub mod sessions;
 pub mod sources;
 pub mod sync;
@@ -359,6 +362,50 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/chats/{id}/pull-requests/{pull_request_id}/diff",
             get(chats::pull_requests::diff),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests",
+            get(pull_requests::list),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}",
+            get(pull_requests::detail),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/diff",
+            get(pull_requests::diff),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/commits",
+            get(pull_requests::commits),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/commits/{sha}",
+            get(pull_requests::commit_diff),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/jobs/{job_id}/log",
+            get(pull_requests::job_log),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/merge",
+            post(pull_requests::merge),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases",
+            get(releases::list).post(releases::create),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases/options",
+            get(releases::options),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases/preview",
+            post(releases::preview),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases/{source_id}/{release_id}/pipeline",
+            get(releases::pipeline),
         )
         .route("/api/chats/{id}/tasks", get(chats::tasks::list))
         .route("/api/chats/{id}/subagents", get(chats::subagents::list))

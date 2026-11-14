@@ -1,219 +1,253 @@
-# Port puller into zone as "Pull Requests" and "Releases" nav items
+# Pull Requests and Releases
 
-## Context
+Two console pages, Pull Requests and Releases, ported from puller (`~/Local/puller`, a single-user `gh` dashboard). Zone's backend serves them from the workspace's stored GitHub sources. They are built with zone's design system and gated by zone permissions. Puller's local coding-agent launchers are out of scope (see Follow-ups).
 
-Puller (`~/Local/puller`) is a single-user local dashboard: a Node server driving the `gh` CLI plus a React + Tailwind/shadcn front end. It shows the user's open GitHub pull requests bucketed into Ready / In progress / Not ready (review threads resolved, bot review current for the head commit, CI green), with diff, commits, failed-check logs and a guarded admin merge; and recent releases with their release-workflow pipeline state plus a create-release flow (next patch tag, generated-notes preview, tag + release with read-back). It also launches local coding-agent CLIs (Fix / Auto / conflict repair / New Task / Verify) in worktrees under `~/Local`.
+The work ships as three stacked PRs:
 
-Zone is a multi-tenant self-hosted platform (Rust axum + Postgres, React console with its own `@zone/ui` kit and `--ui-*` token CSS). It already has typed GitHub clients (`abnegate_vcs::PullRequestService`), the readiness and release-pipeline domain logic (formerly `agent/readiness.rs` and `agent/releases.rs`, now `services/github/readiness.rs` and `services/github/release.rs`), a private GitHub client with rate limiting inside `agent/integrations.rs` (the `assess_pull_requests` / `assess_release_pipelines` LLM tools), per-workspace GitHub sources holding encrypted tokens, and a task runner that can act on PRs. What it lacks is any console page or REST route for PRs or releases.
+1. `refactor(github): lift the GitHub client into services`, merged as #254.
+2. `feat(github): pull request and release services, routes and permissions`, the backend this document describes as built.
+3. `feat(console): Pull Requests and Releases pages`, the frontend.
 
-Goal: two first-class sidebar pages, "Pull Requests" and "Releases", served by zone's Rust backend over zone's stored source credentials, rebuilt in zone's design system, gated by zone permissions, tested the way zone tests things. Puller's local-CLI agent features are mapped onto zone's task machinery as a follow-up slice or dropped.
-
-Puller is read-only reference; its uncommitted WIP (Chat/Discord/Tauri, a compact Fix button) does not change readiness, merge or release semantics.
+The new GitHub API calls come from abnegate-vcs 0.2.2 on crates.io.
 
 ## Decisions
 
-| Question | Decision | Why |
-|---|---|---|
-| What the PR page lists | Every open PR across the workspace's active `github` sources, sorted `updated_at` desc, with client-side Repository and Author filters | Zone has no GitHub identity per console user (`users` has no login column); source tokens belong to the workspace, not the viewer. "Mine" becomes a default filter once a profile field exists. |
-| Readiness rule | Reuse `services/github/readiness.rs::assess` unchanged, with each source's `review_signals` (default: every recognised bot, Greptile + CodeRabbit) | It already generalises puller's Greptile-only rule. Zone is stricter in two places (drafts never ready, no checks ⇒ `checks_absent`); keep zone's rule since the auto-project pipeline shares it. |
-| Buckets | `ready` if `assessment.ready`; else `in_progress` if `checks.state == pending`; else `not_ready` | Port of puller `groupPulls` minus the agent-run terms (slice 2 adds "linked task has an active run"). |
-| Releases listed | Every non-draft release published in the last N days (default 7, allowed 1..90) per active source; PR links parsed from the notes; no "contains my PRs" constraint | Puller's catalogue was seeded from the viewer's PRs; in zone the catalogue is the sources. Drafts must be filtered before `release_identity` (null `published_at` errors today). |
-| Caching | Per-source in-memory snapshots on `AppState` (TTL, single-flight, stale-on-error, rate-limit backoff, incremental re-assessment); no housekeeping sweep; no Postgres table | One assessment is 1 GraphQL + 3 paged REST calls per PR; puller's 10 s cadence would burn a PAT's 5k/h. Sweeps can't be poked and run for nobody. The cache type is small enough to swap for a table later. |
-| Permissions | New `pull_requests:read`, `pull_requests:update` (merge), `releases:read`, `releases:create`, seeded by migration 049 like `022`; admin and user roles get all four, viewer the two reads | Matches zone's `resource:action` convention; viewers can look without merging. Per-request tenancy stays with `workspace_members` (`WorkspaceMember` / `WorkspaceWriter`). |
-| Layout | Pull Requests = Projects master-detail (320 px `.card--list` pane + `<aside>` detail); Releases = Tasks single scroll body with day groups | Detail pane gives diff/commits/logs one stable scroller without puller's motion/row-continuity machinery; releases cards are self-contained. |
-| Nav position | After Tasks: Chats, Projects, Tasks, **Pull Requests**, **Releases**, Models, Wiki, Settings | Plan → work → review/merge → ship reads as the delivery lifecycle; settings stay last, and Sources lives under Settings → Workspace → Sources. |
-| Merge | Server re-assesses the single PR, refuses unless ready and the expected head matches, then `PrService::merge` (REST, GraphQL admin fallback on 405 when `ZONE_GITHUB_ADMIN_MERGE`); method from the request (`merge` default, `squash`, `rebase`) | Puller's `readinessComplete` + `--match-head-commit` guard. |
-| Create release | preview (generate-notes) → digest; create re-previews, requires digest match, then tag object → ref → draft release → publish → read-back; never deletes; 409 `release_manual_reconciliation_required` on partial failure; one create per source at a time | Puller's transaction, with tagger `Zone <zone@users.noreply.github.com>` and marker `<!-- zone-release:<uuid> -->`. |
-| Dropped | Local CLI agents, Auto dispatcher (Web Locks), New Task worktrees, release Verify, Chat/Discord overlays, Tauri, keyboard-shortcut system, motion/row continuity, Shiki worker, action-token/Origin scheme, IndexedDB transcripts, favourites/hidden prefs, SectionPager | Zone has its own runner, auto projects, task wizard, desktop client, JWT+CORS, task logs. Favourites/hidden and syntax highlighting are cheap follow-ups. |
+| Question | Decision |
+|---|---|
+| What the PR page lists | Every open PR across the workspace's active `github` sources. Repository and Author filters run client-side. There is no "Mine" view, because zone has no GitHub identity per console user. |
+| Readiness | `services/github/readiness.rs::assess`, unchanged, run against each source's `review_signals`. Drafts are never ready, and a PR with no checks reads as `checks_absent`. |
+| Buckets | `ready` if the assessment is ready. Otherwise `in_progress` if checks are pending. Otherwise `not_ready`. Sorted by bucket, then `updated_at` descending. |
+| Releases listed | Non-draft releases published within the window: 7 days by default, 1..90 allowed. Each source is read once at the 90-day maximum and cached under its source id; the requested window is cut from that read in memory. PR links are parsed from the notes. Drafts and releases with a null `published_at` are dropped before `release_identity`. |
+| Release pipeline lookups | Only releases published inside the lookup horizon are looked up: the configured default window (`ZONE_GITHUB_RELEASE_WINDOW_DAYS`), and never less than 24 h. One sweep of release-triggered runs covers them, and an exact read by tag follows only for a release the sweep did not complete and whose previous result has not settled. A result settles when its lookup is `complete`, or when it is `pending` and was checked at least `RUN_GRACE` (1 h) after the release was published: GitHub had time to start a run and did not, so the release has no release pipeline and reads as `complete` with no runs ("No runs"). A release older than the horizon carries its previous pipeline, or `unavailable` when there is none, without a GitHub call. The pipeline route still reads its release exactly on demand. |
+| Caching | Per-source in-memory snapshots on `AppState`. Each has a TTL, a refresh floor, single-flight, stale-on-error, a rate-limit backoff and incremental re-assessment. `refresh=1` skips only the TTL: re-assessment stays incremental. A snapshot is stamped when its fetch settles. A key whose first fetch fails is dropped unless it is backing off, and a key nobody reads for an hour is swept on the next read. There is no table. |
+| Rate limits | A spent quota (403/429 with `x-ratelimit-remaining: 0`) or a secondary limit (429) stops the source's assessment fan-out and backs the source off until GitHub's reset, or 5 min when GitHub names none. Every GitHub fan-out holds a permit from its credential's semaphore (8 per installation, or per source for a stored token), and diffs share a server-wide semaphore of 4. A release listing takes a permit per GitHub call (the release pages, the sweep, each exact read) rather than one for the whole listing, so it never holds a permit while waiting for another. A pull request listing holds its source's single-flight lock for the whole fetch, because that lock is the fetch, and waits for a permit per assessment inside it; that wait is bounded by one call of whatever holds the permit. |
+| Permissions | `pull_requests:read`, `pull_requests:update` (merge), `releases:read` and `releases:create`. Admin and user roles get all four; viewers get the two reads. The server enforces the writes: merge needs `pull_requests:update`, preview and create need `releases:create`, each on top of `WorkspaceWriter`. Tenancy is decided per request by `WorkspaceMember` (reads) and `WorkspaceWriter` (writes). |
+| Merge | Re-assess the single PR. Refuse unless it is open, unmerged, ready, and the expected head matches. Then `PullRequestService::merge`: REST first, falling back to the GraphQL admin merge only when `ZONE_GITHUB_ADMIN_MERGE` is on (default off) **and** the caller is a workspace admin or owner. The method is `merge` (default), `squash` or `rebase`. A squash's message lists every commit's message and ends with their `Co-authored-by` trailers, deduplicated. The merge and its audit run in a spawned task, so a caller that hangs up cannot cut them off. |
+| Create release | Preview first, which generates the notes and a digest. Create then does, in order: re-preview, require the digest to match, write the tag object, the ref and the draft release, publish, and read the release back. When the publish answer is lost, the release is read back before anything is reported. It never deletes. A partial failure returns 409 `release_manual_reconciliation_required`. Only one create runs per source at a time, guarded by an in-process set: zone runs a single manager instance, so the guard is per process. The create and its audit run in a spawned task. The tagger is `Zone <zone@users.noreply.github.com>`, and the marker is `<!-- zone-release:<uuid> -->`. |
+| Tags | `^(?:(.+)/)?v?X.Y.Z(-pre)?$`, and a valid git ref name. Tags are grouped into lines by their `prefix/`. The options' `latest_tag`, `next_tag` and `previous_tags` describe the dominant line (the one with the most tags; the unprefixed line wins a tie), and `lines` describes every line. Preview and create refuse a tag that is not newer than its own line's latest stable tag, and a tag that already has a release, drafts included. `prerelease` is derived from the tag (`-pre` means prerelease) and a create that disagrees is a 400. A release is made the latest only when its tag is stable and newer than every stable tag in the repository. All tag pages are read. |
+| Nav | Chats, Projects, Tasks, **Pull Requests**, **Releases**, Models, Wiki, Settings. |
 
-Name collisions to avoid: `crate::pull` / `PullRegistry` / `/ws/pull` / frontend `PullProvider` are Ollama model pulls; `workers::pr` publishes PRs from runs; `services::github::release` is release-pipeline domain logic, distinct from the planned `services::github::releases` service. Use `services::github`, `routes::pull_requests`, `routes::releases`, frontend `features/pull-requests`, `features/releases`, hooks `usePullRequests*`.
+Names to avoid:
 
-## API contract (settled; the frontend `schemas.ts` files are the single adapt point)
+- `crate::pull`, `PullRegistry`, `/ws/pull` and the frontend `PullProvider` are Ollama model pulls.
+- `workers::pr` publishes PRs from runs.
+- `services::github::release` is the release-pipeline domain logic, which is separate from the `services::github::releases` service.
 
-All under `require_auth`; JSON; errors `{ success: false, error }` (409 refusals add `code`). Reads use `WorkspaceMember`, writes `WorkspaceWriter`. Only UUIDs, numbers and SHAs appear in paths (metrics label folding); tags travel in bodies/queries.
+## API contract
 
-| Method | Path | Response |
-|---|---|---|
-| GET | `/api/workspaces/{workspace_id}/pull-requests?refresh=1` | `{ generated_at, stale, partial, ttl_secs, refresh_floor_secs, counts: {ready, in_progress, not_ready, total}, sources: [SourceStatus], pull_requests: [PullRequest], warnings: [] }` |
-| GET | `.../pull-requests/{source_id}/{number}` | `{ pull_request: PullRequest, threads: [Thread], comments: [BotComment] }` (unresolved threads with comments; latest recognised-bot summaries) |
-| GET | `.../pull-requests/{source_id}/{number}/diff?head=<sha40>` | `{ diff: Diff }`; 409 `head_moved` |
-| GET | `.../pull-requests/{source_id}/{number}/commits?head=` | `{ commits: { number, head, base, complete, commits: [Commit] } }` |
-| GET | `.../pull-requests/{source_id}/{number}/commits/{sha}?head=` | `{ diff: Diff }` |
-| GET | `.../pull-requests/{source_id}/{number}/jobs/{job_id}/log?head=` | `{ log: { job_id, run_id, head, text, truncated, fetched_at } }` |
-| POST | `.../pull-requests/{source_id}/{number}/merge` `{ expected_head, method? }` | `{ merged: { number, sha, admin, url } }`; 409 `code: head_moved \| not_ready \| conflict \| protected` (+ `current_head` / `blockers`) |
-| GET | `/api/workspaces/{workspace_id}/releases?days=7&refresh=1` | `{ generated_at, stale, partial, window_days, ttl_secs, sources: [SourceStatus], releases: [Release], warnings }` |
-| GET | `.../releases/options?refresh=1` | `{ generated_at, sources: [SourceOptions], warnings }` |
-| GET | `.../releases/{source_id}/{release_id}/pipeline?refresh=1` | `{ pipeline: ReleasePipeline, state, succeeded, complete, blockers }` |
-| POST | `.../releases/preview` `{ source_id, tag, expected_latest_tag }` | `{ preview: Preview }`; 400 invalid tag; 409 `latest_tag_moved` / `tag_exists` |
-| POST | `.../releases` `{ source_id, tag, expected_latest_tag, prerelease, digest }` | 201 `{ release: { source_id, id, tag, name, url, published_at } }`; 409 `preview_stale` / `release_in_progress` / `release_manual_reconciliation_required { tag, tag_object, reference_created, release_id }` |
+Every route is behind `require_auth` and returns JSON. Errors are `{ success: false, error }`, and 409 refusals add `code`. A malformed path, query or JSON body is a 400 in the same shape. A permission refusal is a 403 `{ error }` naming the permission. Paths carry only UUIDs, numbers and SHAs, so metrics labels fold; tags travel in bodies and queries.
 
-Row shapes (snake_case; existing Rust `Serialize` output is reused verbatim, so `PipelineState` stays kebab-case: `timed-out`, `action-required`):
+| Method | Path | Guard | Response |
+|---|---|---|---|
+| GET | `/api/workspaces/{workspace_id}/pull-requests?refresh=1` | member | `{ generated_at, stale, partial, ttl_secs, refresh_floor_secs, counts: {ready, in_progress, not_ready, total}, sources: [SourceStatus], pull_requests: [PullRequest], warnings }` |
+| GET | `…/pull-requests/{source_id}/{number}` | member | `{ pull_request, threads: [Thread], comments: [BotComment] }` |
+| GET | `…/pull-requests/{source_id}/{number}/diff?head=<sha>` | member | `{ diff: Diff }` |
+| GET | `…/pull-requests/{source_id}/{number}/commits?head=` | member | `{ commits: { number, head, base, complete, commits: [Commit] } }` |
+| GET | `…/pull-requests/{source_id}/{number}/commits/{sha}?head=` | member | `{ diff: Diff }` |
+| GET | `…/pull-requests/{source_id}/{number}/jobs/{job_id}/log?head=` | member | `{ log: { job_id, run_id, head, text, truncated, fetched_at } }` |
+| POST | `…/pull-requests/{source_id}/{number}/merge` `{ expected_head, method? }` | writer + `pull_requests:update` | `{ merged: { number, sha, admin, url } }` |
+| GET | `/api/workspaces/{workspace_id}/releases?days=7&refresh=1` | member | `{ generated_at, stale, partial, window_days, ttl_secs, sources: [SourceStatus], releases: [Release], warnings }` |
+| GET | `…/releases/options?refresh=1` | member | `{ generated_at, sources: [SourceOptions], warnings }` |
+| GET | `…/releases/{source_id}/{release_id}/pipeline?refresh=1` | member | `{ pipeline, state, succeeded, complete, blockers }` |
+| POST | `…/releases/preview` `{ source_id, tag, expected_latest_tag }` | writer + `releases:create` | `{ preview: Preview }` |
+| POST | `…/releases` `{ source_id, tag, expected_latest_tag, prerelease, digest }` | writer + `releases:create` | 201 `{ release: { source_id, id, tag, name, url, published_at } }` |
 
-- `PullRequest`: `source_id, repository ("owner/name"), repository_url, number, title, url, author, updated_at, draft, head, head_ref, base_ref, readiness ('ready'|'in_progress'|'not_ready'), blockers: [{code, detail}] (BlockerReport), checks: {state, complete, counts: {total, passed, failed, running, queued, in_progress, unknown}} (CheckSummary), check_details: [{kind: 'workflow'|'check_run'|'status', id, name, state, url, updated_at}], reviews: [ReviewSummary {reviewer, comment_id, url, confidence: {score, scale}|null, reviewed_commit, created_at}], review_current, unresolved_threads, threads_complete, comments_complete, assessed_at, rank`. `check_details[].id` for `kind == 'check_run'` is the Actions job id the log route takes.
+`expected_latest_tag` is the latest stable tag of the proposed tag's own line. The pipeline route answers only for a release id in the source's current release listing (read from its cache, or fetched when absent); any other id is a 404 without asking GitHub.
+
+409 codes:
+
+- Head-keyed reads (diff, commits, commit diff, job log): `head_moved` with `current_head`.
+- Merge: `head_moved` (with `current_head`, re-fetched after GitHub's head check fails), `not_ready` (with `blockers`), `conflict`, `protected`, `merged` (the PR was already merged), `closed` (the PR is closed). `head_moved`, `conflict`, `merged` and `closed` also drop the source's cached listing.
+- Preview and create: `latest_tag_moved`, `tag_not_newer { tag, latest_tag }`, `tag_exists { tag, tag_object? }`, `release_exists { tag, release_id }`.
+- Create: `preview_stale`, `release_in_progress`, and `release_manual_reconciliation_required { tag, tag_object, reference_created: bool | null, release_id: number | null, release_exists, marker }`. `reference_created` is null when whether the tag's ref points at the new tag object could not be read back. `release_exists` is true when GitHub refused the draft because the tag already had a release. `marker` is the uuid in the `<!-- zone-release:<uuid> -->` marker written into the tag message and the release body.
+
+An invalid tag, and a create whose `prerelease` disagrees with its tag, are 400s. GitHub API errors, rate limits, refused or unresolvable credentials, 5xx refusals and transport failures are 502 (`ServerError::BadGateway`); only an unreadable source configuration is a 409 without a code. A merge or create whose task stopped before reporting back is a 500 saying the outcome is unknown.
+
+Row shapes are snake_case. The existing `Serialize` output is reused, so `PipelineState` stays kebab-case.
+
+- `PullRequest` has these fields:
+  - Identity: `source_id, repository, repository_url, number, title, url, author, updated_at, draft, head, head_ref, base_ref`.
+  - Readiness: `readiness, blockers, checks, check_details: [{kind, id, name, state, url, updated_at}], reviews, review_current, unresolved_threads, threads_complete, comments_complete, assessed_at, rank`.
+  - `check_details[].id` is nullable. It is the Actions job id for a `check_run` whose link is that job's page at the configured web origin, and null for every other row, so a non-null id is always a job whose log can be read.
+  - `reviews[].url` is an absolute web link or null.
+  - In the detail route, `threads_complete` says whether the `threads` list it returns was read in full: the verdict and the list come from one read.
 - `SourceStatus`: `source_id, name, repository, repository_url, freshness ('cached'|'refreshed'|'floored'|'stale'), generated_at, warning`.
-- `Thread`: `id, path, line, outdated, url, comments: [{id, author, body, url, created_at}]`. `BotComment`: `reviewer, body, url, created_at`.
-- `Diff`: `number, head, base, complete, warning, files: [{path, previous_path, status, additions, deletions, changes, binary, truncated, blob_url, hunks: [{header, old_start, old_lines, new_start, new_lines, lines: [{kind: 'addition'|'deletion'|'context'|'meta', content, old_line, new_line}]}]}]` (puller's `PullDiff`, parsed server-side from GitHub's per-file `patch`).
+- `Thread`: `id, path, line, outdated, url, comments: [{id, author, body, url, created_at}]`. `url` is the first comment's URL.
+- `BotComment`: `reviewer, body, url, created_at`.
+- `Diff`: `number, head, base, complete, warning, files: [{path, previous_path, status, additions, deletions, changes, binary, truncated, blob_url, hunks: [{header, old_start, old_lines, new_start, new_lines, lines: [{kind, content, old_line, new_line}]}]}]`.
 - `Commit`: `sha, message, author_name, author_login, authored_at, url`.
-- `Release`: `source_id, repository, repository_url, id, tag, name, url, published_at, prerelease, pulls: [{number, url, title}], pipeline: ReleasePipeline {release, lookup, runs: [PipelineRun], checked_at}, state, succeeded, complete, blockers`.
-- `SourceOptions`: `source_id, repository, repository_url, default_branch, latest_tag, next_tag, previous_tags`. `Preview`: `source_id, repository, tag, name, body, base_tag, target, pulls, digest`.
+- `Release`: `source_id, repository, repository_url, id, tag, name, url, published_at, prerelease, pulls: [{number, url, title}], pipeline, state, succeeded, complete, blockers`.
+- `SourceOptions`: `source_id, repository, repository_url, default_branch, latest_tag, next_tag, previous_tags, lines: [{prefix, latest_tag, next_tag, previous_tags}]`. `prefix` is null for the unprefixed line.
+- `Preview`: `source_id, repository, tag, name, body, base_tag, target, prerelease, pulls, digest`.
 
-Polling contract: PR list every 30 s while visible plus on focus (`refetchIntervalInBackground: false`); the Refresh button sends `refresh=1` and is disabled inside `refresh_floor_secs`; back off 10/20/40/80/120 s on 502. Releases list every 120 s; per-release `pipeline` every 15 s only for releases younger than 30 min whose lookup is pending or a run is queued/running, patched into the list cache. After a merge: invalidate `['pull-requests', ws]` and `['releases', ws]`; after a create: `['releases', ws]`, `['releases', ws, 'options']`, `['pull-requests', ws]`. The server invalidates the source's snapshots on both writes.
+Polling contract for the console:
 
-## Backend (Rust, `runner/zone_server`)
+- The PR list refreshes every 30 s while visible and on focus. Refresh sends `refresh=1` and is disabled inside `refresh_floor_secs`. After a 502 it backs off 10/20/40/80/120 s.
+- Releases refresh every 120 s. A release's `pipeline` is polled every 15 s only while the release is younger than 30 min and its lookup is pending or a run is queued or running.
+- The server invalidates the source's snapshots after a merge or a create.
+
+## Backend as built (`runner/zone_server`)
 
 ### Module map
 
 ```
 src/services/github/
-  mod.rs            GithubServices (AppState field): pulls / releases / options / pipelines Snapshots, releasing guard, publisher: PrService
-  origin.rs         api_origin(&str) -> Result<Url, OriginError>            CodeQL request-url barrier; validated once, returned as a value
-  authentication.rs source_token / authenticated: the ONE source-credential resolution, minting again once on a refused token
-    failure.rs      Failure: a failed operation as the model reads it
-  client.rs         Github (private fields, read-only accessors) + rate limiting MOVED from agent/integrations.rs, plus typed methods (below)
-    review.rs       Review: one pull request's review evidence
-  configuration.rs  Configuration { owner, repository (stored as "repo"), branch, path, token, review_signals }
-  connection.rs     ConnectedSource { source, configuration }; active_source(state, ws, source_id) -> Result<SourceRow, Unavailable>;
-                    connect(state, ws, source_id) -> Result<ConnectedSource, Unconnected>   (replaces the lookups in integrations.rs::run, wait.rs::watched, planner.rs::github_source)
-                    connected_all(state, ws) over every active GitHub source is still to come
-  unavailable.rs    Unavailable { Unreadable, Missing, NotGithub }; message(not_github) words each for the caller
-  unconnected.rs    Unconnected { Unavailable(Unavailable), InvalidConfiguration }; message(not_github)
-  readiness.rs      MOVED from agent/readiness.rs: evidence types, ReviewSignals, assess
-  release.rs        MOVED from agent/releases.rs: ReleaseIdentity, ReleasePipeline, RunEvidence, Lookup, merge
-  refusal.rs        Refusal: what GitHub said in refusing a request
-  testing.rs        #[cfg(test)] wiremock fixtures; testing/connected.rs holds the Connected workspace fixture  snapshot.rs       Snapshots<K, T>: per-key TTL, refresh floor, single-flight, stale-on-error, retry_after on RATE_LIMIT_EXHAUSTED
-  diff.rs           parse_patch(&str) -> Vec<Hunk>; budget(files, limit) -> (Vec<DiffFile>, complete)   (port of puller diff.mjs)
-  pull_requests.rs  PullRequestService: list / detail / diff / commits / commit_diff / job_log / merge; bucket(); refresh_plan()
-  releases.rs       ReleaseService: recent / pipeline / options / preview / create; Tag; next_patch_tag(); previous_tags(); pulls_in_notes(); digest()
-src/routes/pull_requests.rs, src/routes/releases.rs      handlers in the routes/sync.rs style, registered in routes/mod.rs protected_routes
-migrations/049_pull_request_and_release_permissions.sql
-tests/pull_requests_tests.rs, tests/releases_tests.rs     integration against an axum fake GitHub on 127.0.0.1:0 (pattern: tests/pr_reception_status_tests.rs)
+  mod.rs               module declarations only, no re-exports
+  client.rs            Github over abnegate_vcs::PullRequestService and the configured web origin; typed evidence reads;
+                       assess(row, detail, Depth) and assess_with(.., threads) -> Result<Assessed, Fault>
+    review.rs, tests.rs
+  evidence.rs          neutral types client and pull_requests share: Assessed, CheckDetail, CheckKind, Depth (Listing | Full)
+  fault.rs             Fault { RateLimited { retry_after, exhausted }, Unauthenticated, Missing, Upstream }: how a GitHub
+                       read failed, used by the cache and both services; rendered as text only at the edge
+  link.rs              absolute / linked: only http(s) URLs with a host are links
+  throttle.rs          Throttle: a semaphore per credential (8) and one for diffs (4); admitted
+  authentication.rs    source token resolution, minting again once on a refused token (+ failure.rs);
+                       credentialed<T, E> for typed errors, authenticated for the agent's strings
+  configuration.rs     Configuration { owner, repository, branch, path, token, review_signals }
+  connection.rs        ConnectedSource; active_source / connect / connected_sources
+  sources.rs           Sources { connected, invalid }: every active GitHub source, split by whether its configuration parses
+  unavailable.rs       Unavailable { Unreadable, Missing, NotGithub }
+  unconnected.rs       Unconnected { Unavailable, InvalidConfiguration }
+  refusal.rs           Refusal: what GitHub said in refusing a request
+  readiness.rs         assessment evidence, ReviewSignals, assess
+  release.rs           ReleaseIdentity, ReleasePipeline, RunEvidence, Lookup, merge
+  cache.rs             Cache<K, T>: TTL, refresh floor, single-flight, stale-on-error, rate-limit backoff (GitHub's reset,
+                       else RATE_LIMIT_BACKOFF, 5 min), stamped at settle, failed keys dropped, IDLE_EXPIRY (1 h) sweep
+    decision.rs, entry.rs, slot.rs, tests.rs
+  snapshot.rs          Snapshot<T> { value, generated_at, warning }
+  freshness.rs         Freshness { Cached, Refreshed, Floored, Stale }
+  source_status.rs     SourceStatus
+  snapshots.rs         Snapshots { pull_requests, releases (by source), options, pipelines, throttle } plus the
+                       per-source releasing set; invalidate, try_release
+  releasing_guard.rs   ReleasingGuard: one create per source in this process, released on drop
+  diff.rs              unified-diff parser into files and hunks; PER_FILE_DIFF fallback
+    entry, file, hunk, hunks, line, line_kind, open_hunk, patch, path, revision, section, status, tests
+  pull_requests.rs     list / detail / diff / commits / commit_diff / job_log / merge; bucket, refresh_plan, ranked
+    bot_comment, commit, commits, counts, detail, error, listing, log, merged, method, overview, pull_request,
+    readiness, refusal, repository, squash (the squash message), thread, thread_comment
+    reading.rs         impl Github: open_pulls, pull_commits, pull_diff, commit_diff_excerpt, job_log_tail;
+                       unresolved, budgeted (the per-file fallback's patch budget)
+  releases.rs          recent / pipeline / options / preview / create
+    canonical (digest), catalogue (tags grouped into lines), created, failure, included_pull, line, listing (since),
+    notes (pulls_in_notes), offered, placement (whose ref the tag is), preview, proposal, recent, reconciliation,
+    refusal, release, source_options, tag (Tag with prefix, next tag), tag_line, tests, lookups (the permits,
+    horizon and check time a listing's pipeline lookups run inside)
+    reading.rs         impl Github: releases_since, release_pipelines_for, recent_listing, observed_pipeline, source_options,
+                       tag_names, release_tagged, tag_held, tag_reference, branch_head, release_notes, write_tag,
+                       write_reference, write_draft_release, publish_draft, release_by_id
+  testing.rs           #[cfg(test)] wiremock fixtures (+ testing/connected.rs)
+src/auth/github_guard.rs      PullRequestMerger, ReleaseCreator: WorkspaceWriter plus the write's permission
+src/routes/refresh_query.rs   RefreshQuery, shared by both pages
+src/routes/pull_requests.rs   7 handlers; pull_requests/{head_query, merge_request, merging (the spawned merge and its
+                              audit), listing_response, diff_response, commits_response, log_response, merged_response,
+                              refusal_response}
+src/routes/releases.rs        5 handlers; releases/{window_query, preview_request, create_request, creating (the spawned
+                              create and its audit), listing_response, options_response, pipeline_response,
+                              preview_response, created_response, refusal_response, refusal_detail, tag_detail,
+                              reconciliation_detail, rejection}
+migrations/0010_pull_request_and_release_permissions.sql
+tests/integration/pull_requests.rs, tests/integration/releases.rs   wiremock GitHub, own Postgres
 ```
 
-`agent/integrations.rs` keeps `Operation`, `Integration`, `Arguments`, the `Tool` impl, `run`/`observe`, JSON shaping (`assessment_record`, `pipeline_record`, `bound_*`, citations, log excerpting) as a second `impl Github` block that reaches the client through its accessors. There is no re-export shim: `services/github/mod.rs` only declares its modules, and every caller (`agent/integrations.rs`, `agent/wait.rs`, `agent/planner.rs`, `workers/auto_project`) imports each item from the module that defines it, e.g. `services::github::client::Github`. Its `readiness` / `release_pipelines` / `check_logs` become thin adapters over the typed methods with identical JSON output; tests of client behaviour live in `services/github/client/tests.rs`, tests of tool behaviour stay in `agent/integrations.rs`. The readiness and release-pipeline domain modules moved to `services/github/readiness.rs` and `services/github/release.rs`, so `services` never depends on `agent`; `agent` and `workers` import from `services::github`.
+`Github` has four `impl` blocks: `client.rs`, `agent/integrations.rs` (the LLM tool JSON), `pull_requests/reading.rs` and `releases/reading.rs`. Method names must stay unique across all four.
 
-### Typed client additions (`client.rs`)
+The tool path in `agent/integrations.rs` calls `assess` with `Depth::Full`, which keeps the changed-files walk, and its JSON is unchanged. The console list calls `assess` with `Depth::Listing`, which skips that walk, so risk reads as assumed. The client's reads return `Fault`; the agent's string-returning paths take its text through `From<Fault> for String`, so their words are unchanged.
 
-`Github::new(configuration, origin: Url)` (replaces the `ORIGIN` constant; `url()` and `graphql()` already join correctly for `https://api.github.com` and `https://ghe/api/v3`). New thin wrappers over the existing `get`/`post`/`pages`, plus `patch` and `get_optional` (404 → `None`):
+### abnegate-vcs 0.2.2 calls
 
-- PRs: `open_pulls(limit) -> (Vec<PullRecord>, complete)`, `pull(number)`, `assess(&PullRecord, Depth::{Listing, Full}) -> Assessed { assessment, risk, checks: Vec<CheckRecord> }` (Listing skips the 30-page changed-files walk; Full keeps it for the LLM tool), `changed_files(number, max_pages) -> (Vec<FileRecord>, complete)`, `commits(number)` (cap 250), `commit_files(&CommitSha)`, `job_log(job_id, expected_head, limit_bytes) -> JobLogText` (existing verify_job/log_response/collect_log, tail kept).
-- Releases: `releases_since(since, limit)` (drafts dropped, stops past the cutoff), `release(id)`, `release_by_tag(tag)`, `pipelines(&[ReleaseIdentity]) -> Vec<ReleasePipeline>` (today's sweep + exact fallback), `pipeline(&ReleaseIdentity)`, `default_branch()`, `commit_sha(reference)`, `tags(max_pages)`, `generate_notes(tag, target, previous_tag)`, `tag_exists(tag)`, `create_tag_object(tag, message, object, &Tagger)`, `create_reference(reference, sha)`, `create_draft_release(ReleaseDraft)`, `publish_release(id)`.
-- `RATE_LIMIT_EXHAUSTED` becomes `pub const` so `Snapshots` can recognise it.
+- Pull requests:
+  - `list_pull_requests` and `fetch_pull`.
+  - `collect_check_runs`, `collect_statuses` and `collect_workflow_runs`.
+  - `collect_review_threads`, `fetch_review_thread_counts`, `fetch_issue` and `list_comments`.
+  - `fetch_diff`, with `fetch_files` as the 406 fallback.
+  - `list_commits` and `fetch_commit_diff`.
+  - `fetch_workflow_job` and `fetch_job_log_tail`.
+  - `merge`.
+- Releases:
+  - `list_releases` and `fetch_release_by_id`.
+  - `list_tags`, `tag_exists` and `fetch_tag_reference`.
+  - `get_default_branch` and `resolve_commit`.
+  - `generate_release_notes`.
+  - `create_tag`, `create_tag_reference`, `create_release` and `publish_release`.
 
-### Services
+### State, config, permissions, audit
 
-- `Snapshots::read(key, refresh, now, fetch: FnOnce(Option<Arc<T>>) -> Future<Result<T, String>>) -> Result<(Snapshot<T>, Freshness), String>`: fresh and not refresh → `Cached`; refresh inside the floor → `Floored`; `retry_after` in the future → `Stale` without fetching; else take the per-entry async mutex, re-check, fetch (previous value passed in for incremental work), replace on Ok; Err with a previous value → `Stale` + warning (+ `retry_after = now + 5 min` on rate-limit exhaustion); Err with nothing → Err. `peek`, `invalidate`.
-- `PullRequestService::list`: `connected_all` → per-source `snapshots.read` in parallel → `refresh_plan(previous, listed, now, force)` re-assesses only PRs whose `updated_at`/head changed, whose checks are pending/unknown/incomplete, or whose checks failed and were assessed > 120 s ago (puller's `FAILURE_REFRESH_INTERVAL`); bucket, sort (bucket, `updated_at` desc), rank. `merge`: `pull` → head guard → `assess(Listing)` → refuse `NotReady { blockers }` unless ready → `publisher.merge(&PullRequestReference { owner, repository, number }, token, Some(&node_id), head, title, message, method, config.github.admin_merge)` → map `PrError::{HeadMoved, NotMergeable, Protected, AuthFailed}` → invalidate the source's `pulls` + `releases` snapshots. `diff`/`commits`/`job_log` all take `expected_head` and answer 409 `head_moved` when the PR moved.
-- `ReleaseService::recent`: per source `releases_since(now - days)` → `pulls_in_notes` (regex `https://github\.com/{owner}/{repo}/pull/(\d+)`, titles from the generated-notes line, dedup) → `pipelines` merged into the previous snapshot with `services::github::release::merge`. `options`: `tags(3 pages)` + `default_branch` → `next_patch_tag` (highest stable `v?X.Y.Z`, bump patch, keep prefix, default `v0.1.0`) + `previous_tags` (top 10). `preview`: latest-tag check → `tag_exists` → `default_branch` → `commit_sha` → `generate_notes` → `pulls_in_notes` → `digest` (sha256 over canonical `{repository.lowercase, tag, name, body, base_tag, target.lowercase, pulls[{number,title,url}]}`). `create`: `releasing` guard → re-preview and compare digests → tag object → ref → draft → publish → read-back (`draft == false`, `tag_name == tag`) → invalidate `releases`, `options`, `pulls`; any failure after the ref exists → `ReconciliationRequired` naming exactly what was written.
+- **State:** `AppState.github_snapshots: Snapshots`, built from `config.github` in every constructor. The accessor is `github_snapshots()`. `AppState::github()` is still the GitHub App provider.
+- **Config:** `GithubConfig { pull_request_ttl: Duration, release_ttl: Duration, release_window_days: u32, open_pull_request_limit: u32, admin_merge: bool }`, read from these variables:
 
-### Config, state, errors, permissions
+  | Variable | Default | Range |
+  |---|---|---|
+  | `ZONE_GITHUB_PULL_REQUEST_TTL_SECS` | 45 | 10..3600 |
+  | `ZONE_GITHUB_RELEASE_TTL_SECS` | 120 | 10..3600 |
+  | `ZONE_GITHUB_RELEASE_WINDOW_DAYS` | 7 | 1..90 |
+  | `ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT` | 50 | 1..200 |
+  | `ZONE_GITHUB_ADMIN_MERGE` | false | |
 
-- `config.rs`: `GithubConfig { pull_request_ttl_secs (45, 10..3600), release_ttl_secs (120, 10..3600), release_window_days (7, 1..90), open_pull_request_limit (50, 1..200), admin_merge (true) }` with `Default` + `from_env()` (`ZONE_GITHUB_*` via `env_u64` / `env_truthy`); `Config.github` set in `from_env`, listed in the hand-written `Debug`, and `github: Default::default()` at the 7 literal `Config` sites (`config.rs` tests, `state.rs` ×2, `tests/common/mod.rs` ×2, `tests/sync_tests.rs`, `tests/message_embedding_tests.rs`). Pipeline TTL (15 s), options TTL (300 s), refresh floor (10 s), diff budget (16 MiB) and log budget (existing `MAX_LOG_BYTES`) are named constants in the services. Touchpoints: `.env.example` (`ZONE_GITHUB_*` block after `ZONE_AUTO_*`), `docker-compose.yml` + `docker-compose.dev.yml` manager `environment:` lists, `docs/CONFIGURATION.md` (new "GitHub pages" section; also document `GITHUB_API_URL`, currently missing).
-- `state.rs`: `github: GithubServices` built by `GithubServices::from_config(&config)` in all three constructors; accessor `github()`.
-- `error.rs`: add `ServerError::Upstream(String)` → 502 (the `into_response` match is exhaustive). Domain refusals return `Ok((StatusCode::CONFLICT, Json(..)).into_response())` with a `code`, like `routes/tasks.rs::create_run`.
-- `migrations/049_pull_request_and_release_permissions.sql`: `SET LOCAL lock_timeout = '5s'`; `INSERT INTO permissions … ON CONFLICT (name) DO NOTHING` for the four names; `role_permissions` for admin (`…0001`) and user (`…0002`) `WHERE resource IN ('pull_requests','releases')`, viewer (`…0003`) `AND action = 'read'`. No `BEGIN;`/`COMMIT;`. Also append the four names to the hard-coded admin list in `db/users.rs::get_user_with_permissions` (admins bypass `role_permissions`; without this they are locked out).
-- `db/audit.rs`: `actions::PULL_REQUEST_MERGED`, `actions::RELEASE_CREATED`, `resources::PULL_REQUEST`, `resources::RELEASE`; handlers audit via `routes::common::audit` after success.
-- `.github/codeql/extensions/zone-models/models/barriers.yml`: `["zone_server::services::github::origin::api_origin", "ReturnValue", "request-url", "manual"]` (and `client::Github::log_redirect` if CodeQL flags the log redirect).
-- `abnegate_vcs::PullRequestService::configured` gives every GitHub request a 30 s timeout, so a stalled GitHub cannot hang the merge handler.
-- No new crates (`sha2`, `hex`, `regex`, `dashmap`, `wiremock` exist), so `cargo deny` is unaffected. `.sqlx` offline cache untouched (runtime `query_as` only).
+  They are documented in `docs/CONFIGURATION.md`. The service constants are pipeline TTL 15 s, options TTL 300 s, refresh floor 10 s, diff budget 4 MiB (also the per-file fallback's patch budget), diff permits 4, credential permits 8, log tail 1 MiB, failed-check re-assessment after 120 s, any kept assessment re-assessed after 5 min, idle cache keys swept after 1 h, a release with no run settled 1 h after publishing (`RUN_GRACE`), and release pipelines looked up only inside the default window, at least 24 h (`GithubConfig::pipeline_horizon`).
+- **Origin:** `GITHUB_API_URL` was already validated in `config.rs`. The crate handles GitHub Enterprise `/api/v3` and `/api/graphql`. The web origin, `GITHUB_WEB_URL`, is held by each `Github` client: an Actions job link and a release-triggered run link are accepted only at that origin, so GitHub Enterprise job logs and release pipelines are read.
+- **Permissions:** `0010_pull_request_and_release_permissions.sql` seeds the four permissions and the role grants. Both use `ON CONFLICT DO NOTHING`, with no `BEGIN;`/`COMMIT;`. The four names are also in the hard-coded admin list in `db/users.rs::get_user_with_permissions`. `auth::Permission` gains `PullRequestsUpdate` and `ReleasesCreate`, which `auth/github_guard.rs` requires from the caller's claims.
+- **Audit:** `actions::PULL_REQUEST_MERGED` and `actions::RELEASE_CREATED` on `resources::PULL_REQUEST` and `resources::RELEASE`, with the source id as `resource_id`, written through `routes::common::audit` after success inside the spawned task. The merge records `source_id, number, head, method, sha, admin, url`; the release records `source_id, release_id, tag, url, prerelease`.
+- **Errors:** the existing `ServerError::BadGateway` serves as the 502. `error.rs` was not changed.
 
-### Ordered steps
+### Deviations from the original plan
 
-1. Move the client to `services/github/client.rs`, and `agent/readiness.rs` / `agent/releases.rs` to `services/github/readiness.rs` / `release.rs`, with no re-export shims; full suite green with no behaviour change (own commit).
-2. `origin.rs` + `Github::new(configuration, origin)`; update callers and moved tests; barriers row.
-3. `connection::connected_all` beside `connect`; the three lookups already share `connect` / `active_source` since step 1.
-4. `GithubConfig` + 7 sites + `.env.example` / compose / `CONFIGURATION.md`.
-5. `ServerError::Upstream`; `PrService` timeout.
-6. `snapshot.rs`, `GithubServices`, `AppState.github`.
-7. Typed client methods with wiremock tests; re-express the tool adapters (same JSON).
-8. `diff.rs` + tests.
-9. `pull_requests.rs` + tests. 10. `releases.rs` + tests.
-11. Route modules, registration, audit constants, route unit tests.
-12. Migration 049 + `db/users.rs` + permission tests (`tests/tenant_admin_permissions_tests.rs`).
-13. Integration tests against the fake GitHub.
-14. `cargo fmt`, clippy `-D warnings`, nextest, doc tests.
+Pull requests:
 
-## Frontend (`manager/frontend`, React 19 + react-query + zod + Biome; `@zone/ui` kit; plain CSS with `--ui-*` tokens, no Tailwind utilities in app TSX)
+- `Diff.base` is the base **branch name**, not a SHA. Deleted-file `blob_url`s point at that branch.
+- When GitHub refuses a commit diff with 406, the response is an **empty, incomplete** `Diff` carrying `UNRENDERED_COMMIT`. There is no per-file fallback for commits.
+- `check_details[].id` is null except for an Actions `check_run`, where it is the job id.
+- The detail route returns its `pull_request` with `rank: 0`. Rank is only meaningful in the list.
+- The job log is read from its end with `fetch_job_log_tail`. The response returns the log's **last** 1 MiB, starting at a whole character, and `truncated` says whether earlier bytes were dropped. github.com's log store ignores a suffix range, so when it answers with the whole log and serves byte ranges, the end is asked for again from 1 MiB before it. A long log's failure is never cut off.
+- Commit membership (the commit diff route) and the squash message read every page of the PR's commits. GitHub lists at most 250 commits for a PR, so a commit past that is refused as foreign.
 
-### Wiring
+Releases:
 
-- `src/shared/types/permissions.ts`: `PULL_REQUESTS: { READ: 'pull_requests:read', UPDATE: 'pull_requests:update' }`, `RELEASES: { READ: 'releases:read', CREATE: 'releases:create' }`.
-- `src/shared/components/Sidebar/Sidebar.tsx`: two `navItems` after Tasks, single-`d` 24×24 stroke-2 icons: `{ path: '/pull-requests', label: 'Pull Requests', icon: 'M9 6a3 3 0 11-6 0 3 3 0 016 0zM6 9v12M13 6h3a2 2 0 012 2v7M21 18a3 3 0 11-6 0 3 3 0 016 0z' }` and `{ path: '/releases', label: 'Releases', icon: 'M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z' }` (Heroicons v1 outline `tag`).
-- `src/App.tsx`: routes `pull-requests` and `releases` after `tasks`, wrapped in `ProtectedRoute requiredPermission={PERMISSIONS.PULL_REQUESTS.READ}` / `RELEASES.READ`; write actions gated in-page with `PermissionGate`.
-- `src/api/pullRequests.ts`, `src/api/releases.ts` in the `api/tasks.ts` shape (`setGetAccessToken`, `getHeaders`, `parseErrorResponse`, `parse(Schema, json)`; every segment `encodeURIComponent`); registered in `Client.setAccessToken` (`src/api/client.ts`); check `client.auth.test.ts` / `client.test.ts` for sub-API assertions.
-- `src/shared/utils/time.ts`: `relativeTime(value)` via date-fns `formatDistanceToNow` + `absoluteTime(value)` for `title` tooltips (first file in `shared/utils`).
+- Preview requires write access (`WorkspaceWriter`) and `releases:create`, like create. Viewers cannot preview.
+- Tags must match `[prefix/]v?X.Y.Z[-pre]`. Anything else is a 400.
+- The listing's `generated_at` is the **oldest** per-source snapshot time.
+- A stable tag is made the repository's latest release only when it is newer than every stable tag already there; a prerelease never is.
 
-### `features/pull-requests/`
+## Frontend (PR 3, `manager/frontend`)
 
-```
-schemas.ts (+test) · types.ts · index.ts
-utils/identity.ts (pullRequestKey / parsePullRequestKey "sourceId:number"), grouping.ts (READINESS_ORDER/LABELS/TINTS, groupPullRequests), status.ts (CI_TINTS, CHECK_TINTS, summarizeChecks, cardBadge), checks.ts (failedChecks with job ids)
-hooks/usePullRequests.ts (list; refetchInterval 30 s, refetchIntervalInBackground false; refresh() calls the API with refresh=1 and setQueryData; exposes stale/warnings/floor)
-hooks/usePullRequestDetail.ts · usePullRequestDiff.ts · usePullRequestCommits.ts (+ useCommitDiff) · useCheckLog.ts · useMergePullRequest.ts
-      keys ['pull-requests', ws, 'detail'|'diff'|'commits'|'commit'|'log', source_id, number, head, …]; artifact queries keyed on head so a force-push invalidates; enabled only when mounted/asked
-components/PullRequestList.tsx (sticky group headers with count Badge + cards) · PullRequestCard.tsx · PullRequestDetail.tsx · PullRequestBlockers.tsx (failed checks + "Show logs", threads, bot review) · PullRequestDiff.tsx (collapsible files, plain mono unified hunks, batches of 20) · PullRequestCommits.tsx (40 px rows; selecting loads its diff) · MergeDialog.tsx (kit Modal; method select; window.confirm throws in tests) · PullRequestsSkeleton.tsx · icons.tsx
-pages/PullRequestsPage.tsx (+test) · pages/PullRequestsPage.css · pages/index.ts
-```
+`features/pull-requests/` and `features/releases/` hold `schemas.ts` (zod, the single adapt point to the contract above), `types.ts`, `api` modules in the `api/tasks.ts` shape, hooks, components and pages. `client.ts` does not register them. Each page gets a lazy loader and a signed-in route in `src/routes.ts`, plus a route in `App.tsx` behind `ProtectedRoute` on its read permission. Merge and New release are gated on the write permission **and** `useWorkspace().writable`.
 
-Page: `div.page.page--workspace.pull-requests-page` → `PageBar title="Pull Requests" subtitle="Open pull requests and their readiness"` with `Tabs` (All / Ready / In progress / Not ready), Repository and Author `<select>`s, Refresh icon button → `div.pull-requests-workspace` with the 320 px list pane (stale/warning notice strip, group headers, 72 px cards: repo + `#number`, readiness Badge, title, checks summary with status dot, relative time) and the detail `<aside>` (`.details-header` 48 px, `.details-content` with `dl.detail-facts` + blockers list + `Tabs` Blockers / Diff / Commits, `.details-actions` 48 px: "Open on GitHub", Merge gated by `PULL_REQUESTS.UPDATE`, disabled unless ready). Deep link `?id=<source_id>:<number>` honoured once, cleared on close; selection cleared if the PR disappears. Empty/filtered/error states via `EmptyState` and `.error-banner`.
-
-### `features/releases/`
-
-```
-schemas.ts (+test) · types.ts · index.ts
-utils/grouping.ts (dayLabel Today/Yesterday/weekday, groupReleasesByDay), pipeline.ts (PIPELINE_TINTS/LABELS, pipelineActive), tags.ts (tagProblem)
-hooks/useReleases.ts (list every 120 s while visible) · useReleasePipeline.ts (15 s for active releases < 30 min, setQueryData into the list) · useReleaseOptions.ts (enabled only while the wizard is open) · useCreateRelease.ts (preview + create mutations, invalidations)
-components/ReleaseDayGroup.tsx · ReleaseCard.tsx (name link, tag Badge mono, repository, relative time, pipeline chips, "N PRs" + expand toggle → 40 px included-PR rows) · ReleasePipelineChips.tsx · CreateReleaseWizard.tsx (kit Wizard, 2 steps: Target = source select + tag input prefilled with next_tag + previous tags line + Pre-release Checkbox; Review = preview facts, included PRs, notes via MessageContent links="all" or <pre>; Publish → create with digest; 409 → "Reload options") · ReleasesSkeleton.tsx · icons.tsx
-pages/ReleasesPage.tsx (+test) · pages/ReleasesPage.css · pages/index.ts
-```
-
-Page: `PageBar title="Releases" subtitle="Recent releases and their pipelines"` with Repository `<select>`, Refresh, `New release` (gated by `RELEASES.CREATE`) → `div.page-body.releases-body` with partial-history notice, sticky 28 px day headers, 72 px release card headers.
-
-### CSS rules every new stylesheet must satisfy (pinned by `src/styles/design.test.ts` and `pages.design.test.ts`)
-
-Only `--ui-*` tokens (no hex, no `rgba(`, no legacy `--gray-*` scales); tints via `color-mix(in srgb, var(--ui-x) N%, transparent)`; dark overrides under `:root[data-theme='dark']`; never restyle `.page-bar` (48 px); controls 32 / 28 px; badges 20 px (`--ui-badge-height`); rows 40 / 56 px (`--ui-list-row`, `--ui-list-row-2`); list cards `height: 4.5rem; box-sizing: border-box; padding: var(--ui-space-2) var(--ui-space-3)` with a 20 + 18 + 16 line stack; reuse `.details-header` / `.details-content` / `.detail-facts` / `.details-actions` from ProjectsPage.css rather than redefining them; no gradients, `translateY` lifts or decorative `::before` on cards (skeleton shimmer excepted); mono via `--ui-font-mono` at `--ui-text-xs` with 20 px lines; sticky headers stick inside the pane/body scroller only; `@media (max-width: 768px)` hides the list pane while a detail is open. Add `describe('pull requests page layout')` and `describe('releases page layout')` blocks to `pages.design.test.ts` pinning the 320 px pane, 72 px cards, 28 px sticky group/day headers, 20 px chip row, 40 px rows, diff line grid, and palette-only colours.
-
-### Tests
-
-- Unit (bun, `bun run test`): api modules (URLs, bearer header, encoded segments, bodies, error envelope); schemas (fixtures, enum fallbacks, defaults); utils (grouping, status, checks, day labels, pipeline tints, tag problems); hooks (polling flags, refresh path, enabled gating, invalidations); components (group counts, card badges, detail lazy fetching, blockers/logs, diff markers and batching, commits, merge dialog, release card chips/expand, wizard flow); pages (heading, skeleton, empty/filtered, tabs and selects, deep link, stale notice, refresh); `Sidebar.test.tsx` (new items, links, 11-item order); `pages.design.test.ts` blocks.
-- Playwright (mocked): `e2e/navigation.e2e.ts` (`toHaveCount(11)`, re-indexed labels, two new navigation tests, mock the two list routes in `beforeEach`); add the four permission strings to `e2e/test-utils.ts` and `e2e/helpers/auth.ts`; new `e2e/pull-requests.e2e.ts` and `e2e/releases.e2e.ts`; `e2e/layout-fixtures.ts` `setupCommonRoutes` branches for `/pull-requests`, `/releases`, `/releases/options` (the catch-all `{}` would fail zod); `e2e/screenshots.e2e.ts` and `e2e/workspace-layout.e2e.ts` entries for both pages (new baseline screenshots on the first PR; say so in the PR).
-
-## Delivery
-
-- Execute through the consolidation skill: backend and frontend as parallel worktree architects against the settled contract above, then consolidate, review, verify. Backend step 1 (the client move) lands first as its own commit so both sides build on it.
-- Stack three PRs against `main` so CodeRabbit reviews each (it refuses oversized PRs): (1) `refactor(github): lift the GitHub client into services` (pure move + origin + credentials), (2) `feat(github): pull request and release services, routes and permissions`, (3) `feat(console): Pull Requests and Releases pages`. Conventional commits, `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`. Wait for green CI before merging any of them.
-- Format/lint before every commit: `cargo fmt`, clippy `-D warnings`, Biome (`bun run check`).
+- **Pull Requests:** master-detail on the shared resizable `SubNav` (storage key `pull-requests-pane`). The tabs are All / Ready / In progress / Not ready. It has Repository and Author filters and a deep link `?id=<source_id>:<number>`. The detail tabs are Blockers, Diff and Commits. Artifact queries are keyed on the head SHA.
+- **Releases:** a single scroll body grouped by day, with pipeline chips, an expandable list of included PRs, and a two-step create wizard (Target, Review). A 409 there offers "Reload options".
+- **Styling:** `--ui-*` tokens only. Shared detail classes come from `ProjectsPage.css`. Each page has a `describe` block in `pages.design.test.ts`.
+- **Navigation:** the sidebar has 8 items in the order above. `Sidebar.test.tsx` and `e2e/navigation.e2e.ts` (`toHaveCount(8)`) pin it. Empty states link to `/settings/workspace/sources`.
+- **Contract tests:** `schemas.contract.test.ts` in each feature pins the zod schemas to the Rust wire structs through `src/test/rust.ts`.
 
 ## Verification
 
-Backend (from `runner/`, Postgres + Valkey running, `DATABASE_URL` / `TEST_DATABASE_URL` → a migrated `zone_test`, `REDIS_URL`):
+Backend, from `runner/`, against a migrated Postgres with both `DATABASE_URL` and `TEST_DATABASE_URL` set:
 
 ```bash
-cargo fmt --all -- --check && cargo clippy --workspace --exclude zone_desktop --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+cargo clippy --workspace --exclude zone_desktop --all-targets --all-features -- -D warnings
+cargo nextest run --workspace --exclude zone_desktop --all-targets --no-fail-fast --no-default-features --features zone_context/test-utils
+cargo deny --locked check --warn unmaintained --warn notice
 ```
+
+Frontend, from `manager/frontend`:
 
 ```bash
-(cd zone_server && sqlx migrate run) && cargo nextest run --workspace --exclude zone_desktop --all-targets --no-fail-fast --test-threads 8 --no-default-features --features zone_context/test-utils
+bun run typecheck && bun run lint && bun run format:check && bun run check && bun run test
 ```
 
-Focused: `cargo nextest run -p zone_server --no-default-features --features zone_context/test-utils -E 'test(/github|pull_request|release|snapshot|origin|credential|permission|migration|config/)'`. Enterprise path: set `GITHUB_API_URL=https://ghe.example/api/v3` against the fake and assert `/api/v3/repos/...` and `/api/graphql`.
+Run the e2e specs `navigation`, `pull-requests`, `releases`, `workspace-layout` and `mobile` with `bun run test:e2e`.
 
-Frontend (from the repo root then `manager/frontend`; this worktree has no `node_modules`):
+Manual pass against `make dev`, with a workspace that holds GitHub sources:
 
-```bash
-bun install && bun run build:ui
-```
+- PR groups and counts match GitHub.
+- `/diff` and `/log` are fetched only on demand.
+- Merging a throwaway PR works, and a stale head gets a 409.
+- A release is published to a sandbox repo.
+- A viewer sees no Merge or New release.
 
-```bash
-cd manager/frontend && bun run typecheck && bun run lint && bun run format:check && bunx biome check --linter-enabled=false --formatter-enabled=false src && bun run test
-```
+Take screenshots in light and dark at 1440×1000 and 390×844. Finish with `make live-verify`.
 
-```bash
-cd manager/frontend && bun run test:e2e -- --project=chromium e2e/navigation.e2e.ts e2e/pull-requests.e2e.ts e2e/releases.e2e.ts e2e/workspace-layout.e2e.ts e2e/mobile.e2e.ts
-```
+## Follow-ups
 
-Manual, against `make dev` (backend :8000, console :3001) with a workspace holding GitHub sources: sidebar order and active states (expanded, collapsed, mobile drawer); PR groups/counts match GitHub; tabs and selects filter; detail facts; Network tab shows `/diff` only when the Diff tab opens, `/log` only on "Show logs"; `?id=` deep link; merge a throwaway PR (409 on stale head, success toast, releases refetch); polling only while visible; releases day groups, chips updating while a run is active, expand PRs; wizard publishes to a sandbox repo, 409 shows "Reload options"; a viewer sees no Merge / New release and `/unauthorized` without read. Take screenshots of both pages (list + detail, wizard open) in light and dark at 1440×1000 and 390×844 and check them before reporting done; no horizontal scroll. Per CONTRIBUTING.md, finish with `make live-verify`.
-
-## Follow-ups (not in this change)
-
-- Slice 2, agent actions on zone's task machinery: join `tasks.pr_url` → task/status/auto badge and `/tasks?id=` link; `POST .../pull-requests/{source_id}/{number}/fix { instructions }` creates/adopts a task on the project linked to the repository and queues a run (needs `task_runs.instructions` + `create_run` body, `projects.find_by_repository`, `tasks.adopt_pull_request`); merge enqueues `workers::pr::repair_conflicts_for_task` on a conflicted task-linked PR (202); "In progress" also covers a linked task's active run; `review_signals` multi-select on the Sources form. Fix is a small row button (puller's latest WIP), not a panel.
-- Slice 3: adopt foreign PRs into tasks (source ↔ project token bridge); Postgres snapshot table + housekeeping sweep if rate limits bite; `users.github_login` for a default "Mine" filter; favourites/hidden prefs; syntax highlighting in the diff; replace the literal admin permission list in `db/users.rs` with a `permissions` query; type the client's `String` errors.
+- Agent actions on zone's task machinery: link `tasks.pr_url` to a task badge, add a Fix action that queues a run, repair conflicts on merge, and let "In progress" cover a linked task's active run.
+- `users.github_login` for a "Mine" filter, favourites and hidden prefs, and diff syntax highlighting.
+- A Postgres snapshot table if rate limits bite. Replace the literal admin permission list in `db/users.rs` with a query.

@@ -18,11 +18,13 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::time::Duration;
 
 use super::readiness::CommitSha;
 
+pub const RUN_GRACE: Duration = Duration::from_secs(60 * 60);
 const RELEASE_EVENT: &str = "release";
-const RUN_URL_ORIGIN: &str = "https://github.com";
+const SEPARATOR: char = '/';
 
 /// The closed set of states one workflow run may be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -224,7 +226,7 @@ impl RunEvidence {
     /// Accept the record only if every part of its identity says it is a
     /// release-triggered run of this release in this repository, published at
     /// the URL a run of that id would live at.
-    pub fn normalize(&self, release: &ReleaseIdentity) -> Option<PipelineRun> {
+    pub fn normalize(&self, release: &ReleaseIdentity, origin: &str) -> Option<PipelineRun> {
         (self.id > 0
             && self.workflow_id > 0
             && self.attempt > 0
@@ -239,7 +241,7 @@ impl RunEvidence {
                 .started_at
                 .as_deref()
                 .is_none_or(|value| moment(value).is_some())
-            && self.url == run_url(&release.repository, self.id))
+            && self.url == run_url(origin, &release.repository, self.id))
         .then(|| CommitSha::parse(&self.head_sha))
         .flatten()
         .map(|head_sha| PipelineRun {
@@ -360,11 +362,16 @@ impl ReleasePipeline {
     /// A dropped record makes the lookup unavailable: a listing we could only
     /// partly read is not a listing, and the runs it did carry are not proof
     /// that nothing else exists.
-    pub fn observe(release: ReleaseIdentity, evidence: &[RunEvidence], checked_at: &str) -> Self {
+    pub fn observe(
+        release: ReleaseIdentity,
+        evidence: &[RunEvidence],
+        checked_at: &str,
+        origin: &str,
+    ) -> Self {
         let mut runs = Vec::with_capacity(evidence.len());
         let mut dropped = false;
         for record in evidence.iter().filter(|record| record.addresses(&release)) {
-            match record.normalize(&release) {
+            match record.normalize(&release, origin) {
                 Some(run) => runs.push(run),
                 None => dropped = true,
             }
@@ -468,6 +475,27 @@ impl ReleasePipeline {
 
     pub fn succeeded(&self) -> bool {
         self.state() == PipelineState::Succeeded
+    }
+
+    pub fn settled(&self) -> bool {
+        self.lookup == Lookup::Complete || self.lapsed()
+    }
+
+    pub fn concluded(self) -> Self {
+        if self.lapsed() {
+            Self {
+                lookup: Lookup::Complete,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
+    fn lapsed(&self) -> bool {
+        let waited = observed_at(&self.checked_at).saturating_sub(self.release.published());
+        self.lookup == Lookup::Pending
+            && waited >= i64::try_from(RUN_GRACE.as_millis()).unwrap_or(i64::MAX)
     }
 }
 
@@ -582,8 +610,11 @@ fn newer_run(left: PipelineRun, right: PipelineRun) -> PipelineRun {
 
 /// The canonical page a workflow run of this id lives at. A record that names
 /// anything else is not a record of that run.
-pub fn run_url(repository: &str, id: u64) -> String {
-    format!("{RUN_URL_ORIGIN}/{repository}/actions/runs/{id}")
+pub fn run_url(origin: &str, repository: &str, id: u64) -> String {
+    format!(
+        "{}/{repository}/actions/runs/{id}",
+        origin.trim_end_matches(SEPARATOR)
+    )
 }
 
 fn moment(value: &str) -> Option<i64> {
@@ -607,6 +638,8 @@ mod tests {
     use super::*;
 
     const REPOSITORY: &str = "owner/repository";
+    const ORIGIN: &str = "https://github.com";
+    const ENTERPRISE: &str = "https://github.example.com/";
     const BUILT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OTHER: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
@@ -635,7 +668,7 @@ mod tests {
             created_at: "2026-09-05T00:01:00Z".into(),
             started_at: Some("2026-09-05T00:01:10Z".into()),
             updated_at: "2026-09-05T00:04:00Z".into(),
-            url: run_url(REPOSITORY, id),
+            url: run_url(ORIGIN, REPOSITORY, id),
             repository: REPOSITORY.into(),
         }
     }
@@ -645,7 +678,7 @@ mod tests {
     }
 
     fn observed(evidence: &[RunEvidence]) -> ReleasePipeline {
-        ReleasePipeline::observe(release(), evidence, "2026-09-05T00:05:00Z")
+        ReleasePipeline::observe(release(), evidence, "2026-09-05T00:05:00Z", ORIGIN)
     }
 
     #[test]
@@ -700,7 +733,7 @@ mod tests {
     #[test]
     fn a_run_record_is_only_accepted_when_its_whole_identity_holds() {
         let release = release();
-        assert!(succeeded(1, 1).normalize(&release).is_some());
+        assert!(succeeded(1, 1).normalize(&release, ORIGIN).is_some());
         for (label, record) in [
             (
                 "zero id",
@@ -768,7 +801,7 @@ mod tests {
             (
                 "another run's url",
                 RunEvidence {
-                    url: run_url(REPOSITORY, 999),
+                    url: run_url(ORIGIN, REPOSITORY, 999),
                     ..succeeded(1, 1)
                 },
             ),
@@ -780,8 +813,25 @@ mod tests {
                 },
             ),
         ] {
-            assert!(record.normalize(&release).is_none(), "{label}");
+            assert!(record.normalize(&release, ORIGIN).is_none(), "{label}");
         }
+    }
+
+    #[test]
+    fn an_enterprise_run_is_accepted_at_its_own_origin_and_nowhere_else() {
+        let release = release();
+        let enterprise = RunEvidence {
+            url: run_url(ENTERPRISE, REPOSITORY, 1),
+            ..succeeded(1, 1)
+        };
+
+        assert_eq!(
+            enterprise.url,
+            "https://github.example.com/owner/repository/actions/runs/1"
+        );
+        assert!(enterprise.normalize(&release, ENTERPRISE).is_some());
+        assert!(enterprise.normalize(&release, ORIGIN).is_none());
+        assert!(succeeded(1, 1).normalize(&release, ENTERPRISE).is_none());
     }
 
     #[test]
@@ -993,6 +1043,7 @@ mod tests {
             release(),
             &[evidence(1, 1, "in_progress", None), succeeded(2, 2)],
             "2026-09-05T00:05:00Z",
+            ORIGIN,
         );
         let later = ReleasePipeline::observe(
             release(),
@@ -1001,6 +1052,7 @@ mod tests {
                 ..succeeded(1, 1)
             }],
             "2026-09-05T00:09:00Z",
+            ORIGIN,
         );
 
         let merged = merge(Some(earlier.clone()), later);
@@ -1047,7 +1099,12 @@ mod tests {
         let earlier = observed(&[evidence(1, 1, "in_progress", None), succeeded(2, 2)]);
         let merged = merge(
             Some(earlier),
-            ReleasePipeline::observe(release(), &[succeeded(2, 2)], "2026-09-05T00:09:00Z"),
+            ReleasePipeline::observe(
+                release(),
+                &[succeeded(2, 2)],
+                "2026-09-05T00:09:00Z",
+                ORIGIN,
+            ),
         );
         assert_eq!(merged.runs.len(), 1);
         assert_eq!(merged.runs[0].id, 2);
@@ -1059,7 +1116,7 @@ mod tests {
         let earlier = observed(&[succeeded(1, 1)]);
         let merged = merge(
             Some(earlier),
-            ReleasePipeline::observe(release(), &[], "2026-09-05T00:09:00Z"),
+            ReleasePipeline::observe(release(), &[], "2026-09-05T00:09:00Z", ORIGIN),
         );
         assert_eq!(merged.lookup, Lookup::Complete);
         assert_eq!(merged.runs.len(), 1);
@@ -1077,6 +1134,33 @@ mod tests {
             assert_eq!(merged.lookup, Lookup::Complete);
         }
         assert_eq!(merge(None, newer.clone()), newer);
+    }
+
+    #[test]
+    fn a_release_still_without_runs_after_the_grace_has_no_pipeline() {
+        let early = ReleasePipeline::observe(release(), &[], "2026-09-05T00:59:59Z", ORIGIN);
+        assert!(!early.settled(), "GitHub may still start a run");
+        assert_eq!(early.clone().concluded(), early);
+
+        let late = ReleasePipeline::observe(release(), &[], "2026-09-05T01:00:00Z", ORIGIN);
+        assert!(late.settled());
+        let concluded = late.concluded();
+        assert_eq!(concluded.lookup, Lookup::Complete);
+        assert!(concluded.runs.is_empty());
+        assert_eq!(concluded.state(), PipelineState::Unknown);
+        assert_eq!(concluded.blockers(), vec![PipelineBlocker::RunsAbsent]);
+    }
+
+    #[test]
+    fn only_a_reached_lookup_settles() {
+        assert!(observed(&[succeeded(1, 1)]).settled());
+        for checked_at in ["2026-09-06T00:00:00Z", "yesterday"] {
+            let unavailable = ReleasePipeline::unavailable(release(), checked_at);
+            assert!(!unavailable.settled(), "{checked_at}");
+            assert_eq!(unavailable.clone().concluded(), unavailable);
+        }
+        let unreadable = ReleasePipeline::observe(release(), &[], "yesterday", ORIGIN);
+        assert!(!unreadable.settled());
     }
 
     #[test]

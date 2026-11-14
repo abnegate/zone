@@ -7,6 +7,7 @@
 //! - Organization and workspace membership guards
 
 pub mod device;
+pub mod github_guard;
 pub mod jwt;
 pub mod middleware;
 pub mod model_guard;
@@ -16,6 +17,7 @@ pub mod permission;
 pub mod time_zone;
 pub mod workspace_guard;
 
+pub use github_guard::{PullRequestMerger, ReleaseCreator};
 pub use jwt::{
     AccessClaims, create_access_token, create_refresh_token, create_session_access_token,
     validate_access_token,

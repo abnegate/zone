@@ -48,7 +48,7 @@ abnegate-notify = "0.2.0"
 abnegate-recurrence = "0.1.0"
 abnegate-search = "0.2.0"
 abnegate-secret = "0.2.0"
-abnegate-vcs = "0.2.0"
+abnegate-vcs = "0.2.2"
 
 # Server dependencies
 axum = { version = "=0.8.9", features = ["ws", "macros", "multipart"] }

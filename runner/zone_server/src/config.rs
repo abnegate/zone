@@ -128,6 +128,8 @@ pub struct Config {
     pub train_upload_limit_mb: u64,
     /// Auto projects: what the driver admits, how it reviews, when it merges.
     pub auto: AutoProjectConfig,
+    /// The console's Pull Requests and Releases pages.
+    pub github: GithubConfig,
     /// The hosts organizations and workspaces may save endpoints on
     /// (`ZONE_ENDPOINT_HOSTS`); every host when empty.
     pub endpoint_hosts: Hosts,
@@ -897,6 +899,90 @@ impl AutoProjectConfig {
     }
 }
 
+const GITHUB_PULL_REQUEST_TTL: &str = "ZONE_GITHUB_PULL_REQUEST_TTL_SECS";
+const GITHUB_RELEASE_TTL: &str = "ZONE_GITHUB_RELEASE_TTL_SECS";
+const GITHUB_RELEASE_WINDOW_DAYS: &str = "ZONE_GITHUB_RELEASE_WINDOW_DAYS";
+const GITHUB_OPEN_PULL_REQUEST_LIMIT: &str = "ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT";
+const GITHUB_ADMIN_MERGE: &str = "ZONE_GITHUB_ADMIN_MERGE";
+
+const DEFAULT_PULL_REQUEST_TTL_SECS: u64 = 45;
+const DEFAULT_RELEASE_TTL_SECS: u64 = 120;
+const MINIMUM_GITHUB_TTL_SECS: u64 = 10;
+const MAXIMUM_GITHUB_TTL_SECS: u64 = 3600;
+const DEFAULT_RELEASE_WINDOW_DAYS: u64 = 7;
+const MINIMUM_RELEASE_WINDOW_DAYS: u64 = 1;
+pub const MAXIMUM_RELEASE_WINDOW_DAYS: u64 = 90;
+const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+const MINIMUM_PIPELINE_HORIZON: Duration = DAY;
+const DEFAULT_OPEN_PULL_REQUEST_LIMIT: u64 = 50;
+const MINIMUM_OPEN_PULL_REQUEST_LIMIT: u64 = 1;
+const MAXIMUM_OPEN_PULL_REQUEST_LIMIT: u64 = 200;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GithubConfig {
+    pub pull_request_ttl: Duration,
+    pub release_ttl: Duration,
+    pub release_window_days: u32,
+    pub open_pull_request_limit: u32,
+    pub admin_merge: bool,
+}
+
+impl Default for GithubConfig {
+    fn default() -> Self {
+        Self {
+            pull_request_ttl: Duration::from_secs(DEFAULT_PULL_REQUEST_TTL_SECS),
+            release_ttl: Duration::from_secs(DEFAULT_RELEASE_TTL_SECS),
+            release_window_days: DEFAULT_RELEASE_WINDOW_DAYS as u32,
+            open_pull_request_limit: DEFAULT_OPEN_PULL_REQUEST_LIMIT as u32,
+            admin_merge: false,
+        }
+    }
+}
+
+impl GithubConfig {
+    pub fn from_env() -> Self {
+        Self {
+            pull_request_ttl: Duration::from_secs(env_u64(
+                GITHUB_PULL_REQUEST_TTL,
+                DEFAULT_PULL_REQUEST_TTL_SECS,
+                MINIMUM_GITHUB_TTL_SECS,
+                MAXIMUM_GITHUB_TTL_SECS,
+            )),
+            release_ttl: Duration::from_secs(env_u64(
+                GITHUB_RELEASE_TTL,
+                DEFAULT_RELEASE_TTL_SECS,
+                MINIMUM_GITHUB_TTL_SECS,
+                MAXIMUM_GITHUB_TTL_SECS,
+            )),
+            release_window_days: env_u64(
+                GITHUB_RELEASE_WINDOW_DAYS,
+                DEFAULT_RELEASE_WINDOW_DAYS,
+                MINIMUM_RELEASE_WINDOW_DAYS,
+                MAXIMUM_RELEASE_WINDOW_DAYS,
+            ) as u32,
+            open_pull_request_limit: env_u64(
+                GITHUB_OPEN_PULL_REQUEST_LIMIT,
+                DEFAULT_OPEN_PULL_REQUEST_LIMIT,
+                MINIMUM_OPEN_PULL_REQUEST_LIMIT,
+                MAXIMUM_OPEN_PULL_REQUEST_LIMIT,
+            ) as u32,
+            admin_merge: env_truthy(GITHUB_ADMIN_MERGE, false),
+        }
+    }
+
+    pub fn release_window(&self, days: Option<u32>) -> u32 {
+        days.unwrap_or(self.release_window_days).clamp(
+            MINIMUM_RELEASE_WINDOW_DAYS as u32,
+            MAXIMUM_RELEASE_WINDOW_DAYS as u32,
+        )
+    }
+
+    pub fn pipeline_horizon(&self) -> Duration {
+        DAY.saturating_mul(self.release_window_days)
+            .max(MINIMUM_PIPELINE_HORIZON)
+    }
+}
+
 /// A comma-separated list, trimmed, with blanks dropped.
 fn env_list(name: &str) -> Vec<String> {
     env::var(name)
@@ -1370,6 +1456,7 @@ impl Config {
             monitoring: MonitoringConfig::from_env(),
             train_upload_limit_mb: env_u64("TRAIN_UPLOAD_LIMIT_MB", 4096, 4, 65536),
             auto: AutoProjectConfig::from_env(),
+            github: GithubConfig::from_env(),
             endpoint_hosts: Hosts::from_env(),
             host_mounts: crate::host_mounts::HostMounts::from_env(),
             connect_urls: connect_urls(env::var(CONNECT_URLS).ok())?,
@@ -1420,6 +1507,7 @@ impl std::fmt::Debug for Config {
             .field("source_index", &self.source_index)
             .field("monitoring", &self.monitoring)
             .field("auto", &self.auto)
+            .field("github", &self.github)
             .field("endpoint_hosts", &self.endpoint_hosts)
             .field("host_mounts", &self.host_mounts)
             .field("clones", &self.clones)
@@ -1502,6 +1590,13 @@ mod tests {
         CODEX_API_URL,
         CODEX_SANDBOX,
     ];
+    const GITHUB_SETTINGS: [&str; 5] = [
+        GITHUB_PULL_REQUEST_TTL,
+        GITHUB_RELEASE_TTL,
+        GITHUB_RELEASE_WINDOW_DAYS,
+        GITHUB_OPEN_PULL_REQUEST_LIMIT,
+        GITHUB_ADMIN_MERGE,
+    ];
     const INSTANCE_SERVERS: &str = "ZONE_MCP_SERVERS";
     const INSTANCE_CONFIGURATION: &str = "ZONE_MCP_CONFIG";
     const INSTANCE_AUTO_CONNECT: &str = "ZONE_MCP_AUTO_CONNECT";
@@ -1570,6 +1665,7 @@ mod tests {
             train_upload_limit_mb: 4096,
             endpoint_hosts: Default::default(),
             auto: Default::default(),
+            github: Default::default(),
             host_mounts: Default::default(),
             connect_urls: Vec::new(),
             mcp_enabled: true,
@@ -2192,6 +2288,94 @@ mod tests {
         ] {
             assert!(!origins.allows(origin), "{origin} must be rejected");
         }
+    }
+
+    #[test]
+    fn github_pages_settings_default_when_unset_or_unreadable() {
+        let mut environment = Variables::isolated(&GITHUB_SETTINGS);
+
+        assert_eq!(GithubConfig::from_env(), GithubConfig::default());
+        assert_eq!(
+            GithubConfig::default(),
+            GithubConfig {
+                pull_request_ttl: Duration::from_secs(45),
+                release_ttl: Duration::from_secs(120),
+                release_window_days: 7,
+                open_pull_request_limit: 50,
+                admin_merge: false,
+            }
+        );
+
+        for name in GITHUB_SETTINGS {
+            environment.set(name, "not-a-number");
+        }
+        assert_eq!(
+            GithubConfig::from_env(),
+            GithubConfig::default(),
+            "an unreadable number falls back, and an unreadable flag is off"
+        );
+    }
+
+    #[test]
+    fn github_pages_settings_stay_inside_their_bounds() {
+        let mut environment = Variables::isolated(&GITHUB_SETTINGS);
+
+        environment.set(GITHUB_PULL_REQUEST_TTL, "1");
+        environment.set(GITHUB_RELEASE_TTL, "999999");
+        environment.set(GITHUB_RELEASE_WINDOW_DAYS, "0");
+        environment.set(GITHUB_OPEN_PULL_REQUEST_LIMIT, "5000");
+        environment.set(GITHUB_ADMIN_MERGE, "off");
+        assert_eq!(
+            GithubConfig::from_env(),
+            GithubConfig {
+                pull_request_ttl: Duration::from_secs(10),
+                release_ttl: Duration::from_secs(3600),
+                release_window_days: 1,
+                open_pull_request_limit: 200,
+                admin_merge: false,
+            }
+        );
+
+        environment.set(GITHUB_PULL_REQUEST_TTL, "60");
+        environment.set(GITHUB_RELEASE_TTL, "300");
+        environment.set(GITHUB_RELEASE_WINDOW_DAYS, "500");
+        environment.set(GITHUB_OPEN_PULL_REQUEST_LIMIT, "0");
+        environment.set(GITHUB_ADMIN_MERGE, "yes");
+        assert_eq!(
+            GithubConfig::from_env(),
+            GithubConfig {
+                pull_request_ttl: Duration::from_secs(60),
+                release_ttl: Duration::from_secs(300),
+                release_window_days: 90,
+                open_pull_request_limit: 1,
+                admin_merge: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_release_window_the_console_asks_for_is_held_inside_its_bounds() {
+        let github = GithubConfig {
+            release_window_days: 14,
+            ..GithubConfig::default()
+        };
+
+        assert_eq!(github.release_window(None), 14);
+        assert_eq!(github.release_window(Some(30)), 30);
+        assert_eq!(github.release_window(Some(0)), 1);
+        assert_eq!(github.release_window(Some(365)), 90);
+    }
+
+    #[test]
+    fn release_pipelines_are_looked_up_across_the_default_window_and_never_less_than_a_day() {
+        let window = |release_window_days| GithubConfig {
+            release_window_days,
+            ..GithubConfig::default()
+        };
+
+        assert_eq!(GithubConfig::default().pipeline_horizon(), DAY * 7);
+        assert_eq!(window(30).pipeline_horizon(), DAY * 30);
+        assert_eq!(window(0).pipeline_horizon(), DAY);
     }
 
     #[test]

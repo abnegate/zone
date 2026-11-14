@@ -1,0 +1,359 @@
+use std::collections::HashMap;
+use std::num::NonZeroU32;
+
+use abnegate_vcs::BranchName;
+use abnegate_vcs::CommitSha;
+use abnegate_vcs::GeneratedNotes;
+use abnegate_vcs::GitReference;
+use abnegate_vcs::NotesRequest;
+use abnegate_vcs::ObjectId;
+use abnegate_vcs::PullRequestError;
+use abnegate_vcs::Release as Published;
+use abnegate_vcs::ReleaseRequest;
+use abnegate_vcs::TagRequest;
+use abnegate_vcs::Tagger;
+use chrono::DateTime;
+use chrono::Utc;
+use tokio::sync::Semaphore;
+
+use super::Listing;
+use super::Release;
+use super::SourceOptions;
+use super::catalogue::Catalogue;
+use super::failure::RELEASE_MISSING;
+use super::lookups::Lookups;
+use super::notes::Notes;
+use crate::services::github::client::Github;
+use crate::services::github::client::PER_PAGE;
+use crate::services::github::connection::ConnectedSource;
+use crate::services::github::fault::Fault;
+use crate::services::github::link::linked;
+use crate::services::github::release;
+use crate::services::github::release::Lookup;
+use crate::services::github::release::ReleaseIdentity;
+use crate::services::github::release::ReleasePipeline;
+use crate::services::github::release::RunEvidence;
+use crate::services::github::throttle::admitted;
+
+const RELEASE_PAGES: u32 = 10;
+const TAGGER_NAME: &str = "Zone";
+const TAGGER_EMAIL: &str = "zone@users.noreply.github.com";
+const UNLINKED_RELEASE: &str = "GitHub returned the release without a usable link.";
+
+impl Github {
+    pub(crate) async fn releases_since(
+        &self,
+        since: DateTime<Utc>,
+    ) -> Result<(Vec<Published>, bool), PullRequestError> {
+        let mut releases = Vec::new();
+        let mut page = NonZeroU32::MIN;
+        loop {
+            let listed = self
+                .service()
+                .list_releases(self.repository(), self.token(), page, PER_PAGE)
+                .await?;
+            let mut passed = false;
+            for listed in listed.items.into_iter().filter(|listed| !listed.draft) {
+                match listed.published_at.as_deref().and_then(moment) {
+                    Some(published) if published >= since => releases.push(listed),
+                    Some(_) => passed = true,
+                    None => {}
+                }
+            }
+            match listed.next {
+                Some(next) if !passed && next.get() <= RELEASE_PAGES => page = next,
+                Some(_) if !passed => return Ok((releases, false)),
+                _ => return Ok((releases, true)),
+            }
+        }
+    }
+
+    pub(crate) async fn release_pipelines_for(
+        &self,
+        releases: &[ReleaseIdentity],
+        previous: &HashMap<String, ReleasePipeline>,
+        lookups: &Lookups<'_>,
+    ) -> Vec<ReleasePipeline> {
+        let checked_at = lookups.checked_at;
+        let horizon = lookups.horizon.timestamp_millis();
+        let watched: Vec<ReleaseIdentity> = releases
+            .iter()
+            .filter(|identity| identity.published() >= horizon)
+            .cloned()
+            .collect();
+        let sweep = if watched.is_empty() {
+            None
+        } else {
+            self.swept(&watched, lookups.permits).await
+        };
+        let mut pipelines = Vec::with_capacity(releases.len());
+        for identity in releases {
+            let earlier = previous
+                .get(&identity.key())
+                .cloned()
+                .map(ReleasePipeline::concluded);
+            if identity.published() < horizon {
+                pipelines.push(
+                    earlier.unwrap_or_else(|| {
+                        ReleasePipeline::unavailable(identity.clone(), checked_at)
+                    }),
+                );
+                continue;
+            }
+            let observed = match &sweep {
+                Some(records) => {
+                    ReleasePipeline::observe(identity.clone(), records, checked_at, self.origin())
+                }
+                None => ReleasePipeline::unavailable(identity.clone(), checked_at),
+            };
+            let settled = observed.lookup == Lookup::Complete
+                || earlier.as_ref().is_some_and(ReleasePipeline::settled);
+            let observed = if settled {
+                observed
+            } else {
+                release::merge(Some(observed), self.looked_up(identity, lookups).await)
+            };
+            pipelines.push(release::merge(earlier, observed));
+        }
+        pipelines
+    }
+
+    async fn swept(
+        &self,
+        releases: &[ReleaseIdentity],
+        permits: &Semaphore,
+    ) -> Option<Vec<RunEvidence>> {
+        let _permit = admitted(permits).await.ok()?;
+        self.pipeline_sweep(releases).await
+    }
+
+    async fn looked_up(&self, release: &ReleaseIdentity, lookups: &Lookups<'_>) -> ReleasePipeline {
+        match admitted(lookups.permits).await {
+            Ok(_permit) => self
+                .exact_pipeline(release, lookups.checked_at)
+                .await
+                .concluded(),
+            Err(_) => ReleasePipeline::unavailable(release.clone(), lookups.checked_at),
+        }
+    }
+
+    pub(crate) async fn recent_listing(
+        &self,
+        source: &ConnectedSource,
+        origin: &str,
+        since: DateTime<Utc>,
+        previous: Option<&Listing>,
+        lookups: &Lookups<'_>,
+    ) -> Result<Listing, Fault> {
+        let (published, complete) = {
+            let _permit = admitted(lookups.permits).await?;
+            self.releases_since(since).await?
+        };
+        let mut warnings = Vec::new();
+        let mut usable = Vec::with_capacity(published.len());
+        for published in published {
+            match self.release_identity(&published) {
+                Ok(identity) if linked(&published.url) => usable.push((published, identity)),
+                Ok(_) => warnings.push(format!("Release {} has no usable link.", published.tag)),
+                Err(error) => warnings.push(format!("Release {}: {error}", published.tag)),
+            }
+        }
+        let identities: Vec<ReleaseIdentity> = usable
+            .iter()
+            .map(|(_, identity)| identity.clone())
+            .collect();
+        let earlier: HashMap<String, ReleasePipeline> = previous
+            .into_iter()
+            .flat_map(|listing| &listing.releases)
+            .map(|release| (release.pipeline.release.key(), release.pipeline.clone()))
+            .collect();
+        let pipelines = self
+            .release_pipelines_for(&identities, &earlier, lookups)
+            .await;
+        let repository_url = source.configuration.web_url(origin);
+        let releases = usable
+            .into_iter()
+            .zip(pipelines)
+            .map(|((published, _), pipeline)| {
+                let pulls = Notes::new(published.body.as_deref().unwrap_or_default())
+                    .pulls(&repository_url);
+                Release::observed(source, origin, &published, pulls, pipeline)
+            })
+            .collect();
+        Ok(Listing {
+            releases,
+            complete,
+            warnings,
+        })
+    }
+
+    pub(crate) async fn observed_pipeline(
+        &self,
+        id: u64,
+        previous: Option<&ReleasePipeline>,
+        checked_at: &str,
+    ) -> Result<ReleasePipeline, Fault> {
+        let published = match self.release_by_id(id).await {
+            Ok(published) if !published.draft && published.published_at.is_some() => published,
+            Ok(_) | Err(PullRequestError::NotFound) => return Err(Fault::missing(RELEASE_MISSING)),
+            Err(error) => return Err(error.into()),
+        };
+        if !linked(&published.url) {
+            return Err(Fault::upstream(UNLINKED_RELEASE));
+        }
+        let identity = self.release_identity(&published)?;
+        let observed = self.exact_pipeline(&identity, checked_at).await.concluded();
+        let previous = previous
+            .filter(|previous| previous.release.key() == identity.key())
+            .cloned();
+        Ok(release::merge(previous, observed))
+    }
+
+    pub(crate) async fn source_options(
+        &self,
+        source: &ConnectedSource,
+        origin: &str,
+    ) -> Result<SourceOptions, Fault> {
+        let (names, branch) = tokio::join!(
+            self.tag_names(),
+            self.service()
+                .get_default_branch(self.repository(), self.token())
+        );
+        let catalogue = Catalogue::new(names?.iter().map(String::as_str));
+        Ok(SourceOptions {
+            source_id: source.source.id,
+            repository: source.configuration.full_name(),
+            repository_url: source.configuration.web_url(origin),
+            default_branch: branch?.to_string(),
+            latest_tag: catalogue.latest_tag(),
+            next_tag: catalogue.next_tag(),
+            previous_tags: catalogue.previous_tags(),
+            lines: catalogue.lines(),
+        })
+    }
+
+    pub(crate) async fn tag_names(&self) -> Result<Vec<String>, PullRequestError> {
+        let mut names = Vec::new();
+        let mut page = NonZeroU32::MIN;
+        loop {
+            let listed = self
+                .service()
+                .list_tags(self.repository(), self.token(), page, PER_PAGE)
+                .await?;
+            names.extend(listed.items.into_iter().map(|tag| tag.tag));
+            match listed.next {
+                Some(next) => page = next,
+                None => return Ok(names),
+            }
+        }
+    }
+
+    pub(crate) async fn release_tagged(&self, tag: &str) -> Result<Option<u64>, PullRequestError> {
+        let mut page = NonZeroU32::MIN;
+        loop {
+            let listed = self
+                .service()
+                .list_releases(self.repository(), self.token(), page, PER_PAGE)
+                .await?;
+            if let Some(release) = listed.items.iter().find(|release| release.tag == tag) {
+                return Ok(Some(release.id));
+            }
+            match listed.next {
+                Some(next) => page = next,
+                None => return Ok(None),
+            }
+        }
+    }
+
+    pub(crate) async fn tag_held(&self, tag: &str) -> Result<bool, PullRequestError> {
+        self.service()
+            .tag_exists(self.repository(), self.token(), tag)
+            .await
+    }
+
+    pub(crate) async fn tag_reference(
+        &self,
+        tag: &str,
+    ) -> Result<Option<GitReference>, PullRequestError> {
+        self.service()
+            .fetch_tag_reference(self.repository(), self.token(), tag)
+            .await
+    }
+
+    pub(crate) async fn branch_head(&self) -> Result<(BranchName, CommitSha), PullRequestError> {
+        let branch = self
+            .service()
+            .get_default_branch(self.repository(), self.token())
+            .await?;
+        let head = self
+            .service()
+            .resolve_commit(self.repository(), self.token(), branch.as_str())
+            .await?;
+        Ok((branch, head))
+    }
+
+    pub(crate) async fn release_notes(
+        &self,
+        tag: &str,
+        target: &CommitSha,
+        previous: Option<&str>,
+    ) -> Result<GeneratedNotes, PullRequestError> {
+        let request = NotesRequest::new(tag).with_target(target.as_str());
+        let request = match previous {
+            Some(previous) => request.with_previous_tag(previous),
+            None => request,
+        };
+        self.service()
+            .generate_release_notes(self.repository(), self.token(), &request)
+            .await
+    }
+
+    pub(crate) async fn write_tag(
+        &self,
+        tag: &str,
+        message: &str,
+        commit: CommitSha,
+    ) -> Result<ObjectId, PullRequestError> {
+        let request = TagRequest::new(tag, message, commit, Tagger::new(TAGGER_NAME, TAGGER_EMAIL));
+        self.service()
+            .create_tag(self.repository(), self.token(), &request)
+            .await
+    }
+
+    pub(crate) async fn write_reference(
+        &self,
+        tag: &str,
+        object: &ObjectId,
+    ) -> Result<(), PullRequestError> {
+        self.service()
+            .create_tag_reference(self.repository(), self.token(), tag, object)
+            .await
+    }
+
+    pub(crate) async fn write_draft_release(
+        &self,
+        request: &ReleaseRequest,
+    ) -> Result<Published, PullRequestError> {
+        self.service()
+            .create_release(self.repository(), self.token(), request)
+            .await
+    }
+
+    pub(crate) async fn publish_draft(&self, id: u64) -> Result<Published, PullRequestError> {
+        self.service()
+            .publish_release(self.repository(), self.token(), id)
+            .await
+    }
+
+    pub(crate) async fn release_by_id(&self, id: u64) -> Result<Published, PullRequestError> {
+        self.service()
+            .fetch_release_by_id(self.repository(), self.token(), id)
+            .await
+    }
+}
+
+fn moment(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value.trim())
+        .ok()
+        .map(|moment| moment.with_timezone(&Utc))
+}
