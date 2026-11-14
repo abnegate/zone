@@ -68,12 +68,20 @@ function ReceiptCard({ receipt }: { receipt: ActionReceipt }) {
   );
 }
 
+// A discovery is recorded on the agent's own initiative, so a refusal to
+// record one is noise to the reader: there is nothing they asked for and
+// nothing they can do about it. Every other write was asked for, and its
+// failure is theirs to see.
+const worthShowing = (receipt: ActionReceipt): boolean =>
+  receipt.success || receipt.action !== 'record_discovery';
+
 export function ActionReceipts({ receipts }: { receipts: ActionReceipt[] }) {
-  if (receipts.length === 0) return null;
+  const shown = receipts.filter(worthShowing);
+  if (shown.length === 0) return null;
 
   return (
     <div className="action-receipts" data-testid="action-receipts">
-      {receipts.map((receipt) => (
+      {shown.map((receipt) => (
         <ReceiptCard key={receipt.id} receipt={receipt} />
       ))}
     </div>

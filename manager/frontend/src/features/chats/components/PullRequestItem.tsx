@@ -1,7 +1,6 @@
 import { ActionMenu, type ActionMenuItem } from '@zone/ui';
 import type { ChatPullRequest, PullRequestChange } from '../types';
 import {
-  AUTO_FIX_HINT,
   AUTO_FIXING_HINT,
   AUTO_MERGE_HINT,
   connectionHint,
@@ -158,11 +157,6 @@ export function PullRequestItem(props: PullRequestItemProps) {
           {pullRequest.auto_fixing && (
             <span className="chat-change-auto is-fixing" title={AUTO_FIXING_HINT}>
               Fixing
-            </span>
-          )}
-          {pullRequest.auto_fix && !pullRequest.auto_fixing && (
-            <span className="chat-change-auto" title={AUTO_FIX_HINT}>
-              Auto-fix
             </span>
           )}
           {merge && (
