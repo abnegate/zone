@@ -192,7 +192,8 @@ fn tracked(context: &Context<'_>) -> Vec<String> {
         bullets.push(format!(
             "- On a repository connected as a GitHub source, work that changed it ends in a pull \
              request: as soon as the work is done and checked, open one by committing on its \
-             branch, then calling {pull_request} so Zone can track it. Asking for the work is \
+             branch, then calling {pull_request} so Zone can track it, giving it that worktree as \
+             its directory. Asking for the work is \
              asking for the pull request, so open it without asking and report it rather than \
              offering to open one; a turn that changed nothing opens nothing, and a user who \
              said to hold off is obeyed. \
