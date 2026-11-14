@@ -216,17 +216,16 @@ describe('ChangesBox', () => {
     expect(menuItem('Fix automatically')).toBeInTheDocument();
   });
 
-  it('says on the row that auto-fix is watching it', async () => {
+  // Auto-fix being on is the ordinary state, so saying so on every row is
+  // noise. Only a run working right now earns a badge.
+  it('says nothing on the row about auto-fix merely being on', async () => {
     await shown([{ ...OPEN, auto_fix: true }]);
 
-    expect(screen.getByText('Auto-fix')).toHaveAttribute(
-      'title',
-      'Zone starts a run to fix it whenever GitHub reports failing checks or a conflict with its base branch.'
-    );
+    expect(screen.queryByText('Auto-fix')).toBeNull();
     expect(screen.queryByText('Fixing')).toBeNull();
   });
 
-  it('says on the row when a fix run is working, in place of the standing badge', async () => {
+  it('says on the row when a fix run is working', async () => {
     await shown([{ ...OPEN, auto_fix: true, auto_fixing: true }]);
 
     expect(screen.getByText('Fixing')).toHaveAttribute(

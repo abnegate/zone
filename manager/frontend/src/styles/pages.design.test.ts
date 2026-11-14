@@ -264,9 +264,18 @@ describe('question card and receipts', () => {
 
   it('keeps a receipt to a title row, a summary and one meta row', () => {
     const receipts = read(join(features, 'chats', 'components', 'ActionReceipts.css'));
-    expect(rule(receipts, '.action-receipt')).toContain('padding: var(--ui-space-3)');
+    expect(rule(receipts, '.action-receipt')).toContain(
+      'padding: var(--ui-space-2) var(--ui-space-3)'
+    );
     expect(rule(receipts, '.action-receipt-meta')).toContain('display: flex');
     expect(receipts).not.toContain('grid-template-columns: repeat(auto-fit');
+  });
+
+  it('sets a receipt off from the message it follows', () => {
+    const receipts = read(join(features, 'chats', 'components', 'ActionReceipts.css'));
+    expect(rule(receipts, '.action-receipts')).toContain(
+      'margin: var(--ui-space-4) 0 var(--ui-space-2)'
+    );
   });
 });
 
