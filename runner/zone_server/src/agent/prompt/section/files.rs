@@ -41,9 +41,12 @@ const READING: &str = "Read only the part of a file you need when you already kn
              file back to check a write you just made: the tool result already said it applied. \
              Prefer plain-text formats over ones that inflate the context.";
 
-const GIT: &str = "Git: interactive flags such as rebase -i are not supported here. Commit work you were asked \
-             to do once it is done, branching first when the checkout is on the default branch, \
-             and push only when the user asks. Do not \
+const GIT: &str = "Git: interactive flags such as rebase -i are not supported here. Start work that changes \
+             files in a fresh worktree on a new branch off the latest main: fetch, then git \
+             worktree add .worktrees/<branch> -b <branch> origin/main, naming the repository's \
+             default branch where it is not main, and work there rather than in the checkout you \
+             were handed. Commit work you were asked to do once it is done, on that branch, and \
+             push only when the user asks. Do not \
              force-push, hard reset, or rewrite history unless the user asked for it. When gh opens a \
              pull request, write its body to a file and pass it by path so its newlines survive.";
 
@@ -125,7 +128,15 @@ mod tests {
             "Zone's own tool pushes the branch it opens from: {rendered}"
         );
         assert!(
-            rendered.contains("branching first when the checkout is on the default branch"),
+            rendered.contains(
+                "Start work that changes files in a fresh worktree on a new branch off the \
+                 latest main"
+            ),
+            "work starts off an up-to-date main rather than in the checkout the turn was \
+             handed: {rendered}"
+        );
+        assert!(
+            rendered.contains("git worktree add .worktrees/<branch> -b <branch> origin/main"),
             "{rendered}"
         );
         assert!(

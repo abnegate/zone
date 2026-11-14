@@ -70,12 +70,15 @@ const PLAIN: &[Section] = &[
 /// tool that ends zone's turn. Telling that chat to open the pull request its
 /// work needs rather than ask for one adds 257 to each, counted over the
 /// sentences that changed; `every_prompt_stays_inside_its_budget` is what
-/// measures it again.
-pub const CHAT_MAX_CHARS: usize = 30_100;
+/// measures it again. Starting work in a fresh worktree off the latest main,
+/// and handing that worktree to the pull request tool, adds a further 296
+/// counted over the sentences that changed, which is what moved this ceiling
+/// and the planner's up by 300.
+pub const CHAT_MAX_CHARS: usize = 30_400;
 /// Bounds the prompt of a planner chat, which adds the interview section and
 /// its two tools to the chat prompt: 32,163 characters, and 30,170 offered to
-/// a coding agent, each carrying the same 257.
-pub const PLANNER_MAX_CHARS: usize = 32_500;
+/// a coding agent, each carrying the same 257 and the same 296.
+pub const PLANNER_MAX_CHARS: usize = 32_800;
 /// Bounds the prompt of a chat that offers no tools: 4,740 characters.
 pub const PLAIN_MAX_CHARS: usize = 4_800;
 /// Bounds the task prompt over everything production assembles for a run its
