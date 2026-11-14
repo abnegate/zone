@@ -191,7 +191,7 @@ impl Hub {
             "id": 70 + pull.number,
             "name": "test",
             "head_sha": pull.head,
-            "html_url": format!("https://github.com/{OWNER}/{REPOSITORY}/actions/runs/{RUN}/job/{}", 70 + pull.number),
+            "html_url": self.web(&format!("actions/runs/{RUN}/job/{}", 70 + pull.number)),
             "started_at": "2026-11-14T00:10:00Z",
         });
         run.as_object_mut()
@@ -439,7 +439,7 @@ async fn open_pull_requests_are_bucketed_counted_and_ranked() {
             "id": 71,
             "name": "test",
             "state": "success",
-            "url": format!("https://github.com/{OWNER}/{REPOSITORY}/actions/runs/{RUN}/job/71"),
+            "url": board.hub.web(&format!("actions/runs/{RUN}/job/71")),
             "updated_at": "2026-11-14T00:10:00Z",
         }])
     );
@@ -486,7 +486,7 @@ async fn a_source_github_stops_answering_is_served_stale_with_why() {
     board
         .state
         .github_snapshots()
-        .pulls
+        .pull_requests
         .invalidate(&board.source);
     board.hub.server.reset().await;
     Mock::given(method("GET"))
@@ -557,6 +557,17 @@ async fn a_pull_request_reads_with_its_open_threads_and_bot_summaries() {
     assert_eq!(detail["pull_request"]["number"], json!(3));
     assert_eq!(detail["pull_request"]["readiness"], json!("not_ready"));
     assert_eq!(detail["pull_request"]["unresolved_threads"], json!(1));
+    assert_eq!(detail["pull_request"]["threads_complete"], json!(true));
+    assert_eq!(
+        board.hub.requests_to(GRAPHQL).await,
+        1,
+        "the review threads are read once for the threads and the verdict"
+    );
+    assert_eq!(
+        detail["pull_request"]["check_details"][0]["id"],
+        json!(73),
+        "an Actions check run offers its job"
+    );
     assert_eq!(
         detail["threads"],
         json!([{
@@ -776,10 +787,18 @@ async fn mock_job(hub: &Hub, head: &str) {
         json!({
             "id": JOB, "run_id": RUN, "name": "test", "status": "completed",
             "conclusion": "failure", "head_sha": head,
-            "html_url": format!("https://github.com/{OWNER}/{REPOSITORY}/actions/runs/{RUN}/job/{JOB}"),
+            "html_url": hub.web(&format!("actions/runs/{RUN}/job/{JOB}")),
         }),
     )
     .await;
+}
+
+async fn mock_log(hub: &Hub) {
+    Mock::given(method("GET"))
+        .and(path(hub.endpoint(&format!("actions/jobs/{JOB}/logs"))))
+        .respond_with(ResponseTemplate::new(200).set_body_string("error: the build failed\n"))
+        .mount(&hub.server)
+        .await;
 }
 
 #[tokio::test]
@@ -787,11 +806,7 @@ async fn a_failed_jobs_log_is_read_for_the_pull_requests_head_only() {
     let board = Board::new(Hub::hosted().await).await;
     board.hub.pull(&Pull::ready()).await;
     mock_job(&board.hub, READY_HEAD).await;
-    Mock::given(method("GET"))
-        .and(path(format!("/repos/acme/widgets/actions/jobs/{JOB}/logs")))
-        .respond_with(ResponseTemplate::new(200).set_body_string("error: the build failed\n"))
-        .mount(&board.hub.server)
-        .await;
+    mock_log(&board.hub).await;
 
     let (status, body) = board
         .get(&format!(
@@ -852,6 +867,24 @@ async fn a_ready_pull_request_merges_is_audited_and_its_source_read_again() {
         ),
     )
     .await;
+    board
+        .hub
+        .answer(
+            "pulls/1/commits",
+            json!([
+                {
+                    "sha": BASE_HEAD,
+                    "html_url": board.hub.web(&format!("commit/{BASE_HEAD}")),
+                    "commit": {"message": "feat: widgets\n\nCo-authored-by: Ada <ada@example.com>", "author": {"name": "Mona Lisa", "date": "2026-11-14T00:00:00Z"}},
+                },
+                {
+                    "sha": READY_HEAD,
+                    "html_url": board.hub.web(&format!("commit/{READY_HEAD}")),
+                    "commit": {"message": "fix: gadgets", "author": {"name": "Mona Lisa", "date": "2026-11-14T00:10:00Z"}},
+                },
+            ]),
+        )
+        .await;
     board.listed("").await;
 
     let (status, body) = board
@@ -875,6 +908,12 @@ async fn a_ready_pull_request_merges_is_audited_and_its_source_read_again() {
     let asked: Value = serde_json::from_slice(&sent.body).unwrap();
     assert_eq!(asked["sha"], json!(READY_HEAD));
     assert_eq!(asked["merge_method"], json!("squash"));
+    assert_eq!(asked["commit_title"], json!("Change 1 (#1)"));
+    assert_eq!(
+        asked["commit_message"],
+        json!("* feat: widgets\n\n* fix: gadgets\n\nCo-authored-by: Ada <ada@example.com>"),
+        "a squash keeps every commit and its co-authors"
+    );
 
     let audited: Vec<(String, String, Option<Uuid>, Option<Value>)> = sqlx::query_as(
         "SELECT action, resource_type, resource_id, new_values FROM audit_logs \
@@ -894,6 +933,7 @@ async fn a_ready_pull_request_merges_is_audited_and_its_source_read_again() {
     let values = merged[0].3.as_ref().expect("what was merged");
     assert_eq!(values["number"], json!(1));
     assert_eq!(values["sha"], json!(MERGE_COMMIT));
+    assert_eq!(values["method"], json!("squash"));
 
     let again = board.listed("").await;
     assert_eq!(again["sources"][0]["freshness"], json!("refreshed"));
@@ -1116,4 +1156,348 @@ async fn an_enterprise_server_is_read_under_its_api_and_graphql_paths() {
     assert!(board.hub.requests_to(ENTERPRISE_GRAPHQL).await > 0);
     assert_eq!(board.hub.requests_to(GRAPHQL).await, 0);
     assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 0);
+    assert_eq!(
+        listing["pull_requests"][0]["check_details"][0]["id"],
+        json!(71),
+        "an Enterprise Actions job is offered at the Enterprise origin"
+    );
+
+    mock_job(&board.hub, READY_HEAD).await;
+    mock_log(&board.hub).await;
+    let (status, body) = board
+        .get(&format!(
+            "{}/jobs/{JOB}/log?head={READY_HEAD}",
+            board.pull(1)
+        ))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["log"]["run_id"], json!(RUN));
+    assert_eq!(body["log"]["text"], json!("error: the build failed\n"));
+}
+
+async fn writer(board: &Board, role: WorkspaceRole, global: &str) -> String {
+    let email = test_email();
+    let password = test_password();
+    let registered = board
+        .client
+        .post_json(
+            "/api/auth/register",
+            &json!({"email": email, "password": password}),
+        )
+        .await
+        .json_value();
+    let user: Uuid = registered["user"]["id"]
+        .as_str()
+        .expect("registration returns the user")
+        .parse()
+        .expect("a user id");
+    sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
+        .bind(user)
+        .execute(board.state.db())
+        .await
+        .expect("the user's roles are cleared");
+    zone_server::db::users::assign_user_role(board.state.db(), user, global)
+        .await
+        .expect("the global role is assigned");
+    workspace_members::add_member(board.state.db(), board.workspace, user, role, None)
+        .await
+        .expect("a workspace member");
+    board
+        .client
+        .post_json(
+            "/api/auth/login",
+            &json!({"email": email, "password": password}),
+        )
+        .await
+        .json_value()["access_token"]
+        .as_str()
+        .expect("login returns an access token")
+        .to_string()
+}
+
+async fn protected(hub: &Hub) {
+    mock_merge(
+        hub,
+        1,
+        ResponseTemplate::new(405)
+            .set_body_json(json!({"message": "Required status check \"deploy\" is expected."})),
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path(hub.graphql))
+        .and(body_partial_json(
+            json!({"variables": {"input": {"pullRequestId": "PR_1"}}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "mergePullRequest": {"pullRequest": {"merged": true, "mergeCommit": {"oid": MERGE_COMMIT}}},
+        }})))
+        .mount(&hub.server)
+        .await;
+}
+
+async fn administrator_merges(hub: &Hub) -> usize {
+    hub.server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| {
+            request.url.path() == hub.graphql
+                && String::from_utf8_lossy(&request.body).contains("mergePullRequest")
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn only_a_workspace_administrator_merges_past_protection_and_only_when_allowed() {
+    let hub = Hub::hosted().await;
+    let mut config = hub.config();
+    config.github.admin_merge = true;
+    let board = Board::configured(hub, config).await;
+    board.hub.list(&[Pull::ready()]).await;
+    protected(&board.hub).await;
+    let member = writer(&board, WorkspaceRole::Member, "user").await;
+
+    let (status, body) = board
+        .merge_as(1, json!({"expected_head": READY_HEAD}), &member)
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("protected"));
+    assert_eq!(
+        administrator_merges(&board.hub).await,
+        0,
+        "a member's merge never asks for the administrator merge"
+    );
+
+    let (status, body) = board.merge(1, json!({"expected_head": READY_HEAD})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["merged"]["admin"], json!(true));
+    assert_eq!(body["merged"]["sha"], json!(MERGE_COMMIT));
+    assert_eq!(administrator_merges(&board.hub).await, 1);
+}
+
+#[tokio::test]
+async fn an_administrator_merge_is_never_asked_for_unless_the_server_allows_it() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.list(&[Pull::ready()]).await;
+    protected(&board.hub).await;
+
+    let (status, body) = board.merge(1, json!({"expected_head": READY_HEAD})).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("protected"));
+    assert_eq!(administrator_merges(&board.hub).await, 0);
+}
+
+#[tokio::test]
+async fn a_writer_without_the_merge_permission_is_refused() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.list(&[Pull::ready()]).await;
+    mock_merge(
+        &board.hub,
+        1,
+        ResponseTemplate::new(200).set_body_json(json!({"sha": MERGE_COMMIT, "merged": true})),
+    )
+    .await;
+    let reader = writer(&board, WorkspaceRole::Admin, "viewer").await;
+
+    let (status, listing) = board.get_as(&board.collection(), &reader).await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    let (status, body) = board
+        .merge_as(1, json!({"expected_head": READY_HEAD}), &reader)
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("pull_requests:update")),
+        "{body}"
+    );
+    assert_eq!(merges(&board.hub).await, 0);
+}
+
+async fn reached(hub: &Hub, verb: &str) {
+    while !hub
+        .server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .any(|request| request.method.as_str() == verb)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+async fn audited_merges(board: &Board) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*) FROM audit_logs WHERE workspace_id = $1 AND action = 'pull_request.merged'",
+    )
+    .bind(board.workspace)
+    .fetch_one(board.state.db())
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_merge_whose_caller_hangs_up_still_finishes_and_is_audited() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.list(&[Pull::ready()]).await;
+    mock_merge(
+        &board.hub,
+        1,
+        ResponseTemplate::new(200)
+            .set_body_json(json!({"sha": MERGE_COMMIT, "merged": true}))
+            .set_delay(std::time::Duration::from_millis(500)),
+    )
+    .await;
+
+    let answered = tokio::select! {
+        answered = board.merge(1, json!({"expected_head": READY_HEAD})) => Some(answered),
+        () = reached(&board.hub, "PUT") => None,
+    };
+    assert!(
+        answered.is_none(),
+        "the caller hangs up while GitHub merges"
+    );
+
+    let mut audited = 0;
+    for _ in 0..100 {
+        audited = audited_merges(&board).await;
+        if audited > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(audited, 1, "the merge finished and was audited");
+    assert_eq!(merges(&board.hub).await, 1);
+}
+
+#[tokio::test]
+async fn an_explicit_refresh_reassesses_only_what_changed() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.list(&[Pull::ready()]).await;
+    board.listed("").await;
+    board
+        .state
+        .github_snapshots()
+        .pull_requests
+        .invalidate(&board.source);
+
+    let refreshed = board.listed("?refresh=1").await;
+
+    assert_eq!(refreshed["sources"][0]["freshness"], json!("refreshed"));
+    assert_eq!(numbers(&refreshed), [(1, "ready".to_string(), 1)]);
+    assert_eq!(board.hub.requests_to("/repos/acme/widgets/pulls").await, 2);
+    assert_eq!(
+        board.hub.requests_to("/repos/acme/widgets/pulls/1").await,
+        1,
+        "a settled, unchanged pull request is not assessed again"
+    );
+}
+
+#[tokio::test]
+async fn a_rate_limited_assessment_stops_the_source_and_backs_off() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.list(&[Pull::ready(), Pull::running()]).await;
+    Mock::given(method("GET"))
+        .and(path("/repos/acme/widgets/pulls/1"))
+        .respond_with(ResponseTemplate::new(429).set_body_json(json!({"message": "slow down"})))
+        .with_priority(1)
+        .mount(&board.hub.server)
+        .await;
+
+    let limited = board.listed("").await;
+
+    assert_eq!(limited["pull_requests"], json!([]), "{limited}");
+    assert_eq!(limited["sources"][0]["generated_at"], json!(null));
+    assert!(
+        limited["sources"][0]["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("429")),
+        "{limited}"
+    );
+    let asked = board.hub.requests_to("/repos/acme/widgets/pulls").await;
+
+    let held = board.listed("?refresh=1").await;
+    assert_eq!(held["sources"][0]["freshness"], json!("stale"));
+    assert_eq!(
+        board.hub.requests_to("/repos/acme/widgets/pulls").await,
+        asked,
+        "GitHub is not asked again while the rate limit backs off"
+    );
+}
+
+#[tokio::test]
+async fn a_credential_github_refuses_is_a_bad_gateway() {
+    let board = Board::new(Hub::hosted().await).await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(
+            ResponseTemplate::new(401).set_body_json(json!({"message": "Bad credentials"})),
+        )
+        .mount(&board.hub.server)
+        .await;
+
+    let (status, body) = board.get(&board.pull(1)).await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(body["success"], json!(false));
+}
+
+#[tokio::test]
+async fn a_moved_head_drops_the_cached_listing() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.list(&[Pull::ready()]).await;
+    board.listed("").await;
+
+    let (status, body) = board.merge(1, json!({"expected_head": MOVED_HEAD})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("head_moved"));
+
+    let again = board.listed("").await;
+    assert_eq!(again["sources"][0]["freshness"], json!("refreshed"));
+}
+
+#[tokio::test]
+async fn a_merged_or_closed_pull_request_is_refused_for_what_it_is() {
+    let board = Board::new(Hub::hosted().await).await;
+    for (number, state, merged, code) in [
+        (8, "closed", true, "merged"),
+        (9, "closed", false, "closed"),
+    ] {
+        let mut row = board
+            .hub
+            .row(&Pull::of(number, READY_HEAD, Some("success")));
+        row["state"] = json!(state);
+        row["merged"] = json!(merged);
+        board.hub.answer(&format!("pulls/{number}"), row).await;
+
+        let (status, body) = board
+            .merge(number, json!({"expected_head": READY_HEAD}))
+            .await;
+
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], json!(code));
+    }
+    assert_eq!(merges(&board.hub).await, 0);
+}
+
+#[tokio::test]
+async fn a_malformed_request_is_refused_in_the_api_shape() {
+    let board = Board::new(Hub::hosted().await).await;
+
+    for uri in [
+        format!("{}/diff", board.pull(1)),
+        format!("{}/{}/not-a-number", board.collection(), board.source),
+        format!("{}?refresh=1&refresh=2", board.collection()),
+    ] {
+        let (status, body) = board.get(&uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["success"], json!(false), "{uri}");
+        assert!(body["error"].is_string(), "{uri}: {body}");
+    }
+    let (status, body) = board.merge(1, json!({"method": "squash"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["success"], json!(false));
 }

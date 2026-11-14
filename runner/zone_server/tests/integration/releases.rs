@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::time::Duration;
 use uuid::Uuid;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_server::db::sources;
 use zone_server::db::workspace_members::{self, WorkspaceRole};
@@ -20,6 +20,7 @@ use zone_server::state::AppState;
 
 const GITHUB_TOKEN: &str = "ghp_releases_test";
 const REPOSITORY: &str = "/repos/acme/widgets";
+const ENTERPRISE_API: &str = "/api/v3";
 const WEB: &str = "https://github.com/acme/widgets";
 const TARGET: &str = "1111111111111111111111111111111111111111";
 const TAG_OBJECT: &str = "2222222222222222222222222222222222222222";
@@ -47,14 +48,27 @@ struct Releases {
     token: String,
     workspace: Uuid,
     source: Uuid,
+    api: &'static str,
 }
 
 impl Releases {
     async fn new() -> Self {
+        Self::serving("", false).await
+    }
+
+    async fn enterprise() -> Self {
+        Self::serving(ENTERPRISE_API, true).await
+    }
+
+    async fn serving(api: &'static str, enterprise: bool) -> Self {
         let github = MockServer::start().await;
         let database = context_database_url();
         let pool = PgPool::connect(&database).await.expect("the test database");
         let mut config = github_app::config_for(&github);
+        config.github_api_url = format!("{}{api}", github.uri());
+        if enterprise {
+            config.github_web_url = github.uri();
+        }
         config.database_url = database;
         config.comfyui.enabled = false;
         config.web_search.enabled = false;
@@ -87,7 +101,12 @@ impl Releases {
             token,
             workspace,
             source,
+            api,
         }
+    }
+
+    fn route(&self, route: &str) -> String {
+        format!("{}{REPOSITORY}{route}", self.api)
     }
 
     fn releases(&self) -> String {
@@ -176,6 +195,51 @@ impl Releases {
             .to_string()
     }
 
+    async fn writer_in_role(&self, global: &str) -> String {
+        let email = test_email();
+        let password = test_password();
+        let registered = self
+            .client
+            .post_json(
+                "/api/auth/register",
+                &json!({"email": email, "password": password}),
+            )
+            .await
+            .json_value();
+        let user: Uuid = registered["user"]["id"]
+            .as_str()
+            .expect("a user id")
+            .parse()
+            .expect("a user id");
+        sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
+            .bind(user)
+            .execute(&self.pool)
+            .await
+            .expect("the user's roles are cleared");
+        zone_server::db::users::assign_user_role(&self.pool, user, global)
+            .await
+            .expect("the global role is assigned");
+        workspace_members::add_member(
+            self.state.db(),
+            self.workspace,
+            user,
+            WorkspaceRole::Admin,
+            None,
+        )
+        .await
+        .expect("a workspace admin");
+        self.client
+            .post_json(
+                "/api/auth/login",
+                &json!({"email": email, "password": password}),
+            )
+            .await
+            .json_value()["access_token"]
+            .as_str()
+            .expect("login returns an access token")
+            .to_string()
+    }
+
     async fn requests(&self) -> Vec<Request> {
         self.github
             .received_requests()
@@ -193,8 +257,17 @@ impl Releases {
 
     async fn answer(&self, verb: &str, route: &str, response: ResponseTemplate) {
         Mock::given(method(verb))
-            .and(path(format!("{REPOSITORY}{route}")))
+            .and(path(self.route(route)))
             .respond_with(response)
+            .mount(&self.github)
+            .await;
+    }
+
+    async fn answer_first(&self, verb: &str, route: &str, status: u16, body: Value) {
+        Mock::given(method(verb))
+            .and(path(self.route(route)))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .with_priority(1)
             .mount(&self.github)
             .await;
     }
@@ -211,6 +284,7 @@ impl Releases {
     async fn ready(&self) {
         self.answer_json("GET", "/tags", 200, json!([tag_row(LATEST)]))
             .await;
+        self.answer_json("GET", "/releases", 200, json!([])).await;
         self.answer_json("GET", "", 200, json!({"default_branch": "main"}))
             .await;
         self.answer_json("GET", "/commits/main", 200, json!({"sha": TARGET}))
@@ -232,23 +306,27 @@ impl Releases {
     }
 
     async fn writable(&self) {
+        self.writable_as(NEXT).await;
+    }
+
+    async fn writable_as(&self, tag: &str) {
         self.answer_json("POST", "/git/tags", 201, json!({"sha": TAG_OBJECT}))
             .await;
         self.answer_json(
             "POST",
             "/git/refs",
             201,
-            json!({"ref": format!("refs/tags/{NEXT}"), "object": {"sha": TAG_OBJECT, "type": "tag"}}),
+            json!({"ref": format!("refs/tags/{tag}"), "object": {"sha": TAG_OBJECT, "type": "tag"}}),
         )
         .await;
         self.answer_json(
             "POST",
             "/releases",
             201,
-            release(DRAFT_ID, NEXT, None, true, NOTES),
+            release(DRAFT_ID, tag, None, true, NOTES),
         )
         .await;
-        let published = release(DRAFT_ID, NEXT, Some(&ago(0)), false, NOTES);
+        let published = release(DRAFT_ID, tag, Some(&ago(0)), false, NOTES);
         self.answer_json(
             "PATCH",
             &format!("/releases/{DRAFT_ID}"),
@@ -444,6 +522,11 @@ async fn releases_published_inside_the_window_are_listed_with_their_pulls_and_pi
     let (_, wider) = releases
         .get(&format!("{}?days=60", releases.releases()))
         .await;
+    assert_eq!(wider["window_days"], 60);
+    assert_eq!(
+        wider["sources"][0]["freshness"], "cached",
+        "a wider window is cut from the same read"
+    );
     let tags: Vec<&Value> = wider["releases"]
         .as_array()
         .expect("releases")
@@ -465,8 +548,8 @@ async fn releases_published_inside_the_window_are_listed_with_their_pulls_and_pi
             .sent("GET", &format!("{REPOSITORY}/releases"))
             .await
             .len(),
-        2,
-        "one read per window, and the cached one is not read again"
+        1,
+        "one read per source serves every window"
     );
 
     let (_, clamped) = releases
@@ -501,13 +584,12 @@ async fn a_source_github_cannot_answer_is_reported_without_failing_the_page() {
 #[tokio::test]
 async fn the_pipeline_route_is_served_from_its_cache_for_fifteen_seconds() {
     let releases = Releases::new().await;
+    let published = release(PUBLISHED_ID, LATEST, Some(&ago(0)), false, NOTES);
     releases
-        .answer_json(
-            "GET",
-            &format!("/releases/{PUBLISHED_ID}"),
-            200,
-            release(PUBLISHED_ID, LATEST, Some(&ago(0)), false, NOTES),
-        )
+        .answer_json("GET", "/releases", 200, json!([published.clone()]))
+        .await;
+    releases
+        .answer_json("GET", &format!("/releases/{PUBLISHED_ID}"), 200, published)
         .await;
     releases.runs(vec![run(501, LATEST, "success")]).await;
 
@@ -539,7 +621,43 @@ async fn the_pipeline_route_is_served_from_its_cache_for_fifteen_seconds() {
             .sent("GET", &format!("{REPOSITORY}/actions/runs"))
             .await
             .len(),
+        2,
+        "one sweep for the listing the release is checked against, and one exact read"
+    );
+    assert_eq!(
+        releases
+            .sent("GET", &format!("{REPOSITORY}/releases"))
+            .await
+            .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn a_pipeline_is_answered_only_for_a_release_in_the_listing() {
+    let releases = Releases::new().await;
+    releases
+        .answer_json(
+            "GET",
+            "/releases",
+            200,
+            json!([release(PUBLISHED_ID, LATEST, Some(&ago(0)), false, NOTES)]),
+        )
+        .await;
+    releases.runs(vec![run(501, LATEST, "success")]).await;
+    releases.get(&releases.releases()).await;
+    let before = releases.requests().await.len();
+
+    for id in [PUBLISHED_ID + 1, u64::MAX] {
+        let (status, body) = releases.get(&releases.pipeline(id)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {body}");
+        assert_eq!(body["success"], false);
+    }
+
+    assert_eq!(
+        releases.requests().await.len(),
+        before,
+        "a release the listing does not hold never reaches GitHub"
     );
 }
 
@@ -549,19 +667,22 @@ async fn a_draft_or_missing_release_has_no_pipeline() {
     releases
         .answer_json(
             "GET",
-            "/releases/93",
+            "/releases",
             200,
-            release(93, "v2.0.0", None, true, ""),
+            json!([release(93, "v2.0.0", None, true, "")]),
         )
-        .await;
-    releases
-        .answer_json("GET", "/releases/94", 404, json!({"message": "Not Found"}))
         .await;
 
     for id in [93, 94] {
         let (status, body) = releases.get(&releases.pipeline(id)).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {body}");
         assert_eq!(body["success"], false);
+        assert!(
+            releases
+                .sent("GET", &format!("{REPOSITORY}/releases/{id}"))
+                .await
+                .is_empty()
+        );
     }
     let (status, _) = releases
         .get(&format!(
@@ -610,7 +731,180 @@ async fn options_offer_the_next_patch_after_the_latest_stable_tag() {
             "latest_tag": "v1.10.0",
             "next_tag": "v1.10.1",
             "previous_tags": ["v1.11.0-rc.1", "v1.10.0", "v1.2.3"],
+            "lines": [{
+                "prefix": null,
+                "latest_tag": "v1.10.0",
+                "next_tag": "v1.10.1",
+                "previous_tags": ["v1.11.0-rc.1", "v1.10.0", "v1.2.3"],
+            }],
         }])
+    );
+}
+
+#[tokio::test]
+async fn every_tag_page_is_read() {
+    let releases = Releases::new().await;
+    for page in 1..=4 {
+        let full: Vec<Value> = (0..100)
+            .map(|patch| tag_row(&format!("v1.{page}.{patch}")))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(releases.route("/tags")))
+            .and(query_param("page", page.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!(full)))
+            .mount(&releases.github)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path(releases.route("/tags")))
+        .and(query_param("page", "5"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([tag_row("v9.0.0")])))
+        .mount(&releases.github)
+        .await;
+    releases
+        .answer_json("GET", "", 200, json!({"default_branch": "main"}))
+        .await;
+
+    let (status, body) = releases
+        .get(&format!("{}/options", releases.releases()))
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["sources"][0]["latest_tag"], "v9.0.0");
+    assert_eq!(body["sources"][0]["next_tag"], "v9.0.1");
+}
+
+#[tokio::test]
+async fn a_prefixed_repository_offers_and_releases_each_line_on_its_own() {
+    let releases = Releases::new().await;
+    releases.ready().await;
+    releases.writable_as("abnegate-vcs/v0.2.2").await;
+    releases
+        .answer_first(
+            "GET",
+            "/tags",
+            200,
+            json!([
+                tag_row("abnegate-vcs/v0.2.1"),
+                tag_row("abnegate-vcs/v0.2.0"),
+                tag_row("abnegate-llm/v1.0.0"),
+            ]),
+        )
+        .await;
+
+    let (status, body) = releases
+        .get(&format!("{}/options", releases.releases()))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let offered = &body["sources"][0];
+    assert_eq!(offered["latest_tag"], "abnegate-vcs/v0.2.1");
+    assert_eq!(offered["next_tag"], "abnegate-vcs/v0.2.2");
+    assert_eq!(offered["lines"][1]["prefix"], "abnegate-llm");
+    assert_eq!(offered["lines"][1]["next_tag"], "abnegate-llm/v1.0.1");
+
+    let (status, preview) = releases
+        .post(
+            &format!("{}/preview", releases.releases()),
+            &releases.proposal("abnegate-vcs/v0.2.2", Some("abnegate-vcs/v0.2.1")),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["preview"]["base_tag"], "abnegate-vcs/v0.2.1");
+    assert_eq!(preview["preview"]["prerelease"], false);
+    let notes = releases
+        .sent("POST", &format!("{REPOSITORY}/releases/generate-notes"))
+        .await;
+    assert_eq!(
+        notes[0].body_json::<Value>().expect("a JSON body")["previous_tag_name"],
+        "abnegate-vcs/v0.2.1",
+        "the notes run from the same line's latest tag"
+    );
+
+    let mut body = releases.proposal("abnegate-vcs/v0.2.2", Some("abnegate-vcs/v0.2.1"));
+    body["prerelease"] = json!(false);
+    body["digest"] = preview["preview"]["digest"].clone();
+    let (status, created) = releases.post(&releases.releases(), &body).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let drafted: Value = releases
+        .sent("POST", &format!("{REPOSITORY}/releases"))
+        .await[0]
+        .body_json()
+        .expect("a JSON body");
+    assert_eq!(drafted["tag_name"], "abnegate-vcs/v0.2.2");
+    assert_eq!(
+        drafted["make_latest"], "false",
+        "a line behind the repository's newest stable version is not made the latest"
+    );
+}
+
+#[tokio::test]
+async fn a_tag_no_newer_than_its_lines_latest_is_refused() {
+    let releases = Releases::new().await;
+    releases.ready().await;
+    let preview = format!("{}/preview", releases.releases());
+
+    for tag in [LATEST, "v1.3.9", "v1.4.0-rc.1"] {
+        let (status, body) = releases
+            .post(&preview, &releases.proposal(tag, Some(LATEST)))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{tag}: {body}");
+        assert_eq!(body["code"], "tag_not_newer");
+        assert_eq!(body["tag"], tag);
+        assert_eq!(body["latest_tag"], LATEST);
+    }
+    assert!(
+        releases
+            .sent("POST", &format!("{REPOSITORY}/releases/generate-notes"))
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_tag_that_already_has_a_release_even_a_draft_is_refused() {
+    let releases = Releases::new().await;
+    releases.ready().await;
+    releases
+        .answer_first(
+            "GET",
+            "/releases",
+            200,
+            json!([release(95, NEXT, None, true, "")]),
+        )
+        .await;
+
+    let (status, body) = releases
+        .post(
+            &format!("{}/preview", releases.releases()),
+            &releases.proposal(NEXT, Some(LATEST)),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "release_exists");
+    assert_eq!(body["tag"], NEXT);
+    assert_eq!(body["release_id"], 95);
+}
+
+#[tokio::test]
+async fn a_prerelease_flag_that_disagrees_with_the_tag_is_refused() {
+    let releases = Releases::new().await;
+    releases.ready().await;
+    releases.writable().await;
+    let preview = releases.previewed().await;
+    let mut body = releases.proposal(NEXT, Some(LATEST));
+    body["prerelease"] = json!(true);
+    body["digest"] = preview["digest"].clone();
+
+    let (status, refused) = releases.post(&releases.releases(), &body).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["success"], false);
+    assert!(
+        releases
+            .sent("POST", &format!("{REPOSITORY}/git/tags"))
+            .await
+            .is_empty()
     );
 }
 
@@ -663,14 +957,6 @@ async fn a_preview_drafts_the_notes_from_the_latest_tag_to_the_default_branch() 
 async fn a_preview_refuses_a_moved_latest_tag_an_existing_tag_and_a_tag_that_is_no_version() {
     let releases = Releases::new().await;
     releases.ready().await;
-    releases
-        .answer_json(
-            "GET",
-            &format!("/git/ref/tags/{LATEST}"),
-            200,
-            json!({"ref": format!("refs/tags/{LATEST}"), "object": {"sha": OTHER_OBJECT, "type": "tag"}}),
-        )
-        .await;
     let preview = format!("{}/preview", releases.releases());
 
     let (status, moved) = releases
@@ -686,12 +972,20 @@ async fn a_preview_refuses_a_moved_latest_tag_an_existing_tag_and_a_tag_that_is_
     assert_eq!(status, StatusCode::CONFLICT, "{unset}");
     assert_eq!(unset["code"], "latest_tag_moved");
 
+    releases
+        .answer_first(
+            "GET",
+            &format!("/git/ref/tags/{NEXT}"),
+            200,
+            json!({"ref": format!("refs/tags/{NEXT}"), "object": {"sha": OTHER_OBJECT, "type": "tag"}}),
+        )
+        .await;
     let (status, taken) = releases
-        .post(&preview, &releases.proposal(LATEST, Some(LATEST)))
+        .post(&preview, &releases.proposal(NEXT, Some(LATEST)))
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "{taken}");
     assert_eq!(taken["code"], "tag_exists");
-    assert_eq!(taken["tag"], LATEST);
+    assert_eq!(taken["tag"], NEXT);
 
     for tag in ["banana", "v1.4", "v1.4.1 "] {
         let (status, invalid) = releases
@@ -848,13 +1142,21 @@ async fn creating_a_release_tags_references_drafts_publishes_and_reads_it_back_i
 
 #[tokio::test]
 async fn a_prerelease_is_never_made_the_latest() {
+    const CANDIDATE: &str = "v1.5.0-rc.1";
     let releases = Releases::new().await;
     releases.ready().await;
-    releases.writable().await;
-    let preview = releases.previewed().await;
-    let mut body = releases.proposal(NEXT, Some(LATEST));
+    releases.writable_as(CANDIDATE).await;
+    let (status, preview) = releases
+        .post(
+            &format!("{}/preview", releases.releases()),
+            &releases.proposal(CANDIDATE, Some(LATEST)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["preview"]["prerelease"], true);
+    let mut body = releases.proposal(CANDIDATE, Some(LATEST));
     body["prerelease"] = json!(true);
-    body["digest"] = preview["digest"].clone();
+    body["digest"] = preview["preview"]["digest"].clone();
 
     let (status, created) = releases.post(&releases.releases(), &body).await;
 
@@ -1089,6 +1391,7 @@ async fn a_release_github_refuses_after_the_tag_was_written_names_what_to_reconc
     assert_eq!(body["tag_object"], TAG_OBJECT);
     assert_eq!(body["reference_created"], true);
     assert_eq!(body["release_id"], Value::Null);
+    assert_eq!(body["release_exists"], true);
     assert!(
         body.as_object()
             .is_some_and(|body| body.contains_key("release_id"))
@@ -1098,6 +1401,72 @@ async fn a_release_github_refuses_after_the_tag_was_written_names_what_to_reconc
             .as_str()
             .is_some_and(|error| error.contains(TAG_OBJECT)),
         "{body}"
+    );
+    marked_with_the_tags_marker(&releases, &body).await;
+    releases.never_deleted().await;
+}
+
+async fn marked_with_the_tags_marker(releases: &Releases, body: &Value) {
+    let marker = body["marker"]
+        .as_str()
+        .expect("the refusal names its marker");
+    let tagged: Value = releases
+        .sent("POST", &format!("{REPOSITORY}/git/tags"))
+        .await[0]
+        .body_json()
+        .expect("a JSON body");
+    assert!(
+        tagged["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&format!("{MARKER}{marker} -->"))),
+        "{tagged} / {marker}"
+    );
+}
+
+#[tokio::test]
+async fn a_reference_whose_fate_cannot_be_read_back_is_unknown() {
+    let releases = Releases::new().await;
+    releases.ready().await;
+    releases.writable().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{REPOSITORY}/git/refs")))
+        .respond_with(
+            ResponseTemplate::new(422)
+                .set_body_json(json!({"message": "Reference already exists"})),
+        )
+        .with_priority(1)
+        .mount(&releases.github)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{REPOSITORY}/git/ref/tags/{NEXT}")))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+        .up_to_n_times(2)
+        .with_priority(1)
+        .mount(&releases.github)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{REPOSITORY}/git/ref/tags/{NEXT}")))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"message": "boom"})))
+        .with_priority(2)
+        .mount(&releases.github)
+        .await;
+    let preview = releases.previewed().await;
+
+    let (status, body) = releases
+        .create(preview["digest"].as_str().expect("a digest"))
+        .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], "release_manual_reconciliation_required");
+    assert_eq!(body["tag_object"], TAG_OBJECT);
+    assert_eq!(body["reference_created"], Value::Null);
+    assert_eq!(body["release_id"], Value::Null);
+    assert!(
+        releases
+            .sent("POST", &format!("{REPOSITORY}/releases"))
+            .await
+            .is_empty(),
+        "no release is drafted under a reference nobody can vouch for"
     );
     releases.never_deleted().await;
 }
@@ -1113,6 +1482,14 @@ async fn a_draft_github_would_not_publish_is_named_for_reconciling() {
         .with_priority(1)
         .mount(&releases.github)
         .await;
+    releases
+        .answer_first(
+            "GET",
+            &format!("/releases/{DRAFT_ID}"),
+            200,
+            release(DRAFT_ID, NEXT, None, true, NOTES),
+        )
+        .await;
     let preview = releases.previewed().await;
 
     let (status, body) = releases
@@ -1124,7 +1501,179 @@ async fn a_draft_github_would_not_publish_is_named_for_reconciling() {
     assert_eq!(body["tag_object"], TAG_OBJECT);
     assert_eq!(body["reference_created"], true);
     assert_eq!(body["release_id"], DRAFT_ID);
+    assert_eq!(body["release_exists"], false);
+    marked_with_the_tags_marker(&releases, &body).await;
     releases.never_deleted().await;
+}
+
+#[tokio::test]
+async fn a_publish_whose_answer_was_lost_is_read_back_before_reconciling() {
+    let releases = Releases::new().await;
+    releases.ready().await;
+    releases.writable().await;
+    Mock::given(method("PATCH"))
+        .and(path(format!("{REPOSITORY}/releases/{DRAFT_ID}")))
+        .respond_with(ResponseTemplate::new(502).set_body_json(json!({"message": "lost"})))
+        .with_priority(1)
+        .mount(&releases.github)
+        .await;
+    let preview = releases.previewed().await;
+
+    let (status, body) = releases
+        .create(preview["digest"].as_str().expect("a digest"))
+        .await;
+
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["release"]["id"], DRAFT_ID);
+}
+
+#[tokio::test]
+async fn a_failed_create_frees_its_source_for_the_next() {
+    let releases = Releases::new().await;
+    releases.ready().await;
+    releases.writable().await;
+    Mock::given(method("POST"))
+        .and(path(format!("{REPOSITORY}/git/tags")))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({"message": "down"})))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&releases.github)
+        .await;
+    let preview = releases.previewed().await;
+    let digest = preview["digest"].as_str().expect("a digest");
+
+    let (status, body) = releases.create(digest).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+
+    let (status, body) = releases.create(digest).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
+async fn a_create_whose_caller_hangs_up_still_finishes_and_is_audited() {
+    let releases = Releases::new().await;
+    releases.ready().await;
+    releases.writable().await;
+    Mock::given(method("GET"))
+        .and(path(releases.route(&format!("/releases/{DRAFT_ID}"))))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(release(DRAFT_ID, NEXT, Some(&ago(0)), false, NOTES))
+                .set_delay(Duration::from_millis(500)),
+        )
+        .with_priority(1)
+        .mount(&releases.github)
+        .await;
+    let preview = releases.previewed().await;
+    let digest = preview["digest"].as_str().expect("a digest").to_string();
+
+    let published = releases.route(&format!("/releases/{DRAFT_ID}"));
+    let answered = tokio::select! {
+        answered = releases.create(&digest) => Some(answered),
+        () = async {
+            while releases.sent("PATCH", &published).await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        } => None,
+    };
+    assert!(
+        answered.is_none(),
+        "the caller hangs up while GitHub publishes"
+    );
+
+    let mut audited = 0;
+    for _ in 0..100 {
+        audited = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM audit_logs WHERE workspace_id = $1 AND action = 'release.created'",
+        )
+        .bind(releases.workspace)
+        .fetch_one(&releases.pool)
+        .await
+        .expect("the audit log reads");
+        if audited > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(audited, 1, "the release finished and was audited");
+    assert_eq!(
+        releases
+            .sent("PATCH", &format!("{REPOSITORY}/releases/{DRAFT_ID}"))
+            .await
+            .len(),
+        1
+    );
+    assert!(
+        releases
+            .state
+            .github_snapshots()
+            .try_release(releases.source)
+            .is_some(),
+        "the finished create let go of its source"
+    );
+}
+
+#[tokio::test]
+async fn an_enterprise_release_pipeline_is_read_at_its_own_origin() {
+    let releases = Releases::enterprise().await;
+    let web = format!("{}/acme/widgets", releases.github.uri());
+    let mut published = release(PUBLISHED_ID, LATEST, Some(&ago(0)), false, NOTES);
+    published["html_url"] = json!(format!("{web}/releases/tag/{LATEST}"));
+    releases
+        .answer_json("GET", "/releases", 200, json!([published.clone()]))
+        .await;
+    releases
+        .answer_json("GET", &format!("/releases/{PUBLISHED_ID}"), 200, published)
+        .await;
+    let mut built = run(501, LATEST, "success");
+    built["html_url"] = json!(format!("{web}/actions/runs/501"));
+    releases.runs(vec![built]).await;
+
+    let (status, body) = releases.get(&releases.releases()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["releases"][0]["state"], "succeeded", "{body}");
+    assert_eq!(body["releases"][0]["repository_url"], json!(web));
+
+    let (status, pipeline) = releases.get(&releases.pipeline(PUBLISHED_ID)).await;
+    assert_eq!(status, StatusCode::OK, "{pipeline}");
+    assert_eq!(pipeline["state"], "succeeded");
+    assert_eq!(
+        pipeline["pipeline"]["runs"][0]["url"],
+        format!("{web}/actions/runs/501")
+    );
+    assert!(
+        releases
+            .requests()
+            .await
+            .iter()
+            .all(|request| request.url.path().starts_with(ENTERPRISE_API)),
+        "every read went to the Enterprise API"
+    );
+}
+
+#[tokio::test]
+async fn a_writer_without_the_release_permission_is_refused() {
+    let releases = Releases::new().await;
+    releases.ready().await;
+    let writer = releases.writer_in_role("viewer").await;
+
+    let (status, body) = releases
+        .post_as(
+            &format!("{}/preview", releases.releases()),
+            &releases.proposal(NEXT, Some(LATEST)),
+            &writer,
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("releases:create")),
+        "{body}"
+    );
+    let (status, body) = releases.create_as(&"0".repeat(64), &writer).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(releases.requests().await.is_empty());
 }
 
 #[tokio::test]
