@@ -998,6 +998,89 @@ describe('github repository picker', () => {
   });
 });
 
+describe('releases page layout', () => {
+  const css = read(join(features, 'releases', 'pages', 'ReleasesPage.css'));
+
+  it('scrolls one page body under 28px day headers that stick inside it', () => {
+    const body = rule(css, '.releases-body');
+    expect(body).toContain('min-height: 0');
+    expect(body).not.toContain('overflow');
+    const header = rule(css, '.release-day-header');
+    expect(header).toContain('position: sticky');
+    expect(header).toContain('top: 0');
+    expect(header).toContain('height: var(--ui-control-height-sm)');
+    expect(header).toContain('background: var(--ui-bg-base)');
+  });
+
+  it('makes every release card header exactly 72px on 8/12 padding with a 20 + 18 + 16 stack', () => {
+    const header = rule(css, '.release-card-header');
+    expect(header).toContain('height: 4.5rem');
+    expect(header).toContain('box-sizing: border-box');
+    expect(header).toContain('padding: var(--ui-space-2) var(--ui-space-3)');
+    expect(header).not.toContain('gap:');
+    expect(rule(css, '.release-card-title')).toContain('height: var(--ui-space-5)');
+    expect(rule(css, '.release-card-meta')).toContain('height: 1.125rem');
+    expect(rule(css, '.release-card-footer')).toContain('height: var(--ui-space-4)');
+  });
+
+  it('seats whole pipeline chips in a 20px badge row and lets the name give way instead', () => {
+    const chips = rule(css, '.release-pipeline-chips');
+    expect(chips).toContain('height: var(--ui-badge-height)');
+    expect(chips).toContain('flex-shrink: 0');
+    expect(chips).not.toContain('overflow');
+    expect(chips).not.toContain('flex-wrap: wrap');
+    expect(rule(css, '.release-card-name')).toContain('min-width: 3rem');
+    const text = rule(css, '.release-card-tag-text,\n.release-pipeline-chip-text');
+    expect(text).toContain('text-overflow: ellipsis');
+    expect(text).toContain('white-space: nowrap');
+  });
+
+  it('keeps the expand toggle within the 16px footer line, widening its hit area only sideways', () => {
+    const toggle = rule(css, '.release-card-toggle');
+    expect(toggle).toContain('height: var(--ui-space-4)');
+    expect(toggle).toContain('margin: 0 calc(var(--ui-space-1) * -1)');
+    expect(toggle).toContain('padding: 0 var(--ui-space-1)');
+    expect(toggle).toContain('line-height: var(--ui-space-4)');
+  });
+
+  it('lists included pull requests as 40px rows with a mono number', () => {
+    expect(rule(css, '.release-card-pull')).toContain('height: var(--ui-list-row)');
+    const number = rule(css, '.release-card-pull-number');
+    expect(number).toContain('font-family: var(--ui-font-mono)');
+    expect(number).toContain('font-size: var(--ui-text-xs)');
+    expect(number).toContain('line-height: var(--ui-space-5)');
+    expect(rule(css, '.release-card-pulls[hidden]')).toContain('display: none');
+  });
+
+  it('caps the release column at the content width', () => {
+    expect(rule(css, '.release-day')).toContain('max-width: var(--ui-content-width)');
+  });
+
+  it('wraps long links in the release notes instead of scrolling them sideways', () => {
+    const notes = rule(css, '.release-wizard-notes');
+    expect(notes).toContain('overflow-wrap: anywhere');
+    expect(notes).toContain('overflow-y: auto');
+  });
+
+  it('paints only from the palette, with no lifts or decoration', () => {
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    expect(css).not.toContain('rgba(');
+    expect(css).not.toContain('rgb(');
+    expect(css).not.toContain('--gray-');
+    expect(css).not.toContain('translateY');
+    expect(css).not.toContain('::before');
+    expect(css).not.toContain('gradient(');
+    for (const name of css.match(/var\(--[a-z0-9-]+/g) ?? []) {
+      expect(name).toStartWith('var(--ui-');
+    }
+    expect(css).toContain(":root[data-theme='dark'] .release-day-count.ui-badge-neutral");
+  });
+
+  it('never restyles the page bar', () => {
+    expect(css).not.toContain('.page-bar');
+  });
+});
+
 describe('github source chrome', () => {
   const components = join(features, 'github', 'components');
   const shimmer = read(join(components, 'Shimmer.css'));
