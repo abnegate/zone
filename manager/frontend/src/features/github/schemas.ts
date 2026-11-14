@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { isWebUrl, NOT_WEB_URL_MESSAGE } from './utils/webUrl';
 
-const WebUrlSchema = z.string().refine(isWebUrl, { error: NOT_WEB_URL_MESSAGE });
+export const WebUrlSchema = z.string().refine(isWebUrl, { error: NOT_WEB_URL_MESSAGE });
 
 export const GitHubAppOwnerTypeSchema = z.enum(['User', 'Organization']);
 export const GitHubAccountTypeSchema = z.enum(['User', 'Organization', 'Enterprise']);

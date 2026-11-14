@@ -689,6 +689,114 @@ describe('projects page layout', () => {
   });
 });
 
+describe('pull requests page layout', () => {
+  const pages = join(features, 'pull-requests', 'pages');
+  const css = read(join(pages, 'PullRequestsPage.css'));
+  const page = read(join(pages, 'PullRequestsPage.tsx'));
+
+  it('lists pull requests in the resizable SubNav pane and leaves its width to SubNav', () => {
+    expect(page).toContain('<SubNav');
+    expect(page).toContain("PANE_STORAGE_KEY = 'pull-requests-pane'");
+    expect(rule(css, '.pull-requests-list-pane')).not.toContain('width:');
+    expect(rule(css, '.pull-requests-list')).toContain('overflow-y: auto');
+  });
+
+  it('reuses the projects detail chrome instead of redefining it', () => {
+    for (const selector of [
+      '.details-header',
+      '.details-content',
+      '.detail-facts',
+      '.details-actions',
+    ]) {
+      expect(css).not.toContain(`${selector} {`);
+    }
+  });
+
+  it('makes every list card exactly 72px on 8/12 padding with a 20 + 18 + 16 stack', () => {
+    const card = rule(css, '.pull-request-card.card--list');
+    expect(card).toContain('height: 4.5rem');
+    expect(card).toContain('box-sizing: border-box');
+    expect(card).toContain('padding: var(--ui-space-2) var(--ui-space-3)');
+    expect(card).not.toContain('gap:');
+    expect(rule(css, '.pull-request-card-header')).toContain('height: var(--ui-badge-height)');
+    expect(rule(css, '.pull-request-card-meta')).toContain('line-height: 1.125rem');
+    expect(rule(css, '.pull-request-card-footer')).toContain('height: var(--ui-space-4)');
+  });
+
+  it('sticks the readiness group headers inside the list scroller at 28px', () => {
+    const header = rule(css, '.pull-request-group-header');
+    expect(header).toContain('position: sticky');
+    expect(header).toContain('top: 0');
+    expect(header).toContain('height: var(--ui-control-height-sm)');
+    expect(header).toContain('background: var(--ui-bg-base)');
+    expect(rule(css, '.pull-request-group')).not.toContain('overflow');
+  });
+
+  it('sets blockers on a 20px chip row and checks, commits and diff files on 40px rows', () => {
+    expect(rule(css, '.pull-request-blocker')).toContain('min-height: var(--ui-badge-height)');
+    expect(rule(css, '.pull-request-row')).toContain('min-height: var(--ui-list-row)');
+    expect(rule(css, '.pull-request-commit')).toContain('height: var(--ui-list-row)');
+    expect(rule(css, '.pull-request-diff-file-header')).toContain('height: var(--ui-list-row)');
+  });
+
+  it('lays diff lines on a mono 20px grid that wraps instead of scrolling the page sideways', () => {
+    const line = rule(css, '.pull-request-diff-line');
+    expect(line).toContain('display: grid');
+    expect(line).toContain('grid-template-columns: 2.5rem 2.5rem 1rem minmax(0, 1fr)');
+    expect(line).toContain('font-family: var(--ui-font-mono)');
+    expect(line).toContain('font-size: var(--ui-text-xs)');
+    expect(line).toContain('line-height: var(--ui-space-5)');
+    expect(rule(css, '.pull-request-diff-content')).toContain('white-space: pre-wrap');
+    expect(rule(css, '.pull-request-diff-content')).toContain('overflow-wrap: anywhere');
+  });
+
+  it('tints diff lines and notices from the palette', () => {
+    expect(rule(css, ".pull-request-diff-line[data-kind='addition']")).toContain(
+      'color-mix(in srgb, var(--ui-success) 12%, transparent)'
+    );
+    expect(rule(css, ".pull-request-diff-line[data-kind='deletion']")).toContain(
+      'color-mix(in srgb, var(--ui-error) 12%, transparent)'
+    );
+    expect(rule(css, ":root[data-theme='dark'] .pull-request-diff-additions")).toContain(
+      'var(--ui-success-400)'
+    );
+  });
+
+  it('keeps every colour on the palette', () => {
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    expect(css).not.toContain('rgba(');
+    expect(css).not.toMatch(legacyScales);
+    expect(css).not.toContain('translateY');
+    expect(css).not.toContain('gradient(');
+    for (const name of css.match(/var\(--[a-z0-9-]+/g) ?? []) {
+      expect(name).toStartWith('var(--ui-');
+    }
+  });
+
+  it('leaves the skeleton width to SubNav', () => {
+    expect(rule(css, '.pull-requests-skeleton')).not.toMatch(/(^|[^-])width:/m);
+    expect(page).toContain('listPane(<PullRequestsSkeleton />)');
+  });
+
+  it('lets the filter selects give way before the subtitle is cut short', () => {
+    const control = rule(css, '.pull-requests-filters .ui-select-control');
+    expect(control).toContain('flex: 0 1 11rem');
+    expect(control).toContain('min-width: 7rem');
+    expect(rule(css, '.pull-requests-filters .ui-select-trigger')).toContain('width: 100%');
+  });
+
+  it('hides the list pane on a phone while a pull request is open', () => {
+    const phone = media(css, '(max-width: 768px)');
+    expect(
+      rule(
+        phone,
+        '.pull-requests-workspace:has(.pull-request-details) .pull-requests-list-pane,\n  .pull-requests-detail-placeholder'
+      )
+    ).toContain('display: none');
+    expect(rule(phone, '.pull-requests-filters')).toContain('flex-wrap: wrap');
+  });
+});
+
 describe('sources section layout', () => {
   const css = read(join(features, 'sources', 'components', 'SourcesSection.css'));
 
@@ -887,5 +995,112 @@ describe('github repository picker', () => {
     expect(popup).toContain('max-height: min(16rem, 40dvh)');
     expect(popup).toContain('overflow-y: auto');
     expect(css).not.toContain('ui-fade-down');
+  });
+});
+
+describe('releases page layout', () => {
+  const css = read(join(features, 'releases', 'pages', 'ReleasesPage.css'));
+
+  it('scrolls one page body under 28px day headers that stick inside it', () => {
+    const body = rule(css, '.releases-body');
+    expect(body).toContain('min-height: 0');
+    expect(body).not.toContain('overflow');
+    const header = rule(css, '.release-day-header');
+    expect(header).toContain('position: sticky');
+    expect(header).toContain('top: 0');
+    expect(header).toContain('height: var(--ui-control-height-sm)');
+    expect(header).toContain('background: var(--ui-bg-base)');
+  });
+
+  it('makes every release card header exactly 72px on 8/12 padding with a 20 + 18 + 16 stack', () => {
+    const header = rule(css, '.release-card-header');
+    expect(header).toContain('height: 4.5rem');
+    expect(header).toContain('box-sizing: border-box');
+    expect(header).toContain('padding: var(--ui-space-2) var(--ui-space-3)');
+    expect(header).not.toContain('gap:');
+    expect(rule(css, '.release-card-title')).toContain('height: var(--ui-space-5)');
+    expect(rule(css, '.release-card-meta')).toContain('height: 1.125rem');
+    expect(rule(css, '.release-card-footer')).toContain('height: var(--ui-space-4)');
+  });
+
+  it('seats whole pipeline chips in a 20px badge row and lets the name give way instead', () => {
+    const chips = rule(css, '.release-pipeline-chips');
+    expect(chips).toContain('height: var(--ui-badge-height)');
+    expect(chips).toContain('flex-shrink: 0');
+    expect(chips).not.toContain('overflow');
+    expect(chips).not.toContain('flex-wrap: wrap');
+    expect(rule(css, '.release-card-name')).toContain('min-width: 3rem');
+    const text = rule(css, '.release-card-tag-text,\n.release-pipeline-chip-text');
+    expect(text).toContain('text-overflow: ellipsis');
+    expect(text).toContain('white-space: nowrap');
+  });
+
+  it('keeps the expand toggle within the 16px footer line, widening its hit area only sideways', () => {
+    const toggle = rule(css, '.release-card-toggle');
+    expect(toggle).toContain('height: var(--ui-space-4)');
+    expect(toggle).toContain('margin: 0 calc(var(--ui-space-1) * -1)');
+    expect(toggle).toContain('padding: 0 var(--ui-space-1)');
+    expect(toggle).toContain('line-height: var(--ui-space-4)');
+  });
+
+  it('lists included pull requests as 40px rows with a mono number', () => {
+    expect(rule(css, '.release-card-pull')).toContain('height: var(--ui-list-row)');
+    const number = rule(css, '.release-card-pull-number');
+    expect(number).toContain('font-family: var(--ui-font-mono)');
+    expect(number).toContain('font-size: var(--ui-text-xs)');
+    expect(number).toContain('line-height: var(--ui-space-5)');
+    expect(rule(css, '.release-card-pulls[hidden]')).toContain('display: none');
+  });
+
+  it('caps the release column at the content width', () => {
+    expect(rule(css, '.release-day')).toContain('max-width: var(--ui-content-width)');
+  });
+
+  it('wraps long links in the release notes instead of scrolling them sideways', () => {
+    const notes = rule(css, '.release-wizard-notes');
+    expect(notes).toContain('overflow-wrap: anywhere');
+    expect(notes).toContain('overflow-y: auto');
+  });
+
+  it('paints only from the palette, with no lifts or decoration', () => {
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+    expect(css).not.toContain('rgba(');
+    expect(css).not.toContain('rgb(');
+    expect(css).not.toContain('--gray-');
+    expect(css).not.toContain('translateY');
+    expect(css).not.toContain('::before');
+    expect(css).not.toContain('gradient(');
+    for (const name of css.match(/var\(--[a-z0-9-]+/g) ?? []) {
+      expect(name).toStartWith('var(--ui-');
+    }
+    expect(css).toContain(":root[data-theme='dark'] .release-day-count.ui-badge-neutral");
+  });
+
+  it('never restyles the page bar', () => {
+    expect(css).not.toContain('.page-bar');
+  });
+});
+
+describe('github source chrome', () => {
+  const components = join(features, 'github', 'components');
+  const shimmer = read(join(components, 'Shimmer.css'));
+  const notices = read(join(components, 'SourceNotices.css'));
+
+  it('draws the one skeleton shimmer both pages share, and stills it for reduced motion', () => {
+    expect(rule(shimmer, '.source-shimmer')).toContain('linear-gradient');
+    expect(rule(shimmer, '.source-shimmer')).toContain('animation: ui-shimmer');
+    expect(media(shimmer, '(prefers-reduced-motion: reduce)')).toContain('animation: none');
+  });
+
+  it('tints notices from the palette', () => {
+    expect(rule(notices, '.source-notice')).toContain(
+      'color-mix(in srgb, var(--ui-warning) 12%, transparent)'
+    );
+    for (const css of [shimmer, notices]) {
+      expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+      for (const name of css.match(/var\(--[a-z0-9-]+/g) ?? []) {
+        expect(name).toStartWith('var(--ui-');
+      }
+    }
   });
 });
