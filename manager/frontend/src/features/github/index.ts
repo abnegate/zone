@@ -1,6 +1,14 @@
+export * from './backoff';
 export { BranchSelect } from './components/BranchSelect';
 export { RepositoryPicker } from './components/RepositoryPicker';
 export * from './constants';
+export * from './errors';
+export * from './freshness';
 export * from './hooks';
+export * from './icons';
+export * from './notices';
 export * from './schemas';
+export * from './sourceStatus';
+export type { Tint } from './tint';
 export * from './types';
+export { shortSha } from './utils/sha';
