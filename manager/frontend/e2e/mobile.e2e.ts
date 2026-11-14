@@ -16,8 +16,9 @@ test.describe('Mobile Responsiveness', () => {
     await setupAuth(page);
     await page.reload();
 
-    // Wait for page to load (on mobile, sidebar is hidden)
-    await expect(page.locator('.mobile-menu-btn')).toBeVisible({ timeout: 10000 });
+    // Wait for page to load: on a phone the bar's leading slot holds the
+    // drawer trigger and the sidebar is off-screen.
+    await expect(page.locator('.page-bar-lead-btn')).toBeVisible({ timeout: 10000 });
   });
 
   test.describe('Sidebar', () => {
@@ -28,25 +29,25 @@ test.describe('Mobile Responsiveness', () => {
       // The sidebar exists but is translated off-screen
     });
 
-    test('menu toggle button is visible on mobile', async ({ page }) => {
-      await expect(page.locator('.mobile-menu-btn')).toBeVisible();
+    test('the bar leads with the drawer trigger on mobile', async ({ page }) => {
+      await expect(page.locator('.page-bar-lead-btn')).toBeVisible();
     });
 
     test('clicking menu toggle opens sidebar', async ({ page }) => {
-      await page.click('.mobile-menu-btn');
+      await page.click('.page-bar-lead-btn');
 
       // Sidebar should now be visible with .open class
       await expect(page.locator('.sidebar.open')).toBeVisible();
     });
 
     test('overlay appears when sidebar is open', async ({ page }) => {
-      await page.click('.mobile-menu-btn');
+      await page.click('.page-bar-lead-btn');
 
       await expect(page.locator('.sidebar-overlay')).toBeVisible();
     });
 
     test('clicking overlay closes sidebar', async ({ page }) => {
-      await page.click('.mobile-menu-btn');
+      await page.click('.page-bar-lead-btn');
       await expect(page.locator('.sidebar.open')).toBeVisible();
 
       const overlay = page.locator('.sidebar-overlay');
@@ -61,7 +62,7 @@ test.describe('Mobile Responsiveness', () => {
     });
 
     test('clicking nav item closes mobile sidebar', async ({ page }) => {
-      await page.click('.mobile-menu-btn');
+      await page.click('.page-bar-lead-btn');
       await expect(page.locator('.sidebar.open')).toBeVisible();
 
       await page.click('a[href="/chats"]');
@@ -80,7 +81,7 @@ test.describe('Mobile Responsiveness', () => {
         });
       });
 
-      await page.click('.mobile-menu-btn');
+      await page.click('.page-bar-lead-btn');
       await page.click('a[href="/projects"]');
 
       await expect(page).toHaveURL('/projects');
@@ -96,7 +97,7 @@ test.describe('Mobile Responsiveness', () => {
         });
       });
 
-      await page.click('.mobile-menu-btn');
+      await page.click('.page-bar-lead-btn');
       await page.click('a[href="/chats"]');
 
       // Sidebar should close
@@ -136,7 +137,7 @@ test.describe('Mobile Responsiveness', () => {
   test.describe('Touch Interactions', () => {
     test('tap interactions work on mobile', async ({ page }) => {
       // Tap menu toggle
-      await page.tap('.mobile-menu-btn');
+      await page.tap('.page-bar-lead-btn');
 
       await expect(page.locator('.sidebar.open')).toBeVisible();
     });

@@ -21,7 +21,7 @@ async function setTheme(page: Page, theme: 'dark' | 'light'): Promise<void> {
   const opened = (page.viewportSize()?.width ?? 1280) <= 768;
   if (opened) await page.getByRole('button', { name: 'Toggle menu' }).click();
   await toggle.click();
-  if (opened) await page.getByRole('button', { name: 'Toggle menu' }).click();
+  if (opened) await page.getByRole('button', { name: 'Close navigation' }).click();
 }
 
 const chat = {
