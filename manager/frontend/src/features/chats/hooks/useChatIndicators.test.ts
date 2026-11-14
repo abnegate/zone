@@ -115,6 +115,19 @@ describe('useChatIndicators', () => {
     expect(result.current.indicators).toEqual({ 'chat-1': WRITING });
   });
 
+  it.each(['pageshow', 'focus'])(
+    'reads again on %s, which is what a phone fires when it restores the page',
+    async (event) => {
+      mockGetChatIndicators.mockResolvedValue([WRITING]);
+      renderHook(() => useChatIndicators('workspace-1', false, false, 25));
+      await waitFor(() => expect(mockGetChatIndicators).toHaveBeenCalledTimes(1));
+
+      act(() => window.dispatchEvent(new Event(event)));
+
+      await waitFor(() => expect(mockGetChatIndicators).toHaveBeenCalledTimes(2));
+    }
+  );
+
   it('reads again as a turn ends, and once more after the turn has recorded what it opened', async () => {
     mockGetChatIndicators.mockResolvedValue([]);
     const { rerender } = renderHook(

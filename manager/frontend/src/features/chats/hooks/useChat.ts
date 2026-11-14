@@ -51,6 +51,21 @@ import { requestedModel } from '../utils/providerOptions';
 // How many frames to hold while the chat they belong to is still loading.
 const MAX_HELD_FRAMES = 1000;
 
+/**
+ * How long a socket may say nothing before a wake stops believing in it.
+ *
+ * A phone that suspends the tab often takes the connection with it without
+ * ever delivering a close: readyState stays open, no frame arrives again, and
+ * the chat sits on a socket that will never speak, showing whatever it was
+ * showing when the screen went off. Script cannot read the protocol pongs the
+ * server sends every 30s, so silence is the only liveness there is to read,
+ * and a handshake on return costs less than a chat that never updates.
+ *
+ * Only ever consulted on waking, so a conversation watched without
+ * interruption is never reconnected for being quiet.
+ */
+const STALE_SOCKET_MILLISECONDS = 20_000;
+
 function pageIsHidden(): boolean {
   return typeof document !== 'undefined' && document.visibilityState === 'hidden';
 }
@@ -675,6 +690,12 @@ export function useChat(
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempt = 0;
     let pendingVisibleReconnect = false;
+    // When this window last heard anything from the server, which is what a
+    // wake judges the socket on.
+    let spokeAt = Date.now();
+    // Whether a socket has already joined this chat, so the next one that
+    // joins is a reconnection and has a gap behind it to read.
+    let joined = false;
     let assistantId: string | null = null;
     let generationSeen = false;
     const completed = new Set<string>();
@@ -1163,6 +1184,7 @@ export function useChat(
 
     const bindSocket = (socket: WebSocket) => {
       socketRef.current = socket;
+      spokeAt = Date.now();
       buffered.length = 0;
       overflowed = false;
       // Joining replays the queue if it has anything in it, so whatever this
@@ -1191,6 +1213,7 @@ export function useChat(
 
       socket.onmessage = (event) => {
         if (socket !== socketRef.current) return;
+        spokeAt = Date.now();
         let payload: ServerMessage;
         try {
           payload = JSON.parse(event.data);
@@ -1201,6 +1224,12 @@ export function useChat(
         if (payload.type === 'init') {
           announced = true;
           reconnectAttempt = 0;
+          // Nothing replays what landed while this window had no socket: init
+          // carries the chat's status and not its messages, so a rejoining
+          // socket reads the history back rather than carrying on from a
+          // transcript with a hole in it.
+          if (joined) void fetchChat({ silent: true });
+          joined = true;
         } else if (payload.type === 'error' && !announced) {
           if (isRetryableHandshake(payload.message)) {
             return;
@@ -1258,11 +1287,54 @@ export function useChat(
       };
     };
 
+    /** Lets go of a socket this window has stopped believing in. */
+    const dropSocket = () => {
+      const socket = socketRef.current;
+      if (!socket) return;
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      socket.close();
+      socketRef.current = null;
+    };
+
     const onVisible = () => {
-      if (disposed || pageIsHidden() || !pendingVisibleReconnect) {
+      if (disposed || pageIsHidden()) {
         return;
       }
-      pendingVisibleReconnect = false;
+      if (pendingVisibleReconnect) {
+        pendingVisibleReconnect = false;
+        openSocket();
+        return;
+      }
+      const socket = socketRef.current;
+      if (!socket) {
+        openSocket();
+        return;
+      }
+      // Anything other than open has a close event coming, and that path
+      // already reopens. Only an open socket can be a dead one nobody told us
+      // about, and only its silence says so.
+      if (socket.readyState !== 1 || Date.now() - spokeAt < STALE_SOCKET_MILLISECONDS) {
+        return;
+      }
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      // Hanging up without its handlers: a socket the network has already
+      // taken may never deliver the close that would reopen it, so this
+      // window stops waiting for one and dials again itself.
+      dropSocket();
+      cancelChunkFrame();
+      assistantId = null;
+      activeGenerationRef.current = false;
+      sendInFlightRef.current = false;
+      setStreaming(false);
+      setStatus(null);
+      contextEpoch.current += 1;
+      reconnectAttempt = 0;
       openSocket();
     };
     document.addEventListener('visibilitychange', onVisible);
@@ -1281,18 +1353,11 @@ export function useChat(
         clearTimeout(reconnectTimer);
       }
       cancelChunkFrame();
-      const socket = socketRef.current;
-      if (socket) {
-        socket.onopen = null;
-        socket.onmessage = null;
-        socket.onerror = null;
-        socket.onclose = null;
-        socket.close();
-      }
-      socketRef.current = null;
+      dropSocket();
     };
   }, [
     chatId,
+    fetchChat,
     upsertMessage,
     startAssistant,
     applySavedUserMessage,
