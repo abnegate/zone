@@ -143,7 +143,8 @@ pub async fn create_pr_for_task(
             return PrCreationResult::Error(format!("GitHub origin is misconfigured: {error}"));
         }
     };
-    let git = checkout::git();
+    let author = checkout::Author::of(state.db(), execution.actor).await;
+    let git = checkout::git_as(author.as_ref());
     Publication {
         state,
         execution,
