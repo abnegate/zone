@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::db::agent_logins;
 use crate::db::ai_settings::EffectiveAiSettings;
 use crate::services::agent::home::{self, CLAUDE_CODE_OAUTH_TOKEN};
+use crate::services::checkout::Author;
 use crate::services::endpoint::Origin;
 use crate::services::login::credential::{self, Login};
 use crate::services::login::identity::LoginIdentity;
@@ -355,6 +356,24 @@ pub fn in_directory(backend: LlmBackend, directory: &Path) -> LlmBackend {
     backend.configured(|settings| settings.with_working_directory(directory))
 }
 
+/// `backend` with a coding agent that commits as `author`.
+///
+/// A chat's agent runs git itself, so without this a commit it makes carries
+/// whatever identity the checkout happens to configure: the machine's, or
+/// none at all. Naming the Zone account whose turn it is puts the person who
+/// asked for the work on their own commits, and git reads these four names
+/// ahead of any `user.name` and `user.email` a checkout holds. An endpoint
+/// runs no git.
+pub fn as_account(backend: LlmBackend, author: &Author) -> LlmBackend {
+    backend.configured(|settings| {
+        settings
+            .with_variable("GIT_AUTHOR_NAME", author.name.as_str())
+            .with_variable("GIT_AUTHOR_EMAIL", author.email.as_str())
+            .with_variable("GIT_COMMITTER_NAME", author.name.as_str())
+            .with_variable("GIT_COMMITTER_EMAIL", author.email.as_str())
+    })
+}
+
 /// `backend` with a coding agent told to think at a chat's `effort`. An
 /// endpoint takes its effort in each request's body instead.
 pub fn effort(backend: LlmBackend, effort: ReasoningEffort) -> LlmBackend {
@@ -605,6 +624,49 @@ mod tests {
 
     fn variable<'a>(settings: &'a CliSettings, name: &str) -> Option<&'a str> {
         settings.variables.get(name).map(String::as_str)
+    }
+
+    /// A chat's agent commits as the account whose turn it is, author and
+    /// committer both, so GitHub shows the commit as that person's work.
+    #[test]
+    fn an_agent_commits_as_the_account_whose_turn_it_is() {
+        let author = Author {
+            name: "Ada Lovelace".to_string(),
+            email: "ada@example.test".to_string(),
+        };
+
+        let (_, settings, _) = cli(Ok(as_account(
+            LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
+            &author,
+        )));
+
+        assert_eq!(variable(&settings, "GIT_AUTHOR_NAME"), Some("Ada Lovelace"));
+        assert_eq!(
+            variable(&settings, "GIT_AUTHOR_EMAIL"),
+            Some("ada@example.test")
+        );
+        assert_eq!(
+            variable(&settings, "GIT_COMMITTER_NAME"),
+            Some("Ada Lovelace")
+        );
+        assert_eq!(
+            variable(&settings, "GIT_COMMITTER_EMAIL"),
+            Some("ada@example.test")
+        );
+    }
+
+    /// An endpoint runs no git, so there is no identity to hand it.
+    #[test]
+    fn an_endpoint_is_handed_no_git_identity() {
+        let author = Author {
+            name: "Ada Lovelace".to_string(),
+            email: "ada@example.test".to_string(),
+        };
+
+        assert!(matches!(
+            as_account(LlmBackend::Http, &author),
+            LlmBackend::Http
+        ));
     }
 
     fn assert_private(directory: &Path) {

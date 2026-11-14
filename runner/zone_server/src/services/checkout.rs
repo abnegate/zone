@@ -39,6 +39,7 @@ use uuid::Uuid;
 use crate::db::{
     projects, sources,
     tasks::{self, TaskRow},
+    users,
 };
 use crate::services::github_app::{Credential, Error as GitHubError, Provider};
 
@@ -52,7 +53,7 @@ const SOURCE_TOKEN_UNOPENABLE: &str =
 
 const AUTHOR_NAME: &str = "Zone";
 
-const AUTHOR_EMAIL: &str = "zone@localhost";
+const AUTHOR_EMAIL: &str = "zone@users.noreply.github.com";
 
 const BRANCH_PREFIX: &str = "zone/task";
 
@@ -61,11 +62,57 @@ const LOST_LEASE: &str = "Task execution lost its lease";
 pub(crate) const MISMATCHED_ORIGIN: &str =
     "Checkout repository no longer matches the task repository";
 
-/// Git as a task run uses it: commits made as Zone, and branches named
-/// `zone/task-{short id}-{slug}`.
+/// Who a run's commits are authored as: the name and the email of the Zone
+/// account the run acts for.
+///
+/// GitHub attributes a commit by its author email, so a run that commits
+/// under the account's own email publishes that person's work as theirs
+/// rather than as the server's. A run with no account behind it has no
+/// identity to borrow and commits as Zone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Author {
+    pub name: String,
+    pub email: String,
+}
+
+impl Author {
+    /// The account `user` names, or `None` when a run names no account and
+    /// when the account it names has since been deleted.
+    ///
+    /// An account that never set a display name is authored under the local
+    /// part of its email, because git refuses a commit with an empty name.
+    pub async fn of(pool: &PgPool, user: Option<Uuid>) -> Option<Self> {
+        let row = users::get_user_by_id(pool, user?).await.ok()??;
+        let name = row
+            .display_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| local_part(&row.email).to_string());
+        Some(Self {
+            name,
+            email: row.email,
+        })
+    }
+}
+
+/// What stands before an email's `@`, or the whole of it when it has none.
+fn local_part(email: &str) -> &str {
+    email.split('@').next().unwrap_or(email)
+}
+
+/// Git as a task run with no account behind it uses it: commits made as
+/// Zone's GitHub noreply identity.
 pub fn git() -> GitService {
+    git_as(None)
+}
+
+/// Git as a task run uses it: commits made as `author`, and branches named
+/// `zone/task-{short id}-{slug}`.
+pub fn git_as(author: Option<&Author>) -> GitService {
+    let (name, email) = author
+        .map(|author| (author.name.as_str(), author.email.as_str()))
+        .unwrap_or((AUTHOR_NAME, AUTHOR_EMAIL));
     GitService::new()
-        .with_author(AUTHOR_NAME, AUTHOR_EMAIL)
+        .with_author(name, email)
         .with_branch_prefix(
             BranchName::parse(BRANCH_PREFIX).expect("the branch prefix is a branch name"),
         )
@@ -1164,8 +1211,43 @@ mod tests {
             .unwrap();
         assert_eq!(
             git(run.path(), &["log", "-1", "--format=%an <%ae>|%cn <%ce>"]),
-            "Zone <zone@localhost>|Zone <zone@localhost>"
+            "Zone <zone@users.noreply.github.com>|Zone <zone@users.noreply.github.com>"
         );
+    }
+
+    /// A run acting for a Zone account commits as that account, so GitHub
+    /// attributes what the run publishes to the person who asked for it.
+    #[tokio::test]
+    async fn a_run_commits_as_the_account_it_acts_for() {
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        let run = run_worktree(&root, &base, "zone/account");
+        let worktree = run.worktree.clone().expect("the run is a worktree");
+        let author = Author {
+            name: "Ada Lovelace".to_string(),
+            email: "ada@example.test".to_string(),
+        };
+        std::fs::write(run.path().join("work.txt"), "work\n").unwrap();
+        super::git_as(Some(&author))
+            .stage_all(&worktree)
+            .await
+            .unwrap();
+        super::git_as(Some(&author))
+            .commit(&worktree, "(feat): add work")
+            .await
+            .unwrap();
+        assert_eq!(
+            git(run.path(), &["log", "-1", "--format=%an <%ae>|%cn <%ce>"]),
+            "Ada Lovelace <ada@example.test>|Ada Lovelace <ada@example.test>"
+        );
+    }
+
+    /// An account that never set a display name still needs a name on its
+    /// commits, and the local part of its email is what GitHub shows anyway.
+    #[test]
+    fn an_email_without_a_display_name_supplies_the_name() {
+        assert_eq!(local_part("ada@example.test"), "ada");
+        assert_eq!(local_part("ada"), "ada");
     }
 
     /// Recovery knows a finished run's worktree only by its path. The path

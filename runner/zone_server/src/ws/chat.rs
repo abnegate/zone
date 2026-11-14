@@ -3337,6 +3337,10 @@ async fn prepare_chat(
         .await?;
     if let Some(directory) = &directory {
         resolved.backend = crate::services::backend::in_directory(resolved.backend, directory);
+        if let Some(author) = crate::services::checkout::Author::of(state.db(), Some(user_id)).await
+        {
+            resolved.backend = crate::services::backend::as_account(resolved.backend, &author);
+        }
     }
     let organization = configured.and_then(|agent| route.organization_on(agent));
     let opening = match organization.zip(configured) {
