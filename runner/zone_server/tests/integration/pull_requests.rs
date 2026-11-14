@@ -2,24 +2,39 @@
 //! workspace's GitHub sources, assessed and bucketed, read in detail, and
 //! merged only while it is ready and its head is the one the reader saw.
 
+use crate::common::TestClient;
+use crate::common::context_database_url;
+use crate::common::create_test_router;
+use crate::common::create_test_state;
 use crate::common::github_app;
-use crate::common::{
-    TestClient, context_database_url, create_test_router, create_test_state, test_email,
-    test_password,
-};
+use crate::common::test_email;
+use crate::common::test_password;
 
 use abnegate_secret::SecretValue;
 use abnegate_secret::encrypt_value;
 use axum::http::StatusCode;
-use serde_json::{Value, json};
+use axum::http::header::ACCEPT_RANGES;
+use axum::http::header::CONTENT_RANGE;
+use axum::http::header::LOCATION;
+use axum::http::header::RANGE;
+use serde_json::Value;
+use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
-use wiremock::matchers::{body_partial_json, header, method, path, query_param};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::body_partial_json;
+use wiremock::matchers::header;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+use wiremock::matchers::query_param;
 use zone_server::config::Config;
 use zone_server::db::sources;
-use zone_server::db::workspace_members::{self, WorkspaceRole};
+use zone_server::db::workspace_members;
+use zone_server::db::workspace_members::WorkspaceRole;
 use zone_server::services::github::diff::PER_FILE_DIFF;
+use zone_server::services::github::pull_requests::LOG_TAIL;
 use zone_server::state::AppState;
 
 const TOKEN: &str = "ghp_pull_requests_page_test";
@@ -37,6 +52,11 @@ const BASE_HEAD: &str = "5555555555555555555555555555555555555555";
 const MERGE_COMMIT: &str = "6666666666666666666666666666666666666666";
 const JOB: u64 = 71;
 const RUN: u64 = 99;
+const BYTES: &str = "bytes";
+const STORED_LOG: &str = "/store/job-logs/71.txt";
+const LOG_LINE: &str = "2026-11-14T00:10:00Z running the suite\n";
+const FAILURE: &str = "error: the build failed\n";
+const LONG_LOG_BYTES: usize = 17 * 1024 * 1024;
 const DIFF: &str = "diff --git a/src/lib.rs b/src/lib.rs\nindex 1..2 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,2 @@\n fn main() {}\n+fn added() {}\n";
 
 /// One open pull request GitHub knows about, and how its checks stand.
@@ -217,6 +237,18 @@ impl Hub {
             .iter()
             .filter(|request| request.url.path() == endpoint)
             .count()
+    }
+
+    async fn ranges_to(&self, endpoint: &str) -> Vec<String> {
+        self.server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == endpoint)
+            .filter_map(|request| request.headers.get(RANGE))
+            .map(|range| range.to_str().unwrap().to_string())
+            .collect()
     }
 }
 
@@ -796,7 +828,7 @@ async fn mock_job(hub: &Hub, head: &str) {
 async fn mock_log(hub: &Hub) {
     Mock::given(method("GET"))
         .and(path(hub.endpoint(&format!("actions/jobs/{JOB}/logs"))))
-        .respond_with(ResponseTemplate::new(200).set_body_string("error: the build failed\n"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(FAILURE))
         .mount(&hub.server)
         .await;
 }
@@ -819,7 +851,7 @@ async fn a_failed_jobs_log_is_read_for_the_pull_requests_head_only() {
     assert_eq!(body["log"]["job_id"], json!(JOB));
     assert_eq!(body["log"]["run_id"], json!(RUN));
     assert_eq!(body["log"]["head"], json!(READY_HEAD));
-    assert_eq!(body["log"]["text"], json!("error: the build failed\n"));
+    assert_eq!(body["log"]["text"], json!(FAILURE));
     assert_eq!(body["log"]["truncated"], json!(false));
 
     board.hub.server.reset().await;
@@ -845,6 +877,74 @@ async fn a_failed_jobs_log_is_read_for_the_pull_requests_head_only() {
         .get(&format!("{}/jobs/0/log?head={READY_HEAD}", board.pull(1)))
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+async fn mock_stored_log(hub: &Hub, log: &str, start: usize) {
+    Mock::given(method("GET"))
+        .and(path(hub.endpoint(&format!("actions/jobs/{JOB}/logs"))))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header(LOCATION, format!("{}{STORED_LOG}", hub.server.uri())),
+        )
+        .mount(&hub.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(STORED_LOG))
+        .and(header(RANGE, format!("{BYTES}={start}-")))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header(
+                    CONTENT_RANGE,
+                    format!("{BYTES} {start}-{}/{}", log.len() - 1, log.len()),
+                )
+                .set_body_string(&log[start..]),
+        )
+        .with_priority(1)
+        .mount(&hub.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(STORED_LOG))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header(ACCEPT_RANGES, BYTES)
+                .set_body_string(log),
+        )
+        .mount(&hub.server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_long_jobs_log_is_read_from_its_end_where_the_job_failed() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.pull(&Pull::ready()).await;
+    mock_job(&board.hub, READY_HEAD).await;
+    let mut log = LOG_LINE.repeat(LONG_LOG_BYTES / LOG_LINE.len());
+    log.push_str(FAILURE);
+    let tail = usize::try_from(LOG_TAIL).unwrap();
+    let start = log.len() - tail;
+    mock_stored_log(&board.hub, &log, start).await;
+
+    let (status, body) = board
+        .get(&format!(
+            "{}/jobs/{JOB}/log?head={READY_HEAD}",
+            board.pull(1)
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let text = body["log"]["text"].as_str().unwrap();
+    assert!(
+        text.ends_with(FAILURE),
+        "the log is read to its end, where the job failed"
+    );
+    assert_eq!(text.len(), tail, "only the last {tail} bytes are kept");
+    assert!(text == &log[start..], "the kept bytes are the log's last");
+    assert_eq!(body["log"]["truncated"], json!(true));
+    assert_eq!(
+        board.hub.ranges_to(STORED_LOG).await,
+        [format!("{BYTES}=-{tail}"), format!("{BYTES}={start}-")],
+        "the store's whole answer is left unread and only the end is asked for again"
+    );
 }
 
 async fn mock_merge(hub: &Hub, number: u64, response: ResponseTemplate) {
@@ -1172,7 +1272,7 @@ async fn an_enterprise_server_is_read_under_its_api_and_graphql_paths() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["log"]["run_id"], json!(RUN));
-    assert_eq!(body["log"]["text"], json!("error: the build failed\n"));
+    assert_eq!(body["log"]["text"], json!(FAILURE));
 }
 
 async fn writer(board: &Board, role: WorkspaceRole, global: &str) -> String {

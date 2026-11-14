@@ -529,14 +529,6 @@ fn pull_requests_rank_ready_first_then_most_recently_updated() {
 }
 
 #[test]
-fn a_log_keeps_its_end_and_never_splits_a_character() {
-    assert_eq!(reading::tail("abc", 3), ("abc", false));
-    assert_eq!(reading::tail("abcdef", 3), ("def", true));
-    assert_eq!(reading::tail("aé", 1), ("", true));
-    assert_eq!(reading::tail("aéb", 2), ("b", true));
-}
-
-#[test]
 fn github_failures_read_as_missing_or_upstream() {
     for (error, expected) in [
         (

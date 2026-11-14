@@ -8,7 +8,7 @@ The work ships as three stacked PRs:
 2. `feat(github): pull request and release services, routes and permissions`, the backend this document describes as built.
 3. `feat(console): Pull Requests and Releases pages`, the frontend.
 
-The new GitHub API calls come from abnegate-vcs 0.2.1 on crates.io.
+The new GitHub API calls come from abnegate-vcs 0.2.2 on crates.io.
 
 ## Decisions
 
@@ -151,7 +151,7 @@ tests/integration/pull_requests.rs, tests/integration/releases.rs   wiremock Git
 
 The tool path in `agent/integrations.rs` calls `assess` with `Depth::Full`, which keeps the changed-files walk, and its JSON is unchanged. The console list calls `assess` with `Depth::Listing`, which skips that walk, so risk reads as assumed. The client's reads return `Fault`; the agent's string-returning paths take its text through `From<Fault> for String`, so their words are unchanged.
 
-### abnegate-vcs 0.2.1 calls
+### abnegate-vcs 0.2.2 calls
 
 - Pull requests:
   - `list_pull_requests` and `fetch_pull`.
@@ -159,7 +159,7 @@ The tool path in `agent/integrations.rs` calls `assess` with `Depth::Full`, whic
   - `collect_review_threads`, `fetch_review_thread_counts`, `fetch_issue` and `list_comments`.
   - `fetch_diff`, with `fetch_files` as the 406 fallback.
   - `list_commits` and `fetch_commit_diff`.
-  - `fetch_workflow_job` and `fetch_job_log`.
+  - `fetch_workflow_job` and `fetch_job_log_tail`.
   - `merge`.
 - Releases:
   - `list_releases` and `fetch_release_by_id`.
@@ -195,7 +195,7 @@ Pull requests:
 - When GitHub refuses a commit diff with 406, the response is an **empty, incomplete** `Diff` carrying `UNRENDERED_COMMIT`. There is no per-file fallback for commits.
 - `check_details[].id` is null except for an Actions `check_run`, where it is the job id.
 - The detail route returns its `pull_request` with `rank: 0`. Rank is only meaningful in the list.
-- The job log is fetched with the existing cap. The response returns the **last** 1 MiB and sets `truncated` if either cut happened.
+- The job log is read from its end with `fetch_job_log_tail`. The response returns the log's **last** 1 MiB, starting at a whole character, and `truncated` says whether earlier bytes were dropped. github.com's log store ignores a suffix range, so when it answers with the whole log and serves byte ranges, the end is asked for again from 1 MiB before it. A long log's failure is never cut off.
 - Commit membership (the commit diff route) and the squash message read every page of the PR's commits. GitHub lists at most 250 commits for a PR, so a commit past that is refused as foreign.
 
 Releases:

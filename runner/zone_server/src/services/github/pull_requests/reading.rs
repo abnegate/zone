@@ -147,36 +147,22 @@ impl Github {
             .map_err(Fault::Missing)?;
         let downloaded = self
             .service()
-            .fetch_job_log(
+            .fetch_job_log_tail(
                 self.repository(),
                 self.token(),
                 job_id,
-                usize::try_from(self.log_bytes()).unwrap_or(usize::MAX),
+                usize::try_from(LOG_TAIL).unwrap_or(usize::MAX),
             )
             .await?;
-        let text = String::from_utf8_lossy(&downloaded.content);
-        let (kept, cut) = tail(&text, LOG_TAIL);
         Ok(Log {
             job_id: job_id.get(),
             run_id: Some(run_id),
             head: head.to_string(),
-            text: kept.to_string(),
-            truncated: downloaded.truncated || cut,
+            text: String::from_utf8_lossy(&downloaded.content).into_owned(),
+            truncated: downloaded.truncated,
             fetched_at,
         })
     }
-}
-
-pub(super) fn tail(text: &str, limit: u64) -> (&str, bool) {
-    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
-    if text.len() <= limit {
-        return (text, false);
-    }
-    let mut start = text.len() - limit;
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    (&text[start..], true)
 }
 
 pub(super) fn unresolved(threads: Collected<ReviewThreadRecord>) -> Vec<Thread> {
