@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::db::{
-    projects,
+    projects, sources,
     tasks::{self, TaskRow},
 };
 use crate::services::github_app::{Credential, Error as GitHubError, Provider};
@@ -46,6 +46,9 @@ const ROOT: &str = "zone-checkouts-v1";
 
 const PROJECT_TOKEN_UNOPENABLE: &str =
     "The project's GitHub token is sealed under a key this deployment does not hold";
+
+const SOURCE_TOKEN_UNOPENABLE: &str =
+    "The source's GitHub token is sealed under a key this deployment does not hold";
 
 const AUTHOR_NAME: &str = "Zone";
 
@@ -136,7 +139,11 @@ impl Repository {
             }
         }
         let Some((url, holder)) = Self::select(requested, candidates)? else {
-            return Ok(None);
+            // No project of the task names a repository, but its source may
+            // name one and hold a credential for it. That is how a task
+            // started for a chat's pull request reaches a repository the
+            // workspace connected as a source rather than as a project.
+            return Self::from_source(pool, github, task).await;
         };
         let token = match holder {
             Some(project) => github
@@ -146,8 +153,54 @@ impl Repository {
                     GitHubError::Credential => PROJECT_TOKEN_UNOPENABLE.to_string(),
                     error => error.to_string(),
                 })?,
-            None => None,
+            // A repository no project holds. The task's source may hold a
+            // credential for it, and the url check keeps that credential from
+            // ever being used for another repository.
+            None => match Self::from_source(pool, github, task).await? {
+                Some(source) if source.url == url => source.token,
+                _ => None,
+            },
         };
+        Ok(Some(Self { url, token }))
+    }
+
+    /// The repository the task's own source names, with the credential the
+    /// provider resolves for that source. A source whose GitHub connection
+    /// was removed or suspended fails the resolution rather than running
+    /// without a credential, exactly as a project's does.
+    async fn from_source(
+        pool: &PgPool,
+        github: &Provider,
+        task: &TaskRow,
+    ) -> Result<Option<Self>, String> {
+        let Some(id) = task.source_id else {
+            return Ok(None);
+        };
+        let source = sources::get_source(pool, id, task.workspace_id)
+            .await
+            .map_err(|_| "Cannot load task source".to_string())?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        // Only a source that names a repository is a route to one. A folder
+        // or a site the workspace indexes has no repository and no push, and
+        // leaves the task exactly where it was before this fallback existed.
+        if source.source_type != sources::GITHUB {
+            return Ok(None);
+        }
+        let Some(url) = source.url.as_deref() else {
+            return Ok(None);
+        };
+        let Ok(url) = GitService::repository_url(url) else {
+            return Ok(None);
+        };
+        let token = github
+            .source(pool, &source)
+            .await
+            .map_err(|error| match error {
+                GitHubError::Credential => SOURCE_TOKEN_UNOPENABLE.to_string(),
+                error => error.to_string(),
+            })?;
         Ok(Some(Self { url, token }))
     }
 
