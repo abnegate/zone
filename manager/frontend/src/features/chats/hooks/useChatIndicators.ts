@@ -15,6 +15,15 @@ export const INDICATOR_REFRESH_INTERVAL = 20_000;
 /** A turn records what it opened just after its stream ends. */
 export const SETTLE_DELAY = 3_000;
 
+/**
+ * How close together two wakes count as the same one.
+ *
+ * Coming back fires more than one of the events below, and a desktop window
+ * clicked away from and back fires focus on its own, so without this a return
+ * costs three requests for one answer.
+ */
+const WAKE_WINDOW = 2_000;
+
 export interface ChatIndicators {
   indicators: Record<string, ChatIndicator>;
   loading: boolean;
@@ -124,13 +133,28 @@ export function useChatIndicators(
     const timer = setInterval(() => {
       if (document.visibilityState === 'visible') void refresh();
     }, INDICATOR_REFRESH_INTERVAL);
+    // Three events for one return, because no single one of them is reliable:
+    // a phone restoring a backgrounded page fires pageshow, does not always
+    // fire visibilitychange, and throttles or suspends the interval while it
+    // is away — so without these the rows can say what they said before the
+    // screen went off. Reading twice costs a request; reading not at all
+    // leaves a finished turn still showing as writing.
+    let woke = 0;
     const woken = () => {
-      if (document.visibilityState === 'visible') void refresh();
+      if (document.visibilityState !== 'visible') return;
+      const now = Date.now();
+      if (now - woke < WAKE_WINDOW) return;
+      woke = now;
+      void refresh();
     };
     document.addEventListener('visibilitychange', woken);
+    window.addEventListener('pageshow', woken);
+    window.addEventListener('focus', woken);
     return () => {
       clearInterval(timer);
       document.removeEventListener('visibilitychange', woken);
+      window.removeEventListener('pageshow', woken);
+      window.removeEventListener('focus', woken);
     };
   }, [workspaceId, refresh]);
 
