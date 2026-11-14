@@ -423,7 +423,7 @@ for (const viewport of [
           );
           await page.reload();
           await page.locator('.chat-item').first().click();
-          await expect(page.locator('.chat-back-state')).toBeVisible();
+          await expect(page.locator('.chat-header .page-bar-lead-btn')).toBeVisible();
           await page.getByRole('button', { name: 'Back to chats' }).click();
           await expect(page.locator('.chat-item').first()).toBeVisible();
         }

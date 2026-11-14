@@ -13,6 +13,7 @@ import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Link, useSearchParams } from 'react-router-dom';
 import { isProtectedArtifactUrl } from '../../../api/protectedImages';
 import { useAuth } from '../../../features/auth';
+import BarLead from '../../../shared/components/PageBar/BarLead';
 import PageBar from '../../../shared/components/PageBar/PageBar';
 import PlusIcon from '../../../shared/components/PlusIcon/PlusIcon';
 import SubNav from '../../../shared/components/SubNav/SubNav';
@@ -52,6 +53,7 @@ import { ContextUsage } from '../components/ContextUsage';
 import { MoreChats } from '../components/MoreChats';
 import {
   useChat,
+  useChatDraft,
   useChatIndicators,
   useChatProviders,
   useChatPullRequests,
@@ -192,8 +194,13 @@ export default function ChatsPage() {
   const [groupBy, setGroupBy] = useState(readChatGroupBy);
   const [sort, setSort] = useState(readChatSort);
   const [filter, setFilter] = useState(readChatFilter);
-  const [messageInput, setMessageInput] = useState('');
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const {
+    draft: messageInput,
+    setDraft: setMessageInput,
+    attachments,
+    setAttachments,
+    forgetDraft,
+  } = useChatDraft(selectedChatId, user?.id);
   const [isDragging, setIsDragging] = useState(false);
   const [showCharacterModal, setShowCharacterModal] = useState(false);
   const [characterDraft, setCharacterDraft] = useState('');
@@ -1099,6 +1106,7 @@ export default function ChatsPage() {
     setOperationError(null);
     try {
       await deleteChatFn(chatId);
+      forgetDraft(chatId);
       if (selectedChatId === chatId) {
         clearSelectedChat();
       }
@@ -1189,6 +1197,10 @@ export default function ChatsPage() {
       </div>
     </div>
   );
+
+  // On a phone the chat fills the screen, so its bar leads with Back where
+  // every other screen leads with the drawer.
+  const backToChats = { label: 'Back to chats', onClick: clearSelectedChat };
 
   return (
     <div className={`page page--workspace chats-page ${selectedChatId ? 'has-chat' : ''}`}>
@@ -1431,21 +1443,17 @@ export default function ChatsPage() {
 
       <div className="chats-main">
         {selectedChatId && !displayedChat && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="chat-back chat-back-state"
-            onClick={clearSelectedChat}
-          >
-            Back to chats
-          </Button>
+          <div className="chat-header">
+            <BarLead back={backToChats} />
+            <div className="chat-header-info">
+              <h3>{chats.find((chat) => chat.id === selectedChatId)?.title ?? 'Chat'}</h3>
+            </div>
+          </div>
         )}
         {displayedChat ? (
           <>
             <div className="chat-header">
-              <Button variant="ghost" size="sm" className="chat-back" onClick={clearSelectedChat}>
-                Back to chats
-              </Button>
+              <BarLead back={backToChats} />
               <div className="chat-header-info">
                 <h3>{displayedChat.title}</h3>
                 {displayedChat.purpose === 'project_planner' && (

@@ -840,7 +840,7 @@ test.describe('Chat regressions', () => {
       };
       document.querySelector<HTMLElement>('.chat-item')?.click();
       await settle();
-      const back = document.querySelector<HTMLElement>('.chat-back');
+      const back = document.querySelector<HTMLElement>('.chat-header .page-bar-lead-btn');
       back?.click();
       await settle();
       return back !== null && !document.querySelector('.chats-page.has-chat');
