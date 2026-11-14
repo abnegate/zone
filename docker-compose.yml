@@ -320,6 +320,9 @@ services:
       - ZONE_AGENT_STATE_DIR=/app/agent-state
       - ZONE_PROJECT_CLONE_DIR=/tmp/repos
       - ZONE_AGENT_HOST_LOGIN=${ZONE_AGENT_HOST_LOGIN:-false}
+      # Where the mount below puts the host's own home, which is where a person
+      # keeps the MCP servers they configured for Claude Code and codex.
+      - ZONE_AGENT_HOST_HOME=/host-home
       - ZONE_AGENT_ENV_PASSTHROUGH=${ZONE_AGENT_ENV_PASSTHROUGH:-}
       - ZONE_CODEX_SANDBOX=${ZONE_CODEX_SANDBOX:-danger-full-access}
       - ZONE_CLAUDE_TOKEN_URL=${ZONE_CLAUDE_TOKEN_URL:-}
@@ -462,6 +465,10 @@ services:
       - ./comfyui/workflows:/app/comfyui/workflows:ro
       - ./comfyui/recipes:/app/comfyui/recipes:ro
       - ${ZONE_HOST_ROOT:-./.zone/host-empty}:/host
+      # Read-only, and read only to list the MCP servers the coding agents on
+      # this machine are configured with. Set ZONE_HOST_HOME to your home to
+      # import them; left unset this is an empty directory.
+      - ${ZONE_HOST_HOME:-./.zone/host-empty}:/host-home:ro
     ports:
       # The Claude sign-in callback, for a browser on this machine only. With
       # the callback off, Docker picks a spare port instead of taking 54545.

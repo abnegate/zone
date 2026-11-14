@@ -46,6 +46,9 @@ const CODEX_DOCUMENT: &str = "config.toml";
 const CODEX_DIRECTORY: &str = ".codex";
 
 const HOME: &str = "HOME";
+/// The directory the host's own home is mounted at, for a manager that runs in a container and so
+/// has a home of its own that holds nobody's configuration.
+const HOST_HOME: &str = "ZONE_AGENT_HOST_HOME";
 
 /// The keys each agent's document holds its servers under, in the order they are looked for.
 const CLAUDE_KEYS: [&str; 2] = ["mcpServers", "servers"];
@@ -141,10 +144,17 @@ pub async fn of(
 }
 
 /// Every document the organization's turns of `agent` would read servers from, in the order a
-/// name first found in one wins: one per login home Zone keeps for the agent, and, holding no
-/// login of it, the host's own configuration when the instance allows the host's sign-in. That
-/// is where [`crate::services::backend`] points the agent, so it is where the servers configured
-/// for it are.
+/// name first found in one wins: one per login home Zone keeps for the agent, then the host's
+/// own configuration of the agent.
+///
+/// A login home is Zone's, made for a turn to run in, and holds only what the CLI wrote there
+/// itself; the servers a person set up for the account they connected are in the configuration
+/// they keep on their own machine. Both are read, because what is being imported is what the
+/// connected account has configured wherever it configured it, and a login home that does carry
+/// a server still answers for its own name first.
+///
+/// Reading those documents is not signing in as the host: `ZONE_AGENT_HOST_LOGIN` governs whose
+/// credential a turn runs with and is left to govern only that.
 async fn documents(
     state: &AppState,
     organization: Uuid,
@@ -152,14 +162,7 @@ async fn documents(
 ) -> Result<Vec<PathBuf>, sqlx::Error> {
     let config = state.config();
     let logins = agent_logins::list_for(state.db(), organization, agent.as_str()).await?;
-    if logins.is_empty() {
-        return Ok(if config.agents.host_login {
-            host_documents(agent)
-        } else {
-            Vec::new()
-        });
-    }
-    Ok(logins
+    let mut documents: Vec<PathBuf> = logins
         .iter()
         .flat_map(|login| {
             in_directory(
@@ -167,26 +170,50 @@ async fn documents(
                 &config.agents.login_home(organization, agent, login.id),
             )
         })
-        .collect())
+        .collect();
+    documents.extend(configured_documents(agent));
+    Ok(documents)
 }
 
-/// The documents of the host's own configuration of `agent`: those in the directory its
-/// configuration variable names, or, with none, those in the directory it falls back to under
-/// `HOME`. With neither named there is nowhere to look.
-fn host_documents(agent: AgentKind) -> Vec<PathBuf> {
-    let named = home::variable(agent)
-        .and_then(std::env::var_os)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    if let Some(directory) = named {
-        return in_directory(agent, &directory);
-    }
-    let Some(home) = std::env::var_os(HOME)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    else {
-        return Vec::new();
+/// [`host_documents`] read from this process's own environment.
+fn configured_documents(agent: AgentKind) -> Vec<PathBuf> {
+    host_documents(
+        agent,
+        home::variable(agent).and_then(directory_named),
+        directory_named(HOME),
+        directory_named(HOST_HOME),
+    )
+}
+
+/// The documents of the host's own configuration of `agent`: those in `configured`, the directory
+/// the agent's configuration variable names, or, with none named, those in `home`, the home this
+/// process runs under; and those in `host`, the host's own home.
+///
+/// A manager in a container runs under a home of its own that no person configures, so `host` is
+/// where that instance's servers are: compose mounts the host's home read-only and names it in
+/// `ZONE_AGENT_HOST_HOME`. Running on the machine itself, `home` is already that home and `host`
+/// names nothing.
+fn host_documents(
+    agent: AgentKind,
+    configured: Option<PathBuf>,
+    home: Option<PathBuf>,
+    host: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut documents = match configured {
+        Some(configured) => in_directory(agent, &configured),
+        None => home
+            .map(|home| home_documents(agent, &home))
+            .unwrap_or_default(),
     };
+    if let Some(host) = host {
+        documents.extend(home_documents(agent, &host));
+    }
+    documents
+}
+
+/// The documents `agent` would read servers from in the home `directory`, which is the directory
+/// it keeps its state in rather than the home itself.
+fn home_documents(agent: AgentKind, home: &Path) -> Vec<PathBuf> {
     let mut documents = in_directory(agent, &home.join(directory(agent)));
     if agent == AgentKind::Claude {
         // With no `CLAUDE_CONFIG_DIR`, Claude Code keeps a person's own servers in
@@ -194,6 +221,13 @@ fn host_documents(agent: AgentKind) -> Vec<PathBuf> {
         documents.push(home.join(CLAUDE_DOCUMENT));
     }
     documents
+}
+
+/// The directory `variable` names, or `None` when it names none.
+fn directory_named(variable: &str) -> Option<PathBuf> {
+    std::env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The documents `agent` would read servers from in the home `directory`.
@@ -599,6 +633,57 @@ enabled = false
             in_directory(AgentKind::Codex, home),
             [home.join(CODEX_DOCUMENT)]
         );
+    }
+
+    #[test]
+    fn the_host_s_home_is_read_as_well_as_the_home_this_process_runs_under() {
+        let home = PathBuf::from("/home/zone");
+        let host = PathBuf::from("/host-home");
+
+        let documents = host_documents(
+            AgentKind::Claude,
+            None,
+            Some(home.clone()),
+            Some(host.clone()),
+        );
+
+        assert_eq!(
+            documents,
+            [
+                home.join(CLAUDE_DIRECTORY).join(CLAUDE_DOCUMENT),
+                home.join(CLAUDE_DIRECTORY).join(CLAUDE_SETTINGS),
+                home.join(CLAUDE_DOCUMENT),
+                host.join(CLAUDE_DIRECTORY).join(CLAUDE_DOCUMENT),
+                host.join(CLAUDE_DIRECTORY).join(CLAUDE_SETTINGS),
+                host.join(CLAUDE_DOCUMENT),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_named_configuration_directory_stands_in_for_the_home_but_not_for_the_host_s() {
+        let configured = PathBuf::from("/etc/codex");
+        let host = PathBuf::from("/host-home");
+
+        let documents = host_documents(
+            AgentKind::Codex,
+            Some(configured.clone()),
+            Some(PathBuf::from("/home/zone")),
+            Some(host.clone()),
+        );
+
+        assert_eq!(
+            documents,
+            [
+                configured.join(CODEX_DOCUMENT),
+                host.join(CODEX_DIRECTORY).join(CODEX_DOCUMENT),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_no_home_and_no_host_home_there_is_nowhere_to_look() {
+        assert!(host_documents(AgentKind::Claude, None, None, None).is_empty());
     }
 
     #[test]
