@@ -53,7 +53,7 @@ async function openSidebarIfNeeded(page: Page, mobile: boolean) {
   if (!mobile) {
     return;
   }
-  await page.locator('.mobile-menu-btn').click();
+  await page.locator('.page-bar-lead-btn').click();
   await expect(page.locator('.sidebar.open')).toBeVisible();
 }
 

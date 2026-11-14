@@ -122,16 +122,26 @@ describe('shared surfaces', () => {
     expect(rule(layout, '.page-bar-actions .ui-tabs-list')).toContain('overflow-x: auto');
   });
 
-  it('stacks the title over the tab list on a phone and wraps the other actions', () => {
+  it('keeps the lead, title and buttons on one phone row and drops tabs and search below', () => {
     const layout = read(join(styles, '..', 'shared', 'components', 'Layout', 'Layout.css'));
     const phone = media(layout, '(max-width: 768px)');
-    expect(rule(phone, '.page-bar-title')).toContain('flex: 1 1 100%');
-    expect(rule(phone, '.page-bar-actions')).toContain('flex-wrap: wrap');
-    expect(rule(phone, '.page-bar-actions')).toContain('flex: 1 1 100%');
+    const bar = rule(phone, '.page-bar');
+    expect(bar).toContain('position: sticky');
+    expect(bar).toContain('min-height: calc(var(--ui-header-height) + var(--ui-space-2))');
+    expect(bar).toContain('padding-top: calc(var(--ui-space-1-5) + var(--ui-safe-top))');
+    expect(rule(phone, '.page-bar-lead')).toContain('order: 0');
+    const title = rule(phone, '.page-bar-title');
+    expect(title).toContain('flex: 1 1 0');
+    expect(title).toContain('order: 1');
+    expect(title).toContain('text-overflow: ellipsis');
+    expect(rule(phone, '.page-bar-subtitle')).toContain('display: none');
+    // The actions box dissolves so its children land on the bar's own rows.
+    expect(rule(phone, '.page-bar-actions')).toContain('display: contents');
+    expect(rule(phone, '.page-bar-actions > *')).toContain('order: 2');
     expect(phone).toMatch(
-      /\.page-bar-actions > \.ui-tabs-list,\s*\.page-bar-actions > :has\(> \.ui-tabs-list\)\s*\{[^}]*order:\s*-1/
+      /\.page-bar-actions > \.ui-tabs-list,\s*\.page-bar-actions > :has\(> \.ui-tabs-list\),\s*\.page-bar-actions > \.page-search,\s*\.page-bar-actions > form\s*\{[^}]*order:\s*3/
     );
-    expect(rule(phone, '.page-bar-actions > .page-search')).toContain('max-width: none');
+    expect(phone).toMatch(/\.page-bar-actions > \.ui-tabs-list,[^{]*\{[^}]*flex:\s*1 1 100%/);
   });
 
   it('never lets the document itself scroll behind a workspace page', () => {
@@ -227,26 +237,25 @@ describe('page chrome', () => {
     expect(rule(css, '.context-label')).not.toContain('gap');
   });
 
-  it('clears the status bar for the mobile menu button', () => {
+  it('gives the phone bar the status bar inset and nothing floating above it', () => {
     const sidebar = read(join(app, 'shared', 'components', 'Sidebar', 'Sidebar.css'));
-    expect(rule(sidebar, '.mobile-menu-btn')).toContain(
-      'top: calc(var(--ui-space-2) + var(--ui-safe-top))'
-    );
-    expect(rule(sidebar, '.mobile-menu-btn')).toContain(
-      'left: calc(var(--ui-space-3) + var(--ui-safe-left))'
-    );
+    // The drawer trigger lives in the bar's leading slot now, not over the page.
+    expect(sidebar).not.toContain('.mobile-menu-btn');
     const mobile = media(sidebar, '(max-width: 768px)');
     expect(rule(mobile, '.sidebar')).toContain('padding-top: var(--ui-safe-top)');
     expect(rule(mobile, '.sidebar')).toContain('padding-bottom: var(--ui-safe-bottom)');
+    expect(rule(mobile, '.sidebar-close')).toContain('width: var(--ui-space-10)');
+    expect(rule(mobile, '.collapse-btn')).toContain('display: none');
 
     const layout = read(join(app, 'shared', 'components', 'Layout', 'Layout.css'));
+    expect(rule(layout, '.page-bar-lead')).toContain('display: none');
+    expect(rule(layout, '.page-bar-lead-btn')).toContain('height: var(--ui-space-10)');
     const layoutMobile = media(layout, '(max-width: 768px)');
     expect(rule(layoutMobile, '.main-content')).toContain(
-      'padding-top: calc(var(--ui-gutter) + var(--ui-header-height) + var(--ui-safe-top))'
+      'padding-top: calc(var(--ui-space-4) + var(--ui-safe-top))'
     );
-    expect(rule(layoutMobile, '.main-content:has(.page--workspace)')).toContain(
-      'padding-top: calc(var(--ui-header-height) + var(--ui-safe-top))'
-    );
+    expect(rule(layoutMobile, '.main-content:has(.page--workspace)')).toContain('padding: 0');
+    expect(rule(layoutMobile, '.page-bar')).toContain('var(--ui-safe-top)');
   });
 
   it('seats train progress in the sidebar above the footer', () => {

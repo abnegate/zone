@@ -507,16 +507,19 @@
 }
 
 @media (max-width: 768px) {
-  .tasks-filters {
+  /* The filters take the bar's second row, under the title and New task. */
+  .page-bar-actions > .tasks-filters {
     flex: 1 1 100%;
     flex-wrap: wrap;
     min-width: 0;
+    order: 3;
   }
 
   .tasks-filters .ui-select-trigger {
     flex: 1 1 8rem;
     width: auto;
     min-width: 0;
+    height: var(--ui-control-height-lg);
   }
 
   .execution-controls {

@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'bun:test';
-import { render, screen } from '@testing-library/react';
+import { describe, expect, it, mock } from 'bun:test';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { NavDrawerProvider } from '../../context/NavDrawerContext';
 import PageBar from './PageBar';
 
 describe('PageBar', () => {
@@ -25,5 +26,38 @@ describe('PageBar', () => {
     render(<PageBar title="Models" />);
     expect(document.querySelector('.page-bar-subtitle')).toBeNull();
     expect(document.querySelector('.page-bar-actions')).toBeNull();
+  });
+
+  it('leads the bar with the drawer trigger inside the app frame', () => {
+    render(
+      <NavDrawerProvider>
+        <PageBar title="Models" />
+      </NavDrawerProvider>
+    );
+    const trigger = screen.getByRole('button', { name: 'Toggle menu' });
+    expect(trigger.closest('.page-bar-lead')).toBeInTheDocument();
+    expect(trigger).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(trigger);
+    expect(screen.getByRole('button', { name: 'Toggle menu' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    );
+  });
+
+  it('has no leading slot outside the frame, where there is no drawer', () => {
+    render(<PageBar title="Models" />);
+    expect(document.querySelector('.page-bar-lead')).toBeNull();
+  });
+
+  it('leads with back instead of the drawer on a screen reached from a list', () => {
+    const onClick = mock();
+    render(
+      <NavDrawerProvider>
+        <PageBar title="A chat" back={{ label: 'Back to chats', onClick }} />
+      </NavDrawerProvider>
+    );
+    expect(screen.queryByRole('button', { name: 'Toggle menu' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to chats' }));
+    expect(onClick).toHaveBeenCalled();
   });
 });
