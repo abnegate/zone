@@ -17,6 +17,8 @@ use serde::Serialize;
 use std::fmt;
 use std::sync::LazyLock;
 
+use super::link::absolute;
+
 const SHA_LENGTH: usize = 40;
 const SHORT_SHA_LENGTH: usize = 7;
 const BOT_SUFFIX: &str = "[bot]";
@@ -220,7 +222,7 @@ pub trait ReviewSignal: Send + Sync {
             .map(|comment| ReviewSummary {
                 reviewer: self.reviewer().to_string(),
                 comment_id: comment.id,
-                url: nonempty(&comment.url),
+                url: absolute(&comment.url),
                 confidence: self.confidence(&comment.body),
                 reviewed_commit: self.reviewed_commit(&comment.body),
                 created_at: comment.created_at.clone(),
@@ -878,10 +880,6 @@ pub(crate) fn published_at(value: &str) -> i64 {
         .unwrap_or(i64::MIN)
 }
 
-fn nonempty(value: &str) -> Option<String> {
-    (!value.trim().is_empty()).then(|| value.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1411,6 +1409,30 @@ mod tests {
             },
         ];
         assert_eq!(Greptile.summarize(&comments).unwrap().comment_id, 1);
+    }
+
+    #[test]
+    fn a_summary_links_only_to_an_absolute_web_address() {
+        let linked = comment(&summary_body(5, HEAD));
+        assert_eq!(
+            Greptile
+                .summarize(std::slice::from_ref(&linked))
+                .unwrap()
+                .url
+                .as_deref(),
+            Some(linked.url.as_str())
+        );
+        for url in [
+            "/owner/repository/pull/7#issuecomment-11",
+            "javascript:x",
+            " ",
+        ] {
+            let unlinked = ReviewComment {
+                url: url.into(),
+                ..linked.clone()
+            };
+            assert_eq!(Greptile.summarize(&[unlinked]).unwrap().url, None, "{url}");
+        }
     }
 
     #[test]

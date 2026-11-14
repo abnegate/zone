@@ -1,51 +1,53 @@
 use abnegate_vcs::PullRequestError;
 
 use super::Refusal;
-use crate::services::github::client::FOREIGN_JOB;
-use crate::services::github::client::UNAUTHORIZED;
-use crate::services::github::client::described;
-use crate::services::github::client::status_error;
+use crate::services::github::fault::Fault;
 use crate::services::github::unavailable::Unavailable;
+use crate::services::github::unconnected::NOT_GITHUB;
 use crate::services::github::unconnected::Unconnected;
-
-const NOT_FOUND: u16 = 404;
-const NOT_GITHUB: &str = "That source is not a GitHub repository.";
+use crate::services::github_app::Error as GitHubError;
+use crate::services::github_app::Unauthenticated;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Missing(String),
     Invalid(String),
     Disconnected(String),
-    Unreadable(String),
-    Upstream(String),
+    Internal(String),
+    Upstream(Fault),
     Refused(Refusal),
 }
 
-impl Error {
-    pub fn described(message: String) -> Self {
-        if message == status_error(NOT_FOUND) || message == FOREIGN_JOB {
-            Self::Missing(message)
-        } else {
-            Self::Upstream(message)
-        }
-    }
-
-    pub fn unauthenticated(&self) -> Option<&str> {
-        match self {
-            Self::Upstream(message) if *message == status_error(UNAUTHORIZED) => Some(message),
-            _ => None,
+impl From<Fault> for Error {
+    fn from(fault: Fault) -> Self {
+        match fault {
+            Fault::Missing(message) => Self::Missing(message),
+            fault => Self::Upstream(fault),
         }
     }
 }
 
 impl From<PullRequestError> for Error {
     fn from(error: PullRequestError) -> Self {
-        match error {
-            PullRequestError::NotFound
-            | PullRequestError::RepositoryNotFound
-            | PullRequestError::PullRequestNotFound => Self::Missing(described(error)),
-            error => Self::Upstream(described(error)),
-        }
+        Self::from(Fault::from(error))
+    }
+}
+
+impl From<String> for Error {
+    fn from(message: String) -> Self {
+        Self::Upstream(Fault::Upstream(message))
+    }
+}
+
+impl From<GitHubError> for Error {
+    fn from(error: GitHubError) -> Self {
+        Self::Upstream(Fault::from(error))
+    }
+}
+
+impl Unauthenticated for Error {
+    fn unauthenticated(&self) -> bool {
+        matches!(self, Self::Upstream(Fault::Unauthenticated))
     }
 }
 
@@ -56,7 +58,7 @@ impl From<Unconnected> for Error {
             Unconnected::Unavailable(Unavailable::Missing | Unavailable::NotGithub) => {
                 Self::Missing(message)
             }
-            Unconnected::Unavailable(Unavailable::Unreadable) => Self::Unreadable(message),
+            Unconnected::Unavailable(Unavailable::Unreadable) => Self::Internal(message),
             Unconnected::InvalidConfiguration => Self::Disconnected(message),
         }
     }

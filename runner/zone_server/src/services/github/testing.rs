@@ -25,6 +25,8 @@ pub(crate) const STORED_TOKEN: &str = "ghp_storedpersonaltoken";
 pub(crate) const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub(crate) const BLOB: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const BEARER: &str = "Bearer test-secret";
+const WEB_ORIGIN: &str = "https://github.com";
+pub(crate) const ENTERPRISE_ORIGIN: &str = "https://github.example.com";
 pub(crate) const RETRY_AFTER_HEADER: &str = "Retry-After";
 pub(crate) const RATE_LIMIT_REMAINING_HEADER: &str = "X-RateLimit-Remaining";
 
@@ -84,6 +86,16 @@ fn serving(origin: &str, configuration: Configuration) -> Github {
     Github::serving(
         configuration,
         PullRequestService::standing_in_for("github.com", origin).unwrap(),
+        WEB_ORIGIN,
+    )
+    .unwrap()
+}
+
+pub(crate) fn enterprise(server: &MockServer) -> Github {
+    Github::serving(
+        configured(OWNER, REPOSITORY),
+        PullRequestService::standing_in_for("github.com", &server.uri()).unwrap(),
+        ENTERPRISE_ORIGIN,
     )
     .unwrap()
 }

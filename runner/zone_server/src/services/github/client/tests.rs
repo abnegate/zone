@@ -1,12 +1,13 @@
 use super::*;
-use crate::services::github::pull_requests::CheckKind;
 use crate::services::github::testing::BLOB;
 use crate::services::github::testing::COMMIT;
+use crate::services::github::testing::ENTERPRISE_ORIGIN;
 use crate::services::github::testing::RATE_LIMIT_REMAINING_HEADER;
 use crate::services::github::testing::RETRY_AFTER_HEADER;
 use crate::services::github::testing::assert_sent_without_authorization;
 use crate::services::github::testing::check_runs;
 use crate::services::github::testing::commit_and_empty_ci;
+use crate::services::github::testing::enterprise;
 use crate::services::github::testing::github_with_token;
 use crate::services::github::testing::mock;
 use crate::services::github::testing::mock_answering;
@@ -37,6 +38,14 @@ use wiremock::matchers::query_param;
 
 const JOB_ID: u64 = 4242;
 const RUN_ID: u64 = 99;
+
+type Named<'a> = (
+    CheckKind,
+    Option<u64>,
+    &'a str,
+    readiness::CheckState,
+    Option<&'a str>,
+);
 
 /// Pull request `number` read and assessed as the readiness tool reads one
 /// named by number.
@@ -838,6 +847,36 @@ fn ci_tokens_come_from_the_record_that_carries_them() {
 }
 
 #[tokio::test]
+async fn an_enterprise_job_is_identified_at_the_configured_web_origin() {
+    let server = MockServer::start().await;
+    let job = |origin: &str| {
+        WorkflowJob::new(
+            NonZeroU64::new(JOB_ID).unwrap(),
+            NonZeroU64::new(RUN_ID).unwrap(),
+            "build",
+            "completed",
+            Revision::parse(COMMIT).unwrap(),
+        )
+        .with_url(format!(
+            "{origin}/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}"
+        ))
+    };
+
+    assert_eq!(
+        enterprise(&server).verify_job(&job(ENTERPRISE_ORIGIN), JOB_ID, COMMIT),
+        Ok(RUN_ID)
+    );
+    assert_eq!(
+        enterprise(&server).verify_job(&job("https://github.com"), JOB_ID, COMMIT),
+        Err(FOREIGN_JOB.to_string())
+    );
+    assert_eq!(
+        mocked(&server).verify_job(&job(ENTERPRISE_ORIGIN), JOB_ID, COMMIT),
+        Err(FOREIGN_JOB.to_string())
+    );
+}
+
+#[tokio::test]
 async fn job_identity_must_match_the_repository_and_the_requested_job() {
     let server = MockServer::start().await;
     let at = |run: u64, job: u64| -> String {
@@ -887,22 +926,15 @@ async fn job_identity_must_match_the_repository_and_the_requested_job() {
             )
             .is_ok()
     );
-    assert!(!is_job_url(
-        &format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}?x=1"),
-        "owner",
-        "repository",
-        RUN_ID,
-        JOB_ID
-    ));
-    assert!(!is_job_url(
-        &format!(
-            "https://github.com.evil.test/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}"
-        ),
-        "owner",
-        "repository",
-        RUN_ID,
-        JOB_ID
-    ));
+    for foreign in [
+        format!("https://github.com/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}?x=1"),
+        format!("https://github.com.evil.test/owner/repository/actions/runs/{RUN_ID}/job/{JOB_ID}"),
+    ] {
+        assert_eq!(
+            mocked(&server).verify_job(&fetched(JOB_ID, COMMIT, foreign), JOB_ID, COMMIT),
+            Err(FOREIGN_JOB.to_string())
+        );
+    }
 }
 
 #[tokio::test]
@@ -1052,7 +1084,7 @@ async fn review_query_failure(response: ResponseTemplate, readiness: bool) -> (S
     let failed = if readiness {
         assessed_pull(&github, 7).await.map(drop)
     } else {
-        github.threads(7).await.map(drop)
+        github.threads(7).await.map(drop).map_err(String::from)
     };
     let queries = server
         .received_requests()
@@ -1229,7 +1261,10 @@ async fn an_assessment_names_each_check_it_weighed() {
         &server,
         json!([{"id": 21, "name": "test", "head_sha": COMMIT, "status": "in_progress",
                 "html_url": "https://github.com/owner/repository/actions/runs/11/job/21",
-                "started_at": "2026-09-05T00:01:00Z"}]),
+                "started_at": "2026-09-05T00:01:00Z"},
+               {"id": 22, "name": "external", "head_sha": COMMIT, "status": "completed",
+                "conclusion": "success", "details_url": "https://ci.example.com/builds/22",
+                "completed_at": "2026-09-05T00:03:00Z"}]),
     )
     .await;
     mock_statuses(
@@ -1247,7 +1282,7 @@ async fn an_assessment_names_each_check_it_weighed() {
         .await
         .unwrap();
 
-    let named: Vec<(CheckKind, u64, &str, readiness::CheckState, Option<&str>)> = assessed
+    let named: Vec<Named<'_>> = assessed
         .checks
         .iter()
         .map(|check| {
@@ -1265,21 +1300,28 @@ async fn an_assessment_names_each_check_it_weighed() {
         [
             (
                 CheckKind::Workflow,
-                11,
+                None,
                 "CI",
                 readiness::CheckState::Failure,
                 Some("https://github.com/owner/repository/actions/runs/11"),
             ),
             (
                 CheckKind::CheckRun,
-                21,
+                Some(21),
                 "test",
                 readiness::CheckState::Pending,
                 Some("https://github.com/owner/repository/actions/runs/11/job/21"),
             ),
             (
+                CheckKind::CheckRun,
+                None,
+                "external",
+                readiness::CheckState::Success,
+                Some("https://ci.example.com/builds/22"),
+            ),
+            (
                 CheckKind::Status,
-                1,
+                None,
                 "deploy",
                 readiness::CheckState::Success,
                 None

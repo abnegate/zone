@@ -30,11 +30,15 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use super::configuration::Configuration;
-use super::pull_requests::Assessed;
-use super::pull_requests::CheckDetail;
-use super::pull_requests::Depth;
+use super::evidence::Assessed;
+use super::evidence::CheckDetail;
+use super::evidence::CheckKind;
+use super::evidence::Depth;
+use super::fault::Fault;
+use super::link::absolute;
 use super::readiness;
 use super::readiness::CheckEvidence;
+use super::readiness::CheckState;
 use super::readiness::CommentEvidence;
 use super::readiness::CommitSha;
 use super::readiness::PullEvidence;
@@ -114,7 +118,10 @@ pub(super) const SERVER_ERRORS: std::ops::Range<u16> = 500..600;
 const FORBIDDEN: u16 = 403;
 const NOT_FOUND: u16 = 404;
 pub(crate) const UNPROCESSABLE_ENTITY: u16 = 422;
-const TOO_MANY_REQUESTS: u16 = 429;
+pub(crate) const TOO_MANY_REQUESTS: u16 = 429;
+const SEPARATOR: char = '/';
+const RUNS_PATH: &str = "actions/runs";
+const JOB_PATH: &str = "job";
 
 /// Compiling the path vocabulary is the expensive part, so the prioritiser
 /// behind a blast radius is built once and shared by every assessment.
@@ -128,9 +135,18 @@ pub(crate) struct Github {
     log_bytes: u64,
     signals: ReviewSignals,
     configuration: Configuration,
+    origin: String,
 }
 
 impl Github {
+    pub(crate) fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub(crate) fn web_url(&self) -> String {
+        self.configuration.web_url(&self.origin)
+    }
+
     pub(crate) fn service(&self) -> &PullRequestService {
         &self.service
     }
@@ -168,12 +184,13 @@ impl Github {
             PullRequestError::InvalidOrigin => INVALID_ORIGIN.to_string(),
             _ => CLIENT_UNAVAILABLE.to_string(),
         })?;
-        Self::serving(configuration, service)
+        Self::serving(configuration, service, &config.github_web_url)
     }
 
     pub(super) fn serving(
         mut configuration: Configuration,
         service: PullRequestService,
+        origin: &str,
     ) -> Result<Self, String> {
         if !segment(&configuration.owner) || !segment(&configuration.repository) {
             return Err(INVALID_REPOSITORY.to_string());
@@ -195,6 +212,7 @@ impl Github {
             log_bytes: MAX_LOG_BYTES,
             signals,
             configuration,
+            origin: origin.trim_end_matches(SEPARATOR).to_string(),
         })
     }
 
@@ -265,7 +283,7 @@ impl Github {
     pub(crate) async fn ci_rows(
         &self,
         sha: &str,
-    ) -> Result<(Vec<WorkflowRun>, Vec<CheckRun>, Vec<CommitStatus>, bool), String> {
+    ) -> Result<(Vec<WorkflowRun>, Vec<CheckRun>, Vec<CommitStatus>, bool), Fault> {
         let commit = revision(sha)?;
         let filter = WorkflowRunFilter::new().with_head_sha(commit.clone());
         let (workflows, checks, statuses) = tokio::join!(
@@ -278,7 +296,7 @@ impl Github {
         );
         let workflows = workflows.map_err(ci_described)?;
         if !workflows.complete {
-            return Err(PARTIAL_WORKFLOW_RUNS.to_string());
+            return Err(Fault::upstream(PARTIAL_WORKFLOW_RUNS));
         }
         let checks = checks.map_err(ci_described)?;
         let statuses = statuses.map_err(ci_described)?;
@@ -287,7 +305,7 @@ impl Github {
             .iter()
             .any(|status| status.context.is_empty())
         {
-            return Err(UNIDENTIFIED_CI.to_string());
+            return Err(Fault::upstream(UNIDENTIFIED_CI));
         }
         let mut identities = std::collections::HashSet::new();
         let workflows: Vec<WorkflowRun> = workflows
@@ -303,13 +321,13 @@ impl Github {
                 .iter()
                 .any(|check| check.head_sha.as_ref() != Some(&commit))
         {
-            return Err(FOREIGN_CHECKS.to_string());
+            return Err(Fault::upstream(FOREIGN_CHECKS));
         }
         let complete = checks.complete && statuses.complete;
         Ok((workflows, checks.items, statuses.items, complete))
     }
 
-    async fn check_evidence(&self, sha: &str) -> Result<(CheckEvidence, Vec<CheckDetail>), String> {
+    async fn check_evidence(&self, sha: &str) -> Result<(CheckEvidence, Vec<CheckDetail>), Fault> {
         let (workflows, checks, statuses, complete) = self.ci_rows(sha).await?;
         let evidence = CheckEvidence {
             complete,
@@ -317,16 +335,45 @@ impl Github {
         };
         let details = workflows
             .iter()
-            .map(CheckDetail::workflow)
-            .chain(checks.iter().map(CheckDetail::check_run))
-            .chain(
-                statuses
-                    .iter()
-                    .enumerate()
-                    .map(|(position, status)| CheckDetail::status(status, position + 1)),
-            )
+            .map(workflow_detail)
+            .chain(checks.iter().map(|check| self.check_run_detail(check)))
+            .chain(statuses.iter().map(status_detail))
             .collect();
         Ok((evidence, details))
+    }
+
+    fn check_run_detail(&self, check: &CheckRun) -> CheckDetail {
+        let url = [&check.url, &check.details_url]
+            .into_iter()
+            .flatten()
+            .find_map(|url| absolute(url));
+        CheckDetail {
+            kind: CheckKind::CheckRun,
+            id: check
+                .id
+                .filter(|id| url.as_deref().is_some_and(|url| self.actions_job(url, *id))),
+            name: check.name.clone().unwrap_or_default(),
+            state: detail_state(ci_token(Some(&check.status), check.conclusion.as_deref())),
+            url,
+            updated_at: check.completed_at.clone().or(check.started_at.clone()),
+        }
+    }
+
+    fn actions_job(&self, url: &str, job_id: u64) -> bool {
+        let runs = format!("{}{SEPARATOR}{RUNS_PATH}{SEPARATOR}", self.web_url());
+        let job = format!("{SEPARATOR}{JOB_PATH}{SEPARATOR}{job_id}");
+        url.get(..runs.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(&runs))
+            && url[runs.len()..]
+                .strip_suffix(&job)
+                .is_some_and(|run| !run.is_empty() && run.bytes().all(|byte| byte.is_ascii_digit()))
+    }
+
+    fn job_url(&self, run_id: u64, job_id: u64) -> String {
+        format!(
+            "{}{SEPARATOR}{RUNS_PATH}{SEPARATOR}{run_id}{SEPARATOR}{JOB_PATH}{SEPARATOR}{job_id}",
+            self.web_url()
+        )
     }
 
     /// One pull request's readiness. `detail` is the pull request as read by
@@ -338,12 +385,22 @@ impl Github {
         row: &ListedPullRequest,
         detail: Option<PullRequestDetail>,
         depth: Depth,
-    ) -> Result<Assessed, String> {
+    ) -> Result<Assessed, Fault> {
+        self.assess_with(row, detail, depth, None).await
+    }
+
+    pub(crate) async fn assess_with(
+        &self,
+        row: &ListedPullRequest,
+        detail: Option<PullRequestDetail>,
+        depth: Depth,
+        threads: Option<&Collected<ReviewThreadRecord>>,
+    ) -> Result<Assessed, Fault> {
         let detail = match detail {
             Some(detail) => detail,
             None => self.pull(&row.reference).await?,
         };
-        let review = self.review(&detail).await?;
+        let review = self.review(&detail, threads).await?;
         let head = row
             .head_sha
             .as_ref()
@@ -413,14 +470,10 @@ impl Github {
     pub(crate) async fn pull(
         &self,
         reference: &PullRequestReference,
-    ) -> Result<PullRequestDetail, String> {
-        let detail = self
-            .service
-            .fetch_pull(reference, &self.token)
-            .await
-            .map_err(described)?;
+    ) -> Result<PullRequestDetail, Fault> {
+        let detail = self.service.fetch_pull(reference, &self.token).await?;
         if detail.number != reference.number() {
-            return Err(MISMATCHED_PULL.to_string());
+            return Err(Fault::upstream(MISMATCHED_PULL));
         }
         Ok(detail)
     }
@@ -428,24 +481,32 @@ impl Github {
     pub(crate) async fn threads(
         &self,
         number: u64,
-    ) -> Result<Collected<ReviewThreadRecord>, String> {
+    ) -> Result<Collected<ReviewThreadRecord>, Fault> {
         self.service
             .collect_review_threads(&self.reference(number)?, &self.token)
             .await
             .map_err(thread_described)
     }
 
-    async fn review(&self, detail: &PullRequestDetail) -> Result<Review, String> {
+    async fn review(
+        &self,
+        detail: &PullRequestDetail,
+        threads: Option<&Collected<ReviewThreadRecord>>,
+    ) -> Result<Review, Fault> {
         let reference = self.reference(detail.number.get())?;
-        let counts = self
-            .service
-            .fetch_review_thread_counts(&reference, &self.token)
-            .await
-            .map_err(thread_described)?;
+        let threads = match threads {
+            Some(collected) => recorded_evidence(collected),
+            None => thread_evidence(
+                self.service
+                    .fetch_review_thread_counts(&reference, &self.token)
+                    .await
+                    .map_err(thread_described)?,
+            ),
+        };
         Ok(Review {
             draft: detail.draft,
             head: CommitSha::parse(detail.head_sha.as_str()),
-            threads: thread_evidence(counts),
+            threads,
             comments: self
                 .review_comments(&IssueReference::from(&reference))
                 .await?,
@@ -459,7 +520,7 @@ impl Github {
     /// GitHub lists them oldest first, so the second page says whether the
     /// first held all of them, and past two full pages the conversation's
     /// own count says which pages hold the newest.
-    async fn review_comments(&self, reference: &IssueReference) -> Result<CommentEvidence, String> {
+    async fn review_comments(&self, reference: &IssueReference) -> Result<CommentEvidence, Fault> {
         let first = self.comment_page(reference, NonZeroU32::MIN).await?;
         let Some(second) = first.next else {
             return Ok(comment_evidence(first.items, true));
@@ -484,15 +545,14 @@ impl Github {
     async fn newest_comments(
         &self,
         reference: &IssueReference,
-    ) -> Result<Vec<IssueComment>, String> {
+    ) -> Result<Vec<IssueComment>, Fault> {
         let counted = self
             .service
             .fetch_issue(reference, &self.token)
-            .await
-            .map_err(described)?
+            .await?
             .comments;
         let pages = u32::try_from(counted.div_ceil(u64::from(PER_PAGE.get())))
-            .map_err(|_| INVALID_RESPONSE.to_string())?
+            .map_err(|_| Fault::upstream(INVALID_RESPONSE))?
             .max(NEWEST_COMMENT_PAGES);
         let mut comments = Vec::new();
         for page in (pages - NEWEST_COMMENT_PAGES + 1..=pages).filter_map(NonZeroU32::new) {
@@ -505,11 +565,11 @@ impl Github {
         &self,
         reference: &IssueReference,
         page: NonZeroU32,
-    ) -> Result<Page<IssueComment>, String> {
-        self.service
+    ) -> Result<Page<IssueComment>, Fault> {
+        Ok(self
+            .service
             .list_comments(reference, &self.token, page, PER_PAGE)
-            .await
-            .map_err(described)
+            .await?)
     }
 
     pub(crate) fn release_identity(&self, release: &Release) -> Result<ReleaseIdentity, String> {
@@ -559,7 +619,9 @@ impl Github {
             Err(_) => Err(INVALID_TAG.to_string()),
         };
         match runs {
-            Ok(records) => ReleasePipeline::observe(release.clone(), &records, checked_at),
+            Ok(records) => {
+                ReleasePipeline::observe(release.clone(), &records, checked_at, &self.origin)
+            }
             Err(_) => ReleasePipeline::unavailable(release.clone(), checked_at),
         }
     }
@@ -589,13 +651,11 @@ impl Github {
         let run_id = job.run_id.get();
         if job.id.get() != job_id
             || !job.head_sha.as_str().eq_ignore_ascii_case(sha)
-            || !is_job_url(
-                job.url.as_deref().unwrap_or_default(),
-                &self.configuration.owner,
-                &self.configuration.repository,
-                run_id,
-                job_id,
-            )
+            || !job
+                .url
+                .as_deref()
+                .unwrap_or_default()
+                .eq_ignore_ascii_case(&self.job_url(run_id, job_id))
         {
             return Err(FOREIGN_JOB.to_string());
         }
@@ -603,10 +663,30 @@ impl Github {
     }
 }
 
-fn is_job_url(value: &str, owner: &str, repository: &str, run_id: u64, job_id: u64) -> bool {
-    value.eq_ignore_ascii_case(&format!(
-        "https://github.com/{owner}/{repository}/actions/runs/{run_id}/job/{job_id}"
-    ))
+fn workflow_detail(run: &WorkflowRun) -> CheckDetail {
+    CheckDetail {
+        kind: CheckKind::Workflow,
+        id: None,
+        name: run.name.clone().unwrap_or_else(|| run.path.clone()),
+        state: detail_state(ci_token(run.status.as_deref(), run.conclusion.as_deref())),
+        url: absolute(&run.url),
+        updated_at: Some(run.updated_at.clone()),
+    }
+}
+
+fn status_detail(status: &CommitStatus) -> CheckDetail {
+    CheckDetail {
+        kind: CheckKind::Status,
+        id: None,
+        name: status.context.clone(),
+        state: detail_state(&status.state),
+        url: status.target_url.as_deref().and_then(absolute),
+        updated_at: status.created_at.clone(),
+    }
+}
+
+fn detail_state(token: &str) -> CheckState {
+    CheckState::parse(assessment(&[token])).unwrap_or(CheckState::Unknown)
 }
 
 pub(crate) fn segment(value: &str) -> bool {
@@ -636,6 +716,19 @@ pub(crate) fn listed(
     match &detail.updated_at {
         Some(updated_at) => row.with_updated_at(updated_at.clone()),
         None => row,
+    }
+}
+
+fn recorded_evidence(collected: &Collected<ReviewThreadRecord>) -> ThreadEvidence {
+    ThreadEvidence {
+        complete: collected.complete,
+        threads: collected
+            .items
+            .iter()
+            .map(|record| ReviewThread {
+                resolved: record.resolved,
+            })
+            .collect(),
     }
 }
 
@@ -724,23 +817,23 @@ fn log_status_error(status: u16) -> String {
     format!("The job log download returned HTTP {status}.")
 }
 
-fn thread_described(error: PullRequestError) -> String {
+fn thread_described(error: PullRequestError) -> Fault {
     match error {
-        PullRequestError::PullRequestNotFound => MISSING_PULL.to_string(),
+        PullRequestError::PullRequestNotFound => Fault::missing(MISSING_PULL),
         PullRequestError::GitHubApi(message) if message == ANSWERED_ANOTHER_PULL => {
-            MISMATCHED_PULL.to_string()
+            Fault::upstream(MISMATCHED_PULL)
         }
         PullRequestError::GitHubApi(_) | PullRequestError::RepositoryNotFound => {
-            REVIEW_QUERY_REJECTED.to_string()
+            Fault::upstream(REVIEW_QUERY_REJECTED)
         }
-        error => described(error),
+        error => Fault::from(error),
     }
 }
 
-fn ci_described(error: PullRequestError) -> String {
+fn ci_described(error: PullRequestError) -> Fault {
     match error {
-        PullRequestError::Parse(_) => FOREIGN_CHECKS.to_string(),
-        error => described(error),
+        PullRequestError::Parse(_) => Fault::upstream(FOREIGN_CHECKS),
+        error => Fault::from(error),
     }
 }
 

@@ -4,7 +4,10 @@ pub(crate) mod client;
 pub(crate) mod configuration;
 pub(crate) mod connection;
 pub mod diff;
+pub mod evidence;
+pub mod fault;
 pub mod freshness;
+pub mod link;
 pub mod pull_requests;
 pub mod readiness;
 pub(crate) mod refusal;
@@ -17,5 +20,6 @@ pub mod source_status;
 pub(crate) mod sources;
 #[cfg(test)]
 pub(crate) mod testing;
+pub mod throttle;
 pub(crate) mod unavailable;
 pub(crate) mod unconnected;
