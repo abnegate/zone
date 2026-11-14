@@ -14,6 +14,7 @@ use zone_installer::{MANAGER_DIR, ServeKind, bind, config_path, resolve_manager_
 mod manager_bundle;
 #[cfg(desktop)]
 mod menu;
+mod notify;
 #[cfg(desktop)]
 mod zoom;
 
@@ -32,9 +33,18 @@ pub fn run() {
         .init();
 
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::block_on(async move { setup_client(handle).await })
+        })
+        // A notification tapped while the app was not running has no page to
+        // take anywhere, so the page that starts because of the tap is handed
+        // the chat as it loads.
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Finished {
+                notify::opened_page(webview);
+            }
         })
         .invoke_handler(tauri::generate_handler![change_server]);
 
@@ -97,6 +107,8 @@ async fn setup_client(app: AppHandle) -> Result<(), Box<dyn std::error::Error>> 
     app.manage(ClientState {
         server: state.clone(),
     });
+    app.manage(notify::Pending::default());
+    notify::listen(&app);
 
     #[cfg(desktop)]
     menu::build(&app)?;

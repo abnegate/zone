@@ -24,3 +24,4 @@ export { Reasoning } from './Reasoning';
 export { SourcesButton } from './SourcesButton';
 export { SubagentChips } from './SubagentChips';
 export { ToolTrace } from './ToolTrace';
+export { WaitingNotifier } from './WaitingNotifier';

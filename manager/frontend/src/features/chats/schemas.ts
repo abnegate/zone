@@ -537,6 +537,16 @@ export const ChatIndicatorSchema = z.object({
   pull_requests: z.number().catch(0),
 });
 
+export const ChatActivityReadingSchema = z.object({
+  chat_id: z.string(),
+  title: z.string().catch(''),
+  activity: z.enum(CHAT_ACTIVITIES).catch('idle'),
+});
+
+export const ChatActivityResponseSchema = z.object({
+  chats: tolerantArray(ChatActivityReadingSchema).default([]),
+});
+
 export const ChatIndicatorsResponseSchema = z.object({
   chats: tolerantArray(ChatIndicatorSchema).default([]),
 });

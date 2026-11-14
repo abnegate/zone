@@ -1,4 +1,5 @@
 import {
+  ChatActivityResponseSchema,
   ChatIndicatorsResponseSchema,
   ChatProvidersSchema,
   ChatPullRequestSchema,
@@ -23,6 +24,7 @@ import {
 import type { SubagentList, SubagentStep } from '../features/chats/subagentTypes';
 import type {
   Chat,
+  ChatActivityReading,
   ChatIndicator,
   ChatPage,
   ChatPageRequest,
@@ -166,6 +168,29 @@ class ChatsApi {
       throw await ApiError.from(response, 'Failed to load chat indicators');
     }
     return parse(ChatIndicatorsResponseSchema, await response.json()).chats;
+  }
+
+  /**
+   * What each chat in the workspace is doing, without the pull request
+   * readings.
+   *
+   * What a watcher polls in the background to notice a chat that has stopped
+   * and is waiting. Unpaged, unlike the indicators above: a chat nobody has
+   * scrolled to still stops, and this reading costs the server two queries
+   * rather than a GitHub request per row.
+   */
+  async getChatActivity(workspaceId: string, archived?: boolean): Promise<ChatActivityReading[]> {
+    const params = new URLSearchParams({ workspace_id: workspaceId });
+    if (archived !== undefined) {
+      params.set('archived', String(archived));
+    }
+    const response = await fetch(`${API_BASE}/api/chats/activity?${params}`, {
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load chat activity');
+    }
+    return parse(ChatActivityResponseSchema, await response.json()).chats;
   }
 
   async getChat(id: string): Promise<ChatWithMessages> {
