@@ -26,6 +26,7 @@ confidence-threshold = 0.8
 exceptions = [
     { crate = "cssparser@0.36.0", allow = ["MPL-2.0"] },
     { crate = "cssparser@0.37.0", allow = ["MPL-2.0"] },
+    { crate = "cssparser@0.38.0", allow = ["MPL-2.0"] },
     { crate = "cssparser-macros@0.6.1", allow = ["MPL-2.0"] },
     { crate = "cssparser-macros@0.7.0", allow = ["MPL-2.0"] },
     { crate = "dtoa-short@0.3.5", allow = ["MPL-2.0"] },
@@ -34,6 +35,7 @@ exceptions = [
     { crate = "quoted_printable@0.5.2", allow = ["0BSD"] },
     { crate = "selectors@0.36.1", allow = ["MPL-2.0"] },
     { crate = "selectors@0.38.0", allow = ["MPL-2.0"] },
+    { crate = "selectors@0.41.0", allow = ["MPL-2.0"] },
     { crate = "webpki-root-certs@1.0.11", allow = ["CDLA-Permissive-2.0"] },
     { crate = "webpki-roots@0.26.11", allow = ["CDLA-Permissive-2.0"] },
     { crate = "webpki-roots@1.0.11", allow = ["CDLA-Permissive-2.0"] },
