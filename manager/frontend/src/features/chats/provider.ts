@@ -63,6 +63,7 @@ export interface WorkspaceChatProviders {
   default: ChatProviderOffer;
   providers: ChatProviderOffer[];
   recent?: RecentChat | null;
+  offline_enforced?: boolean;
 }
 
 export interface SetChatProviderRequest {

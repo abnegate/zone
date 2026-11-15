@@ -57,6 +57,7 @@ pub async fn workspace(
         default,
         providers,
         recent,
+        offline_enforced: state.network_denial().await.is_enforced(),
     }))
 }
 

@@ -204,6 +204,7 @@ async fn main() {
         AppState::new_with_mail(config.clone(), db, Some(cache), mail)
     };
     state.mcp().configured().await;
+    state.network_denial().await.announce();
 
     // Start background workers
     zone_server::workers::housekeeping::spawn(state.clone());

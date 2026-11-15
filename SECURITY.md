@@ -193,6 +193,14 @@ command, such as a script, a package manager or a raw socket, is not closed by
 the tool gates and relies on the operating-system network deny Zone places on
 an offline chat's child processes.
 
+That deny needs seccomp and Landlock on Linux, or the sandbox library on macOS.
+A host without them cannot start a network-denied command, so an offline chat's
+commands fail closed there instead of running with a network. Zone starts a
+trivial denied command at startup and logs a warning when it does not run, and
+the new-chat dialog's Offline option says that offline chats on that host
+cannot run commands (`offline_enforced` in
+`GET /api/workspaces/{id}/chat-providers`).
+
 ## Privacy Considerations
 
 ### Prompt Logging

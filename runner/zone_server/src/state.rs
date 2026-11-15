@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use sqlx::PgPool;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::sync::OnceCell;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 use zone_context::adapters::{
@@ -29,6 +30,7 @@ use crate::services::github_app::Provider;
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
+use crate::services::network_denial::NetworkDenial;
 use crate::services::task_progress::{self, TaskProgressBroadcaster};
 use crate::sync::SyncRegistry;
 use crate::train_jobs::TrainRegistry;
@@ -122,6 +124,7 @@ struct AppStateInner {
     /// per organization, each shared across chat turns.
     pub mcp: Hubs,
     pub github: OnceLock<Provider>,
+    pub network_denial: OnceCell<NetworkDenial>,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
     /// publish to, so a state built per test observes the same runs.
@@ -250,6 +253,7 @@ impl AppState {
                 frame_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_FRAME_EXTRACT)),
                 mcp,
                 github: OnceLock::new(),
+                network_denial: OnceCell::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
                 pull_request_statuses: StatusCache::default(),
@@ -421,6 +425,25 @@ impl AppState {
         assert!(
             self.inner.github.set(provider).is_ok(),
             "install_github must run before the first github() call"
+        );
+    }
+
+    /// Whether this host can deny an offline chat's commands the network,
+    /// probed on the first call.
+    pub async fn network_denial(&self) -> NetworkDenial {
+        *self
+            .inner
+            .network_denial
+            .get_or_init(NetworkDenial::probe)
+            .await
+    }
+
+    /// Panics if the host was already probed.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn install_network_denial(&self, denial: NetworkDenial) {
+        assert!(
+            self.inner.network_denial.set(denial).is_ok(),
+            "install_network_denial must run before the first network_denial() call"
         );
     }
 }

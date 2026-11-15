@@ -155,6 +155,10 @@ const PROVIDER_EFFORT_RESET_FAILED =
   'AI provider changed, but its reasoning effort could not be reset';
 const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
 const MODEL_CONTEXT_RESET_FAILED = 'Model changed, but its context size could not be fitted to it';
+const OFFLINE_HELP =
+  'Reaches no network beyond the model: no web search, shell network access, MCP servers or GitHub tools.';
+const OFFLINE_UNENFORCED =
+  "This host can't keep commands off the network, so offline chats here can't run commands.";
 
 const failure = (prefix: string, error: unknown): string =>
   error instanceof Error ? `${prefix}: ${error.message}` : prefix;
@@ -2253,7 +2257,11 @@ export default function ChatsPage() {
           )}
           <Checkbox
             label="Offline"
-            helpText="Reaches no network beyond the model: no web search, shell network access, MCP servers or GitHub tools."
+            helpText={
+              workspaceProviders?.offline_enforced === false
+                ? `${OFFLINE_HELP} ${OFFLINE_UNENFORCED}`
+                : OFFLINE_HELP
+            }
             checked={newChatOffline}
             onCheckedChange={(checked) => {
               editNewChat();
