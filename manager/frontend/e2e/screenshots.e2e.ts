@@ -42,7 +42,7 @@ async function chooseCardAction(page: Page, title: string, action: CardAction): 
 async function fontsLoaded(page: Page): Promise<void> {
   await page.waitForFunction(() =>
     Boolean(
-      document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][href*="fonts.googleapis.com"]')?.sheet
+      document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][data-font-stylesheet]')?.sheet
     )
   );
   await page.evaluate(async () => {

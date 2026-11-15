@@ -13,6 +13,7 @@ import { FEATURE_STYLESHEET_ATTRIBUTE } from './src/shared/stylesheet';
 
 const frontendRoot = fileURLToPath(new URL('.', import.meta.url));
 const uiSrc = path.resolve(frontendRoot, '../../packages/ui/src');
+const modules = path.resolve(frontendRoot, '../../node_modules');
 
 const sourceAliases = {
   '@zone/ui/styles/globals.css': path.join(uiSrc, 'styles/globals.css'),
@@ -163,7 +164,7 @@ export default defineConfig(({ command }) => {
         interval: Number(process.env.VITE_POLL_INTERVAL || 300),
       },
       fs: {
-        allow: [frontendRoot, uiSrc],
+        allow: [frontendRoot, uiSrc, modules],
       },
       proxy: {
         '/api': {
@@ -195,7 +196,7 @@ export default defineConfig(({ command }) => {
                 test: /(\/ZoneLogo\.css|\/pages\/AuthPage\.css|\/ResendVerificationButton\.css|\/VerificationPendingBanner\.css|\/InvitationAcceptPage\.css)($|\?)/,
                 priority: 3,
               },
-              { name: FEATURE_STYLESHEET, test: /\.css($|\?)/, priority: 2 },
+              { name: FEATURE_STYLESHEET, test: /\.css($|\?(?!url$))/, priority: 2 },
               {
                 name: RENDERER_CHUNK,
                 test: /\/src\/renderer\.ts$|\/node_modules\/(\.bun\/[^/]+\/node_modules\/)?(react-dom\/(client\.js|cjs\/react-dom-client\.)|scheduler\/)/,
