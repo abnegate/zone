@@ -491,7 +491,7 @@ pub(crate) async fn show_model(
     if let Err(error) = validate_model_name(name) {
         return Err(CatalogError::InvalidName(error));
     }
-    let unanswered = match request_show(state, name).await {
+    let fallback_reason = match request_show(state, name).await {
         Ok(response) => match read_show(response, name).await {
             Err(missing @ CatalogError::NotFound(_)) => missing,
             answered => return answered,
@@ -502,7 +502,7 @@ pub(crate) async fn show_model(
         Some(info) => {
             serde_json::to_value(info).map_err(|error| CatalogError::Parse(error.to_string()))
         }
-        None => Err(unanswered),
+        None => Err(fallback_reason),
     }
 }
 
