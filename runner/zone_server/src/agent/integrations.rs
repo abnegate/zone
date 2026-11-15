@@ -166,9 +166,6 @@ enum Operation {
 }
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
-    if scope.offline {
-        return;
-    }
     for operation in [
         Operation::Build,
         Operation::Deployments,
@@ -6012,41 +6009,5 @@ mod tests {
             .expect_err("a checkout that is not there cannot be pushed from");
 
         assert!(refusal.starts_with("Could not push feature"), "{refusal}");
-    }
-
-    #[tokio::test]
-    async fn an_offline_chat_is_given_no_github_tool() {
-        const NAMES: [&str; 11] = [
-            "get_build_status",
-            "list_deployments",
-            "list_issues",
-            "get_issue",
-            "read_repository_file",
-            "read_check_logs",
-            "assess_pull_requests",
-            "read_review_threads",
-            "assess_release_pipelines",
-            "create_pull_request",
-            "comment_on_issue",
-        ];
-        let registered = |offline: bool| {
-            let mut registry = ToolRegistry::new();
-            register(
-                &mut registry,
-                &WorkspaceScope {
-                    offline,
-                    ..tool(Operation::Build).scope
-                },
-            );
-            registry
-        };
-
-        let online = registered(false);
-        let offline = registered(true);
-
-        for name in NAMES {
-            assert!(online.get(name).is_some(), "{name} is offered online");
-            assert!(offline.get(name).is_none(), "{name} reaches GitHub offline");
-        }
     }
 }

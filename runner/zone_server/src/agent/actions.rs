@@ -171,9 +171,6 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         {
             continue;
         }
-        if scope.offline && matches!(action, Action::StartTask) {
-            continue;
-        }
         registry.register(Arc::new(WorkspaceAction {
             scope: scope.clone(),
             action,
@@ -755,30 +752,6 @@ mod tests {
                 "{} must not ask for a reason: {schema}",
                 tool.name()
             );
-        }
-    }
-
-    #[tokio::test]
-    async fn an_offline_chat_cannot_start_a_task_run() {
-        let registered = |offline: bool| {
-            let mut registry = ToolRegistry::new();
-            register(
-                &mut registry,
-                &WorkspaceScope {
-                    offline,
-                    ..tool(Action::StartTask).scope
-                },
-            );
-            registry
-        };
-
-        let online = registered(false);
-        let offline = registered(true);
-
-        assert!(online.get("start_task").is_some());
-        assert!(offline.get("start_task").is_none());
-        for kept in ["create_task", "get_task_run"] {
-            assert!(offline.get(kept).is_some(), "{kept} needs no network");
         }
     }
 }

@@ -123,8 +123,9 @@ pub struct WorkspaceScope {
     pub chat_id: Option<Uuid>,
     pub user_id: Uuid,
     /// When true, the agent reaches no host beyond the chat's own model
-    /// provider and Zone's model infrastructure: networked tools are withheld
-    /// or refuse with `zone_core::vpn::CHAT_OFFLINE`.
+    /// provider and Zone's model infrastructure: only the tools
+    /// [`super::offline::TOOLS`] names are offered, and those that could reach
+    /// further refuse with `zone_core::vpn::CHAT_OFFLINE`.
     pub offline: bool,
     /// Recorded on every task the turn's agent creates.
     pub origin: Origin,
@@ -646,7 +647,7 @@ impl ChatTools {
     /// for such a chat: the paragraph that teaches them renders off the
     /// catalog, so an ordinary chat is never told to plan a project.
     pub fn with_planner(mut self) -> Self {
-        let Some(scope) = self.scope.clone().filter(|scope| !scope.offline) else {
+        let Some(scope) = self.scope.clone() else {
             return self;
         };
         super::planner::register(&mut self.registry, &scope);
@@ -941,7 +942,14 @@ impl ChatTools {
             .publish_core(core.into_iter().map(listed).collect());
     }
 
+    /// Every path that registers a tool caches the catalog before it is
+    /// published or dispatched, so withholding here keeps a tool an offline
+    /// chat may not use out of the definitions, the deferred catalog that
+    /// `search_tools` and `load_tools` read, and dispatch alike.
     fn cache_catalog(&mut self) {
+        if self.offline() {
+            self.withhold_networked();
+        }
         let mut names: Vec<String> = self
             .registry
             .names()
@@ -952,6 +960,26 @@ impl ChatTools {
         self.name_set = names.iter().cloned().collect();
         self.names = names;
         self.definitions = self.registry.definitions();
+    }
+
+    fn withhold_networked(&mut self) {
+        let withheld: Vec<String> = self
+            .registry
+            .names()
+            .into_iter()
+            .filter(|name| !super::offline::allows(name))
+            .map(str::to_string)
+            .collect();
+        if withheld.is_empty() {
+            return;
+        }
+        for name in &withheld {
+            self.registry.remove(name);
+        }
+        self.core.retain(|name| super::offline::allows(name));
+        self.workspace.retain(|name| super::offline::allows(name));
+        self.remote.retain(|name| super::offline::allows(name));
+        tracing::debug!(?withheld, "Withheld tools an offline chat may not use");
     }
 
     pub fn profile(&self) -> ToolProfile {
@@ -3981,6 +4009,86 @@ mod tests {
             );
             assert!(!offline.has(name), "{name} reaches the network offline");
         }
+    }
+
+    fn everything_enabled() -> AppState {
+        let mut config = test_config();
+        config.monitoring = crate::config::MonitoringConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        config.web_search = crate::services::search::defaults().with_enabled(true);
+        config.comfyui.enabled = true;
+        AppState::new(config, lazy_pool(), None)
+    }
+
+    #[tokio::test]
+    async fn every_tool_an_offline_chat_is_offered_is_on_the_offline_list() {
+        let online = ChatTools::preview(WorkspaceScope {
+            state: everything_enabled(),
+            ..scope()
+        })
+        .await
+        .with_planner();
+        let offline = ChatTools::preview(WorkspaceScope {
+            state: everything_enabled(),
+            offline: true,
+            ..scope()
+        })
+        .await
+        .with_planner();
+
+        let withheld: Vec<&String> = online
+            .names()
+            .iter()
+            .filter(|name| !super::super::offline::allows(name))
+            .collect();
+        assert!(!withheld.is_empty(), "nothing online is withheld offline");
+        let mut offered = offline.names().to_vec();
+        offered.extend(offline.deferred().iter().map(|listed| listed.name.clone()));
+        offered.extend(offline.toolbox.core().into_iter().map(|listed| listed.name));
+        for name in offered {
+            assert!(
+                super::super::offline::allows(&name),
+                "{name} is offered offline but not on the offline list"
+            );
+        }
+        for kept in [
+            "run_shell",
+            super::super::wait::WAIT_FOR,
+            "search_knowledge",
+            "generate_image",
+        ] {
+            assert!(
+                offline.has(kept),
+                "{kept} is withheld: {:?}",
+                offline.names()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_off_the_offline_list_is_withheld_offline_and_kept_online() {
+        let registering = |offline: bool| async move {
+            let mut tools = ChatTools::preview(WorkspaceScope { offline, ..scope() }).await;
+            tools.registry.register(Arc::new(Unpreviewed));
+            tools.cache_catalog();
+            tools
+        };
+
+        let online = registering(false).await;
+        let offline = registering(true).await;
+
+        assert!(online.has("unpreviewed"), "{:?}", online.names());
+        assert!(!offline.has("unpreviewed"), "{:?}", offline.names());
+        assert!(
+            offline
+                .all_definitions()
+                .iter()
+                .all(|definition| definition.function.name != "unpreviewed")
+        );
+        let result = offline.execute("unpreviewed", "{}").await;
+        assert!(!result.success, "{result:?}");
     }
 
     const STUB: &str = "stub";

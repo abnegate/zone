@@ -24,7 +24,7 @@ const DASHBOARD_LIMIT: usize = 50;
 
 pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
     let monitoring = &scope.state.config().monitoring;
-    if !monitoring.enabled || scope.offline {
+    if !monitoring.enabled {
         return;
     }
     if !monitoring.prometheus_url.trim().is_empty() {
@@ -283,11 +283,6 @@ async fn get_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tasks::Origin;
-    use crate::state::AppState;
-    use crate::state::lazy_pool;
-    use crate::state::test_config;
-    use uuid::Uuid;
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
@@ -432,37 +427,5 @@ mod tests {
         );
         assert_eq!(value["total"], 60);
         assert_eq!(value["complete"], false);
-    }
-
-    #[tokio::test]
-    async fn an_offline_chat_is_given_no_monitoring_tool() {
-        let mut config = test_config();
-        config.monitoring = MonitoringConfig {
-            enabled: true,
-            ..MonitoringConfig::default()
-        };
-        let registered = |offline: bool| {
-            let mut registry = ToolRegistry::new();
-            register(
-                &mut registry,
-                &WorkspaceScope {
-                    state: AppState::new(config.clone(), lazy_pool(), None),
-                    workspace_id: Uuid::new_v4(),
-                    chat_id: Some(Uuid::new_v4()),
-                    user_id: Uuid::new_v4(),
-                    offline,
-                    origin: Origin::Member,
-                },
-            );
-            registry
-        };
-
-        let online = registered(false);
-        let offline = registered(true);
-
-        for name in ["query_prometheus", "list_grafana_dashboards"] {
-            assert!(online.get(name).is_some(), "{name} is offered online");
-            assert!(offline.get(name).is_none(), "{name} reaches out offline");
-        }
     }
 }

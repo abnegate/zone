@@ -93,9 +93,6 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Operation::StartTrain,
         Operation::DismissTrain,
     ] {
-        if scope.offline && matches!(operation, Operation::Install) {
-            continue;
-        }
         registry.register(Arc::new(ModelTool {
             scope: scope.clone(),
             operation,
@@ -1321,19 +1318,6 @@ mod tests {
             tool.error.as_deref(),
             Some("Invalid characters in model name")
         );
-    }
-
-    #[tokio::test]
-    async fn an_offline_chat_cannot_install_models() {
-        let mut registry = ToolRegistry::new();
-        register(&mut registry, &offline_with(AppState::for_tests()));
-        let mut names = registry.names();
-        names.sort_unstable();
-        let expected: Vec<&str> = NAMES
-            .into_iter()
-            .filter(|name| *name != "install_model")
-            .collect();
-        assert_eq!(names, expected);
     }
 
     #[tokio::test]
