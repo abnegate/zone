@@ -2,9 +2,15 @@ import { describe, expect, it } from 'bun:test';
 import {
   attachmentMetadata,
   audioAttachments,
+  dataUrlBytes,
   imageAttachments,
+  isHeicFile,
   isSendable,
   isStartingImage,
+  jpegName,
+  MAX_IMAGE_BYTES,
+  MAX_SOURCE_IMAGE_BYTES,
+  readAttachment,
   sourceAttachment,
   videoAttachments,
 } from './attachments';
@@ -146,6 +152,74 @@ describe('isSendable', () => {
         url: 'data:image/png;base64,xx',
       })
     ).toBe(true);
+  });
+});
+
+describe('HEIC attachments', () => {
+  const JPEG = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ==';
+
+  function heic(name: string, type: string, size = 2_000_000): File {
+    const file = new File([new Uint8Array(0)], name, { type });
+    Object.defineProperty(file, 'size', { value: size });
+    return file;
+  }
+
+  it('recognises a HEIC by name when the platform gives it no type', () => {
+    expect(isHeicFile({ name: 'IMG_0001.HEIC', type: '' })).toBe(true);
+    expect(isHeicFile({ name: 'IMG_0001.heif', type: 'application/octet-stream' })).toBe(true);
+    expect(isHeicFile({ name: 'IMG_0001.jpg', type: 'image/heic' })).toBe(true);
+    expect(isHeicFile({ name: 'shot.png', type: 'image/png' })).toBe(false);
+    expect(isHeicFile({ name: 'notes.heic.md', type: 'text/markdown' })).toBe(false);
+  });
+
+  it('attaches a HEIC as the JPEG the model and the browser can both read', async () => {
+    const attachment = await readAttachment(heic('IMG_0001.HEIC', 'image/heic'), {
+      transcode: async () => JPEG,
+    });
+    expect(attachment.url).toBe(JPEG);
+    expect(attachment.type).toBe('image/jpeg');
+    expect(attachment.name).toBe('IMG_0001.jpg');
+    expect(attachment.size).toBe(dataUrlBytes(JPEG));
+    expect(attachment.rejected).toBeUndefined();
+    expect(isSendable(attachment)).toBe(true);
+  });
+
+  it('says what to do when the engine has no HEIC decoder', async () => {
+    const attachment = await readAttachment(heic('IMG_0001.heic', ''), {
+      transcode: async () => null,
+    });
+    expect(attachment.rejected).toBe('HEIC needs converting to JPEG');
+    expect(attachment.url).toBeUndefined();
+  });
+
+  it('allows a phone-sized source but caps the data URL it becomes', async () => {
+    const big = `data:image/jpeg;base64,${'A'.repeat(Math.ceil((MAX_IMAGE_BYTES + 1) * (4 / 3)))}`;
+    expect(
+      (
+        await readAttachment(heic('IMG_0001.heic', 'image/heic', MAX_IMAGE_BYTES + 1), {
+          transcode: async () => big,
+        })
+      ).rejected
+    ).toBe('over 4.0 MB');
+
+    expect(
+      (
+        await readAttachment(heic('IMG_0001.heic', 'image/heic', MAX_SOURCE_IMAGE_BYTES + 1), {
+          transcode: async () => JPEG,
+        })
+      ).rejected
+    ).toBe('over 16.0 MB');
+  });
+
+  it('names the transcoded file even when the original had no extension', () => {
+    expect(jpegName('IMG_0001.HEIC')).toBe('IMG_0001.jpg');
+    expect(jpegName('photo')).toBe('photo.jpg');
+  });
+
+  it('measures a data URL by its bytes, not its characters', () => {
+    expect(dataUrlBytes('data:image/jpeg;base64,YWFh')).toBe(3);
+    expect(dataUrlBytes('data:image/jpeg;base64,YWE=')).toBe(2);
+    expect(dataUrlBytes('data:image/jpeg;base64,YQ==')).toBe(1);
   });
 });
 

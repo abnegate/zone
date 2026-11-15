@@ -69,6 +69,23 @@ export const MAX_ATTACHMENT_BYTES = 256 * 1024;
 /// Images travel to the model as base64 data URLs, so the cap is what is
 /// reasonable to put in a request body and a jsonb column, not a disk limit.
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+/// A phone photo is routinely bigger than a data URL should be, and a HEIC one
+/// is resampled before it becomes a URL, so its source is held to a wider cap.
+export const MAX_SOURCE_IMAGE_BYTES = 16 * 1024 * 1024;
+/// Long edge a transcoded photo is sampled down to. Vision models read about
+/// this many pixels, and it keeps the re-encoded JPEG inside MAX_IMAGE_BYTES.
+export const MAX_IMAGE_EDGE = 1568;
+const JPEG_QUALITY = 0.9;
+
+// No model takes HEIC and no engine but WebKit draws it, so a HEIC attachment
+// is decoded and re-encoded as JPEG rather than previewed and sent as it came.
+const HEIC_TYPES = new Set([
+  'image/heic',
+  'image/heif',
+  'image/heic-sequence',
+  'image/heif-sequence',
+]);
+const HEIC_EXTENSIONS = new Set(['heic', 'heif', 'hif']);
 
 export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -80,13 +97,70 @@ export function isTextFile(file: File): boolean {
   if (file.type.startsWith('text/')) return true;
   if (/^application\/(json|xml|x-yaml|yaml|toml|javascript|typescript)$/.test(file.type))
     return true;
-  const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+  const extension = extensionOf(file.name);
   return TEXT_EXTENSIONS.has(extension);
 }
+
+function extensionOf(name: string): string {
+  return name.split('.').pop()?.toLowerCase() ?? '';
+}
+
+/** A phone's HEIC arrives with no type at all on platforms that do not map it,
+ * where the type alone would have it rejected as an unsupported file. */
+export function isHeicFile(file: { name: string; type: string }): boolean {
+  const type = file.type.toLowerCase();
+  if (HEIC_TYPES.has(type)) return true;
+  if (type && type !== 'application/octet-stream') return false;
+  return HEIC_EXTENSIONS.has(extensionOf(file.name));
+}
+
+/** The name the transcoded attachment carries, since it is no longer a HEIC. */
+export function jpegName(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return `${dot > 0 ? name.slice(0, dot) : name}.jpg`;
+}
+
+/** Bytes behind a base64 data URL, which is what the size cap is really about. */
+export function dataUrlBytes(url: string): number {
+  const base64 = url.slice(url.indexOf(',') + 1);
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+/** Decode-and-re-encode seam: null when this engine has no decoder for the file. */
+export type Transcoder = (file: Blob) => Promise<string | null>;
+
+export const toJpegDataUrl: Transcoder = async (file) => {
+  if (typeof createImageBitmap !== 'function') return null;
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    return null;
+  }
+  try {
+    const longest = Math.max(bitmap.width, bitmap.height, 1);
+    const scale = Math.min(1, MAX_IMAGE_EDGE / longest);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    // A canvas with no JPEG encoder hands back the PNG it defaults to.
+    const url = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+    return url.startsWith('data:image/jpeg;base64,') ? url : null;
+  } catch {
+    return null;
+  } finally {
+    bitmap.close();
+  }
+};
 
 type ReadOptions = {
   signal?: AbortSignal;
   onProgress?: (fraction: number) => void;
+  transcode?: Transcoder;
 };
 
 const ReadFormat = {
@@ -142,6 +216,10 @@ export async function readAttachment(file: File, options: ReadOptions = {}): Pro
     type: file.type,
   };
 
+  if (isHeicFile(file)) {
+    return readTranscoded(file, base, options);
+  }
+
   if (file.type.startsWith('image/')) {
     if (file.size > MAX_IMAGE_BYTES) {
       return { ...base, rejected: `over ${formatBytes(MAX_IMAGE_BYTES)}` };
@@ -168,6 +246,34 @@ export async function readAttachment(file: File, options: ReadOptions = {}): Pro
     if (isCancelled(error)) throw error;
     return { ...base, rejected: 'could not be read' };
   }
+}
+
+/** Re-encode an image the model and the browser cannot take as it came. The
+ * file is decoded whole rather than streamed, so progress only has two points. */
+async function readTranscoded(
+  file: File,
+  base: { id: string; name: string; size: number; type: string },
+  options: ReadOptions
+): Promise<Attachment> {
+  const { signal, onProgress, transcode = toJpegDataUrl } = options;
+  if (signal?.aborted) throw cancelled();
+  if (file.size > MAX_SOURCE_IMAGE_BYTES) {
+    return { ...base, rejected: `over ${formatBytes(MAX_SOURCE_IMAGE_BYTES)}` };
+  }
+
+  const url = await transcode(file);
+  if (signal?.aborted) throw cancelled();
+  if (!url) {
+    return { ...base, rejected: 'HEIC needs converting to JPEG' };
+  }
+
+  const size = dataUrlBytes(url);
+  if (size > MAX_IMAGE_BYTES) {
+    return { ...base, rejected: `over ${formatBytes(MAX_IMAGE_BYTES)}` };
+  }
+
+  onProgress?.(1);
+  return { ...base, name: jpegName(file.name), type: 'image/jpeg', size, url };
 }
 
 /** Fence an attachment's content so the model sees where the file starts and ends. */
