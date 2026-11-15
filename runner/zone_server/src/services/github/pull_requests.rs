@@ -389,7 +389,7 @@ pub async fn merge(
         Err(_) => false,
     };
     if outdated {
-        state.github_snapshots().invalidate(source_id);
+        state.github_snapshots().forget(source_id);
     }
     merged
 }

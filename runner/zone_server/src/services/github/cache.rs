@@ -93,6 +93,12 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
         }
     }
 
+    pub fn forget(&self, key: &K) {
+        if let Some(slot) = self.slots.get(key) {
+            slot.forget();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn holds(&self, key: &K) -> bool {
         self.slots.contains_key(key)

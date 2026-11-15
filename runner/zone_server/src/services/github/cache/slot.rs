@@ -59,6 +59,10 @@ impl<T> Slot<T> {
         self.entry().expire();
     }
 
+    pub(super) fn forget(&self) {
+        self.entry().forget();
+    }
+
     pub(super) fn touch(&self, now: DateTime<Utc>) {
         self.entry().touch(now);
     }

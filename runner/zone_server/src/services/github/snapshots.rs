@@ -47,6 +47,12 @@ impl Snapshots {
         self.options.invalidate(&source_id);
     }
 
+    pub fn forget(&self, source_id: Uuid) {
+        self.pull_requests.forget(&source_id);
+        self.releases.invalidate(&source_id);
+        self.options.invalidate(&source_id);
+    }
+
     pub fn try_release(&self, source_id: Uuid) -> Option<ReleasingGuard> {
         ReleasingGuard::claim(&self.releasing, source_id)
     }

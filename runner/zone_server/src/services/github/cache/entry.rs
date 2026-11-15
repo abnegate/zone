@@ -18,6 +18,7 @@ pub(super) struct Entry<T> {
     used_at: Option<DateTime<Utc>>,
     expired: bool,
     epoch: u64,
+    forgotten: u64,
 }
 
 impl<T> Default for Entry<T> {
@@ -29,6 +30,7 @@ impl<T> Default for Entry<T> {
             used_at: None,
             expired: false,
             epoch: 0,
+            forgotten: 0,
         }
     }
 }
@@ -81,6 +83,9 @@ impl<T> Entry<T> {
         match fetched {
             Ok(value) => {
                 let snapshot = Snapshot::new(value, now);
+                if epoch < self.forgotten {
+                    return Ok((snapshot, Freshness::Refreshed));
+                }
                 self.snapshot = Some(snapshot.clone());
                 self.failure = None;
                 self.retry_after = None;
@@ -105,6 +110,12 @@ impl<T> Entry<T> {
     pub(super) fn expire(&mut self) {
         self.expired = true;
         self.epoch += 1;
+    }
+
+    pub(super) fn forget(&mut self) {
+        self.snapshot = None;
+        self.expire();
+        self.forgotten = self.epoch;
     }
 
     pub(super) fn touch(&mut self, now: DateTime<Utc>) {

@@ -105,6 +105,31 @@ async fn invalidating_a_source_expires_every_read_of_it_and_nothing_else() {
     );
 }
 
+#[tokio::test]
+async fn forgetting_a_source_drops_its_pull_requests_and_expires_the_rest() {
+    let snapshots = Snapshots::new(&GithubConfig::default());
+    let forgotten = Uuid::new_v4();
+    let untouched = Uuid::new_v4();
+    freshness(&snapshots, forgotten).await;
+    freshness(&snapshots, untouched).await;
+
+    snapshots.forget(forgotten);
+
+    assert!(
+        snapshots.pull_requests.peek(&forgotten).is_none(),
+        "no pull request verdict outlives the forget"
+    );
+    assert!(snapshots.releases.peek(&forgotten).is_some());
+    assert_eq!(
+        freshness(&snapshots, forgotten).await,
+        [Freshness::Refreshed; 3]
+    );
+    assert_eq!(
+        freshness(&snapshots, untouched).await,
+        [Freshness::Cached; 3]
+    );
+}
+
 #[test]
 fn one_release_runs_per_source_at_a_time() {
     let snapshots = Snapshots::new(&GithubConfig::default());

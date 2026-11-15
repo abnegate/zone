@@ -638,7 +638,7 @@ fn every_refusal_carries_the_code_the_console_reads() {
 }
 
 #[test]
-fn only_a_refusal_about_what_changed_on_github_outdates_the_listing() {
+fn every_refusal_but_branch_protection_outdates_the_listing() {
     for (refusal, outdates) in [
         (
             Refusal::HeadMoved {
@@ -649,7 +649,7 @@ fn only_a_refusal_about_what_changed_on_github_outdates_the_listing() {
         (Refusal::Conflict, true),
         (Refusal::Merged, true),
         (Refusal::Closed, true),
-        (Refusal::NotReady { blockers: vec![] }, false),
+        (Refusal::NotReady { blockers: vec![] }, true),
         (Refusal::Protected, false),
     ] {
         assert_eq!(refusal.outdates(), outdates, "{refusal:?}");

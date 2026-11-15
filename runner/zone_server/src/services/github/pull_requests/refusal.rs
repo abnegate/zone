@@ -50,7 +50,11 @@ impl Refusal {
     pub fn outdates(&self) -> bool {
         matches!(
             self,
-            Self::HeadMoved { .. } | Self::Conflict | Self::Merged | Self::Closed
+            Self::HeadMoved { .. }
+                | Self::NotReady { .. }
+                | Self::Conflict
+                | Self::Merged
+                | Self::Closed
         )
     }
 }

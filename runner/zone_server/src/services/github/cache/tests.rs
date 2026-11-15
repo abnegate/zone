@@ -377,6 +377,80 @@ async fn an_invalidated_snapshot_is_fetched_again_with_what_it_had() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_forgotten_snapshot_is_fetched_again_from_nothing() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    seeded(&cache, OTHER, start, 70).await;
+
+    cache.forget(&KEY);
+
+    assert!(cache.peek(&KEY).is_none(), "nothing forgotten is served");
+    let (snapshot, freshness) = cache
+        .read(KEY, false, later(start, 1), |previous| async move {
+            assert_eq!(previous, None, "a forgotten snapshot is not reused");
+            Ok(8)
+        })
+        .await
+        .expect("a forgotten snapshot is fetched");
+    assert_eq!(freshness, Freshness::Refreshed);
+    assert_eq!(*snapshot.value, 8);
+    let (snapshot, freshness) = cache
+        .read(OTHER, false, later(start, 1), never)
+        .await
+        .expect("another key keeps its snapshot");
+    assert_eq!(freshness, Freshness::Cached);
+    assert_eq!(*snapshot.value, 70);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_snapshot_forgotten_while_it_was_fetched_is_not_reused() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let writer = &cache;
+
+    let (snapshot, _) = cache
+        .read(KEY, true, later(start, 60), move |_| async move {
+            writer.forget(&KEY);
+            Ok(8)
+        })
+        .await
+        .expect("the read that raced the forget still answers");
+    assert_eq!(*snapshot.value, 8);
+
+    let (snapshot, freshness) = cache
+        .read(KEY, false, later(start, 61), |previous| async move {
+            assert_eq!(previous, None, "what predates the forget is not reused");
+            Ok(9)
+        })
+        .await
+        .expect("what predates the forget is fetched again");
+    assert_eq!(freshness, Freshness::Refreshed);
+    assert_eq!(*snapshot.value, 9);
+}
+
+#[tokio::test(start_paused = true)]
+async fn forgetting_a_snapshot_keeps_its_rate_limit_backoff() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let limited = later(start, 60);
+    cache
+        .read(KEY, false, limited, |_| async { Err(exhausted()) })
+        .await
+        .expect("the previous snapshot is served");
+
+    cache.forget(&KEY);
+
+    let fault = cache
+        .read(KEY, true, limited + TimeDelta::seconds(1), never)
+        .await
+        .expect_err("the backoff refuses without asking");
+    assert_eq!(fault, exhausted());
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_snapshot_invalidated_while_it_was_fetched_is_fetched_again() {
     let cache = cache();
     let start = Utc::now();

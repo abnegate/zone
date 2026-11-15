@@ -1707,6 +1707,38 @@ async fn a_moved_head_drops_the_cached_listing() {
 }
 
 #[tokio::test]
+async fn a_merge_refused_as_not_ready_drops_the_ready_verdict_it_contradicts() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.list(&[Pull::ready()]).await;
+    let listing = board.listed("").await;
+    assert_eq!(numbers(&listing), [(1, "ready".to_string(), 1)]);
+    board.hub.server.reset().await;
+    board
+        .hub
+        .list(&[Pull {
+            mergeable_state: DIRTY,
+            ..Pull::ready()
+        }])
+        .await;
+
+    let (status, body) = board.merge(1, json!({"expected_head": READY_HEAD})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("not_ready"));
+    assert_eq!(body["blockers"][0]["code"], json!("merge_conflict"));
+
+    let again = board.listed("").await;
+    assert_eq!(
+        numbers(&again),
+        [(1, "not_ready".to_string(), 1)],
+        "the listing no longer shows the verdict the merge contradicted: {again}"
+    );
+    assert_eq!(
+        again["pull_requests"][0]["blockers"][0]["code"],
+        json!("merge_conflict")
+    );
+}
+
+#[tokio::test]
 async fn a_merged_or_closed_pull_request_is_refused_for_what_it_is() {
     let board = Board::new(Hub::hosted().await).await;
     for (number, state, merged, code) in [
