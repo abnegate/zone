@@ -1462,6 +1462,7 @@ mod show_tests {
             .and(path("/api/models/owner/repository"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "id": "owner/repository",
+                "gguf": {"totalFileSize": 4096},
                 "siblings": [{"rfilename": "model-Q4_K_M.gguf", "size": 4096}],
             })))
             .expect(expected)

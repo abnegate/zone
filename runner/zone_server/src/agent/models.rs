@@ -1323,8 +1323,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_offline_chat_cannot_install_models() {
+    #[tokio::test]
+    async fn an_offline_chat_cannot_install_models() {
         let mut registry = ToolRegistry::new();
         register(&mut registry, &offline_with(AppState::for_tests()));
         let mut names = registry.names();
