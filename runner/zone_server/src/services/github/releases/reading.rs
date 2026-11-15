@@ -23,6 +23,8 @@ use super::catalogue::Catalogue;
 use super::failure::RELEASE_MISSING;
 use super::lookups::Lookups;
 use super::notes::Notes;
+use crate::services::checkout::AUTHOR_EMAIL;
+use crate::services::checkout::AUTHOR_NAME;
 use crate::services::github::client::Github;
 use crate::services::github::client::PER_PAGE;
 use crate::services::github::connection::ConnectedSource;
@@ -36,8 +38,6 @@ use crate::services::github::release::RunEvidence;
 use crate::services::github::throttle::admitted;
 
 const RELEASE_PAGES: u32 = 10;
-const TAGGER_NAME: &str = "Zone";
-const TAGGER_EMAIL: &str = "zone@users.noreply.github.com";
 const UNLINKED_RELEASE: &str = "GitHub returned the release without a usable link.";
 
 impl Github {
@@ -314,7 +314,7 @@ impl Github {
         message: &str,
         commit: CommitSha,
     ) -> Result<ObjectId, PullRequestError> {
-        let request = TagRequest::new(tag, message, commit, Tagger::new(TAGGER_NAME, TAGGER_EMAIL));
+        let request = TagRequest::new(tag, message, commit, Tagger::new(AUTHOR_NAME, AUTHOR_EMAIL));
         self.service()
             .create_tag(self.repository(), self.token(), &request)
             .await
