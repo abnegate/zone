@@ -4,17 +4,12 @@ use zone_core::llm::BuiltinTools;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Confinement {
-    /// `chats.agent_sandboxed`: the agent gets zone's tools and nothing else.
     pub(super) sandboxed: bool,
-    /// `chats.offline`: the agent reaches no network on the chat's behalf.
     pub(super) offline: bool,
 }
 
 impl Confinement {
-    /// An unsandboxed chat leaves the agent the file and shell tools it ships with, which run
-    /// outside zone. Claude asks zone before running one, under the chat's approval policy;
-    /// codex's are confined by its sandbox alone. An offline chat withholds them too: they reach
-    /// the network without zone seeing it.
+    /// The agent's own tools reach the host and the network without zone gating them.
     pub(super) const fn builtin_tools(self) -> BuiltinTools {
         match self.sandboxed || self.offline {
             true => BuiltinTools::Withheld,
@@ -27,8 +22,6 @@ impl Confinement {
 mod tests {
     use super::*;
 
-    /// Zone's tools reach a spawned coding agent over MCP (see `crate::mcp`), and the agent's own
-    /// tools survive beside them only in a chat that is neither sandboxed nor offline.
     #[test]
     fn only_an_unsandboxed_online_chat_keeps_the_agents_own_tools() {
         for (sandboxed, offline, kept) in [
