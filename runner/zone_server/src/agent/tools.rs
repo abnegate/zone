@@ -123,10 +123,8 @@ pub struct WorkspaceScope {
     pub chat_id: Option<Uuid>,
     pub user_id: Uuid,
     /// When true, the agent reaches no host beyond the chat's own model
-    /// provider and Zone's model infrastructure: MCP servers, GitHub
-    /// integrations, monitoring, project planning and starting task runs are
-    /// withheld, and every other networked tool refuses with
-    /// `zone_core::vpn::CHAT_OFFLINE`.
+    /// provider and Zone's model infrastructure: networked tools are withheld
+    /// or refuse with `zone_core::vpn::CHAT_OFFLINE`.
     pub offline: bool,
     /// Recorded on every task the turn's agent creates.
     pub origin: Origin,
