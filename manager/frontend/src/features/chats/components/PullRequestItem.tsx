@@ -18,6 +18,8 @@ export interface PullRequestItemProps {
   pullRequest: ChatPullRequest;
   busy: boolean;
   onChange: (pullRequest: ChatPullRequest, change: PullRequestChange) => void;
+  /** Asked for a merge, which is confirmed before anything reaches GitHub. */
+  onMerge: (pullRequest: ChatPullRequest) => void;
   onViewChanges: (pullRequest: ChatPullRequest) => void;
   onCopied: (pullRequest: ChatPullRequest, copied: boolean) => void;
 }
@@ -26,6 +28,7 @@ const OPEN_ICON = 'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1
 const COPY_ICON = 'M9 9h10v10H9zM5 15V5h10';
 const CHANGES_ICON = 'M12 5v14M5 12h14M5 20h14';
 const MERGE_ICON = 'M6 3v8a5 5 0 0 0 5 5h8M16 13l3 3-3 3';
+const MERGE_NOW_ICON = 'M7 4v16M7 9a6 6 0 0 0 6 6h4M13 12l4 3-4 3';
 const DRAFT_ICON = 'M4 20h4l10-10-4-4L4 16v4ZM13 7l4 4';
 const FIX_ICON = 'M14.7 6.3a4 4 0 0 1-5 5L5 16v3h3l4.7-4.7a4 4 0 0 0 5-5l-2.4 2.4-2.1-2.1Z';
 const DISMISS_ICON = 'M18 6 6 18M6 6l12 12';
@@ -33,6 +36,7 @@ const DISMISS_ICON = 'M18 6 6 18M6 6l12 12';
 function menuItems({
   pullRequest,
   onChange,
+  onMerge,
   onViewChanges,
   onCopied,
 }: PullRequestItemProps): ActionMenuItem[] {
@@ -67,8 +71,16 @@ function menuItems({
   if (open) {
     const autoMerge = status.auto_merge;
     const mergeHint = readOnly ?? unreachable ?? autoMerge.unavailable ?? undefined;
+    const mergeNowHint = readOnly ?? unreachable ?? status.merge_unavailable ?? undefined;
     const draftHint = readOnly ?? unreachable ?? status.draft_unavailable ?? undefined;
     items.push(
+      {
+        label: 'Merge now',
+        icon: <MenuIcon path={MERGE_NOW_ICON} />,
+        disabled: Boolean(mergeNowHint),
+        hint: mergeNowHint,
+        onSelect: () => onMerge(pullRequest),
+      },
       {
         label: autoMerge.enabled ? 'Cancel auto-merge' : 'Merge when ready',
         icon: <MenuIcon path={MERGE_ICON} />,

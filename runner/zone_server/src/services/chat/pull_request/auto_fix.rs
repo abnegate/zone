@@ -403,6 +403,7 @@ mod tests {
                 unavailable: None,
             },
             draft_unavailable: None,
+            merge_unavailable: None,
             threads: None,
             observed_at: Utc::now(),
         }

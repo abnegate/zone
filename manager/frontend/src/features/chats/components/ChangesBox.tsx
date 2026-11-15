@@ -4,6 +4,7 @@ import type { ChatPullRequest } from '../types';
 import { panelKey } from '../utils/panel';
 import { pullRequestName } from '../utils/pullRequests';
 import { DiffModal } from './DiffModal';
+import { MergeDialog } from './MergeDialog';
 import { PanelBox } from './PanelBox';
 import { PullRequestItem } from './PullRequestItem';
 
@@ -14,8 +15,9 @@ export interface ChangesBoxProps {
 }
 
 export function ChangesBox({ chatId, userId, changes }: ChangesBoxProps): ReactElement {
-  const { pullRequests, dismissed, pending, error, change, undo } = changes;
+  const { pullRequests, dismissed, pending, error, change, merge, undo } = changes;
   const [viewing, setViewing] = useState<ChatPullRequest | null>(null);
+  const [merging, setMerging] = useState<ChatPullRequest | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const list = useRef<HTMLUListElement>(null);
   const undoButton = useRef<HTMLButtonElement>(null);
@@ -55,6 +57,10 @@ export function ChangesBox({ chatId, userId, changes }: ChangesBoxProps): ReactE
                 setNotice(null);
                 void change(target, requested);
               }}
+              onMerge={(target) => {
+                setNotice(null);
+                setMerging(target);
+              }}
               onViewChanges={setViewing}
               onCopied={(target, copied) =>
                 setNotice(
@@ -92,6 +98,18 @@ export function ChangesBox({ chatId, userId, changes }: ChangesBoxProps): ReactE
         </p>
       )}
       <DiffModal chatId={chatId} pullRequest={viewing} onClose={() => setViewing(null)} />
+      <MergeDialog
+        pullRequest={merging}
+        busy={merging !== null && pending.has(merging.id)}
+        onConfirm={(target) => {
+          setNotice(null);
+          void merge(target).then((merged) => {
+            setMerging(null);
+            if (merged) setNotice(`Merged ${pullRequestName(target)}.`);
+          });
+        }}
+        onClose={() => setMerging(null)}
+      />
     </PanelBox>
   );
 }

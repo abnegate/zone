@@ -18,6 +18,11 @@ export interface ChatPullRequests {
   error: string | null;
   refresh: () => Promise<void>;
   change: (pullRequest: ChatPullRequest, change: PullRequestChange) => Promise<void>;
+  /**
+   * Merges it on GitHub now, answering whether GitHub took the merge. Nothing
+   * afterwards takes that back.
+   */
+  merge: (pullRequest: ChatPullRequest) => Promise<boolean>;
   undo: () => Promise<void>;
 }
 
@@ -112,15 +117,21 @@ export function useChatPullRequests(chatId: string | null, streaming: boolean): 
     []
   );
 
-  const change = useCallback(
-    async (pullRequest: ChatPullRequest, requested: PullRequestChange) => {
-      if (!chatId) return;
+  /// Asks the server for a pull request as it stands after `request`, and
+  /// shows that answer in place of the row it came from.
+  const applying = useCallback(
+    async (
+      pullRequest: ChatPullRequest,
+      request: (chat: string) => Promise<ChatPullRequest>,
+      fallback: string
+    ): Promise<boolean> => {
+      if (!chatId) return false;
       const current = generation.current;
       mark(pullRequest.id, true);
       setError(null);
       try {
-        const updated = await chatsApi.updateChatPullRequest(chatId, pullRequest.id, requested);
-        if (current !== generation.current) return;
+        const updated = await request(chatId);
+        if (current !== generation.current) return false;
         read.current += 1;
         cached.pullRequests.update(chatId, (rows) => applied(rows, updated));
         setListing((last) => ({
@@ -133,9 +144,10 @@ export function useChatPullRequests(chatId: string | null, streaming: boolean): 
         setDismissed((last) =>
           updated.dismissed ? updated : last?.id === updated.id ? null : last
         );
+        return true;
       } catch (failure) {
-        if (current !== generation.current) return;
-        setError(message(failure, 'Failed to update the pull request'));
+        if (current === generation.current) setError(message(failure, fallback));
+        return false;
       } finally {
         mark(pullRequest.id, false);
       }
@@ -143,9 +155,30 @@ export function useChatPullRequests(chatId: string | null, streaming: boolean): 
     [chatId, mark]
   );
 
+  const change = useCallback(
+    async (pullRequest: ChatPullRequest, requested: PullRequestChange) => {
+      await applying(
+        pullRequest,
+        (chat) => chatsApi.updateChatPullRequest(chat, pullRequest.id, requested),
+        'Failed to update the pull request'
+      );
+    },
+    [applying]
+  );
+
+  const merge = useCallback(
+    (pullRequest: ChatPullRequest) =>
+      applying(
+        pullRequest,
+        (chat) => chatsApi.mergeChatPullRequest(chat, pullRequest.id),
+        'Failed to merge the pull request'
+      ),
+    [applying]
+  );
+
   const undo = useCallback(async () => {
     if (dismissed) await change(dismissed, { dismissed: false });
   }, [change, dismissed]);
 
-  return { pullRequests, dismissed, pending, error, refresh, change, undo };
+  return { pullRequests, dismissed, pending, error, refresh, change, merge, undo };
 }
