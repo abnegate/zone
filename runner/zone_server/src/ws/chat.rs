@@ -69,10 +69,12 @@ use crate::state::AppState;
 use crate::workers::embeddings::spawn_message_embedding_task;
 use abnegate_search::{SearchContext, SearchHit, SearxngClient, sanitize_query};
 
+mod confinement;
 mod ending;
 pub mod job;
 mod queue;
 
+use confinement::Confinement;
 use ending::Ending;
 use queue::{Finished, Interrupted, Queued, Started};
 
@@ -3274,23 +3276,22 @@ async fn displacement(state: &AppState, chat_id: Uuid, reason: String) -> Option
 async fn project_directory(
     state: &AppState,
     stream: &ChatStream,
-    chat_id: Uuid,
+    chat: &chats::ChatRow,
     workspace_id: Uuid,
-    agentic: bool,
-    offline: bool,
 ) -> (Option<std::path::PathBuf>, Option<String>) {
-    match project_directory::locate(state, chat_id, workspace_id).await {
+    match project_directory::locate(state, chat.id, workspace_id).await {
         Start::Elsewhere => (None, None),
         Start::Directory(directory) => (Some(directory), None),
-        Start::Missing(_) | Start::Unavailable(_) if !agentic => (None, None),
+        Start::Missing(_) | Start::Unavailable(_) if !chat.agent_enabled => (None, None),
         Start::Unavailable(reason) => (None, Some(reason)),
-        Start::Missing(missing) => cloned(stream, chat_id, missing, offline).await,
+        Start::Missing(missing) => cloned(state, stream, chat.id, missing, chat.offline).await,
     }
 }
 
 /// The project's repository, cloned for this turn. An offline chat reaches no network, so it
-/// starts without one rather than clone it.
+/// starts without one rather than clone it, or resolve the credential it would clone with.
 async fn cloned(
+    state: &AppState,
     stream: &ChatStream,
     chat_id: Uuid,
     missing: project_directory::Missing,
@@ -3312,7 +3313,7 @@ async fn cloned(
         },
     )
     .await;
-    match missing.clone_repository().await {
+    match missing.clone_repository(state).await {
         Ok(directory) => (Some(directory), None),
         Err(reason) => {
             tracing::warn!(%chat_id, %reason, "Could not clone the project's repository");
@@ -3333,15 +3334,7 @@ async fn prepare_chat(
     route: Route,
     web_search_requested: bool,
 ) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
-    let (directory, displaced) = project_directory(
-        state,
-        stream,
-        chat_id,
-        workspace_id,
-        chat.agent_enabled,
-        chat.offline,
-    )
-    .await;
+    let (directory, displaced) = project_directory(state, stream, &chat, workspace_id).await;
     let previous = match chats::session(state.db(), chat_id).await {
         Ok(previous) => previous,
         Err(error) => {
@@ -3654,19 +3647,6 @@ async fn pin(
     }
 }
 
-/// A sandboxed chat (`chats.agent_sandboxed`) gives the agent zone's tools and
-/// nothing else. An unsandboxed one leaves it the file and shell tools it
-/// ships with, which run outside zone. Claude asks zone before running one,
-/// under the chat's approval policy; codex's are confined by its sandbox alone.
-/// An offline chat withholds them too: they reach the network without zone
-/// seeing it.
-fn builtin_tools(sandboxed: bool, offline: bool) -> BuiltinTools {
-    match sandboxed || offline {
-        true => BuiltinTools::Withheld,
-        false => BuiltinTools::Granted,
-    }
-}
-
 /// A turn's coding agent reaches the turn's tools only when it is served them,
 /// but is watched either way. Both belong to the backend they were attached
 /// to, so a turn that moves to another backend equips it again.
@@ -3730,7 +3710,7 @@ async fn handle_chat_generation(
         driver,
     } = preparation;
     let offline = tools.offline();
-    let builtin = builtin_tools(sandboxed, offline);
+    let builtin = Confinement { sandboxed, offline }.builtin_tools();
     let origin = tools.origin();
     let directory = tools.working_directory().to_path_buf();
     let mut replay = context.clone();
@@ -10101,26 +10081,6 @@ cat 'DIR/reply.jsonl'
         );
     }
 
-    /// Zone's tools reach a spawned coding agent over MCP (see `crate::mcp`),
-    /// and the agent's own tools survive beside them only in a chat that is
-    /// neither sandboxed nor offline.
-    #[test]
-    fn only_an_unsandboxed_online_chat_keeps_the_agents_own_tools() {
-        for (sandboxed, offline, kept) in [
-            (false, false, BuiltinTools::Granted),
-            (true, false, BuiltinTools::Withheld),
-            (false, true, BuiltinTools::Withheld),
-            (true, true, BuiltinTools::Withheld),
-        ] {
-            assert_eq!(
-                builtin_tools(sandboxed, offline),
-                kept,
-                "sandboxed {sandboxed}, offline {offline}: the agent's own tools reach the \
-                 network and the machine without zone gating them"
-            );
-        }
-    }
-
     #[tokio::test]
     async fn an_offline_chat_records_no_pull_requests() {
         let state = AppState::for_tests();
@@ -10150,7 +10110,7 @@ cat 'DIR/reply.jsonl'
             &root.path().join("clones"),
             Uuid::new_v4(),
             abnegate_vcs::RepositoryUrl::local(&bare).expect("a local repository"),
-            None,
+            project_directory::Access::Anonymous,
         );
         (root, missing)
     }
@@ -10161,7 +10121,14 @@ cat 'DIR/reply.jsonl'
         let (_root, missing) = uncloned();
         let destination = missing.destination().to_path_buf();
 
-        let (directory, reason) = cloned(&ChatStream::of(chat_id), chat_id, missing, true).await;
+        let (directory, reason) = cloned(
+            &AppState::for_tests(),
+            &ChatStream::of(chat_id),
+            chat_id,
+            missing,
+            true,
+        )
+        .await;
 
         assert_eq!(directory, None);
         let reason = reason.expect("the chat is told why it has no checkout");
@@ -10178,7 +10145,14 @@ cat 'DIR/reply.jsonl'
         let (_root, missing) = uncloned();
         let destination = missing.destination().to_path_buf();
 
-        let (directory, reason) = cloned(&ChatStream::of(chat_id), chat_id, missing, false).await;
+        let (directory, reason) = cloned(
+            &AppState::for_tests(),
+            &ChatStream::of(chat_id),
+            chat_id,
+            missing,
+            false,
+        )
+        .await;
 
         assert_eq!(reason, None);
         assert_eq!(directory.as_deref(), Some(destination.as_path()));

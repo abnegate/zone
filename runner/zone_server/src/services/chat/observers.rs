@@ -9,8 +9,7 @@ use super::pull_request::Recorder;
 use super::subagent::Tracker;
 
 /// A turn's agent takes one observer, so the pull requests it opens and the
-/// subagents it starts are watched through this one. A turn with no recorder
-/// leaves the pull requests it opens unrecorded.
+/// subagents it starts are watched through this one.
 pub struct Observers {
     pull_requests: Option<Recorder>,
     subagents: Tracker,
