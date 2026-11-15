@@ -342,6 +342,15 @@ Describe how you tested your changes
 1. [CodeRabbit](https://coderabbit.ai) posts an AI review on the pull request
    (free for this public repository). On repositories with fewer than 10 stars,
    trigger it with `@coderabbitai review` or `@coderabbitai full review`.
+   CodeRabbit's App refuses a pull request whose author GitHub reports as a bot,
+   which is every pull request Zone opens through its GitHub App: its check ends
+   "Review skipped: bot user not eligible for review", because a GitHub App never
+   holds a CodeRabbit seat. The `CodeRabbit Bot PR Review` workflow covers those
+   by running the CodeRabbit CLI, which authenticates with an Agentic API key
+   instead of the author's seat, and posting the findings as a comment. It needs
+   a `CODERABBIT_API_KEY` repository secret holding an Agentic API key from an
+   organization where the key's owner has a seat; without it the workflow says so
+   and stops. CLI reviews draw on that owner's review allowance.
 2. GitHub Actions CI runs lint, tests, and other checks
 3. A maintainer reviews the change
 4. Address review feedback

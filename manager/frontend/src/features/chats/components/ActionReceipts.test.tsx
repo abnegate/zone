@@ -203,10 +203,10 @@ describe('ActionReceipts', () => {
     expect(link).toHaveAttribute('href', '/wiki?id=5d0c7e1a-6b2f-4c3d-9e8a-1f2b3c4d5e6f');
   });
 
-  it('marks a discovery that was not recorded', () => {
+  it('says nothing about a discovery that was not recorded', () => {
     const refusal =
       'Not recorded: that looks like a credential, a connection string carrying a password, or a long run of letters and digits such as a full commit hash. Name the variable rather than its value, or shorten the value.';
-    renderReceipts([
+    const { container } = renderReceipts([
       receipt({
         action: 'record_discovery',
         target_type: 'document',
@@ -218,11 +218,27 @@ describe('ActionReceipts', () => {
       }),
     ]);
 
-    expect(screen.getByTestId('action-receipt')).toHaveClass('action-receipt--failed');
-    expect(screen.getByText('Record discovery failed')).toBeInTheDocument();
-    expect(screen.getByText('Discovery')).toBeInTheDocument();
-    expect(screen.getByText(refusal)).toBeInTheDocument();
-    expect(screen.queryByText('record_discovery failed')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('action-receipt-link')).not.toBeInTheDocument();
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText(refusal)).not.toBeInTheDocument();
+  });
+
+  it('still shows the writes around a discovery it could not record', () => {
+    renderReceipts([
+      receipt({ id: 'task' }),
+      receipt({
+        id: 'discovery',
+        action: 'record_discovery',
+        target_type: 'document',
+        target_id: '',
+        target_label: 'Discovery',
+        success: false,
+        outcome: 'Not recorded.',
+        href: '',
+      }),
+    ]);
+
+    expect(screen.getAllByTestId('action-receipt')).toHaveLength(1);
+    expect(screen.getByText('Created task')).toBeInTheDocument();
+    expect(screen.queryByText('Record discovery failed')).not.toBeInTheDocument();
   });
 });
