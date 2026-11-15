@@ -32,6 +32,16 @@ export const CheckStateSchema = z.enum(['success', 'failure', 'pending', 'none',
 
 export const CheckKindSchema = z.enum(['workflow', 'check_run', 'status', 'unknown']);
 
+export const MergeabilitySchema = z.enum([
+  'clean',
+  'blocked',
+  'behind',
+  'conflicted',
+  'unstable',
+  'draft',
+  'unknown',
+]);
+
 export const FileStatusSchema = z.enum([
   'added',
   'removed',
@@ -61,6 +71,8 @@ const KnownReadinessSchema = ReadinessSchema.catch(ReadinessSchema.enum.not_read
 const KnownCheckStateSchema = CheckStateSchema.catch(CheckStateSchema.enum.unknown);
 
 const KnownCheckKindSchema = CheckKindSchema.catch(CheckKindSchema.enum.unknown);
+
+const KnownMergeabilitySchema = MergeabilitySchema.catch(MergeabilitySchema.enum.unknown);
 
 const KnownFileStatusSchema = FileStatusSchema.catch(FileStatusSchema.enum.unknown);
 
@@ -123,6 +135,7 @@ export const PullRequestSchema = z.object({
   updated_at: z.string(),
   draft: z.boolean(),
   head: z.string().nullable(),
+  mergeable: KnownMergeabilitySchema,
   head_ref: z.string(),
   base_ref: z.string(),
   readiness: KnownReadinessSchema,

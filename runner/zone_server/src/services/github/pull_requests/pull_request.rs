@@ -14,6 +14,7 @@ use crate::services::github::link::absolute;
 use crate::services::github::readiness::BlockerReport;
 use crate::services::github::readiness::CheckSummary;
 use crate::services::github::readiness::CommitSha;
+use crate::services::github::readiness::Mergeability;
 use crate::services::github::readiness::ReviewSummary;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -28,6 +29,7 @@ pub struct PullRequest {
     pub updated_at: String,
     pub draft: bool,
     pub head: Option<CommitSha>,
+    pub mergeable: Mergeability,
     pub head_ref: String,
     pub base_ref: String,
     pub readiness: Readiness,
@@ -65,6 +67,7 @@ impl PullRequest {
             updated_at: assessment.updated_at,
             draft: assessment.draft,
             head: assessment.head,
+            mergeable: assessment.mergeable,
             head_ref: row.head.to_string(),
             base_ref: row.base.to_string(),
             readiness,

@@ -67,8 +67,9 @@ Row shapes are snake_case. The existing `Serialize` output is reused, so `Pipeli
 
 - `PullRequest` has these fields:
   - Identity: `source_id, repository, repository_url, number, title, url, author, updated_at, draft, head, head_ref, base_ref`.
-  - Readiness: `readiness, blockers, checks, check_details: [{kind, id, name, state, url, updated_at}], reviews, review_current, unresolved_threads, threads_complete, comments_complete, assessed_at, rank`.
+  - Readiness: `readiness, mergeable, blockers, checks, check_details: [{kind, id, name, state, url, updated_at}], reviews, review_current, unresolved_threads, threads_complete, comments_complete, assessed_at, rank`.
   - `check_details[].id` is nullable. It is the Actions job id for a `check_run` whose link is that job's page at the configured web origin, and null for every other row, so a non-null id is always a job whose log can be read.
+  - `mergeable` is GitHub's `mergeable_state` as readiness reads it: `clean`, `blocked`, `behind`, `conflicted`, `unstable`, `draft` or `unknown` (not worked out yet, or a state this does not know).
   - `reviews[].url` is an absolute web link or null.
   - In the detail route, `threads_complete` says whether the `threads` list it returns was read in full: the verdict and the list come from one read.
 - `SourceStatus`: `source_id, name, repository, repository_url, freshness ('cached'|'refreshed'|'floored'|'stale'), generated_at, warning`.

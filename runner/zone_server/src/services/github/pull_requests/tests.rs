@@ -18,6 +18,7 @@ use crate::services::github::readiness::CheckState;
 use crate::services::github::readiness::CheckSummary;
 use crate::services::github::readiness::CommitSha;
 use crate::services::github::readiness::Confidence;
+use crate::services::github::readiness::Mergeability;
 use crate::services::github::readiness::ReviewSummary;
 use crate::services::github_app::Unauthenticated;
 
@@ -42,6 +43,7 @@ fn pull_request(number: u64, readiness: Readiness) -> PullRequest {
         updated_at: "2026-11-14T03:00:00Z".into(),
         draft: false,
         head: CommitSha::parse(HEAD),
+        mergeable: Mergeability::Clean,
         head_ref: "feature".into(),
         base_ref: "main".into(),
         readiness,
@@ -104,6 +106,7 @@ fn a_pull_request_row_serialises_as_the_console_reads_it() {
             "updated_at": "2026-11-14T03:00:00Z",
             "draft": false,
             "head": HEAD,
+            "mergeable": "clean",
             "head_ref": "feature",
             "base_ref": "main",
             "readiness": "in_progress",

@@ -27,6 +27,7 @@ import {
   FileStatusSchema,
   HunkSchema,
   LineKindSchema,
+  MergeabilitySchema,
   MergedResponseSchema,
   MergedSchema,
   MergeMethodSchema,
@@ -158,6 +159,12 @@ describe('the pull request vocabularies match the server', () => {
   test('check kinds, plus the fallback for one the console does not know', () => {
     expect(sorted(CheckKindSchema.exclude(['unknown']).options)).toEqual(
       variants(join(GITHUB, 'evidence/check_kind.rs'), 'CheckKind')
+    );
+  });
+
+  test('mergeability', () => {
+    expect(sorted(MergeabilitySchema.options)).toEqual(
+      variants(join(GITHUB, 'readiness.rs'), 'Mergeability')
     );
   });
 

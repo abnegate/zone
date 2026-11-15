@@ -13,6 +13,7 @@ export const wirePullRequest = {
   updated_at: '2026-11-13T10:00:00Z',
   draft: false,
   head: HEAD,
+  mergeable: 'clean',
   head_ref: 'feat/pull-requests',
   base_ref: 'main',
   readiness: 'not_ready',

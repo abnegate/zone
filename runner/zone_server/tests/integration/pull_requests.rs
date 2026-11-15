@@ -489,6 +489,7 @@ async fn open_pull_requests_are_bucketed_counted_and_ranked() {
     assert_eq!(ready["url"], json!(board.hub.web("pull/1")));
     assert_eq!(ready["author"], json!("octocat"));
     assert_eq!(ready["head"], json!(READY_HEAD));
+    assert_eq!(ready["mergeable"], json!("clean"));
     assert_eq!(ready["head_ref"], json!("feature-1"));
     assert_eq!(ready["base_ref"], json!("main"));
     assert_eq!(ready["blockers"], json!([]));
@@ -1219,6 +1220,7 @@ async fn a_pull_request_github_reports_conflicted_is_not_ready_and_never_merged(
     let listing = board.listed("").await;
     assert_eq!(numbers(&listing), [(1, "not_ready".to_string(), 1)]);
     let conflicted = &listing["pull_requests"][0];
+    assert_eq!(conflicted["mergeable"], json!("conflicted"));
     assert!(
         conflicted["blockers"]
             .as_array()

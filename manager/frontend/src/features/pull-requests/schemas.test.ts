@@ -105,6 +105,19 @@ describe('pull request row', () => {
     expect(check.state).toBe('unknown');
   });
 
+  it.each(['clean', 'blocked', 'behind', 'conflicted', 'unstable', 'draft', 'unknown'])(
+    'keeps mergeability %s',
+    (mergeable) => {
+      expect(PullRequestSchema.parse({ ...wirePullRequest, mergeable }).mergeable).toBe(mergeable);
+    }
+  );
+
+  it('reads a mergeability newer than this client as unknown', () => {
+    expect(PullRequestSchema.parse({ ...wirePullRequest, mergeable: 'has_hooks' }).mergeable).toBe(
+      'unknown'
+    );
+  });
+
   it('accepts a pull request with no author, head, review link or confidence', () => {
     const reviews = [
       { ...wirePullRequest.reviews[0], url: null, confidence: null, reviewed_commit: null },
