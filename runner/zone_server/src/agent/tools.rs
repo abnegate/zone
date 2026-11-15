@@ -3938,6 +3938,53 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn an_offline_chat_is_offered_no_tool_that_reaches_the_network() {
+        let networked = [
+            "create_pull_request",
+            "comment_on_issue",
+            "get_build_status",
+            "start_task",
+            "install_model",
+            super::super::planner::CREATE_REPOSITORY,
+            super::super::planner::FINALIZE_PROJECT,
+            "query_prometheus",
+            "list_grafana_dashboards",
+            "web_search",
+            "fetch_url",
+        ];
+        let mut config = test_config();
+        config.monitoring = crate::config::MonitoringConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        config.web_search = crate::services::search::defaults().with_enabled(true);
+        let state = AppState::new(config, lazy_pool(), None);
+
+        let online = ChatTools::preview(WorkspaceScope {
+            state: state.clone(),
+            ..scope()
+        })
+        .await
+        .with_planner();
+        let offline = ChatTools::preview(WorkspaceScope {
+            state,
+            offline: true,
+            ..scope()
+        })
+        .await
+        .with_planner();
+
+        for name in networked {
+            assert!(
+                online.has(name),
+                "{name} is offered online: {:?}",
+                online.names()
+            );
+            assert!(!offline.has(name), "{name} reaches the network offline");
+        }
+    }
+
     const STUB: &str = "stub";
     const STUB_TOOL: &str = "stub__delegate";
 
