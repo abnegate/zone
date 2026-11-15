@@ -57,6 +57,7 @@ const BASE_HEAD: &str = "5555555555555555555555555555555555555555";
 const MERGE_COMMIT: &str = "6666666666666666666666666666666666666666";
 const CLEAN: &str = "clean";
 const DIRTY: &str = "dirty";
+const BLOCKED: &str = "blocked";
 const JOB: u64 = 71;
 const RUN: u64 = 99;
 const BYTES: &str = "bytes";
@@ -104,6 +105,13 @@ impl Pull {
     fn conflicted() -> Self {
         Self {
             mergeable_state: DIRTY,
+            ..Self::ready()
+        }
+    }
+
+    fn blocked() -> Self {
+        Self {
+            mergeable_state: BLOCKED,
             ..Self::ready()
         }
     }
@@ -1534,6 +1542,42 @@ async fn an_administrator_merge_is_never_asked_for_unless_the_server_allows_it()
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], json!("protected"));
     assert_eq!(administrator_merges(&board.hub).await, 0);
+}
+
+#[tokio::test]
+async fn an_administrator_merge_never_bypasses_a_pull_request_github_reports_blocked() {
+    let hub = Hub::hosted().await;
+    let mut config = hub.config();
+    config.github.admin_merge = true;
+    let board = Board::configured(hub, config).await;
+    board.hub.list(&[Pull::blocked()]).await;
+    Mock::given(method("PUT"))
+        .and(path(board.hub.endpoint("pulls/1/merge")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"sha": MERGE_COMMIT, "merged": true})),
+        )
+        .expect(0)
+        .mount(&board.hub.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(board.hub.graphql))
+        .and(body_partial_json(
+            json!({"variables": {"input": {"pullRequestId": "PR_1"}}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "mergePullRequest": {"pullRequest": {"merged": true, "mergeCommit": {"oid": MERGE_COMMIT}}},
+        }})))
+        .expect(0)
+        .mount(&board.hub.server)
+        .await;
+
+    let (status, body) = board.merge(1, json!({"expected_head": READY_HEAD})).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("not_ready"));
+    assert_eq!(body["blockers"][0]["code"], json!("merge_blocked"));
+    assert_eq!(administrator_merges(&board.hub).await, 0);
+    board.hub.server.verify().await;
 }
 
 #[tokio::test]
