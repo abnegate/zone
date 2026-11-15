@@ -28,6 +28,13 @@ const screens = [
   { path: '/wiki', title: 'Knowledge Base', content: '.knowledge-card', tabs: true },
   { path: '/tasks', title: 'Tasks', content: '.task-card:not(.board-skeleton-card)' },
   { path: '/chats', title: 'Chats', content: '.chat-item', tabs: true },
+  {
+    path: '/pull-requests',
+    title: 'Pull Requests',
+    content: '[data-testid="pull-request-card"]',
+    tabs: true,
+  },
+  { path: '/releases', title: 'Releases', content: 'article.release-card' },
 ];
 
 function nameOf(screen: (typeof screens)[number]): string {
