@@ -14,9 +14,9 @@ pub use config::Config;
 use super::environment;
 
 /// A context built from `config`. Every child it starts is given the
-/// [`environment::policy`] and routed through Zone's proxy, its files are
-/// kept under `.zone/`, its walks have Zone's [`walk::BUDGET`], and `curl`
-/// and `wget` are held to the VPN gate.
+/// [`environment::policy`], routed through Zone's proxy and started at the
+/// configured niceness, its files are kept under `.zone/`, its walks have
+/// Zone's [`walk::BUDGET`], and `curl` and `wget` are held to the VPN gate.
 pub fn build(config: Config) -> ToolContext {
     let mut context = ToolContext::default()
         .within(config.working_directory)
@@ -26,7 +26,8 @@ pub fn build(config: Config) -> ToolContext {
         .with_environment(environment::policy())
         .with_proxy(zone_routing::proxy())
         .with_public_web(Arc::new(Offline::new(config.chat_offline)))
-        .with_search_timeout(walk::BUDGET);
+        .with_search_timeout(walk::BUDGET)
+        .with_niceness(config.niceness);
     context.unrestricted = config.unrestricted;
     context.maximum_file_size = config.maximum_file_size;
     context.command_timeout = config.command_timeout;
@@ -40,8 +41,11 @@ mod tests {
     use std::time::Duration;
 
     use abnegate_agent::tool::job::{JobCommand, Jobs};
-    use abnegate_agent::tool::{OFF_LIMITS, ReadFileTool, RunCommandTool, SearchCodeTool, Session};
+    use abnegate_agent::tool::{
+        OFF_LIMITS, ReadFileTool, RunCommandTool, RunShellTool, SearchCodeTool, Session,
+    };
     use abnegate_agent::{Tool, ToolError, ToolResult};
+    use abnegate_exec::Niceness;
     use serde_json::{Value, json};
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -64,8 +68,8 @@ mod tests {
     /// The file a stand-in for `rg` records its arguments in.
     const ARGUMENTS: &str = "arguments";
 
-    fn chat(working_directory: &Path, denied: Vec<PathBuf>, chat_offline: bool) -> ToolContext {
-        build(Config {
+    fn chat_config(working_directory: &Path, denied: Vec<PathBuf>, chat_offline: bool) -> Config {
+        Config {
             working_directory: working_directory.to_path_buf(),
             session: Session::Chat(Uuid::new_v4()),
             denied,
@@ -73,6 +77,19 @@ mod tests {
             maximum_file_size: MAX_TOOL_FILE_BYTES,
             command_timeout: Duration::from_secs(TOOL_COMMAND_TIMEOUT_SECS),
             chat_offline,
+            niceness: Niceness::DEFAULT,
+        }
+    }
+
+    fn chat(working_directory: &Path, denied: Vec<PathBuf>, chat_offline: bool) -> ToolContext {
+        build(chat_config(working_directory, denied, chat_offline))
+    }
+
+    /// A chat context whose commands start at the lowest priority.
+    fn lowered(working_directory: &Path) -> ToolContext {
+        build(Config {
+            niceness: Niceness::LOWEST,
+            ..chat_config(working_directory, Vec::new(), false)
         })
     }
 
@@ -100,6 +117,7 @@ mod tests {
             maximum_file_size: 42,
             command_timeout: Duration::from_secs(7),
             chat_offline: false,
+            niceness: Niceness::LOWEST,
         });
 
         assert_eq!(context.working_directory, directory.path());
@@ -109,6 +127,7 @@ mod tests {
         assert_eq!(context.maximum_file_size, 42);
         assert_eq!(context.command_timeout, Duration::from_secs(7));
         assert!(!context.environment.inherits());
+        assert_eq!(context.niceness, Some(Niceness::LOWEST));
     }
 
     #[tokio::test]
@@ -130,6 +149,47 @@ mod tests {
                 "{name}: {printed:?}"
             );
         }
+    }
+
+    /// Zone's own agent ran its tool commands at the server's priority, so
+    /// chats building and testing at once starved the server's API.
+    #[tokio::test]
+    async fn a_command_the_agent_runs_starts_at_the_configured_niceness() {
+        let directory = tempdir().unwrap();
+        let context = lowered(directory.path());
+
+        let reported = RunShellTool
+            .execute(json!({"command": "ps -o nice= -p $$"}), &context)
+            .await
+            .expect("the shell runs");
+
+        let nice = reported
+            .output
+            .as_deref()
+            .and_then(|output| output.strip_prefix("stdout:"))
+            .map(str::trim);
+        assert!(reported.success, "{reported:?}");
+        assert_eq!(nice, Some("19"), "{reported:?}");
+    }
+
+    #[tokio::test]
+    async fn a_job_the_agent_starts_runs_at_the_configured_niceness() {
+        let directory = tempdir().unwrap();
+        let context = lowered(directory.path());
+
+        let started = Jobs::spawn(
+            &JobCommand::shell("ps -o nice= -p $$").within(directory.path()),
+            &context,
+        )
+        .await
+        .expect("a job starts");
+        let ended = Jobs::settled(context.session, &started.id)
+            .expect("its own session claims it")
+            .await;
+        let log = std::fs::read_to_string(&started.log_path).expect("the job's log");
+        Jobs::kill_session(context.session).await;
+
+        assert_eq!(log.trim(), "19", "{ended:?}");
     }
 
     #[tokio::test]

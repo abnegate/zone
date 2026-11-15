@@ -264,6 +264,15 @@
 }
 
 @media (max-width: 768px) {
+  /* The meter rides the title row, so it gives up the width the label took. */
+  .models-disk-label {
+    display: none;
+  }
+
+  .models-disk-track {
+    width: 3rem;
+  }
+
   .browse-toolbar,
   .browse-filters {
     flex-wrap: wrap;

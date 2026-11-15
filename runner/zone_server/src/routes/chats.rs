@@ -22,6 +22,7 @@ use crate::services::artifacts::ArtifactStore;
 use crate::services::character::ChatCharacter;
 use crate::services::chat::authorship;
 use crate::services::chat::driver::Driver;
+use crate::services::chat::indicator::{self, ChatActivity, Indicator};
 use crate::services::chat::session;
 use crate::services::model::Model;
 use crate::services::provider::Provider;
@@ -397,6 +398,18 @@ pub struct ChatsListResponse {
     offset: i64,
 }
 
+/// What each chat in the workspace is doing, for the list's indicators.
+#[derive(Debug, Serialize)]
+pub struct ChatIndicatorsResponse {
+    chats: Vec<Indicator>,
+}
+
+/// What each chat in the workspace is doing, with nothing read from GitHub.
+#[derive(Debug, Serialize)]
+pub struct ChatActivityResponse {
+    chats: Vec<ChatActivity>,
+}
+
 #[derive(Debug, Serialize)]
 struct SingleMessageResponse {
     message: MessageResponse,
@@ -541,6 +554,41 @@ pub async fn list(
         total,
         limit: page.limit,
         offset: page.offset,
+    }))
+}
+
+/// GET /api/chats/indicators
+///
+/// Separate from the list itself because it is read on a timer and can involve
+/// GitHub, while a list read has to stay quick and local.
+pub async fn indicators(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ListChatsQuery>,
+) -> Result<Json<ChatIndicatorsResponse>, ServerError> {
+    check_workspace_read_access(&state, &auth, query.workspace_id).await?;
+    let page = parse_page(query.limit, query.offset).map_err(ServerError::BadRequest)?;
+    Ok(Json(ChatIndicatorsResponse {
+        chats: indicator::list(&state, query.workspace_id, query.archived, query.sort, page)
+            .await?,
+    }))
+}
+
+/// GET /api/chats/activity
+///
+/// The activity half of the indicators, for a client that watches every chat on
+/// a timer to notice the moment one stops and starts waiting for its reader. It
+/// asks GitHub nothing, so watching costs two queries rather than the
+/// workspace's GitHub budget, and it is unpaged because a chat nobody has
+/// scrolled to still stops.
+pub async fn activity(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ListChatsQuery>,
+) -> Result<Json<ChatActivityResponse>, ServerError> {
+    check_workspace_read_access(&state, &auth, query.workspace_id).await?;
+    Ok(Json(ChatActivityResponse {
+        chats: indicator::activities(&state, query.workspace_id, query.archived).await?,
     }))
 }
 

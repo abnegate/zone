@@ -37,6 +37,7 @@ import {
   APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_ANSWER_DETAIL,
   AWAITING_APPROVAL_DETAIL,
+  CHAT_ACTIVITIES,
   DENIED_DETAIL,
   PULL_REQUEST_CHECKS,
   PULL_REQUEST_MERGEABILITY,
@@ -46,6 +47,7 @@ import {
   TOOL_ERROR_PREFIX,
   UNFINISHED_DETAIL,
 } from './types';
+import { CHAT_SORT, listSort, SERVER_CHAT_SORT } from './utils/arrange';
 
 const CITATIONS_RS = join(
   import.meta.dir,
@@ -644,6 +646,44 @@ describe('a chat pull request reads as the server describes it', () => {
   ] as const)('%s variants match', (file, name, values) => {
     const source = readFileSync(join(PULL_REQUEST_RS, file), 'utf8');
     expect([...values].sort()).toEqual(rustVariants(source, name).sort());
+  });
+
+  /// The reader's only evidence that review comments were addressed. Reading it
+  /// off a field the server stopped sending would leave every chat's row
+  /// claiming a clean review nobody checked, so the name is pinned here.
+  test('the status carries the review threads readiness is read from', () => {
+    const source = readFileSync(join(PULL_REQUEST_RS, 'status.rs'), 'utf8');
+    expect(Object.keys(rustStructFields(source, 'Status'))).toContain('threads');
+  });
+});
+
+const CHATS_DB_RS = join(import.meta.dir, '../../../../../runner/zone_server/src/db/chats/sort.rs');
+
+describe('the chat list asks for an order the server lists by', () => {
+  /// The list query deserialises this enum, so a name the console sends that
+  /// the server does not know fails the whole list rather than one sort. The
+  /// status order is the console's own and must stay out of it.
+  test('Sort variants match the orders the console sends', () => {
+    const source = readFileSync(CHATS_DB_RS, 'utf8');
+    expect([...SERVER_CHAT_SORT].sort()).toEqual(rustVariants(source, 'Sort').sort());
+  });
+
+  test('every order a reader can pick resolves to one the server serves', () => {
+    for (const sort of CHAT_SORT) {
+      expect(SERVER_CHAT_SORT).toContain(listSort(sort));
+    }
+  });
+});
+
+const INDICATOR_RS = join(
+  import.meta.dir,
+  '../../../../../runner/zone_server/src/services/chat/indicator.rs'
+);
+
+describe('a chat row reads the activity the server named', () => {
+  test('Activity variants match', () => {
+    const source = readFileSync(INDICATOR_RS, 'utf8');
+    expect([...CHAT_ACTIVITIES].sort()).toEqual(rustVariants(source, 'Activity').sort());
   });
 });
 

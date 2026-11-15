@@ -4,6 +4,10 @@ import { SourceStatusSchema, WebUrlSchema } from '../github';
 export const BLOCKER_CODES = [
   'draft',
   'head_commit_unverified',
+  'merge_conflict',
+  'merge_behind',
+  'merge_blocked',
+  'mergeability_unverified',
   'threads_incomplete',
   'comments_incomplete',
   'unresolved_threads',

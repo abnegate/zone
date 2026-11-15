@@ -20,6 +20,7 @@ use crate::config::Config;
 use crate::db::agent_logins;
 use crate::db::ai_settings::EffectiveAiSettings;
 use crate::services::agent::home::{self, CLAUDE_CODE_OAUTH_TOKEN};
+use crate::services::checkout::Author;
 use crate::services::endpoint::Origin;
 use crate::services::login::credential::{self, Login};
 use crate::services::login::identity::LoginIdentity;
@@ -274,8 +275,10 @@ async fn touch(state: &AppState, login: Uuid) {
     }
 }
 
-/// `settings` running the binary the environment names for `agent`, when it names one.
+/// `settings` running the binary the environment names for `agent`, when it names one, at the
+/// nice value the operator chose.
 fn executed(config: &Config, agent: AgentKind, settings: CliSettings) -> CliSettings {
+    let settings = settings.with_niceness(config.agents.niceness);
     match overridden(config, agent) {
         Some(executable) => settings.with_executable(executable),
         None => settings,
@@ -353,6 +356,24 @@ pub fn in_directory(backend: LlmBackend, directory: &Path) -> LlmBackend {
     backend.configured(|settings| settings.with_working_directory(directory))
 }
 
+/// `backend` with a coding agent that commits as `author`.
+///
+/// A chat's agent runs git itself, so without this a commit it makes carries
+/// whatever identity the checkout happens to configure: the machine's, or
+/// none at all. Naming the Zone account whose turn it is puts the person who
+/// asked for the work on their own commits, and git reads these four names
+/// ahead of any `user.name` and `user.email` a checkout holds. An endpoint
+/// runs no git.
+pub fn as_account(backend: LlmBackend, author: &Author) -> LlmBackend {
+    backend.configured(|settings| {
+        settings
+            .with_variable("GIT_AUTHOR_NAME", author.name.as_str())
+            .with_variable("GIT_AUTHOR_EMAIL", author.email.as_str())
+            .with_variable("GIT_COMMITTER_NAME", author.name.as_str())
+            .with_variable("GIT_COMMITTER_EMAIL", author.email.as_str())
+    })
+}
+
 /// `backend` with a coding agent told to think at a chat's `effort`. An
 /// endpoint takes its effort in each request's body instead.
 pub fn effort(backend: LlmBackend, effort: ReasoningEffort) -> LlmBackend {
@@ -394,6 +415,7 @@ mod tests {
     use abnegate_agent_cli::{
         CREDITS_REQUIRED, CREDITS_UNCONFIRMED, LONG_CONTEXT_CREDITS_REQUIRED,
     };
+    use abnegate_exec::Niceness;
     use abnegate_secret::{SecretValue, redact};
     use chrono::{TimeDelta, Utc};
     use sqlx::PgPool;
@@ -602,6 +624,49 @@ mod tests {
 
     fn variable<'a>(settings: &'a CliSettings, name: &str) -> Option<&'a str> {
         settings.variables.get(name).map(String::as_str)
+    }
+
+    /// A chat's agent commits as the account whose turn it is, author and
+    /// committer both, so GitHub shows the commit as that person's work.
+    #[test]
+    fn an_agent_commits_as_the_account_whose_turn_it_is() {
+        let author = Author {
+            name: "Ada Lovelace".to_string(),
+            email: "ada@example.test".to_string(),
+        };
+
+        let (_, settings, _) = cli(Ok(as_account(
+            LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
+            &author,
+        )));
+
+        assert_eq!(variable(&settings, "GIT_AUTHOR_NAME"), Some("Ada Lovelace"));
+        assert_eq!(
+            variable(&settings, "GIT_AUTHOR_EMAIL"),
+            Some("ada@example.test")
+        );
+        assert_eq!(
+            variable(&settings, "GIT_COMMITTER_NAME"),
+            Some("Ada Lovelace")
+        );
+        assert_eq!(
+            variable(&settings, "GIT_COMMITTER_EMAIL"),
+            Some("ada@example.test")
+        );
+    }
+
+    /// An endpoint runs no git, so there is no identity to hand it.
+    #[test]
+    fn an_endpoint_is_handed_no_git_identity() {
+        let author = Author {
+            name: "Ada Lovelace".to_string(),
+            email: "ada@example.test".to_string(),
+        };
+
+        assert!(matches!(
+            as_account(LlmBackend::Http, &author),
+            LlmBackend::Http
+        ));
     }
 
     fn assert_private(directory: &Path) {
@@ -1506,8 +1571,12 @@ mod tests {
         sandbox: CodexSandbox,
     ) -> Vec<(&'static str, LlmBackend)> {
         let state = TempDir::new().expect("an agent state root");
+        backends_under(&defaulting_to(agent, state.path(), sandbox), agent)
+    }
+
+    /// [`production_backends`] under `config`.
+    fn backends_under(config: &Config, agent: AgentKind) -> Vec<(&'static str, LlmBackend)> {
         let codex_home = TempDir::new().expect("a codex login's home");
-        let config = defaulting_to(agent, state.path(), sandbox);
         let organization = Uuid::new_v4();
         let chosen = picked(
             organization,
@@ -1515,20 +1584,40 @@ mod tests {
             resolved_login(agent, codex_home.path()),
         );
         vec![
-            ("the instance's default", instance(&config)),
+            ("the instance's default", instance(config)),
             (
                 "the host's sign-in",
-                host(&config, organization, agent)
+                host(config, organization, agent)
                     .expect("the host's backend")
                     .backend,
             ),
             (
                 "an organization's login",
-                on_login(&config, organization, &chosen, None)
+                on_login(config, organization, &chosen, None)
                     .expect("the login's backend")
                     .backend,
             ),
         ]
+    }
+
+    /// An agent's builds and tests share the server's CPUs, so every backend Zone runs one on
+    /// starts it at the nice value the operator chose.
+    #[test]
+    fn production_agent_backends_start_at_the_configured_nice_value() {
+        let chosen = Niceness::try_from(7).expect("a nice value");
+        for &agent in AgentKind::ALL {
+            let state = TempDir::new().expect("an agent state root");
+            let mut config = defaulting_to(agent, state.path(), CodexSandbox::WorkspaceWrite);
+            config.agents.niceness = chosen;
+            for (reached, backend) in backends_under(&config, agent) {
+                let (_, settings, _) = cli(Ok(backend));
+                assert_eq!(
+                    settings.niceness,
+                    Some(chosen),
+                    "{agent} on {reached} ignored ZONE_AGENT_NICENESS"
+                );
+            }
+        }
     }
 
     /// Every backend Zone runs an agent on has no deadline in place of the crate's default five

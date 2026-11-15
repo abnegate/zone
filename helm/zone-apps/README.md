@@ -66,6 +66,7 @@ The following table lists the configurable parameters and their default values.
 | `server.agentState.persistence.size` | Size of the agent-state claim, which grows with every CLI turn; see [Coding Agent Sign-ins](#coding-agent-sign-ins) | `1Gi` |
 | `server.agentState.persistence.storageClass` | Storage class of the agent-state claim; empty uses the cluster default | `""` |
 | `server.env.ZONE_AGENT_USAGE_TTL_SECONDS` | Whole seconds a sign-in's usage reading stays fresh before zone-server reads it again to pick the account a chat or task starts on; anything else is refused at boot | `"60"` |
+| `server.env.ZONE_AGENT_NICENESS` | Nice value, `0` to `19`, the claude and codex CLIs and every build and test they run start at, so zone-server keeps its share of the pod's CPU; anything else is refused at boot | unset (`19`) |
 | `server.env.ZONE_CLAUDE_API_URL` | Where zone-server reads Claude sign-ins' usage and profile, for example through a proxy | unset (`https://api.anthropic.com`) |
 | `server.env.ZONE_CODEX_API_URL` | Where zone-server reads codex sign-ins' usage, for example through a proxy | unset (`https://chatgpt.com`) |
 | `server.env.ZONE_MCP_ENABLED` | Master switch for every MCP server, instance and organization alike; see [docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) | `"true"` |

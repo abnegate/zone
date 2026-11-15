@@ -2,13 +2,13 @@
   display: flex;
   flex-direction: column;
   gap: var(--ui-space-2);
-  margin: 0 0 var(--ui-space-3);
+  margin: var(--ui-space-4) 0 var(--ui-space-2);
 }
 
 .action-receipt {
   display: grid;
   gap: var(--ui-space-1);
-  padding: var(--ui-space-3);
+  padding: var(--ui-space-2) var(--ui-space-3);
   border: 1px solid var(--ui-border);
   border-left: 2px solid var(--ui-text-muted);
   border-radius: 0 var(--ui-radius-lg) var(--ui-radius-lg) 0;
@@ -27,7 +27,7 @@
   display: flex;
   align-items: center;
   gap: var(--ui-space-2);
-  line-height: var(--ui-space-5);
+  line-height: var(--ui-space-4);
 }
 
 .action-receipt-status {
@@ -73,8 +73,8 @@
   overflow: hidden;
   margin: 0;
   color: var(--ui-text-secondary);
-  font-size: var(--ui-text-sm);
-  line-height: var(--ui-space-5);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-space-4);
 }
 
 .action-receipt-reason {

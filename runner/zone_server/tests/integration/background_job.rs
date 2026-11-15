@@ -576,6 +576,7 @@ async fn a_background_job_logs_under_dot_zone_jobs() {
         maximum_file_size: MAXIMUM_FILE_SIZE,
         command_timeout: COMMAND_TIMEOUT,
         chat_offline: false,
+        niceness: abnegate_exec::Niceness::DEFAULT,
     });
 
     let started = Jobs::spawn(

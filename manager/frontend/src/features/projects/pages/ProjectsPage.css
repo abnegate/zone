@@ -957,6 +957,13 @@
     display: none;
   }
 
+  /* Search and the status tabs filter the list, so a phone showing one project
+     instead of the list has no room and no use for them. */
+  .projects-page:has(.project-details) .page-bar-actions > .page-search,
+  .projects-page:has(.project-details) .page-bar-actions > :has(> .ui-tabs-list) {
+    display: none;
+  }
+
   .project-details {
     width: 100%;
   }

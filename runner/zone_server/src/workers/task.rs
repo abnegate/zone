@@ -61,6 +61,7 @@ use crate::services::backend::Resolved;
 use crate::services::chat::session;
 use crate::services::chat::session::RunContext;
 use crate::services::endpoint::Endpoint;
+use crate::services::failure::unreachable;
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router;
 use crate::services::route::Reason;
@@ -277,7 +278,11 @@ impl Fault {
             LlmBackend::Cli { .. } => classify_agent(backend::own_words(&remedied.message)),
             LlmBackend::Http => classify(&remedied.message),
         };
-        Self::new(failure, RUN_FAILED, remedied.message)
+        // Judged on what the provider said, reported in words a reader can act
+        // on: a gateway's connection traceback is retried like any other
+        // transient failure, and read as the model host being down.
+        let message = unreachable(&remedied.message).unwrap_or(remedied.message);
+        Self::new(failure, RUN_FAILED, message)
     }
 
     /// A turn `limit` refused on `backend`, in the words the same refusal

@@ -344,7 +344,6 @@
   color: var(--chat-change-added);
 }
 
-.chat-change-icon.is-conflicted,
 .chat-change-icon.is-failing,
 .chat-change-icon.is-closed {
   color: var(--chat-change-removed);

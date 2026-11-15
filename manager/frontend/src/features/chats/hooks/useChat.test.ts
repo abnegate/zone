@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setSystemTime,
+} from 'bun:test';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode, StrictMode } from 'react';
@@ -2256,6 +2265,58 @@ describe('useChat', () => {
       configurable: true,
       get: () => 'visible',
     });
+  });
+
+  it('reopens a socket that went silent while the page was away, close or no close', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+    const abandoned = lastSocket;
+    act(() => abandoned?.onopen?.());
+    act(() => abandoned?.emit({ type: 'init', chat_id: '1', status: 'ready' }));
+
+    // A phone that took the connection with it leaves the socket open and
+    // mute: no close ever arrives, so the silence is all there is to go on.
+    setSystemTime(new Date(Date.now() + 60_000));
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    setSystemTime();
+
+    expect(lastSocket, 'a mute socket must not survive a wake').not.toBe(abandoned);
+    unmount();
+  });
+
+  it('keeps a socket that was speaking when the page came back', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => expect(lastSocket).not.toBeNull());
+    const live = lastSocket;
+    act(() => live?.onopen?.());
+    act(() => live?.emit({ type: 'init', chat_id: '1', status: 'ready' }));
+
+    act(() => window.dispatchEvent(new Event('focus')));
+
+    expect(lastSocket, 'a working socket must not be thrown away').toBe(live);
+    unmount();
+  });
+
+  it('reads the history back when a socket rejoins, since init replays no messages', async () => {
+    mockGetChat.mockResolvedValue(mockChat);
+    const { result, unmount } = renderHook(() => useChat('1'), { wrapper: createWrapper() });
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(lastSocket).not.toBeNull();
+    });
+    const first = lastSocket;
+    act(() => first?.onopen?.());
+    act(() => first?.emit({ type: 'init', chat_id: '1', status: 'ready' }));
+    const readsBefore = mockGetChat.mock.calls.length;
+
+    act(() => first?.onclose?.());
+    await waitFor(() => expect(lastSocket).not.toBe(first));
+    act(() => lastSocket?.emit({ type: 'init', chat_id: '1', status: 'ready' }));
+
+    await waitFor(() => expect(mockGetChat.mock.calls.length).toBeGreaterThan(readsBefore));
+    unmount();
   });
 
   it('a socket the server refuses before init is not reopened', async () => {

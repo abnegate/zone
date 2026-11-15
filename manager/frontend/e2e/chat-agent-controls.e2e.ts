@@ -246,7 +246,11 @@ for (const width of [1280, 375]) {
         expect(box!.x + box!.width, 'the agent controls fit the viewport').toBeLessThanOrEqual(
           width
         );
-        expect(box!.height, 'the agent controls stay on one line').toBeLessThanOrEqual(30);
+        // A phone gives the chips the bar's own 32px control height for a
+        // bigger target; either way the group stays a single line.
+        expect(box!.height, 'the agent controls stay on one line').toBeLessThanOrEqual(
+          width <= 768 ? 32 : 30
+        );
         expect(
           await lowestContrast(group, GROUP_TEXT),
           'every label meets WCAG AA'

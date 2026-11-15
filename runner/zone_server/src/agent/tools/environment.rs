@@ -280,6 +280,7 @@ mod tests {
             maximum_file_size: super::super::MAX_TOOL_FILE_BYTES,
             command_timeout: Duration::from_secs(super::super::TOOL_COMMAND_TIMEOUT_SECS),
             chat_offline: false,
+            niceness: abnegate_exec::Niceness::DEFAULT,
         })
     }
 

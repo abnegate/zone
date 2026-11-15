@@ -1,9 +1,15 @@
-import type { Chat } from '../types';
+import type { Chat, ChatIndicator } from '../types';
+import { attentionRank } from './indicators';
+import { readAllowed, writeStored } from './storage';
 
 export const CHAT_GROUP_BY = ['none', 'project', 'date'] as const;
 export type ChatGroupBy = (typeof CHAT_GROUP_BY)[number];
 
-export const CHAT_SORT = [
+/**
+ * The orders the server lists chats in. Mirrors `db::chats::Sort`, which the
+ * list query deserialises, so a name that is not here fails that query.
+ */
+export const SERVER_CHAT_SORT = [
   'updated_desc',
   'updated_asc',
   'created_desc',
@@ -11,6 +17,13 @@ export const CHAT_SORT = [
   'title_asc',
   'title_desc',
 ] as const;
+export type ServerChatSort = (typeof SERVER_CHAT_SORT)[number];
+
+/**
+ * What a reader can order the list by. `status` is the console's own: it is
+ * read from each chat's indicator, which the list query knows nothing about.
+ */
+export const CHAT_SORT = [...SERVER_CHAT_SORT, 'status'] as const;
 export type ChatSort = (typeof CHAT_SORT)[number];
 
 export const CHAT_GROUP_OPTIONS: ReadonlyArray<{ value: ChatGroupBy; label: string }> = [
@@ -20,6 +33,7 @@ export const CHAT_GROUP_OPTIONS: ReadonlyArray<{ value: ChatGroupBy; label: stri
 ];
 
 export const CHAT_SORT_OPTIONS: ReadonlyArray<{ value: ChatSort; label: string }> = [
+  { value: 'status', label: 'Needs attention' },
   { value: 'updated_desc', label: 'Last updated' },
   { value: 'updated_asc', label: 'Oldest updated' },
   { value: 'created_desc', label: 'Newest' },
@@ -47,6 +61,12 @@ export interface ArrangeChatsOptions {
   groupBy: ChatGroupBy;
   sort: ChatSort;
   projectNames?: Record<string, string>;
+  /**
+   * What each chat is doing, by chat id. Only the status sort reads it, and a
+   * chat with no reading yet sorts last rather than jumping to the top as the
+   * readings arrive.
+   */
+  indicators?: Record<string, ChatIndicator>;
   now?: Date;
 }
 
@@ -58,6 +78,19 @@ export function isChatSort(value: string): value is ChatSort {
   return (CHAT_SORT as readonly string[]).includes(value);
 }
 
+/**
+ * The order to ask the server for.
+ *
+ * The list is paged server-side and the server knows nothing of a chat's
+ * status, so "Needs attention" is ordered here out of readings the server
+ * never sees. Asking it for that order would fail the whole list query, so it
+ * sorts by last update — which is also what the attention order breaks its own
+ * ties by, leaving the pages in a consistent order either way.
+ */
+export function listSort(sort: ChatSort): ServerChatSort {
+  return sort === 'status' ? 'updated_desc' : sort;
+}
+
 export function readChatGroupBy(): ChatGroupBy {
   return readAllowed(CHAT_GROUP_STORAGE_KEY, CHAT_GROUP_BY, 'none');
 }
@@ -67,16 +100,16 @@ export function readChatSort(): ChatSort {
 }
 
 export function writeChatGroupBy(value: ChatGroupBy): void {
-  localStorage.setItem(CHAT_GROUP_STORAGE_KEY, value);
+  writeStored(CHAT_GROUP_STORAGE_KEY, value);
 }
 
 export function writeChatSort(value: ChatSort): void {
-  localStorage.setItem(CHAT_SORT_STORAGE_KEY, value);
+  writeStored(CHAT_SORT_STORAGE_KEY, value);
 }
 
 export function arrangeChats(chats: readonly Chat[], options: ArrangeChatsOptions): ChatGroup[] {
-  const { groupBy, sort, projectNames = {}, now = new Date() } = options;
-  const sorted = [...chats].sort((left, right) => compareChats(left, right, sort));
+  const { groupBy, sort, projectNames = {}, indicators = {}, now = new Date() } = options;
+  const sorted = [...chats].sort((left, right) => compareChats(left, right, sort, indicators));
 
   if (groupBy === 'none') {
     return [{ key: 'all', label: null, chats: sorted }];
@@ -96,13 +129,19 @@ export function arrangeChats(chats: readonly Chat[], options: ArrangeChatsOption
   return [...buckets.values()].sort((left, right) => compareGroups(left, right, groupBy, sort));
 }
 
-function readAllowed<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
-  const value = localStorage.getItem(key);
-  return value !== null && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
-}
-
-function compareChats(left: Chat, right: Chat, sort: ChatSort): number {
+function compareChats(
+  left: Chat,
+  right: Chat,
+  sort: ChatSort,
+  indicators: Record<string, ChatIndicator>
+): number {
   switch (sort) {
+    case 'status':
+      return (
+        attentionRank(indicators[left.id]) - attentionRank(indicators[right.id]) ||
+        timestamp(right.updated_at) - timestamp(left.updated_at) ||
+        left.id.localeCompare(right.id)
+      );
     case 'updated_desc':
       return (
         timestamp(right.updated_at) - timestamp(left.updated_at) || left.id.localeCompare(right.id)

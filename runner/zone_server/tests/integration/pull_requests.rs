@@ -55,6 +55,8 @@ const FAILED_HEAD: &str = "3333333333333333333333333333333333333333";
 const MOVED_HEAD: &str = "4444444444444444444444444444444444444444";
 const BASE_HEAD: &str = "5555555555555555555555555555555555555555";
 const MERGE_COMMIT: &str = "6666666666666666666666666666666666666666";
+const CLEAN: &str = "clean";
+const DIRTY: &str = "dirty";
 const JOB: u64 = 71;
 const RUN: u64 = 99;
 const BYTES: &str = "bytes";
@@ -66,11 +68,13 @@ const SLOW_RELEASES: u64 = 6;
 const RELEASE_LOOKUP_DELAY: Duration = Duration::from_millis(300);
 const DIFF: &str = "diff --git a/src/lib.rs b/src/lib.rs\nindex 1..2 100644\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1,2 @@\n fn main() {}\n+fn added() {}\n";
 
-/// One open pull request GitHub knows about, and how its checks stand.
+/// One open pull request GitHub knows about, how its checks stand, and
+/// whether GitHub says it merges into its base.
 struct Pull {
     number: u64,
     head: &'static str,
     conclusion: Option<&'static str>,
+    mergeable_state: &'static str,
     threads: Vec<Value>,
 }
 
@@ -92,7 +96,15 @@ impl Pull {
             number,
             head,
             conclusion,
+            mergeable_state: CLEAN,
             threads: Vec::new(),
+        }
+    }
+
+    fn conflicted() -> Self {
+        Self {
+            mergeable_state: DIRTY,
+            ..Self::ready()
         }
     }
 }
@@ -160,6 +172,8 @@ impl Hub {
             "base": {"ref": "main", "sha": BASE_HEAD},
             "user": {"login": "octocat"},
             "commits": 1,
+            "mergeable": pull.mergeable_state != DIRTY,
+            "mergeable_state": pull.mergeable_state,
         })
     }
 
@@ -1168,6 +1182,50 @@ async fn a_merge_is_refused_with_a_code_for_each_reason_it_cannot_go_ahead() {
         1,
         "only a ready pull request at its head is merged"
     );
+}
+
+#[tokio::test]
+async fn a_pull_request_github_reports_conflicted_is_not_ready_and_never_merged() {
+    let board = Board::new(Hub::hosted().await).await;
+    board.hub.list(&[Pull::conflicted()]).await;
+    Mock::given(method("PUT"))
+        .and(path(board.hub.endpoint("pulls/1/merge")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"sha": MERGE_COMMIT, "merged": true})),
+        )
+        .expect(0)
+        .mount(&board.hub.server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(board.hub.graphql))
+        .and(body_partial_json(
+            json!({"variables": {"input": {"pullRequestId": "PR_1"}}}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+            "mergePullRequest": {"pullRequest": {"merged": true, "mergeCommit": {"oid": MERGE_COMMIT}}},
+        }})))
+        .expect(0)
+        .mount(&board.hub.server)
+        .await;
+
+    let listing = board.listed("").await;
+    assert_eq!(numbers(&listing), [(1, "not_ready".to_string(), 1)]);
+    let conflicted = &listing["pull_requests"][0];
+    assert!(
+        conflicted["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| blocker["code"] == "merge_conflict"),
+        "{conflicted}"
+    );
+
+    let (status, body) = board.merge(1, json!({"expected_head": READY_HEAD})).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["code"], json!("not_ready"));
+    assert_eq!(body["blockers"][0]["code"], json!("merge_conflict"));
+    board.hub.server.verify().await;
 }
 
 async fn merges(hub: &Hub) -> usize {

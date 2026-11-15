@@ -37,8 +37,9 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use crate::db::{
-    projects,
+    projects, sources,
     tasks::{self, TaskRow},
+    users,
 };
 use crate::services::github_app::{Credential, Error as GitHubError, Provider};
 
@@ -47,9 +48,12 @@ const ROOT: &str = "zone-checkouts-v1";
 const PROJECT_TOKEN_UNOPENABLE: &str =
     "The project's GitHub token is sealed under a key this deployment does not hold";
 
+const SOURCE_TOKEN_UNOPENABLE: &str =
+    "The source's GitHub token is sealed under a key this deployment does not hold";
+
 const AUTHOR_NAME: &str = "Zone";
 
-const AUTHOR_EMAIL: &str = "zone@localhost";
+const AUTHOR_EMAIL: &str = "zone@users.noreply.github.com";
 
 const BRANCH_PREFIX: &str = "zone/task";
 
@@ -58,11 +62,57 @@ const LOST_LEASE: &str = "Task execution lost its lease";
 pub(crate) const MISMATCHED_ORIGIN: &str =
     "Checkout repository no longer matches the task repository";
 
-/// Git as a task run uses it: commits made as Zone, and branches named
-/// `zone/task-{short id}-{slug}`.
+/// Who a run's commits are authored as: the name and the email of the Zone
+/// account the run acts for.
+///
+/// GitHub attributes a commit by its author email, so a run that commits
+/// under the account's own email publishes that person's work as theirs
+/// rather than as the server's. A run with no account behind it has no
+/// identity to borrow and commits as Zone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Author {
+    pub name: String,
+    pub email: String,
+}
+
+impl Author {
+    /// The account `user` names, or `None` when a run names no account and
+    /// when the account it names has since been deleted.
+    ///
+    /// An account that never set a display name is authored under the local
+    /// part of its email, because git refuses a commit with an empty name.
+    pub async fn of(pool: &PgPool, user: Option<Uuid>) -> Option<Self> {
+        let row = users::get_user_by_id(pool, user?).await.ok()??;
+        let name = row
+            .display_name
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| local_part(&row.email).to_string());
+        Some(Self {
+            name,
+            email: row.email,
+        })
+    }
+}
+
+/// What stands before an email's `@`, or the whole of it when it has none.
+fn local_part(email: &str) -> &str {
+    email.split('@').next().unwrap_or(email)
+}
+
+/// Git as a task run with no account behind it uses it: commits made as
+/// Zone's GitHub noreply identity.
 pub fn git() -> GitService {
+    git_as(None)
+}
+
+/// Git as a task run uses it: commits made as `author`, and branches named
+/// `zone/task-{short id}-{slug}`.
+pub fn git_as(author: Option<&Author>) -> GitService {
+    let (name, email) = author
+        .map(|author| (author.name.as_str(), author.email.as_str()))
+        .unwrap_or((AUTHOR_NAME, AUTHOR_EMAIL));
     GitService::new()
-        .with_author(AUTHOR_NAME, AUTHOR_EMAIL)
+        .with_author(name, email)
         .with_branch_prefix(
             BranchName::parse(BRANCH_PREFIX).expect("the branch prefix is a branch name"),
         )
@@ -136,7 +186,11 @@ impl Repository {
             }
         }
         let Some((url, holder)) = Self::select(requested, candidates)? else {
-            return Ok(None);
+            // No project of the task names a repository, but its source may
+            // name one and hold a credential for it. That is how a task
+            // started for a chat's pull request reaches a repository the
+            // workspace connected as a source rather than as a project.
+            return Self::from_source(pool, github, task).await;
         };
         let token = match holder {
             Some(project) => github
@@ -146,8 +200,54 @@ impl Repository {
                     GitHubError::Credential => PROJECT_TOKEN_UNOPENABLE.to_string(),
                     error => error.to_string(),
                 })?,
-            None => None,
+            // A repository no project holds. The task's source may hold a
+            // credential for it, and the url check keeps that credential from
+            // ever being used for another repository.
+            None => match Self::from_source(pool, github, task).await? {
+                Some(source) if source.url == url => source.token,
+                _ => None,
+            },
         };
+        Ok(Some(Self { url, token }))
+    }
+
+    /// The repository the task's own source names, with the credential the
+    /// provider resolves for that source. A source whose GitHub connection
+    /// was removed or suspended fails the resolution rather than running
+    /// without a credential, exactly as a project's does.
+    async fn from_source(
+        pool: &PgPool,
+        github: &Provider,
+        task: &TaskRow,
+    ) -> Result<Option<Self>, String> {
+        let Some(id) = task.source_id else {
+            return Ok(None);
+        };
+        let source = sources::get_source(pool, id, task.workspace_id)
+            .await
+            .map_err(|_| "Cannot load task source".to_string())?;
+        let Some(source) = source else {
+            return Ok(None);
+        };
+        // Only a source that names a repository is a route to one. A folder
+        // or a site the workspace indexes has no repository and no push, and
+        // leaves the task exactly where it was before this fallback existed.
+        if source.source_type != sources::GITHUB {
+            return Ok(None);
+        }
+        let Some(url) = source.url.as_deref() else {
+            return Ok(None);
+        };
+        let Ok(url) = GitService::repository_url(url) else {
+            return Ok(None);
+        };
+        let token = github
+            .source(pool, &source)
+            .await
+            .map_err(|error| match error {
+                GitHubError::Credential => SOURCE_TOKEN_UNOPENABLE.to_string(),
+                error => error.to_string(),
+            })?;
         Ok(Some(Self { url, token }))
     }
 
@@ -1111,8 +1211,43 @@ mod tests {
             .unwrap();
         assert_eq!(
             git(run.path(), &["log", "-1", "--format=%an <%ae>|%cn <%ce>"]),
-            "Zone <zone@localhost>|Zone <zone@localhost>"
+            "Zone <zone@users.noreply.github.com>|Zone <zone@users.noreply.github.com>"
         );
+    }
+
+    /// A run acting for a Zone account commits as that account, so GitHub
+    /// attributes what the run publishes to the person who asked for it.
+    #[tokio::test]
+    async fn a_run_commits_as_the_account_it_acts_for() {
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        let run = run_worktree(&root, &base, "zone/account");
+        let worktree = run.worktree.clone().expect("the run is a worktree");
+        let author = Author {
+            name: "Ada Lovelace".to_string(),
+            email: "ada@example.test".to_string(),
+        };
+        std::fs::write(run.path().join("work.txt"), "work\n").unwrap();
+        super::git_as(Some(&author))
+            .stage_all(&worktree)
+            .await
+            .unwrap();
+        super::git_as(Some(&author))
+            .commit(&worktree, "(feat): add work")
+            .await
+            .unwrap();
+        assert_eq!(
+            git(run.path(), &["log", "-1", "--format=%an <%ae>|%cn <%ce>"]),
+            "Ada Lovelace <ada@example.test>|Ada Lovelace <ada@example.test>"
+        );
+    }
+
+    /// An account that never set a display name still needs a name on its
+    /// commits, and the local part of its email is what GitHub shows anyway.
+    #[test]
+    fn an_email_without_a_display_name_supplies_the_name() {
+        assert_eq!(local_part("ada@example.test"), "ada");
+        assert_eq!(local_part("ada"), "ada");
     }
 
     /// Recovery knows a finished run's worktree only by its path. The path
