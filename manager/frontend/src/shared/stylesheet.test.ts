@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
 import {
   FEATURE_STYLESHEET_ATTRIBUTE,
-  FONT_STYLESHEET,
+  FONT_STYLESHEET_ATTRIBUTE,
   loadFeatureStylesheet,
   loadFonts,
   resetFeatureStylesheet,
@@ -52,9 +52,10 @@ describe('loadFeatureStylesheet', () => {
 describe('loadFonts', () => {
   it('appends the font stylesheet to the head', () => {
     const target = document.implementation.createHTMLDocument();
-    loadFonts(target);
+    loadFonts('/assets/fonts.css', target);
     const link = target.head.querySelector('link');
     expect(link?.rel).toBe('stylesheet');
-    expect(link?.getAttribute('href')).toBe(FONT_STYLESHEET);
+    expect(link?.getAttribute('href')).toBe('/assets/fonts.css');
+    expect(link?.hasAttribute(FONT_STYLESHEET_ATTRIBUTE)).toBe(true);
   });
 });
