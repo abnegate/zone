@@ -207,7 +207,7 @@ if labels.get("traefik.http.services.manager.loadbalancer.server.port") != "8000
 gluetun_env = service_env(gluetun)
 if gluetun_env.get("HTTP_CONTROL_SERVER_ADDRESS") != "127.0.0.1:8007":
     raise SystemExit("gluetun control API must move off :8000 so manager can bind")
-if gluetun_env.get("GLUETUN_PORT") != "8007":
+if gluetun_env.get("GLUETUN_URL") != "http://127.0.0.1:8007":
     raise SystemExit(
         "bundled exporter must query the moved control API, not manager on :8000"
     )
