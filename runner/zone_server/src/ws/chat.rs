@@ -10114,7 +10114,22 @@ cat 'DIR/reply.jsonl'
             &root.path().join("clones"),
             Uuid::new_v4(),
             abnegate_vcs::RepositoryUrl::local(&bare).expect("a local repository"),
-            project_directory::Access::Anonymous,
+            project_directory::Access::Source(Box::new(crate::db::sources::SourceRow {
+                id: Uuid::new_v4(),
+                name: "Repository".to_string(),
+                source_type: crate::db::sources::GITHUB.to_string(),
+                config: serde_json::json!({"owner": "owner", "repo": "repository"}),
+                credentials_encrypted: None,
+                description: None,
+                url: None,
+                is_active: Some(true),
+                last_verified_at: None,
+                last_error: None,
+                created_at: None,
+                updated_at: None,
+                workspace_id: None,
+                github_installation_id: None,
+            })),
         );
         (root, missing)
     }

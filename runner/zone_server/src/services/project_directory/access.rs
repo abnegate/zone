@@ -9,7 +9,6 @@ use crate::state::AppState;
 /// installation mints its token from GitHub, which a checkout that already stands never needs
 /// and an offline chat must never ask for.
 pub enum Access {
-    Anonymous,
     Source(Box<SourceRow>),
     Project(Box<ProjectRow>),
 }
@@ -19,7 +18,6 @@ impl Access {
     /// fails or succeeds on what the repository allows anyone.
     pub async fn token(&self, state: &AppState) -> Option<SecretValue> {
         let (resolved, holder) = match self {
-            Self::Anonymous => return None,
             Self::Source(source) => (state.github().source(state.db(), source).await, source.id),
             Self::Project(project) => (
                 state.github().project(state.db(), project).await,

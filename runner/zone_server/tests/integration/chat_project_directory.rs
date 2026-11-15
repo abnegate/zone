@@ -172,32 +172,30 @@ impl Fixture {
 
     /// The clone of `url`, made with `token` as a GitHub source of this workspace would hold it.
     fn missing(&self, url: RepositoryUrl, token: Option<&str>) -> Missing {
-        let access = match token {
-            Some(token) => Access::Source(Box::new(sources::SourceRow {
-                id: Uuid::new_v4(),
-                name: "Repository".to_string(),
-                source_type: sources::GITHUB.to_string(),
-                config: json!({"owner": "owner", "repo": "repository"}),
-                credentials_encrypted: Some(
-                    abnegate_secret::encrypt_value(
-                        &SecretValue::new(token),
-                        self.state.master_key(),
-                    )
-                    .expect("a token"),
-                ),
-                description: None,
-                url: None,
-                is_active: Some(true),
-                last_verified_at: None,
-                last_error: None,
-                created_at: None,
-                updated_at: None,
-                workspace_id: Some(self.workspace),
-                github_installation_id: None,
-            })),
-            None => Access::Anonymous,
-        };
-        Missing::new(self.clones.path(), self.workspace, url, access)
+        Missing::new(self.clones.path(), self.workspace, url, self.access(token))
+    }
+
+    /// A GitHub source of this workspace holding `token`, or no credential at all.
+    fn access(&self, token: Option<&str>) -> Access {
+        Access::Source(Box::new(sources::SourceRow {
+            id: Uuid::new_v4(),
+            name: "Repository".to_string(),
+            source_type: sources::GITHUB.to_string(),
+            config: json!({"owner": "owner", "repo": "repository"}),
+            credentials_encrypted: token.map(|token| {
+                abnegate_secret::encrypt_value(&SecretValue::new(token), self.state.master_key())
+                    .expect("a token")
+            }),
+            description: None,
+            url: None,
+            is_active: Some(true),
+            last_verified_at: None,
+            last_error: None,
+            created_at: None,
+            updated_at: None,
+            workspace_id: Some(self.workspace),
+            github_installation_id: None,
+        }))
     }
 }
 
@@ -608,8 +606,8 @@ async fn one_workspaces_clone_is_not_anothers() {
     let (_holder, url) = remote();
     let root = fixture.clones.path();
 
-    let one = Missing::new(root, fixture.workspace, url.clone(), Access::Anonymous);
-    let two = Missing::new(root, other.workspace, url, Access::Anonymous);
+    let one = Missing::new(root, fixture.workspace, url.clone(), fixture.access(None));
+    let two = Missing::new(root, other.workspace, url, other.access(None));
     fixture.remove().await;
     other.remove().await;
 
