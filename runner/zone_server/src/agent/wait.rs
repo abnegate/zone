@@ -308,6 +308,16 @@ const DESCRIPTION: &str = "Wait for something outside this loop to finish: a bac
     resumes with the outcome, so call it alone, size the timeout to what you are waiting for, \
     and do not use it to re-read something that has not changed.";
 
+const OFFLINE_DESCRIPTION: &str = "Wait for something outside this loop to finish: a background \
+    job or another task run. Your turn ends the moment you call this and resumes with the \
+    outcome, so call it alone, size the timeout to what you are waiting for, and do not use it \
+    to re-read something that has not changed.";
+
+const KINDS: [&str; 3] = [KIND_JOB, KIND_TASK_RUN, KIND_CHECK];
+
+/// An offline chat cannot ask GitHub for a commit's checks.
+const OFFLINE_KINDS: [&str; 2] = [KIND_JOB, KIND_TASK_RUN];
+
 /// The two statuses a run that has not finished can hold.
 const RUN_RUNNING: &str = "running";
 const RUN_WAITING: &str = "waiting";
@@ -341,8 +351,12 @@ const WORKSPACE_UNREADABLE: &str = "You cannot read this workspace.";
 /// rather than as anything having happened.
 const LOST_SUBJECT: &str = "This wait";
 
-fn unknown_kind(kind: &str) -> String {
-    format!("kind must be {KIND_JOB}, {KIND_TASK_RUN} or {KIND_CHECK}, not {kind:?}.")
+fn unknown_kind(offline: bool, kind: &str) -> String {
+    if offline {
+        format!("kind must be {KIND_JOB} or {KIND_TASK_RUN}, not {kind:?}.")
+    } else {
+        format!("kind must be {KIND_JOB}, {KIND_TASK_RUN} or {KIND_CHECK}, not {kind:?}.")
+    }
 }
 
 /// The call that waited, and what it waited for.
@@ -788,38 +802,53 @@ impl Tool for WaitForTool {
     }
 
     fn description(&self) -> &str {
-        DESCRIPTION
+        if self.offline() {
+            OFFLINE_DESCRIPTION
+        } else {
+            DESCRIPTION
+        }
     }
 
     fn parameters_schema(&self) -> Value {
+        let mut properties = json!({
+            "timeout_secs": {
+                "type": "integer",
+                "minimum": MIN_WAIT_SECS,
+                "maximum": MAX_WAIT_SECS,
+                "description": format!(
+                    "How long to wait. Default {DEFAULT_WAIT_SECS}. Size it to what you are \
+                     waiting for."
+                )
+            }
+        });
+        if self.offline() {
+            properties["kind"] = json!({"type": "string", "enum": OFFLINE_KINDS});
+            properties["id"] = json!({
+                "type": "string",
+                "description": format!(
+                    "Job id for kind={KIND_JOB}, run id for kind={KIND_TASK_RUN}."
+                )
+            });
+        } else {
+            properties["kind"] = json!({"type": "string", "enum": KINDS});
+            properties["id"] = json!({
+                "type": "string",
+                "description": format!(
+                    "Job id for kind={KIND_JOB}, run id for kind={KIND_TASK_RUN}, \
+                     source id for kind={KIND_CHECK}."
+                )
+            });
+            properties["ref"] = json!({
+                "type": "string",
+                "description": format!(
+                    "kind={KIND_CHECK} only: branch, tag or commit. Defaults to the source \
+                     branch."
+                )
+            });
+        }
         json!({
             "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": [KIND_JOB, KIND_TASK_RUN, KIND_CHECK]},
-                "id": {
-                    "type": "string",
-                    "description": format!(
-                        "Job id for kind={KIND_JOB}, run id for kind={KIND_TASK_RUN}, \
-                         source id for kind={KIND_CHECK}."
-                    )
-                },
-                "ref": {
-                    "type": "string",
-                    "description": format!(
-                        "kind={KIND_CHECK} only: branch, tag or commit. Defaults to the source \
-                         branch."
-                    )
-                },
-                "timeout_secs": {
-                    "type": "integer",
-                    "minimum": MIN_WAIT_SECS,
-                    "maximum": MAX_WAIT_SECS,
-                    "description": format!(
-                        "How long to wait. Default {DEFAULT_WAIT_SECS}. Size it to what you are \
-                         waiting for."
-                    )
-                }
-            },
+            "properties": properties,
             "required": ["kind", "id"],
             "additionalProperties": false
         })
@@ -848,6 +877,10 @@ impl Tool for WaitForTool {
 }
 
 impl WaitForTool {
+    fn offline(&self) -> bool {
+        self.scope.as_ref().is_some_and(|scope| scope.offline)
+    }
+
     async fn open(&self, params: Value, context: &ToolContext) -> Result<String, String> {
         let request: Request =
             serde_json::from_value(params).map_err(|_| INVALID_ARGUMENTS.to_string())?;
@@ -861,7 +894,7 @@ impl WaitForTool {
             KIND_JOB => self.job(&request, context)?,
             KIND_TASK_RUN => self.run(&request, context).await?,
             KIND_CHECK => self.commit(&request).await?,
-            other => return Err(unknown_kind(other)),
+            other => return Err(unknown_kind(self.offline(), other)),
         };
 
         let waiting = Waiting {
@@ -1617,6 +1650,38 @@ mod tests {
         )
         .await;
         assert_eq!(refused(&result), CHAT_OFFLINE);
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_is_not_offered_checks() {
+        let online = scoped(AppState::for_tests(), Uuid::new_v4(), Uuid::new_v4());
+        let schema = online.parameters_schema();
+        assert_eq!(
+            schema["properties"]["kind"]["enum"],
+            json!(KINDS),
+            "{schema}"
+        );
+        assert!(schema["properties"]["ref"].is_object(), "{schema}");
+
+        let offline = offline(AppState::for_tests());
+        let schema = offline.parameters_schema();
+        assert_eq!(
+            schema["properties"]["kind"]["enum"],
+            json!([KIND_JOB, KIND_TASK_RUN]),
+            "{schema}"
+        );
+        assert!(schema["properties"]["ref"].is_null(), "{schema}");
+        let mentioned = format!("kind={KIND_CHECK}");
+        assert!(!schema.to_string().contains(&mentioned), "{schema}");
+        assert!(
+            !offline.description().contains("checks"),
+            "{}",
+            offline.description()
+        );
+        assert_eq!(
+            unknown_kind(true, "build"),
+            format!("kind must be {KIND_JOB} or {KIND_TASK_RUN}, not \"build\".")
+        );
     }
 
     #[tokio::test]

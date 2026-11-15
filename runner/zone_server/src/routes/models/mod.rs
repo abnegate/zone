@@ -493,7 +493,7 @@ pub(crate) async fn show_model(
     }
     let unanswered = match request_show(state, name).await {
         Ok(response) => match read_show(response, name).await {
-            Err(CatalogError::NotFound(missing)) => CatalogError::NotFound(missing),
+            Err(missing @ CatalogError::NotFound(_)) => missing,
             answered => return answered,
         },
         Err(error) => unreachable_ollama(error),
@@ -1510,7 +1510,7 @@ mod show_tests {
     }
 
     #[tokio::test]
-    async fn the_installed_listing_never_asks_hugging_face() {
+    async fn installed_details_never_ask_hugging_face() {
         let ollama = ollama(404).await;
         let hugging_face = hugging_face(0).await;
         let shown = show_installed(&state(&ollama.uri(), &hugging_face), PULLED).await;
