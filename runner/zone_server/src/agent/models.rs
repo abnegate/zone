@@ -35,6 +35,18 @@ const START_TIMEOUT_SECS: u64 = 600;
 const NO_DOCUMENTS: &str = "training needs documents";
 const NO_IMAGES: &str = "training needs images";
 const CLIP_EXTENSIONS: [&str; 6] = ["mp4", "mov", "m4v", "webm", "mkv", "avi"];
+const SOURCES: [&str; 4] = ["ollama", "huggingface", COMFY_SOURCE, "gpt4all"];
+const OFFLINE_SOURCES: [&str; 1] = [COMFY_SOURCE];
+const LIST_DESCRIPTION: &str = "List installed Ollama and Comfy models, with disk used/total. Pass source (ollama, huggingface, comfy, gpt4all) plus optional query and cursor to browse a catalog. Returns at most 25 rows.";
+const OFFLINE_LIST_DESCRIPTION: &str = "List installed Ollama and Comfy models, with disk used/total. Pass source comfy plus optional query and cursor to browse the Comfy catalog. Returns at most 25 rows.";
+const GET_DESCRIPTION: &str = "Show one installed Ollama model, or Hugging Face GGUF/size options when it is not installed. Call this before install_model when the user has not named a quant.";
+const OFFLINE_GET_DESCRIPTION: &str = "Show one installed Ollama model.";
+
+/// The catalogs `list_models` browses: an offline chat reaches only the one
+/// Zone's own ComfyUI serves.
+fn sources(offline: bool) -> &'static [&'static str] {
+    if offline { &OFFLINE_SOURCES } else { &SOURCES }
+}
 
 pub(crate) const NAMES: [&str; 10] = [
     "cancel_model_install",
@@ -119,12 +131,10 @@ impl Tool for ModelTool {
 
     fn description(&self) -> &str {
         match self.operation {
-            Operation::List => {
-                "List installed Ollama and Comfy models, with disk used/total. Pass source (ollama, huggingface, comfy, gpt4all) plus optional query and cursor to browse a catalog. Returns at most 25 rows."
-            }
-            Operation::Get => {
-                "Show one installed Ollama model, or Hugging Face GGUF/size options when it is not installed. Call this before install_model when the user has not named a quant."
-            }
+            Operation::List if self.scope.offline => OFFLINE_LIST_DESCRIPTION,
+            Operation::List => LIST_DESCRIPTION,
+            Operation::Get if self.scope.offline => OFFLINE_GET_DESCRIPTION,
+            Operation::Get => GET_DESCRIPTION,
             Operation::Install => {
                 "Start installing a model and return immediately with current progress. runtime is ollama (default) or comfy for a .safetensors weight. Poll get_model_install; do not claim the install finished until that tool reports success."
             }
@@ -155,7 +165,7 @@ impl Tool for ModelTool {
                 "properties": {
                     "source": {
                         "type": "string",
-                        "enum": ["ollama", "huggingface", "comfy", "gpt4all"],
+                        "enum": sources(self.scope.offline),
                         "description": "Catalog to browse. Omit to list installed models."
                     },
                     "query": {
@@ -218,45 +228,7 @@ impl Tool for ModelTool {
             Operation::ListBases | Operation::GetTrain | Operation::DismissTrain => {
                 json!({"type": "object", "properties": {}, "additionalProperties": false})
             }
-            Operation::StartTrain => json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Adapter or chat-model name to publish as. A pivotal adapter's name is only letters, digits, dashes or underscores."
-                    },
-                    "base": {
-                        "type": "string",
-                        "description": "Training base id from list_train_bases."
-                    },
-                    "subject": {
-                        "type": "string",
-                        "enum": ["person", "other", "language"],
-                        "description": "Defaults from the chosen base."
-                    },
-                    "method": {
-                        "type": "string",
-                        "enum": ["lora", "finetune", "pivotal"],
-                        "description": "Defaults to lora."
-                    },
-                    "trigger": {
-                        "type": "string",
-                        "description": "Identity token the adapter learns. Required for a person."
-                    },
-                    "provider": {
-                        "type": "string",
-                        "enum": ["local", "runpod"],
-                        "description": "Defaults to local. runpod needs a workspace Runpod API key."
-                    },
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Host file paths: images, clips, or language .jsonl/.json/.txt/.md. Relative paths resolve against the tool working directory."
-                    }
-                },
-                "required": ["name", "base", "paths"],
-                "additionalProperties": false
-            }),
+            Operation::StartTrain => self.train_schema(),
         }
     }
 
@@ -303,6 +275,56 @@ impl Tool for ModelTool {
 }
 
 impl ModelTool {
+    /// An offline chat trains only on this machine, so it is not offered
+    /// the remote providers it would be refused.
+    fn train_schema(&self) -> Value {
+        let mut schema = json!({
+            "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Adapter or chat-model name to publish as. A pivotal adapter's name is only letters, digits, dashes or underscores."
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "Training base id from list_train_bases."
+                    },
+                    "subject": {
+                        "type": "string",
+                        "enum": ["person", "other", "language"],
+                        "description": "Defaults from the chosen base."
+                    },
+                    "method": {
+                        "type": "string",
+                        "enum": ["lora", "finetune", "pivotal"],
+                        "description": "Defaults to lora."
+                    },
+                    "trigger": {
+                        "type": "string",
+                        "description": "Identity token the adapter learns. Required for a person."
+                    },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["local", "runpod"],
+                        "description": "Defaults to local. runpod needs a workspace Runpod API key."
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Host file paths: images, clips, or language .jsonl/.json/.txt/.md. Relative paths resolve against the tool working directory."
+                    }
+                },
+                "required": ["name", "base", "paths"],
+                "additionalProperties": false
+        });
+        if self.scope.offline
+            && let Some(properties) = schema["properties"].as_object_mut()
+        {
+            properties.remove("provider");
+        }
+        schema
+    }
+
     async fn run(&self, params: &Value, context: &ToolContext) -> ToolResult {
         if self.tier().mutating() {
             match workspace_members::has_role_or_higher(
@@ -365,7 +387,9 @@ async fn list(scope: &WorkspaceScope, params: &Value) -> ToolResult {
     let query = optional_string_arg(params, "query");
     let cursor = optional_string_arg(params, "cursor").map(str::to_string);
     match optional_string_arg(params, "source") {
-        Some(source) if scope.offline && source != COMFY_SOURCE => ToolResult::error(CHAT_OFFLINE),
+        Some(source) if scope.offline && !OFFLINE_SOURCES.contains(&source) => {
+            ToolResult::error(CHAT_OFFLINE)
+        }
         Some(source) => {
             let listing = ListModelsQuery {
                 source: Some(source.to_string()),
@@ -1318,6 +1342,43 @@ mod tests {
             tool.error.as_deref(),
             Some("Invalid characters in model name")
         );
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_is_offered_no_remote_catalogue_or_compute() {
+        let offered = |scope: &WorkspaceScope, name: &str| {
+            let mut registry = ToolRegistry::new();
+            register(&mut registry, scope);
+            let tool = registry.get(name).expect("the tool is registered");
+            (tool.description().to_string(), tool.parameters_schema())
+        };
+        let online = scope();
+        let offline = offline_with(AppState::for_tests());
+
+        let (description, schema) = offered(&online, "list_models");
+        assert_eq!(schema["properties"]["source"]["enum"], json!(SOURCES));
+        assert!(description.contains("huggingface"), "{description}");
+        let (description, schema) = offered(&offline, "list_models");
+        assert_eq!(
+            schema["properties"]["source"]["enum"],
+            json!([COMFY_SOURCE])
+        );
+        for remote in ["ollama, ", "huggingface", "gpt4all"] {
+            assert!(!description.contains(remote), "{remote}: {description}");
+        }
+
+        let (description, _) = offered(&online, "get_model");
+        assert!(description.contains("Hugging Face"), "{description}");
+        let (description, _) = offered(&offline, "get_model");
+        assert!(!description.contains("Hugging Face"), "{description}");
+        assert!(!description.contains("install_model"), "{description}");
+
+        let (_, schema) = offered(&online, "start_train");
+        assert!(schema.to_string().contains("runpod"), "{schema}");
+        let (_, schema) = offered(&offline, "start_train");
+        assert!(schema["properties"]["provider"].is_null(), "{schema}");
+        assert!(!schema.to_string().contains("runpod"), "{schema}");
+        assert!(schema["properties"]["paths"].is_object(), "{schema}");
     }
 
     #[tokio::test]
