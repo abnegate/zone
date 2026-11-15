@@ -182,10 +182,16 @@ No text of the answer or of the error is read to choose the sentence or copied
 into it, so a server pointed at an internal host does not read that host's
 answer back to a tenant.
 
-A chat's Offline switch keeps the chat off public web search, page fetch and
-`curl` / `wget`. It does not remove MCP tools. An HTTP MCP server on a public
-host, or any MCP server that reaches the internet itself, is egress the switch
-does not close: turn the server off for the workspace, or disable it.
+A chat's Offline switch keeps the chat's agent off every host beyond the
+chat's own model provider and Zone's own model infrastructure. Networked tools
+are withheld from an offline chat or refuse the call: web search and page
+fetch, MCP servers, GitHub tools, starting task runs, monitoring, model installs
+and remote model catalogues, waits on pull request checks, and project clones.
+The pull request watcher and auto-fix skip an offline chat's pull requests.
+`run_command` refuses `curl` and `wget`; any other network access from a shell
+command, such as a script, a package manager or a raw socket, is not closed by
+the tool gates and relies on the operating-system network deny Zone places on
+an offline chat's child processes.
 
 ## Privacy Considerations
 
