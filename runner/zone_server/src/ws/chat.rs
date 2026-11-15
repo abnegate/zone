@@ -3277,27 +3277,46 @@ async fn project_directory(
     chat_id: Uuid,
     workspace_id: Uuid,
     agentic: bool,
+    offline: bool,
 ) -> (Option<std::path::PathBuf>, Option<String>) {
     match project_directory::locate(state, chat_id, workspace_id).await {
         Start::Elsewhere => (None, None),
         Start::Directory(directory) => (Some(directory), None),
         Start::Missing(_) | Start::Unavailable(_) if !agentic => (None, None),
         Start::Unavailable(reason) => (None, Some(reason)),
-        Start::Missing(missing) => {
-            publish(
-                stream,
-                ServerMessage::Status {
-                    message: format!("Cloning {}…", missing.url()),
-                },
-            )
-            .await;
-            match missing.clone_repository().await {
-                Ok(directory) => (Some(directory), None),
-                Err(reason) => {
-                    tracing::warn!(%chat_id, %reason, "Could not clone the project's repository");
-                    (None, Some(reason))
-                }
-            }
+        Start::Missing(missing) => cloned(stream, chat_id, missing, offline).await,
+    }
+}
+
+/// The project's repository, cloned for this turn. An offline chat reaches no network, so it
+/// starts without one rather than clone it.
+async fn cloned(
+    stream: &ChatStream,
+    chat_id: Uuid,
+    missing: project_directory::Missing,
+    offline: bool,
+) -> (Option<std::path::PathBuf>, Option<String>) {
+    if offline {
+        return (
+            None,
+            Some(format!(
+                "This chat is offline, so Zone didn't clone {}.",
+                missing.url()
+            )),
+        );
+    }
+    publish(
+        stream,
+        ServerMessage::Status {
+            message: format!("Cloning {}…", missing.url()),
+        },
+    )
+    .await;
+    match missing.clone_repository().await {
+        Ok(directory) => (Some(directory), None),
+        Err(reason) => {
+            tracing::warn!(%chat_id, %reason, "Could not clone the project's repository");
+            (None, Some(reason))
         }
     }
 }
@@ -3314,8 +3333,15 @@ async fn prepare_chat(
     route: Route,
     web_search_requested: bool,
 ) -> Result<ChatPreparation, Box<dyn std::error::Error + Send + Sync>> {
-    let (directory, displaced) =
-        project_directory(state, stream, chat_id, workspace_id, chat.agent_enabled).await;
+    let (directory, displaced) = project_directory(
+        state,
+        stream,
+        chat_id,
+        workspace_id,
+        chat.agent_enabled,
+        chat.offline,
+    )
+    .await;
     let previous = match chats::session(state.db(), chat_id).await {
         Ok(previous) => previous,
         Err(error) => {
@@ -3632,8 +3658,10 @@ async fn pin(
 /// nothing else. An unsandboxed one leaves it the file and shell tools it
 /// ships with, which run outside zone. Claude asks zone before running one,
 /// under the chat's approval policy; codex's are confined by its sandbox alone.
-fn builtin_tools(sandboxed: bool) -> BuiltinTools {
-    match sandboxed {
+/// An offline chat withholds them too: they reach the network without zone
+/// seeing it.
+fn builtin_tools(sandboxed: bool, offline: bool) -> BuiltinTools {
+    match sandboxed || offline {
         true => BuiltinTools::Withheld,
         false => BuiltinTools::Granted,
     }
@@ -3646,13 +3674,25 @@ fn equipped(
     client: LlmClient,
     served: Option<&AgentTools>,
     observer: &Arc<dyn Observer>,
-    sandboxed: bool,
+    builtin: BuiltinTools,
 ) -> LlmClient {
     let client = match served {
-        Some(served) => client.with_toolset(served.lease.toolset(), builtin_tools(sandboxed)),
+        Some(served) => client.with_toolset(served.lease.toolset(), builtin),
         None => client,
     };
     client.with_observer(observer.clone())
+}
+
+/// A pull request the agent opened is recorded to be watched on GitHub, which
+/// an offline chat never reaches.
+fn pull_requests(
+    state: &AppState,
+    chat_id: Uuid,
+    workspace_id: Uuid,
+    user_id: Uuid,
+    offline: bool,
+) -> Option<Recorder> {
+    (!offline).then(|| Recorder::new(state.clone(), chat_id, workspace_id, user_id))
 }
 
 /// `jobs` collects the background jobs this turn started and has not yet
@@ -3690,6 +3730,7 @@ async fn handle_chat_generation(
         driver,
     } = preparation;
     let offline = tools.offline();
+    let builtin = builtin_tools(sandboxed, offline);
     let origin = tools.origin();
     let directory = tools.working_directory().to_path_buf();
     let mut replay = context.clone();
@@ -3708,7 +3749,7 @@ async fn handle_chat_generation(
                     user: Some(user_id),
                     approval: generation.approvals.clone(),
                     calls: budget.max_tool_calls,
-                    builtin: builtin_tools(sandboxed),
+                    builtin,
                 },
                 &crate::mcp::local_endpoint(state.config()),
             )
@@ -3730,10 +3771,10 @@ async fn handle_chat_generation(
         }),
     );
     let observer: Arc<dyn Observer> = Arc::new(Observers::new(
-        Recorder::new(state.clone(), chat_id, workspace_id, user_id),
+        pull_requests(state, chat_id, workspace_id, user_id, offline),
         tracker,
     ));
-    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
+    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, builtin);
 
     publish(
         stream,
@@ -4166,7 +4207,7 @@ async fn handle_chat_generation(
                 llm_client.with_backend(backend),
                 agent_tools.as_ref(),
                 &observer,
-                sandboxed,
+                builtin,
             );
             replay = whole.clone();
             context = match continuing {
@@ -4269,7 +4310,7 @@ async fn handle_chat_generation(
                 switch.backend.clone(),
                 effort,
             ));
-            llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, sandboxed);
+            llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, builtin);
             tools = ChatTools::empty();
             continuing = wrote;
             context = match (wrote, switch.carried) {
@@ -6129,6 +6170,14 @@ cat 'DIR/reply.jsonl'
                         .expect("the chat's agent on");
                 }
 
+                async fn offline(&self) {
+                    sqlx::query("UPDATE chats SET offline = true WHERE id = $1")
+                        .bind(self.organization.chat)
+                        .execute(&self.organization.pool)
+                        .await
+                        .expect("the chat offline");
+                }
+
                 fn home(&self) -> std::path::PathBuf {
                     self.state.config().agents.login_home(
                         self.organization.id,
@@ -6621,6 +6670,37 @@ cat 'DIR/reply.jsonl'
                 assert_eq!(run.directory, work.to_str().expect("a UTF-8 path"));
                 assert!(
                     answer.starts_with("> Zone couldn't clone https://github.com/owner/repository"),
+                    "{answer}"
+                );
+                assert!(
+                    answer.ends_with(ANSWER),
+                    "the turn was not answered: {answer}"
+                );
+            }
+
+            /// A clone root nothing can be made in would say Zone couldn't clone, were it tried.
+            #[tokio::test]
+            async fn an_offline_chat_is_not_cloned_for_and_says_why() {
+                let blocked = TempDir::new().expect("a parent");
+                let file = blocked.path().join("file");
+                std::fs::write(&file, "").expect("a file where the clones would go");
+                let chat = Chat::cloning_under(file.join("clones")).await;
+                chat.sourced(
+                    db::sources::GITHUB,
+                    serde_json::json!({"owner": "owner", "repo": "repository"}),
+                )
+                .await;
+                chat.with_agent().await;
+                chat.offline().await;
+
+                chat.ask(FIRST).await;
+                let answer = chat.answer().await;
+                chat.remove().await;
+
+                assert!(
+                    answer.starts_with(
+                        "> This chat is offline, so Zone didn't clone https://github.com/owner/repository"
+                    ),
                     "{answer}"
                 );
                 assert!(
@@ -7577,7 +7657,7 @@ cat 'DIR/reply.jsonl'
         let observer: Arc<dyn Observer> = Arc::new(Watching);
         let client = LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli());
 
-        let client = equipped(client, None, &observer, true);
+        let client = equipped(client, None, &observer, BuiltinTools::Withheld);
         assert!(
             observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
             "a turn the agent tools are off for is still watched"
@@ -7588,7 +7668,7 @@ cat 'DIR/reply.jsonl'
             observed(&client).is_none(),
             "a new backend starts unwatched"
         );
-        let client = equipped(client, None, &observer, true);
+        let client = equipped(client, None, &observer, BuiltinTools::Withheld);
         assert!(
             observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
             "a turn handed over to another login is watched again"
@@ -7598,7 +7678,7 @@ cat 'DIR/reply.jsonl'
             LlmClient::new(abnegate_llm::LlmConfig::default()),
             None,
             &observer,
-            true,
+            BuiltinTools::Withheld,
         );
         assert!(matches!(endpoint.backend(), LlmBackend::Http));
     }
@@ -7615,25 +7695,22 @@ cat 'DIR/reply.jsonl'
         )
         .expect("a coding agent is served the turn's tools");
 
-        for (sandboxed, kept) in [
-            (true, BuiltinTools::Withheld),
-            (false, BuiltinTools::Granted),
-        ] {
+        for builtin in [BuiltinTools::Withheld, BuiltinTools::Granted] {
             let client = equipped(
                 LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli()),
                 Some(&served),
                 &observer,
-                sandboxed,
+                builtin,
             );
 
             assert!(
                 client.toolset().is_some(),
-                "sandboxed {sandboxed}: the agent reaches the turn's tools"
+                "{builtin:?}: the agent reaches the turn's tools"
             );
-            assert_eq!(client.builtin_tools(), kept, "sandboxed {sandboxed}");
+            assert_eq!(client.builtin_tools(), builtin);
             assert!(
                 observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
-                "sandboxed {sandboxed}: serving tools does not unwatch the agent"
+                "{builtin:?}: serving tools does not unwatch the agent"
             );
         }
     }
@@ -10025,19 +10102,89 @@ cat 'DIR/reply.jsonl'
     }
 
     /// Zone's tools reach a spawned coding agent over MCP (see `crate::mcp`),
-    /// and which of the agent's own tools survive beside them is
-    /// `agent_sandboxed` alone.
+    /// and the agent's own tools survive beside them only in a chat that is
+    /// neither sandboxed nor offline.
     #[test]
-    fn only_a_sandboxed_chat_withholds_the_agents_own_tools() {
-        assert_eq!(
-            builtin_tools(true),
-            BuiltinTools::Withheld,
-            "a sandboxed chat must not leave the agent tools zone cannot gate"
+    fn only_an_unsandboxed_online_chat_keeps_the_agents_own_tools() {
+        for (sandboxed, offline, kept) in [
+            (false, false, BuiltinTools::Granted),
+            (true, false, BuiltinTools::Withheld),
+            (false, true, BuiltinTools::Withheld),
+            (true, true, BuiltinTools::Withheld),
+        ] {
+            assert_eq!(
+                builtin_tools(sandboxed, offline),
+                kept,
+                "sandboxed {sandboxed}, offline {offline}: the agent's own tools reach the \
+                 network and the machine without zone gating them"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_records_no_pull_requests() {
+        let state = AppState::for_tests();
+        let (chat, workspace, user) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+        assert!(
+            pull_requests(&state, chat, workspace, user, true).is_none(),
+            "a recorded pull request is watched on GitHub, which an offline chat never reaches"
         );
-        assert_eq!(
-            builtin_tools(false),
-            BuiltinTools::Granted,
-            "an unsandboxed chat keeps the agent's own file and shell tools"
+        assert!(
+            pull_requests(&state, chat, workspace, user, false).is_some(),
+            "an online chat records the pull requests its agent opens"
+        );
+    }
+
+    /// A bare repository on this disk, and the clone a project's chat would make of it.
+    fn uncloned() -> (tempfile::TempDir, project_directory::Missing) {
+        let root = tempfile::tempdir().expect("a directory for the repository and its clones");
+        let bare = root.path().join("remote.git");
+        let initialised = std::process::Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&bare)
+            .status()
+            .expect("git runs");
+        assert!(initialised.success(), "git init --bare failed");
+        let missing = project_directory::Missing::new(
+            &root.path().join("clones"),
+            Uuid::new_v4(),
+            abnegate_vcs::RepositoryUrl::local(&bare).expect("a local repository"),
+            None,
+        );
+        (root, missing)
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_does_not_clone_its_projects_repository() {
+        let chat_id = Uuid::new_v4();
+        let (_root, missing) = uncloned();
+        let destination = missing.destination().to_path_buf();
+
+        let (directory, reason) = cloned(&ChatStream::of(chat_id), chat_id, missing, true).await;
+
+        assert_eq!(directory, None);
+        let reason = reason.expect("the chat is told why it has no checkout");
+        assert!(reason.contains("offline"), "{reason}");
+        assert!(
+            !destination.exists(),
+            "an offline chat cloned its project's repository"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_online_chat_clones_its_projects_repository() {
+        let chat_id = Uuid::new_v4();
+        let (_root, missing) = uncloned();
+        let destination = missing.destination().to_path_buf();
+
+        let (directory, reason) = cloned(&ChatStream::of(chat_id), chat_id, missing, false).await;
+
+        assert_eq!(reason, None);
+        assert_eq!(directory.as_deref(), Some(destination.as_path()));
+        assert!(
+            destination.join(".git").is_dir(),
+            "the clone is not a checkout"
         );
     }
 }
