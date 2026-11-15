@@ -71,6 +71,7 @@ use super::fault::Fault;
 use super::freshness::Freshness;
 use super::link::absolute;
 use super::readiness::Assessment;
+use super::readiness::BlockerCode;
 use super::readiness::CheckState;
 use super::readiness::CommitSha;
 use super::snapshot::Snapshot;
@@ -550,7 +551,11 @@ fn current(kept: &PullRequest, row: &ListedPullRequest, now: DateTime<Utc>) -> b
     let settled = kept.checks.complete
         && kept.threads_complete
         && kept.comments_complete
-        && !matches!(kept.checks.state, CheckState::Pending | CheckState::Unknown);
+        && !matches!(kept.checks.state, CheckState::Pending | CheckState::Unknown)
+        && !kept
+            .blockers
+            .iter()
+            .any(|blocker| blocker.code == BlockerCode::MergeabilityUnverified);
     let age = now.signed_duration_since(kept.assessed_at);
     let young = age <= delta(KEPT_LIMIT);
     let recent = kept.checks.state != CheckState::Failure || age <= delta(FAILURE_REFRESH_INTERVAL);

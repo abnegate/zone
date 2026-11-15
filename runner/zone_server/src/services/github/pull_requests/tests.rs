@@ -455,6 +455,34 @@ fn a_settled_unchanged_pull_request_is_kept_and_everything_else_is_assessed_agai
 }
 
 #[test]
+fn a_verdict_github_had_not_worked_mergeability_out_for_is_assessed_again() {
+    let unverified = |number| PullRequest {
+        blockers: vec![BlockerReport {
+            code: BlockerCode::MergeabilityUnverified,
+            detail: "GitHub has not established whether the branch merges.".into(),
+        }],
+        ..settled(number, CheckState::Success)
+    };
+    let conflicted = PullRequest {
+        blockers: vec![BlockerReport {
+            code: BlockerCode::MergeConflict,
+            detail: "The branch conflicts with its base.".into(),
+        }],
+        ..settled(2, CheckState::Success)
+    };
+    let previous = listing(vec![unverified(1), conflicted]);
+    let listed = [row(1, UPDATED_AT, HEAD), row(2, UPDATED_AT, HEAD)];
+
+    let plan = refresh_plan(Some(&previous), &listed, moment(ASSESSED_AT));
+
+    assert_eq!(
+        kept(&plan),
+        [false, true],
+        "only a verdict GitHub has worked mergeability out for is settled"
+    );
+}
+
+#[test]
 fn a_failed_pull_request_is_assessed_again_once_its_verdict_is_two_minutes_old() {
     let previous = listing(vec![settled(1, CheckState::Failure)]);
     let listed = [row(1, UPDATED_AT, HEAD)];
