@@ -302,21 +302,53 @@ fn short(sha: &str) -> &str {
     sha.get(..SHA_CHARS).unwrap_or(sha)
 }
 
+/// What a wait can be for. An offline chat cannot ask GitHub for a commit's
+/// checks.
+fn kinds(offline: bool) -> &'static [&'static str] {
+    if offline {
+        &[KIND_JOB, KIND_TASK_RUN]
+    } else {
+        &[KIND_JOB, KIND_TASK_RUN, KIND_CHECK]
+    }
+}
+
+/// What a wait of `kind` waits for, in the description's words.
+fn awaited(kind: &str) -> &'static str {
+    match kind {
+        KIND_JOB => "a background job",
+        KIND_TASK_RUN => "another task run",
+        _ => "the checks on a commit",
+    }
+}
+
+/// What a wait of `kind` takes as its id.
+fn identifier(kind: &str) -> &'static str {
+    match kind {
+        KIND_JOB => "Job id",
+        KIND_TASK_RUN => "run id",
+        _ => "source id",
+    }
+}
+
+/// `items` as one choice: "a", "a or b", "a, b or c".
+fn alternatives(items: &[&str]) -> String {
+    match items.split_last() {
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 /// What `wait_for` tells the model it is for.
-const DESCRIPTION: &str = "Wait for something outside this loop to finish: a background job, \
-    another task run, or the checks on a commit. Your turn ends the moment you call this and \
-    resumes with the outcome, so call it alone, size the timeout to what you are waiting for, \
-    and do not use it to re-read something that has not changed.";
-
-const OFFLINE_DESCRIPTION: &str = "Wait for something outside this loop to finish: a background \
-    job or another task run. Your turn ends the moment you call this and resumes with the \
-    outcome, so call it alone, size the timeout to what you are waiting for, and do not use it \
-    to re-read something that has not changed.";
-
-const KINDS: [&str; 3] = [KIND_JOB, KIND_TASK_RUN, KIND_CHECK];
-
-/// An offline chat cannot ask GitHub for a commit's checks.
-const OFFLINE_KINDS: [&str; 2] = [KIND_JOB, KIND_TASK_RUN];
+fn description(offline: bool) -> String {
+    let awaited: Vec<&str> = kinds(offline).iter().map(|kind| awaited(kind)).collect();
+    format!(
+        "Wait for something outside this loop to finish: {}. Your turn ends the moment you call \
+         this and resumes with the outcome, so call it alone, size the timeout to what you are \
+         waiting for, and do not use it to re-read something that has not changed.",
+        alternatives(&awaited)
+    )
+}
 
 /// The two statuses a run that has not finished can hold.
 const RUN_RUNNING: &str = "running";
@@ -352,11 +384,10 @@ const WORKSPACE_UNREADABLE: &str = "You cannot read this workspace.";
 const LOST_SUBJECT: &str = "This wait";
 
 fn unknown_kind(offline: bool, kind: &str) -> String {
-    if offline {
-        format!("kind must be {KIND_JOB} or {KIND_TASK_RUN}, not {kind:?}.")
-    } else {
-        format!("kind must be {KIND_JOB}, {KIND_TASK_RUN} or {KIND_CHECK}, not {kind:?}.")
-    }
+    format!(
+        "kind must be {}, not {kind:?}.",
+        alternatives(kinds(offline))
+    )
 }
 
 /// The call that waited, and what it waited for.
@@ -777,9 +808,7 @@ pub fn resume_with_outcome(
 }
 
 pub fn register(registry: &mut ToolRegistry, scope: Option<&WorkspaceScope>) {
-    registry.register(Arc::new(WaitForTool {
-        scope: scope.cloned(),
-    }));
+    registry.register(Arc::new(WaitForTool::new(scope.cloned())));
 }
 
 #[derive(Debug, Deserialize)]
@@ -793,6 +822,7 @@ struct Request {
 
 struct WaitForTool {
     scope: Option<WorkspaceScope>,
+    description: String,
 }
 
 #[async_trait]
@@ -802,11 +832,7 @@ impl Tool for WaitForTool {
     }
 
     fn description(&self) -> &str {
-        if self.offline() {
-            OFFLINE_DESCRIPTION
-        } else {
-            DESCRIPTION
-        }
+        &self.description
     }
 
     fn parameters_schema(&self) -> Value {
@@ -821,23 +847,17 @@ impl Tool for WaitForTool {
                 )
             }
         });
-        if self.offline() {
-            properties["kind"] = json!({"type": "string", "enum": OFFLINE_KINDS});
-            properties["id"] = json!({
-                "type": "string",
-                "description": format!(
-                    "Job id for kind={KIND_JOB}, run id for kind={KIND_TASK_RUN}."
-                )
-            });
-        } else {
-            properties["kind"] = json!({"type": "string", "enum": KINDS});
-            properties["id"] = json!({
-                "type": "string",
-                "description": format!(
-                    "Job id for kind={KIND_JOB}, run id for kind={KIND_TASK_RUN}, \
-                     source id for kind={KIND_CHECK}."
-                )
-            });
+        let kinds = kinds(self.offline());
+        let identifiers: Vec<String> = kinds
+            .iter()
+            .map(|kind| format!("{} for kind={kind}", identifier(kind)))
+            .collect();
+        properties["kind"] = json!({"type": "string", "enum": kinds});
+        properties["id"] = json!({
+            "type": "string",
+            "description": format!("{}.", identifiers.join(", "))
+        });
+        if kinds.contains(&KIND_CHECK) {
             properties["ref"] = json!({
                 "type": "string",
                 "description": format!(
@@ -877,6 +897,14 @@ impl Tool for WaitForTool {
 }
 
 impl WaitForTool {
+    fn new(scope: Option<WorkspaceScope>) -> Self {
+        let offline = scope.as_ref().is_some_and(|scope| scope.offline);
+        Self {
+            scope,
+            description: description(offline),
+        }
+    }
+
     fn offline(&self) -> bool {
         self.scope.as_ref().is_some_and(|scope| scope.offline)
     }
@@ -1077,7 +1105,7 @@ mod tests {
     }
 
     fn tool() -> WaitForTool {
-        WaitForTool { scope: None }
+        WaitForTool::new(None)
     }
 
     fn scoped(state: AppState, workspace: Uuid, user: Uuid) -> WaitForTool {
@@ -1089,16 +1117,14 @@ mod tests {
     }
 
     fn scoped_as(state: AppState, workspace: Uuid, user: Uuid, offline: bool) -> WaitForTool {
-        WaitForTool {
-            scope: Some(WorkspaceScope {
-                state,
-                workspace_id: workspace,
-                chat_id: Some(Uuid::new_v4()),
-                user_id: user,
-                offline,
-                origin: crate::db::tasks::Origin::Member,
-            }),
-        }
+        WaitForTool::new(Some(WorkspaceScope {
+            state,
+            workspace_id: workspace,
+            chat_id: Some(Uuid::new_v4()),
+            user_id: user,
+            offline,
+            origin: crate::db::tasks::Origin::Member,
+        }))
     }
 
     fn context(session: Session) -> ToolContext {
@@ -1658,7 +1684,7 @@ mod tests {
         let schema = online.parameters_schema();
         assert_eq!(
             schema["properties"]["kind"]["enum"],
-            json!(KINDS),
+            json!([KIND_JOB, KIND_TASK_RUN, KIND_CHECK]),
             "{schema}"
         );
         assert!(schema["properties"]["ref"].is_object(), "{schema}");
@@ -1681,6 +1707,24 @@ mod tests {
         assert_eq!(
             unknown_kind(true, "build"),
             format!("kind must be {KIND_JOB} or {KIND_TASK_RUN}, not \"build\".")
+        );
+        assert_eq!(
+            unknown_kind(false, "build"),
+            format!("kind must be {KIND_JOB}, {KIND_TASK_RUN} or {KIND_CHECK}, not \"build\".")
+        );
+        assert!(
+            online
+                .description()
+                .contains("a background job, another task run or the checks on a commit."),
+            "{}",
+            online.description()
+        );
+        assert!(
+            offline
+                .description()
+                .contains("a background job or another task run."),
+            "{}",
+            offline.description()
         );
     }
 
