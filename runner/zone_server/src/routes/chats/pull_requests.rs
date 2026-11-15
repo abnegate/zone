@@ -11,6 +11,7 @@ use axum::{
     extract::{Path, State},
 };
 use uuid::Uuid;
+use zone_core::vpn::CHAT_OFFLINE;
 
 use super::{check_workspace_write_access, get_chat_with_access};
 use crate::auth::AuthUser;
@@ -30,12 +31,20 @@ const PULL_REQUEST_NOT_FOUND: &str = "Pull request not found";
 const NOTHING_TO_CHANGE: &str = "Name at least one of dismissed, draft, auto_merge or auto_fix";
 
 /// GET /api/chats/{id}/pull-requests
+///
+/// An offline chat lists none: each one's status is read from GitHub, and an
+/// offline chat makes no request beyond its own model.
 pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PullRequestsResponse>, ServerError> {
     let (chat, workspace) = chat(&state, &auth, id).await?;
+    if chat.offline {
+        return Ok(Json(PullRequestsResponse {
+            pull_requests: Vec::new(),
+        }));
+    }
     let writable = writable(&state, &auth, workspace).await?;
     let tracked = pull_request::list(&state, workspace, chat.id).await?;
     Ok(Json(PullRequestsResponse {
@@ -56,7 +65,7 @@ pub async fn update(
     if request.is_empty() {
         return Err(ServerError::BadRequest(NOTHING_TO_CHANGE.to_string()));
     }
-    let (chat, workspace) = chat(&state, &auth, id).await?;
+    let (chat, workspace) = online(chat(&state, &auth, id).await?)?;
     check_workspace_write_access(&state, &auth, workspace).await?;
     let mut row = owned(&state, chat.id, pull_request_id).await?;
     if let Some(draft) = request.draft {
@@ -89,7 +98,7 @@ pub async fn diff(
     auth: AuthUser,
     Path((id, pull_request_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DiffResponse>, ServerError> {
-    let (chat, workspace) = chat(&state, &auth, id).await?;
+    let (chat, workspace) = online(chat(&state, &auth, id).await?)?;
     let row = owned(&state, chat.id, pull_request_id).await?;
     let excerpt = pull_request::diff(&state, workspace, &row)
         .await
@@ -105,6 +114,14 @@ async fn chat(state: &AppState, auth: &AuthUser, id: Uuid) -> Result<(ChatRow, U
     let workspace = chat
         .workspace_id
         .ok_or_else(|| ServerError::Forbidden(CHAT_WITHOUT_WORKSPACE.to_string()))?;
+    Ok((chat, workspace))
+}
+
+/// `chat` when it may reach GitHub, which every change and diff does.
+fn online((chat, workspace): (ChatRow, Uuid)) -> Result<(ChatRow, Uuid), ServerError> {
+    if chat.offline {
+        return Err(ServerError::Conflict(CHAT_OFFLINE.to_string()));
+    }
     Ok((chat, workspace))
 }
 
@@ -138,6 +155,91 @@ fn refused(error: Error) -> ServerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::jwt::Claims;
+    use crate::services::github::testing::connected::Connected;
+
+    const ONLINE: i64 = 11;
+    const OFFLINE: i64 = 12;
+
+    fn reader(connected: &Connected) -> AuthUser {
+        AuthUser(Claims {
+            sub: connected.user.to_string(),
+            email: format!("{}@zone.test", connected.user),
+            roles: Vec::new(),
+            permissions: Vec::new(),
+            exp: i64::MAX,
+            iat: 0,
+            jti: String::new(),
+            is_admin: false,
+        })
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_lists_no_pull_request_and_asks_github_nothing() {
+        let connected = Connected::new().await;
+        connected.reads_only(Some(ONLINE)).await;
+        let online = connected.chat_pull_request(false, ONLINE).await;
+        let offline = connected.chat_pull_request(true, OFFLINE).await;
+
+        let Json(listed) = list(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path(offline.chat_id),
+        )
+        .await
+        .expect("an offline chat's pull requests");
+        assert!(
+            listed.pull_requests.is_empty(),
+            "an offline chat's pull request is only shown with what GitHub says of it"
+        );
+
+        let Json(listed) = list(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path(online.chat_id),
+        )
+        .await
+        .expect("an online chat's pull requests");
+        let ids: Vec<Uuid> = listed.pull_requests.iter().map(|one| one.id).collect();
+        assert_eq!(ids, [online.id], "an online chat still lists its own");
+
+        connected.github.verify().await;
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_neither_changes_nor_diffs_a_pull_request() {
+        let connected = Connected::new().await;
+        connected.reads_only(None).await;
+        let offline = connected.chat_pull_request(true, OFFLINE).await;
+
+        let changed = update(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path((offline.chat_id, offline.id)),
+            Json(UpdateRequest {
+                draft: Some(true),
+                ..UpdateRequest::default()
+            }),
+        )
+        .await;
+        assert!(
+            matches!(&changed, Err(ServerError::Conflict(message)) if message == CHAT_OFFLINE),
+            "{changed:?}"
+        );
+
+        let diffed = diff(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path((offline.chat_id, offline.id)),
+        )
+        .await;
+        assert!(
+            matches!(&diffed, Err(ServerError::Conflict(message)) if message == CHAT_OFFLINE),
+            "{diffed:?}"
+        );
+
+        connected.github.verify().await;
+    }
 
     #[test]
     fn github_out_of_reach_is_a_bad_gateway() {

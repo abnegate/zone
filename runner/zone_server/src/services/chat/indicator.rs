@@ -204,7 +204,9 @@ pub async fn activities(
 /// it asked for them.
 ///
 /// The same page as the list itself: a reading for a row nobody has loaded is
-/// a GitHub request spent on nothing.
+/// a GitHub request spent on nothing. An offline chat's row speaks for no pull
+/// request, since reading one asks GitHub on behalf of a chat that makes no
+/// request beyond its own model.
 pub async fn list(
     state: &AppState,
     workspace_id: Uuid,
@@ -214,10 +216,15 @@ pub async fn list(
 ) -> DbResult<Vec<Indicator>> {
     let chats = chats::list_chats(state.db(), workspace_id, archived, sort, page).await?;
     let ids: Vec<Uuid> = chats.iter().map(|chat| chat.id).collect();
+    let online: Vec<Uuid> = chats
+        .iter()
+        .filter(|chat| !chat.offline)
+        .map(|chat| chat.id)
+        .collect();
     let (writing, awaiting_answer, rows) = tokio::try_join!(
         activity::writing(state.db(), workspace_id),
         activity::awaiting_answer(state.db(), workspace_id),
-        chat_pull_requests::for_chats(state.db(), &ids),
+        chat_pull_requests::for_chats(state.db(), &online),
     )?;
     let mut pulls: HashMap<Uuid, Vec<PullIndicator>> = HashMap::new();
     for (chat_id, pull) in signals(state, workspace_id, rows).await {
@@ -309,6 +316,7 @@ mod tests {
 
     use super::*;
     use crate::services::chat::pull_request::{AutoMerge, Mergeable, Threads};
+    use crate::services::github::testing::connected::Connected;
 
     fn row() -> PullRequestRow {
         PullRequestRow {
@@ -474,5 +482,46 @@ mod tests {
 
         assert!(draft.rank() > indicator(None).rank());
         assert!(draft.rank() < closed.rank());
+    }
+
+    #[tokio::test]
+    async fn an_offline_chats_row_speaks_for_no_pull_request_and_asks_github_nothing() {
+        let connected = Connected::new().await;
+        connected.reads_only(Some(11)).await;
+        let online = connected.chat_pull_request(false, 11).await;
+        let offline = connected.chat_pull_request(true, 12).await;
+
+        let indicators = list(
+            &connected.state,
+            connected.workspace,
+            None,
+            Sort::default(),
+            Page::default(),
+        )
+        .await
+        .expect("the workspace's indicators");
+
+        let row = |chat: Uuid| {
+            indicators
+                .iter()
+                .find(|indicator| indicator.chat_id == chat)
+                .expect("every chat has a row")
+        };
+        let offline = row(offline.chat_id);
+        assert!(
+            offline.pull_request.is_none() && offline.pull_requests == 0,
+            "an offline chat's pull request is only shown with what GitHub says of it: {offline:?}"
+        );
+        let shown = row(online.chat_id)
+            .pull_request
+            .as_ref()
+            .map(|pull| pull.id);
+        assert_eq!(
+            shown,
+            Some(online.id),
+            "an online chat's row still speaks for its pull request"
+        );
+
+        connected.github.verify().await;
     }
 }
