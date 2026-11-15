@@ -29,6 +29,7 @@ const ALREADY_MERGED = 'The pull request was already merged.';
 const PUSHED = '9'.repeat(40);
 const HEAD_MOVED = 'New commits were pushed. Review them before merging.';
 const UPDATE_PERMISSION = 'pull_requests:update';
+const REFRESH_LABEL = 'Refresh pull requests';
 const SHORT_SHA_LENGTH = 7;
 
 function shortHead(head: string | null): string {
@@ -404,5 +405,32 @@ test.describe('Pull requests', () => {
     const pane = details(page, readyPullRequest.number);
     await expect(pane.getByRole('link', { name: 'Open on GitHub' })).toBeVisible();
     await expect(pane.getByRole('button', { name: MERGE, exact: true })).toHaveCount(0);
+  });
+});
+
+test.describe('Pull requests on a 375px phone', () => {
+  test.use({ timezoneId: 'UTC', viewport: { width: 375, height: 812 } });
+
+  test.beforeEach(async ({ context }) => {
+    await blockServiceWorker(context);
+  });
+
+  test('keeps Refresh on the bar while one pull request is open', async ({ page }) => {
+    await openPullRequests(page);
+    const refresh = page.getByRole('button', { name: REFRESH_LABEL });
+    const tabs = page.locator('.page-bar-actions > .ui-tabs-list');
+    const filters = page.locator('.pull-requests-filters');
+    await expect(refresh).toBeVisible();
+    await expect(tabs).toBeVisible();
+    await expect(filters).toBeVisible();
+
+    await card(page, readyPullRequest.title).click();
+
+    await expect(details(page, readyPullRequest.number)).toBeVisible();
+    await expect(refresh).toBeVisible();
+    await expect(refresh).toBeInViewport();
+    await expect(tabs).toBeHidden();
+    await expect(filters).toBeHidden();
+    await expect(page.getByTestId(CARD).first()).toBeHidden();
   });
 });

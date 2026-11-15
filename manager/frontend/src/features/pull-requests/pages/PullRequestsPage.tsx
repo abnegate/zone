@@ -325,26 +325,26 @@ export default function PullRequestsPage() {
             aria-label="Filter by author"
             options={filterOptions(authors, 'All authors')}
           />
-          <Button
-            variant="ghost"
-            size="icon"
-            className="pull-requests-refresh"
-            onClick={listing.refresh}
-            disabled={!listing.refreshable && !listing.floored}
-            aria-disabled={listing.floored || undefined}
-            aria-describedby={listing.floored ? FLOORED_DESCRIPTION : undefined}
-            aria-label={REFRESH_LABEL}
-            aria-busy={listing.refreshing}
-            title={listing.floored ? FLOORED : REFRESH_LABEL}
-          >
-            <Icon path={REFRESH_PATH} className="pull-request-icon" />
-          </Button>
-          {listing.floored && (
-            <span id={FLOORED_DESCRIPTION} className="sr-only">
-              {FLOORED}
-            </span>
-          )}
         </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="pull-requests-refresh"
+          onClick={listing.refresh}
+          disabled={!listing.refreshable && !listing.floored}
+          aria-disabled={listing.floored || undefined}
+          aria-describedby={listing.floored ? FLOORED_DESCRIPTION : undefined}
+          aria-label={REFRESH_LABEL}
+          aria-busy={listing.refreshing}
+          title={listing.floored ? FLOORED : REFRESH_LABEL}
+        >
+          <Icon path={REFRESH_PATH} className="pull-request-icon" />
+        </Button>
+        {listing.floored && (
+          <span id={FLOORED_DESCRIPTION} className="sr-only">
+            {FLOORED}
+          </span>
+        )}
       </PageBar>
 
       <div className="pull-requests-workspace">{body()}</div>
