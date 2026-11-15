@@ -43,6 +43,7 @@ use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 use uuid::Uuid;
+use zone_core::vpn::CHAT_OFFLINE;
 
 use super::tools::WorkspaceScope;
 use crate::db::sources::SourceRow;
@@ -953,6 +954,9 @@ impl WaitForTool {
         request: &Request,
     ) -> Result<(String, Option<String>, Subscription), String> {
         let scope = self.scope.as_ref().ok_or(WORKSPACE_REQUIRED)?;
+        if scope.offline {
+            return Err(CHAT_OFFLINE.to_string());
+        }
         let source = Uuid::parse_str(&request.id).map_err(|_| SOURCE_ID_INVALID.to_string())?;
         let watched = self.watched(scope, source).await?;
         let (reference, sha, assessment) = watched.settled(request.reference.as_deref()).await?;
@@ -1007,6 +1011,7 @@ mod tests {
     use crate::services::github_app::testing::issuing;
     use crate::services::github_app::testing::uninstalled;
     use crate::state::AppState;
+    use crate::state::lazy_pool;
     use crate::state::test_config;
     use abnegate_agent::context;
     use abnegate_agent::tool::EnvironmentPolicy;
@@ -1043,13 +1048,21 @@ mod tests {
     }
 
     fn scoped(state: AppState, workspace: Uuid, user: Uuid) -> WaitForTool {
+        scoped_as(state, workspace, user, false)
+    }
+
+    fn offline(state: AppState) -> WaitForTool {
+        scoped_as(state, Uuid::new_v4(), Uuid::new_v4(), true)
+    }
+
+    fn scoped_as(state: AppState, workspace: Uuid, user: Uuid, offline: bool) -> WaitForTool {
         WaitForTool {
             scope: Some(WorkspaceScope {
                 state,
                 workspace_id: workspace,
                 chat_id: Some(Uuid::new_v4()),
                 user_id: user,
-                offline: false,
+                offline,
                 origin: crate::db::tasks::Origin::Member,
             }),
         }
@@ -1582,6 +1595,45 @@ mod tests {
         );
         reset_session(session);
         Jobs::kill_session(session).await;
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_cannot_wait_on_checks() {
+        let github = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&github)
+            .await;
+        let mut config = test_config();
+        config.github_api_url = github.uri();
+        config.github_api_allows_http = true;
+        let tool = offline(AppState::new(config, lazy_pool(), None));
+
+        let (result, _) = opened(
+            &tool,
+            chat(),
+            json!({"kind": KIND_CHECK, "id": Uuid::new_v4().to_string()}),
+        )
+        .await;
+        assert_eq!(refused(&result), CHAT_OFFLINE);
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_still_waits_on_its_jobs() {
+        let directory = TempDir::new().expect("a temporary working directory");
+        let session = chat();
+        let job = spawned(session, "exit 0", directory.path()).await;
+        let tool = offline(AppState::for_tests());
+
+        let (result, waiting) =
+            opened(&tool, session, json!({"kind": KIND_JOB, "id": &job.id})).await;
+        let deadline = waiting.expect("a receipt means a bound wait").deadline;
+        assert_eq!(
+            receipted(&result),
+            receipt(&job_subject(&job.id), &deadline)
+        );
+        reset_session(session);
     }
 
     #[tokio::test]
