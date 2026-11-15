@@ -5,10 +5,10 @@ use crate::auth::permission::{self, Permission};
 use crate::db::workspace_members::{self, WorkspaceRole};
 use crate::pull::Pull;
 use crate::routes::models::{
-    self, CatalogError, DismissError, ListModelsQuery, Method, Subject, TrainForm, browse_models,
-    catalog_pull_start, current_train_job, delete_named, dismiss_train_job, filesystem_usage,
-    list_comfy_models, list_ollama_model_rows, show_model, start_job, train_bases_list,
-    validate_model_name,
+    self, COMFY_SOURCE, CatalogError, DismissError, ListModelsQuery, Method, Subject, TrainForm,
+    browse_models, catalog_pull_start, current_train_job, delete_named, dismiss_train_job,
+    filesystem_usage, list_comfy_models, list_ollama_model_rows, show_installed, show_model,
+    start_job, train_bases_list, validate_model_name,
 };
 use crate::state::AppState;
 use abnegate_comfy::host::Compute;
@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use zone_core::vpn::CHAT_OFFLINE;
 
 use abnegate_agent::Tool;
 use abnegate_agent::ToolContext;
@@ -92,6 +93,9 @@ pub fn register(registry: &mut ToolRegistry, scope: &WorkspaceScope) {
         Operation::StartTrain,
         Operation::DismissTrain,
     ] {
+        if scope.offline && matches!(operation, Operation::Install) {
+            continue;
+        }
         registry.register(Arc::new(ModelTool {
             scope: scope.clone(),
             operation,
@@ -340,7 +344,7 @@ impl ModelTool {
         }
         match self.operation {
             Operation::List => list(&self.scope, params).await,
-            Operation::Get => get(&self.scope.state, params).await,
+            Operation::Get => get(&self.scope, params).await,
             Operation::Install => install(&self.scope.state, params),
             Operation::InstallStatus => install_status(&self.scope.state, params),
             Operation::CancelInstall => cancel_install(&self.scope.state, params),
@@ -364,6 +368,7 @@ async fn list(scope: &WorkspaceScope, params: &Value) -> ToolResult {
     let query = optional_string_arg(params, "query");
     let cursor = optional_string_arg(params, "cursor").map(str::to_string);
     match optional_string_arg(params, "source") {
+        Some(source) if scope.offline && source != COMFY_SOURCE => ToolResult::error(CHAT_OFFLINE),
         Some(source) => {
             let listing = ListModelsQuery {
                 source: Some(source.to_string()),
@@ -428,12 +433,17 @@ async fn installed_models(state: &AppState) -> Vec<models::ModelResponse> {
     }
 }
 
-async fn get(state: &AppState, params: &Value) -> ToolResult {
+async fn get(scope: &WorkspaceScope, params: &Value) -> ToolResult {
     let name = match string_arg(params, "name") {
         Ok(name) => name,
         Err(error) => return error,
     };
-    match show_model(state, name).await {
+    let shown = if scope.offline {
+        show_installed(&scope.state, name).await
+    } else {
+        show_model(&scope.state, name).await
+    };
+    match shown {
         Ok(info) => json_ok(info),
         Err(error) => ToolResult::error(error.message()),
     }
@@ -565,6 +575,9 @@ async fn start_train(
         },
         None => Compute::Local,
     };
+    if scope.offline && compute.is_remote() {
+        return ToolResult::error(CHAT_OFFLINE);
+    }
     let paths = match string_list(params, "paths") {
         Ok(paths) => paths,
         Err(error) => return error,
@@ -831,6 +844,13 @@ mod tests {
 
     fn scope() -> WorkspaceScope {
         scope_with(AppState::for_tests())
+    }
+
+    fn offline_with(state: AppState) -> WorkspaceScope {
+        WorkspaceScope {
+            offline: true,
+            ..scope_with(state)
+        }
     }
 
     fn train_state() -> (tempfile::TempDir, AppState) {
@@ -1301,5 +1321,83 @@ mod tests {
             tool.error.as_deref(),
             Some("Invalid characters in model name")
         );
+    }
+
+    #[test]
+    fn an_offline_chat_cannot_install_models() {
+        let mut registry = ToolRegistry::new();
+        register(&mut registry, &offline_with(AppState::for_tests()));
+        let mut names = registry.names();
+        names.sort_unstable();
+        let expected: Vec<&str> = NAMES
+            .into_iter()
+            .filter(|name| *name != "install_model")
+            .collect();
+        assert_eq!(names, expected);
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_browses_only_the_comfy_catalogue() {
+        let mut config = test_config();
+        config.model_search_proxy_url = Some("http://127.0.0.1:1".to_string());
+        let scope = offline_with(AppState::new(config, crate::state::lazy_pool(), None));
+        for source in ["huggingface", "ollama", "gpt4all"] {
+            let result = run(&scope, "list_models", json!({"source": source})).await;
+            assert_eq!(result.error.as_deref(), Some(CHAT_OFFLINE), "{source}");
+        }
+        let comfy = run(&scope, "list_models", json!({"source": COMFY_SOURCE})).await;
+        assert!(comfy.success, "{:?}", comfy.error);
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_reads_only_installed_model_details() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        const PULLED: &str = "hf.co/owner/repository:Q4_K_M";
+        let ollama = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(404))
+            .expect(1)
+            .mount(&ollama)
+            .await;
+        let hugging_face = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "owner/repository",
+                "siblings": [{"rfilename": "model-Q4_K_M.gguf", "size": 4096}],
+            })))
+            .expect(0)
+            .mount(&hugging_face)
+            .await;
+        let mut config = test_config();
+        config.ollama_host = ollama.uri();
+        config.huggingface_models_url = format!("{}/api/models", hugging_face.uri());
+        let scope = offline_with(AppState::new(config, crate::state::lazy_pool(), None));
+
+        let result = run(&scope, "get_model", json!({"name": PULLED})).await;
+        assert_eq!(
+            result.error.as_deref(),
+            Some(format!("Model not found: {PULLED}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_cannot_train_on_remote_compute() {
+        let (directory, state) = train_state();
+        let scope = offline_with(state);
+        let result = start_train(
+            &scope,
+            &json!({
+                "name": "Ada",
+                "base": "sdxl-people",
+                "provider": "runpod",
+                "paths": ["shot.png"],
+            }),
+            directory.path(),
+        )
+        .await;
+        assert_eq!(result.error.as_deref(), Some(CHAT_OFFLINE));
+        assert!(scope.state.train_jobs().current().is_none());
     }
 }
