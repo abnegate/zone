@@ -2253,7 +2253,7 @@ export default function ChatsPage() {
           )}
           <Checkbox
             label="Offline"
-            helpText="Never use web search, page fetch, or curl/wget. Connected sources still work."
+            helpText="Reaches no network beyond the model: no web search, shell network access, MCP servers or GitHub tools."
             checked={newChatOffline}
             onCheckedChange={(checked) => {
               editNewChat();

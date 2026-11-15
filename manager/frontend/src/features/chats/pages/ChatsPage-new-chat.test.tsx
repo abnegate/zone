@@ -469,6 +469,17 @@ describe('ChatsPage new chat dialog', () => {
     expect(optionLabels('Select Model')).toEqual(['Automatic', 'llama3.2']);
   });
 
+  it('says an offline chat reaches no network beyond its model', async () => {
+    await openNewChat();
+
+    expect(
+      screen.getByText(
+        'Reaches no network beyond the model: no web search, shell network access, MCP servers or GitHub tools.'
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Connected sources still work/)).not.toBeInTheDocument();
+  });
+
   it("starts from the settings of the workspace's most recent chat and sends them", async () => {
     workspaceProviders = { default: selfHosted, providers: offers, recent: recentCodex };
     await openNewChat();
