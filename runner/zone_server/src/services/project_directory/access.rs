@@ -17,19 +17,22 @@ impl Access {
     /// The token to clone with. One that cannot be resolved is not presented, and the clone then
     /// fails or succeeds on what the repository allows anyone.
     pub async fn token(&self, state: &AppState) -> Option<SecretValue> {
-        let (resolved, holder) = match self {
-            Self::Source(source) => (state.github().source(state.db(), source).await, source.id),
-            Self::Project(project) => (
-                state.github().project(state.db(), project).await,
-                project.id,
-            ),
+        let resolved = match self {
+            Self::Source(source) => state
+                .github()
+                .source(state.db(), source)
+                .await
+                .inspect_err(|error| {
+                    tracing::warn!(source = %source.id, %error, "Could not resolve the source's credential");
+                }),
+            Self::Project(project) => state
+                .github()
+                .project(state.db(), project)
+                .await
+                .inspect_err(|error| {
+                    tracing::warn!(project = %project.id, %error, "Could not resolve the project's credential");
+                }),
         };
-        match resolved {
-            Ok(credential) => credential.map(Credential::into_secret),
-            Err(error) => {
-                tracing::warn!(%holder, %error, "Could not resolve the repository's credential");
-                None
-            }
-        }
+        resolved.ok().flatten().map(Credential::into_secret)
     }
 }
