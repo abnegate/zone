@@ -65,7 +65,10 @@ pub async fn update(
     if request.is_empty() {
         return Err(ServerError::BadRequest(NOTHING_TO_CHANGE.to_string()));
     }
-    let (chat, workspace) = online(chat(&state, &auth, id).await?)?;
+    let (chat, workspace) = chat(&state, &auth, id).await?;
+    if chat.offline && request.reaches_github() {
+        return Err(ServerError::Conflict(CHAT_OFFLINE.to_string()));
+    }
     check_workspace_write_access(&state, &auth, workspace).await?;
     let mut row = owned(&state, chat.id, pull_request_id).await?;
     if let Some(draft) = request.draft {
@@ -114,14 +117,6 @@ async fn chat(state: &AppState, auth: &AuthUser, id: Uuid) -> Result<(ChatRow, U
     let workspace = chat
         .workspace_id
         .ok_or_else(|| ServerError::Forbidden(CHAT_WITHOUT_WORKSPACE.to_string()))?;
-    Ok((chat, workspace))
-}
-
-/// `chat` when it may reach GitHub, which every change and diff does.
-fn online((chat, workspace): (ChatRow, Uuid)) -> Result<(ChatRow, Uuid), ServerError> {
-    if chat.offline {
-        return Err(ServerError::Conflict(CHAT_OFFLINE.to_string()));
-    }
     Ok((chat, workspace))
 }
 
@@ -213,19 +208,44 @@ mod tests {
         connected.reads_only(None).await;
         let offline = connected.chat_pull_request(true, OFFLINE).await;
 
-        let changed = update(
-            State(connected.state.clone()),
-            reader(&connected),
-            Path((offline.chat_id, offline.id)),
-            Json(UpdateRequest {
+        for request in [
+            UpdateRequest {
                 draft: Some(true),
                 ..UpdateRequest::default()
-            }),
-        )
-        .await;
-        assert!(
-            matches!(&changed, Err(ServerError::Conflict(message)) if message == CHAT_OFFLINE),
-            "{changed:?}"
+            },
+            UpdateRequest {
+                auto_merge: Some(true),
+                ..UpdateRequest::default()
+            },
+            UpdateRequest {
+                auto_fix: Some(true),
+                ..UpdateRequest::default()
+            },
+            UpdateRequest {
+                dismissed: Some(true),
+                draft: Some(true),
+                ..UpdateRequest::default()
+            },
+        ] {
+            let changed = update(
+                State(connected.state.clone()),
+                reader(&connected),
+                Path((offline.chat_id, offline.id)),
+                Json(request),
+            )
+            .await;
+            assert!(
+                matches!(&changed, Err(ServerError::Conflict(message)) if message == CHAT_OFFLINE),
+                "{changed:?}"
+            );
+        }
+        let kept = owned(&connected.state, offline.chat_id, offline.id)
+            .await
+            .expect("the pull request");
+        assert_eq!(
+            (kept.auto_fix, kept.dismissed_at),
+            (false, None),
+            "a refused change changes nothing"
         );
 
         let diffed = diff(
@@ -242,6 +262,31 @@ mod tests {
         connected.github.verify().await;
     }
 
+    #[tokio::test]
+    async fn an_offline_chat_dismisses_a_pull_request_without_asking_github() {
+        let connected = Connected::new().await;
+        connected.reads_only(None).await;
+        let offline = connected.chat_pull_request(true, OFFLINE).await;
+
+        let dismissed = update(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path((offline.chat_id, offline.id)),
+            Json(UpdateRequest {
+                dismissed: Some(true),
+                ..UpdateRequest::default()
+            }),
+        )
+        .await;
+
+        assert!(dismissed.is_ok(), "{dismissed:?}");
+        let row = owned(&connected.state, offline.chat_id, offline.id)
+            .await
+            .expect("the pull request");
+        assert!(row.dismissed_at.is_some(), "{row:?}");
+        connected.github.verify().await;
+    }
+
     #[test]
     fn github_out_of_reach_is_a_bad_gateway() {
         assert!(matches!(
@@ -255,6 +300,7 @@ mod tests {
             Error::Disconnected,
             Error::Unauthenticated,
             Error::Refused("Resource not accessible by integration".to_string()),
+            Error::Offline,
         ] {
             assert!(matches!(refused(error), ServerError::Conflict(_)));
         }
