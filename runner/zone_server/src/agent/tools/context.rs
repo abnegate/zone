@@ -47,6 +47,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use abnegate_agent::testing::{Loopback, assert_network_denied};
     use abnegate_agent::tool::job::{JobCommand, Jobs};
     use abnegate_agent::tool::{
         OFF_LIMITS, ReadFileTool, RunCommandTool, RunShellTool, SearchCodeTool, Session,
@@ -385,47 +386,14 @@ mod tests {
         );
     }
 
-    /// What a child prints once it has reached the loopback listener.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    const CONNECTED: &str = "reached-the-loopback-listener";
-
-    /// A loopback listener that holds a connection in its backlog without
-    /// accepting it, and a bash script that connects to it and prints
-    /// [`CONNECTED`]. Bash rather than `curl`, so no gate that refuses a
-    /// program by name stands between the script and the listener.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn loopback() -> (std::net::TcpListener, String) {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
-        let port = listener.local_addr().expect("its address").port();
-        let script = format!(
-            "export LC_ALL=C LANG=C; exec 3<>/dev/tcp/127.0.0.1/{port} || exit 1; echo {CONNECTED}"
-        );
-        (listener, script)
-    }
-
-    /// Fail unless the operating system refused the child its connection:
-    /// seatbelt answers `EPERM` and the seccomp filter `EACCES`.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    fn assert_network_denied(output: &str) {
-        assert!(
-            !output.contains(CONNECTED),
-            "the child reached the listener: {output}"
-        );
-        let refused = output.lines().any(|line| {
-            line.contains("/dev/tcp/")
-                && (line.contains("Operation not permitted") || line.contains("Permission denied"))
-        });
-        assert!(refused, "the child was not refused the network: {output}");
-    }
-
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    async fn connected_from_a_shell(chat_offline: bool) -> String {
+    async fn from_a_shell(chat_offline: bool) -> String {
         let directory = tempdir().unwrap();
-        let (_listener, script) = loopback();
+        let loopback = Loopback::new().expect("a loopback listener");
         let context = chat(directory.path(), Vec::new(), chat_offline);
+        let command = format!("bash '{}'", loopback.script().display());
 
         let result = RunShellTool
-            .execute(json!({"command": format!("bash -c '{script}'")}), &context)
+            .execute(json!({"command": command}), &context)
             .await
             .expect("the shell runs");
 
@@ -433,14 +401,14 @@ mod tests {
         result.output.expect("the shell's report")
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    async fn connected_from_a_job(chat_offline: bool) -> (Option<i32>, String) {
+    async fn from_a_job(chat_offline: bool) -> (Option<i32>, String) {
         let directory = tempdir().unwrap();
-        let (_listener, script) = loopback();
+        let loopback = Loopback::new().expect("a loopback listener");
         let context = chat(directory.path(), Vec::new(), chat_offline);
+        let script = loopback.script().display().to_string();
 
         let started = Jobs::spawn(
-            &JobCommand::new("bash", vec!["-c".to_string(), script]).within(directory.path()),
+            &JobCommand::new("bash", vec![script]).within(directory.path()),
             &context,
         )
         .await
@@ -454,40 +422,43 @@ mod tests {
         (ended.exit_code, log)
     }
 
-    /// The offline gates withheld every networked tool, but a shell an
-    /// offline chat ran could still reach any host the server could.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn a_live_chats_shell_reaches_a_local_listener() {
+        let live = from_a_shell(false).await;
+
+        assert!(live.contains(Loopback::CONNECTED), "{live}");
+    }
+
     #[tokio::test]
     async fn an_offline_chats_shell_cannot_reach_a_local_listener() {
         if !abnegate_exec::testing::network_denial_enforced().await {
             return;
         }
 
-        let offline = connected_from_a_shell(true).await;
-        let live = connected_from_a_shell(false).await;
+        let offline = from_a_shell(true).await;
 
         assert!(offline.starts_with("Exit code: 1"), "{offline}");
         assert_network_denied(&offline);
-        assert!(live.contains(CONNECTED), "{live}");
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn a_live_chats_background_job_reaches_a_local_listener() {
+        let (code, live) = from_a_job(false).await;
+
+        assert_eq!(code, Some(0), "{live}");
+        assert!(live.contains(Loopback::CONNECTED), "{live}");
+    }
+
     #[tokio::test]
     async fn an_offline_chats_background_job_cannot_reach_a_local_listener() {
         if !abnegate_exec::testing::network_denial_enforced().await {
             return;
         }
 
-        let (offline_code, offline) = connected_from_a_job(true).await;
-        let (live_code, live) = connected_from_a_job(false).await;
+        let (code, offline) = from_a_job(true).await;
 
-        assert!(
-            offline_code.is_some_and(|code| code != 0),
-            "{offline_code:?}: {offline}"
-        );
+        assert!(code.is_some_and(|code| code != 0), "{code:?}: {offline}");
         assert_network_denied(&offline);
-        assert_eq!(live_code, Some(0), "{live}");
-        assert!(live.contains(CONNECTED), "{live}");
     }
 
     /// Filling a tree past the cap is cheap on Linux and slow on APFS, so the
