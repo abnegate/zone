@@ -44,24 +44,15 @@ fn complaint(status: &Status) -> Option<&'static str> {
     }
 }
 
-/// Why no run may fix a pull request of a chat that is `offline`. A run
-/// pushes to GitHub and its tools reach the web, and an offline chat makes no
-/// request beyond its own model.
-fn withheld(offline: bool) -> Option<&'static str> {
-    offline.then_some(CHAT_OFFLINE)
-}
-
-/// Whether the chat that owns `row` is offline. A chat that is gone or cannot
-/// be read is answered as offline, so a doubt never starts a run.
-async fn offline(state: &AppState, row: &PullRequestRow) -> bool {
-    match chats::get_chat(state.db(), row.chat_id).await {
-        Ok(Some(chat)) => chat.offline,
-        Ok(None) => true,
-        Err(error) => {
-            tracing::warn!(pull_request = %row.id, %error, "could not read whether this pull request's chat is offline");
-            true
-        }
-    }
+/// Whether the chat that owns `row` is offline, which withholds every fix run:
+/// a run pushes to GitHub and its tools reach the web, and an offline chat
+/// makes no request beyond its own model. A chat that is gone is
+/// [`sqlx::Error::RowNotFound`].
+async fn offline(state: &AppState, row: &PullRequestRow) -> Result<bool, sqlx::Error> {
+    chats::get_chat(state.db(), row.chat_id)
+        .await?
+        .map(|chat| chat.offline)
+        .ok_or(sqlx::Error::RowNotFound)
 }
 
 /// Starts a run to fix `row` on its head `branch` when its fresh `status` asks
@@ -92,9 +83,16 @@ pub async fn consider(
     let Some(complaint) = complaint(status) else {
         return;
     };
-    if let Some(reason) = withheld(offline(state, row).await) {
-        tracing::info!(pull_request = %row.id, reason, "auto-fix starts no run");
-        return;
+    match offline(state, row).await {
+        Ok(false) => {}
+        Ok(true) => {
+            tracing::info!(pull_request = %row.id, reason = CHAT_OFFLINE, "auto-fix starts no run");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(pull_request = %row.id, %error, "could not read whether this pull request's chat is offline, so auto-fix starts no run");
+            return;
+        }
     }
     let Some(actor) = row.auto_fix_by else {
         tracing::warn!(pull_request = %row.id, "auto-fix is on with no one to act as");
@@ -780,12 +778,6 @@ mod tests {
             row.auto_fix_run_id, None,
             "a run with no way to push would only spin"
         );
-    }
-
-    #[test]
-    fn an_offline_chat_withholds_every_fix_run() {
-        assert_eq!(withheld(true), Some(CHAT_OFFLINE));
-        assert_eq!(withheld(false), None, "an online chat may fix itself");
     }
 
     #[tokio::test]
