@@ -122,7 +122,11 @@ pub struct WorkspaceScope {
     pub workspace_id: Uuid,
     pub chat_id: Option<Uuid>,
     pub user_id: Uuid,
-    /// When true, this chat never uses public web search, page fetch, or curl/wget.
+    /// When true, the agent reaches no host beyond the chat's own model
+    /// provider and Zone's model infrastructure: MCP servers, GitHub
+    /// integrations, monitoring, project planning and starting task runs are
+    /// withheld, and every other networked tool refuses with
+    /// `zone_core::vpn::CHAT_OFFLINE`.
     pub offline: bool,
     /// Recorded on every task the turn's agent creates.
     pub origin: Origin,
@@ -421,7 +425,8 @@ impl ChatTools {
         &self.context.working_directory
     }
 
-    /// Whether this chat opted out of public web (search, page fetch, curl/wget).
+    /// Whether this chat reaches no host beyond its model provider and Zone's
+    /// model infrastructure; see [`WorkspaceScope::offline`].
     pub fn offline(&self) -> bool {
         self.scope.as_ref().is_some_and(|scope| scope.offline)
     }
@@ -643,7 +648,7 @@ impl ChatTools {
     /// for such a chat: the paragraph that teaches them renders off the
     /// catalog, so an ordinary chat is never told to plan a project.
     pub fn with_planner(mut self) -> Self {
-        let Some(scope) = self.scope.clone() else {
+        let Some(scope) = self.scope.clone().filter(|scope| !scope.offline) else {
             return self;
         };
         super::planner::register(&mut self.registry, &scope);
@@ -804,7 +809,7 @@ impl ChatTools {
         // A preview (connect = false) only sees the hubs already connected,
         // so drafting never spawns a server process.
         let mut connected_servers = 0;
-        if let Some(scope) = &scope {
+        if let Some(scope) = scope.as_ref().filter(|scope| !scope.offline) {
             let hub = if connect {
                 Some(scope.state.mcp().instance().await)
             } else {
@@ -3875,6 +3880,62 @@ mod tests {
             servers::prompt(1, &connected.registry.names())
         );
         assert!(guidance.contains("two underscores"), "{guidance}");
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_connects_and_offers_no_mcp_server() {
+        use abnegate_agent::mcp::McpConfig;
+        use abnegate_agent::mcp::McpServer;
+
+        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("stub_mcp_server.py");
+        let hub = McpHub::connect(&McpConfig::default().with_server(
+            "stub",
+            McpServer::command("python3", [script.to_string_lossy().into_owned()]),
+        ))
+        .await;
+        assert_eq!(hub.server_count(), 1, "the stub server has to connect");
+        let state = AppState::new(test_config(), lazy_pool(), None);
+        state.install_mcp(hub);
+
+        let online = ChatTools::preview(WorkspaceScope {
+            state: state.clone(),
+            ..scope()
+        })
+        .await;
+        let offline = ChatTools::preview(WorkspaceScope {
+            state,
+            offline: true,
+            ..scope()
+        })
+        .await;
+
+        assert!(online.has(STUB_TOOL), "{:?}", online.names());
+        assert!(!offline.has(STUB_TOOL), "{:?}", offline.names());
+        assert_eq!(offline.mcp_guidance(), None);
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_is_never_handed_the_planner() {
+        let planner = [
+            super::super::planner::CREATE_REPOSITORY,
+            super::super::planner::FINALIZE_PROJECT,
+        ];
+
+        let online = ChatTools::preview(scope()).await.with_planner();
+        let offline = ChatTools::preview(WorkspaceScope {
+            offline: true,
+            ..scope()
+        })
+        .await
+        .with_planner();
+
+        for name in planner {
+            assert!(online.has(name), "{name} is offered online");
+            assert!(!offline.has(name), "{name} reaches GitHub offline");
+        }
     }
 
     const STUB: &str = "stub";
