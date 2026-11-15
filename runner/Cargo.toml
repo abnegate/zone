@@ -83,3 +83,20 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+[patch.crates-io]
+abnegate-agent = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-agent-cli = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-comfy = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-config = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-exec = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-http = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-index = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-learn = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-llm = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-notify = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-recurrence = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-search = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-secret = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-vcs = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
+abnegate-vision = { git = "https://github.com/abnegate/crates", branch = "feat/exec-offline-network" }
