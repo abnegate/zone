@@ -19,7 +19,11 @@ macro_rules! columns {
          EXISTS (
              SELECT 1 FROM task_runs
              WHERE task_runs.id = chat_pull_requests.auto_fix_run_id AND task_runs.completed_at IS NULL
-         ) AS auto_fixing"
+         ) AS auto_fixing,
+         EXISTS (
+             SELECT 1 FROM chats
+             WHERE chats.id = chat_pull_requests.chat_id AND chats.offline
+         ) AS offline"
     };
 }
 
@@ -46,6 +50,9 @@ pub struct PullRequestRow {
     pub auto_fix_head: Option<String>,
     /// Whether that run is still working.
     pub auto_fixing: bool,
+    /// Whether the chat that opened it is offline, so nothing reads or
+    /// changes it on GitHub.
+    pub offline: bool,
 }
 
 /// What a run claiming a pull request for auto-fix starts from.

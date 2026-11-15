@@ -73,12 +73,20 @@ pub async fn list(state: &AppState, workspace_id: Uuid, chat_id: Uuid) -> DbResu
 
 /// `row` with what GitHub last said of it, asking again once that is stale.
 /// A fresh status was read with a credential, so only a stale one costs a
-/// credential lookup.
+/// credential lookup. An offline chat's pull request is never read, which
+/// also keeps auto-fix, which only acts on a status read here, off it.
 pub async fn track(
     state: &AppState,
     workspace_id: Uuid,
     mut row: PullRequestRow,
 ) -> DbResult<Tracked> {
+    if row.offline {
+        return Ok(Tracked {
+            row,
+            status: None,
+            connection: Connection::Offline,
+        });
+    }
     if let Some(cached) = state.pull_request_statuses().get(row.id) {
         return Ok(Tracked {
             row,
@@ -244,11 +252,15 @@ async fn credential(
     })
 }
 
+/// What every change and diff of `row` reads GitHub with.
 async fn required(
     state: &AppState,
     workspace_id: Uuid,
     row: &PullRequestRow,
 ) -> Result<Credential, Error> {
+    if row.offline {
+        return Err(Error::Offline);
+    }
     let source = credential::source(state, workspace_id, row)
         .await
         .map_err(|error| {
@@ -404,5 +416,41 @@ async fn automation(
             tracing::debug!(pull_request = %row.id, %error, "could not read a pull request's auto-merge");
             (AutoMerge::unavailable(AutoMerge::UNREAD), Vec::new())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::github::testing::connected::Connected;
+
+    #[tokio::test]
+    async fn nothing_reads_or_changes_an_offline_chats_pull_request_on_github() {
+        let connected = Connected::new().await;
+        connected.reads_only(None).await;
+        let row = connected.chat_pull_request(true, 12).await;
+        let (state, workspace) = (&connected.state, connected.workspace);
+
+        let tracked = track(state, workspace, row.clone())
+            .await
+            .expect("an offline chat's pull request");
+        assert_eq!(tracked.connection, Connection::Offline);
+        assert_eq!(tracked.status, None);
+        assert_eq!(
+            set_draft(state, workspace, &row, true).await,
+            Err(Error::Offline)
+        );
+        assert_eq!(
+            set_auto_merge(state, workspace, &row, true).await,
+            Err(Error::Offline)
+        );
+        assert_eq!(
+            diff(state, workspace, &row)
+                .await
+                .map(|excerpt| excerpt.text),
+            Err(Error::Offline)
+        );
+
+        connected.github.verify().await;
     }
 }

@@ -2,7 +2,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { chooseMenuItem, openMenu, settleMenu } from '../../../test/menu';
 import type { ChatPullRequest, PullRequestStatus } from '../types';
-import { DISCONNECTED_HINT, UNAVAILABLE_HINT, UNCREDENTIALED_HINT } from '../utils/pullRequests';
+import {
+  DISCONNECTED_HINT,
+  OFFLINE_HINT,
+  UNAVAILABLE_HINT,
+  UNCREDENTIALED_HINT,
+} from '../utils/pullRequests';
 
 const mockGetChatPullRequests = mock();
 const mockUpdateChatPullRequest = mock();
@@ -384,6 +389,15 @@ describe('ChangesBox', () => {
       expect(menuItem(name)).toHaveTextContent(UNAVAILABLE_HINT);
       expect(menuItem(name)).not.toHaveTextContent(UNCREDENTIALED_HINT);
     }
+  });
+
+  it("says an offline chat's pull request is not asked about rather than asking for a source", async () => {
+    await shown([{ ...OPEN, credentialed: false, connection: 'offline' }]);
+
+    await openMenu(MENU);
+    expect(menuItem(/View changes/)).toHaveAttribute('aria-disabled', 'true');
+    expect(menuItem(/View changes/)).toHaveTextContent(OFFLINE_HINT);
+    expect(menuItem(/View changes/)).not.toHaveTextContent(UNCREDENTIALED_HINT);
   });
 
   it('asks for GitHub to be reconnected when its connection was removed', async () => {

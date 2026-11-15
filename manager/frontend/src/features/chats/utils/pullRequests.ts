@@ -9,6 +9,7 @@ export const UNCREDENTIALED_HINT = 'No connected GitHub source holds a credentia
 export const DISCONNECTED_HINT =
   'The GitHub connection it was reached through was removed or suspended. Reconnect GitHub.';
 export const UNAVAILABLE_HINT = 'GitHub is temporarily unreachable. Try again in a moment.';
+export const OFFLINE_HINT = 'This chat is offline, so Zone does not ask GitHub about it.';
 export const READ_ONLY_HINT = 'Needs write access to this workspace.';
 export const AUTO_MERGE_HINT = 'GitHub merges it once its checks and reviews pass.';
 export const AUTO_FIXING_HINT =
@@ -94,6 +95,7 @@ const CONNECTION_HINTS: Record<Exclude<PullRequestConnection, 'credentialed'>, s
   uncredentialed: UNCREDENTIALED_HINT,
   disconnected: DISCONNECTED_HINT,
   unavailable: UNAVAILABLE_HINT,
+  offline: OFFLINE_HINT,
 };
 
 /** Why GitHub cannot be asked about the pull request, or nothing when it can. */

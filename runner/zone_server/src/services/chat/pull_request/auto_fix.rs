@@ -15,13 +15,11 @@
 
 use abnegate_vcs::{BranchName, CommitSha, GitService};
 use uuid::Uuid;
-use zone_core::vpn::CHAT_OFFLINE;
 
 use super::checks::Checks;
 use super::mergeable::Mergeable;
 use super::status::Status;
 use crate::db::chat_pull_requests::{self, Claim, PullRequestRow};
-use crate::db::chats;
 use crate::db::projects;
 use crate::db::sources;
 use crate::db::tasks::{Create, Origin};
@@ -42,17 +40,6 @@ fn complaint(status: &Status) -> Option<&'static str> {
         // fixing a verdict that has not arrived.
         _ => None,
     }
-}
-
-/// Whether the chat that owns `row` is offline, which withholds every fix run:
-/// a run pushes to GitHub and its tools reach the web, and an offline chat
-/// makes no request beyond its own model. A chat that is gone is
-/// [`sqlx::Error::RowNotFound`].
-async fn offline(state: &AppState, row: &PullRequestRow) -> Result<bool, sqlx::Error> {
-    chats::get_chat(state.db(), row.chat_id)
-        .await?
-        .map(|chat| chat.offline)
-        .ok_or(sqlx::Error::RowNotFound)
 }
 
 /// Starts a run to fix `row` on its head `branch` when its fresh `status` asks
@@ -83,17 +70,6 @@ pub async fn consider(
     let Some(complaint) = complaint(status) else {
         return;
     };
-    match offline(state, row).await {
-        Ok(false) => {}
-        Ok(true) => {
-            tracing::info!(pull_request = %row.id, reason = CHAT_OFFLINE, "auto-fix starts no run");
-            return;
-        }
-        Err(error) => {
-            tracing::warn!(pull_request = %row.id, %error, "could not read whether this pull request's chat is offline, so auto-fix starts no run");
-            return;
-        }
-    }
     let Some(actor) = row.auto_fix_by else {
         tracing::warn!(pull_request = %row.id, "auto-fix is on with no one to act as");
         return;
@@ -485,6 +461,7 @@ mod tests {
             auto_fix_by: None,
             auto_fix_head: None,
             auto_fixing: false,
+            offline: false,
         }
     }
 
@@ -778,38 +755,5 @@ mod tests {
             row.auto_fix_run_id, None,
             "a run with no way to push would only spin"
         );
-    }
-
-    #[tokio::test]
-    async fn a_failing_pull_request_of_an_offline_chat_starts_no_run() {
-        let pool =
-            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
-                .await
-                .expect("the test database accepts connections");
-        let (workspace, mut row) = watched(&pool, Some("https://github.com/acme/widgets")).await;
-        sqlx::query("UPDATE chats SET offline = TRUE WHERE id = $1")
-            .bind(row.chat_id)
-            .execute(&pool)
-            .await
-            .expect("an offline chat");
-        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
-        let branch = BranchName::parse("fix/widgets").expect("a branch");
-        let head = CommitSha::parse("0123456789abcdef0123456789abcdef01234567").expect("a head");
-
-        consider(
-            &state,
-            workspace,
-            &mut row,
-            &status(Checks::Failing, Mergeable::Unstable),
-            &branch,
-            &head,
-        )
-        .await;
-
-        assert_eq!(
-            row.auto_fix_run_id, None,
-            "a run would push to GitHub on behalf of a chat that makes no request"
-        );
-        assert!(!row.auto_fixing, "no run is working for an offline chat");
     }
 }

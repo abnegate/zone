@@ -561,6 +561,7 @@ export const PULL_REQUEST_CONNECTIONS = [
   'uncredentialed',
   'disconnected',
   'unavailable',
+  'offline',
 ] as const;
 export type PullRequestConnection = (typeof PULL_REQUEST_CONNECTIONS)[number];
 

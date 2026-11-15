@@ -98,7 +98,7 @@ pub async fn diff(
     auth: AuthUser,
     Path((id, pull_request_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DiffResponse>, ServerError> {
-    let (chat, workspace) = online(chat(&state, &auth, id).await?)?;
+    let (chat, workspace) = chat(&state, &auth, id).await?;
     let row = owned(&state, chat.id, pull_request_id).await?;
     let excerpt = pull_request::diff(&state, workspace, &row)
         .await
@@ -146,7 +146,8 @@ fn refused(error: Error) -> ServerError {
         Error::Uncredentialed
         | Error::Disconnected
         | Error::Unauthenticated
-        | Error::Refused(_) => ServerError::Conflict(error.to_string()),
+        | Error::Refused(_)
+        | Error::Offline => ServerError::Conflict(error.to_string()),
         Error::Unreachable => ServerError::BadGateway(error.to_string()),
         Error::Storage | Error::Unsaved => ServerError::Internal(error.to_string()),
     }
