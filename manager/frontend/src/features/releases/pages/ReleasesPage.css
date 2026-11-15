@@ -453,8 +453,9 @@
 }
 
 @media (max-width: 768px) {
-  .releases-filters {
-    flex: 1 1 0;
+  .page-bar-actions > .releases-filters {
+    flex: 1 1 100%;
+    order: 3;
     min-width: 0;
   }
 

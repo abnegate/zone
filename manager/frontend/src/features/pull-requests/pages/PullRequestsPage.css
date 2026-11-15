@@ -753,9 +753,11 @@
 }
 
 @media (max-width: 768px) {
-  .pull-requests-filters {
+  .page-bar-actions > .pull-requests-filters {
     flex: 1 1 100%;
     flex-wrap: wrap;
+    min-width: 0;
+    order: 3;
   }
 
   .pull-requests-filters .ui-select-control {
@@ -768,6 +770,11 @@
 
   .pull-requests-workspace:has(.pull-request-details) .pull-requests-list-pane,
   .pull-requests-detail-placeholder {
+    display: none;
+  }
+
+  .pull-requests-page:has(.pull-request-details) .page-bar-actions > .ui-tabs-list,
+  .pull-requests-page:has(.pull-request-details) .page-bar-actions > .pull-requests-filters {
     display: none;
   }
 

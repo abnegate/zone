@@ -813,7 +813,21 @@ describe('pull requests page layout', () => {
         '.pull-requests-workspace:has(.pull-request-details) .pull-requests-list-pane,\n  .pull-requests-detail-placeholder'
       )
     ).toContain('display: none');
-    expect(rule(phone, '.pull-requests-filters')).toContain('flex-wrap: wrap');
+    expect(
+      rule(
+        phone,
+        '.pull-requests-page:has(.pull-request-details) .page-bar-actions > .ui-tabs-list,\n  .pull-requests-page:has(.pull-request-details) .page-bar-actions > .pull-requests-filters'
+      )
+    ).toContain('display: none');
+  });
+
+  it("seats the filters on the phone bar's second row", () => {
+    const filters = rule(
+      media(css, '(max-width: 768px)'),
+      '.page-bar-actions > .pull-requests-filters'
+    );
+    expect(filters).toContain('flex-wrap: wrap');
+    expect(filters).toContain('order: 3');
   });
 });
 
@@ -1096,8 +1110,12 @@ describe('releases page layout', () => {
     expect(css).toContain(":root[data-theme='dark'] .release-day-count.ui-badge-neutral");
   });
 
-  it('never restyles the page bar', () => {
-    expect(css).not.toContain('.page-bar');
+  it("touches the page bar only to seat its filters on the phone bar's second row", () => {
+    const seat = '.page-bar-actions > .releases-filters';
+    const phone = rule(media(css, '(max-width: 768px)'), seat);
+    expect(phone).toContain('flex: 1 1 100%');
+    expect(phone).toContain('order: 3');
+    expect(css.replaceAll(seat, '')).not.toContain('.page-bar');
   });
 });
 
