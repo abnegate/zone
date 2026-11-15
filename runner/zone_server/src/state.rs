@@ -24,6 +24,7 @@ use crate::config::AgentConfig;
 use crate::config::{Config, ModelBackend};
 use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
+use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
@@ -128,6 +129,7 @@ struct AppStateInner {
     /// Live WebSocket holds per device, so the admin list can show Connected.
     pub device_connections: DashMap<Uuid, u32>,
     pub pull_request_statuses: StatusCache,
+    pub github_snapshots: Snapshots,
 }
 
 impl AppState {
@@ -219,6 +221,8 @@ impl AppState {
             }
         });
 
+        let github_snapshots = Snapshots::new(&config.github);
+
         let mcp = Hubs::new(
             zone_routing::proxy(),
             Policy {
@@ -249,6 +253,7 @@ impl AppState {
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
                 pull_request_statuses: StatusCache::default(),
+                github_snapshots,
             }),
         }
     }
@@ -256,6 +261,11 @@ impl AppState {
     /// What GitHub last said of each pull request a chat opened.
     pub fn pull_request_statuses(&self) -> &StatusCache {
         &self.inner.pull_request_statuses
+    }
+
+    /// What GitHub last said of each workspace source's pull requests and releases.
+    pub fn github_snapshots(&self) -> &Snapshots {
+        &self.inner.github_snapshots
     }
 
     /// Get the configuration
@@ -521,6 +531,7 @@ pub(crate) fn test_config() -> Config {
         train_upload_limit_mb: 512,
         endpoint_hosts: Default::default(),
         auto: Default::default(),
+        github: Default::default(),
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
@@ -699,6 +710,7 @@ mod tests {
             train_upload_limit_mb: 512,
             endpoint_hosts: Default::default(),
             auto: Default::default(),
+            github: Default::default(),
             host_mounts: Default::default(),
             clones: std::env::temp_dir().join("zone-clones"),
             connect_urls: Vec::new(),

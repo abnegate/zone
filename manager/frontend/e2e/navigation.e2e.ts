@@ -1,6 +1,9 @@
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
+import { emptyPullRequests, emptyReleases } from './layout-fixtures';
 import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
+const pullRequestsListPattern = /\/api\/workspaces\/[^/]+\/pull-requests(\?|$)/;
+const releasesListPattern = /\/api\/workspaces\/[^/]+\/releases(\?|$)/;
 const tasksRoutePattern = /\/api\/workspaces\/[^/]+\/tasks/;
 const tasksListPattern = /\/api\/workspaces\/[^/]+\/tasks\/?$/;
 const sourcesRoutePattern = /\/api\/workspaces\/[^/]+\/sources/;
@@ -78,6 +81,14 @@ test.describe('Navigation', () => {
       }
     });
 
+    await routeApi(page, pullRequestsListPattern, (route) =>
+      route.fulfill({ status: 200, json: emptyPullRequests })
+    );
+
+    await routeApi(page, releasesListPattern, (route) =>
+      route.fulfill({ status: 200, json: emptyReleases })
+    );
+
     await routeApi(page, '**/api/knowledge*', (route) => {
       if (route.request().method() === 'GET') {
         route.fulfill({
@@ -147,13 +158,15 @@ test.describe('Navigation', () => {
 
   test('sidebar shows all navigation items', async ({ page }) => {
     const navItems = page.locator('.nav-item');
-    await expect(navItems).toHaveCount(6);
+    await expect(navItems).toHaveCount(8);
     await expect(navItems.nth(0)).toContainText('Chats');
     await expect(navItems.nth(1)).toContainText('Projects');
     await expect(navItems.nth(2)).toContainText('Tasks');
-    await expect(navItems.nth(3)).toContainText('Models');
-    await expect(navItems.nth(4)).toContainText('Wiki');
-    await expect(navItems.nth(5)).toContainText('Settings');
+    await expect(navItems.nth(3)).toContainText('Pull Requests');
+    await expect(navItems.nth(4)).toContainText('Releases');
+    await expect(navItems.nth(5)).toContainText('Models');
+    await expect(navItems.nth(6)).toContainText('Wiki');
+    await expect(navItems.nth(7)).toContainText('Settings');
     await expect(page.locator('a[href="/sources"]')).toHaveCount(0);
   });
 
@@ -194,6 +207,26 @@ test.describe('Navigation', () => {
     await expect(
       page.getByRole('heading', { name: 'Tasks', exact: true })
     ).toBeVisible();
+  });
+
+  test('navigates to Pull Requests page', async ({ page }) => {
+    await page.click('a[href="/pull-requests"]');
+    await expect(page).toHaveURL('/pull-requests');
+    await expect(
+      page.getByRole('heading', { name: 'Pull Requests', exact: true })
+    ).toBeVisible();
+    await expect(page.getByText('No GitHub sources', { exact: true })).toBeVisible();
+    await expect(page.locator('.nav-item:has-text("Pull Requests")')).toHaveClass(/active/);
+  });
+
+  test('navigates to Releases page', async ({ page }) => {
+    await page.click('a[href="/releases"]');
+    await expect(page).toHaveURL('/releases');
+    await expect(
+      page.getByRole('heading', { name: 'Releases', exact: true })
+    ).toBeVisible();
+    await expect(page.getByText('No GitHub sources', { exact: true })).toBeVisible();
+    await expect(page.locator('.nav-item:has-text("Releases")')).toHaveClass(/active/);
   });
 
   test('redirects Sources to workspace settings', async ({ page }) => {

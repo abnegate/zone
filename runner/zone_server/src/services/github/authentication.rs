@@ -9,6 +9,7 @@ use super::configuration::Configuration;
 use crate::db::sources::SourceRow;
 use crate::services::github_app::Credential;
 use crate::services::github_app::Error as GitHubError;
+use crate::services::github_app::Unauthenticated;
 use crate::state::AppState;
 use failure::Failure;
 
@@ -58,6 +59,25 @@ where
     F: Fn(Github) -> Fut,
     Fut: Future<Output = Result<T, String>>,
 {
+    let operation = &operation;
+    credentialed(state, source, configuration, |github| async move {
+        operation(github).await.map_err(Failure)
+    })
+    .await
+    .map_err(|Failure(message)| message)
+}
+
+pub(crate) async fn credentialed<T, E, F, Fut>(
+    state: &AppState,
+    source: &SourceRow,
+    configuration: Configuration,
+    operation: F,
+) -> Result<T, E>
+where
+    F: Fn(Github) -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+    E: Unauthenticated + From<GitHubError> + From<String>,
+{
     let client = |token: Option<SecretValue>| {
         Github::new(
             Configuration {
@@ -66,22 +86,24 @@ where
             },
             state.config(),
         )
+        .map_err(E::from)
     };
-    let Some(credential) = source_credential(state, source).await? else {
+    let credential = source_credential(state, source)
+        .await
+        .map_err(|message| E::from(message.to_string()))?;
+    let Some(credential) = credential else {
         return operation(client(None)?).await;
     };
     let (client, operation) = (&client, &operation);
     state
         .github()
         .retrying(state.db(), credential, |token| async move {
-            let github = client(Some(token)).map_err(Failure)?;
-            operation(github).await.map_err(Failure)
+            operation(client(Some(token))?).await
         })
         .await
-        .map_err(|Failure(message)| message)
 }
 
-fn credential_message(error: &GitHubError) -> &'static str {
+pub(crate) fn credential_message(error: &GitHubError) -> &'static str {
     match error {
         GitHubError::Revoked | GitHubError::Suspended | GitHubError::NotConnected => {
             SOURCE_DISCONNECTED

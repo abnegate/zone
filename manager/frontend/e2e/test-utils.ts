@@ -76,6 +76,10 @@ export const userPermissions = [
   'wiki:read',
   'wiki:create',
   'wiki:update',
+  'pull_requests:read',
+  'pull_requests:update',
+  'releases:read',
+  'releases:create',
 ];
 
 // Admin permissions
@@ -108,6 +112,10 @@ export const adminPermissions = [
   'users:create',
   'users:update',
   'users:delete',
+  'pull_requests:read',
+  'pull_requests:update',
+  'releases:read',
+  'releases:create',
 ];
 
 // Default mock user

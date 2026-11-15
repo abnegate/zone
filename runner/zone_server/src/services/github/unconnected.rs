@@ -1,6 +1,7 @@
 use super::unavailable::Unavailable;
 
 const CONFIGURATION_INVALID: &str = "The GitHub source configuration is invalid.";
+pub(crate) const NOT_GITHUB: &str = "Not a GitHub source.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Unconnected {
@@ -26,8 +27,6 @@ impl From<Unavailable> for Unconnected {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const NOT_GITHUB: &str = "Not a GitHub source.";
 
     #[test]
     fn each_unconnected_source_reads_as_what_it_is() {

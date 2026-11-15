@@ -22,7 +22,7 @@ impl Unavailable {
 mod tests {
     use super::*;
 
-    const NOT_GITHUB: &str = "Not a GitHub source.";
+    use crate::services::github::unconnected::NOT_GITHUB;
 
     #[test]
     fn each_unavailable_source_reads_as_what_it_is() {

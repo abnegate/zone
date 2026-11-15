@@ -1,7 +1,9 @@
 import type { Page } from '@playwright/test';
+import { pullRequestKey } from '../src/features/pull-requests/utils/identity';
 import { expect, test } from './fixtures';
 import {
   mockChats,
+  notReadyPullRequest,
   setupAdminAuth,
   setupCommonRoutes,
 } from './layout-fixtures';
@@ -29,6 +31,20 @@ const screens = [
     heading: 'Tasks',
     content: '.task-card:not(.board-skeleton-card)',
     title: '.task-card-open',
+    titleLeading: '20px',
+  },
+  {
+    path: 'pull-requests',
+    heading: 'Pull Requests',
+    content: '[data-testid="pull-request-card"]',
+    title: '.pull-request-card-title',
+    titleLeading: '20px',
+  },
+  {
+    path: 'releases',
+    heading: 'Releases',
+    content: 'article.release-card',
+    title: '.release-card-name',
     titleLeading: '20px',
   },
   {
@@ -496,6 +512,30 @@ for (const viewport of [
         await expect(page.locator('.result-card')).toBeVisible();
         await capture(page, `${profile}-search-results`, theme);
         await fitsViewport(page);
+      });
+
+      test('the pull request detail and an expanded release stay inside the viewport', async ({
+        page,
+      }) => {
+        await ready(page, `/pull-requests?id=${pullRequestKey(notReadyPullRequest)}`, theme);
+        const pane = page.locator('.pull-request-details');
+        await expect(pane).toBeVisible();
+        await expect(pane.locator('.details-content')).toHaveCSS(
+          'padding-left',
+          viewport.width > 768 ? '20px' : '16px'
+        );
+        await pane.getByRole('tab', { name: 'Diff', exact: true }).click();
+        await expect(pane.locator('.pull-request-diff-file')).toBeVisible();
+        await fitsViewport(page);
+        await capture(page, `${profile}-pull-request-details`, theme);
+
+        await ready(page, '/releases', theme);
+        const toggle = page.locator('article.release-card .release-card-toggle').first();
+        await toggle.click();
+        await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+        await expect(page.locator('.release-card-pulls').first()).toBeVisible();
+        await fitsViewport(page);
+        await capture(page, `${profile}-release-expanded`, theme);
       });
 
       test('browse rows grow to contain wrapped metadata without overlapping', async ({

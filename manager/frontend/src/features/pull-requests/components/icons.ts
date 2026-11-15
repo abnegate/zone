@@ -1,0 +1,7 @@
+export const PULL_REQUEST_PATH =
+  'M9 6a3 3 0 11-6 0 3 3 0 016 0zM6 9v12M13 6h3a2 2 0 012 2v7M21 18a3 3 0 11-6 0 3 3 0 016 0z';
+
+export const CLOSE_PATH = 'M6 18L18 6M6 6l12 12';
+
+export const EXTERNAL_PATH =
+  'M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5';

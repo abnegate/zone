@@ -1,4 +1,3 @@
-// Permission constants matching backend
 export const PERMISSIONS = {
   ORGANIZATIONS: {
     CREATE: 'organizations:create',
@@ -23,6 +22,14 @@ export const PERMISSIONS = {
     READ: 'tasks:read',
     UPDATE: 'tasks:update',
     DELETE: 'tasks:delete',
+  },
+  PULL_REQUESTS: {
+    READ: 'pull_requests:read',
+    UPDATE: 'pull_requests:update',
+  },
+  RELEASES: {
+    READ: 'releases:read',
+    CREATE: 'releases:create',
   },
   CHATS: {
     CREATE: 'chats:create',
