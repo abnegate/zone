@@ -15,11 +15,13 @@
 
 use abnegate_vcs::{BranchName, CommitSha, GitService};
 use uuid::Uuid;
+use zone_core::vpn::CHAT_OFFLINE;
 
 use super::checks::Checks;
 use super::mergeable::Mergeable;
 use super::status::Status;
 use crate::db::chat_pull_requests::{self, Claim, PullRequestRow};
+use crate::db::chats;
 use crate::db::projects;
 use crate::db::sources;
 use crate::db::tasks::{Create, Origin};
@@ -39,6 +41,26 @@ fn complaint(status: &Status) -> Option<&'static str> {
         // are not a complaint. Pending especially: a run started here would be
         // fixing a verdict that has not arrived.
         _ => None,
+    }
+}
+
+/// Why no run may fix a pull request of a chat that is `offline`. A run
+/// pushes to GitHub and its tools reach the web, and an offline chat makes no
+/// request beyond its own model.
+fn withheld(offline: bool) -> Option<&'static str> {
+    offline.then_some(CHAT_OFFLINE)
+}
+
+/// Whether the chat that owns `row` is offline. A chat that is gone or cannot
+/// be read is answered as offline, so a doubt never starts a run.
+async fn offline(state: &AppState, row: &PullRequestRow) -> bool {
+    match chats::get_chat(state.db(), row.chat_id).await {
+        Ok(Some(chat)) => chat.offline,
+        Ok(None) => true,
+        Err(error) => {
+            tracing::warn!(pull_request = %row.id, %error, "could not read whether this pull request's chat is offline");
+            true
+        }
     }
 }
 
@@ -70,6 +92,10 @@ pub async fn consider(
     let Some(complaint) = complaint(status) else {
         return;
     };
+    if let Some(reason) = withheld(offline(state, row).await) {
+        tracing::info!(pull_request = %row.id, reason, "auto-fix starts no run");
+        return;
+    }
     let Some(actor) = row.auto_fix_by else {
         tracing::warn!(pull_request = %row.id, "auto-fix is on with no one to act as");
         return;
@@ -754,5 +780,44 @@ mod tests {
             row.auto_fix_run_id, None,
             "a run with no way to push would only spin"
         );
+    }
+
+    #[test]
+    fn an_offline_chat_withholds_every_fix_run() {
+        assert_eq!(withheld(true), Some(CHAT_OFFLINE));
+        assert_eq!(withheld(false), None, "an online chat may fix itself");
+    }
+
+    #[tokio::test]
+    async fn a_failing_pull_request_of_an_offline_chat_starts_no_run() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .expect("the test database accepts connections");
+        let (workspace, mut row) = watched(&pool, Some("https://github.com/acme/widgets")).await;
+        sqlx::query("UPDATE chats SET offline = TRUE WHERE id = $1")
+            .bind(row.chat_id)
+            .execute(&pool)
+            .await
+            .expect("an offline chat");
+        let state = AppState::new(AppState::for_tests().config().clone(), pool.clone(), None);
+        let branch = BranchName::parse("fix/widgets").expect("a branch");
+        let head = CommitSha::parse("0123456789abcdef0123456789abcdef01234567").expect("a head");
+
+        consider(
+            &state,
+            workspace,
+            &mut row,
+            &status(Checks::Failing, Mergeable::Unstable),
+            &branch,
+            &head,
+        )
+        .await;
+
+        assert_eq!(
+            row.auto_fix_run_id, None,
+            "a run would push to GitHub on behalf of a chat that makes no request"
+        );
+        assert!(!row.auto_fixing, "no run is working for an offline chat");
     }
 }
