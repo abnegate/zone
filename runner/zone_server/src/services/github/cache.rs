@@ -77,8 +77,11 @@ impl<K: Eq + Hash + Clone, T> Cache<K, T> {
         let settled_at = now + delta(started.elapsed());
         let answer = slot.settle(fetched, settled_at, epoch);
         if slot.vacant(settled_at) {
-            self.slots
-                .remove_if(&key, |_, held| Arc::ptr_eq(held, &slot));
+            // Two holders are the map and this read; any more is a reader queued
+            // on the slot that would otherwise settle into a slot the map dropped.
+            self.slots.remove_if(&key, |_, held| {
+                Arc::ptr_eq(held, &slot) && Arc::strong_count(held) == 2
+            });
         }
         answer
     }

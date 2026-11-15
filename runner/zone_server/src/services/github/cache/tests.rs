@@ -1,3 +1,4 @@
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -6,6 +7,8 @@ use std::time::Duration;
 use chrono::DateTime;
 use chrono::TimeDelta;
 use chrono::Utc;
+use futures::poll;
+use tokio::sync::Notify;
 
 use super::Cache;
 use super::IDLE_EXPIRY;
@@ -15,6 +18,7 @@ use crate::services::github::client::TOO_MANY_REQUESTS;
 use crate::services::github::client::status_error;
 use crate::services::github::fault::Fault;
 use crate::services::github::freshness::Freshness;
+use crate::services::github::snapshot::Snapshot;
 
 const KEY: u8 = 1;
 const OTHER: u8 = 2;
@@ -428,6 +432,78 @@ async fn a_snapshot_forgotten_while_it_was_fetched_is_not_reused() {
         .expect("what predates the forget is fetched again");
     assert_eq!(freshness, Freshness::Refreshed);
     assert_eq!(*snapshot.value, 9);
+}
+
+async fn queued_behind_a_forgotten_fetch(
+    cache: &Cache<u8, u32>,
+    at: DateTime<Utc>,
+    outcome: Result<u32, Fault>,
+) -> Result<(Snapshot<u32>, Freshness), Fault> {
+    let release = Notify::new();
+    let (writer, released) = (cache, &release);
+    let mut forgetting = pin!(cache.read(KEY, false, at, move |_| async move {
+        writer.forget(&KEY);
+        released.notified().await;
+        Ok(8)
+    }));
+    let mut queued = pin!(cache.read(KEY, false, at, move |previous| async move {
+        assert_eq!(previous, None, "what predates the forget is not reused");
+        outcome
+    }));
+
+    assert!(
+        poll!(forgetting.as_mut()).is_pending(),
+        "the first read is fetching when it forgets"
+    );
+    assert!(
+        poll!(queued.as_mut()).is_pending(),
+        "the second read waits for the first fetch to settle"
+    );
+    release.notify_one();
+    let (forgotten, queued) = tokio::join!(forgetting, queued);
+    let (snapshot, _) = forgotten.expect("the read that raced the forget still answers");
+    assert_eq!(*snapshot.value, 8);
+    queued
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_fetch_queued_behind_a_forgotten_one_is_kept() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let raced = later(start, 60);
+
+    let (snapshot, freshness) = queued_behind_a_forgotten_fetch(&cache, raced, Ok(9))
+        .await
+        .expect("the queued read fetches after the forget");
+    assert_eq!(freshness, Freshness::Refreshed);
+    assert_eq!(*snapshot.value, 9);
+
+    let (snapshot, freshness) = cache
+        .read(KEY, false, later(raced, 1), never)
+        .await
+        .expect("the queued fetch is served");
+    assert_eq!(freshness, Freshness::Cached);
+    assert_eq!(*snapshot.value, 9);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rate_limit_queued_behind_a_forgotten_fetch_is_kept() {
+    let cache = cache();
+    let start = Utc::now();
+    seeded(&cache, KEY, start, 7).await;
+    let raced = later(start, 60);
+
+    let fault = queued_behind_a_forgotten_fetch(&cache, raced, Err(exhausted()))
+        .await
+        .expect_err("the queued read is rate limited with nothing to serve");
+    assert_eq!(fault, exhausted());
+
+    let fault = cache
+        .read(KEY, false, later(raced, 1), never)
+        .await
+        .expect_err("the backoff refuses without asking");
+    assert_eq!(fault, exhausted());
 }
 
 #[tokio::test(start_paused = true)]
