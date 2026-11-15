@@ -579,8 +579,8 @@ function pullRequestListing(pullRequests: readonly PullRequest[], sources: Repos
     generated_at: minutesBefore(1),
     stale: false,
     partial: false,
-    ttl_secs: 60,
-    refresh_floor_secs: 10,
+    ttl_seconds: 60,
+    refresh_floor_seconds: 10,
     counts: {
       ready: pullRequests.filter((pullRequest) => pullRequest.readiness === 'ready').length,
       in_progress: pullRequests.filter((pullRequest) => pullRequest.readiness === 'in_progress')
@@ -753,7 +753,7 @@ function releaseListing(releases: Release[], sources: Repository[]): ReleasesRes
     stale: false,
     partial: false,
     window_days: 7,
-    ttl_secs: 120,
+    ttl_seconds: 120,
     sources: sources.map(sourceStatus),
     releases,
     warnings: [],

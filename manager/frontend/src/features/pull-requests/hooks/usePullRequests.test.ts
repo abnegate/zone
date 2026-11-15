@@ -188,7 +188,7 @@ describe('usePullRequests', () => {
 
   it('holds refresh back while the listing is inside the refresh floor', async () => {
     mockList.mockResolvedValue(
-      listing({ generated_at: new Date().toISOString(), refresh_floor_secs: 60 })
+      listing({ generated_at: new Date().toISOString(), refresh_floor_seconds: 60 })
     );
     const { result } = renderHook(() => usePullRequests(), { wrapper: provider() });
     await waitFor(() => expect(result.current.pullRequests).toHaveLength(1));
@@ -202,7 +202,7 @@ describe('usePullRequests', () => {
 
   it('allows refresh again once the floor has passed', async () => {
     mockList.mockResolvedValue(
-      listing({ generated_at: new Date().toISOString(), refresh_floor_secs: 0.2 })
+      listing({ generated_at: new Date().toISOString(), refresh_floor_seconds: 0.2 })
     );
     const { result } = renderHook(() => usePullRequests(), { wrapper: provider() });
     await waitFor(() => expect(result.current.floored).toBe(true));
@@ -312,17 +312,17 @@ describe('floorEnd', () => {
   const generatedAt = Date.parse('2026-11-13T10:00:00Z');
 
   it('ends the floor its length after the listing was generated', () => {
-    const listed = listing({ generated_at: '2026-11-13T10:00:00Z', refresh_floor_secs: 10 });
+    const listed = listing({ generated_at: '2026-11-13T10:00:00Z', refresh_floor_seconds: 10 });
     expect(floorEnd(listed, generatedAt + 5_000)).toBe(generatedAt + 10_000);
   });
 
   it('never runs longer than the floor from when the listing arrived', () => {
-    const listed = listing({ generated_at: '2026-11-13T10:00:00Z', refresh_floor_secs: 10 });
+    const listed = listing({ generated_at: '2026-11-13T10:00:00Z', refresh_floor_seconds: 10 });
     expect(floorEnd(listed, generatedAt - 60_000)).toBe(generatedAt - 50_000);
   });
 
   it('times the floor from arrival when the generation time is unreadable', () => {
-    const listed = listing({ generated_at: 'soon', refresh_floor_secs: 10 });
+    const listed = listing({ generated_at: 'soon', refresh_floor_seconds: 10 });
     expect(floorEnd(listed, generatedAt)).toBe(generatedAt + 10_000);
   });
 });

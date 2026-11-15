@@ -45,7 +45,7 @@ export interface PullRequests {
 export function floorEnd(listing: PullRequestsResponse, receivedAt: number): number {
   const generatedAt = Date.parse(listing.generated_at);
   const start = Number.isNaN(generatedAt) ? receivedAt : Math.min(generatedAt, receivedAt);
-  return start + listing.refresh_floor_secs * MILLISECONDS;
+  return start + listing.refresh_floor_seconds * MILLISECONDS;
 }
 
 function useBefore(deadline: number | null): boolean {

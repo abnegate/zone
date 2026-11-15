@@ -78,7 +78,7 @@ export function listing(releases: Release[]): ReleasesResponse {
     stale: false,
     partial: false,
     window_days: 7,
-    ttl_secs: 120,
+    ttl_seconds: 120,
     sources: [],
     releases,
     warnings: [],

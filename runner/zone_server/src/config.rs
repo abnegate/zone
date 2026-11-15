@@ -899,16 +899,16 @@ impl AutoProjectConfig {
     }
 }
 
-const GITHUB_PULL_REQUEST_TTL: &str = "ZONE_GITHUB_PULL_REQUEST_TTL_SECS";
-const GITHUB_RELEASE_TTL: &str = "ZONE_GITHUB_RELEASE_TTL_SECS";
+const GITHUB_PULL_REQUEST_TTL: &str = "ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS";
+const GITHUB_RELEASE_TTL: &str = "ZONE_GITHUB_RELEASE_TTL_SECONDS";
 const GITHUB_RELEASE_WINDOW_DAYS: &str = "ZONE_GITHUB_RELEASE_WINDOW_DAYS";
 const GITHUB_OPEN_PULL_REQUEST_LIMIT: &str = "ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT";
 const GITHUB_ADMIN_MERGE: &str = "ZONE_GITHUB_ADMIN_MERGE";
 
-const DEFAULT_PULL_REQUEST_TTL_SECS: u64 = 45;
-const DEFAULT_RELEASE_TTL_SECS: u64 = 120;
-const MINIMUM_GITHUB_TTL_SECS: u64 = 10;
-const MAXIMUM_GITHUB_TTL_SECS: u64 = 3600;
+const DEFAULT_PULL_REQUEST_TTL_SECONDS: u64 = 45;
+const DEFAULT_RELEASE_TTL_SECONDS: u64 = 120;
+const MINIMUM_GITHUB_TTL_SECONDS: u64 = 10;
+const MAXIMUM_GITHUB_TTL_SECONDS: u64 = 3600;
 const DEFAULT_RELEASE_WINDOW_DAYS: u64 = 7;
 const MINIMUM_RELEASE_WINDOW_DAYS: u64 = 1;
 pub const MAXIMUM_RELEASE_WINDOW_DAYS: u64 = 90;
@@ -930,8 +930,8 @@ pub struct GithubConfig {
 impl Default for GithubConfig {
     fn default() -> Self {
         Self {
-            pull_request_ttl: Duration::from_secs(DEFAULT_PULL_REQUEST_TTL_SECS),
-            release_ttl: Duration::from_secs(DEFAULT_RELEASE_TTL_SECS),
+            pull_request_ttl: Duration::from_secs(DEFAULT_PULL_REQUEST_TTL_SECONDS),
+            release_ttl: Duration::from_secs(DEFAULT_RELEASE_TTL_SECONDS),
             release_window_days: DEFAULT_RELEASE_WINDOW_DAYS as u32,
             open_pull_request_limit: DEFAULT_OPEN_PULL_REQUEST_LIMIT as u32,
             admin_merge: false,
@@ -944,15 +944,15 @@ impl GithubConfig {
         Self {
             pull_request_ttl: Duration::from_secs(env_u64(
                 GITHUB_PULL_REQUEST_TTL,
-                DEFAULT_PULL_REQUEST_TTL_SECS,
-                MINIMUM_GITHUB_TTL_SECS,
-                MAXIMUM_GITHUB_TTL_SECS,
+                DEFAULT_PULL_REQUEST_TTL_SECONDS,
+                MINIMUM_GITHUB_TTL_SECONDS,
+                MAXIMUM_GITHUB_TTL_SECONDS,
             )),
             release_ttl: Duration::from_secs(env_u64(
                 GITHUB_RELEASE_TTL,
-                DEFAULT_RELEASE_TTL_SECS,
-                MINIMUM_GITHUB_TTL_SECS,
-                MAXIMUM_GITHUB_TTL_SECS,
+                DEFAULT_RELEASE_TTL_SECONDS,
+                MINIMUM_GITHUB_TTL_SECONDS,
+                MAXIMUM_GITHUB_TTL_SECONDS,
             )),
             release_window_days: env_u64(
                 GITHUB_RELEASE_WINDOW_DAYS,

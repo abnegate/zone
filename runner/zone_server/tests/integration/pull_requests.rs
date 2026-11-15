@@ -473,8 +473,8 @@ async fn open_pull_requests_are_bucketed_counted_and_ranked() {
     );
     assert_eq!(listing["stale"], json!(false));
     assert_eq!(listing["partial"], json!(false));
-    assert_eq!(listing["ttl_secs"], json!(45));
-    assert_eq!(listing["refresh_floor_secs"], json!(10));
+    assert_eq!(listing["ttl_seconds"], json!(45));
+    assert_eq!(listing["refresh_floor_seconds"], json!(10));
     assert_eq!(listing["warnings"], json!([]));
     let source = &listing["sources"][0];
     assert_eq!(source["source_id"], json!(board.source));

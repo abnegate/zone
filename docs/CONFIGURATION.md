@@ -2340,11 +2340,11 @@ Publication, pull-request sync, conflict repair, auto-project reviews and merges
 
 The console's **Pull Requests** and **Releases** pages read every active GitHub source in the workspace with that source's own credential. What GitHub said about each source is kept in the server's memory and shown again until it expires, so a page left open does not spend the credential's rate limit on every poll. **Refresh** asks GitHub again unless the source was read in the last 10 seconds. When GitHub cannot be reached, the page keeps showing what it last read and says the source is stale; when the credential's rate limit is exhausted, the source is not asked again for 5 minutes. A pipeline is read again after 15 seconds, and a source's tags and default branch after 5 minutes. A merge or a new release forgets what was read about its source. All settings are optional.
 
-### `ZONE_GITHUB_PULL_REQUEST_TTL_SECS`
+### `ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS`
 - **Default**: `45` (10–3600)
 - **Description**: How long a source's open pull requests are shown before GitHub is asked again.
 
-### `ZONE_GITHUB_RELEASE_TTL_SECS`
+### `ZONE_GITHUB_RELEASE_TTL_SECONDS`
 - **Default**: `120` (10–3600)
 - **Description**: How long a source's recent releases are shown before GitHub is asked again.
 
@@ -2671,7 +2671,7 @@ Need to find a specific config? Quick lookup:
 - **Search**: SEARCH_ENABLE_WEB_SEARCH, SEARCH_*, SEARXNG_*
 - **MCP / magents**: ZONE_MCP_ENABLED, ZONE_MCP_AUTO_CONNECT, ZONE_MCP_AUTO_MAGENTS, ZONE_MCP_CONFIG, ZONE_MCP_SERVERS, ZONE_MCP_COMMANDS
 - **Auto projects**: ZONE_AUTO_ENABLED, ZONE_AUTO_PARALLEL_TASKS, ZONE_AUTO_REVIEW_MODELS, ZONE_AUTO_REVIEW_BOTS, ZONE_AUTO_ADMIN_MERGE, ZONE_AUTO_*
-- **GitHub pages**: ZONE_GITHUB_PULL_REQUEST_TTL_SECS, ZONE_GITHUB_RELEASE_TTL_SECS, ZONE_GITHUB_RELEASE_WINDOW_DAYS, ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT, ZONE_GITHUB_ADMIN_MERGE
+- **GitHub pages**: ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS, ZONE_GITHUB_RELEASE_TTL_SECONDS, ZONE_GITHUB_RELEASE_WINDOW_DAYS, ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT, ZONE_GITHUB_ADMIN_MERGE
 - **Notifications**: ZONE_NOTIFY_SLACK_WEBHOOK, ZONE_NOTIFY_DISCORD_WEBHOOK, ZONE_NOTIFY_EMAIL_TO, SMTP_*
 - **Security**: LITELLM_MASTER_KEY, LITELLM_SALT_KEY, SEARXNG_SECRET_KEY
 - **Timezone**: TZ

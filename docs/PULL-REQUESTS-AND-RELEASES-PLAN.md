@@ -39,14 +39,14 @@ Every route is behind `require_auth` and returns JSON. Errors are `{ success: fa
 
 | Method | Path | Guard | Response |
 |---|---|---|---|
-| GET | `/api/workspaces/{workspace_id}/pull-requests?refresh=1` | member | `{ generated_at, stale, partial, ttl_secs, refresh_floor_secs, counts: {ready, in_progress, not_ready, total}, sources: [SourceStatus], pull_requests: [PullRequest], warnings }` |
+| GET | `/api/workspaces/{workspace_id}/pull-requests?refresh=1` | member | `{ generated_at, stale, partial, ttl_seconds, refresh_floor_seconds, counts: {ready, in_progress, not_ready, total}, sources: [SourceStatus], pull_requests: [PullRequest], warnings }` |
 | GET | `…/pull-requests/{source_id}/{number}` | member | `{ pull_request, threads: [Thread], comments: [BotComment] }` |
 | GET | `…/pull-requests/{source_id}/{number}/diff?head=<sha>` | member | `{ diff: Diff }` |
 | GET | `…/pull-requests/{source_id}/{number}/commits?head=` | member | `{ commits: { number, head, base, complete, commits: [Commit] } }` |
 | GET | `…/pull-requests/{source_id}/{number}/commits/{sha}?head=` | member | `{ diff: Diff }` |
 | GET | `…/pull-requests/{source_id}/{number}/jobs/{job_id}/log?head=` | member | `{ log: { job_id, run_id, head, text, truncated, fetched_at } }` |
 | POST | `…/pull-requests/{source_id}/{number}/merge` `{ expected_head, method? }` | writer + `pull_requests:update` | `{ merged: { number, sha, admin, url } }` |
-| GET | `/api/workspaces/{workspace_id}/releases?days=7&refresh=1` | member | `{ generated_at, stale, partial, window_days, ttl_secs, sources: [SourceStatus], releases: [Release], warnings }` |
+| GET | `/api/workspaces/{workspace_id}/releases?days=7&refresh=1` | member | `{ generated_at, stale, partial, window_days, ttl_seconds, sources: [SourceStatus], releases: [Release], warnings }` |
 | GET | `…/releases/options?refresh=1` | member | `{ generated_at, sources: [SourceOptions], warnings }` |
 | GET | `…/releases/{source_id}/{release_id}/pipeline?refresh=1` | member | `{ pipeline, state, succeeded, complete, blockers }` |
 | POST | `…/releases/preview` `{ source_id, tag, expected_latest_tag }` | writer + `releases:create` | `{ preview: Preview }` |
@@ -83,7 +83,7 @@ Row shapes are snake_case. The existing `Serialize` output is reused, so `Pipeli
 
 Polling contract for the console:
 
-- The PR list refreshes every 30 s while visible and on focus. Refresh sends `refresh=1` and is disabled inside `refresh_floor_secs`. After a 502 it backs off 10/20/40/80/120 s.
+- The PR list refreshes every 30 s while visible and on focus. Refresh sends `refresh=1` and is disabled inside `refresh_floor_seconds`. After a 502 it backs off 10/20/40/80/120 s.
 - Releases refresh every 120 s. A release's `pipeline` is polled every 15 s only while the release is younger than 30 min and its lookup is pending or a run is queued or running.
 - The server invalidates the source's snapshots after a merge or a create.
 
@@ -178,8 +178,8 @@ The tool path in `agent/integrations.rs` calls `assess` with `Depth::Full`, whic
 
   | Variable | Default | Range |
   |---|---|---|
-  | `ZONE_GITHUB_PULL_REQUEST_TTL_SECS` | 45 | 10..3600 |
-  | `ZONE_GITHUB_RELEASE_TTL_SECS` | 120 | 10..3600 |
+  | `ZONE_GITHUB_PULL_REQUEST_TTL_SECONDS` | 45 | 10..3600 |
+  | `ZONE_GITHUB_RELEASE_TTL_SECONDS` | 120 | 10..3600 |
   | `ZONE_GITHUB_RELEASE_WINDOW_DAYS` | 7 | 1..90 |
   | `ZONE_GITHUB_OPEN_PULL_REQUEST_LIMIT` | 50 | 1..200 |
   | `ZONE_GITHUB_ADMIN_MERGE` | false | |

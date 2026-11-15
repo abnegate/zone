@@ -530,7 +530,7 @@ async fn releases_published_inside_the_window_are_listed_with_their_pulls_and_pi
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["window_days"], 7);
-    assert_eq!(body["ttl_secs"], 120);
+    assert_eq!(body["ttl_seconds"], 120);
     assert_eq!(body["stale"], false);
     assert_eq!(body["partial"], false);
     assert_eq!(body["warnings"], json!([]));

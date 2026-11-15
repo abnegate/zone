@@ -117,7 +117,7 @@ export const ReleasesResponseSchema = z.object({
   stale: z.boolean(),
   partial: z.boolean(),
   window_days: z.number().int(),
-  ttl_secs: z.number().int().nonnegative(),
+  ttl_seconds: z.number().int().nonnegative(),
   sources: z.array(SourceStatusSchema),
   releases: z.array(ReleaseSchema),
   warnings: z.array(z.string()).default([]),

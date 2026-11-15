@@ -81,7 +81,7 @@ const listing = {
   stale: false,
   partial: false,
   window_days: 7,
-  ttl_secs: 120,
+  ttl_seconds: 120,
   sources: [source],
   releases: [release],
   warnings: [],

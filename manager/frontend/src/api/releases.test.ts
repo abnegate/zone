@@ -30,7 +30,7 @@ const listing = {
   stale: false,
   partial: false,
   window_days: 14,
-  ttl_secs: 120,
+  ttl_seconds: 120,
   sources: [],
   releases: [
     {
