@@ -97,6 +97,7 @@ mod models;
 mod organization_console_contract;
 mod organization_members;
 mod password_reset;
+mod policy_routing;
 mod policy_store;
 mod pr_reception_status;
 mod pre_v1_ledger;

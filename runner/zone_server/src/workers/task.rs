@@ -36,6 +36,7 @@ use uuid::Uuid;
 use zone_core::llm::BuiltinTools;
 use zone_core::llm::LlmBackend;
 use zone_core::llm::LlmClient;
+use zone_enterprise::policy::Denial;
 
 use crate::agent;
 use crate::agent::AgentEvent;
@@ -309,14 +310,17 @@ impl Fault {
     }
 
     /// The backend an attempt was to run on could not be resolved. Only a
-    /// database read can succeed on a later attempt, and every login being
-    /// exhausted, once the earliest resets: a sign-in that failed needs an
-    /// admin, and a state directory that cannot be made, an operator.
+    /// database read can succeed on a later attempt, an agent policy that
+    /// could not be read among them, and every login being exhausted, once
+    /// the earliest resets: a sign-in that failed needs an admin, a state
+    /// directory that cannot be made, an operator, and a policy denial, a
+    /// policy change.
     fn backend(error: backend::Error) -> Self {
         let failure = match error {
             backend::Error::Database { .. }
+            | backend::Error::Denied(Denial::Unreadable)
             | backend::Error::Unusable(Unusable {
-                reason: Reason::Unreadable,
+                reason: Reason::Unreadable | Reason::Denied(Denial::Unreadable),
             }) => Failure::Transient,
             backend::Error::Limited { resets_at, .. } => Failure::RateLimited {
                 retry_after: resets_at.and_then(remaining),
@@ -324,6 +328,7 @@ impl Fault {
             backend::Error::SignedOut { .. }
             | backend::Error::Renewal { .. }
             | backend::Error::Home { .. }
+            | backend::Error::Denied(_)
             | backend::Error::Unusable(_) => Failure::Terminal,
         };
         Self::new(failure, RUN_FAILED, error.to_string())
@@ -5591,6 +5596,40 @@ mod retry_tests {
             let message = error.to_string();
             let fault = Fault::backend(error);
             assert_eq!(fault.failure, Failure::Terminal, "{message}");
+            assert_eq!(fault.message, message);
+        }
+    }
+
+    /// A policy that could not be read may be read on the next attempt; a
+    /// policy that denies the run denies every attempt alike.
+    #[test]
+    fn a_backend_a_policy_denies_is_retried_only_when_the_policy_could_not_be_read() {
+        use zone_enterprise::policy;
+
+        for (error, failure) in [
+            (
+                backend::Error::Denied(Denial::Unreadable),
+                Failure::Transient,
+            ),
+            (
+                backend::Error::Unusable(Unusable::from(Reason::Denied(Denial::Unreadable))),
+                Failure::Transient,
+            ),
+            (
+                backend::Error::Denied(Denial::Agent(policy::Agent::Codex)),
+                Failure::Terminal,
+            ),
+            (
+                backend::Error::Unusable(Unusable::from(Reason::Denied(Denial::Provider(
+                    policy::Provider::OpenAI,
+                )))),
+                Failure::Terminal,
+            ),
+            (backend::Error::Denied(Denial::Model), Failure::Terminal),
+        ] {
+            let message = error.to_string();
+            let fault = Fault::backend(error);
+            assert_eq!(fault.failure, failure, "{message}");
             assert_eq!(fault.message, message);
         }
     }

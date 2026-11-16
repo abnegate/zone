@@ -15,6 +15,7 @@ use abnegate_llm::{Credential, ReasoningEffort};
 use chrono::{DateTime, SecondsFormat, Utc};
 use uuid::Uuid;
 use zone_core::llm::{LlmBackend, SignIn, cli};
+use zone_enterprise::policy::{Denial, Effective};
 
 use crate::config::Config;
 use crate::db::agent_logins;
@@ -25,6 +26,7 @@ use crate::services::endpoint::Origin;
 use crate::services::login::credential::{self, Login};
 use crate::services::login::identity::LoginIdentity;
 use crate::services::login::router::{self, Chosen};
+use crate::services::policy;
 use crate::services::route::Unusable;
 use crate::state::AppState;
 
@@ -84,9 +86,20 @@ pub enum Error {
     },
     #[error(transparent)]
     Unusable(#[from] Unusable),
+    #[error(transparent)]
+    Denied(#[from] Denial),
 }
 
 impl Error {
+    /// The agent policy denial this failure is, directly or as the reason a route is unusable.
+    pub fn denial(&self) -> Option<Denial> {
+        match self {
+            Self::Denied(denial) => Some(*denial),
+            Self::Unusable(unusable) => unusable.denial(),
+            _ => None,
+        }
+    }
+
     /// Why one of `agent`'s logins could not be made ready for a turn.
     pub fn resolving(agent: AgentKind, error: credential::Error) -> Self {
         match error {
@@ -152,6 +165,9 @@ pub fn agent(config: &Config, settings: &EffectiveAiSettings, origin: Origin) ->
 /// and never when every login is exhausted. A provider whose settings resolved to an endpoint
 /// of `origin` [`Origin::Settings`] runs over HTTP to it, and every other provider runs on the
 /// instance default.
+///
+/// Under `routing.policy`, an agent the policy denies never runs: not as the one `settings`
+/// choose, which is then refused, not as another agent's login, and not under the host's sign-in.
 pub async fn for_settings(
     state: &AppState,
     organization: Uuid,
@@ -161,11 +177,16 @@ pub async fn for_settings(
 ) -> Result<Resolved, Error> {
     let config = state.config();
     let Some(agent) = settings.agent() else {
-        return Ok(Resolved::unrouted(match origin {
+        let backend = match origin {
             Origin::Settings => LlmBackend::Http,
             Origin::Instance => instance(config),
-        }));
+        };
+        if let LlmBackend::Cli { agent, .. } = &backend {
+            admitted(routing.policy, *agent)?;
+        }
+        return Ok(Resolved::unrouted(backend));
     };
+    admitted(routing.policy, agent)?;
     let chosen = match router::pick(
         state,
         organization,
@@ -174,6 +195,7 @@ pub async fn for_settings(
         routing.sticky,
         routing.model,
         routing.strict,
+        routing.policy,
     )
     .await
     {
@@ -193,6 +215,10 @@ pub async fn for_settings(
         touch(state, chosen.login.id).await;
     }
     Ok(resolved)
+}
+
+fn admitted(policy: Option<&Effective>, agent: AgentKind) -> Result<(), Denial> {
+    policy.map_or(Ok(()), |policy| policy::admits(policy, agent))
 }
 
 /// The backend `chosen`, one of `organization`'s logins, runs its turns on: its agent in the
