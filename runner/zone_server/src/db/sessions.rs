@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::{Executor, PgPool, Postgres};
+use sqlx::{Executor, PgExecutor, PgPool, Postgres};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -215,7 +215,10 @@ pub async fn revoke_session(pool: &PgPool, session_id: Uuid) -> DbResult<()> {
 ///
 /// Revokes all active sessions for a user (logout everywhere).
 /// Returns the count of sessions that were revoked.
-pub async fn revoke_all_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult<i64> {
+pub async fn revoke_all_user_sessions(
+    executor: impl PgExecutor<'_>,
+    user_id: Uuid,
+) -> DbResult<i64> {
     let result = sqlx::query(
         r#"
         UPDATE sessions
@@ -224,7 +227,7 @@ pub async fn revoke_all_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult<
         "#,
     )
     .bind(user_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(result.rows_affected() as i64)

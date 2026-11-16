@@ -4,7 +4,7 @@
 //! Tokens are hashed before storage for security.
 
 use chrono::{DateTime, Duration, Utc};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -108,7 +108,7 @@ pub async fn recently_verified_user(pool: &PgPool, token: &str) -> DbResult<Opti
 /// Mark a user's email as verified
 ///
 /// Sets the email_verified flag to true for the given user
-pub async fn mark_email_verified(pool: &PgPool, user_id: Uuid) -> DbResult<()> {
+pub async fn mark_email_verified(executor: impl PgExecutor<'_>, user_id: Uuid) -> DbResult<()> {
     let result = sqlx::query!(
         r#"
         UPDATE users
@@ -117,7 +117,7 @@ pub async fn mark_email_verified(pool: &PgPool, user_id: Uuid) -> DbResult<()> {
         "#,
         user_id
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     if result.rows_affected() == 0 {
