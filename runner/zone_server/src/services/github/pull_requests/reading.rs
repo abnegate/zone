@@ -41,6 +41,8 @@ use crate::services::github::throttle::admitted;
 pub(super) const NOT_ACCEPTABLE: u16 = 406;
 pub(super) const MOVED_REPOSITORY: &str =
     "GitHub listed open pull requests of another repository part way through.";
+pub(super) const STALLED_CURSOR: &str =
+    "GitHub said more open pull requests follow a page that listed none it had not.";
 
 impl Github {
     pub(crate) async fn open_pulls(
@@ -102,12 +104,16 @@ impl Github {
             if *identified != page.repository_id {
                 return Err(Fault::upstream(MOVED_REPOSITORY));
             }
+            let read = pulls.len();
             pulls.extend(
                 page.items
                     .into_iter()
                     .filter(|row| listed.insert(row.node_id.clone())),
             );
             match page.next {
+                Some(_) if pulls.len() == read => {
+                    return Err(Fault::upstream(STALLED_CURSOR));
+                }
                 Some(next) if pulls.len() < limit => after = Some(next),
                 next => {
                     let complete = next.is_none() && pulls.len() <= limit;

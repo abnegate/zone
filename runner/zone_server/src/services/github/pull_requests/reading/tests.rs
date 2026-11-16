@@ -464,3 +464,48 @@ async fn a_batch_sent_once_the_listing_stopped_asks_github_for_nothing() {
     assert_eq!(read, [None]);
     assert!(server.received_requests().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn a_page_that_lists_nothing_new_but_says_more_follow_stops_the_listing() {
+    let empty = std::ops::RangeInclusive::new(1, 0);
+    for (name, rows) in [("an empty page", empty), ("a page listed before", 1..=100)] {
+        let server = MockServer::start().await;
+        open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+        open_page(&server, REPOSITORY_ID, 50, Some(CURSOR), rows, Some(LATER)).await;
+        let github = mocked(&server);
+
+        let stalled = github.open_pull_requests(&Semaphore::new(1), 150).await;
+
+        assert_eq!(
+            stalled.err(),
+            Some(Fault::upstream(STALLED_CURSOR)),
+            "{name}"
+        );
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn a_page_that_names_the_cursor_it_was_read_after_stops_the_listing() {
+    let server = MockServer::start().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(
+        &server,
+        REPOSITORY_ID,
+        50,
+        Some(CURSOR),
+        101..=110,
+        Some(CURSOR),
+    )
+    .await;
+    let github = mocked(&server);
+
+    let stalled = github.open_pull_requests(&Semaphore::new(1), 150).await;
+
+    let fault = stalled.expect_err("a cursor that never moves is never read after again");
+    assert!(
+        !fault.halts(),
+        "the listing is read through REST instead: {fault}"
+    );
+    server.verify().await;
+}
