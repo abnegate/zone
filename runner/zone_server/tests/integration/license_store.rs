@@ -65,7 +65,7 @@ fn untrusted() -> SigningKey {
 }
 
 fn keyring() -> Keyring {
-    Keyring::new([TrustedKey::new(TRUSTED, trusted().verifying_key().to_bytes()).unwrap()])
+    Keyring::new([TrustedKey::new(TRUSTED, trusted().verifying_key().to_bytes()).unwrap()]).unwrap()
 }
 
 fn payload(tier: Tier, expires_at: DateTime<Utc>) -> Payload {

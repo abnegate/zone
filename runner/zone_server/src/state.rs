@@ -656,7 +656,7 @@ mod tests {
     #[tokio::test]
     async fn an_installed_keyring_replaces_the_production_one() {
         let state = AppState::for_tests();
-        let keyring = Keyring::new([]);
+        let keyring = Keyring::new([]).unwrap();
         state.install_keyring(keyring.clone());
 
         assert_eq!(state.licenses().keyring(), &keyring);

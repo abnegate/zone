@@ -28,7 +28,7 @@ pub(crate) fn trusted(id: &str, key: &SigningKey) -> TrustedKey {
 }
 
 pub(crate) fn keyring() -> Keyring {
-    Keyring::new([trusted(FIRST, &first()), trusted(SECOND, &second())])
+    Keyring::new([trusted(FIRST, &first()), trusted(SECOND, &second())]).unwrap()
 }
 
 pub(crate) fn payload() -> Payload {

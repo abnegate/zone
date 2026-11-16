@@ -1,6 +1,6 @@
 use ed25519_dalek::{PUBLIC_KEY_LENGTH, VerifyingKey};
 
-use crate::error::Error;
+use crate::key_error::KeyError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedKey {
@@ -9,10 +9,10 @@ pub struct TrustedKey {
 }
 
 impl TrustedKey {
-    pub fn new(id: impl Into<String>, public: [u8; PUBLIC_KEY_LENGTH]) -> Result<Self, Error> {
-        let key = VerifyingKey::from_bytes(&public).map_err(|_| Error::Key)?;
+    pub fn new(id: impl Into<String>, public: [u8; PUBLIC_KEY_LENGTH]) -> Result<Self, KeyError> {
+        let key = VerifyingKey::from_bytes(&public).map_err(|_| KeyError)?;
         if key.is_weak() {
-            return Err(Error::Key);
+            return Err(KeyError);
         }
         Ok(Self { id: id.into(), key })
     }
@@ -58,13 +58,13 @@ mod tests {
     #[test]
     fn refuses_bytes_that_are_not_a_point() {
         assert!(VerifyingKey::from_bytes(&NOT_A_POINT).is_err());
-        assert_eq!(TrustedKey::new("broken", NOT_A_POINT), Err(Error::Key));
+        assert_eq!(TrustedKey::new("broken", NOT_A_POINT), Err(KeyError));
     }
 
     #[test]
     fn refuses_the_identity_point_as_weak() {
         assert!(VerifyingKey::from_bytes(&IDENTITY).unwrap().is_weak());
-        assert_eq!(TrustedKey::new("weak", IDENTITY), Err(Error::Key));
+        assert_eq!(TrustedKey::new("weak", IDENTITY), Err(KeyError));
     }
 
     #[test]
@@ -77,6 +77,6 @@ mod tests {
                 .unwrap()
                 .is_weak()
         );
-        assert_eq!(TrustedKey::new("weak", negative_identity), Err(Error::Key));
+        assert_eq!(TrustedKey::new("weak", negative_identity), Err(KeyError));
     }
 }

@@ -262,11 +262,10 @@ async fn the_service_reports_licensed_seats_beside_the_used_ones() {
     let fixture = Fixture::new().await;
     let signing = SigningKey::from_bytes(&SEED);
     let state = fixture.client.state();
-    state.install_keyring(Keyring::new([TrustedKey::new(
-        KEY_ID,
-        signing.verifying_key().to_bytes(),
-    )
-    .unwrap()]));
+    state.install_keyring(
+        Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()])
+            .unwrap(),
+    );
     let now = Utc::now();
     let license = state
         .licenses()

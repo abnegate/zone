@@ -6,6 +6,8 @@ use crate::error::Error;
 
 pub const SEPARATOR: char = '.';
 
+const INVISIBLE: [char; 2] = ['\u{200B}', '\u{FEFF}'];
+
 pub fn encode(payload: &[u8], signature: &[u8; SIGNATURE_LENGTH]) -> String {
     format!(
         "{}{SEPARATOR}{}",
@@ -17,7 +19,7 @@ pub fn encode(payload: &[u8], signature: &[u8; SIGNATURE_LENGTH]) -> String {
 pub(crate) fn decode(text: &str) -> Result<(Vec<u8>, [u8; SIGNATURE_LENGTH]), Error> {
     let normalized: String = text
         .chars()
-        .filter(|character| !character.is_ascii_whitespace())
+        .filter(|character| !character.is_whitespace() && !INVISIBLE.contains(character))
         .collect();
     let (payload, signature) = normalized.split_once(SEPARATOR).ok_or(Error::Malformed)?;
     if payload.is_empty() || signature.contains(SEPARATOR) {
@@ -75,6 +77,25 @@ mod tests {
             .flat_map(|character| [character, ' ', '\t', '\n', '\r', '\x0c'])
             .collect();
         assert_eq!(decode(&spaced), Ok((payload_bytes(), SIGNATURE)));
+    }
+
+    #[test]
+    fn strips_unicode_whitespace_and_invisible_characters() {
+        let text = encode(&payload_bytes(), &SIGNATURE);
+        let spaced: String = text
+            .chars()
+            .flat_map(|character| {
+                [
+                    character, '\u{00A0}', '\u{200B}', '\u{FEFF}', '\u{2028}', '\u{3000}',
+                ]
+            })
+            .collect();
+        assert_eq!(decode(&spaced), Ok((payload_bytes(), SIGNATURE)));
+    }
+
+    #[test]
+    fn refuses_input_of_only_invisible_characters() {
+        assert_eq!(decode("\u{00A0}\u{200B}\u{FEFF}"), Err(Error::Malformed));
     }
 
     #[test]

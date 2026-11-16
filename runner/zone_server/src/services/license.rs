@@ -216,6 +216,7 @@ mod tests {
 
     fn keyring() -> Keyring {
         Keyring::new([TrustedKey::new(KEY_ID, signing().verifying_key().to_bytes()).unwrap()])
+            .unwrap()
     }
 
     fn licenses() -> Licenses {

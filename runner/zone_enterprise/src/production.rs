@@ -29,6 +29,11 @@ mod tests {
     }
 
     #[test]
+    fn the_compiled_in_keys_build_a_keyring() {
+        assert_eq!(Keyring::production().ids().count(), super::KEYS.len());
+    }
+
+    #[test]
     fn holds_exactly_the_2026_key() {
         let keyring = Keyring::production();
         assert_eq!(keyring.ids().collect::<Vec<_>>(), [ID]);

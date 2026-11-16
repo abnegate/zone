@@ -1,9 +1,11 @@
+mod duplicate_key;
 mod edition;
 mod encoding;
 mod error;
 #[cfg(test)]
 mod fixtures;
 mod header;
+mod key_error;
 mod keyring;
 mod license;
 mod payload;
@@ -15,9 +17,11 @@ mod status;
 mod tier;
 mod trusted_key;
 
+pub use duplicate_key::DuplicateKey;
 pub use edition::Edition;
 pub use encoding::{SEPARATOR, encode};
-pub use error::{Error, KEY_INVALID, MALFORMED, PAYLOAD_INVALID, SIGNATURE_INVALID, UNKNOWN_KEY};
+pub use error::{Error, MALFORMED, PAYLOAD_INVALID, SIGNATURE_INVALID, UNKNOWN_KEY};
+pub use key_error::KeyError;
 pub use keyring::Keyring;
 pub use license::License;
 pub use payload::Payload;

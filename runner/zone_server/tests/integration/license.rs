@@ -204,7 +204,7 @@ fn untrusted() -> SigningKey {
 }
 
 fn keyring() -> Keyring {
-    Keyring::new([TrustedKey::new(TRUSTED, trusted().verifying_key().to_bytes()).unwrap()])
+    Keyring::new([TrustedKey::new(TRUSTED, trusted().verifying_key().to_bytes()).unwrap()]).unwrap()
 }
 
 fn expiring(tier: Tier, expires_in: TimeDelta) -> Payload {

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
-use ed25519_dalek::Signature;
+use ed25519_dalek::{PUBLIC_KEY_LENGTH, Signature};
 
+use crate::duplicate_key::DuplicateKey;
 use crate::encoding;
 use crate::error::Error;
 use crate::header::Header;
@@ -16,21 +18,34 @@ pub struct Keyring {
 }
 
 impl Keyring {
-    pub fn new(keys: impl IntoIterator<Item = TrustedKey>) -> Self {
-        Self {
-            keys: keys
-                .into_iter()
-                .map(|key| (key.id().to_owned(), key))
-                .collect(),
+    pub fn new(keys: impl IntoIterator<Item = TrustedKey>) -> Result<Self, DuplicateKey> {
+        let mut trusted = HashMap::new();
+        for key in keys {
+            match trusted.entry(key.id().to_owned()) {
+                Entry::Occupied(entry) => {
+                    return Err(DuplicateKey {
+                        id: entry.key().clone(),
+                    });
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(key);
+                }
+            }
         }
+        Ok(Self { keys: trusted })
     }
 
+    /// Panics if a compiled-in key is invalid or listed twice.
     pub fn production() -> Self {
-        Self::new(
-            production::KEYS
-                .iter()
-                .filter_map(|(id, public)| TrustedKey::new(*id, *public).ok()),
-        )
+        Self::trusting(&production::KEYS)
+    }
+
+    fn trusting(keys: &[(&str, [u8; PUBLIC_KEY_LENGTH])]) -> Self {
+        let keys = keys.iter().map(|(id, public)| {
+            TrustedKey::new(*id, *public)
+                .unwrap_or_else(|error| panic!("The production key {id} is unusable: {error}"))
+        });
+        Self::new(keys).unwrap_or_else(|error| panic!("The production keyring is invalid: {error}"))
     }
 
     pub fn get(&self, id: &str) -> Option<&TrustedKey> {
@@ -143,6 +158,18 @@ mod tests {
         let text = signed();
         let license = fixtures::keyring()
             .verify(&format!("\n\t  {text} \r\n\n"))
+            .unwrap();
+        assert_eq!(license.text(), text);
+    }
+
+    #[test]
+    fn verifies_a_key_with_non_breaking_and_zero_width_spaces() {
+        let text = signed();
+        let license = fixtures::keyring()
+            .verify(&format!(
+                "\u{FEFF}{}\u{00A0}",
+                wrap(&text, 16, "\u{200B}\u{00A0}")
+            ))
             .unwrap();
         assert_eq!(license.text(), text);
     }
@@ -337,7 +364,8 @@ mod tests {
 
     #[test]
     fn rotation_drops_licenses_from_a_retired_key() {
-        let keyring = Keyring::new([fixtures::trusted(fixtures::SECOND, &fixtures::second())]);
+        let keyring =
+            Keyring::new([fixtures::trusted(fixtures::SECOND, &fixtures::second())]).unwrap();
         assert_eq!(
             keyring.verify(&signed()),
             Err(Error::UnknownKey {
@@ -433,7 +461,7 @@ mod tests {
 
     #[test]
     fn an_empty_keyring_trusts_nothing() {
-        let keyring = Keyring::new([]);
+        let keyring = Keyring::new([]).unwrap();
         assert_eq!(keyring.ids().count(), 0);
         assert_eq!(
             keyring.verify(&signed()),
@@ -454,5 +482,35 @@ mod tests {
             fixtures::first().verifying_key().to_bytes()
         );
         assert!(keyring.get("2026-1").is_none());
+    }
+
+    #[test]
+    fn refuses_a_duplicate_key_id() {
+        let error = Keyring::new([
+            fixtures::trusted(fixtures::FIRST, &fixtures::first()),
+            fixtures::trusted(fixtures::FIRST, &fixtures::second()),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DuplicateKey {
+                id: fixtures::FIRST.into()
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "The production key broken is unusable")]
+    fn an_invalid_compiled_in_key_panics() {
+        let mut not_a_point = [0; PUBLIC_KEY_LENGTH];
+        not_a_point[0] = 2;
+        Keyring::trusting(&[("broken", not_a_point)]);
+    }
+
+    #[test]
+    #[should_panic(expected = "The production keyring is invalid")]
+    fn a_compiled_in_key_listed_twice_panics() {
+        let public = fixtures::first().verifying_key().to_bytes();
+        Keyring::trusting(&[(fixtures::FIRST, public), (fixtures::FIRST, public)]);
     }
 }

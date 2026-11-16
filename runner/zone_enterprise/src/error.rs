@@ -2,20 +2,22 @@ pub const MALFORMED: &str = "license_malformed";
 pub const UNKNOWN_KEY: &str = "license_unknown_key";
 pub const SIGNATURE_INVALID: &str = "license_signature_invalid";
 pub const PAYLOAD_INVALID: &str = "license_payload_invalid";
-pub const KEY_INVALID: &str = "license_key_invalid";
+
+const SHOWN_ID_LENGTH: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error("The license key is not in the expected format.")]
     Malformed,
-    #[error("The license key was signed with a key this server does not trust ({id}).")]
+    #[error(
+        "The license key was signed with a key this server does not trust ({}).",
+        shown(id)
+    )]
     UnknownKey { id: String },
     #[error("The license key's signature is invalid.")]
     Signature,
     #[error("The license key's contents are invalid: {0}")]
     Payload(String),
-    #[error("The trusted public key is not a valid, strong Ed25519 key.")]
-    Key,
 }
 
 impl Error {
@@ -25,9 +27,14 @@ impl Error {
             Self::UnknownKey { .. } => UNKNOWN_KEY,
             Self::Signature => SIGNATURE_INVALID,
             Self::Payload(_) => PAYLOAD_INVALID,
-            Self::Key => KEY_INVALID,
         }
     }
+}
+
+fn shown(id: &str) -> &str {
+    id.char_indices()
+        .nth(SHOWN_ID_LENGTH)
+        .map_or(id, |(end, _)| &id[..end])
 }
 
 #[cfg(test)]
@@ -46,7 +53,6 @@ mod tests {
         );
         assert_eq!(Error::Signature.code(), SIGNATURE_INVALID);
         assert_eq!(Error::Payload("seats".into()).code(), PAYLOAD_INVALID);
-        assert_eq!(Error::Key.code(), KEY_INVALID);
     }
 
     #[test]
@@ -64,5 +70,19 @@ mod tests {
         }
         .to_string();
         assert!(message.contains("2031-4"), "message was {message}");
+    }
+
+    #[test]
+    fn unknown_key_message_shows_only_the_start_of_a_long_id() {
+        let shown = "é".repeat(SHOWN_ID_LENGTH);
+        let message = Error::UnknownKey {
+            id: format!("{shown}{}", "x".repeat(10_000)),
+        }
+        .to_string();
+        assert!(
+            message.contains(&format!("({shown})")),
+            "message was {message}"
+        );
+        assert!(!message.contains('x'), "message was {message}");
     }
 }

@@ -219,7 +219,8 @@ mod tests {
     fn license(tier: Tier) -> License {
         let signing = SigningKey::from_bytes(&SEED);
         let keyring =
-            Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()]);
+            Keyring::new([TrustedKey::new(KEY_ID, signing.verifying_key().to_bytes()).unwrap()])
+                .unwrap();
         let expires_at = "2027-11-01T00:00:00Z".parse().unwrap();
         let text = sign(
             &Payload {
