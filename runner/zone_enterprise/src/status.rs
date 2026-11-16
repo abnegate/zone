@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +14,23 @@ pub enum Status {
     Active,
     Grace,
     Lapsed,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Community => "community",
+            Self::Active => "active",
+            Self::Grace => "grace",
+            Self::Lapsed => "lapsed",
+        }
+    }
+}
+
+impl fmt::Display for Status {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 pub(crate) const fn grace() -> TimeDelta {
@@ -102,5 +121,21 @@ mod tests {
             values,
             [r#""community""#, r#""active""#, r#""grace""#, r#""lapsed""#]
         );
+    }
+
+    #[test]
+    fn displays_its_wire_value() {
+        for value in [
+            Status::Community,
+            Status::Active,
+            Status::Grace,
+            Status::Lapsed,
+        ] {
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                value.to_string(),
+                "{value:?}"
+            );
+        }
     }
 }

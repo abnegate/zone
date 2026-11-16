@@ -207,9 +207,9 @@ async fn main() {
     };
     match state.licenses().load(state.db()).await {
         Ok(stored) => tracing::info!(
-            edition = ?Edition::from(stored.license()),
-            status = ?status(stored.license(), Utc::now()),
-            "License verified"
+            edition = %Edition::from(stored.license()),
+            status = %status(stored.license(), Utc::now()),
+            "License loaded"
         ),
         Err(error) => {
             tracing::warn!(%error, "Could not load the license; running as Community until it loads")

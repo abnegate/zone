@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::license::License;
@@ -9,6 +11,22 @@ pub enum Edition {
     Community,
     Team,
     Enterprise,
+}
+
+impl Edition {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Community => "community",
+            Self::Team => "team",
+            Self::Enterprise => "enterprise",
+        }
+    }
+}
+
+impl fmt::Display for Edition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 impl From<Tier> for Edition {
@@ -73,5 +91,16 @@ mod tests {
             .map(|edition| serde_json::to_string(edition).unwrap())
             .collect();
         assert_eq!(values, [r#""community""#, r#""team""#, r#""enterprise""#]);
+    }
+
+    #[test]
+    fn displays_its_wire_value() {
+        for edition in [Edition::Community, Edition::Team, Edition::Enterprise] {
+            assert_eq!(
+                serde_json::to_value(edition).unwrap(),
+                edition.to_string(),
+                "{edition:?}"
+            );
+        }
     }
 }
