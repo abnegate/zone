@@ -5,6 +5,7 @@ type Loader = () => Promise<unknown>;
 
 export const loaders = {
   agentSignIn: () => import('./features/settings/ai/AgentSignInPage'),
+  analytics: () => import('./features/analytics/pages/AnalyticsPage'),
   authenticatedProviders: () => import('./shared/components/AuthenticatedProviders'),
   chats: () => import('./features/chats/pages/ChatsPage'),
   layout: () => import('./shared/components/Layout/Layout'),
@@ -24,6 +25,7 @@ const SHELL = [loaders.authenticatedProviders, loaders.setupGate, loaders.layout
 const SIGNED_IN_ROUTES: Record<string, Loader[]> = {
   '/': [...SHELL, loaders.chats],
   '/agent-sign-in': [loaders.authenticatedProviders, loaders.agentSignIn],
+  '/analytics': [...SHELL, loaders.analytics],
   '/chats': [...SHELL, loaders.chats],
   '/models': [...SHELL, loaders.models],
   '/org-settings': [...SHELL, loaders.settings],
