@@ -260,6 +260,8 @@ type ServerMessage =
   | { type: 'denied'; message: string; code: string }
   | { type: 'status'; message: string };
 
+export type DeniedMessage = Extract<ServerMessage, { type: 'denied' }>;
+
 interface Denied {
   code: PolicyDenialCode;
   message: string;
