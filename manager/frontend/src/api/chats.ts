@@ -9,6 +9,7 @@ import {
   ChatSourcesResponseSchema,
   ChatsResponseSchema,
   ChatTasksResponseSchema,
+  ChatTokenUsageResponseSchema,
   ContextResponseSchema,
   MessageResponseSchema,
   MessagesResponseSchema,
@@ -34,6 +35,7 @@ import type {
   ChatSearchResponse,
   ChatSource,
   ChatTask,
+  ChatTokenUsage,
   ChatWithMessages,
   ContextUsage,
   CreateChatRequest,
@@ -355,6 +357,18 @@ class ChatsApi {
       throw await ApiError.from(response, 'Failed to load tasks');
     }
     return parse(ChatTasksResponseSchema, await response.json()).tasks;
+  }
+
+  async getChatTokenUsage(chatId: string, limit?: number): Promise<ChatTokenUsage> {
+    const query = limit === undefined ? '' : `?limit=${encodeURIComponent(limit)}`;
+    const response = await fetch(
+      `${API_BASE}/api/chats/${encodeURIComponent(chatId)}/token-usage${query}`,
+      { headers: this.getHeaders() }
+    );
+    if (!response.ok) {
+      throw await ApiError.from(response, 'Failed to load token usage');
+    }
+    return parse(ChatTokenUsageResponseSchema, await response.json());
   }
 
   async getChatSubagents(chatId: string): Promise<SubagentList> {

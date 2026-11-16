@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { ContextUsageSchema } from '../schemas';
-import type { ContextUsage as Usage } from '../types';
+import type { ContextUsage as Usage, TokenTotals } from '../types';
 import { ContextUsage } from './ContextUsage';
 
 const usage: Usage = {
@@ -151,4 +151,49 @@ it('uses the chosen window as total when the server omitted a limit', () => {
 it('still shows the known total when usage has not arrived', () => {
   render(<ContextUsage usage={null} capacity={131072} />);
   expect(screen.getByRole('button', { name: /Context/ }).textContent).toContain('0 / 128K');
+});
+
+const spend: TokenTotals = {
+  turns: 4,
+  reported_turns: 4,
+  prompt_tokens: 96_000,
+  completion_tokens: 4_000,
+  total_tokens: 100_000,
+  rounds: 11,
+  tool_calls: 7,
+  peak_context_tokens: 31_000,
+  instructions_tokens: 48_000,
+  conversation_tokens: 30_000,
+  tools_tokens: 14_000,
+  results_tokens: 6_000,
+  summary_tokens: 0,
+  attachments_tokens: 0,
+  overhead_tokens: 2_000,
+  first_at: '2026-11-16T00:00:00Z',
+  last_at: '2026-11-16T01:00:00Z',
+};
+
+it('reports what the chat has spent, averaged over the turns a provider reported', () => {
+  render(<ContextUsage usage={usage} spend={spend} />);
+  fireEvent.click(screen.getByRole('button', { name: /Context/ }));
+  const panel = screen.getByRole('region', { name: 'Tokens spent in this chat' });
+  expect(panel.textContent).toContain('100,000');
+  expect(panel.textContent).toContain('25,000');
+  expect(panel.textContent).toContain('11');
+});
+
+it('says how many turns no provider reported rather than averaging over them', () => {
+  render(<ContextUsage usage={usage} spend={{ ...spend, reported_turns: 2 }} />);
+  fireEvent.click(screen.getByRole('button', { name: /Context/ }));
+  const panel = screen.getByRole('region', { name: 'Tokens spent in this chat' });
+  expect(panel.textContent).toContain('50,000');
+  expect(
+    screen.getByText(/2 of 4 turns ran on a backend that reported no token count/)
+  ).toBeTruthy();
+});
+
+it('shows no spend block before the chat has run a turn', () => {
+  render(<ContextUsage usage={usage} spend={{ ...spend, turns: 0 }} />);
+  fireEvent.click(screen.getByRole('button', { name: /Context/ }));
+  expect(screen.queryByRole('region', { name: 'Tokens spent in this chat' })).toBeNull();
 });

@@ -14,6 +14,7 @@ pub mod chat_pull_requests;
 pub mod chat_sources;
 pub mod chat_subagents;
 pub mod chat_tasks;
+pub mod chat_token_usage;
 pub mod chats;
 pub mod context;
 pub mod context_gatherings;
