@@ -13,10 +13,15 @@ interface SsoButtonsProps {
 const STORAGE_BLOCKED =
   'Your browser blocked session storage, which single sign-on needs. Allow it for this site and try again.';
 
-function originOf(url: string): string | null {
+const LOGIN_PATH = '/login';
+const WEB_PROTOCOLS = new Set(['https:', 'http:']);
+
+function loginElsewhere(callbackOrigin: string): string | null {
   try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.origin : null;
+    const login = new URL(LOGIN_PATH, callbackOrigin);
+    return WEB_PROTOCOLS.has(login.protocol) && login.origin !== window.location.origin
+      ? login.href
+      : null;
   } catch {
     return null;
   }
@@ -30,12 +35,11 @@ export default function SsoButtons({ sso, next }: SsoButtonsProps) {
     return null;
   }
 
-  const callbackOrigin = originOf(sso.callback_origin);
-  const elsewhere = callbackOrigin !== null && callbackOrigin !== window.location.origin;
+  const elsewhere = loginElsewhere(sso.callback_origin);
 
   const start = async (provider: SsoPublicProvider) => {
     if (elsewhere) {
-      window.location.assign(`${callbackOrigin}/login`);
+      window.location.assign(elsewhere);
       return;
     }
     setPending(provider.id);

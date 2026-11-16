@@ -93,6 +93,34 @@ describe('SsoButtons', () => {
     expect(sessionStorage.getItem(SSO_ATTEMPT_KEY)).toBeNull();
   });
 
+  it('sends the browser to the sign-in page at the root of the configured origin, keeping its port', async () => {
+    render(<SsoButtons sso={atOrigin(SSO_OFFERED, 'https://zone.acme.com:8443/')} next="/" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in with Okta' }));
+
+    expect(assign).toHaveBeenCalledWith('https://zone.acme.com:8443/login');
+  });
+
+  it('sends the browser to the sign-in page at the origin root even when the configured origin carries a path, because the console is only served at the root', async () => {
+    render(<SsoButtons sso={atOrigin(SSO_OFFERED, 'https://acme.com/zone/')} next="/" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in with Okta' }));
+
+    expect(assign).toHaveBeenCalledWith('https://acme.com/login');
+    expect(mockAuthorize).not.toHaveBeenCalled();
+  });
+
+  it('starts in place when the configured origin matches this page apart from a path', async () => {
+    mockAuthorize.mockResolvedValue({ url: 'https://idp.test/authorize', state: 's1' });
+    render(<SsoButtons sso={atOrigin(SSO_OFFERED, `${window.location.origin}/zone`)} next="/" />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in with Okta' }));
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('https://idp.test/authorize'));
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(mockAuthorize).toHaveBeenCalledWith(OKTA.id);
+  });
+
   it('starts in place when the configured origin cannot be read as a web origin', async () => {
     mockAuthorize.mockResolvedValue({ url: 'https://idp.test/authorize', state: 's1' });
     render(<SsoButtons sso={atOrigin(SSO_OFFERED, 'javascript:alert(1)')} next="/" />);
