@@ -1,9 +1,5 @@
 {
   "extends": "../tsconfig.json",
-  "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023", "DOM", "DOM.Iterable"]
-  },
   "include": ["."],
   "exclude": []
 }
