@@ -41,6 +41,12 @@ impl Cache {
             .map(|loaded| &loaded.stored)
     }
 
+    pub(super) fn unsettled_within(&self, within: Duration) -> bool {
+        self.loaded
+            .as_ref()
+            .is_some_and(|loaded| !loaded.is_settled() && loaded.is_fresh(within))
+    }
+
     pub(super) fn swap(&mut self, stored: Stored) {
         self.replace(Loaded::new(stored));
     }
@@ -113,6 +119,16 @@ mod tests {
         assert_eq!(cache.fresh(INTERVAL), Some(&Stored::Empty));
         assert_eq!(cache.settled(), None);
         assert_eq!(cache.fresh_settled(INTERVAL), None);
+        assert!(cache.unsettled_within(INTERVAL));
+        assert!(!cache.unsettled_within(Duration::ZERO));
+    }
+
+    #[test]
+    fn a_settled_load_is_never_unsettled() {
+        let mut cache = Cache::default();
+        assert!(!cache.unsettled_within(INTERVAL));
+        cache.swap(Stored::Empty);
+        assert!(!cache.unsettled_within(INTERVAL));
     }
 
     #[test]

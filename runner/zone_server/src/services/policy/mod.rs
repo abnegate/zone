@@ -210,9 +210,18 @@ async fn organization_of(state: &AppState, workspace: Uuid) -> Option<Uuid> {
     }
 }
 
+/// A stored key that no longer verifies, such as after a keyring change, keeps the saved
+/// policies enforced: only removing the license stops enforcement.
 async fn enforced(state: &AppState) -> Result<bool, Denial> {
-    match state.settled_license().await {
-        Ok(license) => Ok(Feature::Policy.enforced(license.as_ref())),
+    match state.stored_license().await {
+        Ok(Stored::Unverified(error)) => {
+            tracing::warn!(
+                code = error.code(),
+                "The stored license key does not verify, so agent policies stay enforced and can't be changed until an admin replaces or removes it"
+            );
+            Ok(true)
+        }
+        Ok(stored) => Ok(Feature::Policy.enforced(stored.license())),
         Err(error) => {
             tracing::warn!(%error, "Could not read the license, so agent policies deny everything until it can be read");
             Err(Denial::Unreadable)

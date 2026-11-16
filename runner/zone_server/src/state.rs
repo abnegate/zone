@@ -32,7 +32,7 @@ use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
 use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
-use crate::services::license::Licenses;
+use crate::services::license::{Licenses, Stored};
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
@@ -473,6 +473,11 @@ impl AppState {
     /// [`Licenses::settled`].
     pub async fn settled_license(&self) -> DbResult<Option<License>> {
         self.inner.licenses.settled(&self.inner.db).await
+    }
+
+    /// [`Self::settled_license`] as the key stored, verified or not.
+    pub async fn stored_license(&self) -> DbResult<Stored> {
+        self.inner.licenses.stored(&self.inner.db).await
     }
 
     pub async fn edition(&self) -> Edition {

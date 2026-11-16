@@ -35,6 +35,11 @@ Removing the license is different: the server runs as Community, and
 Community enforces no policy. Zone keeps the saved policies, and enforces them
 again as soon as a Team or Enterprise license is installed.
 
+A stored license key that no longer verifies, for example after an upgrade
+changes the keys Zone trusts, isn't treated as removed. The saved policies stay
+enforced, and every change is refused with `license_required` until an admin
+installs a key that verifies or removes the license.
+
 If Zone can't read the license or a policy when it needs it, it refuses
 instead of running unrestricted. The refusal is `policy_unreadable`; a task
 run retries it, and in a chat you can try again shortly.

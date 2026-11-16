@@ -6,6 +6,7 @@
 use abnegate_agent_cli::login::claude::Tokens;
 use abnegate_agent_cli::{AgentKind, CliSettings};
 use abnegate_secret::SecretValue;
+use axum::http::StatusCode;
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -26,12 +27,15 @@ use zone_server::services::route::Route;
 use zone_server::services::stages::{AUTO, Preferences};
 use zone_server::state::AppState;
 
+use crate::common::policy::Fixture as PolicyFixture;
 use crate::common::sso::{active, keyring, lapsed};
 use crate::common::{Database, agents, create_test_state, test_config};
 
 const PREFIX: &str = "policy_routing";
 const CLAUDE: &str = "claude_code";
 const CODEX: &str = "codex";
+const UNVERIFIABLE: &str = "not a license key";
+const LICENSE_REQUIRED: &str = "license_required";
 const CODEX_CREDENTIALS_FILE: &str = "auth.json";
 const CODEX_CREDENTIALS: &str = r#"{"tokens":{"access_token":"fake-codex-access-token","refresh_token":"fake-codex-refresh-token","account_id":"fake-codex-account"}}"#;
 const SIGNED_OUT: &str = "Invalid API key · Please run /login";
@@ -460,4 +464,32 @@ async fn a_handover_never_moves_onto_a_model_the_policy_denies() {
         "the turn moved onto a model the policy denies: {:?}",
         governed.map(|switch| switch.model)
     );
+}
+
+#[tokio::test]
+async fn a_stored_key_that_fails_verification_keeps_enforcing_and_refuses_changes() {
+    let fixture = PolicyFixture::new(PREFIX).await;
+    fixture.write_organization(json!({"agents": []})).await;
+    fixture.store_license(UNVERIFIABLE).await;
+
+    let loaded = zone_server::services::policy::load(
+        fixture.state(),
+        fixture.organization,
+        Some(fixture.workspace),
+    )
+    .await;
+    let change = fixture
+        .update_organization(&fixture.owner.token, &json!({"agents": null}))
+        .await;
+    fixture.cleanup().await;
+
+    assert_eq!(
+        loaded
+            .expect("a readable policy")
+            .expect("an enforced policy")
+            .agent(policy::Agent::Claude),
+        Err(Denial::Agent(policy::Agent::Claude))
+    );
+    assert_eq!(change.status, StatusCode::FORBIDDEN, "{}", change.text());
+    assert_eq!(change.json_value()["code"], json!(LICENSE_REQUIRED));
 }
