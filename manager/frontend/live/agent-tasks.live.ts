@@ -1,4 +1,4 @@
-import { type Locator, type Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { api, chooseTaskAction, expect, signIn, state, test, tokenFor } from './harness';
 import { latest, roundsFor, script, settledRounds, stamp } from './stub';
 

@@ -846,7 +846,7 @@ test.describe('agent tools from chat', () => {
       .filter(([label, , accepts]) => !(accepts ?? [label]).some((tool) => tools.includes(tool)))
       .map(([label]) => label);
     record(50, {
-      result: missing.length === 0 && Boolean(chatPr) ? 'WORKS' : 'FAILS',
+      result: missing.length === 0 && chatPr ? 'WORKS' : 'FAILS',
       cause:
         missing.length === 0
           ? undefined

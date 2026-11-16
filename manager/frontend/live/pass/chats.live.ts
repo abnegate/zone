@@ -50,7 +50,7 @@ async function contextMeter(page: Page): Promise<string> {
 
 async function ollamaUp(): Promise<boolean> {
   const response = await fetch(`${ollama}/api/tags`).catch(() => null);
-  return Boolean(response && response.ok);
+  return Boolean(response?.ok);
 }
 
 test.describe('chats', () => {

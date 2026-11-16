@@ -207,7 +207,7 @@ test.describe('compose stack', () => {
     await shot(page, '58-hard-question');
     const afterHard = dockerLogs('litellm', since);
     const modelsSeen = (text: string) => [
-      ...new Set([...text.matchAll(/model[=:]\s*'?([A-Za-z0-9_.:\-\/]+)/g)].map((m) => m[1])),
+      ...new Set([...text.matchAll(/model[=:]\s*'?([A-Za-z0-9_.:\-/]+)/g)].map((m) => m[1])),
     ];
     const fastLog = modelsSeen(afterTrivial);
     const hardLog = modelsSeen(afterHard).filter((m) => !fastLog.includes(m));

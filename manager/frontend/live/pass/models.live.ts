@@ -15,7 +15,7 @@ const GGUF = 'hf.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M';
 
 async function installed(): Promise<string[]> {
   const response = await fetch(`${ollama}/api/tags`).catch(() => null);
-  if (!response || !response.ok) return [];
+  if (!response?.ok) return [];
   const body = (await response.json()) as { models?: { name: string }[] };
   return (body.models ?? []).map((m) => m.name);
 }

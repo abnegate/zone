@@ -65,7 +65,7 @@ export async function turnDone(marker: string, timeout = 1_800_000): Promise<Stu
       async () => {
         const rounds = await forwardedFor(marker);
         const last = rounds[rounds.length - 1];
-        if (!last || !last.answer) return 'open';
+        if (!last?.answer) return 'open';
         const names = last.answer.calls.map((c) => c.name);
         if (names.length === 0) return 'done';
         return names.some((n) => n === 'ask_user' || n === 'submit_plan') ? 'done' : 'open';

@@ -61,7 +61,7 @@ interface Readiness {
   promotable: boolean;
 }
 
-const punctuation = /^[!-\/:-@\[-^`{-~]+|[!-\/:-@\[-^`{-~]+$/g;
+const punctuation = /^[!-/:-@[-^`{-~]+|[!-/:-@[-^`{-~]+$/g;
 
 function normalize(text: string): string {
   return text
