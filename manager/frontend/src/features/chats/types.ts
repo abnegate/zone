@@ -224,9 +224,6 @@ export const APPROVAL_TIMED_OUT_DETAIL =
 export const APPROVAL_CANCELLED_DETAIL =
   'The turn stopped before this tool call was approved, so it did not run.';
 
-/// Told to a call the organization's policy needs a person to approve when
-/// nobody attending the run can. Held to the server's `POLICY` by
-/// `schemas.contract.test.ts`.
 export const POLICY_DETAIL =
   "Your organization's policy requires a person to approve this tool call, and nobody can approve it in this run.";
 

@@ -12,12 +12,26 @@ import {
   COMMUNITY_ORGANIZATION,
   LAPSED_ORGANIZATION,
 } from '../src/features/enterprise/policy/fixtures';
+import { SAVE_LABEL } from '../src/features/enterprise/policy/components/PolicyEditor';
 import {
+  EFFECTIVE_SUMMARY,
+  ORGANIZATION_SUMMARY,
+} from '../src/features/enterprise/policy/components/PolicyFieldFrame';
+import { LAPSED_NOTICE } from '../src/features/enterprise/policy/components/PolicyLapsedNotice';
+import { SOURCE_LABELS } from '../src/features/enterprise/policy/components/PolicySourceBadge';
+import { UPGRADE_NOTICE } from '../src/features/enterprise/policy/components/PolicyUpgradeNotice';
+import {
+  AGENT_POLICY_LINK,
+  agentLabel,
   denialMessage,
   NOT_ALLOWED,
+  notAllowed,
+  pendingText,
+  providerLabel,
   refusalMessage,
 } from '../src/features/enterprise/policy/messages';
-import { PolicyCode } from '../src/features/enterprise/policy/schemas';
+import { PolicyAgent, PolicyCode, PolicyProvider } from '../src/features/enterprise/policy/schemas';
+import { PolicySource } from '../src/features/enterprise/policy/source';
 import type {
   OrganizationPolicyResponse,
   UpdatePolicyRequest,
@@ -34,14 +48,8 @@ import {
 } from './layout-fixtures';
 import { blockServiceWorker, routeApi } from './test-utils';
 
-const SAVE_LABEL = 'Save policy';
-const ORGANIZATION_SUMMARY = 'Organization';
-const EFFECTIVE_SUMMARY = 'In effect';
-const INHERITED = 'Inherited from organization';
-const OVERRIDDEN = 'Set for this workspace';
-const UPGRADE_NOTICE = 'Agent policy is part of Zone Team and Enterprise.';
-const LAPSED_NOTICE = 'Your Zone license has lapsed. Policies are still enforced';
-const AGENT_POLICY_LINK = 'See the agent policy';
+const INHERITED = SOURCE_LABELS[PolicySource.Organization];
+const OVERRIDDEN = SOURCE_LABELS[PolicySource.Workspace];
 
 const ORGANIZATION_POLICY_PATH = '/settings/organization/agent-policy';
 const WORKSPACE_POLICY_PATH = '/settings/workspace/agent-policy';
@@ -62,10 +70,12 @@ const HTTP_EFFORTS: ChatProviderOffer['efforts'] = ['off', 'low', 'medium', 'hig
 const ALLOWED_MODEL = 'qwen3:8b';
 const DENIED_MODEL = 'llama3.2:3b';
 const MODEL_DENIED = denialMessage(PolicyCode.ModelDenied);
-const ANTHROPIC_DENIED = denialMessage(PolicyCode.ProviderDenied, 'Anthropic');
-const CODEX_DENIED = denialMessage(PolicyCode.AgentDenied, 'Codex');
-const OPENAI_SETTINGS_DENIED = denialMessage(PolicyCode.ProviderDenied, 'OpenAI');
-const CODEX_SETTINGS_DENIED = denialMessage(PolicyCode.AgentDenied, 'Codex (ChatGPT subscription)');
+const ANTHROPIC_DENIED = denialMessage(
+  PolicyCode.ProviderDenied,
+  providerLabel(PolicyProvider.Anthropic)
+);
+const OPENAI_DENIED = denialMessage(PolicyCode.ProviderDenied, providerLabel(PolicyProvider.OpenAI));
+const CODEX_DENIED = denialMessage(PolicyCode.AgentDenied, agentLabel(PolicyAgent.Codex));
 
 interface PolicyServer {
   patches: UpdatePolicyRequest[];
@@ -178,6 +188,20 @@ test.describe('Organization agent policy', () => {
     expect(server.patches.at(-1)).toEqual({ models: ['claude-*', 'qwen3', 'gpt-5**'] });
   });
 
+  test('saves text typed into a list without being added', async ({ page }) => {
+    await openSettings(page);
+    const server = await serveOrganizationPolicy(page, ACTIVE_ORGANIZATION);
+    await page.goto(ORGANIZATION_POLICY_PATH, { waitUntil: 'domcontentloaded' });
+
+    const servers = field(page, 'MCP servers');
+    await servers.getByRole('checkbox', { name: 'Restrict MCP servers' }).click();
+    await servers.getByRole('textbox', { name: 'Add to MCP servers' }).fill('github');
+    await expect(servers.getByText(pendingText(['github']))).toBeVisible();
+    await page.getByRole('button', { name: SAVE_LABEL }).click();
+
+    await expect.poll(() => server.patches).toEqual([{ mcp_servers: ['github'] }]);
+  });
+
   test('keeps a lapsed policy read-only and says it is still enforced', async ({ page }) => {
     await openSettings(page);
     await serveOrganizationPolicy(page, LAPSED_ORGANIZATION);
@@ -234,6 +258,24 @@ test.describe('Workspace agent policy', () => {
     await expect(openai).toBeDisabled();
     await expect(providers.locator('.policy-option--denied')).toHaveCount(4);
     await expect(providers.getByText(NOT_ALLOWED).first()).toBeVisible();
+  });
+
+  test('refuses an entry the organization does not cover before it is sent', async ({ page }) => {
+    await openSettings(page);
+    await serveWorkspacePolicy(page, ACTIVE_WORKSPACE_OVERRIDDEN);
+    await page.goto(WORKSPACE_POLICY_PATH, { waitUntil: 'domcontentloaded' });
+
+    const domains = field(page, 'Outbound domains');
+    const entry = domains.getByRole('textbox', { name: 'Add to Outbound domains' });
+    await entry.fill('evil.com');
+    await domains.getByRole('button', { name: 'Add to Outbound domains' }).click();
+    await expect(domains.getByRole('alert')).toHaveText(notAllowed(['evil.com']));
+    await expect(entry).toHaveAttribute('aria-invalid', 'true');
+
+    await entry.fill('api.github.com');
+    await domains.getByRole('button', { name: 'Add to Outbound domains' }).click();
+    await expect(domains.getByText('api.github.com', { exact: true })).toBeVisible();
+    await expect(domains.getByRole('alert')).toHaveCount(0);
   });
 
   for (const viewport of WIDTHS) {
@@ -294,9 +336,9 @@ test.describe('AI settings under an agent policy', () => {
     await trigger.click();
     const openai = page.getByRole('option', { name: 'OpenAI', exact: true });
     await expect(openai).toHaveAttribute('data-disabled', '');
-    await expect(openai).toContainText(OPENAI_SETTINGS_DENIED);
+    await expect(openai).toContainText(OPENAI_DENIED);
     await expect(page.getByRole('option', { name: 'Codex (ChatGPT subscription)' })).toContainText(
-      CODEX_SETTINGS_DENIED
+      CODEX_DENIED
     );
     await expect(page.getByRole('option', { name: 'Anthropic', exact: true })).not.toHaveAttribute(
       'data-disabled'
@@ -309,7 +351,7 @@ test.describe('AI settings under an agent policy', () => {
     const panel = page.getByRole('region', { name: 'Codex sign-in' });
     await expect(panel.getByTestId('agent-sign-in-denial')).toHaveText(CODEX_DENIED);
     await expect(panel.getByRole('button', { name: 'Sign in with ChatGPT' })).toBeDisabled();
-    await expect(page.getByTestId('ai-provider-denial')).toHaveText(CODEX_SETTINGS_DENIED);
+    await expect(page.getByTestId('ai-provider-denial')).toHaveText(CODEX_DENIED);
   });
 });
 
@@ -459,8 +501,8 @@ test.describe('Chats under an agent policy', () => {
       socket.setOnSend(async () => {
         await socket.emit({
           type: 'denied',
-          message: 'Your organization denied this turn.',
-          code: PolicyCode.ModelDenied,
+          message: ANTHROPIC_DENIED,
+          code: PolicyCode.ProviderDenied,
         });
       });
       await page.goto(`/chats?id=${chat.id}`);
@@ -470,8 +512,7 @@ test.describe('Chats under an agent policy', () => {
 
       const denial = page.getByTestId('chat-denial');
       await expect(denial).toHaveClass(/chats-error/);
-      await expect(denial).toContainText(MODEL_DENIED);
-      await expect(denial).not.toContainText('Your organization denied this turn.');
+      await expect(denial).toContainText(ANTHROPIC_DENIED);
       const link = denial.getByRole('link', { name: AGENT_POLICY_LINK });
       await expect(link).toHaveAttribute('href', WORKSPACE_POLICY_PATH);
       await expect(page.locator('.message-form textarea')).toBeEnabled();

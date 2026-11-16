@@ -114,7 +114,6 @@ export function AgentSignIn({
   onAttemptChange,
 }: AgentSignInProps) {
   const headingId = useId();
-  const denialId = useId();
   const [code, setCode] = useState('');
   const [codeError, setCodeError] = useState<string | null>(null);
   const [busy, setBusy] = useState<SignInAction | null>(null);
@@ -396,7 +395,6 @@ export function AgentSignIn({
           onClick={() => void start('start')}
           loading={busy === 'start'}
           disabled={busy !== null || denial !== null}
-          aria-describedby={denial === null ? undefined : denialId}
         >
           {another ? `Add another ${account} account` : `Sign in with ${account}`}
         </Button>
@@ -421,7 +419,7 @@ export function AgentSignIn({
               <p className="form-hint agent-sign-in-note">{saveLabel} to use this provider.</p>
             )}
             {denial !== null && (
-              <p id={denialId} className="agent-sign-in-denial" data-testid="agent-sign-in-denial">
+              <p className="agent-sign-in-denial" data-testid="agent-sign-in-denial">
                 {denial}
               </p>
             )}

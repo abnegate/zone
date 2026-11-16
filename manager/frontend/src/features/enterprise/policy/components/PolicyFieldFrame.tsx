@@ -14,6 +14,7 @@ interface PolicyFieldFrameProps {
   effective?: string;
   control?: ReactNode;
   error?: string;
+  errorId?: string;
   children?: ReactNode;
 }
 
@@ -25,10 +26,12 @@ export function PolicyFieldFrame({
   effective,
   control,
   error,
+  errorId: givenErrorId,
   children,
 }: PolicyFieldFrameProps) {
   const titleId = useId();
-  const errorId = useId();
+  const ownErrorId = useId();
+  const errorId = givenErrorId ?? ownErrorId;
 
   return (
     <div

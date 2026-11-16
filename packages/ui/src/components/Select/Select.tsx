@@ -155,6 +155,31 @@ export interface SelectOption {
 
 const SELECT_EMPTY_VALUE = '__empty__';
 
+function unavailableText(options: readonly SelectOption[]): string {
+  return options
+    .filter((option) => option.disabled && option.description)
+    .map((option) => `${option.label} is unavailable. ${option.description}`)
+    .join(' ');
+}
+
+interface SelectUnavailableProps {
+  id: string;
+  options: readonly SelectOption[];
+}
+
+function SelectUnavailable({ id, options }: SelectUnavailableProps) {
+  const text = unavailableText(options);
+  return text === '' ? null : (
+    <span id={id} className="sr-only">
+      {text}
+    </span>
+  );
+}
+
+function unavailableId(options: readonly SelectOption[], id: string): string | undefined {
+  return unavailableText(options) === '' ? undefined : id;
+}
+
 function encodeOptionValue(value: string): string {
   return value === '' ? SELECT_EMPTY_VALUE : value;
 }
@@ -217,6 +242,7 @@ const Select = forwardRef<HTMLButtonElement, SelectProps>(
     const hasEmptyOption = options.some((option) => option.value === '');
     const valueRef = useRef(value);
     valueRef.current = value;
+    const reasonsId = useId();
 
     const handleValueChange = useCallback(
       (nextValue: string) => {
@@ -260,10 +286,12 @@ const Select = forwardRef<HTMLButtonElement, SelectProps>(
             ref={ref}
             className={cn(error && 'ui-select-trigger-error', className)}
             aria-label={ariaLabel}
+            aria-describedby={unavailableId(options, reasonsId)}
             title={title}
           >
             <SelectValue placeholder={placeholderText} />
           </SelectTrigger>
+          <SelectUnavailable id={reasonsId} options={options} />
           <SelectContent>
             {options.map((option) => (
               <SelectItem
@@ -306,5 +334,7 @@ export {
   SelectRoot,
   SelectSeparator,
   SelectTrigger,
+  SelectUnavailable,
   SelectValue,
+  unavailableId,
 };

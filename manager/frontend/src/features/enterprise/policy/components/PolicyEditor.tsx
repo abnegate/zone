@@ -1,16 +1,35 @@
 import { Button } from '@zone/ui';
 import { type FormEvent, useState } from 'react';
-import { changed, type PolicyErrors, patchFrom } from '../draft';
-import { agentLabel, isAdminCode, providerLabel, refusalField, refusalMessage } from '../messages';
+import {
+  changed,
+  ENTRY_FIELDS,
+  type PolicyEntryField,
+  type PolicyErrors,
+  type PolicyTexts,
+  parseEntries,
+  patchFrom,
+  typed,
+  uncovered,
+  withEntries,
+} from '../draft';
+import {
+  agentLabel,
+  isAdminCode,
+  notAllowed,
+  providerLabel,
+  refusalField,
+  refusalMessage,
+} from '../messages';
 import type { PolicyRefusal } from '../PolicyRefusal';
 import {
   POLICY_AGENTS,
   POLICY_PROVIDERS,
   PolicyAgentSchema,
+  PolicyCode,
   PolicyField,
   PolicyProviderSchema,
 } from '../schemas';
-import type { PolicyScope } from '../source';
+import { PolicyScope } from '../source';
 import type { PolicyAgent, PolicyProvider, PolicyRules, UpdatePolicyRequest } from '../types';
 import { PolicyCeilingField } from './PolicyCeilingField';
 import { PolicyListField, type PolicyOption } from './PolicyListField';
@@ -18,6 +37,11 @@ import { PolicyListField, type PolicyOption } from './PolicyListField';
 export const SAVE_LABEL = 'Save policy';
 
 export const DISCARD_LABEL = 'Discard changes';
+
+export const LEGENDS: Readonly<Record<PolicyScope, string>> = {
+  [PolicyScope.Organization]: 'Organization agent policy',
+  [PolicyScope.Workspace]: 'Workspace agent policy',
+};
 
 const PROVIDER_OPTIONS: readonly PolicyOption[] = POLICY_PROVIDERS.map((provider) => ({
   value: provider,
@@ -29,11 +53,11 @@ const AGENT_OPTIONS: readonly PolicyOption[] = POLICY_AGENTS.map((agent) => ({
   label: agentLabel(agent),
 }));
 
-const PLACEHOLDERS = {
-  models: 'claude-sonnet-4, gpt-5*',
-  mcpServers: 'github, linear',
-  domains: 'github.com, example.com',
-} as const;
+const PLACEHOLDERS: Readonly<Record<PolicyEntryField, string>> = {
+  [PolicyField.Models]: 'claude-sonnet-4, gpt-5*',
+  [PolicyField.McpServers]: 'github, linear',
+  [PolicyField.Domains]: 'github.com, example.com',
+};
 
 function isProvider(value: string): value is PolicyProvider {
   return PolicyProviderSchema.safeParse(value).success;
@@ -51,6 +75,11 @@ function agentsOf(list: string[] | null): PolicyAgent[] | null {
   return list === null ? null : list.filter(isAgent);
 }
 
+function without<T extends object>(record: T, key: keyof T): T {
+  const { [key]: _, ...rest } = record;
+  return rest as T;
+}
+
 interface Problems {
   fields: PolicyErrors;
   form: string | null;
@@ -62,6 +91,9 @@ function problemsOf(refusal: PolicyRefusal | null, error: string | null): Proble
   }
   if (!isAdminCode(refusal.code)) {
     return { fields: {}, form: refusal.message };
+  }
+  if (refusal.code === PolicyCode.Wider) {
+    return { fields: {}, form: refusal.message.trim() || refusalMessage(refusal.code) };
   }
   const field = refusalField(refusal.code);
   const message = refusalMessage(refusal.code);
@@ -95,21 +127,54 @@ export function PolicyEditor({
   onSave,
   onReset,
 }: PolicyEditorProps) {
-  const [draft, setDraft] = useState<PolicyRules | null>(null);
-  const current = draft ?? saved;
-  const request = patchFrom(saved, current);
-  const dirty = changed(request);
+  const [edits, setEdits] = useState<Partial<PolicyRules>>({});
+  const [texts, setTexts] = useState<PolicyTexts>({});
+  const [rejections, setRejections] = useState<PolicyErrors>({});
+  const current: PolicyRules = { ...saved, ...edits };
+  const dirty = changed(patchFrom(saved, current)) || typed(texts);
   const problems = problemsOf(refusal, error);
+  const errors: PolicyErrors = { ...problems.fields, ...rejections };
+  const workspace = scope === PolicyScope.Workspace;
 
   const change = (update: Partial<PolicyRules>) => {
-    setDraft({ ...current, ...update });
+    setEdits((previous) => ({ ...previous, ...update }));
     if (error) {
       onReset();
     }
   };
 
+  const write = (field: PolicyEntryField, text: string) => {
+    setTexts((previous) => ({ ...previous, [field]: text }));
+    setRejections((previous) => without(previous, field));
+  };
+
+  const rejection = (field: PolicyEntryField, entries: readonly string[]): string | null => {
+    if (!workspace) {
+      return null;
+    }
+    const outside = uncovered(field, organization?.[field] ?? null, entries);
+    return outside.length === 0 ? null : notAllowed(outside);
+  };
+
+  const add = (field: PolicyEntryField) => {
+    const list = current[field];
+    const entries = parseEntries(texts[field] ?? '', field);
+    if (list === null || entries.length === 0) {
+      return;
+    }
+    const refused = rejection(field, entries);
+    if (refused !== null) {
+      setRejections((previous) => ({ ...previous, [field]: refused }));
+      return;
+    }
+    change({ [field]: withEntries(list, entries) });
+    write(field, '');
+  };
+
   const discard = () => {
-    setDraft(null);
+    setEdits({});
+    setTexts({});
+    setRejections({});
     onReset();
   };
 
@@ -118,14 +183,64 @@ export function PolicyEditor({
     if (pending || !dirty || !editable) {
       return;
     }
-    onSave(request, () => setDraft(null));
+    const rules: PolicyRules = { ...current };
+    const refused: PolicyErrors = {};
+    for (const field of ENTRY_FIELDS) {
+      const list = rules[field];
+      const entries = parseEntries(texts[field] ?? '', field);
+      if (list === null || entries.length === 0) {
+        continue;
+      }
+      const reason = rejection(field, entries);
+      if (reason === null) {
+        rules[field] = withEntries(list, entries);
+      } else {
+        refused[field] = reason;
+      }
+    }
+    if (Object.keys(refused).length > 0) {
+      setRejections(refused);
+      return;
+    }
+    const request = patchFrom(saved, rules);
+    const settle = () => {
+      setEdits({});
+      setTexts({});
+    };
+    if (!changed(request)) {
+      settle();
+      return;
+    }
+    onSave(request, settle);
   };
 
   const shared = { scope, editable };
 
+  const entryField = (field: PolicyEntryField) => (
+    <PolicyListField
+      {...shared}
+      field={field}
+      value={current[field]}
+      organization={organization?.[field]}
+      effective={effective?.[field]}
+      placeholder={PLACEHOLDERS[field]}
+      error={errors[field]}
+      text={texts[field] ?? ''}
+      onText={(text) => write(field, text)}
+      onAdd={() => add(field)}
+      onChange={(value) => {
+        change({ [field]: value });
+        if (value === null) {
+          write(field, '');
+        }
+      }}
+    />
+  );
+
   return (
     <form className="policy-form" onSubmit={submit} noValidate>
       <fieldset className="settings-card policy-fields" disabled={pending}>
+        <legend className="sr-only">{LEGENDS[scope]}</legend>
         <PolicyListField
           {...shared}
           field={PolicyField.Providers}
@@ -133,7 +248,7 @@ export function PolicyEditor({
           organization={organization?.providers}
           effective={effective?.providers}
           options={PROVIDER_OPTIONS}
-          error={problems.fields[PolicyField.Providers]}
+          error={errors[PolicyField.Providers]}
           onChange={(value) => change({ providers: providersOf(value) })}
         />
         <PolicyListField
@@ -143,47 +258,20 @@ export function PolicyEditor({
           organization={organization?.agents}
           effective={effective?.agents}
           options={AGENT_OPTIONS}
-          error={problems.fields[PolicyField.Agents]}
+          error={errors[PolicyField.Agents]}
           onChange={(value) => change({ agents: agentsOf(value) })}
         />
-        <PolicyListField
-          {...shared}
-          field={PolicyField.Models}
-          value={current.models}
-          organization={organization?.models}
-          effective={effective?.models}
-          placeholder={PLACEHOLDERS.models}
-          error={problems.fields[PolicyField.Models]}
-          onChange={(value) => change({ models: value })}
-        />
+        {entryField(PolicyField.Models)}
         <PolicyCeilingField
           {...shared}
           value={current.ceiling}
           organization={organization?.ceiling}
           effective={effective?.ceiling}
-          error={problems.fields[PolicyField.Ceiling]}
+          error={errors[PolicyField.Ceiling]}
           onChange={(value) => change({ ceiling: value })}
         />
-        <PolicyListField
-          {...shared}
-          field={PolicyField.McpServers}
-          value={current.mcp_servers}
-          organization={organization?.mcp_servers}
-          effective={effective?.mcp_servers}
-          placeholder={PLACEHOLDERS.mcpServers}
-          error={problems.fields[PolicyField.McpServers]}
-          onChange={(value) => change({ mcp_servers: value })}
-        />
-        <PolicyListField
-          {...shared}
-          field={PolicyField.Domains}
-          value={current.domains}
-          organization={organization?.domains}
-          effective={effective?.domains}
-          placeholder={PLACEHOLDERS.domains}
-          error={problems.fields[PolicyField.Domains]}
-          onChange={(value) => change({ domains: value })}
-        />
+        {entryField(PolicyField.McpServers)}
+        {entryField(PolicyField.Domains)}
       </fieldset>
       {problems.form && (
         <div className="alert alert-error" role="alert">

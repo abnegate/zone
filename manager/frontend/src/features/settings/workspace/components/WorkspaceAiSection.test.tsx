@@ -242,7 +242,7 @@ describe('WorkspaceAiSection', () => {
         expect(option('Anthropic')).toHaveAttribute('data-disabled');
       });
       expect(optionDescription(option('Anthropic'))).toBe(
-        "Your organization's policy doesn't allow Anthropic in this workspace."
+        "Your organization's policy doesn't allow Anthropic API in this workspace."
       );
       expect(option('OpenAI')).toHaveAttribute('data-disabled');
       expect(option('Codex (ChatGPT subscription)')).toHaveAttribute('data-disabled');

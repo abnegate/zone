@@ -1,6 +1,6 @@
 import { Select, type SelectOption } from '@zone/ui';
 import type { ReactNode } from 'react';
-import { denialMessage, type PolicyRules, providerDenial } from '../../enterprise';
+import { type PolicyRules, providerDenialMessage } from '../../enterprise';
 import type { AiProvider, CommonAiSettings, OrganizationKeys } from '../workspace/types';
 import {
   awsRegions,
@@ -162,12 +162,7 @@ function EndpointHints({
 }
 
 function deniedBy(policy: PolicyRules | null, provider: AiProvider): string | null {
-  const denial = policy === null ? null : providerDenial(policy, provider);
-  return denial === null ? null : denialMessage(denial, providerLabelOf(provider));
-}
-
-function providerLabelOf(provider: AiProvider): string {
-  return providerOptions.find((option) => option.value === provider)?.label ?? provider;
+  return policy === null ? null : providerDenialMessage(policy, provider);
 }
 
 function policyProviderOptions(policy: PolicyRules | null): SelectOption[] {

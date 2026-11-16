@@ -4,9 +4,11 @@ import {
   type SelectOption,
   SelectRoot,
   SelectTrigger,
+  SelectUnavailable,
   SelectValue,
+  unavailableId,
 } from '@zone/ui';
-import type { ReactNode } from 'react';
+import { type ReactNode, useId } from 'react';
 
 export function HeaderSelect({
   className,
@@ -33,6 +35,7 @@ export function HeaderSelect({
   placeholder?: string;
   display?: ReactNode;
 }) {
+  const reasonsId = useId();
   return (
     <SelectRoot
       value={value}
@@ -45,12 +48,14 @@ export function HeaderSelect({
       <SelectTrigger
         className={className}
         aria-label={ariaLabel}
+        aria-describedby={unavailableId(options, reasonsId)}
         data-testid={testId}
         title={title}
       >
         <span className="chat-header-select-label">{label}</span>
         <SelectValue placeholder={placeholder}>{display}</SelectValue>
       </SelectTrigger>
+      <SelectUnavailable id={reasonsId} options={options} />
       <SelectContent>
         {options.map((option) => (
           <SelectItem

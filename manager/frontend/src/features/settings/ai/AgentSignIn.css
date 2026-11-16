@@ -41,8 +41,12 @@
   margin: 0;
   font-size: var(--ui-text-xs);
   line-height: var(--ui-leading-normal);
-  color: var(--ui-warning);
+  color: var(--ui-warning-600);
   overflow-wrap: anywhere;
+}
+
+:root[data-theme='dark'] .agent-sign-in-state .agent-sign-in-denial {
+  color: var(--ui-warning-400);
 }
 
 .agent-sign-in-state:focus-visible,

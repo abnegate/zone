@@ -1,18 +1,13 @@
-/**
- * The agent policy editor and the server agree on the admin API only by convention: the
- * responses live in `runner/zone_server/src/routes/policy/`, and the rules, vocabularies and
- * codes in `runner/zone_enterprise/src/policy/`. A field, value or code changed on one side
- * alone either fails every read of the policy or shows a refusal the console can't explain.
- *
- * This reads the server's source and asserts the console mirrors it.
- */
-
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { z } from 'zod';
 
 import { rustVariants, structFields } from '../../../test/rust';
+import type { DeniedMessage } from '../../chats/hooks/useChat';
+import { ChatProviderOfferSchema } from '../../chats/schemas';
+import { InstalledModelSchema } from '../../models/schemas';
+import { AgentStatusSchema } from '../../settings/ai/schemas';
 import { EDITIONS, LICENSE_STATUSES } from '../schemas';
 import {
   OrganizationPolicyResponseSchema,
@@ -49,6 +44,10 @@ const TIER_RS = join(POLICY, 'tier.rs');
 const FIELD_RS = join(POLICY, 'field.rs');
 const DENIAL_RS = join(POLICY, 'denial.rs');
 const ERROR_RS = join(POLICY, 'error.rs');
+const OFFER_RS = join(SERVER, 'services/provider/offer.rs');
+const MODELS_RS = join(SERVER, 'routes/models/types.rs');
+const LOGIN_STATUS_RS = join(SERVER, 'services/login/status.rs');
+const CHAT_WS_RS = join(SERVER, 'ws/chat.rs');
 
 const CODE = /pub const ([A-Z_]+): &str = "([^"]+)";/g;
 const FIELD = /^pub\s+([a-z_][a-z_0-9]*)\s*:\s*(.+?),?$/;
@@ -58,6 +57,10 @@ const DEFAULTED_RULES = /#\[serde\(default\)\]\s*pub struct Rules\b/;
 const ARM = /Self::[A-Za-z]+ => "([^"]+)"/g;
 const CEILINGS = /pub const CEILINGS: \[Self; \d+\] = \[([^\]]*)\]/;
 const SELF = 'Self::';
+const DENIAL_FIELD = 'denial';
+const DENIED_VARIANT = 'Denied';
+const TAGGED_MESSAGES =
+  /#\[serde\(tag = "type", rename_all = "snake_case"\)\]\s*pub enum ServerMessage \{/;
 
 const RESPONSES: [string, string, Shaped][] = [
   ['OrganizationResponse', ORGANIZATION_RS, OrganizationPolicyResponseSchema],
@@ -66,6 +69,12 @@ const RESPONSES: [string, string, Shaped][] = [
 ];
 
 type Shaped = z.ZodObject<z.ZodRawShape>;
+
+const DENIED_BY: [string, string, Shaped][] = [
+  ['Offer', OFFER_RS, ChatProviderOfferSchema],
+  ['ModelResponse', MODELS_RS, InstalledModelSchema],
+  ['AgentStatus', LOGIN_STATUS_RS, AgentStatusSchema],
+];
 
 const read = (path: string): string => readFileSync(path, 'utf8');
 
@@ -113,7 +122,6 @@ function rustNullable(path: string, structName: string): string[] {
     .sort();
 }
 
-/** The fields of a request struct the server reads when the console leaves them out. */
 function tolerated(path: string, structName: string): string[] {
   const names: string[] = [];
   let defaulted = false;
@@ -130,7 +138,6 @@ function tolerated(path: string, structName: string): string[] {
   return names.sort();
 }
 
-/** The wire values an enum's `as_str` returns, one string literal per arm, in order. */
 function literals(path: string, enumName: string): string[] {
   const source = read(path);
   const implementation = source.indexOf(`impl ${enumName} {`);
@@ -148,6 +155,19 @@ function ceilings(): string[] {
     .split(',')
     .map((variant) => variant.trim().replace(SELF, '').toLowerCase())
     .filter((variant) => variant.length > 0);
+}
+
+function variantFields(path: string, enumName: string, variant: string): string[] {
+  const source = read(path);
+  const declared = source.indexOf(`pub enum ${enumName} {`);
+  if (declared < 0) throw new Error(`${enumName} is not an enum in ${path}`);
+  const fields = new RegExp(`\\n\\s*${variant} \\{([^}]*)\\}`).exec(source.slice(declared));
+  if (!fields) throw new Error(`${enumName}::${variant} has no fields in ${path}`);
+  return fields[1]
+    .split(',')
+    .map((field) => field.split(':')[0].trim())
+    .filter((field) => field.length > 0)
+    .sort();
 }
 
 function codes(path: string): Map<string, string> {
@@ -266,6 +286,24 @@ describe('the agent policy codes match the server', () => {
   test('a refusal carries the error and code the server writes', () => {
     expect(keys(PolicyRefusalSchema)).toEqual(
       sorted(Object.keys(rustShape(COMMON_RS, 'ErrorResponse')))
+    );
+  });
+});
+
+describe('a policy denial reaches the console under the name the server sends it', () => {
+  test.each(DENIED_BY)('%s carries an optional denial', (structName, path, schema) => {
+    expect(rustShape(path, structName)[DENIAL_FIELD]).toBe(true);
+    expect(zodShape(schema)[DENIAL_FIELD]).toBe(true);
+    expect(zodNullable(schema)).toContain(DENIAL_FIELD);
+  });
+
+  test('a denied turn arrives as a denied frame with its message and code', () => {
+    const frame: DeniedMessage = { type: 'denied', message: '', code: '' };
+
+    expect(frame.type).toBe(DENIED_VARIANT.toLowerCase());
+    expect(read(CHAT_WS_RS)).toMatch(TAGGED_MESSAGES);
+    expect(variantFields(CHAT_WS_RS, 'ServerMessage', DENIED_VARIANT)).toEqual(
+      sorted(Object.keys(frame).filter((key) => key !== 'type'))
     );
   });
 });

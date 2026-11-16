@@ -1686,10 +1686,10 @@ describe('AgentSignIn', () => {
 
       const button = screen.getByRole('button', { name: 'Sign in with ChatGPT' });
       expect(button).toBeDisabled();
-      expect(screen.getByTestId('agent-sign-in-denial')).toHaveTextContent(CODEX_DENIED);
-      expect(button.getAttribute('aria-describedby')).toBe(
-        screen.getByTestId('agent-sign-in-denial').id
-      );
+      const denial = screen.getByTestId('agent-sign-in-denial');
+      expect(denial).toHaveTextContent(CODEX_DENIED);
+      expect(button).not.toHaveAttribute('aria-describedby');
+      expect(denial.closest('[role="status"]')).not.toBeNull();
       fireEvent.click(button);
       expect(agentsApi.start).not.toHaveBeenCalled();
     });

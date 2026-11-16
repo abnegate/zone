@@ -9,11 +9,11 @@ import {
   LAPSED_ORGANIZATION,
   ORGANIZATION_ID,
 } from '../fixtures';
-import { NOTHING_ALLOWED, refusalMessage, unrestrictedText } from '../messages';
+import { NOTHING_ALLOWED_WARNING, refusalMessage, unrestrictedText } from '../messages';
 import { PolicyRefusal } from '../PolicyRefusal';
 import { PolicyCode, PolicyField } from '../schemas';
 import type { OrganizationPolicyResponse } from '../types';
-import { ORGANIZATION_READ_ONLY } from './OrganizationPolicySection';
+import { ORGANIZATION_READ_ONLY } from './OrganizationPolicy';
 import { DISCARD_LABEL, SAVE_LABEL } from './PolicyEditor';
 import { LAPSED_NOTICE } from './PolicyLapsedNotice';
 import { UPGRADE_NOTICE } from './PolicyUpgradeNotice';
@@ -211,7 +211,7 @@ describe('OrganizationPolicySection', () => {
 
       const servers = field('MCP servers');
       fireEvent.click(within(servers).getByRole('checkbox', { name: 'Restrict MCP servers' }));
-      expect(within(servers).getByText(NOTHING_ALLOWED)).toBeInTheDocument();
+      expect(within(servers).getByText(NOTHING_ALLOWED_WARNING)).toBeInTheDocument();
       fireEvent.change(within(servers).getByRole('textbox'), { target: { value: 'github' } });
       fireEvent.click(within(servers).getByRole('button', { name: 'Add to MCP servers' }));
       fireEvent.click(save());
@@ -262,7 +262,7 @@ describe('OrganizationPolicySection', () => {
       });
     }
 
-    for (const code of [PolicyCode.LicenseRequired, PolicyCode.BodyInvalid, PolicyCode.Wider]) {
+    for (const code of [PolicyCode.LicenseRequired, PolicyCode.BodyInvalid]) {
       it(`shows ${code} as a form alert`, async () => {
         updateOrganization.mockRejectedValue(new PolicyRefusal({ error: 'raw', code }, 403));
         await loaded(ACTIVE_ORGANIZATION);
@@ -276,6 +276,22 @@ describe('OrganizationPolicySection', () => {
         expect(alert).not.toHaveTextContent('raw');
       });
     }
+
+    it("shows policy_wider_than_organization in the server's words", async () => {
+      const worded =
+        "This workspace's providers can't allow more than your organization's policy does.";
+      updateOrganization.mockRejectedValue(
+        new PolicyRefusal({ error: worded, code: PolicyCode.Wider }, 400)
+      );
+      await loaded(ACTIVE_ORGANIZATION);
+
+      fireEvent.click(within(field('Providers')).getByRole('checkbox', { name: 'OpenAI API' }));
+      fireEvent.click(save());
+
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveClass('alert-error');
+      expect(alert).toHaveTextContent(worded);
+    });
 
     it('clears a refusal once the policy is edited again', async () => {
       updateOrganization.mockRejectedValue(

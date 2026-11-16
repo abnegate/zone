@@ -93,11 +93,18 @@
   margin: 0;
   font-size: var(--ui-text-xs);
   line-height: var(--ui-leading-normal);
-  color: var(--ui-text-muted);
+  color: var(--ui-text-secondary);
 }
 
-.policy-field-note {
-  color: var(--ui-text-secondary);
+.policy-field-warning {
+  margin: 0;
+  padding: var(--ui-space-2) var(--ui-space-3);
+  font-size: var(--ui-text-xs);
+  line-height: var(--ui-leading-normal);
+  color: var(--ui-text-primary);
+  background: var(--ui-warning-muted);
+  border-left: 3px solid var(--ui-warning);
+  border-radius: var(--ui-radius-sm);
 }
 
 .policy-field-summary {

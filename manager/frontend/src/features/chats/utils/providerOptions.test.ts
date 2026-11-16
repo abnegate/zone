@@ -331,10 +331,20 @@ describe('providerChoices', () => {
 });
 
 describe('offerDenial', () => {
-  it('words a denied offer through the policy messages, naming the offer', () => {
-    expect(offerDenial(offer({ label: 'Anthropic', denial: 'policy_provider_denied' }))).toBe(
-      "Your organization's policy doesn't allow Anthropic in this workspace."
-    );
+  it('words a denied offer through the policy messages, naming its policy provider', () => {
+    expect(
+      offerDenial(
+        offer({ provider: 'anthropic', label: 'Anthropic', denial: 'policy_provider_denied' })
+      )
+    ).toBe("Your organization's policy doesn't allow Anthropic API in this workspace.");
+  });
+
+  it("prefers the server's own wording of the denial", () => {
+    const worded = "Your organization's policy doesn't allow OpenAI API in this workspace.";
+
+    expect(
+      offerDenial(offer({ usable: false, reason: worded, denial: 'policy_provider_denied' }))
+    ).toBe(worded);
   });
 
   it('shows a reason the server worded as it is', () => {

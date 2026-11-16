@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test';
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { chooseSelect, openSelect, optionDescription } from '../../../test/select';
+import { chooseSelect, describedText, openSelect, optionDescription } from '../../../test/select';
 import type {
   ChatProviderOffer,
   ChatProviderSelection,
@@ -122,6 +122,9 @@ describe('ProviderPicker', () => {
     );
     expect(screen.getByRole('option', { name: 'Self-Hosted' })).not.toHaveAttribute(
       'data-disabled'
+    );
+    expect(describedText(screen.getByRole('combobox', { name: 'AI provider', hidden: true }))).toBe(
+      "Codex is unavailable. Your organization's policy doesn't allow Codex in this workspace."
     );
     fireEvent.click(denied);
 

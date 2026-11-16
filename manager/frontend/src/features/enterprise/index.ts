@@ -2,6 +2,7 @@ export { LicenseSection } from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
 export {
+  AGENT_POLICY_LINK,
   denialMessage,
   denialReason,
   isDenialCode,
@@ -9,6 +10,8 @@ export {
   type PolicyDenialCode,
   type PolicyRules,
   providerDenial,
+  providerDenialMessage,
+  providerSubject,
   useOrganizationPolicy,
   useWorkspacePolicy,
   WorkspacePolicySection,

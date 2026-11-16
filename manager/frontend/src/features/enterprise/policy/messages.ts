@@ -65,7 +65,14 @@ const UNRESTRICTED: Readonly<Record<PolicyFieldValue, string>> = {
 
 export const NOTHING_ALLOWED = 'Nothing is allowed.';
 
+export const NOTHING_ALLOWED_WARNING =
+  'Nothing is allowed, so everything this field covers is refused. Add an entry, or stop restricting it.';
+
 export const NOT_ALLOWED = 'Not allowed by your organization';
+
+export const AGENT_POLICY_LINK = 'See the agent policy';
+
+const ENTRY_SEPARATOR = ', ';
 
 const DEFAULT_PROVIDER_SUBJECT = 'this provider';
 
@@ -153,6 +160,14 @@ export function denialMessage(code: PolicyDenialCode, subject?: string): string 
 
 export function denialReason(denial: string, subject?: string): string {
   return isDenialCode(denial) ? denialMessage(denial, subject) : denial;
+}
+
+export function notAllowed(entries: readonly string[]): string {
+  return `${NOT_ALLOWED}: ${entries.join(ENTRY_SEPARATOR)}.`;
+}
+
+export function pendingText(entries: readonly string[]): string {
+  return `Saving adds ${entries.join(ENTRY_SEPARATOR)}.`;
 }
 
 export function refusalMessage(code: PolicyAdminCode): string {

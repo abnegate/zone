@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   agentLabel,
   ceilingLabel,
@@ -9,6 +11,8 @@ import {
   isAdminCode,
   isDenialCode,
   NO_CEILING_LABEL,
+  notAllowed,
+  pendingText,
   providerLabel,
   refusalField,
   refusalMessage,
@@ -23,22 +27,80 @@ import {
   PolicyCode,
   PolicyField,
 } from './schemas';
+import type { PolicyDenialCode } from './types';
+
+const POLICY_RS = join(import.meta.dir, '../../../../../../runner/zone_enterprise/src/policy');
+const PROVIDER_RS = join(POLICY_RS, 'provider.rs');
+const AGENT_RS = join(POLICY_RS, 'agent.rs');
+const DENIAL_RS = join(POLICY_RS, 'denial.rs');
+
+const ARM = /Self::([A-Za-z]+)(?:\(_\))? => (?:"([^"]+)"|([A-Z_]+))/g;
+const ERROR = /#\[error\(\s*"((?:[^"\\]|\\.)*)"[^\]]*\]\s*([A-Za-z]+)/g;
+const CODE = /pub const ([A-Z_]+): &str = "([^"]+)";/g;
+const PLACEHOLDER = '{}';
+
+const read = (path: string): string => readFileSync(path, 'utf8');
+
+function method(source: string, name: string): string {
+  const start = source.indexOf(`fn ${name}(`);
+  if (start < 0) throw new Error(`fn ${name} not found in the Rust source`);
+  return source.slice(start, source.indexOf('\n    }\n', start));
+}
+
+function arms(source: string, name: string): Map<string, string> {
+  return new Map(
+    [...method(source, name).matchAll(ARM)].map((match) => [match[1], match[2] ?? match[3]])
+  );
+}
+
+function labels(path: string): Map<string, string> {
+  const source = read(path);
+  const values = arms(source, 'as_str');
+  const words = arms(source, 'label');
+  return new Map([...values].map(([variant, value]) => [value, words.get(variant) ?? '']));
+}
+
+interface RustDenial {
+  code: PolicyDenialCode;
+  template: string;
+}
+
+function denials(): Map<string, RustDenial> {
+  const source = read(DENIAL_RS);
+  const constants = new Map([...source.matchAll(CODE)].map((match) => [match[1], match[2]]));
+  const codes = arms(source, 'code');
+  return new Map(
+    [...source.matchAll(ERROR)].map((match) => {
+      const code = constants.get(codes.get(match[2]) ?? '');
+      if (code === undefined || !isDenialCode(code)) {
+        throw new Error(`Denial::${match[2]} has no denial code`);
+      }
+      return [match[2], { code, template: match[1] }];
+    })
+  );
+}
+
+function denial(variant: string): RustDenial {
+  const found = denials().get(variant);
+  if (found === undefined) throw new Error(`Denial::${variant} not found in ${DENIAL_RS}`);
+  return found;
+}
 
 describe('labels', () => {
   it('labels providers as the server does', () => {
-    expect(POLICY_PROVIDERS.map(providerLabel)).toEqual([
-      'Local models',
-      'Anthropic API',
-      'OpenAI API',
-      'AWS Bedrock',
-      'Google Vertex AI',
-      'Azure OpenAI',
-      'Other OpenAI-compatible endpoints',
-    ]);
+    const server = labels(PROVIDER_RS);
+
+    expect(POLICY_PROVIDERS.map(providerLabel)).toEqual(
+      POLICY_PROVIDERS.map((provider) => server.get(provider) ?? '')
+    );
   });
 
   it('labels coding agents as the server does', () => {
-    expect(POLICY_AGENTS.map(agentLabel)).toEqual(['Claude Code', 'Codex']);
+    const server = labels(AGENT_RS);
+
+    expect(POLICY_AGENTS.map(agentLabel)).toEqual(
+      POLICY_AGENTS.map((agent) => server.get(agent) ?? '')
+    );
   });
 
   it('describes the ceilings the editor offers', () => {
@@ -59,28 +121,35 @@ describe('labels', () => {
 });
 
 describe('denialMessage', () => {
-  it('matches the server wording for every denial', () => {
-    expect(denialMessage(PolicyCode.ProviderDenied, 'OpenAI API')).toBe(
-      "Your organization's policy doesn't allow OpenAI API in this workspace."
+  it('words every denial the server declares', () => {
+    expect([...denials().values()].map((rust) => rust.code).sort()).toEqual(
+      [...POLICY_DENIAL_CODES].sort()
     );
-    expect(denialMessage(PolicyCode.AgentDenied, 'Codex')).toBe(
-      "Your organization's policy doesn't allow Codex in this workspace."
-    );
-    expect(denialMessage(PolicyCode.ModelDenied)).toBe(
-      "Your organization's policy doesn't allow this model in this workspace. Choose an allowed model."
-    );
-    expect(denialMessage(PolicyCode.ServerDenied)).toBe(
-      "Your organization's policy doesn't allow this MCP server in this workspace."
-    );
-    expect(denialMessage(PolicyCode.DomainDenied)).toBe(
-      "Your organization's policy doesn't allow requests to this domain from this workspace."
-    );
-    expect(denialMessage(PolicyCode.ApprovalRequired)).toBe(
-      "Your organization's policy requires a person to approve this tool call, and nobody can approve it in this run."
-    );
-    expect(denialMessage(PolicyCode.Unreadable)).toBe(
-      "Your organization's agent policy couldn't be read, so this can't start. Try again shortly."
-    );
+  });
+
+  it('names a denied provider the way the server does', () => {
+    const { code, template } = denial('Provider');
+
+    for (const provider of POLICY_PROVIDERS) {
+      const label = providerLabel(provider);
+      expect(denialMessage(code, label)).toBe(template.replace(PLACEHOLDER, label));
+    }
+  });
+
+  it('names a denied coding agent the way the server does', () => {
+    const { code, template } = denial('Agent');
+
+    for (const agent of POLICY_AGENTS) {
+      const label = agentLabel(agent);
+      expect(denialMessage(code, label)).toBe(template.replace(PLACEHOLDER, label));
+    }
+  });
+
+  it('matches the server wording for every other denial', () => {
+    for (const variant of ['Model', 'Server', 'Domain', 'Approval', 'Unreadable']) {
+      const { code, template } = denial(variant);
+      expect(denialMessage(code), variant).toBe(template);
+    }
   });
 
   it('names the provider or agent generically without a label', () => {
@@ -114,6 +183,16 @@ describe('refusalMessage', () => {
 
   it('names Team and Enterprise when a license is required', () => {
     expect(refusalMessage(PolicyCode.LicenseRequired)).toContain('Team or Enterprise');
+  });
+});
+
+describe('entry messages', () => {
+  it('names the entries the organization does not allow', () => {
+    expect(notAllowed(['gitlab', 'jira'])).toBe('Not allowed by your organization: gitlab, jira.');
+  });
+
+  it('names the entries a save adds', () => {
+    expect(pendingText(['github'])).toBe('Saving adds github.');
   });
 });
 

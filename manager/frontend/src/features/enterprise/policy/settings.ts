@@ -1,5 +1,6 @@
 import { AiProviderSchema } from '../../settings/workspace/schemas';
 import type { AiProvider as AiProviderValue } from '../../settings/workspace/types';
+import { agentLabel, denialMessage, providerLabel } from './messages';
 import { PolicyAgent, PolicyCode, PolicyProvider } from './schemas';
 import type {
   PolicyAgent as PolicyAgentValue,
@@ -35,4 +36,21 @@ export function providerDenial(
     return rules.agents === null || rules.agents.includes(agent) ? null : PolicyCode.AgentDenied;
   }
   return null;
+}
+
+export function providerSubject(provider: AiProviderValue): string | undefined {
+  const direct = DIRECT[provider];
+  if (direct !== undefined) {
+    return providerLabel(direct);
+  }
+  const agent = AGENTS[provider];
+  return agent === undefined ? undefined : agentLabel(agent);
+}
+
+export function providerDenialMessage(
+  rules: PolicyRules,
+  provider: AiProviderValue
+): string | null {
+  const denial = providerDenial(rules, provider);
+  return denial === null ? null : denialMessage(denial, providerSubject(provider));
 }
