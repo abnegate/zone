@@ -53,6 +53,16 @@
   color: var(--ui-text-secondary);
 }
 
+.license-unverified {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ui-space-1);
+}
+
+.license-unverified p {
+  margin: 0;
+}
+
 .license-details {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

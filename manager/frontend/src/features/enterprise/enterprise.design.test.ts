@@ -31,6 +31,13 @@ describe('license section surfaces', () => {
     expect(rule(css, '.license-key-form .form-group')).toContain('margin-bottom: 0');
   });
 
+  it('stacks the unverified reason under its headline with no paragraph margins', () => {
+    const warning = rule(css, '.license-unverified');
+    expect(warning).toContain('flex-direction: column');
+    expect(warning).toContain('gap: var(--ui-space-1)');
+    expect(rule(css, '.license-unverified p')).toContain('margin: 0');
+  });
+
   it('lets every column shrink below its content', () => {
     for (const selector of [
       '.license-section',

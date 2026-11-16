@@ -40,6 +40,13 @@ export const LICENSE_REFUSAL_CODES = [
   LicenseRefusalCode.Lapsed,
 ] as const;
 
+export const UNVERIFIED_CODES = [
+  LicenseRefusalCode.Malformed,
+  LicenseRefusalCode.UnknownKey,
+  LicenseRefusalCode.SignatureInvalid,
+  LicenseRefusalCode.PayloadInvalid,
+] as const;
+
 export const EditionSchema = z.enum(EDITIONS);
 
 export const LicenseStatusSchema = z.enum(LICENSE_STATUSES);
@@ -63,11 +70,16 @@ export const SeatsSchema = z.object({
   over: z.boolean(),
 });
 
+export const UnverifiedSchema = z.object({
+  code: z.enum(UNVERIFIED_CODES),
+});
+
 export const LicenseResponseSchema = z.object({
   edition: EditionSchema,
   status: LicenseStatusSchema,
   license: LicenseDetailsSchema.nullable(),
   seats: SeatsSchema,
+  unverified: UnverifiedSchema.nullable(),
 });
 
 export const SetLicenseRequestSchema = z.object({

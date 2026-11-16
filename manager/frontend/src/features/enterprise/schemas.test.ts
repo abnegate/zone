@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'bun:test';
-import { ACME_LICENSE, ACTIVE, COMMUNITY, GRACE, LAPSED, OVER_SEATS } from './fixtures';
+import { ACME_LICENSE, ACTIVE, COMMUNITY, GRACE, LAPSED, OVER_SEATS, UNVERIFIED } from './fixtures';
 import {
   LICENSE_REFUSAL_CODES,
+  LicenseRefusalCode,
   LicenseRefusalSchema,
   LicenseResponseSchema,
   SetLicenseRequestSchema,
+  UNVERIFIED_CODES,
 } from './schemas';
 
 describe('LicenseResponseSchema', () => {
@@ -27,6 +29,27 @@ describe('LicenseResponseSchema', () => {
     expect(parsed.edition).toBe('team');
     expect(parsed.status).toBe('lapsed');
     expect(parsed.license?.tier).toBe('team');
+  });
+
+  for (const code of UNVERIFIED_CODES) {
+    it(`reads a stored key that no longer verifies with ${code} as Community`, () => {
+      const response = { ...UNVERIFIED, unverified: { code } };
+      expect(LicenseResponseSchema.parse(response)).toEqual(response);
+    });
+  }
+
+  it('rejects an unverified key that claims the lapsed code, which only a paste can earn', () => {
+    expect(
+      LicenseResponseSchema.safeParse({
+        ...UNVERIFIED,
+        unverified: { code: LicenseRefusalCode.Lapsed },
+      }).success
+    ).toBe(false);
+  });
+
+  it('rejects a response that leaves unverified out instead of sending null', () => {
+    const { unverified: _unverified, ...missing } = COMMUNITY;
+    expect(LicenseResponseSchema.safeParse(missing).success).toBe(false);
   });
 
   it('rejects a status the contract does not define', () => {

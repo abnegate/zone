@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-import { ACTIVE, COMMUNITY, GRACE, LAPSED, OVER_SEATS } from './fixtures';
-import { LICENSE_REFUSAL_CODES } from './schemas';
+import { ACTIVE, COMMUNITY, GRACE, LAPSED, OVER_SEATS, UNVERIFIED } from './fixtures';
+import { LICENSE_REFUSAL_CODES, LicenseRefusalCode, UNVERIFIED_CODES } from './schemas';
 import {
   editionLabel,
   expiryLabel,
@@ -11,7 +11,9 @@ import {
   statusLabel,
   statusNotice,
   statusTone,
+  storesLicense,
   Tone,
+  unverifiedReason,
 } from './status';
 
 describe('editionLabel', () => {
@@ -108,5 +110,33 @@ describe('refusalMessage', () => {
     for (const message of messages) {
       expect(message.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe('unverifiedReason', () => {
+  it('explains every way a stored key can stop verifying, each differently', () => {
+    const reasons = UNVERIFIED_CODES.map(unverifiedReason);
+    for (const reason of reasons) {
+      expect(reason.length).toBeGreaterThan(0);
+    }
+    expect(new Set(reasons).size).toBe(UNVERIFIED_CODES.length);
+  });
+
+  it('asks for a renewed key when the signing key is no longer trusted', () => {
+    expect(unverifiedReason(LicenseRefusalCode.UnknownKey)).toBe(
+      'It was signed with a key this release no longer trusts. Paste a renewed key.'
+    );
+  });
+});
+
+describe('storesLicense', () => {
+  it('is true whenever the server holds a license row, verified or not', () => {
+    expect(storesLicense(ACTIVE)).toBe(true);
+    expect(storesLicense(LAPSED)).toBe(true);
+    expect(storesLicense(UNVERIFIED)).toBe(true);
+  });
+
+  it('is false when no license is stored', () => {
+    expect(storesLicense(COMMUNITY)).toBe(false);
   });
 });

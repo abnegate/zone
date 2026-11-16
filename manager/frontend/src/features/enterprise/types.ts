@@ -8,6 +8,7 @@ import type {
   SeatsSchema,
   SetLicenseRequestSchema,
   TierSchema,
+  UnverifiedSchema,
 } from './schemas';
 
 export type Edition = z.infer<typeof EditionSchema>;
@@ -19,3 +20,5 @@ export type LicenseResponse = z.infer<typeof LicenseResponseSchema>;
 export type SetLicenseRequest = z.infer<typeof SetLicenseRequestSchema>;
 export type LicenseRefusalBody = z.infer<typeof LicenseRefusalSchema>;
 export type LicenseRefusalCode = LicenseRefusalBody['code'];
+export type Unverified = z.infer<typeof UnverifiedSchema>;
+export type UnverifiedCode = Unverified['code'];

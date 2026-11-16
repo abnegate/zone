@@ -18,6 +18,8 @@ export {
   SetLicenseRequestSchema,
   TIERS,
   TierSchema,
+  UNVERIFIED_CODES,
+  UnverifiedSchema,
 } from './schemas';
 export type {
   LicenseDetails,
@@ -26,4 +28,6 @@ export type {
   Seats,
   SetLicenseRequest,
   Tier,
+  Unverified,
+  UnverifiedCode,
 } from './types';

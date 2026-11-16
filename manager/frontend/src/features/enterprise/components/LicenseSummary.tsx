@@ -6,7 +6,9 @@ import {
   seatText,
   statusLabel,
   statusTone,
+  storesLicense,
   Tone,
+  unverifiedReason,
 } from '../status';
 import type { LicenseResponse } from '../types';
 
@@ -23,7 +25,7 @@ interface LicenseSummaryProps {
 }
 
 export function LicenseSummary({ response, onRemove }: LicenseSummaryProps) {
-  const { edition, status, license, seats } = response;
+  const { edition, status, license, seats, unverified } = response;
 
   return (
     <div className="settings-card license-summary">
@@ -33,17 +35,26 @@ export function LicenseSummary({ response, onRemove }: LicenseSummaryProps) {
           <span className="license-edition-name">{editionLabel(edition)}</span>
         </div>
         {license && (
-          <>
-            <Badge variant={BADGE_VARIANTS[statusTone(status)]}>{statusLabel(status)}</Badge>
-            <div className="license-summary-actions">
-              <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
-                Remove
-              </Button>
-            </div>
-          </>
+          <Badge variant={BADGE_VARIANTS[statusTone(status)]}>{statusLabel(status)}</Badge>
+        )}
+        {storesLicense(response) && (
+          <div className="license-summary-actions">
+            <Button type="button" variant="ghost" size="sm" onClick={onRemove}>
+              Remove license
+            </Button>
+          </div>
         )}
       </div>
-      {license === null && (
+      {unverified && (
+        <div className="alert alert-warning license-unverified" role="status">
+          <p>
+            A license key is stored, but this version of Zone can't verify it, so this server runs
+            the free Community edition.
+          </p>
+          <p>{unverifiedReason(unverified.code)}</p>
+        </div>
+      )}
+      {!storesLicense(response) && (
         <p className="license-community">
           No license is installed, so this server runs the free Community edition.
         </p>

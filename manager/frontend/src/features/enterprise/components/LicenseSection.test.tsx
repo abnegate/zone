@@ -2,10 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ApiError } from '../../../api/ApiError';
-import { ACTIVE, COMMUNITY, GRACE, LAPSED, OVER_SEATS } from '../fixtures';
+import { ACTIVE, COMMUNITY, GRACE, LAPSED, OVER_SEATS, UNVERIFIED } from '../fixtures';
 import { LicenseRefusal } from '../LicenseRefusal';
-import { LICENSE_REFUSAL_CODES } from '../schemas';
-import { refusalMessage } from '../status';
+import { LICENSE_REFUSAL_CODES, UNVERIFIED_CODES } from '../schemas';
+import { refusalMessage, unverifiedReason } from '../status';
 import type { LicenseResponse } from '../types';
 
 const get = mock();
@@ -49,6 +49,19 @@ function paste(text: string) {
   fireEvent.change(keyBox(), { target: { value: text } });
 }
 
+const REMOVE_DIALOG = 'Remove the license?';
+
+function removeButton(): HTMLElement {
+  return screen.getByRole('button', { name: 'Remove license' });
+}
+
+function confirmRemoval(): HTMLElement {
+  fireEvent.click(removeButton());
+  const dialog = screen.getByRole('dialog', { name: REMOVE_DIALOG });
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Remove license' }));
+  return dialog;
+}
+
 function details(): Record<string, string> {
   const entries: Record<string, string> = {};
   for (const term of screen.getAllByRole('term', { hidden: true })) {
@@ -86,9 +99,35 @@ describe('LicenseSection', () => {
       expect(details()).toEqual({ Seats: '12 seats used this month' });
       expect(keyBox()).toBeEnabled();
       expect(screen.getByRole('button', { name: 'Add license' })).toBeDisabled();
-      expect(screen.queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Remove license' })).not.toBeInTheDocument();
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
+
+    it('warns that a stored key no longer verifies instead of saying none is installed', async () => {
+      await loaded(UNVERIFIED);
+
+      expect(screen.queryByText(/No license is installed/)).not.toBeInTheDocument();
+      const warning = screen.getByRole('status');
+      expect(warning).toHaveClass('alert-warning');
+      expect(warning).toHaveTextContent(
+        "A license key is stored, but this version of Zone can't verify it"
+      );
+      expect(warning).toHaveTextContent('signed with a key this release no longer trusts');
+      expect(warning).toHaveTextContent('Paste a renewed key.');
+      expect(screen.getByText('Community', { selector: '.license-edition-name' })).toBeTruthy();
+      expect(details()).toEqual({ Seats: '12 seats used this month' });
+      expect(removeButton()).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Replace license' })).toBeDisabled();
+    });
+
+    for (const code of UNVERIFIED_CODES) {
+      it(`gives the reason a stored key failed with ${code}`, async () => {
+        await loaded({ ...UNVERIFIED, unverified: { code } });
+
+        expect(screen.getByRole('status')).toHaveTextContent(unverifiedReason(code));
+        expect(removeButton()).toBeInTheDocument();
+      });
+    }
 
     it('shows an active license with its customer, tier, seats and expiry', async () => {
       await loaded(ACTIVE);
@@ -103,7 +142,7 @@ describe('LicenseSection', () => {
         'Grace ends': 'Dec 1, 2027',
       });
       expect(screen.getByRole('button', { name: 'Replace license' })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Remove' })).toBeInTheDocument();
+      expect(removeButton()).toBeInTheDocument();
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
@@ -209,6 +248,18 @@ describe('LicenseSection', () => {
       expect(screen.getByText('Grace period')).toBeInTheDocument();
     });
 
+    it('replaces a stored key that no longer verifies and drops the warning', async () => {
+      set.mockResolvedValue(ACTIVE);
+      await loaded(UNVERIFIED);
+
+      paste('payload.signature');
+      fireEvent.click(screen.getByRole('button', { name: 'Replace license' }));
+
+      await screen.findByText('License replaced.');
+      expect(screen.queryByText(/can't verify it/)).not.toBeInTheDocument();
+      expect(details().Customer).toBe('Acme Ltd');
+    });
+
     for (const code of LICENSE_REFUSAL_CODES) {
       it(`explains a ${code} refusal next to the key`, async () => {
         set.mockRejectedValue(new LicenseRefusal({ error: 'Refused by the server', code }));
@@ -261,36 +312,69 @@ describe('LicenseSection', () => {
       remove.mockResolvedValue(COMMUNITY);
       await loaded(ACTIVE);
 
-      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
-      const dialog = screen.getByRole('dialog', { name: 'Remove the license?' });
+      fireEvent.click(removeButton());
+      const dialog = screen.getByRole('dialog', { name: REMOVE_DIALOG });
+      expect(dialog).toHaveTextContent('configuring Enterprise features stops');
       expect(remove).not.toHaveBeenCalled();
 
       fireEvent.click(within(dialog).getByRole('button', { name: 'Remove license' }));
 
       await waitFor(() =>
-        expect(
-          screen.queryByRole('dialog', { name: 'Remove the license?' })
-        ).not.toBeInTheDocument()
+        expect(screen.queryByRole('dialog', { name: REMOVE_DIALOG })).not.toBeInTheDocument()
       );
       expect(remove).toHaveBeenCalledTimes(1);
       expect(screen.getByText(/No license is installed/)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Add license' })).toBeInTheDocument();
     });
 
+    it('removes a stored key that no longer verifies, explaining the server stays on Community', async () => {
+      remove.mockResolvedValue(COMMUNITY);
+      await loaded(UNVERIFIED);
+
+      fireEvent.click(removeButton());
+      const dialog = screen.getByRole('dialog', { name: REMOVE_DIALOG });
+      expect(dialog).toHaveTextContent("deletes the stored key this version of Zone can't verify");
+      expect(dialog).toHaveTextContent('stays on the Community edition');
+      expect(dialog).not.toHaveTextContent('configuring Enterprise features stops');
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Remove license' }));
+
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog', { name: REMOVE_DIALOG })).not.toBeInTheDocument()
+      );
+      expect(remove).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+      expect(screen.getByText(/No license is installed/)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Remove license' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Add license' })).toBeInTheDocument();
+    });
+
+    it('keeps the unverified warning when removing the stored key fails', async () => {
+      remove.mockRejectedValue(new ApiError('Failed to remove the license: 500', 500));
+      await loaded(UNVERIFIED);
+
+      const dialog = confirmRemoval();
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'Failed to remove the license: 500'
+      );
+      expect(
+        screen.getByText(/A license key is stored, but this version of Zone can't verify it/)
+      ).toBeInTheDocument();
+    });
+
     it('leaves the license alone when the removal is cancelled', async () => {
       await loaded(ACTIVE);
 
-      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+      fireEvent.click(removeButton());
       fireEvent.click(
-        within(screen.getByRole('dialog', { name: 'Remove the license?' })).getByRole('button', {
+        within(screen.getByRole('dialog', { name: REMOVE_DIALOG })).getByRole('button', {
           name: 'Cancel',
         })
       );
 
       await waitFor(() =>
-        expect(
-          screen.queryByRole('dialog', { name: 'Remove the license?' })
-        ).not.toBeInTheDocument()
+        expect(screen.queryByRole('dialog', { name: REMOVE_DIALOG })).not.toBeInTheDocument()
       );
       expect(remove).not.toHaveBeenCalled();
       expect(details().Customer).toBe('Acme Ltd');
@@ -300,9 +384,7 @@ describe('LicenseSection', () => {
       remove.mockRejectedValue(new ApiError('Failed to remove the license: 500', 500));
       await loaded(ACTIVE);
 
-      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
-      const dialog = screen.getByRole('dialog', { name: 'Remove the license?' });
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Remove license' }));
+      const dialog = confirmRemoval();
 
       expect(await within(dialog).findByRole('alert')).toHaveTextContent(
         'Failed to remove the license: 500'

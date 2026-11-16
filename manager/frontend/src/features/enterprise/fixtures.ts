@@ -1,4 +1,4 @@
-import { Edition, LicenseStatus } from './schemas';
+import { Edition, LicenseRefusalCode, LicenseStatus } from './schemas';
 import type { LicenseDetails, LicenseResponse, Tier } from './types';
 
 export const ACME_LICENSE: LicenseDetails = {
@@ -17,6 +17,12 @@ export const COMMUNITY: LicenseResponse = {
   status: LicenseStatus.Community,
   license: null,
   seats: { used: 12, licensed: null, over: false },
+  unverified: null,
+};
+
+export const UNVERIFIED: LicenseResponse = {
+  ...COMMUNITY,
+  unverified: { code: LicenseRefusalCode.UnknownKey },
 };
 
 export function licensed(
@@ -29,6 +35,7 @@ export function licensed(
     status,
     license: { ...ACME_LICENSE, tier },
     seats: { used, licensed: ACME_LICENSE.seats, over: used > ACME_LICENSE.seats },
+    unverified: null,
   };
 }
 

@@ -5,6 +5,7 @@ import type {
   LicenseResponse,
   LicenseStatus as LicenseStatusValue,
   Seats,
+  UnverifiedCode,
 } from './types';
 
 export const Tone = {
@@ -49,6 +50,17 @@ const REFUSAL_MESSAGES: Readonly<Record<LicenseRefusalCodeValue, string>> = {
     'This license is past its grace period, so it can no longer be added. Ask for a renewed license key.',
 };
 
+const UNVERIFIED_REASONS: Readonly<Record<UnverifiedCode, string>> = {
+  [LicenseRefusalCode.Malformed]:
+    'The stored key is incomplete or damaged. Paste the key again exactly as you received it.',
+  [LicenseRefusalCode.UnknownKey]:
+    'It was signed with a key this release no longer trusts. Paste a renewed key.',
+  [LicenseRefusalCode.SignatureInvalid]:
+    'Its signature no longer checks out, so it may have been changed. Paste the key again or ask for a new one.',
+  [LicenseRefusalCode.PayloadInvalid]:
+    "It is signed, but this release can't read its details. Ask for a new license key.",
+};
+
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' });
 
 export function editionLabel(edition: EditionValue): string {
@@ -65,6 +77,14 @@ export function statusTone(status: LicenseStatusValue): Tone {
 
 export function refusalMessage(code: LicenseRefusalCodeValue): string {
   return REFUSAL_MESSAGES[code];
+}
+
+export function unverifiedReason(code: UnverifiedCode): string {
+  return UNVERIFIED_REASONS[code];
+}
+
+export function storesLicense(response: LicenseResponse): boolean {
+  return response.license !== null || response.unverified !== null;
 }
 
 export function licenseDate(value: string): string {

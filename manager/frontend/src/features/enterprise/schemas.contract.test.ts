@@ -14,6 +14,8 @@ import {
   SeatsSchema,
   SetLicenseRequestSchema,
   TIERS,
+  UNVERIFIED_CODES,
+  UnverifiedSchema,
 } from './schemas';
 
 const RUNNER = join(import.meta.dir, '../../../../../runner');
@@ -24,8 +26,6 @@ const COMMON = join(SERVER, 'routes/common.rs');
 const SERVICE = join(SERVER, 'services/license.rs');
 const ERRORS = join(ENTERPRISE, 'error.rs');
 
-/// Raised while building the keyring from a trusted public key, never for a
-/// pasted license key, so no client is ever refused with it.
 const KEYRING_ONLY = ['license_key_invalid'];
 
 const CODE = /pub const [A-Z_]+: &str = "([^"]+)";/g;
@@ -45,8 +45,6 @@ function rustShape(path: string, structName: string): Record<string, boolean> {
   );
 }
 
-/// Whether the parsed value may lack the key. serde omits a key only under
-/// `skip_serializing_if`, and that is what the output optionality must mirror.
 function zodShape(schema: Shaped): Record<string, boolean> {
   return Object.fromEntries(
     Object.entries(schema.shape).map(([key, value]) => [key, value._zod.optout === 'optional'])
@@ -74,11 +72,16 @@ function codes(path: string): string[] {
   return [...read(path).matchAll(CODE)].map((match) => match[1]);
 }
 
+function pastedKeyCodes(): string[] {
+  return codes(ERRORS).filter((code) => !KEYRING_ONLY.includes(code));
+}
+
 describe('the license reads as the server serialises it', () => {
   test.each<[string, Shaped]>([
     ['LicenseResponse', LicenseResponseSchema],
     ['LicenseDetails', LicenseDetailsSchema],
     ['SeatsResponse', SeatsSchema],
+    ['UnverifiedResponse', UnverifiedSchema],
   ])('%s carries the same fields on both sides, none of them omitted', (structName, schema) => {
     expect(zodShape(schema)).toEqual(rustShape(ROUTE, structName));
   });
@@ -87,6 +90,7 @@ describe('the license reads as the server serialises it', () => {
     ['LicenseResponse', LicenseResponseSchema],
     ['LicenseDetails', LicenseDetailsSchema],
     ['SeatsResponse', SeatsSchema],
+    ['UnverifiedResponse', UnverifiedSchema],
   ])('%s is null in exactly the fields the server may send as null', (structName, schema) => {
     expect(zodNullable(schema)).toEqual(rustNullable(ROUTE, structName));
   });
@@ -120,14 +124,14 @@ describe('the license vocabularies match the server', () => {
   });
 
   test('the console models every refusal code the server sends, and no other', () => {
-    const verifier = codes(ERRORS);
     const service = codes(SERVICE);
 
-    expect(verifier).toEqual(expect.arrayContaining(KEYRING_ONLY));
     expect(service).toHaveLength(1);
-    expect(sorted(LICENSE_REFUSAL_CODES)).toEqual(
-      sorted([...verifier.filter((code) => !KEYRING_ONLY.includes(code)), ...service])
-    );
+    expect(sorted(LICENSE_REFUSAL_CODES)).toEqual(sorted([...pastedKeyCodes(), ...service]));
     expect(LICENSE_REFUSAL_CODES).toHaveLength(5);
+  });
+
+  test('a stored key that stops verifying carries one of the verifier codes', () => {
+    expect(sorted(UNVERIFIED_CODES)).toEqual(sorted(pastedKeyCodes()));
   });
 });

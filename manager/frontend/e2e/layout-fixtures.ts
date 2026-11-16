@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import { Edition, LicenseStatus } from '../src/features/enterprise/schemas';
 import type { LicenseResponse } from '../src/features/enterprise/types';
 import type { SourceStatus } from '../src/features/github/sourceStatus';
 import {
@@ -38,10 +39,11 @@ const mockOrganization = {
 };
 
 const communityLicense: LicenseResponse = {
-  edition: 'community',
-  status: 'community',
+  edition: Edition.Community,
+  status: LicenseStatus.Community,
   license: null,
   seats: { used: 1, licensed: null, over: false },
+  unverified: null,
 };
 
 const mockWorkspace = {

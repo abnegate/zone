@@ -2,7 +2,8 @@ import { Button } from '@zone/ui';
 import { useId, useState } from 'react';
 import { useLicense } from '../hooks';
 import { LicenseStatus } from '../schemas';
-import { overSeatNotice, statusNotice } from '../status';
+import { overSeatNotice, statusNotice, storesLicense } from '../status';
+import type { LicenseResponse } from '../types';
 import { LicenseKeyForm } from './LicenseKeyForm';
 import { LicenseSummary } from './LicenseSummary';
 import { RemoveLicenseDialog } from './RemoveLicenseDialog';
@@ -11,7 +12,7 @@ import './LicenseSection.css';
 export function LicenseSection() {
   const headingId = useId();
   const { response, loading, error, refresh } = useLicense();
-  const [removing, setRemoving] = useState(false);
+  const [removing, setRemoving] = useState<LicenseResponse | null>(null);
 
   if (loading) {
     return <div className="loading-state">Loading license...</div>;
@@ -49,9 +50,14 @@ export function LicenseSection() {
           {overSeats}
         </div>
       )}
-      {response && <LicenseSummary response={response} onRemove={() => setRemoving(true)} />}
-      {response && <LicenseKeyForm licensed={response.license !== null} />}
-      {removing && <RemoveLicenseDialog onClose={() => setRemoving(false)} />}
+      {response && <LicenseSummary response={response} onRemove={() => setRemoving(response)} />}
+      {response && <LicenseKeyForm licensed={storesLicense(response)} />}
+      {removing && (
+        <RemoveLicenseDialog
+          verified={removing.unverified === null}
+          onClose={() => setRemoving(null)}
+        />
+      )}
     </section>
   );
 }
