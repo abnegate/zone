@@ -1,6 +1,3 @@
-//! The license gate for paid features. Whether a license entitles a feature is decided by
-//! zone_enterprise; this only turns a refusal into the response every gated route sends.
-
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -12,7 +9,6 @@ use crate::state::AppState;
 
 const SEPARATOR: &str = " or ";
 
-/// A feature the server's license doesn't include, answered as 403 `license_required`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unentitled(pub Feature);
 

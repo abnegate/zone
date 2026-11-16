@@ -12,7 +12,6 @@ use crate::state::AppState;
 
 const REQUIRED: &str = "required";
 
-/// Whether a password may be used, given who is using it and the server's enforcement setting.
 pub async fn access(pool: &PgPool, admin: bool) -> DbResult<PasswordAccess> {
     Ok(password_access(settings::required(pool).await?, admin))
 }

@@ -1,8 +1,6 @@
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-/// The account a single sign-on lands in, and how it got there: `provisioned` for an account the
-/// sign-in created, `linked` for an existing account the identity was first linked to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settlement {
     pub user: Uuid,

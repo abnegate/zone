@@ -33,8 +33,6 @@ impl Policy {
         })
     }
 
-    /// Whether the claims leave out something this policy decides on, which OpenID Connect Core
-    /// 5.3 lets a provider such as Okta answer from its userinfo endpoint instead.
     pub fn incomplete(&self, claims: &Claims) -> bool {
         claims.email.is_none()
             || (self.require_verified_email
