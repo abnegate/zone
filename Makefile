@@ -602,16 +602,8 @@ shell-valkey: ## Open shell in valkey container
 
 ##@ Testing
 
-test: ## Run basic smoke tests for all services
-	@echo "$(BLUE)Running smoke tests...$(NC)"
-	@echo "Testing Ollama API..."
-	@curl -sf http://localhost:11434/api/tags >/dev/null 2>&1 && echo "$(GREEN)✓ Ollama$(NC)" || echo "$(RED)✗ Ollama$(NC)"
-	@echo "Testing LiteLLM API..."
-	@curl -sf http://localhost:4000/health >/dev/null 2>&1 && echo "$(GREEN)✓ LiteLLM$(NC)" || echo "$(RED)✗ LiteLLM$(NC)"
-	@echo "Testing Manager API..."
-	@curl -sf http://localhost:8000/api/health >/dev/null 2>&1 && echo "$(GREEN)✓ Manager$(NC)" || echo "$(RED)✗ Manager$(NC)"
-	@echo "Testing Console..."
-	@curl -sf http://localhost:3000/health >/dev/null 2>&1 && echo "$(GREEN)✓ Console$(NC)" || echo "$(RED)✗ Console$(NC)"
+test: ## Smoke test the running stack
+	@sh scripts/smoke-test.sh
 
 test-server: ## Run zone_server (Rust) unit tests
 	@echo "$(BLUE)Running zone_server tests...$(NC)"

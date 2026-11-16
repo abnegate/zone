@@ -17,6 +17,8 @@ on:
       - 'scripts/test-dockerfile-members.sh'
       - 'ollama/pull-models.sh'
       - 'scripts/test-pull-models.sh'
+      - 'scripts/smoke-test.sh'
+      - 'scripts/test-smoke-test.sh'
       - 'manager/Dockerfile'
       - 'runner/Cargo.toml'
       - 'runner/zone_server/src/**'
@@ -37,6 +39,8 @@ on:
       - 'scripts/test-dockerfile-members.sh'
       - 'ollama/pull-models.sh'
       - 'scripts/test-pull-models.sh'
+      - 'scripts/smoke-test.sh'
+      - 'scripts/test-smoke-test.sh'
       - 'manager/Dockerfile'
       - 'runner/Cargo.toml'
       - 'runner/zone_server/src/**'
@@ -107,3 +111,6 @@ jobs:
 
       - name: Verify the Ollama pull script prints plain text to logs
         run: sh scripts/test-pull-models.sh
+
+      - name: Verify make test probes the endpoints an install publishes
+        run: sh scripts/test-smoke-test.sh
