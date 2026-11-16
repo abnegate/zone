@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { emptyOverview, overview } from '../../../test/analytics';
-import { NO_TREND } from '../components';
+import { NO_SERIES, NO_TREND } from '../components';
 import type { Analytics } from '../hooks';
 import type { TimePeriod } from '../types';
 
@@ -232,6 +232,25 @@ describe('AnalyticsPage', () => {
     );
     expect(container.querySelectorAll('.analytics-chart-bar')).toHaveLength(3);
     expect(screen.getByText(NO_TREND)).toBeDefined();
+  });
+
+  it('says the capped runs are too recent to chart when no complete bucket holds them', () => {
+    const full = overview();
+    state = {
+      ...IDLE,
+      overview: overview({
+        truncated: { runs: true, pull_requests: false },
+        measured_from: full.window.end,
+        runs: { ...full.runs, series: [] },
+      }),
+    };
+    const { container } = renderPage();
+
+    expect(screen.getByRole('status').textContent).toBe(
+      'Showing the newest 10,000 runs, all too recent to chart yet.'
+    );
+    expect(screen.getByText(NO_SERIES)).toBeDefined();
+    expect(container.querySelector('.analytics-chart')).toBeNull();
   });
 
   it('shows the loading skeleton before the first overview arrives', () => {

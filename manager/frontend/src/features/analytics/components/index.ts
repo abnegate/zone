@@ -10,7 +10,7 @@ export { type Figure, Figures } from './Figures';
 export { MeterRow } from './MeterRow';
 export { MODELS_LABEL, ModelBreakdownTable, NO_MODELS } from './ModelBreakdownTable';
 export { PULL_REQUESTS_TITLE, PullRequestSummaryCard } from './PullRequestSummaryCard';
-export { chartCaption, Outcome, RunSeriesChart } from './RunSeriesChart';
+export { chartCaption, NO_SERIES, Outcome, RunSeriesChart } from './RunSeriesChart';
 export { RunTiles } from './RunTiles';
 export { SectionCard } from './SectionCard';
 export { NO_SOURCES, SOURCES_LABEL, SourceLeaderboard } from './SourceLeaderboard';

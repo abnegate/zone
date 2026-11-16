@@ -9,7 +9,7 @@ const BAR_WIDTH = 0.7;
 const BAR_OFFSET = (1 - BAR_WIDTH) / 2;
 const TICK_LABELS = 7;
 
-export const NO_SERIES = 'No run fell inside this window to chart.';
+export const NO_SERIES = 'No complete bucket to chart yet.';
 
 export const Outcome = {
   Succeeded: 'succeeded',
