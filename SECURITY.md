@@ -212,6 +212,19 @@ tools in an offline chat, even when the chat turns Zone tools only off: those
 tools reach the network without Zone seeing them, so offline overrides
 unsandboxed and the agent gets Zone's tools alone.
 
+An agent policy's `domains` rule (see [docs/POLICY.md](docs/POLICY.md#network))
+builds on the same gates. While either the organization's or the workspace's
+policy sets it, every chat and task run in the workspace is held to everything
+above, as if its Offline switch were on, and Zone then lets back in only
+`fetch_url` to the hosts the policy allows, checked before the request and
+after every redirect, and HTTP MCP servers whose host it allows. Web search,
+GitHub tools, stdio MCP servers and the agents' own built-in tools stay
+withheld, and shell commands keep the operating-system network deny. A chat
+that is offline in its own right gets nothing back. Zone's own traffic is not
+agent egress and does not follow the rule: the chat's model provider, Zone's
+model infrastructure, its project clones and pull request calls to GitHub,
+and knowledge source sync.
+
 ## Privacy Considerations
 
 ### Prompt Logging
