@@ -47,7 +47,9 @@ For production, regenerate secrets for security.
     outcome, `/settings/organization/github`;
   - the address GitHub delivers a synced repository's webhooks to,
     `/api/webhooks/sync/…`, which GitHub itself has to reach;
-  - the links in sign-up verification and password reset mail.
+  - the links in sign-up verification and password reset mail;
+  - the single sign-on redirect URI, `{APP_BASE_URL}/sso/callback`, which
+    you register with each identity provider. See [SSO.md](SSO.md#the-redirect-uri).
 - **Why http in compose**: Traefik answers `http` on that host with no
   certificate, and upgrades it itself when `SECURITY_HTTP_REDIRECT=true`;
   `https` works only once a certificate is in place. Set
@@ -59,6 +61,8 @@ For production, regenerate secrets for security.
   to sign in again, so name the origin you actually use. GitHub keeps the
   addresses an App was registered with: after changing `APP_BASE_URL`, correct
   them in the App's settings on GitHub, or delete the App and connect again.
+  The same goes for single sign-on: update the redirect URI at every
+  identity provider, or their sign-ins fail.
 
 ---
 
