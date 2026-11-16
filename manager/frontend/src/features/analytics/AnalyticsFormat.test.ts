@@ -1,5 +1,19 @@
-import { describe, expect, it } from 'bun:test';
-import { AnalyticsFormat, NOT_MEASURED } from './AnalyticsFormat';
+import { afterAll, beforeAll, describe, expect, it } from 'bun:test';
+
+const LOCAL_ZONE = 'America/Los_Angeles';
+const previousZone = process.env.TZ;
+
+let AnalyticsFormat: typeof import('./AnalyticsFormat').AnalyticsFormat;
+let NOT_MEASURED: string;
+
+beforeAll(async () => {
+  process.env.TZ = LOCAL_ZONE;
+  ({ AnalyticsFormat, NOT_MEASURED } = await import('./AnalyticsFormat'));
+});
+
+afterAll(() => {
+  process.env.TZ = previousZone;
+});
 
 describe('AnalyticsFormat', () => {
   it('formats durations from seconds to days', () => {
@@ -34,11 +48,10 @@ describe('AnalyticsFormat', () => {
     expect(AnalyticsFormat.decimal(null)).toBe(NOT_MEASURED);
   });
 
-  it('dates a zoneless server timestamp as the UTC moment it is, on the local calendar', () => {
-    const local = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
-    expect(AnalyticsFormat.date('2026-11-15T23:30:00.123456')).toBe(
-      local.format(new Date('2026-11-15T23:30:00.123Z'))
-    );
+  it('dates a zoneless server timestamp on the UTC calendar the chart buckets use', () => {
+    expect(new Date('2026-11-16T00:30:00Z').getDate()).toBe(15);
+    expect(AnalyticsFormat.date('2026-11-15T23:30:00.123456')).toBe('Nov 15');
+    expect(AnalyticsFormat.date('2026-11-16T00:30:00')).toBe('Nov 16');
   });
 
   it('hands back a timestamp it cannot read unchanged', () => {

@@ -8,7 +8,6 @@ const HEIGHT = 100;
 const BAR_WIDTH = 0.7;
 const BAR_OFFSET = (1 - BAR_WIDTH) / 2;
 const TICK_LABELS = 7;
-const GRID_FRACTIONS = [1, 0.5, 0] as const;
 
 export const NO_SERIES = 'No run fell inside this window to chart.';
 
@@ -68,6 +67,7 @@ export function RunSeriesChart({ series, period }: RunSeriesChartProps) {
     return <p className="analytics-quiet">{NO_SERIES}</p>;
   }
   const maximum = RunSeriesAxis.ceiling(Math.max(0, ...series.map((point) => point.total)));
+  const gridlines = RunSeriesAxis.gridlines(maximum);
   const every = RunSeriesAxis.labelEvery(series.length, TICK_LABELS);
   const caption = chartCaption(period);
   const columns = { '--analytics-chart-points': series.length } as CSSProperties;
@@ -80,8 +80,8 @@ export function RunSeriesChart({ series, period }: RunSeriesChartProps) {
     <figure className="analytics-chart" style={columns}>
       <div className="analytics-chart-plot">
         <div className="analytics-chart-axis" aria-hidden="true">
-          {GRID_FRACTIONS.map((fraction) => (
-            <span key={fraction}>{AnalyticsFormat.count(maximum * fraction)}</span>
+          {gridlines.map((value) => (
+            <span key={value}>{AnalyticsFormat.count(value)}</span>
           ))}
         </div>
         <svg
@@ -92,14 +92,14 @@ export function RunSeriesChart({ series, period }: RunSeriesChartProps) {
           aria-labelledby={titleId}
         >
           <title id={titleId}>{caption}</title>
-          {GRID_FRACTIONS.map((fraction) => (
+          {gridlines.map((value) => (
             <line
-              key={fraction}
+              key={value}
               className="analytics-chart-grid"
               x1={0}
               x2={series.length}
-              y1={HEIGHT - fraction * HEIGHT}
-              y2={HEIGHT - fraction * HEIGHT}
+              y1={HEIGHT - (value / maximum) * HEIGHT}
+              y2={HEIGHT - (value / maximum) * HEIGHT}
               vectorEffect="non-scaling-stroke"
             />
           ))}
@@ -123,11 +123,14 @@ export function RunSeriesChart({ series, period }: RunSeriesChartProps) {
         </svg>
       </div>
       <div className="analytics-chart-ticks" aria-hidden="true">
-        {series.map((point, index) => (
-          <span key={point.window.start}>
-            {index % every === 0 ? RunSeriesAxis.tick(point.window, period) : ''}
-          </span>
-        ))}
+        {series.map((point, index) => {
+          const rank = RunSeriesAxis.rank(index, every);
+          return (
+            <span key={point.window.start} data-rank={rank}>
+              {rank ? RunSeriesAxis.tick(point.window, period) : ''}
+            </span>
+          );
+        })}
       </div>
       <figcaption className="analytics-legend">
         {totals.map(({ outcome, total }) => (

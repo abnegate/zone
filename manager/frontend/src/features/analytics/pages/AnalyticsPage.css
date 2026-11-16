@@ -466,7 +466,7 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .analytics-chart-ticks > span:nth-child(even) {
+  .analytics-chart-ticks > span[data-rank='minor'] {
     visibility: hidden;
   }
 

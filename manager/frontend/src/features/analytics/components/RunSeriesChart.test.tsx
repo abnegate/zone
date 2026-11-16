@@ -117,6 +117,42 @@ describe('RunSeriesChart', () => {
     );
   });
 
+  it('marks no fractional run on the axis when the tallest bucket is small', () => {
+    const single = [{ ...series[0], total: 1, succeeded: 1, failed: 0, cancelled: 0 }];
+    const { container } = render(<RunSeriesChart series={single} period="week" />);
+
+    const labels = [...container.querySelectorAll('.analytics-chart-axis > span')].map(
+      (label) => label.textContent
+    );
+    expect(labels).toEqual(['1', '0']);
+    expect(container.querySelectorAll('.analytics-chart-grid')).toHaveLength(2);
+  });
+
+  it('ranks the labelled hour ticks so a narrow screen can drop every other one', () => {
+    const hours = Array.from({ length: 24 }, (_, hour) => ({
+      ...series[0],
+      window: {
+        start: `2026-11-16T${String(hour).padStart(2, '0')}:00:00`,
+        end: `2026-11-16T${String(hour + 1).padStart(2, '0')}:00:00`,
+      },
+    }));
+    const { container } = render(<RunSeriesChart series={hours} period="day" />);
+
+    const ticks = [...container.querySelectorAll('.analytics-chart-ticks > span')];
+    const labelled = ticks.filter((tick) => tick.textContent);
+    expect(labelled.map((tick) => tick.getAttribute('data-rank'))).toEqual([
+      'major',
+      'minor',
+      'major',
+      'minor',
+      'major',
+      'minor',
+    ]);
+    expect(
+      ticks.filter((tick) => !tick.textContent).every((tick) => !tick.hasAttribute('data-rank'))
+    ).toBe(true);
+  });
+
   it('says the day buckets are UTC days', () => {
     const { container } = chart();
 

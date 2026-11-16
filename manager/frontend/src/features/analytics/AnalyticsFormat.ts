@@ -2,6 +2,8 @@ import { utcInstant } from '../../shared/utils/time';
 
 export const NOT_MEASURED = '—';
 
+export const TIME_ZONE = 'UTC';
+
 const SECONDS_PER_MINUTE = 60;
 const SECONDS_PER_HOUR = 3_600;
 const SECONDS_PER_DAY = 86_400;
@@ -10,7 +12,11 @@ const PERCENT = 100;
 const counts = new Intl.NumberFormat();
 const decimals = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 const shares = new Intl.NumberFormat(undefined, { style: 'percent', maximumFractionDigits: 0 });
-const dates = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
+const dates = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+  timeZone: TIME_ZONE,
+});
 
 function duration(seconds: number): string {
   if (seconds < SECONDS_PER_MINUTE) return `${Math.round(seconds)}s`;
