@@ -41,7 +41,6 @@ import type {
   Invitation,
   InvitationDetails,
   InvitationsResponse,
-  Limits,
   Message,
   ModelSource,
   Organization,
@@ -49,10 +48,8 @@ import type {
   OrganizationDevice,
   OrganizationMember,
   OrgMembersResponse,
-  Plan,
   SendMessageRequest,
   SessionsResponse,
-  Subscription,
   UpdateAiSettingsRequest,
   UpdateChatRequest,
   UpdateDeviceRequest,
@@ -62,7 +59,6 @@ import type {
   UpdateWorkspaceMemberRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceThemeRequest,
-  Usage,
   Workspace,
   WorkspaceAiSettings,
   WorkspaceMember,
@@ -81,7 +77,6 @@ import {
   InvitationDetailsSchema,
   InvitationSchema,
   InvitationsResponseSchema,
-  LimitsResponseSchema,
   OrganizationAiSettingsResetSchema,
   OrganizationAiSettingsSaveSchema,
   OrganizationDeviceSchema,
@@ -89,14 +84,10 @@ import {
   OrganizationResponseSchema,
   OrganizationsResponseSchema,
   OrgMembersResponseSchema,
-  PlanResponseSchema,
-  PlansResponseSchema,
   ProjectResponseSchema,
   ResendVerificationResponseSchema,
   ResetPasswordResponseSchema,
   SessionsResponseSchema,
-  SubscriptionResponseSchema,
-  UsageResponseSchema,
   VerifyEmailResponseSchema,
   WorkspaceAiSettingsResponseSchema,
   WorkspaceMemberSchema,
@@ -1061,75 +1052,6 @@ class Client {
       const errorData = await this.parseErrorResponse(response);
       throw new Error(errorData.message || `Failed to accept invitation: ${response.status}`);
     }
-  }
-
-  // Billing & Usage API
-
-  async getPlans(): Promise<Plan[]> {
-    const response = await fetch(`${API_BASE}/api/plans`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to fetch plans: ${response.status}`);
-    }
-    const data = parse(PlansResponseSchema, await response.json());
-    return data.plans;
-  }
-
-  async getPlan(planId: string): Promise<Plan> {
-    const response = await fetch(`${API_BASE}/api/plans/${encodeURIComponent(planId)}`, {
-      headers: this.getHeaders(),
-    });
-    if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to fetch plan: ${response.status}`);
-    }
-    const data = parse(PlanResponseSchema, await response.json());
-    return data.plan;
-  }
-
-  async getSubscription(orgId: string): Promise<Subscription> {
-    const response = await fetch(
-      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/subscription`,
-      {
-        headers: this.getHeaders(),
-      }
-    );
-    if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to fetch subscription: ${response.status}`);
-    }
-    const data = parse(SubscriptionResponseSchema, await response.json());
-    return data.subscription;
-  }
-
-  async getUsage(orgId: string): Promise<Usage> {
-    const response = await fetch(
-      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/usage`,
-      {
-        headers: this.getHeaders(),
-      }
-    );
-    if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to fetch usage: ${response.status}`);
-    }
-    return parse(UsageResponseSchema, await response.json());
-  }
-
-  async getLimits(orgId: string): Promise<Limits> {
-    const response = await fetch(
-      `${API_BASE}/api/organizations/${encodeURIComponent(orgId)}/limits`,
-      {
-        headers: this.getHeaders(),
-      }
-    );
-    if (!response.ok) {
-      const errorData = await this.parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to fetch limits: ${response.status}`);
-    }
-    return parse(LimitsResponseSchema, await response.json());
   }
 
   // Audit Logs API
