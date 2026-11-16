@@ -11,6 +11,7 @@
 //! for Docker deployments, with the server process permissions.
 
 pub mod context;
+pub mod egress;
 pub mod environment;
 
 use abnegate_agent::Tool;
@@ -39,7 +40,10 @@ use zone_core::commands;
 use zone_core::commands::Shell;
 use zone_core::llm::Toolset;
 use zone_core::servers;
+use zone_enterprise::policy::Effective;
 
+use self::egress::Record;
+use self::egress::Recorder;
 use super::citations;
 use super::citations::Citation;
 use super::identifier;
@@ -356,6 +360,12 @@ pub struct ChatTools {
     /// The coding agent these tools are served to over MCP, whose model calls
     /// each by another name than the registry's. `None` in zone's own loop.
     agent: Option<AgentKind>,
+    /// The organization's agent policy for the workspace, when it has one.
+    policy: Option<Arc<Effective>>,
+    /// Tools a policy's network restriction keeps although they are off the
+    /// offline list, because each holds itself to the policy's domains.
+    readmitted: HashSet<String>,
+    recorder: Recorder,
 }
 
 impl ChatTools {
@@ -364,13 +374,32 @@ impl ChatTools {
     /// Search tools stay registered and degrade to keyword search when
     /// embeddings are unavailable, so the model can still look things up.
     pub async fn build(scope: WorkspaceScope) -> Self {
+        Self::build_with(scope, None).await
+    }
+
+    /// [`Self::build`] under the organization's agent policy for the workspace.
+    pub async fn build_with(scope: WorkspaceScope, policy: Option<Arc<Effective>>) -> Self {
         let agents = &scope.state.config().agents;
         let (denied, niceness) = (agents.state.clone(), agents.niceness);
-        Self::assemble(Some(scope), ToolProfile::Chat, None, true, denied, niceness).await
+        Self::assemble(
+            Some(scope),
+            ToolProfile::Chat,
+            None,
+            true,
+            denied,
+            niceness,
+            policy,
+        )
+        .await
     }
 
     /// Preview only the known catalog; never start MCP processes while drafting.
     pub async fn preview(scope: WorkspaceScope) -> Self {
+        Self::preview_with(scope, None).await
+    }
+
+    /// [`Self::preview`] under the organization's agent policy for the workspace.
+    pub async fn preview_with(scope: WorkspaceScope, policy: Option<Arc<Effective>>) -> Self {
         let agents = &scope.state.config().agents;
         let (denied, niceness) = (agents.state.clone(), agents.niceness);
         Self::assemble(
@@ -380,6 +409,7 @@ impl ChatTools {
             false,
             denied,
             niceness,
+            policy,
         )
         .await
     }
@@ -424,10 +454,26 @@ impl ChatTools {
         &self.context.working_directory
     }
 
-    /// Whether this chat reaches no host beyond its model provider and Zone's
-    /// model infrastructure; see [`WorkspaceScope::offline`].
+    /// Whether this chat or run reaches no host beyond its model provider and
+    /// Zone's model infrastructure, because it opted out of the public web
+    /// (see [`WorkspaceScope::offline`]) or its policy restricts the network.
+    /// Only the tools the policy readmits reach further, each held to the
+    /// policy's domains.
     pub fn offline(&self) -> bool {
-        self.scope.as_ref().is_some_and(|scope| scope.offline)
+        self.scope.as_ref().is_some_and(|scope| scope.offline) || self.restricted()
+    }
+
+    fn restricted(&self) -> bool {
+        self.policy
+            .as_deref()
+            .is_some_and(Effective::restricts_network)
+    }
+
+    /// Report every request the policy refuses while these tools run to
+    /// `record`, with the host or server it refused. Reaches every tool
+    /// already built, and replaces any recorder set before.
+    pub fn set_recorder(&self, record: Arc<Record>) {
+        self.recorder.set(record);
     }
 
     /// The origin a task this tool set's agent creates is recorded with.
@@ -469,6 +515,9 @@ impl ChatTools {
             unattended: false,
             actor_name: OnceCell::new(),
             agent: None,
+            policy: None,
+            readmitted: HashSet::new(),
+            recorder: Recorder::default(),
         }
     }
 
@@ -586,11 +635,23 @@ impl ChatTools {
         workspace_id: Uuid,
         actor: Option<Uuid>,
     ) -> Self {
+        Self::for_task_with(state, cwd, workspace_id, actor, None).await
+    }
+
+    /// [`Self::for_task`] under the organization's agent policy for the
+    /// workspace, which holds a run with no writer as much as one with.
+    pub async fn for_task_with(
+        state: &AppState,
+        cwd: std::path::PathBuf,
+        workspace_id: Uuid,
+        actor: Option<Uuid>,
+        policy: Option<Arc<Effective>>,
+    ) -> Self {
         let writer = match actor {
             Some(user_id) if task_writer(state, workspace_id, user_id).await => Some(user_id),
             _ => None,
         };
-        Self::task(state, cwd, workspace_id, writer).await
+        Self::task(state, cwd, workspace_id, writer, policy).await
     }
 
     /// The catalog [`Self::for_task`] assembles for a writer it authorized,
@@ -602,7 +663,7 @@ impl ChatTools {
         workspace_id: Uuid,
         writer: Uuid,
     ) -> Self {
-        Self::task(state, cwd, workspace_id, Some(writer)).await
+        Self::task(state, cwd, workspace_id, Some(writer), None).await
     }
 
     async fn task(
@@ -610,6 +671,7 @@ impl ChatTools {
         cwd: std::path::PathBuf,
         workspace_id: Uuid,
         writer: Option<Uuid>,
+        policy: Option<Arc<Effective>>,
     ) -> Self {
         let scope = writer.map(|user_id| WorkspaceScope {
             state: state.clone(),
@@ -627,6 +689,7 @@ impl ChatTools {
             true,
             agents.state.clone(),
             agents.niceness,
+            policy,
         )
         .await
     }
@@ -732,6 +795,10 @@ impl ChatTools {
 
     /// `denied` is the agents' state root, which every host tool set is
     /// denied, whether or not a workspace scope came with it.
+    ///
+    /// A `policy` that restricts the network takes the tools offline as the
+    /// chat's own setting does; only a chat online on its own is readmitted
+    /// what the policy can hold to its domains.
     async fn assemble(
         scope: Option<WorkspaceScope>,
         profile: ToolProfile,
@@ -739,7 +806,15 @@ impl ChatTools {
         connect: bool,
         denied: PathBuf,
         niceness: Niceness,
+        policy: Option<Arc<Effective>>,
     ) -> Self {
+        let chat_offline = scope.as_ref().is_some_and(|scope| scope.offline);
+        let restricted = policy.as_deref().is_some_and(Effective::restricts_network);
+        let offline = chat_offline || restricted;
+        let readmitting = restricted && !chat_offline;
+        let scope = scope.map(|scope| WorkspaceScope { offline, ..scope });
+        let recorder = Recorder::default();
+        let mut readmitted: HashSet<String> = HashSet::new();
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
         let mut remote: HashSet<String> = HashSet::new();
@@ -778,7 +853,15 @@ impl ChatTools {
                 .iter()
                 .map(|name| name.to_string())
                 .collect();
-            super::web::register(&mut registry, scope);
+            super::web::register(
+                &mut registry,
+                scope,
+                policy.clone().filter(|_| readmitting),
+                &recorder,
+            );
+            if readmitting {
+                readmitted.insert(super::web::FETCH_URL.to_string());
+            }
         }
 
         // Snapshot before the host tools land, so the extend below adds those
@@ -808,7 +891,7 @@ impl ChatTools {
         // A preview (connect = false) only sees the hubs already connected,
         // so drafting never spawns a server process.
         let mut connected_servers = 0;
-        if let Some(scope) = scope.as_ref().filter(|scope| !scope.offline) {
+        if let Some(scope) = scope.as_ref().filter(|_| !chat_offline) {
             let hub = if connect {
                 Some(scope.state.mcp().instance().await)
             } else {
@@ -822,9 +905,32 @@ impl ChatTools {
             let hub = hub.as_deref();
             connected_servers = hub.map_or(0, McpHub::server_count);
             let mut added = hub.map_or(0, |hub| mcp::register(&mut registry, hub));
+            if let (Some(hub), Some(policy)) = (hub, policy.as_deref()) {
+                let configured = if restricted {
+                    Some(scope.state.mcp().configured().await)
+                } else {
+                    None
+                };
+                let withheld: Vec<String> = hub
+                    .server_names()
+                    .into_iter()
+                    .filter(|name| {
+                        let server = configured
+                            .as_ref()
+                            .and_then(|configured| configured.servers.get(name));
+                        !egress::admits(policy, name, server)
+                    })
+                    .collect();
+                added -= egress::withhold(&mut registry, &before, &withheld);
+                connected_servers -= withheld.len();
+            }
             if let Some((organization, overrides)) = organization_servers(scope, connect).await {
-                let registered = organization
-                    .register(&mut registry, &|server| load::offered(&overrides, server));
+                let registered = organization.register(&mut registry, &|definition| {
+                    load::offered(&overrides, definition.id)
+                        && policy.as_deref().is_none_or(|policy| {
+                            egress::admits(policy, &definition.name, Some(&definition.server))
+                        })
+                });
                 added += registered.tools;
                 connected_servers += registered.servers;
             }
@@ -849,6 +955,9 @@ impl ChatTools {
                     .filter(|name| !before.contains(**name))
                     .map(|name| name.to_string()),
             );
+            if readmitting {
+                readmitted.extend(remote.iter().cloned());
+            }
         }
 
         // Control flow is core on the same grounds: asking a question and
@@ -891,7 +1000,6 @@ impl ChatTools {
             .as_ref()
             .and_then(|scope| scope.chat_id)
             .map_or(Session::Detached, Session::Chat);
-        let offline = scope.as_ref().is_some_and(|scope| scope.offline);
         let context = context(profile, cwd, session, vec![denied], offline, niceness);
         let mcp_guidance = servers::prompt(connected_servers, &registry.names());
 
@@ -915,6 +1023,9 @@ impl ChatTools {
             lease: None,
             actor_name: OnceCell::new(),
             agent: None,
+            policy,
+            readmitted,
+            recorder,
         };
         assembled.cache_catalog();
         assembled.publish_catalog();
@@ -963,11 +1074,13 @@ impl ChatTools {
     }
 
     fn withhold_networked(&mut self) {
+        let readmitted = &self.readmitted;
+        let allows = |name: &str| super::offline::allows(name) || readmitted.contains(name);
         let withheld: Vec<String> = self
             .registry
             .names()
             .into_iter()
-            .filter(|name| !super::offline::allows(name))
+            .filter(|name| !allows(name))
             .map(str::to_string)
             .collect();
         if withheld.is_empty() {
@@ -976,9 +1089,9 @@ impl ChatTools {
         for name in &withheld {
             self.registry.remove(name);
         }
-        self.core.retain(|name| super::offline::allows(name));
-        self.workspace.retain(|name| super::offline::allows(name));
-        self.remote.retain(|name| super::offline::allows(name));
+        self.core.retain(|name| allows(name));
+        self.workspace.retain(|name| allows(name));
+        self.remote.retain(|name| allows(name));
         tracing::debug!(?withheld, "Withheld tools an offline chat may not use");
     }
 
@@ -2097,7 +2210,6 @@ impl ListProjectsTool {
 
 #[cfg(test)]
 mod tests {
-
     /// The plan tool joins the catalog late, because whether a task requires
     /// approval is known per task and not per profile — and it joins the core
     /// set, since a run that had to load it first would have been told to
@@ -2145,6 +2257,8 @@ mod tests {
         assert!(!tools.execute(question, "{}").await.success);
         assert!(tools.has("read_file"));
     }
+    use super::super::web::FETCH_URL;
+    use super::super::web::WEB_SEARCH;
     use super::*;
     use crate::services::mcp_servers::testing;
     use crate::state::lazy_pool;
@@ -2159,6 +2273,8 @@ mod tests {
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::time::timeout;
+    use zone_enterprise::policy::Denial;
+    use zone_enterprise::policy::Rules;
 
     #[tokio::test]
     async fn chat_tools_never_carry_the_process_environment() {
@@ -4089,6 +4205,227 @@ mod tests {
         );
         let result = offline.execute("unpreviewed", "{}").await;
         assert!(!result.success, "{result:?}");
+    }
+
+    fn restricting(
+        mcp_servers: Option<&[&str]>,
+        domains: Option<&[&str]>,
+    ) -> Option<Arc<Effective>> {
+        let owned = |entries: &[&str]| entries.iter().map(|entry| entry.to_string()).collect();
+        Some(Arc::new(Effective::new(
+            Rules {
+                mcp_servers: mcp_servers.map(owned),
+                domains: domains.map(owned),
+                ..Rules::default()
+            },
+            Rules::default(),
+        )))
+    }
+
+    fn offered(tools: &ChatTools) -> Vec<String> {
+        let mut offered = tools.names().to_vec();
+        offered.extend(tools.deferred().iter().map(|listed| listed.name.clone()));
+        offered.extend(tools.toolbox.core().into_iter().map(|listed| listed.name));
+        offered
+    }
+
+    async fn refuses_curl(tools: &ChatTools) {
+        let result = tools
+            .execute(
+                "run_command",
+                &json!({"command": "curl", "args": ["https://example.com"]}).to_string(),
+            )
+            .await;
+        assert!(!result.success, "{result:?}");
+        let error = result.error.as_deref().unwrap_or_default();
+        assert!(error.contains(zone_core::vpn::CHAT_OFFLINE), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_network_restriction_withholds_every_tool_off_the_offline_list_but_fetch_url() {
+        let _vpn = zone_core::vpn::Hold::on();
+        let online = ChatTools::preview(WorkspaceScope {
+            state: everything_enabled(),
+            ..scope()
+        })
+        .await
+        .with_planner();
+        let restricted = ChatTools::preview_with(
+            WorkspaceScope {
+                state: everything_enabled(),
+                ..scope()
+            },
+            restricting(None, Some(&["example.com"])),
+        )
+        .await
+        .with_planner();
+
+        assert!(restricted.offline());
+        assert!(restricted.has(FETCH_URL), "{:?}", restricted.names());
+        for name in online.names() {
+            let kept = super::super::offline::allows(name) || name == FETCH_URL;
+            assert_eq!(restricted.has(name), kept, "{name}");
+        }
+        for name in offered(&restricted) {
+            assert!(
+                super::super::offline::allows(&name) || name == FETCH_URL,
+                "{name} is offered under the restriction"
+            );
+        }
+        refuses_curl(&restricted).await;
+    }
+
+    #[tokio::test]
+    async fn a_chat_offline_on_its_own_is_readmitted_nothing_whatever_the_policy() {
+        for policy in [None, restricting(None, Some(&["example.com"]))] {
+            let held = ChatTools::preview_with(
+                WorkspaceScope {
+                    state: everything_enabled(),
+                    offline: true,
+                    ..scope()
+                },
+                policy,
+            )
+            .await;
+
+            assert!(held.offline());
+            assert!(!held.has(FETCH_URL), "{:?}", held.names());
+            for name in offered(&held) {
+                assert!(
+                    super::super::offline::allows(&name),
+                    "{name} is offered offline"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_policy_that_leaves_the_network_alone_closes_no_gate() {
+        let tools = ChatTools::preview_with(
+            WorkspaceScope {
+                state: everything_enabled(),
+                ..scope()
+            },
+            restricting(Some(&["docs"]), None),
+        )
+        .await;
+
+        assert!(!tools.offline());
+        assert!(tools.has(WEB_SEARCH) && tools.has(FETCH_URL));
+        assert!(tools.has("create_pull_request"));
+    }
+
+    #[tokio::test]
+    async fn a_run_with_no_writer_is_held_offline_by_a_network_restriction() {
+        let _vpn = zone_core::vpn::Hold::on();
+        let state = AppState::for_tests();
+        let unrestricted =
+            ChatTools::for_task(&state, std::env::temp_dir(), Uuid::new_v4(), None).await;
+        let restricted = ChatTools::for_task_with(
+            &state,
+            std::env::temp_dir(),
+            Uuid::new_v4(),
+            None,
+            restricting(None, Some(&["example.com"])),
+        )
+        .await;
+
+        assert!(!unrestricted.offline());
+        assert!(restricted.offline());
+        refuses_curl(&restricted).await;
+    }
+
+    async fn serving_the_stub() -> AppState {
+        use abnegate_agent::mcp::McpConfig;
+        use abnegate_agent::mcp::McpServer;
+
+        let script = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("stub_mcp_server.py");
+        let hub = McpHub::connect(&McpConfig::default().with_server(
+            STUB,
+            McpServer::command("python3", [script.to_string_lossy().into_owned()]),
+        ))
+        .await;
+        assert_eq!(hub.server_count(), 1, "the stub server has to connect");
+        let state = AppState::new(test_config(), lazy_pool(), None);
+        state.install_mcp(hub);
+        state
+    }
+
+    #[tokio::test]
+    async fn the_policy_names_the_mcp_servers_a_chat_is_offered_with_the_network_open() {
+        let state = serving_the_stub().await;
+        let preview = |policy| {
+            ChatTools::preview_with(
+                WorkspaceScope {
+                    state: state.clone(),
+                    ..scope()
+                },
+                policy,
+            )
+        };
+
+        let named = preview(restricting(Some(&[STUB]), None)).await;
+        let unnamed = preview(restricting(Some(&["other"]), None)).await;
+        let nothing = preview(restricting(Some(&[]), None)).await;
+
+        assert!(named.has(STUB_TOOL), "{:?}", named.names());
+        assert!(named.mcp_guidance().is_some());
+        for withheld in [&unnamed, &nothing] {
+            assert!(!withheld.offline());
+            assert!(!withheld.has(STUB_TOOL), "{:?}", withheld.names());
+            assert!(!withheld.remote.contains(STUB_TOOL));
+            assert_eq!(withheld.mcp_guidance(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_network_restriction_withholds_a_command_server_it_names() {
+        let state = serving_the_stub().await;
+
+        let restricted = ChatTools::preview_with(
+            WorkspaceScope { state, ..scope() },
+            restricting(Some(&[STUB]), Some(&["example.com"])),
+        )
+        .await;
+
+        assert!(!restricted.has(STUB_TOOL), "{:?}", restricted.names());
+        assert_eq!(restricted.mcp_guidance(), None);
+    }
+
+    #[tokio::test]
+    async fn a_recorder_set_on_the_tools_reaches_fetch_url() {
+        let _vpn = zone_core::vpn::Hold::off();
+        let tools = ChatTools::preview_with(
+            WorkspaceScope {
+                state: everything_enabled(),
+                ..scope()
+            },
+            restricting(None, Some(&["example.com"])),
+        )
+        .await;
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = recorded.clone();
+        tools.set_recorder(Arc::new(move |denial, host| {
+            sink.lock()
+                .expect("the record is readable")
+                .push((denial, host.to_string()));
+        }));
+
+        let result = tools
+            .execute(
+                FETCH_URL,
+                &json!({"url": "https://evil.test/collect"}).to_string(),
+            )
+            .await;
+
+        assert_eq!(result.error, Some(Denial::Domain.to_string()));
+        assert_eq!(
+            *recorded.lock().expect("the record is readable"),
+            [(Denial::Domain, "evil.test".to_string())]
+        );
     }
 
     const STUB: &str = "stub";
