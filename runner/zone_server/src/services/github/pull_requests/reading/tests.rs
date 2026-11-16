@@ -10,6 +10,7 @@ use wiremock::matchers::body_partial_json;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+use wiremock::matchers::query_param;
 
 use super::*;
 use crate::services::github::client::FOREIGN_JOB;
@@ -85,6 +86,62 @@ async fn open_pull_requests_are_read_up_to_the_limit_and_say_whether_that_was_al
         .collect();
     assert_eq!(numbers, [1, 2]);
     assert!(!complete);
+}
+
+async fn rest_page(server: &MockServer, page: u32, numbers: impl IntoIterator<Item = u64>) {
+    let rows: Vec<Value> = numbers.into_iter().map(listed_pull).collect();
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repository/pulls"))
+        .and(query_param("page", page.to_string()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!(rows)))
+        .mount(server)
+        .await;
+}
+
+async fn pages_read(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/repos/owner/repository/pulls")
+        .filter_map(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "page")
+                .map(|(_, page)| page.into_owned())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_pull_request_updated_onto_a_later_page_is_listed_once_and_the_listing_stays_whole() {
+    let server = MockServer::start().await;
+    rest_page(&server, 1, 1..=100).await;
+    rest_page(&server, 2, 100..=102).await;
+    let github = mocked(&server);
+
+    let (pulls, complete) = github.open_pulls(102).await.unwrap();
+
+    assert_eq!(numbers(&pulls), (1..=102).collect::<Vec<u64>>());
+    assert!(complete, "a repeat is not a pull request past the limit");
+    assert_eq!(pages_read(&server).await, ["1", "2"]);
+}
+
+#[tokio::test]
+async fn a_repeat_does_not_count_toward_the_limit_and_paging_goes_on() {
+    let server = MockServer::start().await;
+    rest_page(&server, 1, 1..=100).await;
+    rest_page(&server, 2, 100..=199).await;
+    rest_page(&server, 3, 200..=201).await;
+    let github = mocked(&server);
+
+    let (pulls, complete) = github.open_pulls(200).await.unwrap();
+
+    assert_eq!(numbers(&pulls), (1..=200).collect::<Vec<u64>>());
+    assert!(!complete, "pull request 201 is past the limit");
+    assert_eq!(pages_read(&server).await, ["1", "2", "3"]);
 }
 
 #[tokio::test]

@@ -50,6 +50,7 @@ impl Github {
     ) -> Result<(Vec<ListedPullRequest>, bool), Fault> {
         let limit = usize::try_from(limit).unwrap_or(usize::MAX);
         let mut pulls = Vec::new();
+        let mut numbers = HashSet::new();
         let mut page = NonZeroU32::MIN;
         loop {
             let listed = self
@@ -62,7 +63,12 @@ impl Github {
                     PER_PAGE,
                 )
                 .await?;
-            pulls.extend(listed.items);
+            pulls.extend(
+                listed
+                    .items
+                    .into_iter()
+                    .filter(|row| numbers.insert(row.reference.number())),
+            );
             match listed.next {
                 Some(next) if pulls.len() < limit => page = next,
                 next => {
