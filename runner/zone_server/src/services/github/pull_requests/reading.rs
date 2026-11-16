@@ -130,14 +130,14 @@ impl Github {
     /// The evidence on each pull request `rows` lists, read in one GraphQL
     /// request under one of `permits` that is let go once GitHub answers or
     /// the client's guard runs out, whichever is first. A pull request read
-    /// for another,
-    /// or that GitHub could not answer for, is `None`, and so is every one of
-    /// them when GitHub refused the request for any reason short of a halt or
-    /// took too long, to be read through REST instead.
+    /// for another, or that GitHub could not answer for, is `None`, and so is
+    /// every one of them when GitHub refused the request for any reason short
+    /// of a halt or took too long, to be read through REST instead.
     ///
     /// A refusal that every later batch would meet too, or a batch GitHub
     /// could not answer at all, sets `stop`, and a batch sent once `stop` is
-    /// set asks GitHub for nothing.
+    /// set asks GitHub for nothing. A batch GitHub took too long over leaves
+    /// `stop` alone, so only its own pull requests are read through REST.
     pub(crate) async fn evidence(
         &self,
         permits: &Semaphore,
@@ -146,7 +146,7 @@ impl Github {
         stop: &AtomicBool,
     ) -> Result<Vec<Option<PullRequestEvidence>>, Fault> {
         let unread = || rows.iter().map(|_| None).collect();
-        let ids: Vec<&str> = rows.iter().map(|row| row.node_id.as_str()).collect();
+        let identifiers: Vec<&str> = rows.iter().map(|row| row.node_id.as_str()).collect();
         let read = {
             let _permit = admitted(permits).await?;
             if stop.load(Ordering::Acquire) {
@@ -156,7 +156,7 @@ impl Github {
                 self.repository(),
                 self.token(),
                 repository,
-                &ids,
+                &identifiers,
             ))
             .await
         };
@@ -182,7 +182,6 @@ impl Github {
                 return Ok(unread());
             }
             Err(fault) => {
-                stop.store(true, Ordering::Release);
                 tracing::warn!(
                     repository = %self.repository(),
                     %fault,

@@ -18,6 +18,7 @@ use wiremock::matchers::path;
 use wiremock::matchers::query_param;
 
 use super::*;
+use crate::services::github::client::REQUEST_FAILED;
 use crate::services::github::pull_requests::GRAPHQL_LIMIT;
 use crate::services::github::pull_requests::Readiness;
 use crate::services::github::pull_requests::SURVEY_DEADLINE;
@@ -903,24 +904,25 @@ async fn a_batch_is_assessed_as_soon_as_its_evidence_arrives() {
 }
 
 #[tokio::test]
-async fn a_batch_github_takes_too_long_over_is_read_through_rest_and_stops_the_rest() {
+async fn a_batch_github_takes_too_long_over_is_read_through_rest_for_its_own_pull_requests() {
     let server = silent().await;
     opened(&server, 1..=12).await;
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .and(body_string_contains("\"ids\""))
         .respond_with(|request: &Request| {
-            let nodes: Vec<Value> = asked_ids(request)
-                .iter()
-                .map(|id| node(number_of(id)))
-                .collect();
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"data": {"nodes": nodes}}))
-                .set_delay(SLOW)
+            let asked: Vec<u64> = asked_ids(request).iter().map(|id| number_of(id)).collect();
+            let nodes: Vec<Value> = asked.iter().map(|number| node(*number)).collect();
+            let answered =
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"nodes": nodes}}));
+            match asked.contains(&1) {
+                true => answered.set_delay(SLOW),
+                false => answered,
+            }
         })
         .mount(&server)
         .await;
-    for number in 1..=12 {
+    for number in 1..=10 {
         rested(&server, number).await;
     }
     let permits = Semaphore::new(1);
@@ -938,24 +940,62 @@ async fn a_batch_github_takes_too_long_over_is_read_through_rest_and_stops_the_r
             .pull_requests
             .iter()
             .all(|pull_request| pull_request.threads_complete && pull_request.checks.complete),
-        "every pull request read through REST has a whole verdict: {listing:?}"
+        "every pull request has a whole verdict: {listing:?}"
     );
     assert_eq!(
-        batches(&server).await.len(),
-        1,
-        "the second batch was never sent"
+        batches(&server).await,
+        [(1..=10).collect::<Vec<u64>>(), vec![11, 12]],
+        "the batch after the slow one was sent"
     );
     for number in 1..=12 {
         assert_eq!(
             reads_of(&server, &format!("pulls/{number}")).await,
-            1,
+            usize::from(number <= 10),
             "#{number}"
         );
     }
     assert_eq!(
         thread_counts(&server).await,
-        12,
-        "a batch that took too long leaves thread counts to be read"
+        10,
+        "only the slow batch leaves thread counts to be read"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_batch_whose_read_fails_short_of_a_halt_is_read_through_rest() {
+    let server = silent().await;
+    let github = mocked(&server);
+    let row = ListedPullRequest::new(
+        github.reference(1).unwrap(),
+        identifier(1),
+        format!("{WEB}/pull/1"),
+        abnegate_vcs::BranchName::parse("feature-1").unwrap(),
+        abnegate_vcs::BranchName::parse("main").unwrap(),
+    );
+    let permits = Semaphore::new(0);
+    permits.close();
+    let repository = repository();
+    let survey = Survey::new(
+        github,
+        &permits,
+        &repository,
+        None,
+        now(),
+        GRAPHQL_LIMIT,
+        tokio::time::Instant::now() + SURVEY_DEADLINE,
+    );
+
+    let judged = survey
+        .batch(&RepositoryId::new(REPOSITORY_ID), &[(0, &row)])
+        .await;
+
+    assert_eq!(
+        judged,
+        Ok(vec![(
+            0,
+            (Origin::Rest, Err(Fault::upstream(REQUEST_FAILED)))
+        )])
     );
     server.verify().await;
 }

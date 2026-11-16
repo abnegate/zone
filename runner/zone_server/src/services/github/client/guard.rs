@@ -7,9 +7,11 @@ use crate::services::github::fault::Fault;
 
 pub(crate) const GRAPHQL_SLOW: &str =
     "GitHub's GraphQL API took too long to answer, so this listing asks it nothing more.";
+pub(crate) const GRAPHQL_LATE: &str = "GitHub's GraphQL API took too long to answer this read.";
 
-/// How long one listing waits on each GitHub GraphQL read, and whether one
-/// of them already ran out of that time, after which none is sent.
+/// How long one listing waits on each GitHub GraphQL read. A `bounded` read
+/// that runs out of that time keeps every `bounded` read after it from being
+/// sent; a `limited` read that runs out of it fails alone.
 #[derive(Debug, Clone)]
 pub(crate) struct Guard {
     patience: Duration,
@@ -24,9 +26,6 @@ impl Guard {
         }
     }
 
-    /// What `read` answers, unless GitHub already took too long over a read
-    /// of this listing, in which case it is never sent, or takes too long
-    /// over this one.
     pub(crate) async fn bounded<T>(&self, read: impl Future<Output = T>) -> Result<T, Fault> {
         if self.slow.load(Ordering::Acquire) {
             return Err(Fault::upstream(GRAPHQL_SLOW));
@@ -40,12 +39,10 @@ impl Guard {
         }
     }
 
-    /// What `read` answers unless GitHub takes too long over it, which says
-    /// nothing of the reads after it.
     pub(crate) async fn limited<T>(&self, read: impl Future<Output = T>) -> Result<T, Fault> {
         tokio::time::timeout(self.patience, read)
             .await
-            .map_err(|_| Fault::upstream(GRAPHQL_SLOW))
+            .map_err(|_| Fault::upstream(GRAPHQL_LATE))
     }
 }
 
@@ -80,7 +77,7 @@ mod tests {
             .await;
         let after = guard.bounded(async { 7 }).await;
 
-        assert_eq!(slow, Err(Fault::upstream(GRAPHQL_SLOW)));
+        assert_eq!(slow, Err(Fault::upstream(GRAPHQL_LATE)));
         assert_eq!(after, Ok(7));
     }
 

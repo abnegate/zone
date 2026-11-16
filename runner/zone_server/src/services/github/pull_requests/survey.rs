@@ -123,7 +123,11 @@ impl<'a> Survey<'a> {
                 verdicts[index] = Some(verdict);
             }
         }
-        Ok(self.listed(rows.iter().zip(verdicts.into_iter().flatten()), complete))
+        let paired = rows
+            .iter()
+            .zip(verdicts)
+            .map(|(row, verdict)| (row, verdict.unwrap_or_else(late)));
+        Ok(self.listed(paired, complete))
     }
 
     /// The verdicts on one batch of rows. Its evidence is read under a
@@ -142,7 +146,16 @@ impl<'a> Survey<'a> {
         )
         .await;
         let read = match read {
-            Ok(read) => read?,
+            Ok(Ok(read)) => read,
+            Ok(Err(fault)) if fault.halts() => return Err(fault),
+            Ok(Err(fault)) => {
+                tracing::warn!(
+                    repository = %self.repository.name,
+                    %fault,
+                    "Reading pull requests through REST after their batch could not be read"
+                );
+                rows.iter().map(|_| None).collect()
+            }
             Err(_) => return Ok(batch.iter().map(|(index, _)| (*index, late())).collect()),
         };
         let verdicts: Vec<_> = batch

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use serde_json::Value;
 use serde_json::json;
 use wiremock::Mock;
@@ -11,6 +13,7 @@ use wiremock::matchers::path;
 
 use super::*;
 use crate::services::github::client::FOREIGN_JOB;
+use crate::services::github::client::Guard;
 use crate::services::github::client::UNEXPECTED_RESPONSE;
 use crate::services::github::diff::LineKind;
 use crate::services::github::diff::PER_FILE_DIFF;
@@ -465,6 +468,39 @@ async fn a_batch_sent_once_the_listing_stopped_asks_github_for_nothing() {
 
     assert_eq!(read, [None]);
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_batch_github_takes_too_long_over_leaves_the_batches_after_it_to_be_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"data": {"nodes": [null]}}))
+                .set_delay(Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+    let github = mocked(&server).guarded(Guard::new(Duration::from_millis(50)));
+    let row = listed_row(&github, 1);
+    let stop = AtomicBool::new(false);
+
+    let read = github
+        .evidence(
+            &Semaphore::new(1),
+            &RepositoryId::new(REPOSITORY_ID),
+            &[&row],
+            &stop,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(read, [None], "its own pull request is read through REST");
+    assert!(
+        !stop.load(Ordering::Acquire),
+        "a slow batch stopped the batches after it"
+    );
 }
 
 /// A GitHub that fails the test on any page it was not told to answer, so a
