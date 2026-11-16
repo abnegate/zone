@@ -1,12 +1,10 @@
 import type { QueryClient } from '@tanstack/react-query';
-import { releasesApi } from '../../../api/releases';
 import { PRELOADED_GC_TIME } from '../../github/constants';
-import { releaseWindowKey } from './keys';
+import { releaseListQuery } from './listQuery';
 
 export function preloadReleases(queryClient: QueryClient, workspaceId: string): Promise<void> {
   return queryClient.prefetchQuery({
-    queryKey: releaseWindowKey(workspaceId),
-    queryFn: ({ signal }) => releasesApi.list(workspaceId, {}, signal),
+    ...releaseListQuery(queryClient, workspaceId),
     gcTime: PRELOADED_GC_TIME,
   });
 }

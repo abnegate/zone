@@ -5,7 +5,6 @@ import { useWorkspace } from '../../../shared/context/WorkspaceContext';
 import {
   errorMessage,
   gatewayFailed,
-  NO_WORKSPACE,
   retryDelay,
   retryPolled,
   type SourceStatus,
@@ -13,6 +12,7 @@ import {
 } from '../../github';
 import { pullRequestKeys } from '../queryKeys';
 import type { PullRequest, PullRequestsResponse } from '../types';
+import { pullRequestListQuery } from './listQuery';
 
 export const LIST_POLL_MS = 30_000;
 
@@ -70,11 +70,7 @@ export function usePullRequests(): PullRequests {
   const workspaceId = currentWorkspace?.id;
 
   const { data, dataUpdatedAt, isLoading, error, failureReason } = useQuery({
-    queryKey: pullRequestKeys.list(workspaceId),
-    queryFn: ({ signal }) => {
-      if (!workspaceId) throw new Error(NO_WORKSPACE);
-      return pullRequestsApi.list(workspaceId, false, signal);
-    },
+    ...pullRequestListQuery(workspaceId),
     enabled: !!workspaceId,
     refetchInterval: LIST_POLL_MS,
     refetchIntervalInBackground: false,

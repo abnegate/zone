@@ -119,7 +119,7 @@ describe('useReleases', () => {
     expect(result.current.listing).toEqual(current);
     expect(result.current.loading).toBe(false);
     expect(result.current.error).toBeNull();
-    expect(mockList).toHaveBeenCalledWith('workspace-1', { days: undefined }, expect.anything());
+    expect(mockList).toHaveBeenCalledWith('workspace-1', { days: undefined });
   });
 
   it('asks for the window it is given', async () => {

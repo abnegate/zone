@@ -1,8 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it, mock } from 'bun:test';
+import { type QueryClient, useQueryClient } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 
+let client: QueryClient | null = null;
+
+function Reader() {
+  client = useQueryClient();
+  return <div data-testid="outlet" />;
+}
+
 mock.module('react-router-dom', () => ({
-  Outlet: () => <div data-testid="outlet" />,
+  Outlet: Reader,
 }));
 
 mock.module('../../features/models/hooks/usePull', () => ({
@@ -36,5 +44,15 @@ describe('AuthenticatedProviders', () => {
 
     expect(screen.getByTestId('waiting-notifier')).toBeInTheDocument();
     expect(screen.getByTestId('outlet')).toBeInTheDocument();
+  });
+
+  it("forgets the signed-out reader's data", () => {
+    const first = render(<AuthenticatedProviders />);
+    client?.setQueryData(['pull-requests', 'workspace-1', 'list'], { pull_requests: [] });
+    first.unmount();
+
+    render(<AuthenticatedProviders />);
+
+    expect(client?.getQueryCache().getAll()).toHaveLength(0);
   });
 });

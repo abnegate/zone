@@ -143,7 +143,7 @@ describe('PullRequestsPage', () => {
     await waitFor(() =>
       expect(cards()).toEqual(['Ready change', 'Running change', 'Blocked change'])
     );
-    expect(mockList).toHaveBeenCalledWith('workspace-1', false, expect.any(AbortSignal));
+    expect(mockList).toHaveBeenCalledWith('workspace-1', false);
     expect(screen.getByText('Select a pull request')).toBeInTheDocument();
   });
 
