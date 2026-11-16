@@ -33,6 +33,7 @@ const SOURCE = 'Scratch repo';
 const REPO_PROJECT = 'Real pass repository';
 const SCRATCH_PROJECT = 'Real pass scratch';
 const BROKEN_PROJECT = 'Real pass broken';
+const UNOFFERED_KINDS = ['Slack', 'Email', 'Calendar'];
 
 interface Run {
   id: string;
@@ -426,21 +427,21 @@ test.describe('sources, projects and tasks', () => {
       },
       'Text notes',
     );
-    for (const kind of ['Notion', 'Slack', 'Email', 'Calendar']) {
+    for (const kind of UNOFFERED_KINDS) {
       outcomes[kind.toLowerCase()] = kinds.includes(kind)
         ? 'offered although the server has no adapter for it'
         : 'not offered (no adapter on the server)';
     }
     const reachedVerify = (outcome: string) =>
       outcome.startsWith('added; verify ->');
-    const unoffered = ['Notion', 'Slack', 'Email', 'Calendar'].filter(
+    const unoffered = UNOFFERED_KINDS.filter(
       (kind) => !kinds.includes(kind),
     );
     const works =
       reachedVerify(outcomes.gitlab) &&
       reachedVerify(outcomes.web_url) &&
       reachedVerify(outcomes.text) &&
-      unoffered.length === 4;
+      unoffered.length === UNOFFERED_KINDS.length;
     const refused = Object.entries(outcomes)
       .filter(([, outcome]) => outcome.startsWith('wizard refused'))
       .map(([kind, outcome]) => `${kind}: ${outcome}`);
@@ -450,8 +451,8 @@ test.describe('sources, projects and tasks', () => {
         ? undefined
         : refused.length > 0
           ? `product: the wizard offers a kind the server refuses (${refused.join('; ')})`
-          : unoffered.length < 4
-            ? `product: the wizard offers a kind without an adapter (${['Notion', 'Slack', 'Email', 'Calendar'].filter((kind) => kinds.includes(kind)).join(', ')})`
+          : unoffered.length < UNOFFERED_KINDS.length
+            ? `product: the wizard offers a kind without an adapter (${UNOFFERED_KINDS.filter((kind) => kinds.includes(kind)).join(', ')})`
             : `product: a kind did not reach Verify (${JSON.stringify(outcomes)})`,
       note: 'GitLab is verified with a deliberately bad token, so its verdict is the adapter refusing the credential, which is the point: the adapter answered',
       wizard_kinds: kinds,

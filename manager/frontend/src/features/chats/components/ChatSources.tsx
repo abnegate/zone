@@ -15,7 +15,6 @@ const KIND_LABELS: Record<string, string> = {
   github: 'GitHub',
   gitlab: 'GitLab',
   filesystem: 'Folder',
-  notion: 'Notion',
   text: 'Text',
   web: 'Web',
   imap: 'Mail',

@@ -202,7 +202,7 @@ Key API capabilities:
 
 - **Parallel Task Execution**: Run independent tasks concurrently
 - **Custom Agent Workflows**: Define project-specific agent sequences
-- **External Integrations**: Jira, Linear, Notion sync
+- **External Integrations**: Jira and Linear sync
 - **Team Collaboration**: Multi-user workspaces
 - **Model Fine-tuning**: Train models on project-specific data from Wiki
 - **Automated Testing**: Integration with CI/CD pipelines

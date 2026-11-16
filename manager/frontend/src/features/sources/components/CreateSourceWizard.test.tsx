@@ -244,7 +244,6 @@ describe('CreateSourceWizard kinds', () => {
     expect(kinds).toEqual(['GitHub', 'GitLab', 'Filesystem', 'Web URL', 'Text']);
     expect(kinds).not.toContain('Email');
     expect(kinds).not.toContain('Calendar');
-    expect(screen.queryByText('Notion')).toBeNull();
   });
 });
 
