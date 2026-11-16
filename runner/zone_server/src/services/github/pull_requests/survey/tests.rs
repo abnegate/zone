@@ -29,6 +29,7 @@ use crate::services::github::testing::mocked;
 const OWNER: &str = "owner";
 const NAME: &str = "repository";
 const REPOSITORY_ID: &str = "R_repository";
+const REPOSITORY: &str = "owner/repository";
 const ELSEWHERE: &str = "R_elsewhere";
 const WEB: &str = "https://github.com/owner/repository";
 const UPDATED_AT: &str = "2026-11-14T03:00:00Z";
@@ -1000,6 +1001,25 @@ async fn a_batch_whose_read_fails_short_of_a_halt_is_read_through_rest() {
     server.verify().await;
 }
 
+#[test]
+fn late_pull_requests_are_counted_by_whether_a_verdict_on_them_stands() {
+    assert!(late_warnings(REPOSITORY, 0, 0).is_empty());
+    assert_eq!(
+        late_warnings(REPOSITORY, 1, 1),
+        [
+            "owner/repository: 1 pull request was not assessed again in time; its last verdict stands.",
+            "owner/repository: 1 pull request was not assessed in time, so it is left out.",
+        ]
+    );
+    assert_eq!(
+        late_warnings(REPOSITORY, 3, 2),
+        [
+            "owner/repository: 3 pull requests were not assessed again in time; their last verdicts stand.",
+            "owner/repository: 2 pull requests were not assessed in time, so they are left out.",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn a_batch_every_later_batch_would_fail_alike_stops_them_for_that_listing_only() {
     for (name, refusal) in [
@@ -1302,14 +1322,18 @@ async fn a_listing_past_its_deadline_keeps_the_last_verdicts_of_what_it_had_not_
     assert_eq!(numbers(&again), [1, 2, 3]);
     assert_eq!(again.pull_requests[0].updated_at, CHANGED_AT);
     assert_eq!(again.pull_requests[1..], first.pull_requests[1..]);
-    assert_eq!(again.warnings.len(), 1, "{:?}", again.warnings);
-    assert!(
-        again.warnings[0].contains("2 pull requests"),
-        "{:?}",
-        again.warnings
+    assert_eq!(
+        again.warnings,
+        [
+            "owner/repository: 2 pull requests were not assessed again in time; their last verdicts stand."
+        ]
     );
     assert!(!cold.complete);
     assert_eq!(numbers(&cold), [1]);
+    assert_eq!(
+        cold.warnings,
+        ["owner/repository: 2 pull requests were not assessed in time, so they are left out."]
+    );
     assert_eq!(permits.available_permits(), CREDENTIAL_PERMITS);
     server.verify().await;
 }

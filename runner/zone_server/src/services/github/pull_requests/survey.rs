@@ -250,52 +250,80 @@ impl<'a> Survey<'a> {
             complete,
             warnings: Vec::new(),
         };
-        let (mut kept, mut batched, mut followed, mut rested, mut late) = (0, 0, 0, 0, 0);
+        let (mut kept, mut batched, mut followed, mut rested) = (0, 0, 0, 0);
+        let (mut standing, mut dropped) = (0, 0);
         for (row, (origin, verdict)) in verdicts {
             match origin {
                 Origin::Kept => kept += 1,
                 Origin::Batch => batched += 1,
                 Origin::FollowUp => followed += 1,
                 Origin::Rest => rested += 1,
-                Origin::Late => late += 1,
+                Origin::Late => {}
             }
-            match verdict {
-                Ok(pull_request) => listing.pull_requests.push(pull_request),
-                Err(fault) => {
-                    let number = row.reference.number().get();
-                    listing.complete = false;
-                    if origin != Origin::Late {
-                        listing
-                            .warnings
-                            .push(format!("{}#{number}: {fault}", self.repository.name));
-                    }
-                    listing.pull_requests.extend(
-                        self.previous
-                            .into_iter()
-                            .flat_map(|previous| previous.pull_requests.iter())
-                            .find(|kept| kept.number == number)
-                            .cloned(),
-                    );
+            let fault = match verdict {
+                Ok(pull_request) => {
+                    listing.pull_requests.push(pull_request);
+                    continue;
                 }
+                Err(fault) => fault,
+            };
+            let number = row.reference.number().get();
+            listing.complete = false;
+            let last = self.last(number);
+            match origin {
+                Origin::Late if last.is_some() => standing += 1,
+                Origin::Late => dropped += 1,
+                _ => listing
+                    .warnings
+                    .push(format!("{}#{number}: {fault}", self.repository.name)),
             }
+            listing.pull_requests.extend(last);
         }
-        if late > 0 {
-            listing.warnings.push(format!(
-                "{}: {late} pull requests were not assessed again in time; their last verdicts stand.",
-                self.repository.name
-            ));
-        }
+        listing
+            .warnings
+            .extend(late_warnings(&self.repository.name, standing, dropped));
         tracing::info!(
             repository = %self.repository.name,
             kept,
             batched,
             followed,
             rested,
-            late,
+            late = standing + dropped,
             "Assessed open pull requests"
         );
         listing
     }
+
+    fn last(&self, number: u64) -> Option<PullRequest> {
+        self.previous
+            .into_iter()
+            .flat_map(|previous| previous.pull_requests.iter())
+            .find(|kept| kept.number == number)
+            .cloned()
+    }
+}
+
+fn late_warnings(repository: &str, standing: usize, dropped: usize) -> Vec<String> {
+    let mut warnings = Vec::new();
+    match standing {
+        0 => {}
+        1 => warnings.push(format!(
+            "{repository}: 1 pull request was not assessed again in time; its last verdict stands."
+        )),
+        count => warnings.push(format!(
+            "{repository}: {count} pull requests were not assessed again in time; their last verdicts stand."
+        )),
+    }
+    match dropped {
+        0 => {}
+        1 => warnings.push(format!(
+            "{repository}: 1 pull request was not assessed in time, so it is left out."
+        )),
+        count => warnings.push(format!(
+            "{repository}: {count} pull requests were not assessed in time, so they are left out."
+        )),
+    }
+    warnings
 }
 
 fn late() -> Verdict {
