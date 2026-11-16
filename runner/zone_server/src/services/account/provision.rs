@@ -14,8 +14,6 @@ const WORKSPACE_SLUG: &str = "default";
 const WORKSPACE_DESCRIPTION: &str = "Your default workspace";
 const SLUG_SUFFIX_LENGTH: usize = 8;
 
-/// The user and everything that must commit with it: the `user` role and, when the email was
-/// proved elsewhere, the verified flag.
 pub async fn insert(
     connection: &mut PgConnection,
     email: &str,
@@ -26,7 +24,7 @@ pub async fn insert(
 ) -> DbResult<UserRow> {
     let mut user = users::create_user(
         &mut *connection,
-        email,
+        &email.to_lowercase(),
         password_hash,
         display_name,
         is_admin,

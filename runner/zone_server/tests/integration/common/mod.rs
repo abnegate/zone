@@ -83,6 +83,7 @@ pub fn test_config() -> Config {
         jwt_secret: "test-secret-key-must-be-at-least-32-chars-long".to_string(),
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
+        session_lifetime: 2_592_000,
         model_backend: Default::default(),
         agents: agents(),
         litellm_host: std::env::var("LITELLM_HOST")
@@ -552,6 +553,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         jwt_secret: "test-secret-key-must-be-at-least-32-chars-long".to_string(),
         jwt_access_lifetime: 900,
         jwt_refresh_lifetime: 604800,
+        session_lifetime: 2_592_000,
         model_backend: Default::default(),
         agents: agents(),
         litellm_host: ollama_host.to_string(),

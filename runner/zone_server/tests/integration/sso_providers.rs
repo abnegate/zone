@@ -50,13 +50,30 @@ async fn licensed(fixture: &Fixture, tier: Tier) -> Account {
     admin
 }
 
-async fn every_write(fixture: &Fixture, token: &str, id: Uuid) -> [TestResponse; 4] {
+async fn licensed_writes(fixture: &Fixture, token: &str, id: Uuid) -> [TestResponse; 5] {
     [
         fixture
             .create(token, &json!({ "display_name": "Okta" }))
             .await,
         fixture
             .update(token, id, &json!({ "display_name": "Renamed" }))
+            .await,
+        fixture
+            .update(
+                token,
+                id,
+                &json!({ "enabled": false, "require_verified_email": false }),
+            )
+            .await,
+        fixture.update(token, id, &json!({ "enabled": true })).await,
+        fixture.enforce(token, true).await,
+    ]
+}
+
+async fn narrowing_writes(fixture: &Fixture, token: &str, id: Uuid) -> [TestResponse; 3] {
+    [
+        fixture
+            .update(token, id, &json!({ "enabled": false }))
             .await,
         fixture.delete(token, id).await,
         fixture.enforce(token, false).await,
@@ -71,7 +88,8 @@ async fn every_route_needs_a_signed_in_server_admin() {
     let id = Uuid::new_v4();
 
     let mut responses = vec![fixture.settings(&member.token).await];
-    responses.extend(every_write(&fixture, &member.token, id).await);
+    responses.extend(licensed_writes(&fixture, &member.token, id).await);
+    responses.extend(narrowing_writes(&fixture, &member.token, id).await);
     for response in responses {
         response.assert_status(StatusCode::FORBIDDEN);
         assert_eq!(response.json_value(), json!({ "error": REQUIRED }));
@@ -123,11 +141,9 @@ async fn community_can_read_but_not_change_anything() {
         })
     );
 
-    for response in every_write(&fixture, &admin.token, Uuid::new_v4()).await {
+    for response in licensed_writes(&fixture, &admin.token, Uuid::new_v4()).await {
         assert_license_required(&response);
     }
-    let enable = fixture.enforce(&admin.token, true).await;
-    assert_license_required(&enable);
     assert_eq!(fixture.providers().await, 0);
     fixture.cleanup().await;
 }
@@ -171,10 +187,34 @@ async fn a_lapsed_license_shows_existing_providers_read_only() {
     assert_eq!(body["edition"], "team", "{body}");
     assert_eq!(body["status"], "lapsed", "{body}");
     assert_eq!(body["providers"][0]["id"], id.to_string(), "{body}");
-    for response in every_write(&fixture, &admin.token, id).await {
+    for response in licensed_writes(&fixture, &admin.token, id).await {
         assert_license_required(&response);
     }
     assert_eq!(fixture.providers().await, 1);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_lapsed_license_still_takes_a_provider_out_of_service() {
+    let fixture = Fixture::new(PREFIX).await;
+    let admin = licensed(&fixture, Tier::Team).await;
+    let identity_provider = IdentityProvider::start().await;
+    let id = fixture
+        .created(&admin.token, &identity_provider.provider())
+        .await;
+    fixture.store_license(&lapsed(Tier::Team)).await;
+
+    let [disabled, deleted, relaxed] = narrowing_writes(&fixture, &admin.token, id).await;
+
+    disabled.assert_status(StatusCode::OK);
+    assert_eq!(disabled.json_value()["enabled"], false);
+    deleted.assert_status(StatusCode::NO_CONTENT);
+    relaxed.assert_status(StatusCode::OK);
+    assert_eq!(fixture.providers().await, 0);
+    let missing = fixture
+        .update(&admin.token, Uuid::new_v4(), &json!({ "enabled": false }))
+        .await;
+    assert_code(&missing, StatusCode::NOT_FOUND, PROVIDER_NOT_FOUND);
     fixture.cleanup().await;
 }
 

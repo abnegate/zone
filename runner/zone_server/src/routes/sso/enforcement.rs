@@ -25,7 +25,8 @@ pub async fn put(
     ServerAdmin(admin): ServerAdmin,
     body: Result<Json<EnforcementRequest>, JsonRejection>,
 ) -> Response {
-    if let Err(unentitled) = entitlement::require(&state, Feature::Sso).await {
+    let relaxes = body.as_ref().is_ok_and(|Json(request)| !request.required);
+    if !relaxes && let Err(unentitled) = entitlement::require(&state, Feature::Sso).await {
         return unentitled.into_response();
     }
     let Json(request) = match body {

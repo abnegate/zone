@@ -198,6 +198,7 @@ mod tests {
             user_agent: Some("Test Browser".to_string()),
             device_info: Some(serde_json::json!({"device": "Desktop"})),
             device_id: None,
+            sso_provider_id: None,
             last_active_at: Utc::now(),
             expires_at: Utc::now(),
             revoked_at: None,

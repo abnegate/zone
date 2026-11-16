@@ -174,7 +174,10 @@ pub async fn update(
     path: Result<Path<Uuid>, PathRejection>,
     body: Result<Json<UpdateProviderRequest>, JsonRejection>,
 ) -> Response {
-    if let Err(unentitled) = entitlement::require(&state, Feature::Sso).await {
+    let disables = body
+        .as_ref()
+        .is_ok_and(|Json(request)| request.revision().only_disables());
+    if !disables && let Err(unentitled) = entitlement::require(&state, Feature::Sso).await {
         return unentitled.into_response();
     }
     let Ok(Path(id)) = path else {
@@ -195,9 +198,6 @@ pub async fn delete(
     ServerAdmin(admin): ServerAdmin,
     path: Result<Path<Uuid>, PathRejection>,
 ) -> Response {
-    if let Err(unentitled) = entitlement::require(&state, Feature::Sso).await {
-        return unentitled.into_response();
-    }
     let Ok(Path(id)) = path else {
         return missing();
     };

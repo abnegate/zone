@@ -383,11 +383,13 @@ async fn deleting_a_provider_deletes_its_identities_and_attempts() {
     .unwrap();
     attempts::issue(fixture.pool(), doomed.id, &authorization())
         .await
-        .unwrap();
+        .unwrap()
+        .expect("room for the attempt");
     let surviving = authorization();
     attempts::issue(fixture.pool(), kept.id, &surviving)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("room for the attempt");
 
     assert!(providers::delete(fixture.pool(), doomed.id).await.unwrap());
 
@@ -424,7 +426,8 @@ async fn an_attempt_is_consumed_once_and_stores_only_the_hash_of_its_state() {
 
     let expires_at = attempts::issue(fixture.pool(), provider.id, &authorization)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("room for the attempt");
 
     let lifetime = expires_at - Utc::now();
     assert!(
@@ -470,7 +473,8 @@ async fn an_expired_attempt_is_refused_and_pruned_by_the_next_issue() {
     let expired = authorization();
     attempts::issue(fixture.pool(), provider.id, &expired)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("room for the attempt");
     sqlx::query("UPDATE sso_attempts SET expires_at = now() - interval '1 second'")
         .execute(fixture.pool())
         .await
@@ -491,13 +495,53 @@ async fn an_expired_attempt_is_refused_and_pruned_by_the_next_issue() {
     let fresh = authorization();
     attempts::issue(fixture.pool(), provider.id, &fresh)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("room for the attempt");
 
     let hashes: Vec<String> = sqlx::query_scalar("SELECT state_hash FROM sso_attempts")
         .fetch_all(fixture.pool())
         .await
         .unwrap();
     assert_eq!(hashes, [hash_token(&fresh.state)]);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn no_attempt_is_issued_while_the_table_is_full_of_live_ones() {
+    let fixture = Fixture::new().await;
+    let provider = fixture.provider("0oa1").await;
+    sqlx::query(
+        "INSERT INTO sso_attempts (state_hash, provider_id, nonce, code_verifier, expires_at) \
+         SELECT md5(series::text), $1, 'nonce', 'verifier', now() + interval '10 minutes' \
+         FROM generate_series(1, $2::bigint) AS series",
+    )
+    .bind(provider.id)
+    .bind(attempts::CAPACITY)
+    .execute(fixture.pool())
+    .await
+    .unwrap();
+
+    let refused = authorization();
+    assert_eq!(
+        attempts::issue(fixture.pool(), provider.id, &refused)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(fixture.count("sso_attempts").await, attempts::CAPACITY);
+
+    sqlx::query("UPDATE sso_attempts SET expires_at = now() - interval '1 second'")
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    let admitted = authorization();
+    assert!(
+        attempts::issue(fixture.pool(), provider.id, &admitted)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(fixture.count("sso_attempts").await, 1);
     fixture.cleanup().await;
 }
 
@@ -637,24 +681,14 @@ async fn an_identity_is_unique_per_provider_subject_and_per_provider_user() {
             .unwrap(),
         Some(linked.clone())
     );
-    assert_eq!(
-        identities::find_for_user(fixture.pool(), provider.id, ada.id)
-            .await
-            .unwrap(),
-        Some(linked.clone())
-    );
+    assert!(identities::linked(fixture.pool(), ada.id).await.unwrap());
     assert_eq!(
         identities::find(fixture.pool(), provider.id, "subject-2")
             .await
             .unwrap(),
         None
     );
-    assert_eq!(
-        identities::find_for_user(fixture.pool(), provider.id, grace.id)
-            .await
-            .unwrap(),
-        None
-    );
+    assert!(!identities::linked(fixture.pool(), grace.id).await.unwrap());
     fixture.cleanup().await;
 }
 
@@ -696,19 +730,18 @@ async fn touching_an_identity_records_the_latest_email_and_sign_in() {
 }
 
 #[tokio::test]
-async fn an_email_is_looked_up_ignoring_case() {
+async fn an_email_is_stored_in_lower_case_and_looked_up_ignoring_case() {
     let fixture = Fixture::new().await;
-    let mixed = fixture.user("Ada@Acme.com").await;
-    let lower = fixture.user("ada@acme.com").await;
-    fixture.user("grace@acme.com").await;
+    let ada = fixture.user("Ada@Acme.com").await;
+    let grace = fixture.user("grace@acme.com").await;
 
+    assert_eq!(ada.email, "ada@acme.com");
     let found = users::find_by_email_ignoring_case(fixture.pool(), "ADA@acme.COM")
         .await
         .unwrap();
-
     assert_eq!(
         found.iter().map(|user| user.id).collect::<Vec<_>>(),
-        [mixed.id, lower.id]
+        [ada.id]
     );
     assert!(
         users::find_by_email_ignoring_case(fixture.pool(), "nobody@acme.com")
@@ -720,22 +753,42 @@ async fn an_email_is_looked_up_ignoring_case() {
     sqlx::query(
         "UPDATE users SET is_admin = true, is_active = false, email_verified = true WHERE id = $1",
     )
-    .bind(mixed.id)
+    .bind(ada.id)
     .execute(fixture.pool())
     .await
     .unwrap();
-    let found = users::find_by_email_ignoring_case(fixture.pool(), "ada@acme.com")
+    let account = users::find_by_email_ignoring_case(fixture.pool(), "ada@acme.com")
         .await
-        .unwrap();
-    let account = found[0].account();
-    assert_eq!(account.id, mixed.id);
+        .unwrap()[0]
+        .account();
+    assert_eq!(account.id, ada.id);
     assert!(account.admin);
     assert!(!account.active);
     assert!(account.email_verified);
-    let account = found[1].account();
+    let account = users::find_by_email_ignoring_case(fixture.pool(), "GRACE@acme.com")
+        .await
+        .unwrap()[0]
+        .account();
+    assert_eq!(account.id, grace.id);
     assert!(!account.admin);
     assert!(account.active);
     assert!(!account.email_verified);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn a_case_variant_of_an_email_names_the_lower_case_key() {
+    let fixture = Fixture::new().await;
+    fixture.user("ada@acme.com").await;
+
+    let error = users::create_user(fixture.pool(), "ADA@acme.com", "hash", None, false)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        unique_constraint(&error).as_deref(),
+        Some(users::EMAIL_LOWER_KEY)
+    );
     fixture.cleanup().await;
 }
 

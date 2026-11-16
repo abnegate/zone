@@ -61,6 +61,14 @@ impl<'a> Revision<'a> {
     pub fn enabled(&self, record: &ProviderRecord) -> bool {
         self.enabled.unwrap_or(record.enabled)
     }
+
+    pub fn only_disables(&self) -> bool {
+        *self
+            == Self {
+                enabled: Some(false),
+                ..Self::default()
+            }
+    }
 }
 
 impl fmt::Debug for Revision<'_> {
@@ -172,6 +180,36 @@ mod tests {
             ..Revision::default()
         };
         assert!(!revision.replaces_secret(&record, &key));
+    }
+
+    #[test]
+    fn only_a_bare_disable_only_disables() {
+        let disable = Revision {
+            enabled: Some(false),
+            ..Revision::default()
+        };
+        assert!(disable.only_disables());
+        for revision in [
+            Revision::default(),
+            Revision {
+                enabled: Some(true),
+                ..Revision::default()
+            },
+            Revision {
+                display_name: Some("Okta"),
+                ..disable
+            },
+            Revision {
+                require_verified_email: Some(false),
+                ..disable
+            },
+            Revision {
+                allowed_domains: Some(&[][..]),
+                ..disable
+            },
+        ] {
+            assert!(!revision.only_disables(), "{revision:?}");
+        }
     }
 
     #[test]

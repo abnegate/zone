@@ -13,7 +13,7 @@ pub enum Resolution {
 pub fn resolve(
     by_subject: Option<Account>,
     by_email: &[Account],
-    linked_elsewhere: bool,
+    linked: bool,
     require_verified_email: bool,
 ) -> Result<Resolution, Error> {
     if let Some(account) = by_subject {
@@ -26,7 +26,7 @@ pub fn resolve(
     match by_email {
         [] => Ok(Resolution::Provision),
         [account] => {
-            if linked_elsewhere || (account.admin && !require_verified_email) {
+            if linked || !require_verified_email {
                 return Err(Error::EmailConflict);
             }
             if !account.active {
@@ -126,16 +126,22 @@ mod tests {
     }
 
     #[test]
-    fn a_non_admin_links_when_verification_is_off() {
-        for local in [account(2), unverified(2)] {
+    fn an_existing_account_is_never_linked_when_verification_is_off() {
+        for local in [account(2), unverified(2), admin(2), inactive(2)] {
             assert_eq!(
                 resolve(None, &[local], false, false),
-                Ok(Resolution::Link {
-                    user: Uuid::from_u128(2),
-                    reclaim: !local.email_verified
-                })
+                Err(Error::EmailConflict),
+                "{local:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_known_subject_still_signs_in_when_verification_is_off() {
+        assert_eq!(
+            resolve(Some(account(1)), &[account(2)], true, false),
+            Ok(Resolution::SignIn(Uuid::from_u128(1)))
+        );
     }
 
     #[test]
@@ -165,15 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn an_admin_conflicts_when_verification_is_off() {
-        assert_eq!(
-            resolve(None, &[admin(2)], false, false),
-            Err(Error::EmailConflict)
-        );
-    }
-
-    #[test]
-    fn an_account_linked_to_another_subject_conflicts() {
+    fn an_account_linked_through_any_provider_conflicts() {
         assert_eq!(
             resolve(None, &[account(2)], true, true),
             Err(Error::EmailConflict)

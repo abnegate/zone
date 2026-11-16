@@ -1,8 +1,3 @@
-//! Session database queries
-//!
-//! Provides functions for managing user sessions, including creation, validation,
-//! revocation, and cleanup of expired sessions.
-
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::{Executor, PgExecutor, PgPool, Postgres};
@@ -10,7 +5,6 @@ use uuid::Uuid;
 
 use super::DbResult;
 
-/// Session row from database
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Session {
     pub id: Uuid,
@@ -20,16 +14,24 @@ pub struct Session {
     pub user_agent: Option<String>,
     pub device_info: Option<JsonValue>,
     pub device_id: Option<Uuid>,
+    pub sso_provider_id: Option<Uuid>,
     pub last_active_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
 
-/// Create a new session
-///
-/// Creates a session record for tracking user authentication across devices.
-/// Sessions are tied to refresh tokens and include metadata about the client.
+pub struct NewSession<'a> {
+    pub user_id: Uuid,
+    pub refresh_token_hash: &'a str,
+    pub ip_address: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+    pub device_info: Option<JsonValue>,
+    pub sso_provider_id: Option<Uuid>,
+    pub expires_at: DateTime<Utc>,
+    pub absolute_expires_at: DateTime<Utc>,
+}
+
 pub async fn create_session(
     executor: impl PgExecutor<'_>,
     user_id: Uuid,
@@ -39,7 +41,25 @@ pub async fn create_session(
     device_info: Option<JsonValue>,
     expires_at: NaiveDateTime,
 ) -> DbResult<Session> {
-    let session: Session = sqlx::query_as(
+    let expires_at = expires_at.and_utc();
+    start(
+        executor,
+        NewSession {
+            user_id,
+            refresh_token_hash,
+            ip_address,
+            user_agent,
+            device_info,
+            sso_provider_id: None,
+            expires_at,
+            absolute_expires_at: expires_at,
+        },
+    )
+    .await
+}
+
+pub async fn start(executor: impl PgExecutor<'_>, session: NewSession<'_>) -> DbResult<Session> {
+    sqlx::query_as(
         r#"
         INSERT INTO sessions (
             user_id,
@@ -47,9 +67,11 @@ pub async fn create_session(
             ip_address,
             user_agent,
             device_info,
-            expires_at
+            sso_provider_id,
+            expires_at,
+            absolute_expires_at
         )
-        VALUES ($1, $2, $3::inet, $4, $5, $6)
+        VALUES ($1, $2, $3::inet, $4, $5, $6, LEAST($7, $8), $8)
         RETURNING
             id,
             user_id,
@@ -58,25 +80,25 @@ pub async fn create_session(
             user_agent,
             device_info,
             device_id,
+            sso_provider_id,
             last_active_at,
             expires_at,
             revoked_at,
             created_at
         "#,
     )
-    .bind(user_id)
-    .bind(refresh_token_hash)
-    .bind(ip_address)
-    .bind(user_agent)
-    .bind(device_info)
-    .bind(expires_at)
+    .bind(session.user_id)
+    .bind(session.refresh_token_hash)
+    .bind(session.ip_address)
+    .bind(session.user_agent)
+    .bind(session.device_info)
+    .bind(session.sso_provider_id)
+    .bind(session.expires_at)
+    .bind(session.absolute_expires_at)
     .fetch_one(executor)
-    .await?;
-
-    Ok(session)
+    .await
 }
 
-/// Bind a session to the device that just signed in.
 pub async fn attach_device(
     executor: impl PgExecutor<'_>,
     session_id: Uuid,
@@ -90,7 +112,6 @@ pub async fn attach_device(
     Ok(())
 }
 
-/// The device a live session is bound to, if any.
 pub async fn device_id_for(pool: &PgPool, session_id: Uuid) -> DbResult<Option<Uuid>> {
     sqlx::query_scalar("SELECT device_id FROM sessions WHERE id = $1")
         .bind(session_id)
@@ -99,10 +120,6 @@ pub async fn device_id_for(pool: &PgPool, session_id: Uuid) -> DbResult<Option<U
         .map(|value| value.flatten())
 }
 
-/// Get session by refresh token hash
-///
-/// Finds an active session by its refresh token hash. Returns None if the
-/// session doesn't exist, has expired, or has been revoked.
 pub async fn get_session_by_token(
     pool: &PgPool,
     refresh_token_hash: &str,
@@ -117,6 +134,7 @@ pub async fn get_session_by_token(
             user_agent,
             device_info,
             device_id,
+            sso_provider_id,
             last_active_at,
             expires_at,
             revoked_at,
@@ -125,6 +143,7 @@ pub async fn get_session_by_token(
         WHERE refresh_token_hash = $1
           AND revoked_at IS NULL
           AND expires_at > NOW()
+          AND absolute_expires_at > NOW()
         "#,
     )
     .bind(refresh_token_hash)
@@ -134,9 +153,6 @@ pub async fn get_session_by_token(
     Ok(session)
 }
 
-/// Update last active timestamp for a session
-///
-/// Updates the last_active_at field to track session activity.
 pub async fn update_last_active(pool: &PgPool, session_id: Uuid) -> DbResult<()> {
     sqlx::query(
         r#"
@@ -158,17 +174,18 @@ pub async fn rotate_session(
     executor: impl PgExecutor<'_>,
     session_id: Uuid,
     refresh_token_hash: &str,
-    expires_at: NaiveDateTime,
+    expires_at: DateTime<Utc>,
 ) -> DbResult<Option<Session>> {
     let session: Option<Session> = sqlx::query_as(
         r#"
         UPDATE sessions
         SET refresh_token_hash = $2,
-            expires_at = $3,
+            expires_at = LEAST($3, absolute_expires_at),
             last_active_at = NOW()
         WHERE id = $1
           AND revoked_at IS NULL
           AND expires_at > NOW()
+          AND absolute_expires_at > NOW()
         RETURNING
             id,
             user_id,
@@ -177,6 +194,7 @@ pub async fn rotate_session(
             user_agent,
             device_info,
             device_id,
+            sso_provider_id,
             last_active_at,
             expires_at,
             revoked_at,
@@ -192,7 +210,6 @@ pub async fn rotate_session(
     Ok(session)
 }
 
-/// Revoke a specific session together with the refresh token bound to it.
 pub async fn revoke_session(pool: &PgPool, session_id: Uuid) -> DbResult<()> {
     sqlx::query(
         r#"
@@ -215,10 +232,6 @@ pub async fn revoke_session(pool: &PgPool, session_id: Uuid) -> DbResult<()> {
     Ok(())
 }
 
-/// Revoke all sessions for a user
-///
-/// Revokes all active sessions for a user (logout everywhere).
-/// Returns the count of sessions that were revoked.
 pub async fn revoke_all_user_sessions(
     executor: impl PgExecutor<'_>,
     user_id: Uuid,
@@ -237,8 +250,6 @@ pub async fn revoke_all_user_sessions(
     Ok(result.rows_affected() as i64)
 }
 
-/// Revoke every session of a user except `keep`, refresh tokens included, and
-/// return how many sessions were revoked.
 pub async fn revoke_other_user_sessions(pool: &PgPool, user_id: Uuid, keep: Uuid) -> DbResult<i64> {
     let revoked: Option<i64> = sqlx::query_scalar(
         r#"
@@ -265,7 +276,6 @@ pub async fn revoke_other_user_sessions(pool: &PgPool, user_id: Uuid, keep: Uuid
     Ok(revoked.unwrap_or(0))
 }
 
-/// Revoke every live session bound to a device, refresh tokens included.
 pub async fn revoke_device_sessions(pool: &PgPool, device_id: Uuid) -> DbResult<i64> {
     let revoked: Option<i64> = sqlx::query_scalar(
         r#"
@@ -291,7 +301,30 @@ pub async fn revoke_device_sessions(pool: &PgPool, device_id: Uuid) -> DbResult<
     Ok(revoked.unwrap_or(0))
 }
 
-/// Stamp last-active on a session and its device at most once a minute.
+pub async fn revoke_provider_sessions(
+    executor: impl PgExecutor<'_>,
+    sso_provider_id: Uuid,
+) -> DbResult<u64> {
+    let result = sqlx::query(
+        r#"
+        WITH revoked AS (
+            UPDATE sessions
+            SET revoked_at = NOW()
+            WHERE sso_provider_id = $1 AND revoked_at IS NULL
+            RETURNING refresh_token_hash
+        )
+        UPDATE refresh_tokens
+        SET revoked_at = NOW()
+        WHERE token_hash IN (SELECT refresh_token_hash FROM revoked)
+          AND revoked_at IS NULL
+        "#,
+    )
+    .bind(sso_provider_id)
+    .execute(executor)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 pub async fn touch_activity(pool: &PgPool, session_id: Uuid) -> DbResult<()> {
     sqlx::query(
         r#"
@@ -313,9 +346,6 @@ pub async fn touch_activity(pool: &PgPool, session_id: Uuid) -> DbResult<()> {
     Ok(())
 }
 
-/// List all sessions for a user
-///
-/// Returns all sessions (active and revoked) for a user, ordered by creation date.
 pub async fn list_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult<Vec<Session>> {
     let sessions: Vec<Session> = sqlx::query_as(
         r#"
@@ -327,6 +357,7 @@ pub async fn list_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult<Vec<Se
             user_agent,
             device_info,
             device_id,
+            sso_provider_id,
             last_active_at,
             expires_at,
             revoked_at,
@@ -343,9 +374,6 @@ pub async fn list_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult<Vec<Se
     Ok(sessions)
 }
 
-/// List active (non-revoked) sessions for a user
-///
-/// Returns only active sessions that have not expired or been revoked.
 pub async fn list_active_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult<Vec<Session>> {
     let sessions: Vec<Session> = sqlx::query_as(
         r#"
@@ -357,6 +385,7 @@ pub async fn list_active_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult
             user_agent,
             device_info,
             device_id,
+            sso_provider_id,
             last_active_at,
             expires_at,
             revoked_at,
@@ -365,6 +394,7 @@ pub async fn list_active_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult
         WHERE user_id = $1
             AND revoked_at IS NULL
             AND expires_at > NOW()
+            AND absolute_expires_at > NOW()
         ORDER BY last_active_at DESC
         "#,
     )
@@ -375,9 +405,6 @@ pub async fn list_active_user_sessions(pool: &PgPool, user_id: Uuid) -> DbResult
     Ok(sessions)
 }
 
-/// Check if a session belongs to a user
-///
-/// Returns true if the session exists and belongs to the specified user.
 pub async fn is_user_session(pool: &PgPool, session_id: Uuid, user_id: Uuid) -> DbResult<bool> {
     let result: Option<(i32,)> =
         sqlx::query_as("SELECT 1 FROM sessions WHERE id = $1 AND user_id = $2")
@@ -389,7 +416,6 @@ pub async fn is_user_session(pool: &PgPool, session_id: Uuid, user_id: Uuid) -> 
     Ok(result.is_some())
 }
 
-/// Check whether a session is currently usable by its bound user.
 pub async fn is_active_user_session<'e, E>(
     executor: E,
     session_id: Uuid,
@@ -407,6 +433,7 @@ where
           AND s.user_id = $2
           AND s.revoked_at IS NULL
           AND s.expires_at > NOW()
+          AND s.absolute_expires_at > NOW()
           AND (s.device_id IS NULL OR d.status = 'allowed')
         "#,
     )
@@ -418,10 +445,6 @@ where
     Ok(result.is_some())
 }
 
-/// Cleanup expired sessions
-///
-/// Deletes sessions that have expired or been revoked.
-/// Returns the count of sessions that were deleted.
 pub async fn cleanup_expired_sessions(pool: &PgPool) -> DbResult<i64> {
     let result = sqlx::query(
         r#"
@@ -441,7 +464,6 @@ mod tests {
 
     #[test]
     fn test_session_struct() {
-        // Ensure Session struct can be instantiated (compile-time check)
         let _session = Session {
             id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),
@@ -450,6 +472,7 @@ mod tests {
             user_agent: Some("test".to_string()),
             device_info: None,
             device_id: None,
+            sso_provider_id: None,
             last_active_at: chrono::Utc::now(),
             expires_at: chrono::Utc::now(),
             revoked_at: None,
