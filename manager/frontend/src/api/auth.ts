@@ -4,7 +4,7 @@ import { timeZoneHeaders } from './timeZone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '';
 
-function jsonHeaders(): HeadersInit {
+export function jsonHeaders(): HeadersInit {
   return {
     'Content-Type': 'application/json',
     ...deviceHeaders(),
@@ -12,16 +12,16 @@ function jsonHeaders(): HeadersInit {
   };
 }
 
-async function refused(response: Response, fallback: string): Promise<never> {
+export async function refused(response: Response, fallback: string): Promise<never> {
   const error = await response.json().catch(() => ({ error: fallback }));
-  const message = error.error || fallback;
-  if (error.code === 'device_pending' || error.code === 'device_blocked') {
+  const message = error?.error || fallback;
+  if (typeof error?.code === 'string' && error.code) {
     throw new AuthRequestError(message, error.code);
   }
   throw new Error(message);
 }
 
-async function authResponseParser(): Promise<(data: unknown) => AuthResponse> {
+export async function authResponseParser(): Promise<(data: unknown) => AuthResponse> {
   const [{ parse }, { AuthResponseSchema }] = await Promise.all([
     import('../validation'),
     import('../features/auth/schemas'),

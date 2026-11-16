@@ -1,4 +1,5 @@
 import { test as base, expect } from '@playwright/test';
+import { atOrigin, NO_SSO } from '../src/features/auth/ssoFixtures';
 import { CHAT_PROVIDERS, WORKSPACE_CHAT_PROVIDERS } from './test-utils';
 
 const defaultOrg = {
@@ -78,6 +79,21 @@ export const test = base.extend({
         status: 401,
         contentType: 'application/json',
         body: JSON.stringify({ error: 'Invalid refresh token' }),
+      });
+    });
+
+    await context.route(/\/api\/auth\/sso\/providers(\?|$)/, (route) => {
+      const type = route.request().resourceType();
+      if (type !== 'xhr' && type !== 'fetch') {
+        return route.continue();
+      }
+      if (route.request().method() !== 'GET') {
+        return route.continue();
+      }
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify(atOrigin(NO_SSO, new URL(route.request().url()).origin)),
       });
     });
 

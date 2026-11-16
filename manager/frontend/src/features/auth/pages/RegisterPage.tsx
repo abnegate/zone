@@ -3,7 +3,10 @@ import type React from 'react';
 import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
+import AuthCard from '../components/AuthCard';
 import { useAuth } from '../context';
+import { useSsoProviders } from '../hooks/useSsoProviders';
+import { messageOf } from '../ssoMessages';
 import './AuthPage.css';
 
 export default function RegisterPage() {
@@ -16,8 +19,8 @@ export default function RegisterPage() {
   const [error, setError] = useState('');
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
+  const sso = useSsoProviders();
 
-  // Redirect if already authenticated
   useEffect(() => {
     if (isAuthenticated && !authLoading) {
       navigate('/', { replace: true });
@@ -59,7 +62,7 @@ export default function RegisterPage() {
       });
       navigate('/');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Registration failed');
+      setError(messageOf(err, 'Registration failed'));
     } finally {
       setLoading(false);
     }
@@ -73,6 +76,22 @@ export default function RegisterPage() {
           <span>Loading...</span>
         </div>
       </div>
+    );
+  }
+
+  if (sso?.required) {
+    return (
+      <AuthCard subtitle="Create your account">
+        <p className="auth-notice">
+          This server uses single sign-on. Your account is created the first time you sign in with
+          your identity provider.
+        </p>
+        <div className="auth-footer">
+          <p>
+            <Link to="/login">Go to sign in</Link>
+          </p>
+        </div>
+      </AuthCard>
     );
   }
 

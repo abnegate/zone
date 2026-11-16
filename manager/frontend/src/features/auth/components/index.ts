@@ -3,4 +3,5 @@ export { default as AuthStatus } from './AuthStatus';
 export { default as CheckIcon } from './CheckIcon';
 export { default as ResendVerificationButton } from './ResendVerificationButton';
 export { default as SessionsSection } from './SessionsSection';
+export { default as SsoButtons } from './SsoButtons';
 export { default as VerificationPendingBanner } from './VerificationPendingBanner';

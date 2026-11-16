@@ -5,6 +5,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
 import AuthCard from '../components/AuthCard';
 import AuthStatus from '../components/AuthStatus';
+import { messageOf } from '../ssoMessages';
 import { isValidTokenFormat } from '../utils';
 import './AuthPage.css';
 
@@ -57,11 +58,10 @@ export default function ResetPasswordPage() {
       setFieldErrors({});
       await client.resetPassword(token, password);
       setSuccess(true);
-      // Clear password fields from state after success
       setPassword('');
       setConfirmPassword('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to reset password');
+      setError(messageOf(err, 'Failed to reset password'));
     } finally {
       setLoading(false);
     }

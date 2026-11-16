@@ -5,7 +5,10 @@ import { flushSync } from 'react-dom';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import ZoneLogo from '../../../shared/components/ZoneLogo';
 import { type PathLike, pathAfterAuth } from '../../../shared/lastPath';
+import SsoButtons from '../components/SsoButtons';
 import { useAuth } from '../context';
+import { useSsoProviders } from '../hooks/useSsoProviders';
+import { messageOf } from '../ssoMessages';
 import type { LoginRequest } from '../types';
 
 const FIELDS = ['email', 'password'] as const;
@@ -44,6 +47,8 @@ export default function LoginPage() {
   const location = useLocation();
   const { login, isAuthenticated, isLoading: authLoading } = useAuth();
   const next = pathAfterAuth(fromLocation(location.state));
+  const sso = useSsoProviders();
+  const required = sso?.required ?? false;
 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [rootError, setRootError] = useState('');
@@ -81,7 +86,7 @@ export default function LoginPage() {
       navigate(next, { replace: true });
       void notify('success', 'Successfully logged in');
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Login failed';
+      const message = messageOf(err, 'Login failed');
       void notify('error', message);
       setRootError(message);
     } finally {
@@ -115,7 +120,11 @@ export default function LoginPage() {
           <p>Sign in to your account</p>
         </div>
 
+        <SsoButtons sso={sso} next={next} />
+
         <form className="auth-form" onSubmit={handleSubmit} onChange={revalidate}>
+          {required && <p className="auth-notice">Password sign-in is for server admins.</p>}
+
           <Input
             label="Email"
             type="email"
@@ -137,9 +146,11 @@ export default function LoginPage() {
             name="password"
           />
 
-          <div className="auth-form-links">
-            <Link to="/forgot-password">Forgot password?</Link>
-          </div>
+          {!required && (
+            <div className="auth-form-links">
+              <Link to="/forgot-password">Forgot password?</Link>
+            </div>
+          )}
 
           {rootError && (
             <div className="auth-error" role="alert">
@@ -152,11 +163,13 @@ export default function LoginPage() {
           </Button>
         </form>
 
-        <div className="auth-footer">
-          <p>
-            Don't have an account? <Link to="/register">Create one</Link>
-          </p>
-        </div>
+        {!required && (
+          <div className="auth-footer">
+            <p>
+              Don't have an account? <Link to="/register">Create one</Link>
+            </p>
+          </div>
+        )}
       </div>
     </div>
   );

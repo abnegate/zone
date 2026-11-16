@@ -82,6 +82,35 @@ describe('auth API', () => {
       });
     });
 
+    it.each([
+      ['sso_required', 'This server requires single sign-on.'],
+      ['account_disabled', 'This account is disabled.'],
+    ])('throws a %s refusal with its code', async (code, error) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        json: () => Promise.resolve({ error, code }),
+      });
+
+      await expect(login({ email: 'test@test.com', password: 'password' })).rejects.toMatchObject({
+        name: 'AuthRequestError',
+        code,
+        message: error,
+      });
+    });
+
+    it('throws a plain error when the refusal has no code', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        json: () => Promise.resolve({ error: 'Invalid credentials', code: '' }),
+      });
+
+      const failure = await login({ email: 'test@test.com', password: 'wrong' }).catch(
+        (error: unknown) => error
+      );
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).name).toBe('Error');
+    });
+
     it('uses default error message when json parsing fails', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,
@@ -95,6 +124,18 @@ describe('auth API', () => {
   });
 
   describe('register', () => {
+    it('throws an sso_required refusal with its code', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        json: () =>
+          Promise.resolve({ error: 'This server requires single sign-on.', code: 'sso_required' }),
+      });
+
+      await expect(
+        register({ email: 'new@test.com', password: 'Password123' })
+      ).rejects.toMatchObject({ name: 'AuthRequestError', code: 'sso_required' });
+    });
+
     it('returns auth response on success', async () => {
       const mockResponse = {
         access_token: 'test-access-token',

@@ -2,8 +2,19 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BrowserRouter } from 'react-router-dom';
+import { AuthRequestError } from '../../../api/auth';
+import { SsoCode } from '../SsoCode';
+import { SSO_OFFERED, SSO_REQUIRED } from '../ssoFixtures';
+import { SSO_MESSAGES } from '../ssoMessages';
 
 const mockUseAuth = mock();
+const mockListProviders = mock();
+
+mock.module('../../../api/sso', () => ({
+  authorize: mock(),
+  completeCallback: mock(),
+  listProviders: mockListProviders,
+}));
 
 mock.module('../context', () => ({
   useAuth: mockUseAuth,
@@ -43,6 +54,8 @@ describe('RegisterPage', () => {
 
   beforeEach(() => {
     mock.clearAllMocks();
+    mockListProviders.mockReset();
+    mockListProviders.mockRejectedValue(new Error('offline'));
     mockUseAuth.mockReturnValue({
       isAuthenticated: false,
       isLoading: false,
@@ -326,6 +339,41 @@ describe('RegisterPage', () => {
           password: 'P@$$w0rd!#',
         })
       );
+    });
+  });
+
+  describe('Single sign-on', () => {
+    it('shows a notice with a link to sign in instead of the form when single sign-on is required', async () => {
+      mockListProviders.mockResolvedValue(SSO_REQUIRED);
+      renderRegisterPage();
+
+      expect(
+        await screen.findByText(/your account is created the first time you sign in/i)
+      ).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: 'Go to sign in' })).toHaveAttribute('href', '/login');
+      expect(screen.queryByLabelText(/email/i)).toBeNull();
+      expect(screen.queryByRole('button', { name: /create account/i })).toBeNull();
+    });
+
+    it('keeps the form when single sign-on is offered but not required', async () => {
+      mockListProviders.mockResolvedValue(SSO_OFFERED);
+      renderRegisterPage();
+
+      await waitFor(() => expect(mockListProviders).toHaveBeenCalled());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(screen.getByRole('button', { name: /create account/i })).toBeInTheDocument();
+    });
+
+    it('shows the sso_required message when registration is refused', async () => {
+      mockRegister.mockRejectedValue(new AuthRequestError('Refused', SsoCode.Required));
+      renderRegisterPage();
+
+      await userEvent.type(screen.getByLabelText(/email/i), 'new@example.com');
+      await userEvent.type(screen.getByLabelText(/^password$/i), 'Password123');
+      await userEvent.type(screen.getByLabelText(/confirm password/i), 'Password123');
+      await userEvent.click(screen.getByRole('button', { name: /create account/i }));
+
+      expect(await screen.findByText(SSO_MESSAGES[SsoCode.Required])).toBeInTheDocument();
     });
   });
 });
