@@ -13,6 +13,7 @@ pub mod identity_provider;
 pub mod logs;
 pub mod mail;
 pub mod mcp;
+pub mod policy;
 pub mod sso;
 pub mod stand_in;
 pub mod transcript;
