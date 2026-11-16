@@ -644,6 +644,33 @@ impl Checkout {
                 return 0;
             }
         };
+        // Every git call below runs through the hardened service, which
+        // refuses a clone whose configuration carries anything beyond what
+        // Zone pins — and a run's tools write there as a matter of course, so
+        // without putting the base back first the reclaim would simply be
+        // refused on exactly the busy repository it exists for. This is the
+        // step `recover_path` takes before it removes a worktree.
+        //
+        // Recovery also defers while another run works in the base. That rule
+        // is not repeated here: the run asking for its branch is itself
+        // working in this base, so the guard would refuse every call. What it
+        // protects is the base's shared configuration, which Zone rewrites
+        // from what it knows before every use anyway — `refresh` did it for
+        // this very run moments ago, under the same lock.
+        let origin = {
+            let base = base.clone();
+            match Self::detailed(move || Self::origin_of(&base)).await {
+                Ok(origin) => origin,
+                Err(error) => {
+                    tracing::warn!(%error, "Cannot read the base clone's origin while freeing a branch");
+                    return 0;
+                }
+            }
+        };
+        if let Err(error) = sanitize(&base, &origin).await {
+            tracing::warn!(%error, "Cannot put the base clone back while freeing a branch");
+            return 0;
+        }
         let directory = root.clone();
         let entries = match Self::filesystem(move || Self::entries(&directory)).await {
             Ok(entries) => entries,
@@ -1424,6 +1451,39 @@ mod tests {
         );
         forget_organization(&pool, organization).await;
         forget_organization(&pool, other).await;
+    }
+
+    /// A base clone carries whatever a run's tools wrote to it — husky sets
+    /// `core.hooksPath`, an agent sets `user.email` — and the hardened git
+    /// service refuses a clone configured beyond what Zone pins. Freeing a
+    /// branch has to put the base back first, or it is refused on exactly the
+    /// repository it exists for.
+    #[tokio::test]
+    async fn a_branch_is_freed_from_a_base_a_run_wrote_to() {
+        let pool =
+            PgPool::connect(&std::env::var("TEST_DATABASE_URL").expect("isolated test database"))
+                .await
+                .unwrap();
+        let (_holder, root) = private_root();
+        let base = base_clone(&root);
+        let (organization, held, _) =
+            finished_run_on(&pool, &root, &base, "zone/dirty-base", true).await;
+        let mine = run_worktree(&root, &base, "zone/mine");
+        // What a run's own tools leave behind in the shared clone, written
+        // after the worktrees exist, as a run writes it while it works.
+        git(&base, &["config", "core.hooksPath", ".husky"]);
+        let wanted = BranchName::parse("zone/dirty-base").unwrap();
+
+        let freed = Checkout::release_branch_in(&pool, &root, mine.path(), &wanted).await;
+
+        assert_eq!(freed, 1, "the branch is freed despite the written config");
+        assert!(!held.exists());
+        let configured = git(&base, &["config", "--list"]).to_ascii_lowercase();
+        assert!(
+            !configured.contains("hookspath"),
+            "and the base is put back to what Zone knows: {configured}"
+        );
+        forget_organization(&pool, organization).await;
     }
 
     /// The safety rule is recovery's and is not relaxed to start a run: work
