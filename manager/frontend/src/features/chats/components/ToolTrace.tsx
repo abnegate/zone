@@ -5,6 +5,7 @@ import {
   APPROVAL_TIMED_OUT_DETAIL,
   AWAITING_APPROVAL_DETAIL,
   DENIED_DETAIL,
+  POLICY_DETAIL,
   PREVIEW_LABEL,
   REASON_MISSING,
   REASONED_TOOLS,
@@ -152,6 +153,7 @@ type ToolState =
   | 'denied'
   | 'timed_out'
   | 'cancelled'
+  | 'policy'
   | 'ok'
   | 'failed';
 
@@ -164,6 +166,7 @@ const WORDED_REFUSALS = new Map<string, Refusal>(
       [DENIED_DETAIL, 'denied'],
       [APPROVAL_TIMED_OUT_DETAIL, 'timed_out'],
       [APPROVAL_CANCELLED_DETAIL, 'cancelled'],
+      [POLICY_DETAIL, 'policy'],
     ] as const
   ).flatMap(([detail, refusal]) => [
     [detail, refusal],
@@ -205,6 +208,8 @@ function toolLabel(name: string, state: ToolState): string {
       return `Cancelled ${gerund} ${object}`;
     case 'denied':
       return `Denied ${gerund} ${object}`;
+    case 'policy':
+      return `Policy blocked ${gerund} ${object}`;
     case 'failed':
       return `Failed to ${base} ${object}`;
     case 'ok':

@@ -3,6 +3,7 @@ use crate::common;
 
 use abnegate_agent::Tool;
 use abnegate_agent::tool::Session;
+use abnegate_agent::tool::Tier;
 use abnegate_agent::tool::job::{self, Jobs};
 use abnegate_llm::{LlmConfig, Message, Role, ToolCall};
 use futures::StreamExt;
@@ -17,7 +18,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 use zone_core::llm::LlmClient;
 use zone_core::variables::Variables;
-use zone_server::agent::approval::refusal::{APPROVAL_CANCELLED, DENIED};
+use zone_server::agent::approval::refusal::{APPROVAL_CANCELLED, DENIED, POLICY};
 use zone_server::agent::prompt;
 use zone_server::agent::wait::{self, KIND_JOB, WAIT_FOR};
 use zone_server::agent::{
@@ -797,6 +798,65 @@ async fn a_write_whose_turn_stops_while_it_waits_is_told_it_was_cancelled() {
         .expect("the cancelled call completes");
     assert!(detail.contains(APPROVAL_CANCELLED), "{detail}");
     assert!(!detail.contains(DENIED), "nobody denied it: {detail}");
+}
+
+/// A task under a `write` ceiling has nobody to approve a host write, so the
+/// write is refused by the policy at once and recorded, never put to a card.
+#[tokio::test]
+async fn an_unattended_write_above_the_ceiling_is_refused_by_the_policy() {
+    let path = std::env::temp_dir().join(format!("zone-policy-{}.txt", Uuid::new_v4()));
+    std::fs::write(&path, "before").unwrap();
+    let approval = ApprovalPolicy::unattended().with_ceiling(Some(Tier::Write));
+    let withheld = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&withheld);
+    approval.set_recorder(Arc::new(move |name: &str| {
+        recorder.lock().unwrap().push(name.to_string());
+    }));
+    let write = json!({"id":"policy_write","name":"write_file","arguments":{"path":path,"content":"after"}});
+    let (events, _) = exercise_approved(
+        vec![(200, text(&write.to_string())), (200, text("Withheld."))],
+        vec![Message::user("Overwrite the file.")],
+        approval,
+    )
+    .await;
+    let kept = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(kept, "before");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::ToolApprovalRequired { .. })),
+        "nobody attends the run to answer a card"
+    );
+    let detail = events
+        .iter()
+        .find_map(|event| match event {
+            AgentEvent::ToolCallCompleted { id, detail, .. } if id == "policy_write" => {
+                Some(detail.as_str())
+            }
+            _ => None,
+        })
+        .expect("the withheld call completes");
+    assert!(detail.contains(POLICY), "{detail}");
+    assert_eq!(*withheld.lock().unwrap(), ["write_file"]);
+    assert_eq!(answer(&events), "Withheld.");
+}
+
+/// With no ceiling an unattended run writes without asking, as tasks always have.
+#[tokio::test]
+async fn an_unattended_write_without_a_ceiling_runs() {
+    let path = std::env::temp_dir().join(format!("zone-unattended-{}.txt", Uuid::new_v4()));
+    let write = json!({"id":"unattended_write","name":"write_file","arguments":{"path":path,"content":"written"}});
+    let (events, _) = exercise_approved(
+        vec![(200, text(&write.to_string())), (200, text("Wrote."))],
+        vec![Message::user("Write the file.")],
+        ApprovalPolicy::unattended(),
+    )
+    .await;
+    let written = std::fs::read_to_string(&path);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(written.unwrap(), "written");
+    assert_eq!(answer(&events), "Wrote.");
 }
 
 #[tokio::test]

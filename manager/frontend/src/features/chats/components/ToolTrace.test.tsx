@@ -8,6 +8,7 @@ import {
   AWAITING_APPROVAL_DETAIL,
   DENIED_DETAIL,
   type JobStarted,
+  POLICY_DETAIL,
   type Question,
   TOOL_ERROR_PREFIX,
   type ToolCallRecord,
@@ -657,6 +658,7 @@ describe('ToolTrace', () => {
           call({ ...shell, id: 'denied', detail: 'Refused', refusal: 'denied' }),
           call({ ...shell, id: 'timed', detail: 'Refused', refusal: 'timed_out' }),
           call({ ...shell, id: 'cancelled', detail: 'Refused', refusal: 'cancelled' }),
+          call({ ...shell, id: 'policy', detail: 'Refused', refusal: 'policy' }),
           call({
             ...shell,
             id: 'log',
@@ -672,11 +674,38 @@ describe('ToolTrace', () => {
       'Denied running a shell command',
       'Approval timed out for running a shell command',
       'Cancelled running a shell command',
+      'Policy blocked running a shell command',
       'Failed to run a shell command',
     ]);
-    expect(rows[3]?.querySelector('.tool-call-detail')?.textContent).toBe(
+    expect(rows[4]?.querySelector('.tool-call-detail')?.textContent).toBe(
       `${TOOL_ERROR_PREFIX}${DENIED_DETAIL}`
     );
+  });
+
+  it('labels a call its policy withheld from the words a stored record kept', () => {
+    const shell = { name: 'run_shell', success: false };
+    render(
+      <ToolTrace
+        calls={[
+          call({ ...shell, id: 'chat', detail: `${TOOL_ERROR_PREFIX}${POLICY_DETAIL}` }),
+          call({ ...shell, id: 'agent', detail: POLICY_DETAIL }),
+          call({ id: 'own', name: 'Bash', success: false, detail: POLICY_DETAIL }),
+        ]}
+      />
+    );
+
+    const rows = screen.getAllByTestId('tool-call');
+    expect(rows.map((row) => row.querySelector('.tool-call-name')?.textContent)).toEqual([
+      'Policy blocked running a shell command',
+      'Policy blocked running a shell command',
+      'Bash',
+    ]);
+    expect(rows.map((row) => row.closest('li')?.classList.contains('tool-call--failed'))).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(rows[2]?.querySelector('.tool-call-detail')?.textContent).toBe(POLICY_DETAIL);
   });
 
   it('labels a call with a refusal it cannot read from its words', () => {

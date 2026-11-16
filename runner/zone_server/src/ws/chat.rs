@@ -3716,7 +3716,20 @@ async fn handle_chat_generation(
         driver,
     } = preparation;
     let offline = tools.offline();
-    let builtin = Confinement { sandboxed, offline }.builtin_tools();
+    let builtin = Confinement {
+        sandboxed,
+        offline,
+        ceiling: generation.approvals.ceiling(),
+        prompted: agentic
+            && matches!(
+                llm_client.backend(),
+                LlmBackend::Cli {
+                    agent: abnegate_agent_cli::AgentKind::Claude,
+                    ..
+                }
+            ),
+    }
+    .builtin_tools();
     let origin = tools.origin();
     let directory = tools.working_directory().to_path_buf();
     let mut replay = context.clone();

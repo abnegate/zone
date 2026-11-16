@@ -20,6 +20,10 @@ pub const APPROVAL_TIMED_OUT: &str =
 pub const APPROVAL_CANCELLED: &str =
     "The turn stopped before this tool call was approved, so it did not run.";
 
+/// What a call is told when the organization's policy needs a person to
+/// approve it and nobody attending the run can.
+pub const POLICY: &str = "Your organization's policy requires a person to approve this tool call, and nobody can approve it in this run.";
+
 /// Stored with the call and sent with its result, so the console labels a refused call from
 /// what refused it rather than from the words its outcome happens to start with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,10 +32,11 @@ pub enum Refusal {
     Denied,
     TimedOut,
     Cancelled,
+    Policy,
 }
 
 impl Refusal {
-    const ALL: [Self; 3] = [Self::Denied, Self::TimedOut, Self::Cancelled];
+    const ALL: [Self; 4] = [Self::Denied, Self::TimedOut, Self::Cancelled, Self::Policy];
 
     /// What the call is told in place of running.
     pub const fn message(self) -> &'static str {
@@ -39,6 +44,7 @@ impl Refusal {
             Self::Denied => DENIED,
             Self::TimedOut => APPROVAL_TIMED_OUT,
             Self::Cancelled => APPROVAL_CANCELLED,
+            Self::Policy => POLICY,
         }
     }
 
@@ -64,6 +70,7 @@ mod tests {
             (Refusal::Denied, "denied"),
             (Refusal::TimedOut, "timed_out"),
             (Refusal::Cancelled, "cancelled"),
+            (Refusal::Policy, "policy"),
         ] {
             assert_eq!(
                 serde_json::to_value(refusal).expect("a refusal serializes"),
