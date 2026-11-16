@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'bun:test';
 import {
-  administersServer,
   COMPACT_QUERY,
   findSection,
   GROUP_LABELS,
@@ -390,11 +389,6 @@ describe('visibleSections', () => {
         administersServer: true,
       })
     ).toEqual([CONNECT, LICENSE, SESSIONS]);
-  });
-
-  it('decides server administration from the access alone', () => {
-    expect(administersServer({ administersServer: true })).toBe(true);
-    expect(administersServer({ administersServer: false })).toBe(false);
   });
 
   it('finds the License section in the server group', () => {

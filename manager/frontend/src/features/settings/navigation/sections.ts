@@ -84,8 +84,7 @@ const installsModels = (access: SettingsAccess): boolean => access.installsModel
 const readsWorkspaceSources = (access: SettingsAccess): boolean =>
   inWorkspace(access) && access.readsSources;
 
-export const administersServer = (access: Pick<SettingsAccess, 'administersServer'>): boolean =>
-  access.administersServer;
+const administersServer = (access: SettingsAccess): boolean => access.administersServer;
 
 const always = (): boolean => true;
 
