@@ -848,6 +848,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_task_someone_moved_by_hand_is_not_dragged_back() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .expect("the run settles");
+        sqlx::query("UPDATE tasks SET status = 'blocked' WHERE id = $1")
+            .bind(run.task_id)
+            .execute(&pool)
+            .await
+            .expect("a person moves it");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "a passing check does not overrule where a person put the task"
+        );
+        assert_eq!(task_status(&pool, run.task_id).await, "blocked");
+    }
+
+    #[tokio::test]
+    async fn a_task_claimed_again_is_left_to_its_new_run() {
+        let pool = pool().await;
+        let watched = watched(&pool, true).await;
+
+        let run = start(&pool, &watched, None)
+            .await
+            .expect("auto-fix is on and nothing is claimed");
+        tasks::complete_task_run(&pool, run.id, "completed", None, None)
+            .await
+            .expect("the first run settles");
+        // The task is working again, on a run of its own.
+        let again = tasks::create_task_run(&pool, run.task_id)
+            .await
+            .expect("a second run");
+        sqlx::query("UPDATE tasks SET status = 'review', active_run_id = $2 WHERE id = $1")
+            .bind(run.task_id)
+            .bind(again.id)
+            .execute(&pool)
+            .await
+            .expect("the second run claims it");
+
+        assert!(
+            !complete_auto_fix_task(&pool, run.id)
+                .await
+                .expect("the update"),
+            "the settled run does not finish a task another run is working on"
+        );
+    }
+
     async fn task_status(pool: &PgPool, task_id: Uuid) -> String {
         tasks::get_task(pool, task_id)
             .await

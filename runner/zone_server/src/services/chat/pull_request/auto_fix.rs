@@ -275,15 +275,18 @@ async fn start(
 /// Whether the pull request now shows that the run it had did what it was
 /// started for.
 ///
-/// A merge settles it outright. Short of that, the complaint has to be gone
-/// and the checks have to have actually passed: pending, absent or unreadable
-/// checks prove nothing, and reading them as proof would finish a task on the
-/// strength of a verdict that never arrived.
+/// A merge settles it outright. Short of that this is [`Status::ready_to_merge`],
+/// the same bar the chat uses to offer a merge: every check passed, nothing in
+/// the way of merging, and no review thread left open. Nothing weaker will do.
+/// A fix run is told to answer every unresolved review comment, so a task that
+/// completed while comments sat unanswered would be reporting work it did not
+/// do, and `ready_to_merge` is already tested for exactly these states.
+///
+/// Being too strict here costs a task that waits in review for a person, which
+/// is where it already was. Being too loose costs a task that stops asking for
+/// attention it still needs.
 fn proven(status: &Status) -> bool {
-    if status.state == State::Merged {
-        return true;
-    }
-    status.open() && status.checks == Checks::Passing && status.mergeable != Mergeable::Conflicted
+    status.state == State::Merged || status.ready_to_merge()
 }
 
 /// Finishes the task of a run that has already ended, once `status` proves it
@@ -479,10 +482,20 @@ mod tests {
         assert_eq!(complaint(&status(Checks::Pending, Mergeable::Clean)), None);
     }
 
+    /// A pull request with nothing left wrong with it: checks passed, it
+    /// merges cleanly, and every review thread is resolved.
+    fn settled() -> Status {
+        let mut status = status(Checks::Passing, Mergeable::Clean);
+        status.threads = Some(super::super::threads::Threads {
+            open: 0,
+            resolved: 3,
+        });
+        status
+    }
+
     #[test]
-    fn passing_checks_prove_the_run_did_its_job() {
-        assert!(proven(&status(Checks::Passing, Mergeable::Clean)));
-        assert!(proven(&status(Checks::Passing, Mergeable::Unstable)));
+    fn a_pull_request_with_nothing_left_wrong_proves_the_run_did_its_job() {
+        assert!(proven(&settled()));
     }
 
     #[test]
@@ -493,26 +506,69 @@ mod tests {
     }
 
     #[test]
+    fn a_review_comment_nobody_answered_proves_nothing() {
+        // A fix run is told to answer every unresolved comment, so finishing
+        // its task while one is open would report work it did not do.
+        let mut open = settled();
+        open.threads = Some(super::super::threads::Threads {
+            open: 1,
+            resolved: 2,
+        });
+        assert!(!proven(&open));
+    }
+
+    #[test]
+    fn threads_that_were_never_read_prove_nothing() {
+        // GitHub would not list them in full, so nothing says they are clear.
+        let mut unread = settled();
+        unread.threads = None;
+        assert!(!proven(&unread));
+    }
+
+    #[test]
     fn a_verdict_that_never_arrived_proves_nothing() {
         // The complaint is gone in all three, and in none of them did anything
         // report that the checks pass.
         for checks in [Checks::Pending, Checks::None, Checks::Unknown] {
-            assert!(
-                !proven(&status(checks, Mergeable::Clean)),
-                "{checks:?} should not finish a task"
-            );
+            let mut status = settled();
+            status.checks = checks;
+            assert!(!proven(&status), "{checks:?} should not finish a task");
         }
     }
 
     #[test]
-    fn a_failing_or_conflicted_pull_request_proves_nothing() {
-        assert!(!proven(&status(Checks::Failing, Mergeable::Clean)));
-        assert!(!proven(&status(Checks::Passing, Mergeable::Conflicted)));
+    fn anything_short_of_a_clean_merge_proves_nothing() {
+        // Blocked, behind and unknown are all states where the fix has not
+        // been shown to hold, whatever the checks that ran said.
+        for mergeable in [
+            Mergeable::Conflicted,
+            Mergeable::Unstable,
+            Mergeable::Blocked,
+            Mergeable::Unknown,
+        ] {
+            let mut status = settled();
+            status.mergeable = mergeable;
+            assert!(!proven(&status), "{mergeable:?} should not finish a task");
+        }
+    }
+
+    #[test]
+    fn a_failing_pull_request_proves_nothing() {
+        let mut failing = settled();
+        failing.checks = Checks::Failing;
+        assert!(!proven(&failing));
+    }
+
+    #[test]
+    fn a_draft_proves_nothing() {
+        let mut draft = settled();
+        draft.draft = true;
+        assert!(!proven(&draft));
     }
 
     #[test]
     fn a_pull_request_closed_unmerged_proves_nothing() {
-        let mut closed = status(Checks::Passing, Mergeable::Clean);
+        let mut closed = settled();
         closed.state = State::Closed;
         assert!(!proven(&closed));
     }
