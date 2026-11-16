@@ -1005,6 +1005,91 @@ async fn driver_tasks_still_waiting_move_to_the_front_of_the_most_urgent_first_o
     );
 }
 
+#[tokio::test]
+async fn the_run_finish_index_builds_while_runs_keep_beating() {
+    const BEFORE_RUN_FINISH_INDEX: i64 = 10;
+    const INDEX: &str = "idx_task_runs_finished";
+    const BEAT: &str = "UPDATE task_runs SET heartbeat_at = NOW() WHERE id = $1";
+    let database = Database::new(PREFIX).await;
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    Migrator::new(directory.as_path())
+        .await
+        .unwrap()
+        .run_to(BEFORE_RUN_FINISH_INDEX, &database.pool)
+        .await
+        .unwrap();
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let task = database.task().await;
+        let run: Uuid = sqlx::query_scalar(
+            "INSERT INTO task_runs(task_id, status, heartbeat_at) \
+             VALUES ($1, 'running', NOW()) RETURNING id",
+        )
+        .bind(task)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+        runs.push(run);
+    }
+
+    let mut lingering = database.pool.begin().await.unwrap();
+    sqlx::query(BEAT)
+        .bind(runs[0])
+        .execute(&mut *lingering)
+        .await
+        .unwrap();
+    let building = tokio::spawn({
+        let pool = database.pool.clone();
+        async move { migrations::run(&pool).await }
+    });
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                 WHERE datname = current_database() AND pid <> pg_backend_pid() \
+                   AND query LIKE '%' || $1 || '%' AND wait_event_type = 'Lock')",
+            )
+            .bind(INDEX)
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the index build waits on the lingering transaction");
+
+    let mut beating = database.pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL lock_timeout = '1s'")
+        .execute(&mut *beating)
+        .await
+        .unwrap();
+    let beat = sqlx::query(BEAT).bind(runs[1]).execute(&mut *beating).await;
+    beating.commit().await.unwrap();
+    lingering.commit().await.unwrap();
+    let built = building.await.unwrap();
+    let valid: Option<bool> = sqlx::query_scalar(
+        "SELECT index.indisvalid FROM pg_index index \
+         JOIN pg_class class ON class.oid = index.indexrelid WHERE class.relname = $1",
+    )
+    .bind(INDEX)
+    .fetch_optional(&database.pool)
+    .await
+    .unwrap();
+    database.cleanup().await;
+
+    assert!(
+        beat.is_ok(),
+        "a heartbeat must not queue behind the index build, or a long build expires every \
+         running run's lease: {beat:?}"
+    );
+    built.expect("the migrations finish once the lingering transaction ends");
+    assert_eq!(valid, Some(true), "{INDEX} is built and usable");
+}
+
 /// The tables `sql` holds a lock on until its transaction ends, upper-cased,
 /// read from each kind of statement a migration changes a live table with.
 fn locked_tables(sql: &str) -> BTreeSet<String> {
