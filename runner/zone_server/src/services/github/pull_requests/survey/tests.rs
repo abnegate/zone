@@ -1273,3 +1273,39 @@ async fn a_listing_past_its_deadline_keeps_the_last_verdicts_of_what_it_had_not_
     assert_eq!(permits.available_permits(), CREDENTIAL_PERMITS);
     server.verify().await;
 }
+
+#[tokio::test]
+async fn a_thread_count_github_halts_on_halts_the_listing_under_the_guard() {
+    for (name, halt, expected) in [
+        (
+            "a secondary rate limit",
+            ResponseTemplate::new(403).set_body_json(json!({"message": SECONDARY_LIMIT})),
+            Fault::RateLimited {
+                retry_after: None,
+                exhausted: false,
+            },
+        ),
+        (
+            "a credential GitHub refuses",
+            ResponseTemplate::new(401).set_body_json(json!({"message": "Bad credentials"})),
+            Fault::Unauthenticated,
+        ),
+    ] {
+        let server = silent().await;
+        opened(&server, [1]).await;
+        evidence(&server, |id| overflowing(number_of(id))).await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("\"number\""))
+            .respond_with(halt)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let permits = Semaphore::new(CREDENTIAL_PERMITS);
+
+        let listing = surveyed(&server, &permits, None, LIMIT).await;
+
+        assert_eq!(listing, Err(expected), "{name}");
+        server.verify().await;
+    }
+}
