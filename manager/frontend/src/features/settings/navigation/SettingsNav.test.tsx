@@ -119,7 +119,6 @@ describe('SettingsNav', () => {
       ['AI defaults', '/settings/organization/ai'],
       ['Members', '/settings/organization/members'],
       ['Devices', '/settings/organization/devices'],
-      ['Billing', '/settings/organization/billing'],
       ['Audit log', '/settings/organization/audit'],
       ['GitHub', '/settings/organization/github'],
       ['MCP servers', '/settings/organization/mcp'],
@@ -130,13 +129,13 @@ describe('SettingsNav', () => {
   });
 
   it('marks the current section as the current page', () => {
-    renderNav(ownerAccess, '/settings/organization/billing');
+    renderNav(ownerAccess, '/settings/organization/audit');
 
     const current = screen
       .getAllByRole('link')
       .filter((link) => link.getAttribute('aria-current') === 'page');
     expect(current.map((link) => link.getAttribute('href'))).toEqual([
-      '/settings/organization/billing',
+      '/settings/organization/audit',
     ]);
   });
 
@@ -158,7 +157,6 @@ describe('SettingsNav', () => {
       'AI defaults',
       'Members',
       'Devices',
-      'Billing',
       'Audit log',
       'GitHub',
       'MCP servers',

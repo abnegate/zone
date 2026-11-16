@@ -216,7 +216,6 @@ describe('SettingsPage', () => {
         'AI defaults',
         'Members',
         'Devices',
-        'Billing',
         'Audit log',
         'GitHub',
         'MCP servers',
@@ -244,7 +243,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
     });
 
-    it('shows an organization owner and workspace admin all fifteen sections', () => {
+    it('shows an organization owner and workspace admin all fourteen sections', () => {
       signInAs('owner', 'admin');
 
       renderAt('/settings/workspace/general');
@@ -260,7 +259,6 @@ describe('SettingsPage', () => {
         'AI defaults',
         'Members',
         'Devices',
-        'Billing',
         'Audit log',
         'GitHub',
         'MCP servers',
@@ -356,16 +354,36 @@ describe('SettingsPage', () => {
     });
 
     it('sends a hidden deep link to the first visible section', () => {
-      renderAt('/settings/organization/billing');
+      renderAt('/settings/organization/devices');
 
       expect(location()).toBe('/settings/workspace/general');
       expect(screen.getByTestId('settings-content').textContent).toBe('workspace/general');
     });
 
     it('keeps the query and hash when sending a hidden deep link on', () => {
-      renderAt('/settings/organization/billing?x=1#y');
+      renderAt('/settings/organization/devices?x=1#y');
 
       expect(location()).toBe('/settings/workspace/general?x=1#y');
+    });
+
+    it('sends an owner on the retired billing section to the first visible section', () => {
+      signInAs('owner', 'admin');
+
+      renderAt('/settings/organization/billing');
+
+      expect(location()).toBe('/settings/workspace/general');
+      expect(screen.getByTestId('settings-content').textContent).toBe('workspace/general');
+      expect(screen.queryByRole('region', { name: 'Billing' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: 'Billing' })).not.toBeInTheDocument();
+    });
+
+    it('sends an organization admin with no workspace on the retired billing section to AI defaults', () => {
+      signInAs('admin', null);
+
+      renderAt('/settings/organization/billing');
+
+      expect(location()).toBe('/settings/organization/ai');
+      expect(screen.getByTestId('settings-content').textContent).toBe('organization/ai');
     });
 
     it('sends an unknown section to the first visible section', () => {
@@ -605,9 +623,9 @@ describe('SettingsPage', () => {
     });
 
     it('holds a hidden deep link until the role resolves, then redirects', () => {
-      const { rerenderAt } = renderAt('/settings/organization/billing');
+      const { rerenderAt } = renderAt('/settings/organization/devices');
 
-      expect(location()).toBe('/settings/organization/billing');
+      expect(location()).toBe('/settings/organization/devices');
       expect(screen.getByText('Loading settings...')).toBeInTheDocument();
       expect(screen.queryByTestId('settings-content')).not.toBeInTheDocument();
 

@@ -36,7 +36,6 @@ import '../features/chats/components/SubagentsBox.css';
 import '../features/chats/components/SubagentChip.css';
 import '../features/chats/components/QueueItem.css';
 import '../features/settings/organization/components/AuditLogsSection.css';
-import '../features/settings/organization/components/BillingSection.css';
 import '../features/settings/organization/components/DevicesSection.css';
 import '../features/settings/organization/components/GitHubSection.css';
 import '../features/settings/organization/components/InvitationsSection.css';

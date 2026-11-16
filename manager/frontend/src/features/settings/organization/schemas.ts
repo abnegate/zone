@@ -162,100 +162,6 @@ export const InvitationsResponseSchema = z.preprocess(
   })
 );
 
-// Billing & Usage Schemas
-export const SubscriptionStatusSchema = z.enum(['active', 'canceled', 'past_due', 'trialing']);
-
-export const PlanLimitsSchema = z.object({
-  max_users: z.number().nullable(),
-  max_workspaces: z.number().nullable(),
-  max_projects: z.number().nullable(),
-  max_storage_gb: z.number().nullable(),
-  max_api_calls_monthly: z.number().nullable(),
-});
-
-export const PlanSchema = z.object({
-  id: z.string().min(1),
-  name: z.string(),
-  description: z.string().nullable(),
-  price_monthly: z.number(),
-  price_yearly: z.number(),
-  features: z.array(z.string()),
-  limits: PlanLimitsSchema,
-  is_public: z.boolean(),
-});
-
-export const SubscriptionSchema = z.object({
-  id: z.string().min(1),
-  organization_id: z.string().min(1),
-  plan_id: z.string().min(1),
-  plan_name: z.string(),
-  status: SubscriptionStatusSchema,
-  current_period_start: z.string().datetime({ offset: true }),
-  current_period_end: z.string().datetime({ offset: true }),
-  cancel_at_period_end: z.boolean(),
-});
-
-export const UsageSchema = z.object({
-  members: z.number().min(0),
-  workspaces: z.number().min(0),
-  chat_messages: z.number().min(0),
-  period_start: z.string().datetime({ offset: true }),
-  period_end: z.string().datetime({ offset: true }),
-});
-
-export const LimitsSchema = z.object({
-  max_members: z.number().nullable(),
-  max_workspaces: z.number().nullable(),
-  max_chats_per_month: z.number().nullable(),
-});
-
-export const PlansResponseSchema = z.object({
-  plans: z.array(PlanSchema),
-});
-
-export const PlanResponseSchema = z.object({
-  plan: PlanSchema,
-});
-
-export const SubscriptionResponseSchema = z.object({
-  subscription: SubscriptionSchema,
-});
-
-// The server reports the period and the counters it meters; the console reads
-// them as one flat usage record.
-export const UsageResponseSchema = z
-  .object({
-    current_period_start: z.string().datetime({ offset: true }),
-    current_period_end: z.string().datetime({ offset: true }),
-    usage: z.object({
-      chat_messages: z.number().min(0),
-      members: z.number().min(0),
-      workspaces: z.number().min(0),
-    }),
-  })
-  .transform((response) => ({
-    members: response.usage.members,
-    workspaces: response.usage.workspaces,
-    chat_messages: response.usage.chat_messages,
-    period_start: response.current_period_start,
-    period_end: response.current_period_end,
-  }));
-
-// A plan spells "unlimited" as a negative limit; the console reads it as null.
-const boundedLimit = (limit: number): number | null => (limit < 0 ? null : limit);
-
-export const LimitsResponseSchema = z
-  .object({
-    max_members: z.number(),
-    max_workspaces: z.number(),
-    max_chats_per_month: z.number(),
-  })
-  .transform((limits) => ({
-    max_members: boundedLimit(limits.max_members),
-    max_workspaces: boundedLimit(limits.max_workspaces),
-    max_chats_per_month: boundedLimit(limits.max_chats_per_month),
-  }));
-
 // Audit Log Schemas
 // Actions and resource types are the server's dotted names; the lists name the
 // ones the console offers as filters and the schema accepts any the server has.
@@ -332,15 +238,6 @@ export type DevicesResponse = z.infer<typeof DevicesResponseSchema>;
 export type DevicePolicyZ = z.infer<typeof DevicePolicySchema>;
 export type InvitationZ = z.infer<typeof InvitationSchema>;
 export type InvitationsResponse = z.infer<typeof InvitationsResponseSchema>;
-export type PlanZ = z.infer<typeof PlanSchema>;
-export type SubscriptionZ = z.infer<typeof SubscriptionSchema>;
-export type UsageZ = z.infer<typeof UsageSchema>;
-export type LimitsZ = z.infer<typeof LimitsSchema>;
-export type PlansResponse = z.infer<typeof PlansResponseSchema>;
-export type PlanResponse = z.infer<typeof PlanResponseSchema>;
-export type SubscriptionResponse = z.infer<typeof SubscriptionResponseSchema>;
-export type UsageResponse = z.infer<typeof UsageResponseSchema>;
-export type LimitsResponse = z.infer<typeof LimitsResponseSchema>;
 export type AuditActionZ = z.infer<typeof AuditActionSchema>;
 export type AuditResourceTypeZ = z.infer<typeof AuditResourceTypeSchema>;
 export type AuditLogZ = z.infer<typeof AuditLogSchema>;

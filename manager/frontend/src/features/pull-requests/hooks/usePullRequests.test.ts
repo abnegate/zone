@@ -107,7 +107,7 @@ describe('usePullRequests', () => {
     const { result } = renderHook(() => usePullRequests(), { wrapper: provider() });
 
     await waitFor(() => expect(result.current.pullRequests).toEqual(listed.pull_requests));
-    expect(mockList).toHaveBeenCalledWith('workspace-1', false, expect.any(AbortSignal));
+    expect(mockList).toHaveBeenCalledWith('workspace-1', false);
     expect(result.current.sources).toEqual(listed.sources);
     expect(result.current.warnings).toEqual(['acme/api: rate limited']);
     expect(result.current.generatedAt).toBe(LONG_AGO);

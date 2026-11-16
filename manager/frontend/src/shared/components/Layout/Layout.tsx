@@ -4,8 +4,11 @@ import { DownloadDock, TrainDock } from '../../../features/models';
 import { NavDrawerProvider } from '../../context/NavDrawerContext';
 import Sidebar from '../Sidebar/Sidebar';
 import './Layout.css';
+import { usePreloadPages } from './usePreloadPages';
 
 export default function Layout() {
+  usePreloadPages();
+
   return (
     <NavDrawerProvider>
       <div className="layout">

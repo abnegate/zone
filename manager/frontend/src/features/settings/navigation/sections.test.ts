@@ -25,7 +25,6 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Organization, section: SettingsSection.Ai, label: 'AI defaults' },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
-  { group: SettingsGroup.Organization, section: SettingsSection.Billing, label: 'Billing' },
   { group: SettingsGroup.Organization, section: SettingsSection.Audit, label: 'Audit log' },
   { group: SettingsGroup.Organization, section: SettingsSection.GitHub, label: 'GitHub' },
   { group: SettingsGroup.Organization, section: SettingsSection.Mcp, label: 'MCP servers' },
@@ -70,7 +69,6 @@ describe('settings constants', () => {
       Sources: 'sources',
       Members: 'members',
       Devices: 'devices',
-      Billing: 'billing',
       Audit: 'audit',
       GitHub: 'github',
       Mcp: 'mcp',
@@ -147,13 +145,14 @@ describe('findSection', () => {
   });
 
   it('finds nothing for a section that belongs to another group', () => {
-    expect(findSection('workspace', 'billing')).toBeUndefined();
+    expect(findSection('workspace', 'audit')).toBeUndefined();
     expect(findSection('server', 'members')).toBeUndefined();
   });
 
   it('finds nothing for an unknown group or section', () => {
     expect(findSection('nowhere', 'ai')).toBeUndefined();
     expect(findSection('workspace', 'nothing')).toBeUndefined();
+    expect(findSection('organization', 'billing')).toBeUndefined();
   });
 
   it('finds nothing when the group or section is missing', () => {
@@ -197,7 +196,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all sixteen sections to an organization owner who administers the workspace', () => {
+  it('shows all fifteen sections to an organization owner who administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -207,7 +206,7 @@ describe('visibleSections', () => {
       readsSources: true,
     });
 
-    expect(visible).toHaveLength(16);
+    expect(visible).toHaveLength(15);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
