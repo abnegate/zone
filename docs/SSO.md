@@ -381,7 +381,8 @@ and takes the account over:
 
 - It replaces the account's password with a random one.
 - It marks the email as verified.
-- It revokes all of the account's sessions and refresh tokens.
+- It revokes all of the account's sessions and refresh tokens, and refuses
+  any password sign-in that was still in progress with the old password.
 - It records `reclaimed: true` in the audit log.
 
 This stops someone from registering a colleague's address before SSO is set

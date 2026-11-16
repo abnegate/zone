@@ -28,7 +28,6 @@ const LOGIN_OK: &str = "ok";
 const LOGIN_DISABLED: &str = "disabled";
 const LOGIN_ERROR: &str = "error";
 const LOGIN_INVALID_CREDENTIALS: &str = "invalid_credentials";
-const LOGIN_SSO_REQUIRED: &str = "sso_required";
 
 /// Register request
 #[derive(Debug, Deserialize)]
@@ -133,7 +132,7 @@ pub async fn register(
 
     provision::furnish(state.db(), &user).await;
 
-    match session::issue(&state, user.id, &headers).await {
+    match session::issue(&state, user.id, &headers, None).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(refusal) => refusal.into_response(),
     }
@@ -215,7 +214,7 @@ pub async fn login(
         }
     };
     if access == PasswordAccess::Refused {
-        crate::metrics::record_login(LOGIN_SSO_REQUIRED);
+        crate::metrics::record_login(sso::SSO_REQUIRED);
         return sso_required();
     }
 
@@ -223,7 +222,7 @@ pub async fn login(
         tracing::warn!("Failed to update last login: {}", error);
     }
 
-    match session::issue(&state, user.id, &headers).await {
+    match session::issue(&state, user.id, &headers, Some(&user.password_hash)).await {
         Ok(response) => {
             crate::metrics::record_login(LOGIN_OK);
             if access == PasswordAccess::BreakGlass {
@@ -286,6 +285,7 @@ fn unavailable(error: &sqlx::Error) -> Response {
 fn login_outcome(refusal: Refusal) -> &'static str {
     match refusal {
         Refusal::DevicePending | Refusal::DeviceBlocked => LOGIN_DISABLED,
+        Refusal::Superseded => LOGIN_INVALID_CREDENTIALS,
         Refusal::Missing | Refusal::Unavailable => LOGIN_ERROR,
     }
 }
@@ -364,7 +364,16 @@ pub async fn refresh(
         Err(refusal) => return refusal.into_response(),
     };
 
-    match session::generate_tokens(&state, &user_perms, &headers, &device, Some(current.id)).await {
+    match session::generate_tokens(
+        &state,
+        &user_perms,
+        &headers,
+        &device,
+        Some(current.id),
+        None,
+    )
+    .await
+    {
         Ok(tokens) => Json(AuthResponse::new(
             &user_perms,
             tokens,
@@ -741,8 +750,11 @@ fn invalid_reset_token() -> Response {
 
 #[cfg(test)]
 mod tests {
+    use zone_enterprise::sso;
+
     use super::{
-        LOGIN_DISABLED, LOGIN_ERROR, LOGIN_SSO_REQUIRED, Refusal, login_outcome, verification_url,
+        LOGIN_DISABLED, LOGIN_ERROR, LOGIN_INVALID_CREDENTIALS, Refusal, login_outcome,
+        verification_url,
     };
 
     #[test]
@@ -751,13 +763,18 @@ mod tests {
         assert_eq!(login_outcome(Refusal::DeviceBlocked), LOGIN_DISABLED);
         assert_eq!(login_outcome(Refusal::Missing), LOGIN_ERROR);
         assert_eq!(login_outcome(Refusal::Unavailable), LOGIN_ERROR);
+        assert_eq!(
+            login_outcome(Refusal::Superseded),
+            LOGIN_INVALID_CREDENTIALS
+        );
         assert_eq!(LOGIN_DISABLED, "disabled");
         assert_eq!(LOGIN_ERROR, "error");
+        assert_eq!(LOGIN_INVALID_CREDENTIALS, "invalid_credentials");
     }
 
     #[test]
     fn a_password_refused_for_single_sign_on_has_its_own_login_metric_label() {
-        assert_eq!(LOGIN_SSO_REQUIRED, "sso_required");
+        assert_eq!(sso::SSO_REQUIRED, "sso_required");
     }
 
     /// The console routes the verification page at /verify-email, so the mail

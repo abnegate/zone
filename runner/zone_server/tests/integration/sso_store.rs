@@ -858,10 +858,13 @@ async fn reclaiming_an_account_replaces_its_password_and_verifies_its_email() {
     let squatted = fixture.user("ada@acme.com").await;
     let bystander = fixture.user("grace@acme.com").await;
     let replacement = hash_password("Another-horse-2").unwrap();
+    let mut connection = fixture.pool().acquire().await.unwrap();
 
-    users::reclaim(fixture.pool(), squatted.id, &replacement)
-        .await
-        .unwrap();
+    assert!(
+        users::reclaim(&mut connection, squatted.id, &replacement)
+            .await
+            .unwrap()
+    );
 
     let stored = users::get_user_by_email(fixture.pool(), "ada@acme.com")
         .await
@@ -877,10 +880,48 @@ async fn reclaiming_an_account_replaces_its_password_and_verifies_its_email() {
     assert!(!untouched.email_verified);
     assert!(zone_server::auth::verify_password(PASSWORD, &untouched.password_hash).unwrap());
     assert_eq!(untouched.id, bystander.id);
-    assert!(matches!(
-        users::reclaim(fixture.pool(), Uuid::new_v4(), &replacement).await,
-        Err(sqlx::Error::RowNotFound)
-    ));
+    assert!(
+        !users::reclaim(&mut connection, Uuid::new_v4(), &replacement)
+            .await
+            .unwrap()
+    );
+    drop(connection);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_account_verified_or_promoted_after_it_was_resolved_is_not_reclaimed() {
+    let fixture = Fixture::new().await;
+    let verified = fixture.user("ada@acme.com").await;
+    let promoted = fixture.user("grace@acme.com").await;
+    sqlx::query("UPDATE users SET email_verified = TRUE WHERE id = $1")
+        .bind(verified.id)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET is_admin = TRUE WHERE id = $1")
+        .bind(promoted.id)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    let replacement = hash_password("Another-horse-2").unwrap();
+    let mut connection = fixture.pool().acquire().await.unwrap();
+
+    for user in [&verified, &promoted] {
+        assert!(
+            !users::reclaim(&mut connection, user.id, &replacement)
+                .await
+                .unwrap(),
+            "{}",
+            user.email
+        );
+        let stored = users::get_user_by_email(fixture.pool(), &user.email)
+            .await
+            .unwrap()
+            .expect("still there");
+        assert!(zone_server::auth::verify_password(PASSWORD, &stored.password_hash).unwrap());
+    }
+    drop(connection);
     fixture.cleanup().await;
 }
 

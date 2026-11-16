@@ -21,7 +21,7 @@ pub struct RefreshTokenRow {
 
 /// Create a new refresh token
 pub async fn create_refresh_token(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     user_id: Uuid,
     token_hash: &str,
     expires_at: NaiveDateTime,
@@ -40,7 +40,7 @@ pub async fn create_refresh_token(
     .bind(expires_at)
     .bind(user_agent)
     .bind(ip_address)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(row)

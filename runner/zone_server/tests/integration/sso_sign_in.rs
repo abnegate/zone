@@ -2,6 +2,7 @@
 //! sign-in, and the callback that links, reclaims or provisions the account and starts a session.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -15,8 +16,9 @@ use zone_enterprise::sso::{
     TOKEN_EXCHANGE_FAILED, challenge, testing,
 };
 use zone_enterprise::{Tier, period_start};
+use zone_server::auth::hash_password;
 use zone_server::db::audit::{actions, resources};
-use zone_server::db::seats;
+use zone_server::db::{refresh_tokens, seats, sessions, users};
 use zone_server::services::sso::console::CALLBACK_PATH;
 use zone_server::utils::crypto::hash_token;
 
@@ -31,6 +33,8 @@ const ACCOUNT_DISABLED: &str = "account_disabled";
 const DEVICE_BLOCKED: &str = "device_blocked";
 const UNREACHABLE_ISSUER: &str = "http://127.0.0.1:9";
 const TIME_ZONE: &str = "Europe/London";
+const LOCK_WAIT: Duration = Duration::from_secs(30);
+const LOCK_POLL: Duration = Duration::from_millis(20);
 
 type Adjustment<'a> = Box<dyn FnOnce(Claims) -> Claims + 'a>;
 
@@ -125,6 +129,29 @@ impl Server {
         self.identity_provider
             .grant(&code, &started.challenge, claims);
         code
+    }
+
+    /// Waits until some statement in this server's database is queued behind a row or table
+    /// lock, which is how a test knows a request reached the point it holds a transaction across.
+    async fn queued_behind_a_lock(&self) {
+        tokio::time::timeout(LOCK_WAIT, async {
+            loop {
+                let queued: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                     WHERE datname = current_database() AND wait_event_type = 'Lock' \
+                       AND pid <> pg_backend_pid())",
+                )
+                .fetch_one(self.fixture.pool())
+                .await
+                .unwrap();
+                if queued {
+                    return;
+                }
+                tokio::time::sleep(LOCK_POLL).await;
+            }
+        })
+        .await
+        .expect("the request queued behind the held lock");
     }
 
     async fn callback(&self, state: &str, code: &str) -> TestResponse {
@@ -222,6 +249,16 @@ impl Server {
     async fn live_sessions(&self, user: Uuid) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM sessions WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(user)
+        .fetch_one(self.fixture.pool())
+        .await
+        .unwrap()
+    }
+
+    async fn live_refresh_tokens(&self, user: Uuid) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL",
         )
         .bind(user)
         .fetch_one(self.fixture.pool())
@@ -598,6 +635,38 @@ async fn an_unverified_squatter_loses_the_account_to_the_person_who_proves_the_e
             "reclaimed": true,
         }))
     );
+    server.cleanup().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_password_sign_in_racing_a_reclaim_leaves_no_live_session() {
+    let server = Server::new().await;
+    let registered = server.fixture.register_as(testing::EMAIL).await;
+    registered.assert_status(StatusCode::CREATED);
+    let squatter = session(&registered);
+    let replacement = hash_password("Unknown-horse-9").unwrap();
+    let mut reclaim = server.fixture.pool().begin().await.unwrap();
+    assert!(
+        users::reclaim(&mut reclaim, squatter.user, &replacement)
+            .await
+            .unwrap()
+    );
+    refresh_tokens::revoke_all_user_tokens(&mut *reclaim, squatter.user)
+        .await
+        .unwrap();
+    sessions::revoke_all_user_sessions(&mut *reclaim, squatter.user)
+        .await
+        .unwrap();
+
+    let password = test_password();
+    let (login, ()) = tokio::join!(server.fixture.login(testing::EMAIL, &password), async {
+        server.queued_behind_a_lock().await;
+        reclaim.commit().await.unwrap();
+    });
+
+    login.assert_status(StatusCode::UNAUTHORIZED);
+    assert_eq!(server.live_sessions(squatter.user).await, 0);
+    assert_eq!(server.live_refresh_tokens(squatter.user).await, 0);
     server.cleanup().await;
 }
 
