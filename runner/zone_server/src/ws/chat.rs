@@ -38,14 +38,14 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore, broadcast, mpsc};
 use uuid::Uuid;
-use zone_core::llm::{BuiltinTools, LlmBackend, LlmClient, Observer};
+use zone_core::llm::{LlmBackend, LlmClient, Observer};
 use zone_enterprise::policy::Effective;
 
 use crate::agent::learned;
 use crate::agent::wait::{self, Outcome, WaitSettled, Waited, Waiting};
 use crate::agent::{
     self, ActionReceipt, AgentEvent, AgentRun, ChatTools, Citation, Question, Refusal, Spend,
-    ToolCallRecord, WorkspaceScope,
+    ToolCallRecord,
 };
 use crate::auth::validate_access_token;
 use crate::db::{
@@ -2932,9 +2932,6 @@ async fn handle_send_message(
                         Subject::Chat(chat_id),
                     )
                 });
-                if let Some(auditor) = &auditor {
-                    request.approvals.set_recorder(auditor.approvals());
-                }
                 let web_search_requested = !(chat.offline || restricted)
                     && state
                         .config()
@@ -3725,16 +3722,20 @@ async fn pin(
 }
 
 /// A turn's coding agent reaches the turn's tools only when it is served them,
-/// but is watched either way. Both belong to the backend they were attached
-/// to, so a turn that moves to another backend equips it again.
+/// but is watched either way. Both, and whether it keeps its own tools, belong
+/// to the backend they were attached to, so a turn that moves to another
+/// backend equips it again.
 fn equipped(
     client: LlmClient,
     served: Option<&AgentTools>,
     observer: &Arc<dyn Observer>,
-    builtin: BuiltinTools,
+    confinement: Confinement,
 ) -> LlmClient {
     let client = match served {
-        Some(served) => client.with_toolset(served.lease.toolset(), builtin),
+        Some(served) => {
+            let builtin = confinement.builtin_tools(client.backend());
+            client.with_toolset(served.lease.toolset(), builtin)
+        }
         None => client,
     };
     client.with_observer(observer.clone())
@@ -3789,22 +3790,12 @@ async fn handle_chat_generation(
         driver,
     } = preparation;
     let offline = tools.offline();
-    let builtin = Confinement {
+    let confinement = Confinement {
         sandboxed,
         offline,
         ceiling: generation.approvals.ceiling(),
-        prompted: agentic
-            && matches!(
-                llm_client.backend(),
-                LlmBackend::Cli {
-                    agent: abnegate_agent_cli::AgentKind::Claude,
-                    ..
-                }
-            ),
-    }
-    .builtin_tools();
-    let origin = tools.origin();
-    let directory = tools.working_directory().to_path_buf();
+    };
+    let renewal = tools.renewal();
     let mut replay = context.clone();
     let definitions = agentic.then(|| tools.definitions().to_vec());
     // Bound for the whole turn on purpose. The token is revoked when the lease
@@ -3821,7 +3812,7 @@ async fn handle_chat_generation(
                     user: Some(user_id),
                     approval: generation.approvals.clone(),
                     calls: budget.max_tool_calls,
-                    builtin,
+                    builtin: confinement.builtin_tools(llm_client.backend()),
                 },
                 &crate::mcp::local_endpoint(state.config()),
             )
@@ -3850,7 +3841,7 @@ async fn handle_chat_generation(
         offline,
         tracker,
     ));
-    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, builtin);
+    let mut llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, confinement);
 
     publish(
         stream,
@@ -4284,7 +4275,7 @@ async fn handle_chat_generation(
                 llm_client.with_backend(backend),
                 agent_tools.as_ref(),
                 &observer,
-                builtin,
+                confinement,
             );
             replay = whole.clone();
             context = match continuing {
@@ -4399,7 +4390,7 @@ async fn handle_chat_generation(
                 switch.backend.clone(),
                 effort,
             ));
-            llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, builtin);
+            llm_client = equipped(llm_client, agent_tools.as_ref(), &observer, confinement);
             tools = ChatTools::empty();
             continuing = wrote;
             context = match (wrote, switch.carried) {
@@ -4512,17 +4503,7 @@ async fn handle_chat_generation(
 
         // ChatTools is not Clone and the run took the set it was given by
         // value, so the run that resumes the turn needs one of its own.
-        tools = ChatTools::build(WorkspaceScope {
-            state: state.clone(),
-            workspace_id,
-            chat_id: Some(chat_id),
-            user_id,
-            offline,
-            origin,
-        })
-        .await
-        .starting_in(Some(directory.clone()))
-        .await;
+        tools = renewal.build().await;
         // A planner chat keeps its two closing calls across a rebuilt
         // catalog, as `session::build` gave them to the first turn.
         tools = match crate::db::chats::link(state.db(), chat_id).await {
@@ -4906,6 +4887,7 @@ mod tests {
     use super::*;
     use crate::db::workspaces;
     use sqlx::PgPool;
+    use zone_core::llm::BuiltinTools;
 
     #[test]
     fn retrieved_context_helpers_normalize_bound_and_interleave_sources() {
@@ -7746,18 +7728,25 @@ cat 'DIR/reply.jsonl'
     }
 
     fn cli() -> LlmBackend {
-        LlmBackend::cli(
-            abnegate_agent_cli::AgentKind::Claude,
-            abnegate_agent_cli::CliSettings::default(),
-        )
+        agent(abnegate_agent_cli::AgentKind::Claude)
     }
+
+    fn agent(kind: abnegate_agent_cli::AgentKind) -> LlmBackend {
+        LlmBackend::cli(kind, abnegate_agent_cli::CliSettings::default())
+    }
+
+    const CONFINED: Confinement = Confinement {
+        sandboxed: true,
+        offline: false,
+        ceiling: None,
+    };
 
     #[test]
     fn a_coding_agent_is_watched_whether_or_not_it_is_served_tools() {
         let observer: Arc<dyn Observer> = Arc::new(Watching);
         let client = LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli());
 
-        let client = equipped(client, None, &observer, BuiltinTools::Withheld);
+        let client = equipped(client, None, &observer, CONFINED);
         assert!(
             observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
             "a turn the agent tools are off for is still watched"
@@ -7768,7 +7757,7 @@ cat 'DIR/reply.jsonl'
             observed(&client).is_none(),
             "a new backend starts unwatched"
         );
-        let client = equipped(client, None, &observer, BuiltinTools::Withheld);
+        let client = equipped(client, None, &observer, CONFINED);
         assert!(
             observed(&client).is_some_and(|attached| Arc::ptr_eq(&attached, &observer)),
             "a turn handed over to another login is watched again"
@@ -7778,7 +7767,7 @@ cat 'DIR/reply.jsonl'
             LlmClient::new(abnegate_llm::LlmConfig::default()),
             None,
             &observer,
-            BuiltinTools::Withheld,
+            CONFINED,
         );
         assert!(matches!(endpoint.backend(), LlmBackend::Http));
     }
@@ -7795,12 +7784,18 @@ cat 'DIR/reply.jsonl'
         )
         .expect("a coding agent is served the turn's tools");
 
-        for builtin in [BuiltinTools::Withheld, BuiltinTools::Granted] {
+        for (sandboxed, builtin) in [
+            (true, BuiltinTools::Withheld),
+            (false, BuiltinTools::Granted),
+        ] {
             let client = equipped(
                 LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli()),
                 Some(&served),
                 &observer,
-                builtin,
+                Confinement {
+                    sandboxed,
+                    ..CONFINED
+                },
             );
 
             assert!(
@@ -7813,6 +7808,48 @@ cat 'DIR/reply.jsonl'
                 "{builtin:?}: serving tools does not unwatch the agent"
             );
         }
+    }
+
+    #[test]
+    fn a_handover_under_a_ceiling_withholds_the_tools_of_an_agent_that_never_asks() {
+        let observer: Arc<dyn Observer> = Arc::new(Watching);
+        let mut tools = ChatTools::empty();
+        let served = AgentTools::serve(
+            &cli(),
+            &mut tools,
+            crate::mcp::testing::scope(Uuid::new_v4()),
+            "http://127.0.0.1:1/mcp",
+        )
+        .expect("a coding agent is served the turn's tools");
+        let confinement = Confinement {
+            sandboxed: false,
+            offline: false,
+            ceiling: Some(abnegate_agent::tool::Tier::Write),
+        };
+
+        let claude = equipped(
+            LlmClient::new(abnegate_llm::LlmConfig::default()).with_backend(cli()),
+            Some(&served),
+            &observer,
+            confinement,
+        );
+        assert_eq!(
+            claude.builtin_tools(),
+            BuiltinTools::Granted,
+            "Claude asks zone before each of its own calls"
+        );
+
+        let codex = equipped(
+            claude.with_backend(agent(abnegate_agent_cli::AgentKind::Codex)),
+            Some(&served),
+            &observer,
+            confinement,
+        );
+        assert_eq!(
+            codex.builtin_tools(),
+            BuiltinTools::Withheld,
+            "Codex asks zone about none of its own calls, so the ceiling withholds them"
+        );
     }
 
     #[tokio::test]

@@ -671,8 +671,6 @@ mod permission_tests {
         assert_eq!(builtin_tier("Write"), Tier::Host);
     }
 
-    /// Under a `host` ceiling an auto-approving chat lets the agent's shell
-    /// through, and puts its web fetch to the reader.
     #[tokio::test]
     async fn a_ceiling_asks_the_reader_about_the_agents_tools_above_it() {
         let mut opened = open(ApprovalPolicy::auto().with_ceiling(Some(Tier::Host))).await;

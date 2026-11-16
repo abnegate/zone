@@ -23,17 +23,15 @@ use reqwest::dns::Resolving;
 use reqwest::redirect::Policy;
 use zone_enterprise::policy::Effective;
 
-/// Redirect hops a restricted fetch follows, as many as the public client.
+/// As many as the public client follows.
 const MAXIMUM_REDIRECTS: usize = 3;
 
-/// A host the policy does not admit.
 #[derive(Debug, Clone, thiserror::Error)]
 #[error("Requests to {host} are outside the workspace's allowed domains.")]
 pub struct Refused {
     pub host: String,
 }
 
-/// Refuse `url` unless the policy admits its host.
 pub fn admit(policy: &Effective, url: &Url) -> Result<(), Refused> {
     let host = url.host_str().unwrap_or_default();
     policy.domain(host).map_err(|_| Refused {
@@ -41,8 +39,6 @@ pub fn admit(policy: &Effective, url: &Url) -> Result<(), Refused> {
     })
 }
 
-/// A client that sends nothing to a host `policy` does not admit or that a
-/// public fetch must not reach, routed through `proxy` when one is given.
 pub fn client(
     policy: Arc<Effective>,
     proxy: Option<Proxy>,
@@ -74,7 +70,6 @@ pub fn client(
     .build()
 }
 
-/// The refusal a failed request carries, when the policy refused a hop.
 pub fn refused(error: &reqwest::Error) -> Option<&Refused> {
     let mut source: Option<&(dyn Error + 'static)> = error.source();
     while let Some(cause) = source {

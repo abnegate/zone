@@ -79,7 +79,6 @@ async fn client() -> TestClient {
     .await
 }
 
-/// An organization with one workspace, made by its owner.
 struct Tenant {
     token: String,
     user: Uuid,
@@ -142,7 +141,7 @@ impl Tenant {
         ChatTools::build_with(self.scope(client, false), policy).await
     }
 
-    /// Store `server` and wait until the organization's hub has connected it.
+    /// Returns once the organization's hub has connected the server.
     async fn serve(&self, client: &TestClient, server: Value) {
         let servers = format!("/api/organizations/{}/mcp-servers", self.organization);
         let response = client.post_json_auth(&servers, &server, &self.token).await;

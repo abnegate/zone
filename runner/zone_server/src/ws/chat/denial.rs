@@ -13,7 +13,6 @@ use crate::services::policy::{self, Denied, Subject};
 use crate::services::route::Unusable;
 use crate::state::AppState;
 
-/// The policy refused `model`, the model the turn would have run on.
 #[derive(Debug, thiserror::Error)]
 #[error("{denial}")]
 pub(super) struct Refused {
@@ -21,7 +20,6 @@ pub(super) struct Refused {
     pub(super) model: String,
 }
 
-/// `actor`'s turn in `chat`, one of `workspace`'s, whose refusals are audited against the chat.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Turn {
     pub(super) chat: Uuid,
@@ -30,7 +28,6 @@ pub(super) struct Turn {
 }
 
 impl Turn {
-    /// Audits `denial`, naming `detail`, the model it refused, when it refused one.
     pub(super) async fn record(self, state: &AppState, denial: Denial, detail: Option<&str>) {
         let denied = Denied {
             workspace: self.workspace,

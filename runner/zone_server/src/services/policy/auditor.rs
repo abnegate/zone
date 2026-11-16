@@ -4,14 +4,13 @@ use uuid::Uuid;
 use zone_enterprise::policy::Denial;
 
 use super::{Denied, Subject, record};
-use crate::agent::approval::Recorder;
-use crate::agent::tools::egress::Record;
+use crate::agent::approval::Withholding;
+use crate::agent::tools::egress::Refusing;
 use crate::db::audit::actions;
 use crate::state::AppState;
 
-/// Audits every tool call a policy refuses while `subject` runs: what `actor` started in
-/// `workspace`, one of `organization`'s. The tools report synchronously, so each refusal is
-/// written in a task of its own and never holds the call up.
+/// The tools report synchronously, so each refusal is written in a task of its own and never
+/// holds the call up.
 #[derive(Clone)]
 pub struct Auditor {
     state: AppState,
@@ -38,14 +37,12 @@ impl Auditor {
         }
     }
 
-    /// Records each call withheld because nobody can approve it, by the tool's name.
-    pub fn approvals(&self) -> Recorder {
+    pub fn approvals(&self) -> Arc<Withholding> {
         let auditor = self.clone();
         Arc::new(move |tool: &str| auditor.record(Denial::Approval, tool))
     }
 
-    /// Records each request a tool refuses to send, by the host or server it refused.
-    pub fn egress(&self) -> Arc<Record> {
+    pub fn egress(&self) -> Arc<Refusing> {
         let auditor = self.clone();
         Arc::new(move |denial: Denial, refused: &str| auditor.record(denial, refused))
     }

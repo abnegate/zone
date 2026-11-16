@@ -13,6 +13,7 @@
 pub mod context;
 pub mod egress;
 pub mod environment;
+pub mod renewal;
 
 use abnegate_agent::Tool;
 use abnegate_agent::ToolContext;
@@ -42,8 +43,9 @@ use zone_core::llm::Toolset;
 use zone_core::servers;
 use zone_enterprise::policy::Effective;
 
-use self::egress::Record;
-use self::egress::Recorder;
+use self::egress::Refusals;
+use self::egress::Refusing;
+use self::renewal::Renewal;
 use super::citations;
 use super::citations::Citation;
 use super::identifier;
@@ -360,12 +362,14 @@ pub struct ChatTools {
     /// The coding agent these tools are served to over MCP, whose model calls
     /// each by another name than the registry's. `None` in zone's own loop.
     agent: Option<AgentKind>,
-    /// The organization's agent policy for the workspace, when it has one.
     policy: Option<Arc<Effective>>,
     /// Tools a policy's network restriction keeps although they are off the
     /// offline list, because each holds itself to the policy's domains.
     readmitted: HashSet<String>,
-    recorder: Recorder,
+    refusals: Refusals,
+    /// Whether the chat opted out of the public web itself, which `scope`
+    /// no longer says once a policy has taken the tools offline too.
+    chat_offline: bool,
 }
 
 impl ChatTools {
@@ -377,7 +381,6 @@ impl ChatTools {
         Self::build_with(scope, None).await
     }
 
-    /// [`Self::build`] under the organization's agent policy for the workspace.
     pub async fn build_with(scope: WorkspaceScope, policy: Option<Arc<Effective>>) -> Self {
         let agents = &scope.state.config().agents;
         let (denied, niceness) = (agents.state.clone(), agents.niceness);
@@ -398,7 +401,6 @@ impl ChatTools {
         Self::preview_with(scope, None).await
     }
 
-    /// [`Self::preview`] under the organization's agent policy for the workspace.
     pub async fn preview_with(scope: WorkspaceScope, policy: Option<Arc<Effective>>) -> Self {
         let agents = &scope.state.config().agents;
         let (denied, niceness) = (agents.state.clone(), agents.niceness);
@@ -469,11 +471,23 @@ impl ChatTools {
             .is_some_and(Effective::restricts_network)
     }
 
-    /// Report every request the policy refuses while these tools run to
-    /// `record`, with the host or server it refused. Reaches every tool
-    /// already built, and replaces any recorder set before.
-    pub fn set_recorder(&self, record: Arc<Record>) {
-        self.recorder.set(record);
+    /// Reaches every tool already built, and replaces any hook set before.
+    pub fn set_recorder(&self, refusing: Arc<Refusing>) {
+        self.refusals.set(refusing);
+    }
+
+    /// What builds this chat another set of these tools, under the same
+    /// policy and reporting to the same hook.
+    pub fn renewal(&self) -> Renewal {
+        Renewal {
+            scope: self.scope.clone().map(|scope| WorkspaceScope {
+                offline: self.chat_offline,
+                ..scope
+            }),
+            directory: self.context.working_directory.clone(),
+            policy: self.policy.clone(),
+            refusals: self.refusals.clone(),
+        }
     }
 
     /// The origin a task this tool set's agent creates is recorded with.
@@ -517,7 +531,8 @@ impl ChatTools {
             agent: None,
             policy: None,
             readmitted: HashSet::new(),
-            recorder: Recorder::default(),
+            refusals: Refusals::default(),
+            chat_offline: false,
         }
     }
 
@@ -638,8 +653,7 @@ impl ChatTools {
         Self::for_task_with(state, cwd, workspace_id, actor, None).await
     }
 
-    /// [`Self::for_task`] under the organization's agent policy for the
-    /// workspace, which holds a run with no writer as much as one with.
+    /// A run with no writer is held to `policy` as much as one with a writer.
     pub async fn for_task_with(
         state: &AppState,
         cwd: std::path::PathBuf,
@@ -813,7 +827,7 @@ impl ChatTools {
         let offline = chat_offline || restricted;
         let readmitting = restricted && !chat_offline;
         let scope = scope.map(|scope| WorkspaceScope { offline, ..scope });
-        let recorder = Recorder::default();
+        let refusals = Refusals::default();
         let mut readmitted: HashSet<String> = HashSet::new();
         let mut registry = ToolRegistry::new();
         let mut workspace = Vec::new();
@@ -857,7 +871,7 @@ impl ChatTools {
                 &mut registry,
                 scope,
                 policy.clone().filter(|_| readmitting),
-                &recorder,
+                &refusals,
             );
             if readmitting {
                 readmitted.insert(super::web::FETCH_URL.to_string());
@@ -1025,7 +1039,8 @@ impl ChatTools {
             agent: None,
             policy,
             readmitted,
-            recorder,
+            refusals,
+            chat_offline,
         };
         assembled.cache_catalog();
         assembled.publish_catalog();
@@ -4396,7 +4411,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_recorder_set_on_the_tools_reaches_fetch_url() {
+    async fn a_hook_set_on_the_tools_reaches_fetch_url() {
         let _vpn = zone_core::vpn::Hold::off();
         let tools = ChatTools::preview_with(
             WorkspaceScope {

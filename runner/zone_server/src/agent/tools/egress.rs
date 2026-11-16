@@ -23,32 +23,32 @@ const PROBE: &str = "tool";
 
 /// Told of every request a policy refused at run time: the denial, and the
 /// host or server it refused.
-pub type Record = dyn Fn(Denial, &str) + Send + Sync;
+pub type Refusing = dyn Fn(Denial, &str) + Send + Sync;
 
-/// Where a tool set reports its refusals. Shared by the tool set and every
-/// tool that refuses, so a recorder set after assembly reaches them all.
+/// Shared by the tool set and every tool that refuses, so a hook set after
+/// assembly reaches them all.
 #[derive(Clone, Default)]
-pub struct Recorder(Arc<RwLock<Option<Arc<Record>>>>);
+pub struct Refusals(Arc<RwLock<Option<Arc<Refusing>>>>);
 
-impl Recorder {
-    pub fn set(&self, record: Arc<Record>) {
-        *self.0.write().unwrap_or_else(PoisonError::into_inner) = Some(record);
+impl Refusals {
+    pub fn set(&self, refusing: Arc<Refusing>) {
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = Some(refusing);
+    }
+
+    pub fn current(&self) -> Option<Arc<Refusing>> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub fn record(&self, denial: Denial, subject: &str) {
-        let record = self
-            .0
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(record) = record {
-            record(denial, subject);
+        if let Some(refusing) = self.current() {
+            refusing(denial, subject);
         }
     }
 }
 
-/// Whether `policy` admits the MCP server named `name`, defined as `server`.
-///
 /// Under a network restriction a server is admitted only when it is reached
 /// over HTTP at an admitted host: a command server reaches whatever its
 /// process does, and a server whose definition is unknown here cannot be
@@ -72,8 +72,6 @@ pub fn admits(policy: &Effective, name: &str, server: Option<&McpServer>) -> boo
         })
 }
 
-/// Take every tool registered since `before` that one of `servers` attached
-/// out of `registry`, and return how many were taken.
 pub fn withhold(
     registry: &mut ToolRegistry,
     before: &HashSet<String>,
@@ -96,9 +94,7 @@ pub fn withhold(
     withheld.len()
 }
 
-/// The part every tool `server` attaches is named under, before the
-/// separator. It holds no separator itself, so a tool's name splits at its
-/// first.
+/// Holds no separator itself, so a tool's name splits at its first.
 fn identifier(server: &str) -> String {
     let qualified = mcp::qualified_tool_name(server, PROBE);
     match qualified.split_once(mcp::SEPARATOR) {
@@ -160,13 +156,13 @@ mod tests {
     }
 
     #[test]
-    fn a_recorder_set_after_cloning_reaches_every_clone() {
-        let recorder = Recorder::default();
-        let held = recorder.clone();
+    fn a_hook_set_after_cloning_reaches_every_clone() {
+        let refusals = Refusals::default();
+        let held = refusals.clone();
         held.record(Denial::Domain, "unrecorded.test");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let sink = seen.clone();
-        recorder.set(Arc::new(move |denial, subject| {
+        refusals.set(Arc::new(move |denial, subject| {
             sink.lock()
                 .expect("the sink is readable")
                 .push((denial, subject.to_string()));

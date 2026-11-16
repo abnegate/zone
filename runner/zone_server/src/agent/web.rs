@@ -31,7 +31,7 @@ use zone_enterprise::policy::Effective;
 
 use super::identifier::Kind;
 use super::tools::WorkspaceScope;
-use super::tools::egress::Recorder;
+use super::tools::egress::Refusals;
 use crate::db::DbResult;
 use crate::db::chat_sources;
 use crate::utils::text::truncate;
@@ -48,14 +48,13 @@ const PROXY_VARIABLE: &str = "TOOL_RUNNER_PROXY_URL";
 pub const WEB_SEARCH: &str = "web_search";
 pub const FETCH_URL: &str = "fetch_url";
 
-/// Register both web tools. With `policy`, `fetch_url` is held to the
-/// policy's domains in place of the chat's offline gate, and reports each
-/// host it refuses to `recorder`.
+/// With `policy`, `fetch_url` is held to the policy's domains in place of the
+/// chat's offline gate.
 pub fn register(
     registry: &mut ToolRegistry,
     scope: &WorkspaceScope,
     policy: Option<Arc<Effective>>,
-    recorder: &Recorder,
+    refusals: &Refusals,
 ) {
     let config = scope.state.config().web_search.clone();
     if !config.enabled || config.query_url.trim().is_empty() {
@@ -67,7 +66,7 @@ pub fn register(
     }));
     registry.register(Arc::new(FetchUrlTool {
         policy,
-        recorder: recorder.clone(),
+        refusals: refusals.clone(),
     }));
 }
 
@@ -212,7 +211,7 @@ impl Tool for WebSearchTool {
 #[derive(Default)]
 struct FetchUrlTool {
     policy: Option<Arc<Effective>>,
-    recorder: Recorder,
+    refusals: Refusals,
 }
 
 impl FetchUrlTool {
@@ -233,7 +232,7 @@ impl FetchUrlTool {
         match fetch_within(url, policy.clone(), proxy).await {
             Ok(result) => result,
             Err(refused) => {
-                self.recorder.record(Denial::Domain, &refused.host);
+                self.refusals.record(Denial::Domain, &refused.host);
                 ToolResult::error(Denial::Domain.to_string())
             }
         }
@@ -661,7 +660,7 @@ mod tests {
             &mut registry,
             &scoped(crate::services::search::defaults(), NO_REGISTRY, None),
             None,
-            &Recorder::default(),
+            &Refusals::default(),
         );
         assert!(registry.get("web_search").is_none());
         assert!(registry.get("fetch_url").is_none());
@@ -678,7 +677,7 @@ mod tests {
                 None,
             ),
             None,
-            &Recorder::default(),
+            &Refusals::default(),
         );
         assert!(registry.get("web_search").is_some());
         assert!(registry.get("fetch_url").is_some());
@@ -686,19 +685,19 @@ mod tests {
 
     type Recorded = Arc<Mutex<Vec<(Denial, String)>>>;
 
-    fn recording() -> (Recorder, Recorded) {
-        let recorder = Recorder::default();
+    fn recording() -> (Refusals, Recorded) {
+        let refusals = Refusals::default();
         let recorded: Recorded = Arc::default();
         let sink = recorded.clone();
-        recorder.set(Arc::new(move |denial, host| {
+        refusals.set(Arc::new(move |denial, host| {
             sink.lock()
                 .expect("the record is readable")
                 .push((denial, host.to_string()));
         }));
-        (recorder, recorded)
+        (refusals, recorded)
     }
 
-    fn within(domains: &[&str], recorder: &Recorder) -> FetchUrlTool {
+    fn within(domains: &[&str], refusals: &Refusals) -> FetchUrlTool {
         FetchUrlTool {
             policy: Some(Arc::new(Effective::new(
                 Rules {
@@ -707,7 +706,7 @@ mod tests {
                 },
                 Rules::default(),
             ))),
-            recorder: recorder.clone(),
+            refusals: refusals.clone(),
         }
     }
 
@@ -724,10 +723,10 @@ mod tests {
     #[tokio::test]
     async fn fetch_url_refuses_a_host_the_policy_does_not_admit_before_sending_anything() {
         let _vpn = zone_core::vpn::Hold::off();
-        let (recorder, record) = recording();
+        let (refusals, record) = recording();
         let offline = ToolContext::default().with_public_web(Arc::new(Offline::new(true)));
 
-        let result = within(&["example.com"], &recorder)
+        let result = within(&["example.com"], &refusals)
             .execute(
                 json!({"url": "https://example.com.evil.test/collect"}),
                 &offline,
@@ -765,9 +764,9 @@ mod tests {
             .expect(0)
             .mount(&proxy)
             .await;
-        let (recorder, record) = recording();
+        let (refusals, record) = recording();
 
-        let result = within(&["example.com"], &recorder)
+        let result = within(&["example.com"], &refusals)
             .fetch("http://api.example.com/start", through(&proxy))
             .await;
 
@@ -802,9 +801,9 @@ mod tests {
             .expect(1)
             .mount(&proxy)
             .await;
-        let (recorder, record) = recording();
+        let (refusals, record) = recording();
 
-        let result = within(&["example.com"], &recorder)
+        let result = within(&["example.com"], &refusals)
             .fetch("http://api.example.com/start", through(&proxy))
             .await;
 
@@ -822,9 +821,9 @@ mod tests {
     #[tokio::test]
     async fn a_held_fetch_still_waits_for_the_vpn() {
         let _vpn = zone_core::vpn::Hold::required_off();
-        let (recorder, record) = recording();
+        let (refusals, record) = recording();
 
-        let result = within(&["example.com"], &recorder)
+        let result = within(&["example.com"], &refusals)
             .execute(
                 json!({"url": "https://api.example.com"}),
                 &ToolContext::default(),
