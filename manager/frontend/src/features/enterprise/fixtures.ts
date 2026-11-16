@@ -46,3 +46,13 @@ export const GRACE = licensed(LicenseStatus.Grace);
 export const LAPSED = licensed(LicenseStatus.Lapsed, Edition.Team);
 
 export const OVER_SEATS = licensed(LicenseStatus.Active, Edition.Enterprise, 30);
+
+export const UNCOUNTED: LicenseResponse = {
+  ...ACTIVE,
+  seats: { used: null, licensed: ACME_LICENSE.seats, over: false },
+};
+
+export const UNCOUNTED_COMMUNITY: LicenseResponse = {
+  ...COMMUNITY,
+  seats: { used: null, licensed: null, over: false },
+};

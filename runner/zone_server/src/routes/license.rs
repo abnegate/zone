@@ -31,13 +31,13 @@ pub struct LicenseResponse {
 }
 
 impl LicenseResponse {
-    pub fn new(stored: &Stored, seats: Seats, now: DateTime<Utc>) -> Self {
+    pub fn new(stored: &Stored, seats: SeatsResponse, now: DateTime<Utc>) -> Self {
         let license = stored.license();
         Self {
             edition: Edition::from(license),
             status: status(license, now),
             license: license.map(LicenseDetails::from),
-            seats: SeatsResponse::from(seats),
+            seats,
             unverified: stored.refusal().map(UnverifiedResponse::from),
         }
     }
@@ -72,15 +72,25 @@ impl From<&License> for LicenseDetails {
 
 #[derive(Debug, Serialize)]
 pub struct SeatsResponse {
-    pub used: u32,
+    pub used: Option<u32>,
     pub licensed: Option<u32>,
     pub over: bool,
+}
+
+impl SeatsResponse {
+    fn uncounted(license: Option<&License>) -> Self {
+        Self {
+            used: None,
+            licensed: license.map(License::seats),
+            over: false,
+        }
+    }
 }
 
 impl From<Seats> for SeatsResponse {
     fn from(seats: Seats) -> Self {
         Self {
-            used: seats.used,
+            used: Some(seats.used),
             licensed: seats.licensed,
             over: seats.over(),
         }
@@ -142,14 +152,16 @@ fn rejection(error: SetError) -> Response {
     }
 }
 
-fn counted(seats: DbResult<Seats>, license: Option<&License>) -> Seats {
-    seats.unwrap_or_else(|error| {
-        tracing::error!(%error, "Could not count seats after changing the license; reporting none in use");
-        Seats {
-            used: 0,
-            licensed: license.map(License::seats),
+/// The change is already committed, so a failed count must not fail the
+/// response; it reports usage as unknown rather than inventing a figure.
+fn counted(seats: DbResult<Seats>, license: Option<&License>) -> SeatsResponse {
+    match seats {
+        Ok(seats) => SeatsResponse::from(seats),
+        Err(error) => {
+            tracing::error!(%error, "Could not count seats after changing the license; reporting usage as unknown");
+            SeatsResponse::uncounted(license)
         }
-    })
+    }
 }
 
 async fn respond(state: &AppState, stored: Stored) -> Result<Json<LicenseResponse>, ServerError> {
@@ -158,7 +170,11 @@ async fn respond(state: &AppState, stored: Stored) -> Result<Json<LicenseRespons
         .licenses()
         .seats(state.db(), stored.license(), now)
         .await?;
-    Ok(Json(LicenseResponse::new(&stored, seats, now)))
+    Ok(Json(LicenseResponse::new(
+        &stored,
+        SeatsResponse::from(seats),
+        now,
+    )))
 }
 
 async fn committed(state: &AppState, stored: Stored) -> Json<LicenseResponse> {
@@ -294,7 +310,7 @@ mod tests {
 
     #[test]
     fn community_sends_null_license_and_licensed_seats_rather_than_omitting_them() {
-        let response = LicenseResponse::new(&Stored::Empty, seats(4, None), Utc::now());
+        let response = LicenseResponse::new(&Stored::Empty, seats(4, None).into(), Utc::now());
 
         assert_eq!(
             serialized(&response),
@@ -313,7 +329,7 @@ mod tests {
         let license = license(Tier::Team);
         let response = LicenseResponse::new(
             &Stored::Verified(license.clone()),
-            seats(2, Some(SEATS)),
+            seats(2, Some(SEATS)).into(),
             license.issued_at(),
         );
 
@@ -351,7 +367,7 @@ mod tests {
         for (now, expected) in moments {
             let response = LicenseResponse::new(
                 &Stored::Verified(license.clone()),
-                seats(1, Some(SEATS)),
+                seats(1, Some(SEATS)).into(),
                 now,
             );
             assert_eq!(response.status, expected);
@@ -365,7 +381,7 @@ mod tests {
             &Stored::Unverified(zone_enterprise::Error::UnknownKey {
                 id: "2031-4".into(),
             }),
-            seats(4, None),
+            seats(4, None).into(),
             Utc::now(),
         );
 
@@ -424,18 +440,29 @@ mod tests {
     }
 
     #[test]
-    fn seats_that_could_not_be_counted_after_a_change_are_reported_as_none_in_use() {
+    fn seats_that_could_not_be_counted_after_a_change_are_reported_as_unknown_and_never_over() {
         let license = license(Tier::Team);
-
-        assert_eq!(
-            counted(Err(sqlx::Error::PoolClosed), Some(&license)),
-            seats(0, Some(SEATS))
-        );
-        assert_eq!(counted(Err(sqlx::Error::PoolClosed), None), seats(0, None));
-        assert_eq!(
-            counted(Ok(seats(2, Some(SEATS))), Some(&license)),
-            seats(2, Some(SEATS))
-        );
+        let cases = [
+            (
+                counted(Err(sqlx::Error::PoolClosed), Some(&license)),
+                json!({ "used": null, "licensed": SEATS, "over": false }),
+            ),
+            (
+                counted(Err(sqlx::Error::PoolClosed), None),
+                json!({ "used": null, "licensed": null, "over": false }),
+            ),
+            (
+                counted(Ok(seats(2, Some(SEATS))), Some(&license)),
+                json!({ "used": 2, "licensed": SEATS, "over": false }),
+            ),
+            (
+                counted(Ok(seats(SEATS + 1, Some(SEATS))), Some(&license)),
+                json!({ "used": SEATS + 1, "licensed": SEATS, "over": true }),
+            ),
+        ];
+        for (seats, expected) in cases {
+            assert_eq!(serde_json::to_value(&seats).unwrap(), expected);
+        }
     }
 
     #[tokio::test]

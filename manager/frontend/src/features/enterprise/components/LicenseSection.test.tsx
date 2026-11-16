@@ -2,7 +2,16 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ApiError } from '../../../api/ApiError';
-import { ACTIVE, COMMUNITY, GRACE, LAPSED, OVER_SEATS, UNVERIFIED } from '../fixtures';
+import {
+  ACTIVE,
+  COMMUNITY,
+  GRACE,
+  LAPSED,
+  OVER_SEATS,
+  UNCOUNTED,
+  UNCOUNTED_COMMUNITY,
+  UNVERIFIED,
+} from '../fixtures';
 import { LicenseRefusal } from '../LicenseRefusal';
 import { LICENSE_REFUSAL_CODES, UNVERIFIED_CODES } from '../schemas';
 import { refusalMessage, unverifiedReason } from '../status';
@@ -180,6 +189,14 @@ describe('LicenseSection', () => {
       expect(details().Seats).toBe('30 of 25 seats used this month');
     });
 
+    it('says seat usage is unavailable instead of showing a count it does not have', async () => {
+      await loaded(UNCOUNTED);
+
+      expect(details().Seats).toBe('Seat usage unavailable (25 seats licensed)');
+      expect(screen.queryByText(/used this month/)).not.toBeInTheDocument();
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
     it('offers a retry when the license fails to load', async () => {
       get.mockRejectedValueOnce(
         new ApiError('Failed to load the license: This needs a server admin.', 403)
@@ -246,6 +263,20 @@ describe('LicenseSection', () => {
 
       await screen.findByText('License replaced.');
       expect(screen.getByText('Grace period')).toBeInTheDocument();
+    });
+
+    it('shows usage as unavailable when the key is stored but its seats could not be counted', async () => {
+      set.mockResolvedValue(UNCOUNTED);
+      await loaded(OVER_SEATS);
+      expect(screen.getByRole('status')).toHaveTextContent('30 people were active this month');
+
+      paste('payload.signature');
+      fireEvent.click(screen.getByRole('button', { name: 'Replace license' }));
+
+      await screen.findByText('License replaced.');
+      expect(details().Seats).toBe('Seat usage unavailable (25 seats licensed)');
+      expect(screen.queryByText(/people were active this month/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/0 of 25/)).not.toBeInTheDocument();
     });
 
     it('replaces a stored key that no longer verifies and drops the warning', async () => {
@@ -361,6 +392,17 @@ describe('LicenseSection', () => {
       expect(
         screen.getByText(/A license key is stored, but this version of Zone can't verify it/)
       ).toBeInTheDocument();
+    });
+
+    it('shows usage as unavailable when the license is removed but seats could not be counted', async () => {
+      remove.mockResolvedValue(UNCOUNTED_COMMUNITY);
+      await loaded(OVER_SEATS);
+
+      confirmRemoval();
+
+      await screen.findByText(/No license is installed/);
+      expect(details()).toEqual({ Seats: 'Seat usage unavailable' });
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
 
     it('leaves the license alone when the removal is cancelled', async () => {

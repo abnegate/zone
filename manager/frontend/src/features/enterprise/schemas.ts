@@ -65,7 +65,7 @@ export const LicenseDetailsSchema = z.object({
 });
 
 export const SeatsSchema = z.object({
-  used: z.number().int().nonnegative(),
+  used: z.number().int().nonnegative().nullable(),
   licensed: z.number().int().positive().nullable(),
   over: z.boolean(),
 });

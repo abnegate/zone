@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'bun:test';
-import { ACTIVE, COMMUNITY, GRACE, LAPSED, OVER_SEATS, UNVERIFIED } from './fixtures';
+import {
+  ACTIVE,
+  COMMUNITY,
+  GRACE,
+  LAPSED,
+  OVER_SEATS,
+  UNCOUNTED,
+  UNCOUNTED_COMMUNITY,
+  UNVERIFIED,
+} from './fixtures';
 import { LICENSE_REFUSAL_CODES, LicenseRefusalCode, UNVERIFIED_CODES } from './schemas';
 import {
   editionLabel,
@@ -87,12 +96,28 @@ describe('seatText', () => {
   it('names a single licensed seat in the singular', () => {
     expect(seatText({ used: 0, licensed: 1, over: false })).toBe('0 of 1 seat used this month');
   });
+
+  it('says usage is unavailable rather than inventing a count, keeping the licensed seats', () => {
+    expect(seatText(UNCOUNTED.seats)).toBe('Seat usage unavailable (25 seats licensed)');
+    expect(seatText({ used: null, licensed: 1, over: false })).toBe(
+      'Seat usage unavailable (1 seat licensed)'
+    );
+  });
+
+  it('says usage is unavailable in Community', () => {
+    expect(seatText(UNCOUNTED_COMMUNITY.seats)).toBe('Seat usage unavailable');
+  });
 });
 
 describe('overSeatNotice', () => {
   it('says nothing within the licensed seats or in Community', () => {
     expect(overSeatNotice(ACTIVE.seats)).toBeNull();
     expect(overSeatNotice(COMMUNITY.seats)).toBeNull();
+  });
+
+  it('says nothing when usage could not be counted, even if the response claims over', () => {
+    expect(overSeatNotice(UNCOUNTED.seats)).toBeNull();
+    expect(overSeatNotice({ used: null, licensed: 25, over: true })).toBeNull();
   });
 
   it('counts the extra people and promises nobody loses access', () => {

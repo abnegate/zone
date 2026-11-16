@@ -89,6 +89,11 @@ describe('the license reads as the server serialises it', () => {
     expect(zodNullable(schema)).toEqual(rustNullable(ROUTE, structName));
   });
 
+  test('seat usage is null when the server could not count it', () => {
+    expect(rustNullable(ROUTE, 'SeatsResponse')).toEqual(['licensed', 'used']);
+    expect(zodNullable(SeatsSchema)).toEqual(['licensed', 'used']);
+  });
+
   test('SetLicenseRequest is sent with the fields the server reads', () => {
     expect(keys(SetLicenseRequestSchema.shape)).toEqual(
       keys(rustShape(ROUTE, 'SetLicenseRequest'))

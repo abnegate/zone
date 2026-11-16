@@ -23,6 +23,20 @@ const TRUSTED_SEED: [u8; 32] = [0x11; 32];
 const UNTRUSTED_SEED: [u8; 32] = [0x22; 32];
 const LINE_WIDTH: usize = 64;
 const SEATS: u32 = 25;
+/// Seats are counted from `sessions`; renaming it once the license changes
+/// fails the count after the change has committed, and only in this test's
+/// own database. The upsert fires both the INSERT and UPDATE statement
+/// triggers, so the rename must tolerate running twice.
+const WITHHOLD_SESSIONS_ON_CHANGE: &str = "
+    CREATE FUNCTION withhold_sessions() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+        ALTER TABLE IF EXISTS sessions RENAME TO withheld_sessions;
+        RETURN NULL;
+    END
+    $$;
+    CREATE TRIGGER withhold_sessions AFTER INSERT OR UPDATE OR DELETE ON licenses
+    FOR EACH STATEMENT EXECUTE FUNCTION withhold_sessions();
+";
 
 struct Account {
     id: Uuid,
@@ -163,6 +177,13 @@ impl Fixture {
     async fn update_user(&self, statement: &'static str, account: &Account) {
         sqlx::query(statement)
             .bind(account.id)
+            .execute(self.pool())
+            .await
+            .unwrap();
+    }
+
+    async fn withhold_sessions_on_change(&self) {
+        sqlx::raw_sql(WITHHOLD_SESSIONS_ON_CHANGE)
             .execute(self.pool())
             .await
             .unwrap();
@@ -769,6 +790,62 @@ async fn seats_over_the_license_are_reported_but_never_block_sign_in() {
     );
     fixture.login(&admin).await;
     fixture.login(&member).await;
+    fixture.cleanup().await;
+}
+
+fn assert_uncounted(body: &Value, licensed: Value) {
+    assert_eq!(
+        body["seats"],
+        json!({ "used": null, "licensed": licensed, "over": false })
+    );
+    assert!(
+        body["seats"].get("used").is_some(),
+        "seats.used is omitted: {body}"
+    );
+}
+
+#[tokio::test]
+async fn setting_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    let payload = Payload {
+        seats: 1,
+        ..current(Tier::Team)
+    };
+    let key = issue(&payload);
+    fixture.register().await;
+    fixture.withhold_sessions_on_change().await;
+
+    let response = fixture.put(&admin.token, &key).await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_eq!(body["edition"], "team", "{body}");
+    assert_eq!(body["license"], details(&payload));
+    assert_uncounted(&body, json!(1));
+    assert_eq!(fixture.stored().await.as_deref(), Some(key.as_str()));
+    assert_eq!(fixture.audits(actions::LICENSE_SET).await.len(), 1);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn removing_a_key_whose_seats_cannot_be_counted_reports_usage_as_unknown() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    fixture
+        .put(&admin.token, &active(Tier::Team))
+        .await
+        .assert_status(StatusCode::OK);
+    fixture.withhold_sessions_on_change().await;
+
+    let response = fixture.delete(&admin.token).await;
+
+    response.assert_status(StatusCode::OK);
+    let body = response.json_value();
+    assert_community(&body);
+    assert_uncounted(&body, Value::Null);
+    assert_eq!(fixture.rows().await, 0);
+    assert_eq!(fixture.audits(actions::LICENSE_REMOVED).await.len(), 1);
     fixture.cleanup().await;
 }
 

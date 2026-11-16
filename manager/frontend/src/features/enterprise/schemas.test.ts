@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'bun:test';
-import { ACME_LICENSE, ACTIVE, COMMUNITY, GRACE, LAPSED, OVER_SEATS, UNVERIFIED } from './fixtures';
+import {
+  ACME_LICENSE,
+  ACTIVE,
+  COMMUNITY,
+  GRACE,
+  LAPSED,
+  OVER_SEATS,
+  UNCOUNTED,
+  UNCOUNTED_COMMUNITY,
+  UNVERIFIED,
+} from './fixtures';
 import {
   LICENSE_REFUSAL_CODES,
   LicenseRefusalCode,
@@ -18,6 +28,8 @@ describe('LicenseResponseSchema', () => {
     ['active', ACTIVE],
     ['grace', GRACE],
     ['over-seat', OVER_SEATS],
+    ['uncounted', UNCOUNTED],
+    ['uncounted Community', UNCOUNTED_COMMUNITY],
   ] as const) {
     it(`reads the ${name} response`, () => {
       expect(LicenseResponseSchema.parse(response)).toEqual(response);
@@ -59,6 +71,23 @@ describe('LicenseResponseSchema', () => {
   it('rejects a response that leaves the license out instead of sending null', () => {
     const { license: _license, ...missing } = COMMUNITY;
     expect(LicenseResponseSchema.safeParse(missing).success).toBe(false);
+  });
+
+  it('reads seats whose usage could not be counted as null', () => {
+    expect(LicenseResponseSchema.parse(UNCOUNTED).seats.used).toBeNull();
+  });
+
+  it('rejects seats that leave the used count out instead of sending null', () => {
+    expect(
+      LicenseResponseSchema.safeParse({ ...ACTIVE, seats: { licensed: 25, over: false } }).success
+    ).toBe(false);
+  });
+
+  it('rejects a negative used count', () => {
+    expect(
+      LicenseResponseSchema.safeParse({ ...ACTIVE, seats: { used: -1, licensed: 25, over: false } })
+        .success
+    ).toBe(false);
   });
 
   it('rejects seats that leave the licensed count out instead of sending null', () => {

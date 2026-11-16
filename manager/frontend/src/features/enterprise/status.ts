@@ -61,6 +61,8 @@ const UNVERIFIED_REASONS: Readonly<Record<UnverifiedCode, string>> = {
     "It is signed, but this release can't read its details. Ask for a new license key.",
 };
 
+const SEATS_UNCOUNTED = 'Seat usage unavailable';
+
 const DATE_FORMAT = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' });
 
 export function editionLabel(edition: EditionValue): string {
@@ -115,17 +117,22 @@ function seatsNoun(count: number): string {
   return count === 1 ? 'seat' : 'seats';
 }
 
-export function seatText(seats: Seats): string {
-  if (seats.licensed === null) {
-    return `${seats.used} ${seatsNoun(seats.used)} used this month`;
+export function seatText({ used, licensed }: Seats): string {
+  if (used === null) {
+    return licensed === null
+      ? SEATS_UNCOUNTED
+      : `${SEATS_UNCOUNTED} (${licensed} ${seatsNoun(licensed)} licensed)`;
   }
-  return `${seats.used} of ${seats.licensed} ${seatsNoun(seats.licensed)} used this month`;
+  if (licensed === null) {
+    return `${used} ${seatsNoun(used)} used this month`;
+  }
+  return `${used} of ${licensed} ${seatsNoun(licensed)} used this month`;
 }
 
-export function overSeatNotice(seats: Seats): string | null {
-  if (!seats.over || seats.licensed === null) {
+export function overSeatNotice({ used, licensed, over }: Seats): string | null {
+  if (!over || used === null || licensed === null) {
     return null;
   }
-  const extra = seats.used - seats.licensed;
-  return `${seats.used} people were active this month, ${extra} more than the ${seats.licensed} ${seatsNoun(seats.licensed)} this license covers. Everyone keeps access; add seats to the license to cover them.`;
+  const extra = used - licensed;
+  return `${used} people were active this month, ${extra} more than the ${licensed} ${seatsNoun(licensed)} this license covers. Everyone keeps access; add seats to the license to cover them.`;
 }
