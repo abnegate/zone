@@ -30,7 +30,7 @@ impl Background {
     ) -> Option<String> {
         let mut refusal = None;
         for candidate in candidates {
-            match route.admit(state, backend, candidate).await {
+            match route.admit(backend, candidate).await {
                 Ok(()) => return Some(candidate.clone()),
                 Err(denial) => {
                     refusal.get_or_insert(denial);

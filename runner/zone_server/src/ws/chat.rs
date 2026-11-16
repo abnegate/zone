@@ -3218,7 +3218,7 @@ async fn classifying(
             && preferences.admits(model)
             && catalog.accepts(model)
     });
-    let refused = match route.admit(state, &backend, &chosen).await {
+    let refused = match route.admit(&backend, &chosen).await {
         Ok(()) => {
             config.classifier_model = chosen;
             return Ok(Some(backend));
@@ -3226,7 +3226,7 @@ async fn classifying(
         Err(denial) => denial,
     };
     if let Some(own) = own
-        && route.admit(state, &backend, own).await.is_ok()
+        && route.admit(&backend, own).await.is_ok()
     {
         config.classifier_model = own.to_string();
         return Ok(Some(backend));
@@ -3448,10 +3448,7 @@ async fn prepare_chat(
         model.image,
         model.agentic,
     );
-    if let Err(denial) = route
-        .admit(state, &resolved.backend, &chat.model_name)
-        .await
-    {
+    if let Err(denial) = route.admit(&resolved.backend, &chat.model_name).await {
         return Err(denial::Refused {
             denial,
             model: chat.model_name,

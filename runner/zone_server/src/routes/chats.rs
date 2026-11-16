@@ -854,7 +854,7 @@ async fn workspace_refusal(
     chosen: bool,
     asked: Asked,
 ) -> Option<axum::response::Response> {
-    if !chosen && let Err(denial) = route.precheck(state, Some(model)).await {
+    if !chosen && let Err(denial) = route.precheck(Some(model)).await {
         return Some(asked.refuse(state, denial, Some(model)).await);
     }
     let endpoint = match route.endpoint() {

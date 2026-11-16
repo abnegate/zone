@@ -98,11 +98,8 @@ pub fn ceiling(effective: &Effective) -> Option<tool::Tier> {
 }
 
 /// Whether `effective` lets `model` run on `backend`: the model itself, then a coding agent by
-/// its agent, a direct API by that API, and anything else over HTTP by the upstream
-/// `endpoint`'s LiteLLM routes it to. The routes are looked up only when the policy restricts
-/// providers, and an upstream they do not name is [`policy::Provider::Other`].
+/// its agent, a direct API by that API, and anything else over HTTP by where `endpoint` sends it.
 pub async fn admit(
-    _state: &AppState,
     effective: &Effective,
     endpoint: &Endpoint,
     backend: &LlmBackend,
@@ -307,7 +304,6 @@ mod tests {
         model: &str,
     ) -> Result<(), Denial> {
         admit(
-            &AppState::for_tests(),
             effective,
             &endpoint(&server.uri(), KEY),
             backend,

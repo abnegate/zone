@@ -218,7 +218,7 @@ async fn list_workspace_models(
         return error.into_response();
     }
     let route = Route::for_workspace(&state, workspace).await;
-    if let Err(denial) = route.precheck(&state, None).await {
+    if let Err(denial) = route.precheck(None).await {
         return refusal::denied(denial);
     }
     let origin = match route.endpoint() {
@@ -256,7 +256,7 @@ async fn govern(state: &AppState, route: &Route, models: &mut [ModelResponse]) {
             .filter(|model| model.completion != Some(false))
             .map(|model| async {
                 model.denial = route
-                    .precheck(state, Some(&model.entry.name))
+                    .precheck(Some(&model.entry.name))
                     .await
                     .err()
                     .map(|denial| denial.code().to_owned());

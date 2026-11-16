@@ -207,10 +207,9 @@ async fn community_stores_rules_and_enforces_none_of_them() {
     let route = fixture.route().await;
     let loaded =
         zone_server::services::policy::load(&fixture.state, fixture.organization, None).await;
-    let precheck = route.precheck(&fixture.state, Some("gpt-5")).await;
+    let precheck = route.precheck(Some("gpt-5")).await;
     let admitted = route
         .admit(
-            &fixture.state,
             &LlmBackend::cli(AgentKind::Codex, CliSettings::default()),
             "gpt-5",
         )
@@ -235,7 +234,7 @@ async fn an_active_team_license_makes_a_denied_agents_route_unusable() {
     let route = fixture.route().await;
     let unusable = route.endpoint().expect_err("a route the policy denies");
     let resolved = route.backend(&fixture.state).await;
-    let precheck = route.precheck(&fixture.state, None).await;
+    let precheck = route.precheck(None).await;
     fixture.cleanup().await;
 
     assert_eq!(unusable.code(), Some(policy::AGENT_DENIED));
@@ -367,7 +366,6 @@ async fn stored_rules_that_cannot_be_read_deny_everything() {
         zone_server::services::policy::load(&fixture.state, fixture.organization, None).await;
     let admitted = route
         .admit(
-            &fixture.state,
             &LlmBackend::cli(AgentKind::Claude, CliSettings::default()),
             "sonnet",
         )
@@ -389,17 +387,13 @@ async fn a_model_the_policy_does_not_list_is_not_admitted() {
 
     let route = fixture.route().await;
     let backend = LlmBackend::cli(AgentKind::Claude, CliSettings::default());
-    let denied = route.admit(&fixture.state, &backend, "sonnet").await;
-    let allowed = route
-        .admit(&fixture.state, &backend, "claude-opus-4-1")
-        .await;
+    let denied = route.admit(&backend, "sonnet").await;
+    let allowed = route.admit(&backend, "claude-opus-4-1").await;
     let prechecked = [
-        route.precheck(&fixture.state, Some("sonnet")).await,
-        route
-            .precheck(&fixture.state, Some("claude-opus-4-1"))
-            .await,
-        route.precheck(&fixture.state, Some(AUTO)).await,
-        route.precheck(&fixture.state, None).await,
+        route.precheck(Some("sonnet")).await,
+        route.precheck(Some("claude-opus-4-1")).await,
+        route.precheck(Some(AUTO)).await,
+        route.precheck(None).await,
     ];
     let usable = route.endpoint().is_ok();
     fixture.cleanup().await;

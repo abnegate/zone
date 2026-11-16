@@ -765,7 +765,7 @@ pub async fn repair_conflicts_for_task(state: &AppState, task_id: Uuid) -> Repai
         Ok(model) => model,
         Err(error) => return RepairOutcome::Failed(error.to_string()),
     };
-    if let Err(denial) = route.admit(state, &backend, &model).await {
+    if let Err(denial) = route.admit(&backend, &model).await {
         background.refused(state, denial, Some(&model)).await;
         return RepairOutcome::Failed(denial.to_string());
     }
