@@ -395,7 +395,7 @@ pub(crate) async fn authorize_organization(
     }
 }
 
-async fn authorize_workspace(
+pub(crate) async fn authorize_workspace(
     connection: &mut PgConnection,
     organization_id: Uuid,
     workspace_id: Uuid,

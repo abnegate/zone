@@ -164,6 +164,41 @@ pub async fn record(state: &AppState, action: &'static str, denied: &Denied<'_>)
     }
 }
 
+/// Audits, as `action`, `denial` of what `actor` asked of `organization` itself, such as a
+/// sign-in or its AI settings, naming `detail`, what was refused. A failure to record it is
+/// logged and never fails the caller.
+pub async fn record_organization(
+    state: &AppState,
+    action: &'static str,
+    organization: Uuid,
+    actor: Uuid,
+    denial: Denial,
+    detail: Option<&str>,
+) {
+    let context = AuditContext {
+        org_id: Some(organization),
+        workspace_id: None,
+        actor_id: Some(actor),
+        actor_email: None,
+        ip_address: None,
+        user_agent: None,
+    };
+    let values = json!({ CODE: denial.code(), DETAIL: detail });
+    if let Err(error) = audit::log_action(
+        state.db(),
+        &context,
+        action,
+        audit::resources::ORGANIZATION,
+        Some(organization),
+        None,
+        Some(values),
+    )
+    .await
+    {
+        tracing::error!(%error, action, %organization, "Failed to record an agent policy denial");
+    }
+}
+
 async fn organization_of(state: &AppState, workspace: Uuid) -> Option<Uuid> {
     match workspaces::get_workspace(state.db(), workspace).await {
         Ok(row) => row.map(|row| row.organization_id),

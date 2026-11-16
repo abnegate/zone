@@ -48,6 +48,9 @@ pub struct ModelResponse {
     pub recipe_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_files: Option<Vec<String>>,
+    /// The code of the agent policy's denial when it refuses chats this model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denial: Option<String>,
 }
 
 impl From<ModelEntry> for ModelResponse {

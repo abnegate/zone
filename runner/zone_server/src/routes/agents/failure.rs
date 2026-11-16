@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+use zone_enterprise::policy::Denial;
 
 use super::kind::Kind;
 use crate::db::ai_settings::AccessError;
@@ -23,6 +24,7 @@ pub struct Failure {
     status: StatusCode,
     message: Cow<'static, str>,
     kind: Option<Kind>,
+    code: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -30,6 +32,8 @@ struct Body<'a> {
     error: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<Kind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<&'static str>,
 }
 
 impl Failure {
@@ -38,11 +42,20 @@ impl Failure {
             status,
             message: message.into(),
             kind: None,
+            code: None,
         }
     }
 
     pub(super) fn admins_only() -> Self {
         Self::new(StatusCode::FORBIDDEN, ADMINS_ONLY)
+    }
+
+    /// A sign-in the organization's agent policy refuses, sent with the denial's code.
+    pub(super) fn denied(denial: Denial) -> Self {
+        Self {
+            code: Some(denial.code()),
+            ..Self::new(StatusCode::FORBIDDEN, denial.to_string())
+        }
     }
 
     /// Why a pasted Claude code did not finish its sign-in, and whether it can be pasted again.
@@ -110,6 +123,7 @@ impl IntoResponse for Failure {
         let body = Body {
             error: &self.message,
             kind: self.kind,
+            code: self.code,
         };
         (self.status, Json(body)).into_response()
     }
@@ -205,6 +219,18 @@ mod tests {
         assert_eq!(
             sent(Failure::admins_only()).await,
             (StatusCode::FORBIDDEN, json!({ "error": ADMINS_ONLY }))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_the_policy_refuses_carries_the_denials_code() {
+        let denial = Denial::Agent(zone_enterprise::policy::Agent::Claude);
+        assert_eq!(
+            sent(Failure::denied(denial)).await,
+            (
+                StatusCode::FORBIDDEN,
+                json!({ "error": denial.to_string(), "code": "policy_agent_denied" })
+            )
         );
     }
 }

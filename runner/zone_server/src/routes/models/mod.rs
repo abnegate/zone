@@ -43,6 +43,7 @@ use crate::auth::{AuthUser, ModelInstaller, ModelRemover};
 use crate::db::ai_settings;
 use crate::error::ServerError;
 use crate::pull::{ComfyPull, ManifestFile, Pull, PullStart};
+use crate::routes::policy::refusal;
 use crate::services::comfy::{language, overlay, policy};
 use crate::services::endpoint::Origin;
 use crate::services::model::Model;
@@ -217,22 +218,51 @@ async fn list_workspace_models(
         return error.into_response();
     }
     let route = Route::for_workspace(&state, workspace).await;
+    if let Err(denial) = route.precheck(&state, None).await {
+        return refusal::denied(denial);
+    }
     let origin = match route.endpoint() {
         Ok(endpoint) => endpoint.origin(),
         Err(unusable) => return ServerError::Conflict(unusable.to_string()).into_response(),
     };
     match origin {
-        Origin::Instance => list_installed_models(state).await,
+        Origin::Instance => {
+            let mut inventory = inventory(&state).await;
+            govern(&state, &route, inventory.models_mut()).await;
+            inventory.into_response()
+        }
         Origin::Settings => {
             let preferences = route.preferences(&state.config().comfyui.classifier_model);
-            let saved: Vec<ModelResponse> = preferences
+            let mut saved: Vec<ModelResponse> = preferences
                 .completions()
                 .into_iter()
                 .map(saved_model)
                 .collect();
+            govern(&state, &route, &mut saved).await;
             Json(saved).into_response()
         }
     }
+}
+
+/// Marks each model in `models` a chat may run that the agent policy `route` runs under
+/// refuses, with the code of its denial.
+async fn govern(state: &AppState, route: &Route, models: &mut [ModelResponse]) {
+    if route.policy().is_none() {
+        return;
+    }
+    futures::future::join_all(
+        models
+            .iter_mut()
+            .filter(|model| model.completion != Some(false))
+            .map(|model| async {
+                model.denial = route
+                    .precheck(state, Some(&model.entry.name))
+                    .await
+                    .err()
+                    .map(|denial| denial.code().to_owned());
+            }),
+    )
+    .await;
 }
 
 /// A model the AI settings save, with only what is known of it without asking
@@ -253,20 +283,51 @@ fn saved_model(name: &str) -> ModelResponse {
 }
 
 async fn list_installed_models(state: AppState) -> axum::response::Response {
-    let comfy = list_comfy_models(&state);
-    match list_ollama_model_rows(&state).await {
+    inventory(&state).await.into_response()
+}
+
+/// The installed models: every one, those that could be read beside why Ollama's could not, or
+/// why none could be.
+enum Inventory {
+    Listed(Vec<ModelResponse>),
+    Partial(PartialInventory),
+    Failed(OllamaFailure),
+}
+
+impl Inventory {
+    fn models_mut(&mut self) -> &mut [ModelResponse] {
+        match self {
+            Self::Listed(models) => models,
+            Self::Partial(partial) => &mut partial.models,
+            Self::Failed(_) => &mut [],
+        }
+    }
+}
+
+impl IntoResponse for Inventory {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Listed(models) => Json(models).into_response(),
+            Self::Partial(partial) => Json(partial).into_response(),
+            Self::Failed(failure) => failure.into_response(),
+        }
+    }
+}
+
+async fn inventory(state: &AppState) -> Inventory {
+    let comfy = list_comfy_models(state);
+    match list_ollama_model_rows(state).await {
         Ok(mut models) => {
             models.extend(comfy);
-            Json(models).into_response()
+            Inventory::Listed(models)
         }
-        Err(failure) if comfy.is_empty() => failure.into_response(),
-        Err(failure) => Json(PartialInventory {
+        Err(failure) if comfy.is_empty() => Inventory::Failed(failure),
+        Err(failure) => Inventory::Partial(PartialInventory {
             models: comfy,
             errors: ProviderErrors {
                 ollama: failure.message,
             },
-        })
-        .into_response(),
+        }),
     }
 }
 

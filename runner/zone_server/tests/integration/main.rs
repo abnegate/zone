@@ -99,6 +99,7 @@ mod organization_members;
 mod password_reset;
 mod policy_chat;
 mod policy_egress;
+mod policy_rest;
 mod policy_routes;
 mod policy_routing;
 mod policy_store;

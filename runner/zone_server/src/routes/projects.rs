@@ -20,7 +20,9 @@ use crate::db::github_installations::{self, InstallationStatus, InstallationSumm
 use crate::db::projects::{self, LinkError, NewProject, ProjectRow, Reorder};
 use crate::db::{auto_projects, chats, sources, sync_config, tasks, workspace_members};
 use crate::error::ServerError;
+use crate::routes::policy::asked::Asked;
 use crate::services::model::Model;
+use crate::services::policy::Subject;
 use crate::services::route::Route;
 use crate::state::AppState;
 use crate::sync::hook::Removal;
@@ -385,8 +387,16 @@ pub async fn start_auto(
         .filter(|model| !model.is_empty())
         .unwrap_or(crate::services::stages::AUTO)
         .to_string();
-    let endpoint = Route::for_workspace(&state, workspace_id)
-        .await
+    let route = Route::for_workspace(&state, workspace_id).await;
+    if let Err(denial) = route.precheck(&state, Some(&model)).await {
+        let asked = Asked {
+            workspace: workspace_id,
+            actor: Some(user_id),
+            subject: Subject::Workspace(workspace_id),
+        };
+        return Ok(asked.refuse(&state, denial, Some(&model)).await);
+    }
+    let endpoint = route
         .into_endpoint()
         .map_err(|unusable| ServerError::Conflict(unusable.to_string()))?;
     if Model::profile_on(endpoint.origin(), &state.config().ollama_host, &model)

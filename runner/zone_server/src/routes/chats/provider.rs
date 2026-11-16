@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use uuid::Uuid;
+use zone_enterprise::policy::{Denial, Effective};
 
 use super::{
     SingleChatResponse, chat_with_messages, check_workspace_read_access,
@@ -23,6 +24,8 @@ use crate::db::ai_settings::EffectiveAiSettings;
 use crate::db::chats::{self, provider::Choice};
 use crate::error::ServerError;
 use crate::routes::common::ErrorResponse;
+use crate::routes::policy::asked::Asked;
+use crate::services::policy::{self, Subject};
 use crate::services::provider::{self, Offer, Provider, Refusal};
 use crate::services::route::{self, Route};
 use crate::state::AppState;
@@ -44,7 +47,8 @@ pub async fn workspace(
 ) -> Result<Json<WorkspaceProvidersResponse>, ServerError> {
     check_workspace_read_access(&state, &auth, id).await?;
     let (organization, settings) = saved(&state, id).await?;
-    let offers = provider::offers(&state, organization, &settings).await?;
+    let loaded = policy::load(&state, organization, Some(id)).await;
+    let offers = provider::offers(&state, organization, &settings, governing(&loaded)).await?;
     let (default, providers) = split(offers, &settings);
     let recent = chats::recent::get(state.db(), id)
         .await
@@ -73,7 +77,8 @@ pub async fn list(
         .ok_or_else(|| ServerError::Forbidden(CHAT_WITHOUT_WORKSPACE.to_string()))?;
     let (organization, settings) = saved(&state, workspace).await?;
     let choice = chats::provider::get(state.db(), id).await?;
-    let offers = provider::offers(&state, organization, &settings).await?;
+    let loaded = policy::load(&state, organization, Some(workspace)).await;
+    let offers = provider::offers(&state, organization, &settings, governing(&loaded)).await?;
     let cli = Route::of(
         state.config(),
         workspace,
@@ -81,6 +86,7 @@ pub async fn list(
         settings.clone(),
         choice.clone(),
     )
+    .with_policy(loaded.ok().flatten())
     .agent(state.config())
     .is_some();
     let selected = choice.map(|choice| Selection {
@@ -113,9 +119,14 @@ pub async fn choose(
     if let Err(error) = check_workspace_write_access(&state, &auth, workspace).await {
         return error.into_response();
     }
+    let asked = Asked {
+        workspace,
+        actor: auth.0.user_id().ok(),
+        subject: Subject::Chat(id),
+    };
     let choice = match chosen(
         &state,
-        workspace,
+        asked,
         request.provider.as_deref(),
         request.model.as_deref(),
     )
@@ -145,11 +156,12 @@ pub async fn choose(
     }
 }
 
-/// The choice `provider` and `model` make for a chat in `workspace`, checked
-/// against what the workspace can use. No provider follows the workspace.
+/// The choice `provider` and `model` make for a chat in the workspace `asked`
+/// names, checked against what the workspace can use and what its agent policy
+/// allows, with a denial audited. No provider follows the workspace.
 pub(super) async fn chosen(
     state: &AppState,
-    workspace: Uuid,
+    asked: Asked,
     provider: Option<&str>,
     model: Option<&str>,
 ) -> Result<Option<Choice>, Refusal> {
@@ -159,18 +171,55 @@ pub(super) async fn chosen(
             None => Ok(None),
         };
     };
+    let workspace = asked.workspace;
     let (organization, settings) = saved(state, workspace)
         .await
         .map_err(|_| Refusal::Unreadable)?;
-    provider::choose(state, organization, &settings, provider, model)
-        .await
-        .map(Some)
+    let loaded = policy::load(state, organization, Some(workspace)).await;
+    let refused = match &loaded {
+        Ok(None) => None,
+        Ok(Some(effective)) => {
+            Provider::named(provider).and_then(|named| policy::provider(effective, named).err())
+        }
+        Err(denial) => Some(*denial),
+    };
+    if let Some(denial) = refused {
+        asked.record(state, denial, Some(provider)).await;
+        return Err(Refusal::Denied(denial));
+    }
+    let choice = provider::choose(state, organization, &settings, provider, model).await?;
+    let route = Route::of(
+        state.config(),
+        workspace,
+        organization,
+        settings,
+        Some(choice.clone()),
+    )
+    .with_policy(loaded.ok().flatten());
+    if let Err(denial) = route.precheck(state, choice.model.as_deref()).await {
+        let detail = match denial {
+            Denial::Model => choice.model.as_deref(),
+            _ => Some(provider),
+        };
+        asked.record(state, denial, detail).await;
+        return Err(Refusal::Denied(denial));
+    }
+    Ok(Some(choice))
+}
+
+/// The policy `loaded` holds, as an offer is judged by it.
+fn governing(loaded: &Result<Option<Effective>, Denial>) -> Result<Option<&Effective>, Denial> {
+    match loaded {
+        Ok(effective) => Ok(effective.as_ref()),
+        Err(denial) => Err(*denial),
+    }
 }
 
 pub(super) fn refused(refusal: Refusal) -> Response {
     let status = match refusal {
         Refusal::Unavailable(..) => StatusCode::CONFLICT,
         Refusal::Unreadable => StatusCode::INTERNAL_SERVER_ERROR,
+        Refusal::Denied(_) => StatusCode::FORBIDDEN,
         Refusal::Unnamed
         | Refusal::Blank
         | Refusal::Orphaned
@@ -198,7 +247,8 @@ async fn saved(
 }
 
 /// The workspace's default offer, reported however it stands, and every
-/// offer a chat can choose.
+/// offer a chat can choose, beside those the agent policy denies, so a chat
+/// sees why it can't choose them.
 fn split(offers: Vec<Offer>, settings: &EffectiveAiSettings) -> (Offer, Vec<Offer>) {
     let default = offered(
         &offers,
@@ -206,7 +256,7 @@ fn split(offers: Vec<Offer>, settings: &EffectiveAiSettings) -> (Offer, Vec<Offe
     );
     let providers = offers
         .into_iter()
-        .filter(|offer| offer.usable && offer.provider.choosable())
+        .filter(|offer| (offer.usable || offer.denial.is_some()) && offer.provider.choosable())
         .collect();
     (default, providers)
 }
@@ -235,6 +285,7 @@ mod tests {
             models: Vec::new(),
             efforts: &[],
             requires_model: false,
+            denial: None,
         }
     }
 
@@ -260,6 +311,27 @@ mod tests {
                 Provider::Codex
             ],
             "only usable, choosable providers are offered, in order"
+        );
+    }
+
+    #[test]
+    fn a_denied_offer_is_listed_unusable_beside_the_usable_ones() {
+        let offers = Provider::ALL
+            .map(|provider| {
+                let mut offer = offer(provider, provider == Provider::SelfHosted);
+                if matches!(provider, Provider::OpenAI | Provider::Bedrock) {
+                    offer.denial = Some(Denial::Model.code().to_string());
+                }
+                offer
+            })
+            .to_vec();
+
+        let (_, offered) = split(offers, &settings(Provider::SelfHosted.as_str()));
+
+        assert_eq!(
+            providers(&offered),
+            [Provider::SelfHosted, Provider::OpenAI],
+            "a denied provider is listed so a chat sees why, unless it can't be chosen at all"
         );
     }
 
