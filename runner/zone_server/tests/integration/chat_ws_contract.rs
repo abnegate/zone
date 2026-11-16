@@ -32,6 +32,7 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
 };
+use zone_enterprise::policy::Denial;
 use zone_server::{
     agent::wait::{Verdict, WaitSettled, Waiting},
     auth::validate_access_token,
@@ -1385,6 +1386,24 @@ fn a_job_exited_frame_is_matched_by_its_job_and_omits_an_exit_code_it_never_had(
             "job": {"id": JOB_ID},
         }),
         "a killed job has no exit code, and the key is absent rather than null"
+    );
+}
+
+#[test]
+fn a_denied_frame_carries_the_policy_refusal_and_its_code_and_nothing_else() {
+    let frame = serde_json::to_value(ServerMessage::Denied {
+        message: Denial::Model.to_string(),
+        code: Denial::Model.code().to_string(),
+    })
+    .expect("the frame serialises");
+
+    assert_eq!(
+        frame,
+        json!({
+            "type": "denied",
+            "message": "Your organization's policy doesn't allow this model in this workspace. Choose an allowed model.",
+            "code": "policy_model_denied",
+        })
     );
 }
 

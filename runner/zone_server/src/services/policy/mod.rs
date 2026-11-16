@@ -247,7 +247,8 @@ mod tests {
     }
 
     async fn routing(model: &str) -> MockServer {
-        let server = MockServer::start().await;
+        // Unpooled: a pooled server's URL may still have another test's routes cached.
+        let server = MockServer::builder().start().await;
         Mock::given(method("GET"))
             .and(path("/v2/model/info"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -279,7 +280,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_model_the_policy_does_not_list_is_denied_on_any_backend() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         let effective = effective(Rules {
             models: Some(vec!["claude-opus-*".into()]),
             ..Rules::default()
@@ -298,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_direct_api_is_judged_by_that_api_without_a_lookup() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(500))
             .expect(0)
@@ -361,7 +362,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_endpoint_without_routes_is_another_provider() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
@@ -393,7 +394,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_is_looked_up_while_providers_are_unrestricted() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(500))
             .expect(0)
@@ -420,7 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_coding_agent_is_judged_by_its_agent_and_model_alone() {
-        let server = MockServer::start().await;
+        let server = MockServer::builder().start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(500))
             .expect(0)
