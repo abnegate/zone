@@ -198,6 +198,11 @@ account with usage credits turned on keeps every turn going past its plan's
 limits, on those credits: read *Usage credits* before choosing it for an
 organization whose tasks run unattended.
 
+With a Zone Team or Enterprise license, an organization's agent policy can
+restrict which providers, coding agents and models its organization and
+workspaces may use, how far Auto-approve goes, and which MCP servers and
+domains agents reach. See [POLICY.md](POLICY.md).
+
 ### Saved endpoints
 
 Self-Hosted, OpenAI and Anthropic send completions over HTTP to the endpoint
