@@ -88,8 +88,19 @@ async function capturePage(
     await expect(page.locator(content).first()).toBeVisible();
     await expect(page.locator(SKELETON_CARD)).toHaveCount(0);
   }
-  if (options?.path?.includes('modal-'))
+  if (options?.path?.includes('modal-')) {
     await expect(page.getByRole('dialog')).toBeVisible();
+    await expect(page.getByRole('dialog')).toHaveCSS('opacity', '1');
+    await page.waitForFunction(() =>
+      document
+        .getAnimations()
+        .every(
+          (animation) =>
+            animation.playState !== 'running' ||
+            !Number.isFinite(animation.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY)
+        )
+    );
+  }
   await fontsLoaded(page);
   await page.screenshot({ ...options, animations: 'disabled', style: SETTLED_FILE_BUTTONS });
 }
