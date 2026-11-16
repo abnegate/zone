@@ -1,4 +1,5 @@
 use uuid::Uuid;
+use zone_enterprise::policy::Effective;
 
 use super::Continuation;
 
@@ -19,4 +20,6 @@ pub struct Routing<'a> {
     /// Whether only the configured agent's logins may run it, never another agent's: a chat
     /// that chose its agent runs on that agent or not at all.
     pub strict: bool,
+    /// The agent policy the backend runs under: no agent it denies is run.
+    pub policy: Option<&'a Effective>,
 }
