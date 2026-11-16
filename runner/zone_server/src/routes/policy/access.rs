@@ -9,7 +9,7 @@ use crate::db::workspaces;
 const ORGANIZATION_MISSING: &str = "Organization not found";
 const WORKSPACE_MISSING: &str = "Workspace not found";
 
-/// What a caller may do with a policy layer. Every caller who may see a layer may read it.
+/// Every caller who may see a layer may read it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
     Read,
@@ -21,7 +21,6 @@ impl Access {
         self == Self::Write
     }
 
-    /// Refuses a change unless the caller may write the layer.
     pub fn write(self, refused: &'static str) -> Result<(), Refusal> {
         match self {
             Self::Write => Ok(()),

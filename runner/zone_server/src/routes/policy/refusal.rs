@@ -11,7 +11,6 @@ use crate::routes::common::ErrorResponse;
 const FAILED: &str = "Could not load or save the agent policy";
 const UNAUTHENTICATED: &str = "Invalid user ID in token";
 
-/// Why an agent policy route answered without the policy.
 #[derive(Debug)]
 pub enum Refusal {
     Unauthenticated,
@@ -82,7 +81,6 @@ impl IntoResponse for Refusal {
     }
 }
 
-/// A request the agent policy refuses, answered as 403 with the denial's code.
 pub fn denied(denial: Denial) -> Response {
     (
         StatusCode::FORBIDDEN,
@@ -91,7 +89,6 @@ pub fn denied(denial: Denial) -> Response {
         .into_response()
 }
 
-/// Rules an admin can't save, answered as 400 with the error's code.
 pub fn invalid(error: &policy::Error) -> Response {
     (
         StatusCode::BAD_REQUEST,

@@ -280,8 +280,6 @@ pub async fn delete_workspace_theme(pool: &PgPool, workspace_id: Uuid) -> DbResu
     Ok(result.rows_affected() > 0)
 }
 
-/// Locks a workspace's link to its organization for the caller's transaction, and reports whether
-/// the workspace belongs to that organization.
 pub async fn lock_owned(
     connection: &mut PgConnection,
     organization_id: Uuid,

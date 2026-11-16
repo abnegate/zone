@@ -1678,7 +1678,6 @@ async fn routed(
         .map_err(Fault::backend)
 }
 
-/// `model`, when the agent policy `route` runs under lets it run on `backend`.
 async fn admitted(
     route: &Route,
     backend: &LlmBackend,
@@ -1690,8 +1689,6 @@ async fn admitted(
     }
 }
 
-/// Audits that the agent policy refused a run of `task`, started by `actor`,
-/// with `denial`, on `model` when one was judged.
 async fn refused(
     state: &AppState,
     task: &tasks::TaskRow,
@@ -2856,16 +2853,12 @@ async fn task_tools(
     }
 }
 
-/// The organization's agent policy a run's tools are held to, and where every
-/// call it refuses is audited.
 struct Enforcement {
     policy: Arc<Effective>,
     auditor: Auditor,
 }
 
 impl Enforcement {
-    /// The enforcement `route`'s policy asks of a run of `task` started by
-    /// `actor`, none when no policy is enforced.
     fn of(
         state: &AppState,
         route: &Route,
@@ -9184,7 +9177,6 @@ mod cli_tests {
         .with_sign_in(SignIn::Organization)
     }
 
-    /// A route under `rules`, the organization's policy, on `provider`.
     fn governed(state: &AppState, provider: &str, rules: Rules) -> Route {
         Route::new(
             state.config(),

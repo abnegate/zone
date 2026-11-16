@@ -406,22 +406,41 @@ async fn authorize_workspace(
     Err(denied(StatusCode::NOT_FOUND, missing))
 }
 
+async fn find_task(state: &AppState, task_id: Uuid) -> Result<tasks::TaskRow, Box<Response>> {
+    tasks::get_task(state.db(), task_id)
+        .await
+        .map_err(database_error)?
+        .ok_or_else(|| denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND))
+}
+
 async fn authorize_task(
     state: &AppState,
     auth: &AuthUser,
     task_id: Uuid,
 ) -> Result<tasks::TaskRow, Box<Response>> {
-    let task = tasks::get_task(state.db(), task_id)
-        .await
-        .map_err(database_error)?
-        .ok_or_else(|| denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND))?;
-
+    let task = find_task(state, task_id).await?;
     authorize_workspace(state, auth, task.workspace_id, TASK_NOT_FOUND).await?;
     Ok(task)
 }
 
-/// Refuses a run of `task` on `model`, or on the model its run chooses when none is named,
-/// that its workspace's agent policy denies, with the denial audited as `actor`'s.
+/// A task the caller may change, answering anyone else the way the change itself would, so a
+/// caller who could never make it is not told what the agent policy thinks of it.
+async fn authorize_writer(
+    state: &AppState,
+    auth: &AuthUser,
+    task_id: Uuid,
+) -> Result<tasks::TaskRow, Box<Response>> {
+    let user_id = user_id(auth)?;
+    let task = find_task(state, task_id).await?;
+    let writable = workspace_members::can_write(state.db(), task.workspace_id, user_id)
+        .await
+        .map_err(database_error)?;
+    if !writable {
+        return Err(denied(StatusCode::NOT_FOUND, TASK_NOT_FOUND));
+    }
+    Ok(task)
+}
+
 async fn admitted(
     state: &AppState,
     task: &tasks::TaskRow,
@@ -587,7 +606,7 @@ pub async fn update(
         .as_deref()
         .filter(|model| !model.trim().is_empty())
     {
-        let admission = match authorize_task(&state, &auth, id).await {
+        let admission = match authorize_writer(&state, &auth, id).await {
             Ok(task) => admitted(&state, &task, user_id, Some(model)).await,
             Err(response) => Err(response),
         };
@@ -763,7 +782,7 @@ pub async fn create_run(
         Ok(user_id) => user_id,
         Err(response) => return *response,
     };
-    let admission = match authorize_task(&state, &auth, id).await {
+    let admission = match authorize_writer(&state, &auth, id).await {
         Ok(task) => admitted(&state, &task, user_id, task.model_name.as_deref()).await,
         Err(response) => Err(response),
     };
