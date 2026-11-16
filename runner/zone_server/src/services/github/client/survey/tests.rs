@@ -26,6 +26,13 @@ use crate::services::github::testing::COMMIT;
 use crate::services::github::testing::mocked;
 use crate::services::github::testing::pull_detail;
 use crate::services::github::testing::summary;
+use abnegate_vcs::CheckRun;
+use abnegate_vcs::Collected;
+use abnegate_vcs::CommitSha as Revision;
+use abnegate_vcs::CommitStatus;
+use abnegate_vcs::IssueComment;
+use abnegate_vcs::MergeableState;
+use abnegate_vcs::WorkflowRun;
 
 const NUMBER: u64 = 7;
 const SOURCE: &str = "owner/repository";
@@ -54,7 +61,7 @@ struct Parts {
     mergeable: MergeableState,
     threads: ReviewThreadCount,
     comments: Collected<IssueComment>,
-    head: Option<Head>,
+    head: Option<HeadChecks>,
 }
 
 fn commit() -> Revision {
@@ -331,7 +338,7 @@ impl Fixture {
                 true,
             ),
             comments: Collected::new(self.comments[newest..].to_vec(), newest == 0),
-            head: Some((
+            head: Some(HeadChecks::new(
                 commit(),
                 Collected::new(self.workflows.clone(), true),
                 Collected::new(self.checks.clone(), true),
@@ -526,15 +533,24 @@ async fn listed(
     row: &ListedPullRequest,
     parts: Parts,
 ) -> Result<PullRequest, Fault> {
+    surveyed(github, permits, row, row.clone(), parts).await
+}
+
+/// `row` assessed from `parts`, read in the batch as `read`.
+async fn surveyed(
+    github: &Github,
+    permits: &Semaphore,
+    row: &ListedPullRequest,
+    read: ListedPullRequest,
+    parts: Parts,
+) -> Result<PullRequest, Fault> {
+    let evidence = PullRequestEvidence::new(read, parts.mergeable, parts.threads, parts.comments);
+    let evidence = match parts.head {
+        Some(head) => evidence.with_head(head),
+        None => evidence,
+    };
     github
-        .assess_listed(
-            permits,
-            row,
-            parts.mergeable,
-            parts.threads,
-            parts.comments,
-            parts.head,
-        )
+        .assess_open(permits, row, evidence)
         .await
         .map(|assessed| PullRequest::assessed(assessed, &repository(), row, now()))
 }
@@ -645,14 +661,14 @@ async fn checks_the_batch_could_not_hold_are_read_again_for_the_head() {
     let fixture = ready();
     let rest = reassessed(&fixture).await;
     let partial = |workflows: bool, checks: bool, statuses: bool| {
-        Some((
+        Some(HeadChecks::new(
             commit(),
             Collected::new(fixture.workflows.clone(), workflows),
             Collected::new(fixture.checks.clone(), checks),
             Collected::new(fixture.statuses.clone(), statuses),
         ))
     };
-    let foreign = Some((
+    let foreign = Some(HeadChecks::new(
         Revision::parse(BLOB).unwrap(),
         Collected::new(Vec::new(), true),
         Collected::new(Vec::new(), true),
@@ -734,4 +750,78 @@ async fn overflowing_threads_and_checks_share_one_permit() {
     assert_eq!(batched, rest);
     assert_eq!(permits.available_permits(), 1);
     server.verify().await;
+}
+
+/// The REST verdict on `fixture` when reading it by number finds `detail`.
+async fn reassessed_reading(fixture: &Fixture, detail: Value) -> PullRequest {
+    let server = MockServer::start().await;
+    answer(&server, &format!("pulls/{NUMBER}"), None, detail, None).await;
+    fixture.serve(&server).await;
+    let github = mocked(&server);
+    let row = fixture.row(&github);
+    let assessed = github.assess(&row, None, Depth::Listing).await.unwrap();
+    PullRequest::assessed(assessed, &repository(), &row, now())
+}
+
+#[tokio::test]
+async fn a_head_that_moved_after_the_listing_is_never_verified_or_checked() {
+    let fixture = ready();
+    let rest = reassessed_reading(&fixture, pull_detail(BLOB)).await;
+    let silent = silent().await;
+    let github = mocked(&silent);
+    let row = fixture.row(&github);
+    let moved = row.clone().with_head_sha(Revision::parse(BLOB).unwrap());
+    let parts = Parts {
+        head: Some(HeadChecks::new(
+            Revision::parse(BLOB).unwrap(),
+            Collected::new(Vec::new(), true),
+            Collected::new(Vec::new(), true),
+            Collected::new(Vec::new(), true),
+        )),
+        ..fixture.parts()
+    };
+
+    let batched = surveyed(&github, &closed(), &row, moved, parts)
+        .await
+        .unwrap();
+
+    assert_eq!(batched, rest);
+    assert_eq!(batched.head, None);
+    assert!(
+        batched
+            .blockers
+            .iter()
+            .any(|blocker| blocker.code == BlockerCode::HeadCommitUnverified),
+        "{:?}",
+        batched.blockers
+    );
+    silent.verify().await;
+}
+
+#[tokio::test]
+async fn a_pull_request_the_batch_reads_as_a_draft_is_one_though_listed_ready() {
+    let fixture = ready();
+    let mut detail = pull_detail(COMMIT);
+    detail["draft"] = json!(true);
+    let rest = reassessed_reading(&fixture, detail).await;
+    let silent = silent().await;
+    let github = mocked(&silent);
+    let row = fixture.row(&github);
+    let drafted = row.clone().with_draft(true);
+
+    let batched = surveyed(&github, &closed(), &row, drafted, fixture.parts())
+        .await
+        .unwrap();
+
+    assert_eq!(batched, rest);
+    assert!(batched.draft);
+    assert!(
+        batched
+            .blockers
+            .iter()
+            .any(|blocker| blocker.code == BlockerCode::Draft),
+        "{:?}",
+        batched.blockers
+    );
+    silent.verify().await;
 }

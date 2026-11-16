@@ -1,3 +1,4 @@
+use std::num::NonZeroU8;
 use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 
@@ -8,11 +9,14 @@ use abnegate_vcs::Excerpt;
 use abnegate_vcs::ListedPullRequest;
 use abnegate_vcs::PullRequestCommit;
 use abnegate_vcs::PullRequestError;
+use abnegate_vcs::PullRequestEvidence;
 use abnegate_vcs::PullRequestReference;
+use abnegate_vcs::RepositoryId;
 use abnegate_vcs::ReviewThreadRecord;
 use abnegate_vcs::StateFilter;
 use chrono::DateTime;
 use chrono::Utc;
+use tokio::sync::Semaphore;
 
 use super::Commit;
 use super::DIFF_BUDGET;
@@ -28,8 +32,11 @@ use crate::services::github::diff::Diff;
 use crate::services::github::diff::Entry;
 use crate::services::github::fault::Fault;
 use crate::services::github::link::absolute;
+use crate::services::github::throttle::admitted;
 
 pub(super) const NOT_ACCEPTABLE: u16 = 406;
+pub(super) const MOVED_REPOSITORY: &str =
+    "GitHub listed open pull requests of another repository part way through.";
 
 impl Github {
     pub(crate) async fn open_pulls(
@@ -60,6 +67,88 @@ impl Github {
                 }
             }
         }
+    }
+
+    /// Up to `limit` of the repository's open pull requests, the most
+    /// recently updated first, read through GraphQL a page at a time under
+    /// one of `permits` each, with the repository's node id and whether that
+    /// was every open pull request.
+    pub(crate) async fn open_pull_requests(
+        &self,
+        permits: &Semaphore,
+        limit: u32,
+    ) -> Result<(RepositoryId, Vec<ListedPullRequest>, bool), Fault> {
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let mut pulls = Vec::new();
+        let mut repository: Option<RepositoryId> = None;
+        let mut after: Option<String> = None;
+        loop {
+            let page = {
+                let _permit = admitted(permits).await?;
+                self.service()
+                    .list_open_pull_requests(
+                        self.repository(),
+                        self.token(),
+                        page_size(limit.saturating_sub(pulls.len())),
+                        after.as_deref(),
+                    )
+                    .await?
+            };
+            let identified = repository.get_or_insert_with(|| page.repository_id.clone());
+            if *identified != page.repository_id {
+                return Err(Fault::upstream(MOVED_REPOSITORY));
+            }
+            pulls.extend(page.items);
+            match page.next {
+                Some(next) if pulls.len() < limit => after = Some(next),
+                next => {
+                    let complete = next.is_none() && pulls.len() <= limit;
+                    pulls.truncate(limit);
+                    return Ok((page.repository_id, pulls, complete));
+                }
+            }
+        }
+    }
+
+    /// The evidence on each pull request `rows` lists, read in one GraphQL
+    /// request under one of `permits` that is let go once GitHub answers. A
+    /// pull request read for another, or that GitHub could not answer for, is
+    /// `None`, and so is every one of them when GitHub refused the request
+    /// for any reason short of a halt, to be read through REST instead.
+    pub(crate) async fn evidence(
+        &self,
+        permits: &Semaphore,
+        repository: &RepositoryId,
+        rows: &[&ListedPullRequest],
+    ) -> Result<Vec<Option<PullRequestEvidence>>, Fault> {
+        let ids: Vec<&str> = rows.iter().map(|row| row.node_id.as_str()).collect();
+        let read = {
+            let _permit = admitted(permits).await?;
+            self.service()
+                .fetch_pull_request_evidence(self.repository(), self.token(), repository, &ids)
+                .await
+        };
+        let slots = match read.map_err(Fault::from) {
+            Ok(slots) if slots.len() == rows.len() => slots,
+            Ok(slots) => {
+                tracing::warn!(
+                    asked = rows.len(),
+                    answered = slots.len(),
+                    "GitHub answered for a different number of pull requests than asked"
+                );
+                return Ok(rows.iter().map(|_| None).collect());
+            }
+            Err(fault) if fault.halts() => return Err(fault),
+            Err(fault) => {
+                tracing::warn!(%fault, "Reading pull requests through REST after GitHub refused their batch");
+                return Ok(rows.iter().map(|_| None).collect());
+            }
+        };
+        Ok(slots
+            .into_iter()
+            .zip(rows)
+            .map(|(slot, row)| slot.into_evidence().filter(|read| answers(read, row)))
+            .collect())
     }
 
     pub(crate) async fn pull_commits(
@@ -194,6 +283,22 @@ pub(super) fn budgeted(files: &[ChangedFile], budget: usize) -> Vec<Entry<'_>> {
             }
         })
         .collect()
+}
+
+/// How many open pull requests to ask GitHub for when `remaining` are
+/// wanted: at least one and at most a page.
+fn page_size(remaining: usize) -> NonZeroU8 {
+    let size = remaining.clamp(1, usize::from(PER_PAGE.get()));
+    u8::try_from(size)
+        .ok()
+        .and_then(NonZeroU8::new)
+        .unwrap_or(PER_PAGE)
+}
+
+/// Whether `read` is the pull request `row` lists, in the repository it is
+/// listed in.
+fn answers(read: &PullRequestEvidence, row: &ListedPullRequest) -> bool {
+    read.pull_request.node_id == row.node_id && read.pull_request.reference == row.reference
 }
 
 fn budget() -> usize {

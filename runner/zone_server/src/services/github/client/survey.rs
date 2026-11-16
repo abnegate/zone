@@ -1,12 +1,7 @@
-use abnegate_vcs::CheckRun;
-use abnegate_vcs::Collected;
-use abnegate_vcs::CommitSha as Revision;
-use abnegate_vcs::CommitStatus;
-use abnegate_vcs::IssueComment;
+use abnegate_vcs::HeadChecks;
 use abnegate_vcs::ListedPullRequest;
-use abnegate_vcs::MergeableState;
+use abnegate_vcs::PullRequestEvidence;
 use abnegate_vcs::ReviewThreadCount;
-use abnegate_vcs::WorkflowRun;
 use tokio::sync::Semaphore;
 
 use super::Github;
@@ -23,39 +18,51 @@ use crate::services::github::readiness::CheckEvidence;
 use crate::services::github::readiness::CommitSha;
 use crate::services::github::throttle::admitted;
 
-type Head = (
-    Revision,
-    Collected<WorkflowRun>,
-    Collected<CheckRun>,
-    Collected<CommitStatus>,
-);
-
 impl Github {
-    /// A listed pull request's readiness from evidence read for many pull
-    /// requests at once, the same verdict `assess` reaches reading it alone.
+    /// The readiness of the open pull request `row` lists, from `evidence`
+    /// read for many pull requests at once: the verdict `assess` reaches
+    /// reading it alone. A head the listing and the evidence disagree on is
+    /// never verified, as a head the listing and a read by number disagree on
+    /// never is.
     ///
     /// Only what that read could not hold in full is read again, under one of
     /// `permits`: review threads past the ones it counted, and the head's
     /// checks when they overflowed or were of a commit other than the head.
     /// A pull request whose evidence was read in full takes no permit.
-    pub(crate) async fn assess_listed(
+    pub(crate) async fn assess_open(
         &self,
         permits: &Semaphore,
         row: &ListedPullRequest,
-        mergeable: MergeableState,
-        threads: ReviewThreadCount,
-        comments: Collected<IssueComment>,
-        head: Option<Head>,
+        evidence: PullRequestEvidence,
     ) -> Result<Assessed, Fault> {
-        let listed = row
+        let PullRequestEvidence {
+            pull_request,
+            mergeable_state,
+            threads,
+            comments,
+            head,
+            ..
+        } = evidence;
+        let read = pull_request
             .head_sha
             .as_ref()
             .and_then(|sha| CommitSha::parse(sha.as_str()));
+        let listed = row
+            .head_sha
+            .as_ref()
+            .and_then(|sha| CommitSha::parse(sha.as_str()))
+            .filter(|listed| read.as_ref() == Some(listed));
         let batched = match head {
             Some(head) if whole(&head, listed.as_ref()) => {
-                let (sha, workflows, checks, statuses) = head;
+                let HeadChecks {
+                    sha,
+                    workflow_runs,
+                    check_runs,
+                    statuses,
+                    ..
+                } = head;
                 let (workflows, checks, statuses, complete) =
-                    vetted(&sha, workflows, checks, statuses)?;
+                    vetted(&sha, workflow_runs, check_runs, statuses)?;
                 Some(self.checked(&workflows, &checks, &statuses, complete))
             }
             _ => None,
@@ -73,9 +80,9 @@ impl Github {
         Ok(self.appraise(
             row,
             Gathered {
-                draft: row.draft,
+                draft: pull_request.draft,
                 head: listed,
-                mergeable: mergeability(mergeable),
+                mergeable: mergeability(mergeable_state),
                 threads: thread_evidence(threads),
                 comments: comment_evidence(comments.items, comments.complete),
                 checks,
@@ -114,12 +121,11 @@ impl Github {
 
 /// Whether `head` holds every check on the listed head commit, so nothing
 /// about it needs reading again.
-fn whole(head: &Head, listed: Option<&CommitSha>) -> bool {
-    let (sha, workflows, checks, statuses) = head;
-    listed.is_some_and(|listed| CommitSha::parse(sha.as_str()).as_ref() == Some(listed))
-        && workflows.complete
-        && checks.complete
-        && statuses.complete
+fn whole(head: &HeadChecks, listed: Option<&CommitSha>) -> bool {
+    listed.is_some_and(|listed| CommitSha::parse(head.sha.as_str()).as_ref() == Some(listed))
+        && head.workflow_runs.complete
+        && head.check_runs.complete
+        && head.statuses.complete
 }
 
 #[cfg(test)]
