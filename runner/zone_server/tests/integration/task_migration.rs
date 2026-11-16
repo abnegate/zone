@@ -1107,7 +1107,9 @@ async fn an_index_build_interrupted_on_an_earlier_boot_is_built_again() {
         .iter()
         .filter(|migration| migration.version > BEFORE_CONCURRENT_INDEXES && migration.no_tx)
         .map(|migration| {
-            let index = interrupted::index_built(migration.sql.as_str())
+            let index = interrupted::indexes_built(migration.sql.as_str())
+                .into_iter()
+                .next()
                 .expect("each concurrent migration builds a named index");
             (index, migration.sql.as_str().to_string())
         })

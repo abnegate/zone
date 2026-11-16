@@ -17,9 +17,9 @@ const INVALID_INDEXES: &str = "SELECT format('%I.%I', namespace.nspname, class.r
      WHERE NOT pg_index.indisvalid AND namespace.nspname = current_schema() \
        AND class.relname = ANY($1)";
 
-/// The index a `CREATE [UNIQUE] INDEX CONCURRENTLY` statement in `sql` builds,
-/// named as Postgres stores it.
-pub fn index_built(sql: &str) -> Option<String> {
+/// Every index the `CREATE [UNIQUE] INDEX CONCURRENTLY` statements in `sql`
+/// build, named as Postgres stores them.
+pub fn indexes_built(sql: &str) -> Vec<String> {
     let code = sql
         .lines()
         .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
@@ -31,18 +31,29 @@ pub fn index_built(sql: &str) -> Option<String> {
             .get(at)
             .is_some_and(|word| word.eq_ignore_ascii_case(expected))
     };
-    let at = (0..words.len()).find(|&at| {
-        keyword(at, "INDEX")
-            && keyword(at + 1, "CONCURRENTLY")
-            && (at >= 1 && keyword(at - 1, "CREATE")
-                || at >= 2 && keyword(at - 1, "UNIQUE") && keyword(at - 2, "CREATE"))
-    })?;
-    let named = words[at + 2..].iter().find(|word| {
-        !QUALIFIERS
-            .iter()
-            .any(|qualifier| word.eq_ignore_ascii_case(qualifier))
-    })?;
-    let named = named.split('(').next().unwrap_or(named);
+    (0..words.len())
+        .filter(|&at| {
+            keyword(at, "INDEX")
+                && keyword(at + 1, "CONCURRENTLY")
+                && (at >= 1 && keyword(at - 1, "CREATE")
+                    || at >= 2 && keyword(at - 1, "UNIQUE") && keyword(at - 2, "CREATE"))
+        })
+        .filter_map(|at| {
+            words[at + 2..]
+                .iter()
+                .find(|word| {
+                    !QUALIFIERS
+                        .iter()
+                        .any(|qualifier| word.eq_ignore_ascii_case(qualifier))
+                })
+                .copied()
+                .and_then(stored_name)
+        })
+        .collect()
+}
+
+fn stored_name(word: &str) -> Option<String> {
+    let named = word.split('(').next().unwrap_or(word);
     let named = named.rsplit('.').next().unwrap_or(named);
     match named
         .strip_prefix('"')
@@ -75,7 +86,7 @@ pub async fn drop_invalid_indexes(
         .iter()
         .filter(|migration| migration.no_tx && !applied.contains(&migration.version))
         .filter(|migration| !migration.migration_type.is_down_migration())
-        .filter_map(|migration| index_built(migration.sql.as_str()))
+        .flat_map(|migration| indexes_built(migration.sql.as_str()))
         .collect();
     if pending.is_empty() {
         return Ok(());
@@ -97,7 +108,7 @@ pub async fn drop_invalid_indexes(
 
 #[cfg(test)]
 mod tests {
-    use super::index_built;
+    use super::indexes_built;
 
     #[test]
     fn a_concurrent_build_names_the_index_it_builds() {
@@ -119,7 +130,7 @@ mod tests {
                 "Idx_Runs",
             ),
         ] {
-            assert_eq!(index_built(sql).as_deref(), Some(name), "{sql}");
+            assert_eq!(indexes_built(sql), [name], "{sql}");
         }
     }
 
@@ -132,7 +143,15 @@ mod tests {
             "-- CREATE INDEX CONCURRENTLY idx_runs ON task_runs (id)",
             "REINDEX INDEX CONCURRENTLY idx_runs",
         ] {
-            assert_eq!(index_built(sql), None, "{sql}");
+            assert!(indexes_built(sql).is_empty(), "{sql}");
         }
+    }
+
+    #[test]
+    fn every_concurrent_build_in_a_migration_is_named() {
+        let sql = "-- no-transaction\n\
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_task ON task_runs (task_id);\n\
+            CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS idx_runs_owner ON task_runs (owner);";
+        assert_eq!(indexes_built(sql), ["idx_runs_task", "idx_runs_owner"]);
     }
 }
