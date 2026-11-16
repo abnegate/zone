@@ -2,7 +2,6 @@ use uuid::Uuid;
 
 use super::RunRow;
 
-/// One finished run with the source its task belongs to and the model it ran on.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct AttributedRunRow {
     #[sqlx(flatten)]

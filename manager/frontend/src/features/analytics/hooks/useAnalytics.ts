@@ -6,7 +6,7 @@ import { ValidationError } from '../../../validation';
 import { analyticsKeys } from '../queryKeys';
 import type { Overview, TimePeriod } from '../types';
 
-const STALE_MS = 60_000;
+const STALE_MILLISECONDS = 60_000;
 
 export const NO_WORKSPACE = 'No workspace selected';
 
@@ -36,7 +36,7 @@ export function useAnalytics(period: TimePeriod): Analytics {
       return analyticsApi.overview(workspaceId, period, signal);
     },
     enabled: !!workspaceId,
-    staleTime: STALE_MS,
+    staleTime: STALE_MILLISECONDS,
     placeholderData: (previous, previousQuery) =>
       previousQuery && partialMatchKey(previousQuery.queryKey, analyticsKeys.workspace(workspaceId))
         ? previous

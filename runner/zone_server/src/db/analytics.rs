@@ -91,7 +91,6 @@ pub async fn snapshot(pool: &PgPool) -> DbResult<Transaction<'static, Postgres>>
     Ok(transaction)
 }
 
-/// Active workspaces with a run that finished inside the window.
 pub async fn reportable_workspaces<'e, E>(
     executor: E,
     since: NaiveDateTime,
@@ -273,7 +272,6 @@ where
     Capped::fetch(query, limit, executor).await
 }
 
-/// How many of the workspace's tasks stand in each status right now.
 pub async fn task_statuses<'e, E>(executor: E, workspace_id: Uuid) -> DbResult<Vec<CountRow>>
 where
     E: Executor<'e, Database = Postgres>,
@@ -293,7 +291,6 @@ where
     .await
 }
 
-/// How many tasks each origin put on the board inside `[start, end)`.
 pub async fn task_origins<'e, E>(
     executor: E,
     workspace_id: Uuid,
@@ -322,8 +319,6 @@ where
     .await
 }
 
-/// Tasks created inside `[start, end)`, tasks shipped inside it, and how many
-/// of those shipped have since been reopened.
 pub async fn task_activity<'e, E>(
     executor: E,
     workspace_id: Uuid,
@@ -358,9 +353,8 @@ where
     .await
 }
 
-/// How many runs that finished inside `[start, end)` reached each evaluation
-/// verdict, reading each run's newest log from `phase` and `agent` that
-/// carries one. A log whose verdict is null or not text carries none, so it
+/// Each run counts its newest log from `phase` and `agent` that carries a
+/// verdict. A log whose verdict is null or not text carries none, so it
 /// cannot hide an older log that does.
 pub async fn evaluation_verdicts<'e, E>(
     executor: E,

@@ -1,4 +1,3 @@
-/// How many tasks a workspace created, shipped, and shipped only to reopen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::FromRow)]
 pub struct TaskActivityRow {
     pub created: i64,

@@ -1,7 +1,6 @@
 use chrono::NaiveDateTime;
 use uuid::Uuid;
 
-/// One finished run, as analytics reads it.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct RunRow {
     pub run_id: Uuid,
