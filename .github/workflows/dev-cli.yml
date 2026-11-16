@@ -9,6 +9,8 @@ on:
       - 'docker-compose*.yml'
       - '.env.example'
       - 'scripts/compose.sh'
+      - 'scripts/env-file.sh'
+      - 'scripts/test-env-file.sh'
       - 'scripts/configure-model-proxy.sh'
       - 'scripts/test-compose-profiles.sh'
       - 'scripts/test-migrations.py'
@@ -31,6 +33,8 @@ on:
       - 'docker-compose*.yml'
       - '.env.example'
       - 'scripts/compose.sh'
+      - 'scripts/env-file.sh'
+      - 'scripts/test-env-file.sh'
       - 'scripts/configure-model-proxy.sh'
       - 'scripts/test-compose-profiles.sh'
       - 'scripts/test-migrations.py'
@@ -89,6 +93,9 @@ jobs:
 
       - name: Verify make up and make dev retire left-out profiles without Docker
         run: python3 scripts/test-compose-up.py
+
+      - name: Verify .env values read the way Compose reads them
+        run: sh scripts/test-env-file.sh
 
       - name: Verify profile selection and retirement against real Compose
         run: |

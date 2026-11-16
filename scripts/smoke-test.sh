@@ -4,6 +4,9 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 
+# shellcheck source=SCRIPTDIR/env-file.sh
+. "$root/scripts/env-file.sh"
+
 ZONE_ENV_FILE=${ZONE_ENV_FILE:-$root/.env}
 ZONE_COMPOSE=${ZONE_COMPOSE:-./scripts/compose.sh}
 TIMEOUT_SECONDS=10
@@ -22,24 +25,6 @@ else
 fi
 
 failures=0
-
-read_env_value() {
-    name=$1
-    file=$2
-    if [ ! -f "$file" ]; then
-        return 0
-    fi
-    awk -F= -v name="$name" '
-        $0 ~ "^[[:space:]]*(export[[:space:]]+)?" name "[[:space:]]*=" {
-            value = $0
-            sub(/^[[:space:]]*(export[[:space:]]+)?[^=]+=/, "", value)
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-            gsub(/^["'\'']|["'\'']$/, "", value)
-            found = value
-        }
-        END { if (found != "") print found }
-    ' "$file"
-}
 
 setting() {
     name=$1
