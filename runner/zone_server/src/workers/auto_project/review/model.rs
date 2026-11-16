@@ -752,7 +752,6 @@ mod tests {
         venue.lineup(&Author::Unrecorded, configured, 1)
     }
 
-    /// A venue on the instance's endpoint whose organization's policy lists `models`.
     fn governed(models: &[&str]) -> Venue {
         use zone_enterprise::policy::{Effective, Rules};
 

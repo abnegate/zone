@@ -311,14 +311,12 @@ pub struct UpdateAiSettingsRequest {
 }
 
 impl UpdateAiSettingsRequest {
-    /// The provider this save names, which the agent policy judges.
     fn provider(&self) -> Option<&str> {
         self.provider
             .as_deref()
             .filter(|provider| !provider.trim().is_empty())
     }
 
-    /// The Fast and Reasoning models this save names, which the agent policy judges.
     fn models(&self) -> impl Iterator<Item = &str> {
         [self.model_fast.as_deref(), self.model_reasoning.as_deref()]
             .into_iter()
@@ -326,8 +324,6 @@ impl UpdateAiSettingsRequest {
             .filter(|model| !model.trim().is_empty())
     }
 
-    /// Why `effective` refuses this save, and what it refuses: the provider or the agent it
-    /// names, else a chat model it names.
     fn refusal(&self, effective: &Effective) -> Option<(Denial, &str)> {
         let provider = self.provider().and_then(|provider| {
             let named = Provider::named(provider)?;
@@ -389,10 +385,8 @@ fn access_error(error: ai_settings::AccessError) -> Box<Response> {
     }
 }
 
-/// Refuses, with the denial audited, `user`'s save of `request` to the AI settings of
-/// `organization`, or of `workspace` in it, when the agent policy they run under denies the
-/// provider, agent or chat model it names: the organization's own policy for its settings, and
-/// the workspace's effective policy for a workspace's. Only someone who may save them is told.
+/// An organization's settings answer to its own policy and a workspace's to its effective policy.
+/// Only someone who may save them is told.
 async fn admit(
     state: &AppState,
     user: Uuid,

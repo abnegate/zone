@@ -20,8 +20,6 @@ pub(super) enum Unprepared {
 }
 
 impl Unprepared {
-    /// The agent policy's denial that leaves the run unprepared, and the model it refused when
-    /// it judged one.
     pub(super) fn denial(&self) -> Option<(Denial, Option<&str>)> {
         match self {
             Self::Denied { denial, model } => Some((*denial, Some(model))),

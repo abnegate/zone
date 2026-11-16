@@ -54,7 +54,6 @@ impl Fixture {
         self.sso.state()
     }
 
-    /// Installs an active Team or Enterprise license.
     pub async fn license(&self, tier: Tier) {
         self.sso.license(&self.owner, tier).await;
     }
@@ -69,7 +68,6 @@ impl Fixture {
         self.sso.store_license(key).await;
     }
 
-    /// Registers someone who belongs to nothing.
     pub async fn stranger(&self) -> Account {
         self.sso.register().await
     }
@@ -87,19 +85,16 @@ impl Fixture {
         account
     }
 
-    /// Adds a member of the organization to another of its workspaces.
     pub async fn seat(&self, workspace: Uuid, account: &Account, role: WorkspaceRole) {
         workspace_members::add_member(self.pool(), workspace, account.id, role, None)
             .await
             .unwrap();
     }
 
-    /// Creates another workspace in the fixture's organization, owned by the owner.
     pub async fn another_workspace(&self) -> Uuid {
         create_workspace(self.pool(), self.organization, self.owner.id).await
     }
 
-    /// Creates another organization with a workspace of its own, both owned by `owner`.
     pub async fn another_organization(&self, owner: &Account) -> (Uuid, Uuid) {
         let organization = create_organization(self.pool(), owner.id).await;
         let workspace = create_workspace(self.pool(), organization, owner.id).await;

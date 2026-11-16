@@ -277,9 +277,7 @@ pub async fn sign_out(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Refuses, with the denial audited, `user`'s sign-in of `organization` to `agent` while its
-/// agent policy denies the agent. A sign-in belongs to the organization, so only the
-/// organization's own policy applies.
+/// A sign-in belongs to the organization, so only the organization's own policy applies.
 async fn admit(
     state: &AppState,
     organization: Uuid,
@@ -303,7 +301,6 @@ async fn refused(
     Failure::denied(denial)
 }
 
-/// Why `loaded`, the organization's agent policy or why it could not be read, refuses `agent`.
 fn refusal(loaded: &Result<Option<Effective>, Denial>, agent: AgentKind) -> Option<Denial> {
     match loaded {
         Ok(None) => None,
@@ -312,7 +309,6 @@ fn refusal(loaded: &Result<Option<Effective>, Denial>, agent: AgentKind) -> Opti
     }
 }
 
-/// `status` with the code of `loaded`'s denial of its agent, when it denies it.
 fn governed(mut status: AgentStatus, loaded: &Result<Option<Effective>, Denial>) -> AgentStatus {
     status.denial = refusal(loaded, status.agent).map(|denial| denial.code().to_owned());
     status

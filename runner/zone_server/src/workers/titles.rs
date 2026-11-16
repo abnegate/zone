@@ -145,15 +145,11 @@ async fn summarize_task(state: &AppState, task: &tasks::TaskRow) -> Option<Strin
     .await
 }
 
-/// What a title is generated from: the instructions it follows and the text it summarizes.
 struct Prompt<'a> {
     instructions: &'a str,
     content: &'a str,
 }
 
-/// A title for `prompt` from the first model the policy `route` runs under admits, preferring
-/// the stage's own, then the Fast, Reasoning and `requested` models. None when no model can or
-/// may title it, which `background` audits when the policy is why.
 async fn generate(
     state: &AppState,
     route: Route,

@@ -207,7 +207,6 @@ pub(super) async fn chosen(
     Ok(Some(choice))
 }
 
-/// The policy `loaded` holds, as an offer is judged by it.
 fn governing(loaded: &Result<Option<Effective>, Denial>) -> Result<Option<&Effective>, Denial> {
     match loaded {
         Ok(effective) => Ok(effective.as_ref()),

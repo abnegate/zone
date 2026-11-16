@@ -73,9 +73,7 @@ impl Offer {
         }
     }
 
-    /// This offer under `effective`: denied when the policy refuses its provider or agent, and
-    /// otherwise offering only the models the policy admits on `endpoint`, the one the provider
-    /// sends to. An offer whose every model is refused is denied as its first model was.
+    /// An offer whose every model is refused is denied as its first model was.
     async fn govern(&mut self, effective: &Effective, endpoint: Option<&Endpoint>) {
         if let Err(denial) = policy::provider(effective, self.provider) {
             self.deny(denial);
@@ -104,8 +102,7 @@ impl Offer {
     }
 }
 
-/// Whether `effective` lets `provider` run `model`: an agent by its name alone, and an endpoint
-/// by the upstream `endpoint` routes the model to as well.
+/// An agent is judged by the model's name alone; an endpoint by where it routes the model too.
 async fn admitted(
     effective: &Effective,
     provider: Provider,

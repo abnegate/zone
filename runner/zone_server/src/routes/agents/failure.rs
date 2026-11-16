@@ -50,7 +50,6 @@ impl Failure {
         Self::new(StatusCode::FORBIDDEN, ADMINS_ONLY)
     }
 
-    /// A sign-in the organization's agent policy refuses, sent with the denial's code.
     pub(super) fn denied(denial: Denial) -> Self {
         Self {
             code: Some(denial.code()),

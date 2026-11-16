@@ -10,7 +10,6 @@ use crate::db::audit::actions;
 use crate::services::policy::{self, Denied, Subject};
 use crate::state::AppState;
 
-/// What `actor` asked `workspace` to start, for `subject`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Asked {
     pub workspace: Uuid,
@@ -19,7 +18,6 @@ pub struct Asked {
 }
 
 impl Asked {
-    /// Audits `denial` of this request, naming `detail`, the model or provider refused.
     pub async fn record(&self, state: &AppState, denial: Denial, detail: Option<&str>) {
         let denied = Denied {
             workspace: self.workspace,
@@ -32,15 +30,12 @@ impl Asked {
         policy::record(state, actions::AGENT_POLICY_TURN_DENIED, &denied).await;
     }
 
-    /// [`Self::record`], answered as the refusal it is.
     pub async fn refuse(&self, state: &AppState, denial: Denial, detail: Option<&str>) -> Response {
         self.record(state, denial, detail).await;
         refusal::denied(denial)
     }
 }
 
-/// Audits `denial` of what `actor` asked of `organization` itself, a sign-in or its AI settings,
-/// naming `detail`, what was refused.
 pub async fn record_organization(
     state: &AppState,
     organization: Uuid,

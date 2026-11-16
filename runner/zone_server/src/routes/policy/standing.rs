@@ -5,8 +5,6 @@ use super::access::Access;
 use super::refusal::Refusal;
 use crate::auth::entitlement::Unentitled;
 
-/// What the server's license means for agent policies: whether they can be changed, and whether
-/// they are enforced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Standing {
     pub entitled: bool,
@@ -29,8 +27,6 @@ impl Standing {
         self.entitled && access.writable()
     }
 
-    /// Refuses a change unless the license is Team or Enterprise and active or in its grace
-    /// period.
     pub fn require(&self) -> Result<(), Refusal> {
         if self.entitled {
             return Ok(());
