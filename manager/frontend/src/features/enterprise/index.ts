@@ -21,6 +21,7 @@ export {
   UNVERIFIED_CODES,
   UnverifiedSchema,
 } from './schemas';
+export { SsoSection } from './sso';
 export type {
   LicenseDetails,
   LicenseRefusalBody,
