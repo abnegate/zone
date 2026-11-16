@@ -15,6 +15,16 @@ pub(crate) struct Configuration {
     pub(crate) review_signals: Option<Vec<String>>,
 }
 
+impl Configuration {
+    pub(crate) fn full_name(&self) -> String {
+        format!("{}/{}", self.owner, self.repository)
+    }
+
+    pub(crate) fn web_url(&self, origin: &str) -> String {
+        format!("{}/{}", origin.trim_end_matches('/'), self.full_name())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -22,6 +32,27 @@ mod tests {
     use crate::services::github::testing::REPOSITORY;
     use crate::services::github::testing::STORED_TOKEN;
     use serde_json::json;
+
+    #[test]
+    fn a_repository_is_named_and_linked_as_github_shows_it() {
+        let configuration = Configuration {
+            owner: OWNER.into(),
+            repository: REPOSITORY.into(),
+            branch: None,
+            path: None,
+            token: None,
+            review_signals: None,
+        };
+
+        assert_eq!(configuration.full_name(), format!("{OWNER}/{REPOSITORY}"));
+        for origin in ["https://github.example.com", "https://github.example.com/"] {
+            assert_eq!(
+                configuration.web_url(origin),
+                format!("https://github.example.com/{OWNER}/{REPOSITORY}"),
+                "{origin}"
+            );
+        }
+    }
 
     #[test]
     fn a_configuration_never_prints_its_token() {

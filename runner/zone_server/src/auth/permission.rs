@@ -9,6 +9,8 @@ use crate::db::{DbResult, users};
 pub enum Permission {
     ModelsCreate,
     ModelsDelete,
+    PullRequestsUpdate,
+    ReleasesCreate,
 }
 
 impl Permission {
@@ -16,6 +18,8 @@ impl Permission {
         match self {
             Self::ModelsCreate => "models:create",
             Self::ModelsDelete => "models:delete",
+            Self::PullRequestsUpdate => "pull_requests:update",
+            Self::ReleasesCreate => "releases:create",
         }
     }
 
@@ -23,6 +27,8 @@ impl Permission {
         let action = match self {
             Self::ModelsCreate => "Installing or training models on this server",
             Self::ModelsDelete => "Removing models from this server",
+            Self::PullRequestsUpdate => "Merging pull requests",
+            Self::ReleasesCreate => "Creating releases",
         };
         format!(
             "{action} requires the {} permission. Ask a server admin for access.",
@@ -53,6 +59,11 @@ mod tests {
     fn names_match_the_seeded_permissions() {
         assert_eq!(Permission::ModelsCreate.name(), "models:create");
         assert_eq!(Permission::ModelsDelete.name(), "models:delete");
+        assert_eq!(
+            Permission::PullRequestsUpdate.name(),
+            "pull_requests:update"
+        );
+        assert_eq!(Permission::ReleasesCreate.name(), "releases:create");
     }
 
     #[test]

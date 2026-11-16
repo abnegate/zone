@@ -19,6 +19,7 @@ const STATUS: PullRequestStatus = {
   mergeable: 'clean',
   auto_merge: { enabled: false, unavailable: null },
   draft_unavailable: null,
+  merge_unavailable: null,
   threads: null,
   observed_at: '2026-11-05T10:00:00Z',
 };

@@ -6,7 +6,6 @@ const ORGANIZATION_TABS = [
   ['members', '/settings/organization/members'],
   ['invitations', '/settings/organization/members'],
   ['devices', '/settings/organization/devices'],
-  ['billing', '/settings/organization/billing'],
   ['audit', '/settings/organization/audit'],
   ['github', '/settings/organization/github'],
 ] as const;
@@ -31,8 +30,8 @@ describe('legacyOrganizationPath', () => {
     expect(legacyOrganizationPath('?tab=invitations&x=1', '#y')).toBe(
       '/settings/organization/members?x=1#y'
     );
-    expect(legacyOrganizationPath('?a=1&tab=billing&b=2', '')).toBe(
-      '/settings/organization/billing?a=1&b=2'
+    expect(legacyOrganizationPath('?a=1&tab=audit&b=2', '')).toBe(
+      '/settings/organization/audit?a=1&b=2'
     );
   });
 
@@ -51,6 +50,7 @@ describe('legacyOrganizationPath', () => {
   it('lands on AI defaults for an unknown tab', () => {
     expect(legacyOrganizationPath('?tab=nothing', '')).toBe('/settings/organization/ai');
     expect(legacyOrganizationPath('?tab=theme&x=1', '#y')).toBe('/settings/organization/ai?x=1#y');
+    expect(legacyOrganizationPath('?tab=billing', '')).toBe('/settings/organization/ai');
   });
 });
 
@@ -76,7 +76,7 @@ describe('legacyWorkspacePath', () => {
 
   it('has no legacy path for an unknown tab', () => {
     expect(legacyWorkspacePath('?tab=nothing', '')).toBeNull();
-    expect(legacyWorkspacePath('?tab=billing', '')).toBeNull();
+    expect(legacyWorkspacePath('?tab=audit', '')).toBeNull();
   });
 });
 

@@ -4,6 +4,7 @@ use abnegate_secret::SecretValue;
 use abnegate_vcs::PullRequestService;
 use serde_json::Value;
 use serde_json::json;
+use uuid::Uuid;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -13,6 +14,9 @@ use wiremock::matchers::path;
 
 use super::client::Github;
 use super::configuration::Configuration;
+use super::connection::ConnectedSource;
+use crate::db::sources;
+use crate::db::sources::SourceRow;
 
 pub(crate) const OWNER: &str = "owner";
 pub(crate) const REPOSITORY: &str = "repository";
@@ -21,6 +25,8 @@ pub(crate) const STORED_TOKEN: &str = "ghp_storedpersonaltoken";
 pub(crate) const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 pub(crate) const BLOB: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const BEARER: &str = "Bearer test-secret";
+const WEB_ORIGIN: &str = "https://github.com";
+pub(crate) const ENTERPRISE_ORIGIN: &str = "https://github.example.com";
 pub(crate) const RETRY_AFTER_HEADER: &str = "Retry-After";
 pub(crate) const RATE_LIMIT_REMAINING_HEADER: &str = "X-RateLimit-Remaining";
 
@@ -44,6 +50,29 @@ pub(crate) fn configured(owner: &str, repository: &str) -> Configuration {
     }
 }
 
+/// A source named `name`, connected to `owner/repository`, that no database holds.
+pub(crate) fn connected_source(id: Uuid, name: &str) -> ConnectedSource {
+    ConnectedSource {
+        source: SourceRow {
+            id,
+            name: name.into(),
+            source_type: sources::GITHUB.into(),
+            config: json!({"owner": OWNER, "repo": REPOSITORY}),
+            credentials_encrypted: None,
+            description: None,
+            url: None,
+            is_active: Some(true),
+            last_verified_at: None,
+            last_error: None,
+            created_at: None,
+            updated_at: None,
+            workspace_id: None,
+            github_installation_id: None,
+        },
+        configuration: configured(OWNER, REPOSITORY),
+    }
+}
+
 pub(crate) fn github_named(server: &MockServer, owner: &str, repository: &str) -> Github {
     serving(&server.uri(), configured(owner, repository))
 }
@@ -57,6 +86,16 @@ fn serving(origin: &str, configuration: Configuration) -> Github {
     Github::serving(
         configuration,
         PullRequestService::standing_in_for("github.com", origin).unwrap(),
+        WEB_ORIGIN,
+    )
+    .unwrap()
+}
+
+pub(crate) fn enterprise(server: &MockServer) -> Github {
+    Github::serving(
+        configured(OWNER, REPOSITORY),
+        PullRequestService::standing_in_for("github.com", &server.uri()).unwrap(),
+        ENTERPRISE_ORIGIN,
     )
     .unwrap()
 }

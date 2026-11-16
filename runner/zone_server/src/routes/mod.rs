@@ -7,7 +7,6 @@ pub mod ai_settings;
 pub mod artifacts;
 pub mod audit;
 pub mod auth;
-pub mod billing;
 pub mod chats;
 pub mod common;
 pub mod connect;
@@ -22,6 +21,9 @@ pub mod mcp_servers;
 pub mod models;
 pub mod organizations;
 pub mod projects;
+pub mod pull_requests;
+pub mod refresh_query;
+pub mod releases;
 pub mod sessions;
 pub mod sources;
 pub mod sync;
@@ -98,9 +100,6 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/auth/forgot-password", post(auth::forgot_password))
         .route("/api/auth/reset-password", post(auth::reset_password))
-        // Public billing routes
-        .route("/api/plans", get(billing::list_plans))
-        .route("/api/plans/{plan_id}", get(billing::get_plan))
         // Public invitation route (to view invitation details)
         .route("/api/invitations/{token}", get(invitations::get_invitation))
         // Artifact reads (public - a bearer header or an HMAC-signed URL, checked
@@ -358,8 +357,56 @@ pub fn create_router(state: AppState) -> Router {
             patch(chats::pull_requests::update),
         )
         .route(
+            "/api/chats/{id}/pull-requests/{pull_request_id}/merge",
+            post(chats::pull_requests::merge),
+        )
+        .route(
             "/api/chats/{id}/pull-requests/{pull_request_id}/diff",
             get(chats::pull_requests::diff),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests",
+            get(pull_requests::list),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}",
+            get(pull_requests::detail),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/diff",
+            get(pull_requests::diff),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/commits",
+            get(pull_requests::commits),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/commits/{sha}",
+            get(pull_requests::commit_diff),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/jobs/{job_id}/log",
+            get(pull_requests::job_log),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/pull-requests/{source_id}/{number}/merge",
+            post(pull_requests::merge),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases",
+            get(releases::list).post(releases::create),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases/options",
+            get(releases::options),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases/preview",
+            post(releases::preview),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/releases/{source_id}/{release_id}/pipeline",
+            get(releases::pipeline),
         )
         .route("/api/chats/{id}/tasks", get(chats::tasks::list))
         .route("/api/chats/{id}/subagents", get(chats::subagents::list))
@@ -525,19 +572,6 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/organizations/{org_id}/agents/{agent}/logins/{login_id}",
             delete(agents::sign_out_login),
-        )
-        // Billing routes
-        .route(
-            "/api/organizations/{org_id}/subscription",
-            get(billing::get_org_subscription_handler),
-        )
-        .route(
-            "/api/organizations/{org_id}/usage",
-            get(billing::get_org_usage),
-        )
-        .route(
-            "/api/organizations/{org_id}/limits",
-            get(billing::get_org_limits_handler),
         )
         // Audit logs
         .route(

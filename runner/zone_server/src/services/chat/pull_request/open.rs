@@ -1,11 +1,13 @@
 use abnegate_secret::SecretValue;
-use abnegate_vcs::{CommitSha, MergeMethod, PullRequestService};
+use abnegate_vcs::{CommitSha, MergeMethod, PullRequestReference, PullRequestService};
 
 use super::status::Status;
 
 /// What a change to a pull request is made with, once it is known to be open.
 pub struct Open {
     pub service: PullRequestService,
+    /// Where it lives, which the merge REST call addresses it by.
+    pub reference: PullRequestReference,
     pub token: SecretValue,
     pub status: Status,
     /// GitHub's GraphQL node id, which every change addresses it by.

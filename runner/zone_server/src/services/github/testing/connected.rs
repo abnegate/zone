@@ -6,10 +6,20 @@ use serde_json::Value;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
+use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::any;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 use super::OWNER;
 use super::REPOSITORY;
+use super::STORED_TOKEN;
+use crate::db::chat_pull_requests;
+use crate::db::chat_pull_requests::NewPullRequest;
+use crate::db::chat_pull_requests::PullRequestRow;
+use crate::db::chats::create_chat;
 use crate::db::github_apps::testing::pool;
 use crate::db::github_apps::testing::seed_organization;
 use crate::db::github_apps::testing::seed_user;
@@ -98,6 +108,67 @@ impl Connected {
     /// A source of `kind` holding `configuration`, with no credential.
     pub(crate) async fn source_of(&self, kind: &str, configuration: Value) -> SourceRow {
         self.created(kind, configuration, None, None).await
+    }
+
+    /// Pull request `number` of a new chat of the workspace that is
+    /// `offline` or not, opened on `owner/repository` through a source
+    /// holding a stored token.
+    pub(crate) async fn chat_pull_request(&self, offline: bool, number: i64) -> PullRequestRow {
+        let source = self.source(None, Some(STORED_TOKEN)).await;
+        let chat = create_chat(
+            &self.pool,
+            Some(self.workspace),
+            "Changes",
+            "qwen3:8b",
+            false,
+            true,
+        )
+        .await
+        .expect("a chat")
+        .id;
+        sqlx::query("UPDATE chats SET offline = $2 WHERE id = $1")
+            .bind(chat)
+            .bind(offline)
+            .execute(&self.pool)
+            .await
+            .expect("the chat's offline setting");
+        let url = format!("{}/{OWNER}/{REPOSITORY}/pull/{number}", self.github.uri());
+        chat_pull_requests::record(
+            &self.pool,
+            &NewPullRequest {
+                chat_id: chat,
+                owner: OWNER,
+                repo: REPOSITORY,
+                number,
+                url: &url,
+                title: Some("Add widgets"),
+                source_id: Some(source.id),
+                opened_by: None,
+            },
+        )
+        .await
+        .expect("a recorded pull request")
+    }
+
+    /// GitHub expects pull request `number` to be read, when there is one,
+    /// and nothing else; `github.verify()` holds it to that.
+    pub(crate) async fn reads_only(&self, number: Option<i64>) {
+        if let Some(number) = number {
+            Mock::given(method("GET"))
+                .and(path(format!("/repos/{OWNER}/{REPOSITORY}/pulls/{number}")))
+                .respond_with(ResponseTemplate::new(404))
+                .with_priority(1)
+                .expect(1..)
+                .named("the pull request that may be read")
+                .mount(&self.github)
+                .await;
+        }
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .named("any other request")
+            .mount(&self.github)
+            .await;
     }
 
     pub(crate) async fn deactivate(&self, source: &SourceRow) {

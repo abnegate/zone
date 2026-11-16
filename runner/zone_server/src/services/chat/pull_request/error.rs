@@ -4,6 +4,7 @@ use abnegate_vcs::pull_request::ApplicationError;
 use crate::services::github::refusal::Refusal;
 use crate::services::github_app;
 use crate::services::github_app::Unauthenticated;
+use zone_core::vpn::CHAT_OFFLINE;
 
 const TOO_MANY_REQUESTS: u16 = 429;
 
@@ -27,6 +28,8 @@ pub enum Error {
     Storage,
     #[error("The pull request's auto-fix setting could not be saved.")]
     Unsaved,
+    #[error("{CHAT_OFFLINE}")]
+    Offline,
 }
 
 impl From<PullRequestError> for Error {

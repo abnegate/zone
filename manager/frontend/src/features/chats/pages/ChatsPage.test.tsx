@@ -3822,6 +3822,24 @@ describe('ChatsPage', () => {
       );
     });
 
+    it("says an offline chat withholds the agent's own tools even with Zone tools only off", async () => {
+      mockGetChatProviders.mockResolvedValue(chatProviders({ cli: true }));
+      await openHeader({ agent_enabled: true, agent_sandboxed: false, offline: true });
+      const trigger = screen.getByTestId('agent-permissions');
+      expect(trigger).toHaveAttribute(
+        'aria-label',
+        'Agent permissions: auto-approve off, Host tools withheld offline (Zone tools only off)'
+      );
+      expect(trigger).not.toHaveTextContent('Host tools');
+
+      fireEvent.click(trigger);
+      const toggle = screen.getByRole('button', { name: 'Zone tools only', pressed: false });
+      expect(toggle).toHaveTextContent(
+        "This chat is offline, so the agent's own tools are withheld regardless"
+      );
+      expect(toggle).not.toHaveClass('agent-permission--warning');
+    });
+
     it.each([
       { auto_approve: false, agent_sandboxed: true },
       { auto_approve: true, agent_sandboxed: true },
@@ -6121,6 +6139,7 @@ describe('ChatsPage', () => {
         auto_merge: { enabled: false, unavailable: null },
         threads: { open: 0, resolved: 0 },
         draft_unavailable: null,
+        merge_unavailable: null,
         observed_at: '2026-11-13T10:00:00Z',
         ...(overrides.status as Record<string, unknown> | undefined),
       },

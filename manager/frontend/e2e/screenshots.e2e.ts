@@ -1,13 +1,24 @@
 import { test, expect } from './fixtures';
 import type { Page } from '@playwright/test';
+import { pullRequestKey } from '../src/features/pull-requests/utils/identity';
 import { blockServiceWorker, routeApi, SOURCES_PATH } from './test-utils';
-import { mockTasks, setupAdminAuth, setupCommonRoutes, tasksNow } from './layout-fixtures';
+import {
+  githubNow,
+  mockTasks,
+  notReadyPullRequest,
+  readyPullRequest,
+  setupAdminAuth,
+  setupCommonRoutes,
+  tasksNow,
+} from './layout-fixtures';
 
 const runScreenshots = process.env.RUN_SCREENSHOTS === 'true';
 const describeScreenshots = runScreenshots ? test.describe : test.describe.skip;
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 const TASK_CARD = '.task-card:not(.board-skeleton-card)';
+const PULL_REQUEST_CARD = '[data-testid="pull-request-card"]';
+const RELEASE_CARD = 'article.release-card';
 const SKELETON_CARD = '.skeleton-card, .board-skeleton-card';
 const PHONE = { width: 375, height: 812 };
 // document.getAnimations() omits ::file-selector-button, so animations: 'disabled' cannot settle it.
@@ -42,7 +53,7 @@ async function chooseCardAction(page: Page, title: string, action: CardAction): 
 async function fontsLoaded(page: Page): Promise<void> {
   await page.waitForFunction(() =>
     Boolean(
-      document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][href*="fonts.googleapis.com"]')?.sheet
+      document.querySelector<HTMLLinkElement>('link[rel="stylesheet"][data-font-stylesheet]')?.sheet
     )
   );
   await page.evaluate(async () => {
@@ -66,14 +77,30 @@ async function capturePage(
     'screenshots/dark-tasks.png': TASK_CARD,
     'screenshots/sources-populated.png': '.source-card',
     'screenshots/wiki-populated.png': '.knowledge-card',
+    'screenshots/pull-requests-populated.png': PULL_REQUEST_CARD,
+    'screenshots/pull-requests-detail.png': PULL_REQUEST_CARD,
+    'screenshots/dark-pull-requests.png': PULL_REQUEST_CARD,
+    'screenshots/releases-populated.png': RELEASE_CARD,
+    'screenshots/dark-releases.png': RELEASE_CARD,
   };
   const content = populated[options?.path ?? ''];
   if (content) {
     await expect(page.locator(content).first()).toBeVisible();
     await expect(page.locator(SKELETON_CARD)).toHaveCount(0);
   }
-  if (options?.path?.includes('modal-'))
+  if (options?.path?.includes('modal-')) {
     await expect(page.getByRole('dialog')).toBeVisible();
+    await expect(page.getByRole('dialog')).toHaveCSS('opacity', '1');
+    await page.waitForFunction(() =>
+      document
+        .getAnimations()
+        .every(
+          (animation) =>
+            animation.playState !== 'running' ||
+            !Number.isFinite(animation.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY)
+        )
+    );
+  }
   await fontsLoaded(page);
   await page.screenshot({ ...options, animations: 'disabled', style: SETTLED_FILE_BUTTONS });
 }
@@ -1006,5 +1033,96 @@ describeScreenshots('Screenshots - Modals', () => {
       path: 'screenshots/dark-modal-new-project.png',
       fullPage: true,
     });
+  });
+});
+
+describeScreenshots('Screenshots - Pull Requests and Releases', () => {
+  test.use({ timezoneId: 'UTC' });
+
+  test.beforeEach(async ({ context }) => {
+    await blockServiceWorker(context);
+  });
+
+  async function openGitHubPage(page: Page, path: string, populated: boolean): Promise<void> {
+    await page.clock.setFixedTime(githubNow);
+    await setupCommonRoutes(page, populated);
+    await page.goto('/login');
+    await page.evaluate(() => localStorage.clear());
+    await setupAdminAuth(page);
+
+    await page.goto(path);
+    await page.waitForLoadState('domcontentloaded');
+    await expect(page.getByRole('navigation')).toBeVisible({ timeout: 10000 });
+  }
+
+  async function enableDarkMode(page: Page): Promise<void> {
+    await page.evaluate(() => {
+      document.documentElement.setAttribute('data-theme', 'dark');
+    });
+    await page.waitForTimeout(100);
+  }
+
+  const notReadyLink = `/pull-requests?id=${pullRequestKey(notReadyPullRequest)}`;
+
+  test('Pull requests page (empty)', async ({ page }) => {
+    await openGitHubPage(page, '/pull-requests', false);
+    await expect(page.getByText('No GitHub sources', { exact: true })).toBeVisible();
+    await verifyNoErrors(page);
+    await capturePage(page, { path: 'screenshots/pull-requests-empty.png', fullPage: true });
+  });
+
+  test('Pull requests page (populated)', async ({ page }) => {
+    await openGitHubPage(page, '/pull-requests', true);
+    await verifyNoErrors(page);
+    await capturePage(page, { path: 'screenshots/pull-requests-populated.png', fullPage: true });
+  });
+
+  test('Pull request detail', async ({ page }) => {
+    await openGitHubPage(page, notReadyLink, true);
+    await expect(page.getByRole('region', { name: 'Unresolved threads' })).toBeVisible();
+    await verifyNoErrors(page);
+    await capturePage(page, { path: 'screenshots/pull-requests-detail.png', fullPage: true });
+  });
+
+  test('Pull request detail (dark)', async ({ page }) => {
+    await openGitHubPage(page, notReadyLink, true);
+    await expect(page.getByRole('region', { name: 'Unresolved threads' })).toBeVisible();
+    await enableDarkMode(page);
+    await verifyNoErrors(page);
+    await capturePage(page, { path: 'screenshots/dark-pull-requests.png', fullPage: true });
+  });
+
+  test('Merge pull request modal', async ({ page }) => {
+    await openGitHubPage(page, `/pull-requests?id=${pullRequestKey(readyPullRequest)}`, true);
+    await page.getByRole('button', { name: 'Merge', exact: true }).click();
+    await capturePage(page, { path: 'screenshots/modal-merge-pull-request.png', fullPage: true });
+  });
+
+  test('Releases page (empty)', async ({ page }) => {
+    await openGitHubPage(page, '/releases', false);
+    await expect(page.getByText('No GitHub sources', { exact: true })).toBeVisible();
+    await verifyNoErrors(page);
+    await capturePage(page, { path: 'screenshots/releases-empty.png', fullPage: true });
+  });
+
+  test('Releases page (populated)', async ({ page }) => {
+    await openGitHubPage(page, '/releases', true);
+    await verifyNoErrors(page);
+    await capturePage(page, { path: 'screenshots/releases-populated.png', fullPage: true });
+  });
+
+  test('Releases page (dark)', async ({ page }) => {
+    await openGitHubPage(page, '/releases', true);
+    await expect(page.locator(RELEASE_CARD).first()).toBeVisible();
+    await enableDarkMode(page);
+    await verifyNoErrors(page);
+    await capturePage(page, { path: 'screenshots/dark-releases.png', fullPage: true });
+  });
+
+  test('New release modal', async ({ page }) => {
+    await openGitHubPage(page, '/releases', true);
+    await page.getByRole('button', { name: 'New release', exact: true }).click();
+    await expect(page.getByRole('dialog').getByLabel('Tag', { exact: true })).toBeVisible();
+    await capturePage(page, { path: 'screenshots/modal-new-release.png', fullPage: true });
   });
 });

@@ -393,7 +393,7 @@ export interface Chat {
    */
   auto_approve?: boolean;
   /**
-   * When true, this chat never uses public web search, page fetch, or curl/wget.
+   * When true, this chat reaches no network beyond its model.
    * Older servers omit this; treat those chats as online.
    */
   offline?: boolean;
@@ -561,6 +561,7 @@ export const PULL_REQUEST_CONNECTIONS = [
   'uncredentialed',
   'disconnected',
   'unavailable',
+  'offline',
 ] as const;
 export type PullRequestConnection = (typeof PULL_REQUEST_CONNECTIONS)[number];
 
@@ -631,6 +632,8 @@ export interface PullRequestStatus {
   mergeable: PullRequestMergeability;
   auto_merge: PullRequestAutoMerge;
   draft_unavailable: string | null;
+  /** Why it cannot be merged now, if it cannot. */
+  merge_unavailable: string | null;
   threads: PullRequestThreads | null;
   observed_at: string;
 }

@@ -1,1 +1,4 @@
 name: Zone
+
+paths-ignore:
+  - runner/**/tests/**

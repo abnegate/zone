@@ -14,6 +14,7 @@ use zone_server::config::{AgentConfig, Config};
 use zone_server::db::agent_logins::{self, Insert};
 use zone_server::db::chats::occupancy::{self, Reported};
 use zone_server::services::model::UNSUPPORTED;
+use zone_server::services::network_denial::NetworkDenial;
 
 use crate::common::{TestClient, TestResponse, agents, test_config, test_email, test_password};
 
@@ -1188,6 +1189,36 @@ async fn the_workspace_lists_chat_providers_before_any_chat_exists() {
         StatusCode::FORBIDDEN,
         "a stranger listed the workspace's providers: {}",
         refused.text()
+    );
+}
+
+#[tokio::test]
+async fn the_workspace_says_whether_this_host_can_run_offline_commands() {
+    for denial in [NetworkDenial::Enforced, NetworkDenial::Unenforced] {
+        let tenant = Tenant::new().await;
+        tenant.client.state().install_network_denial(denial);
+
+        let listed = tenant.workspace_offers().await;
+
+        assert_eq!(
+            listed["offline_enforced"],
+            json!(denial.is_enforced()),
+            "{denial:?}: {listed}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_workspace_reports_what_the_host_probe_found() {
+    let tenant = Tenant::new().await;
+    let probed = NetworkDenial::probe().await;
+
+    let listed = tenant.workspace_offers().await;
+
+    assert_eq!(
+        listed["offline_enforced"],
+        json!(probed.is_enforced()),
+        "{listed}"
     );
 }
 

@@ -7,7 +7,9 @@ use abnegate_vcs::RepositoryUrl;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::Access;
 use crate::services::checkout::{self, Checkout};
+use crate::state::AppState;
 
 const GIT: &str = ".git";
 const STAGING: &str = "staging";
@@ -22,17 +24,12 @@ const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// is never mistaken for one that finished.
 pub struct Missing {
     url: RepositoryUrl,
-    token: Option<SecretValue>,
+    access: Access,
     destination: PathBuf,
 }
 
 impl Missing {
-    pub fn new(
-        root: &Path,
-        workspace: Uuid,
-        url: RepositoryUrl,
-        token: Option<SecretValue>,
-    ) -> Self {
+    pub fn new(root: &Path, workspace: Uuid, url: RepositoryUrl, access: Access) -> Self {
         let destination = root
             .join(workspace.as_hyphenated().to_string())
             .join(hex::encode(Sha256::digest(
@@ -40,7 +37,7 @@ impl Missing {
             )));
         Self {
             url,
-            token,
+            access,
             destination,
         }
     }
@@ -61,20 +58,15 @@ impl Missing {
     }
 
     /// Clones the repository, unless another chat did while this one waited for the
-    /// repository's lock, and returns where it stands. Dropping this ends the `git` it started.
-    pub async fn clone_repository(self) -> Result<PathBuf, String> {
-        self.attempt().await.map_err(|error| {
-            let error = match &self.token {
-                Some(token) if !token.expose().is_empty() => {
-                    error.replace(token.expose(), REDACTED)
-                }
-                _ => error,
-            };
-            format!("Zone couldn't clone {}: {error}", self.url)
-        })
+    /// repository's lock, and returns where it stands. Its credential is resolved only for a
+    /// clone that is about to run. Dropping this ends the `git` it started.
+    pub async fn clone_repository(self, state: &AppState) -> Result<PathBuf, String> {
+        self.attempt(state)
+            .await
+            .map_err(|error| format!("Zone couldn't clone {}: {error}", self.url))
     }
 
-    async fn attempt(&self) -> Result<PathBuf, String> {
+    async fn attempt(&self, state: &AppState) -> Result<PathBuf, String> {
         let workspace = self
             .destination
             .parent()
@@ -102,11 +94,12 @@ impl Missing {
             }
         })
         .await?;
+        let token = self.access.token(state).await;
         checkout::git()
             .with_timeout(TIMEOUT)
-            .clone_repository(&self.url, &staging, self.token.as_ref())
+            .clone_repository(&self.url, &staging, token.as_ref())
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| redacted(error.to_string(), token.as_ref()))?;
         let destination = self.destination.clone();
         Checkout::filesystem(move || {
             let _lock = lock;
@@ -142,6 +135,13 @@ fn prepare_parent(workspace: &Path) -> std::io::Result<()> {
         std::fs::set_permissions(workspace, std::fs::Permissions::from_mode(0o700))?;
     }
     Checkout::validate_root(workspace)
+}
+
+fn redacted(error: String, token: Option<&SecretValue>) -> String {
+    match token {
+        Some(token) if !token.expose().is_empty() => error.replace(token.expose(), REDACTED),
+        _ => error,
+    }
 }
 
 fn remove_directory(directory: &Path) -> std::io::Result<()> {

@@ -1,55 +1,73 @@
 /**
- * Runs a HEIC decode in a worker, and inline where there is no worker to run
- * it in. Separate from `heic.ts` so the worker can import the decoding itself
- * without importing the code that starts workers.
+ * Runs a HEIC decode in a worker. Separate from `heic.ts` so the worker can
+ * import the decoding itself without importing the code that starts workers.
+ *
+ * The worker is the only place a decode happens. Decoding a full-size photo
+ * is about a second of solid CPU and a malformed one can be far worse, and
+ * nothing can interrupt that work once it starts: a timeout around a
+ * synchronous decode on the main thread would measure the freeze rather than
+ * prevent it. So a worker that cannot start, dies, or outlasts its deadline
+ * gives up and the attachment is declined, which the composer already has a
+ * message for.
  */
 
-import { type DecodeResponse, decodeHeicPixels, type Pixels } from './heic';
+import type { DecodeResponse, Pixels } from './heic';
 
 /** Long enough for a large photo on a slow phone, short enough to give up on. */
-const DECODE_TIMEOUT_MS = 30_000;
+export const DECODE_TIMEOUT_MS = 30_000;
 
-/**
- * Decode HEIC bytes to RGBA, off the main thread when that is possible.
- *
- * Null means this file could not be decoded, which the caller reports as an
- * attachment it cannot take.
- */
-export async function decodeHeic(bytes: ArrayBuffer): Promise<Pixels | null> {
-  if (typeof Worker !== 'function') return decodeHeicPixels(bytes);
-  try {
-    return await inWorker(bytes);
-  } catch {
-    // A worker that cannot start or dies mid-decode leaves the main thread as
-    // the only way to answer; a frozen composer beats a photo that will not go.
-    return decodeHeicPixels(bytes);
-  }
+/** How a decoding worker is started. A seam, so tests need no bundler. */
+export type Spawn = () => Worker;
+
+export const spawnDecoder: Spawn = () =>
+  new Worker(new URL('./heicWorker.ts', import.meta.url), { type: 'module' });
+
+export interface DecodeOptions {
+  spawn?: Spawn;
+  timeout?: number;
 }
 
-function inWorker(bytes: ArrayBuffer): Promise<Pixels | null> {
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL('./heicWorker.ts', import.meta.url), { type: 'module' });
-    const timer = setTimeout(() => {
-      finish();
-      reject(new Error('HEIC decoding timed out'));
-    }, DECODE_TIMEOUT_MS);
+/**
+ * Decode HEIC bytes to RGBA, off the main thread.
+ *
+ * Null means this file could not be decoded here, for any reason: no worker,
+ * a worker that failed, a decoder that could not read it, or a decode that
+ * ran past its deadline. The caller reports an attachment it cannot take.
+ */
+export function decodeHeic(
+  bytes: ArrayBuffer,
+  options: DecodeOptions = {}
+): Promise<Pixels | null> {
+  const { spawn = spawnDecoder, timeout = DECODE_TIMEOUT_MS } = options;
+  if (typeof Worker !== 'function') return Promise.resolve(null);
 
-    const finish = () => {
+  let worker: Worker;
+  try {
+    worker = spawn();
+  } catch {
+    return Promise.resolve(null);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (pixels: Pixels | null) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      // Terminating is what actually stops a decode that overran, and what
+      // keeps a worker per attachment from outliving the composer.
       worker.terminate();
+      resolve(pixels);
     };
+    const timer = setTimeout(() => finish(null), timeout);
 
     worker.onmessage = (event: MessageEvent<DecodeResponse>) => {
-      finish();
-      resolve('pixels' in event.data ? event.data.pixels : null);
+      finish('pixels' in event.data ? event.data.pixels : null);
     };
-    worker.onerror = (event) => {
-      finish();
-      reject(new Error(event.message || 'HEIC worker failed'));
-    };
+    worker.onerror = () => finish(null);
 
     // Copied rather than transferred: transferring detaches the caller's
-    // buffer, and the fallback below still needs to read it if this fails.
+    // buffer, and the caller may still read it after this answers.
     worker.postMessage({ bytes });
   });
 }

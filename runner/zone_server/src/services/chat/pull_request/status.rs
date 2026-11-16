@@ -21,6 +21,8 @@ pub struct Status {
     pub auto_merge: AutoMerge,
     /// Why it cannot be moved between draft and ready for review, if it cannot.
     pub draft_unavailable: Option<String>,
+    /// Why it cannot be merged now, if it cannot.
+    pub merge_unavailable: Option<String>,
     /// Its review threads while it is open, unless GitHub would not list them all.
     pub threads: Option<Threads>,
     pub observed_at: DateTime<Utc>,
@@ -63,6 +65,7 @@ mod tests {
             mergeable: Mergeable::Clean,
             auto_merge: AutoMerge::unavailable(AutoMerge::UNREAD),
             draft_unavailable: None,
+            merge_unavailable: None,
             threads: Some(Threads {
                 open: 0,
                 resolved: 4,

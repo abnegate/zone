@@ -5,6 +5,7 @@
 //! where relative paths resolve and nothing more: a chat reaches every other folder it could
 //! reach before by its absolute path.
 
+mod access;
 mod candidate;
 mod missing;
 mod origin;
@@ -12,19 +13,17 @@ mod scan;
 mod search;
 mod start;
 
+pub use access::Access;
 pub use missing::Missing;
 pub use origin::Origin;
 pub use start::Start;
 
-use abnegate_secret::SecretValue;
 use uuid::Uuid;
 
 use crate::db::chats;
 use crate::db::projects;
 use crate::db::projects::ProjectRow;
 use crate::db::sources;
-use crate::db::sources::SourceRow;
-use crate::services::github_app::Credential;
 use crate::state::AppState;
 use candidate::Candidate;
 use search::Search;
@@ -89,15 +88,13 @@ async fn project(state: &AppState, chat: Uuid, workspace: Uuid) -> Option<Projec
 }
 
 /// What a project names, first to last: its source, then the GitHub repository linked to it.
-/// A credential that cannot be resolved is not presented, and a clone then fails or succeeds on
-/// what the repository allows anyone.
+/// Neither's credential is resolved here: only a clone presents one.
 async fn candidates(state: &AppState, project: &ProjectRow, workspace: Uuid) -> Vec<Candidate> {
     let mut candidates = Vec::new();
     if let Some(id) = project.source_id {
         match sources::get_source(state.db(), id, workspace).await {
             Ok(Some(source)) if source.is_active.unwrap_or(true) => {
-                let token = source_token(state, &source).await;
-                candidates.extend(Candidate::of_source(&source, token));
+                candidates.extend(Candidate::of_source(&source));
             }
             Ok(_) => {}
             Err(error) => {
@@ -105,36 +102,13 @@ async fn candidates(state: &AppState, project: &ProjectRow, workspace: Uuid) -> 
             }
         }
     }
-    if let Some(url) = &project.github_repo_url {
-        let token = match state.github().project(state.db(), project).await {
-            Ok(credential) => credential.map(Credential::into_secret),
-            Err(error) => {
-                tracing::warn!(project = %project.id, %error, "Could not resolve the project's credential");
-                None
-            }
-        };
-        candidates.extend(Candidate::of_project(url, token));
-    }
+    candidates.extend(Candidate::of_project(project));
     candidates
-}
-
-/// The token a GitHub source clones with. No other kind of source clones, so no other kind's
-/// credential is resolved.
-async fn source_token(state: &AppState, source: &SourceRow) -> Option<SecretValue> {
-    if source.source_type != sources::GITHUB {
-        return None;
-    }
-    match state.github().source(state.db(), source).await {
-        Ok(credential) => credential.map(Credential::into_secret),
-        Err(error) => {
-            tracing::warn!(source = %source.id, %error, "Could not resolve the source's credential");
-            None
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use abnegate_llm::ReasoningEffort;
     use serde_json::json;
 
     use super::*;
@@ -142,6 +116,8 @@ mod tests {
     use crate::db::sources::NewSource;
     use crate::db::sources::SLACK;
     use crate::services::github::testing::MINTED_TOKEN;
+    use crate::services::github::testing::OWNER;
+    use crate::services::github::testing::REPOSITORY;
     use crate::services::github::testing::connected::Connected;
     use crate::services::github::testing::number;
     use crate::services::github_app::testing::issuing;
@@ -183,5 +159,99 @@ mod tests {
         let found = candidates(&connected.state, &project, connected.workspace).await;
 
         assert!(found.is_empty());
+    }
+
+    #[tokio::test]
+    async fn finding_a_repository_mints_no_token_until_it_is_cloned() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 0).await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let project = projects::create(
+            &connected.pool,
+            NewProject {
+                name: "Repository",
+                description: None,
+                workspace_id: Some(connected.workspace),
+                source_id: Some(source.id),
+                status: None,
+            },
+        )
+        .await
+        .expect("create the project");
+        projects::link_github(
+            &connected.pool,
+            project.id,
+            &format!("https://github.com/{OWNER}/{REPOSITORY}"),
+            None,
+            Some(installation),
+        )
+        .await
+        .expect("link the project's repository")
+        .expect("the project exists");
+        let chat = chats::create_chat_with_title(
+            &connected.pool,
+            Some(connected.workspace),
+            "Offline",
+            "auto",
+            (true, true),
+            false,
+            false,
+            ReasoningEffort::Auto,
+            Some(project.id),
+            true,
+            None,
+            None,
+        )
+        .await
+        .expect("create the chat");
+
+        assert!(matches!(
+            peek(&connected.state, chat.id, connected.workspace).await,
+            Start::Missing(_)
+        ));
+        let Start::Missing(missing) = locate(&connected.state, chat.id, connected.workspace).await
+        else {
+            panic!("a repository nobody cloned is missing");
+        };
+        let destination = missing.destination().to_path_buf();
+        std::fs::create_dir_all(destination.join(".git")).expect("stand in for a finished clone");
+        let located = locate(&connected.state, chat.id, connected.workspace).await;
+        std::fs::remove_dir_all(&destination).expect("remove the stand-in clone");
+
+        assert!(matches!(located, Start::Directory(directory) if directory == destination));
+        connected.github.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_clone_presents_the_token_its_installation_mints() {
+        let connected = Connected::new().await;
+        let number = number();
+        issuing(&connected.github, number, MINTED_TOKEN, 1).await;
+        let installation = connected.installation(number).await;
+        let source = connected.source(Some(installation), None).await;
+        let root = tempfile::tempdir().expect("a directory for the repository and its clones");
+        let bare = root.path().join("remote.git");
+        let initialised = std::process::Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&bare)
+            .status()
+            .expect("git runs");
+        assert!(initialised.success(), "git init --bare failed");
+        let missing = Missing::new(
+            &root.path().join("clones"),
+            connected.workspace,
+            abnegate_vcs::RepositoryUrl::local(&bare).expect("a local repository"),
+            Access::Source(Box::new(source)),
+        );
+
+        let cloned = missing
+            .clone_repository(&connected.state)
+            .await
+            .expect("the repository clones");
+
+        assert!(cloned.join(".git").is_dir(), "the clone is not a checkout");
+        connected.github.verify().await;
     }
 }

@@ -18,3 +18,9 @@ impl From<GitHubError> for Failure {
         Self(credential_message(&error).to_string())
     }
 }
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self(message)
+    }
+}

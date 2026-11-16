@@ -1,13 +1,13 @@
 use std::path::{Path, PathBuf};
 
-use abnegate_secret::SecretValue;
 use abnegate_vcs::{GitService, RepositoryUrl};
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::search::Search;
-use super::{Missing, Origin, Start, scan};
+use super::{Access, Missing, Origin, Start, scan};
 use crate::config::Config;
+use crate::db::projects::ProjectRow;
 use crate::db::sources::{GITHUB, SourceRow};
 use crate::db::workspace_host_directories;
 use crate::host_mounts::{CONTAINER_ROOT, HostMounts, normalize};
@@ -24,12 +24,12 @@ pub(super) enum Candidate {
         origin: Origin,
         /// How to clone it, which only a GitHub repository offers: nothing else has a way to
         /// present a token that keeps it out of the URL.
-        clone: Option<(RepositoryUrl, Option<SecretValue>)>,
+        clone: Option<(RepositoryUrl, Access)>,
     },
 }
 
 impl Candidate {
-    pub(super) fn of_source(source: &SourceRow, token: Option<SecretValue>) -> Option<Self> {
+    pub(super) fn of_source(source: &SourceRow) -> Option<Self> {
         match source.source_type.as_str() {
             FILESYSTEM => text(&source.config, &["base_path", "path"])
                 .map(|path| Self::Folder(path.to_string())),
@@ -41,7 +41,7 @@ impl Candidate {
                         .ok()?;
                 Some(Self::Repository {
                     origin: Origin::parse(url.as_str())?,
-                    clone: Some((url, token)),
+                    clone: Some((url, Access::Source(Box::new(source.clone())))),
                 })
             }
             GITLAB => {
@@ -61,11 +61,12 @@ impl Candidate {
         }
     }
 
-    pub(super) fn of_project(url: &str, token: Option<SecretValue>) -> Option<Self> {
-        let url = GitService::repository_url(url).ok()?;
+    /// The GitHub repository linked to `project`, if one is.
+    pub(super) fn of_project(project: &ProjectRow) -> Option<Self> {
+        let url = GitService::repository_url(project.github_repo_url.as_deref()?).ok()?;
         Some(Self::Repository {
             origin: Origin::parse(url.as_str())?,
-            clone: Some((url, token)),
+            clone: Some((url, Access::Project(Box::new(project.clone())))),
         })
     }
 
@@ -118,13 +119,13 @@ impl Candidate {
                 {
                     return usable(config, directory);
                 }
-                let Some((url, token)) = clone else {
+                let Some((url, access)) = clone else {
                     return Start::Unavailable(format!(
                         "No folder of this workspace holds a checkout of {origin}, and Zone \
                          clones only GitHub repositories. Add a folder that holds one."
                     ));
                 };
-                let missing = Missing::new(&config.clones, workspace, url, token);
+                let missing = Missing::new(&config.clones, workspace, url, access);
                 match missing.present() {
                     true => usable(config, missing.destination().to_path_buf()),
                     false => Start::Missing(missing),
@@ -242,66 +243,77 @@ mod tests {
     fn a_source_is_a_folder_or_a_repository_and_anything_else_has_no_directory() {
         for config in [json!({"base_path": "/srv"}), json!({"path": "/srv"})] {
             assert!(matches!(
-                Candidate::of_source(&source(FILESYSTEM, config), None),
+                Candidate::of_source(&source(FILESYSTEM, config)),
                 Some(Candidate::Folder(path)) if path == "/srv"
             ));
         }
         assert!(matches!(
-            Candidate::of_source(&source(GITHUB, json!({"owner": "o", "repo": "r"})), None),
+            Candidate::of_source(&source(GITHUB, json!({"owner": "o", "repo": "r"}))),
             Some(Candidate::Repository { clone: Some(_), .. })
         ));
         assert!(matches!(
-            Candidate::of_source(
-                &source(GITLAB, json!({"project_id": "g/p", "host": "https://git.example"})),
-                None
-            ),
+            Candidate::of_source(&source(
+                GITLAB,
+                json!({"project_id": "g/p", "host": "https://git.example"})
+            )),
             Some(Candidate::Repository { clone: None, origin })
                 if Some(origin.clone()) == Origin::parse("git@git.example:g/p.git")
         ));
         assert!(
-            Candidate::of_source(
-                &source(GITHUB, json!({"owner": "--upload-pack=evil", "repo": "r"})),
-                None
-            )
+            Candidate::of_source(&source(
+                GITHUB,
+                json!({"owner": "--upload-pack=evil", "repo": "r"})
+            ))
             .is_none(),
             "an owner GitHub would not allow is never given to git"
         );
         for kind in ["web", "text", "notion"] {
-            assert!(Candidate::of_source(&source(kind, json!({})), None).is_none());
+            assert!(Candidate::of_source(&source(kind, json!({}))).is_none());
+        }
+    }
+
+    fn project(repository: Option<&str>) -> ProjectRow {
+        ProjectRow {
+            id: Uuid::new_v4(),
+            workspace_id: None,
+            source_id: None,
+            name: "project".into(),
+            description: None,
+            status: "active".into(),
+            github_repo_url: repository.map(str::to_string),
+            github_access_token: None,
+            created_at: None,
+            updated_at: None,
+            github_installation_id: None,
+            position: 0,
         }
     }
 
     #[test]
-    fn a_repository_is_cloned_with_the_token_it_was_given() {
-        let token = |candidate: Option<Candidate>| match candidate {
-            Some(Candidate::Repository {
-                clone: Some((_, token)),
-                ..
-            }) => token.map(|token| token.expose().to_string()),
-            _ => panic!("a GitHub repository is cloneable"),
+    fn a_repository_is_cloned_with_the_credential_of_whoever_named_it() {
+        let github = SourceRow {
+            id: Uuid::new_v4(),
+            ..source(GITHUB, json!({"owner": "o", "repo": "r"}))
         };
+        assert!(matches!(
+            Candidate::of_source(&github),
+            Some(Candidate::Repository {
+                clone: Some((_, Access::Source(named))),
+                ..
+            }) if named.id == github.id
+        ));
 
-        assert_eq!(
-            token(Candidate::of_source(
-                &source(GITHUB, json!({"owner": "o", "repo": "r"})),
-                Some(SecretValue::new("ghs_installationtoken"))
-            )),
-            Some("ghs_installationtoken".to_string())
-        );
-        assert_eq!(
-            token(Candidate::of_project(
-                "https://github.com/o/r",
-                Some(SecretValue::new("ghp_projecttoken"))
-            )),
-            Some("ghp_projecttoken".to_string())
-        );
-        assert_eq!(
-            token(Candidate::of_source(
-                &source(GITHUB, json!({"owner": "o", "repo": "r"})),
-                None
-            )),
-            None,
-            "a repository with no credential is cloned anonymously"
+        let linked = project(Some("https://github.com/o/r"));
+        assert!(matches!(
+            Candidate::of_project(&linked),
+            Some(Candidate::Repository {
+                clone: Some((_, Access::Project(named))),
+                ..
+            }) if named.id == linked.id
+        ));
+        assert!(
+            Candidate::of_project(&project(None)).is_none(),
+            "a project with no repository linked names nothing to clone"
         );
     }
 

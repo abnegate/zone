@@ -3,6 +3,7 @@ import type { createRoot } from 'react-dom/client';
 import App from './App';
 import { hasStoredSession } from './api/session';
 import { firstRouteLoaded, preloadSignedInRoutes } from './routes';
+import fonts from './shared/fonts.css?url';
 import { persistCurrentPath } from './shared/lastPath';
 import { setUpServiceWorker } from './shared/serviceWorker';
 import { loadFeatureStylesheet, loadFonts } from './shared/stylesheet';
@@ -29,7 +30,7 @@ function AfterFirstPaint() {
         void loadFeatureStylesheet();
         void preloadSignedInRoutes();
       } else {
-        loadFonts();
+        loadFonts(fonts);
       }
       setPainted(true);
     }, AFTER_FIRST_PAINT_DELAY_MILLISECONDS);
@@ -44,7 +45,7 @@ function AfterFirstPaint() {
 
 const signedIn = hasStoredSession();
 if (signedIn) {
-  loadFonts();
+  loadFonts(fonts);
 }
 
 export function start(create: typeof createRoot): void {

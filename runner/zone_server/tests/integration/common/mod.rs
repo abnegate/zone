@@ -8,6 +8,7 @@
 pub mod comfy;
 pub mod context;
 pub mod database;
+pub mod eventually;
 pub mod github_app;
 pub mod logs;
 pub mod mail;
@@ -106,6 +107,7 @@ pub fn test_config() -> Config {
         train_upload_limit_mb: 512,
         endpoint_hosts: Default::default(),
         auto: Default::default(),
+        github: Default::default(),
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),
@@ -572,6 +574,7 @@ pub fn test_config_with_ollama_host(ollama_host: &str) -> Config {
         train_upload_limit_mb: 512,
         endpoint_hosts: Default::default(),
         auto: Default::default(),
+        github: Default::default(),
         host_mounts: Default::default(),
         clones: std::env::temp_dir().join("zone-clones"),
         connect_urls: Vec::new(),

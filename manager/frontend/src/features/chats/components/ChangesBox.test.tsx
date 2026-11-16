@@ -2,16 +2,23 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { chooseMenuItem, openMenu, settleMenu } from '../../../test/menu';
 import type { ChatPullRequest, PullRequestStatus } from '../types';
-import { DISCONNECTED_HINT, UNAVAILABLE_HINT, UNCREDENTIALED_HINT } from '../utils/pullRequests';
+import {
+  DISCONNECTED_HINT,
+  OFFLINE_HINT,
+  UNAVAILABLE_HINT,
+  UNCREDENTIALED_HINT,
+} from '../utils/pullRequests';
 
 const mockGetChatPullRequests = mock();
 const mockUpdateChatPullRequest = mock();
+const mockMergeChatPullRequest = mock();
 const mockGetChatPullRequestDiff = mock();
 
 mock.module('../../../api/chats', () => ({
   chatsApi: {
     getChatPullRequests: mockGetChatPullRequests,
     updateChatPullRequest: mockUpdateChatPullRequest,
+    mergeChatPullRequest: mockMergeChatPullRequest,
     getChatPullRequestDiff: mockGetChatPullRequestDiff,
   },
 }));
@@ -39,6 +46,7 @@ const STATUS: PullRequestStatus = {
   mergeable: 'blocked',
   auto_merge: { enabled: false, unavailable: null },
   draft_unavailable: null,
+  merge_unavailable: null,
   threads: null,
   observed_at: '2026-11-05T10:00:00Z',
 };
@@ -89,6 +97,7 @@ describe('ChangesBox', () => {
     localStorage.clear();
     mockGetChatPullRequests.mockReset();
     mockUpdateChatPullRequest.mockReset();
+    mockMergeChatPullRequest.mockReset();
     mockGetChatPullRequestDiff.mockReset();
   });
 
@@ -366,7 +375,7 @@ describe('ChangesBox', () => {
     await shown([{ ...OPEN, credentialed: false, connection: 'uncredentialed' }]);
 
     await openMenu(MENU);
-    for (const name of [/View changes/, /Merge when ready/, /Convert to draft/]) {
+    for (const name of [/View changes/, /Merge when ready/, /Merge now/, /Convert to draft/]) {
       expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
       expect(menuItem(name)).toHaveTextContent(UNCREDENTIALED_HINT);
     }
@@ -379,11 +388,20 @@ describe('ChangesBox', () => {
     await shown([{ ...OPEN, credentialed: false, connection: 'unavailable' }]);
 
     await openMenu(MENU);
-    for (const name of [/View changes/, /Merge when ready/, /Convert to draft/]) {
+    for (const name of [/View changes/, /Merge when ready/, /Merge now/, /Convert to draft/]) {
       expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
       expect(menuItem(name)).toHaveTextContent(UNAVAILABLE_HINT);
       expect(menuItem(name)).not.toHaveTextContent(UNCREDENTIALED_HINT);
     }
+  });
+
+  it("says an offline chat's pull request is not asked about rather than asking for a source", async () => {
+    await shown([{ ...OPEN, credentialed: false, connection: 'offline' }]);
+
+    await openMenu(MENU);
+    expect(menuItem(/View changes/)).toHaveAttribute('aria-disabled', 'true');
+    expect(menuItem(/View changes/)).toHaveTextContent(OFFLINE_HINT);
+    expect(menuItem(/View changes/)).not.toHaveTextContent(UNCREDENTIALED_HINT);
   });
 
   it('asks for GitHub to be reconnected when its connection was removed', async () => {
@@ -399,7 +417,7 @@ describe('ChangesBox', () => {
 
     await openMenu(MENU);
     expect(menuItem('View changes')).not.toHaveAttribute('aria-disabled');
-    for (const name of [/Dismiss/, /Merge when ready/, /Convert to draft/]) {
+    for (const name of [/Dismiss/, /Merge when ready/, /Merge now/, /Convert to draft/]) {
       expect(menuItem(name)).toHaveAttribute('aria-disabled', 'true');
       expect(menuItem(name)).toHaveTextContent('Needs write access to this workspace.');
     }
@@ -423,7 +441,71 @@ describe('ChangesBox', () => {
 
     await openMenu(MENU);
     expect(screen.queryByRole('menuitem', { name: /Merge when ready/ })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: /Merge now/ })).toBeNull();
     expect(screen.queryByRole('menuitem', { name: /draft/i })).toBeNull();
+  });
+
+  it('merges it on GitHub once the reader confirms which one they meant', async () => {
+    mockMergeChatPullRequest.mockResolvedValue(withStatus({ state: 'merged' }));
+    await shown([OPEN]);
+
+    await chooseMenuItem(MENU, 'Merge now');
+
+    const dialog = await screen.findByRole('dialog', { name: 'Merge widgets #12?' });
+    expect(within(dialog).getByText(STATUS.title)).toBeInTheDocument();
+    expect(mockMergeChatPullRequest).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Merge' }));
+    });
+
+    expect(mockMergeChatPullRequest).toHaveBeenCalledWith('chat-1', 'pr-1');
+    expect(await screen.findByText('Merged widgets #12.')).toBeInTheDocument();
+    await screen.findByRole('img', { name: 'Merged' });
+  });
+
+  it('asks GitHub for nothing when the reader cancels the merge', async () => {
+    await shown([OPEN]);
+
+    await chooseMenuItem(MENU, 'Merge now');
+    const dialog = await screen.findByRole('dialog', { name: 'Merge widgets #12?' });
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    });
+
+    expect(mockMergeChatPullRequest).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('says what GitHub refused the merge for, and claims no merge', async () => {
+    mockMergeChatPullRequest.mockRejectedValue(
+      new Error('GitHub refused: Branch protection refused: 1 review is required.')
+    );
+    await shown([OPEN]);
+
+    await chooseMenuItem(MENU, 'Merge now');
+    const dialog = await screen.findByRole('dialog', { name: 'Merge widgets #12?' });
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Merge' }));
+    });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('1 review is required.');
+    expect(screen.queryByText('Merged widgets #12.')).toBeNull();
+  });
+
+  it('offers the merge disabled, with the reason, while GitHub would refuse it', async () => {
+    const reason = 'Its branch conflicts with its base; repair the conflict first.';
+    await shown([withStatus({ mergeable: 'conflicted', merge_unavailable: reason })]);
+
+    await openMenu(MENU);
+    const merge = menuItem(/Merge now/);
+    expect(merge).toHaveAttribute('aria-disabled', 'true');
+    expect(merge).toHaveTextContent(reason);
+    expect(merge).toHaveAttribute('title', reason);
+    fireEvent.click(merge);
+    await settleMenu();
+    expect(mockMergeChatPullRequest).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('says so when GitHub refuses a change', async () => {

@@ -51,9 +51,9 @@ const PROJECT_TOKEN_UNOPENABLE: &str =
 const SOURCE_TOKEN_UNOPENABLE: &str =
     "The source's GitHub token is sealed under a key this deployment does not hold";
 
-const AUTHOR_NAME: &str = "Zone";
+pub(crate) const AUTHOR_NAME: &str = "Zone";
 
-const AUTHOR_EMAIL: &str = "zone@users.noreply.github.com";
+pub(crate) const AUTHOR_EMAIL: &str = "zone@users.noreply.github.com";
 
 const BRANCH_PREFIX: &str = "zone/task";
 

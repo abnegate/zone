@@ -22,15 +22,11 @@ describe('route preloading', () => {
     expect(await preloadRoute('/models', storageWith(ACCESS_TOKEN_KEY))).toHaveLength(4);
     expect(await preloadRoute('/models/', storageWith(REFRESH_TOKEN_KEY))).toHaveLength(4);
     expect(await preloadRoute('/', storageWith(ACCESS_TOKEN_KEY))).toHaveLength(4);
+    expect(await preloadRoute('/releases', storageWith(ACCESS_TOKEN_KEY))).toHaveLength(4);
   });
 
   it('loads the settings shell for a nested section and for each legacy settings path', async () => {
-    for (const path of [
-      '/settings/organization/billing',
-      '/org-settings',
-      '/sessions',
-      '/sources',
-    ]) {
+    for (const path of ['/settings/organization/audit', '/org-settings', '/sessions', '/sources']) {
       expect(await preloadRoute(path, storageWith(ACCESS_TOKEN_KEY))).toHaveLength(4);
     }
   });
@@ -41,6 +37,10 @@ describe('route preloading', () => {
 
   it('loads each signed in chunk once for later navigation', async () => {
     const settled = (await preloadSignedInRoutes(storageWith(ACCESS_TOKEN_KEY))) as unknown[];
-    expect(settled).toHaveLength(11);
+    expect(settled).toHaveLength(13);
+  });
+
+  it('loads the shell and the pull requests page for a pull request link', async () => {
+    expect(await preloadRoute('/pull-requests', storageWith(ACCESS_TOKEN_KEY))).toHaveLength(4);
   });
 });
