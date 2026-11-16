@@ -1,6 +1,4 @@
-//! The server's one stored license key
-
-use sqlx::{Executor, Postgres};
+use sqlx::{Executor, PgPool, Postgres};
 
 use super::DbResult;
 
@@ -16,19 +14,25 @@ where
         .await
 }
 
-pub async fn set<'e, E>(executor: E, key: &str) -> DbResult<()>
-where
-    E: Executor<'e, Database = Postgres>,
-{
+/// Stores the key and returns the one it replaced. The table lock makes the
+/// read and the write one step even when no row exists yet, which a row lock
+/// cannot cover.
+pub async fn replace(pool: &PgPool, key: &str) -> DbResult<Option<String>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("LOCK TABLE licenses IN EXCLUSIVE MODE")
+        .execute(&mut *transaction)
+        .await?;
+    let previous = get(&mut *transaction).await?;
     sqlx::query(
         "INSERT INTO licenses (id, key) VALUES ($1, $2)
          ON CONFLICT (id) DO UPDATE SET key = EXCLUDED.key, updated_at = now()",
     )
     .bind(SINGLETON)
     .bind(key)
-    .execute(executor)
+    .execute(&mut *transaction)
     .await?;
-    Ok(())
+    transaction.commit().await?;
+    Ok(previous)
 }
 
 pub async fn remove<'e, E>(executor: E) -> DbResult<Option<String>>

@@ -236,6 +236,20 @@ fn lapsed(tier: Tier) -> String {
     issue(&expiring(tier, -TimeDelta::days(GRACE_DAYS + 1)))
 }
 
+fn retired() -> String {
+    sign(
+        &Payload {
+            key_id: UNTRUSTED.into(),
+            ..current(Tier::Enterprise)
+        },
+        &untrusted(),
+    )
+}
+
+fn forged() -> String {
+    sign(&current(Tier::Enterprise), &untrusted())
+}
+
 fn wrap(text: &str) -> String {
     text.as_bytes()
         .chunks(LINE_WIDTH)
@@ -262,6 +276,15 @@ fn details(payload: &Payload) -> Value {
 }
 
 fn assert_community(body: &Value) {
+    assert_runs_as_community(body);
+    assert_eq!(body["unverified"], Value::Null, "{body}");
+    assert!(
+        body.get("unverified").is_some(),
+        "unverified is omitted: {body}"
+    );
+}
+
+fn assert_runs_as_community(body: &Value) {
     assert_eq!(body["edition"], "community", "{body}");
     assert_eq!(body["status"], "community", "{body}");
     assert_eq!(body["license"], Value::Null, "{body}");
@@ -576,7 +599,7 @@ async fn a_stored_lapsed_key_is_shown_as_lapsed_with_its_tier() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
     let payload = expiring(Tier::Team, -TimeDelta::days(GRACE_DAYS + 1));
-    licenses::set(fixture.pool(), &issue(&payload))
+    licenses::replace(fixture.pool(), &issue(&payload))
         .await
         .unwrap();
 
@@ -595,7 +618,7 @@ async fn a_lapsed_license_locks_nobody_out() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
     let member = fixture.register().await;
-    licenses::set(fixture.pool(), &lapsed(Tier::Enterprise))
+    licenses::replace(fixture.pool(), &lapsed(Tier::Enterprise))
         .await
         .unwrap();
     assert_eq!(
@@ -626,23 +649,64 @@ async fn a_lapsed_license_locks_nobody_out() {
 }
 
 #[tokio::test]
-async fn a_stored_key_that_no_longer_verifies_reads_as_community() {
+async fn a_stored_key_that_no_longer_verifies_reads_as_community_and_names_why() {
     let fixture = Fixture::new().await;
     let admin = fixture.register().await;
-    let retired = sign(
-        &Payload {
-            key_id: UNTRUSTED.into(),
-            ..current(Tier::Enterprise)
-        },
-        &untrusted(),
-    );
-    licenses::set(fixture.pool(), &retired).await.unwrap();
 
-    let response = fixture.get(&admin.token).await;
+    for (text, code) in [(retired(), UNKNOWN_KEY), (forged(), SIGNATURE_INVALID)] {
+        licenses::replace(fixture.pool(), &text).await.unwrap();
+
+        let response = fixture.get(&admin.token).await;
+
+        response.assert_status(StatusCode::OK);
+        let body = response.json_value();
+        assert_runs_as_community(&body);
+        assert_eq!(body["unverified"], json!({ "code": code }));
+        assert_eq!(fixture.stored().await, Some(text));
+    }
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn removing_a_key_that_no_longer_verifies_is_audited() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    licenses::replace(fixture.pool(), &retired()).await.unwrap();
+
+    let response = fixture.delete(&admin.token).await;
 
     response.assert_status(StatusCode::OK);
     assert_community(&response.json_value());
-    assert_eq!(fixture.stored().await.as_deref(), Some(retired.as_str()));
+    assert_eq!(fixture.rows().await, 0);
+    let audits = fixture.audits(actions::LICENSE_REMOVED).await;
+    assert_eq!(audits.len(), 1);
+    let audit = &audits[0];
+    assert_eq!(audit.resource_type, resources::LICENSE);
+    assert_eq!(audit.resource_id, None);
+    assert_eq!(audit.organization_id, None);
+    assert_eq!(audit.actor_id, Some(admin.id));
+    assert_eq!(audit.old_values, Some(json!({ "verified": false })));
+    assert_eq!(audit.new_values, None);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn replacing_a_key_that_no_longer_verifies_is_audited() {
+    let fixture = Fixture::new().await;
+    let admin = fixture.register().await;
+    licenses::replace(fixture.pool(), &forged()).await.unwrap();
+    let payload = current(Tier::Team);
+
+    let response = fixture.put(&admin.token, &issue(&payload)).await;
+
+    response.assert_status(StatusCode::OK);
+    assert_eq!(response.json_value()["unverified"], Value::Null);
+    let audits = fixture.audits(actions::LICENSE_SET).await;
+    assert_eq!(audits.len(), 1);
+    let audit = &audits[0];
+    assert_eq!(audit.resource_id, Some(payload.id));
+    assert_eq!(audit.old_values, Some(json!({ "verified": false })));
+    assert_eq!(audit.new_values.as_ref().unwrap()["id"], json!(payload.id));
     fixture.cleanup().await;
 }
 

@@ -5,10 +5,10 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 use zone_enterprise::{
-    Edition, Keyring, License, Payload, SigningKey, Status, Tier, TrustedKey, sign,
+    Edition, Error, Keyring, License, Payload, SigningKey, Status, Tier, TrustedKey, sign,
 };
 use zone_server::db::{licenses, migrations};
-use zone_server::services::license::{Licenses, SetError};
+use zone_server::services::license::{Licenses, SetError, Stored};
 use zone_server::state::AppState;
 
 use crate::common::{Database, TestClient};
@@ -108,6 +108,23 @@ fn verified(text: &str) -> License {
     keyring().verify(text).unwrap()
 }
 
+fn unknown() -> String {
+    sign(
+        &Payload {
+            key_id: UNTRUSTED.into(),
+            ..payload(Tier::Enterprise, Utc::now() + TimeDelta::days(365))
+        },
+        &untrusted(),
+    )
+}
+
+fn forged() -> String {
+    sign(
+        &payload(Tier::Enterprise, Utc::now() + TimeDelta::days(365)),
+        &untrusted(),
+    )
+}
+
 #[tokio::test]
 async fn a_second_license_row_violates_the_singleton_check() {
     let fixture = Fixture::new().await;
@@ -127,7 +144,7 @@ async fn a_second_license_row_violates_the_singleton_check() {
 async fn a_stored_key_reads_back() {
     let fixture = Fixture::new().await;
 
-    licenses::set(fixture.pool(), "first").await.unwrap();
+    licenses::replace(fixture.pool(), "first").await.unwrap();
 
     assert_eq!(
         licenses::get(fixture.pool()).await.unwrap().as_deref(),
@@ -139,13 +156,13 @@ async fn a_stored_key_reads_back() {
 #[tokio::test]
 async fn a_second_key_replaces_the_first() {
     let fixture = Fixture::new().await;
-    licenses::set(fixture.pool(), "first").await.unwrap();
+    licenses::replace(fixture.pool(), "first").await.unwrap();
     let first: DateTime<Utc> = sqlx::query_scalar("SELECT updated_at FROM licenses")
         .fetch_one(fixture.pool())
         .await
         .unwrap();
 
-    licenses::set(fixture.pool(), "second").await.unwrap();
+    licenses::replace(fixture.pool(), "second").await.unwrap();
 
     let second: DateTime<Utc> = sqlx::query_scalar("SELECT updated_at FROM licenses")
         .fetch_one(fixture.pool())
@@ -163,7 +180,7 @@ async fn a_second_key_replaces_the_first() {
 #[tokio::test]
 async fn removing_returns_the_stored_key_once() {
     let fixture = Fixture::new().await;
-    licenses::set(fixture.pool(), "stored").await.unwrap();
+    licenses::replace(fixture.pool(), "stored").await.unwrap();
 
     assert_eq!(
         licenses::remove(fixture.pool()).await.unwrap().as_deref(),
@@ -185,7 +202,7 @@ async fn an_empty_server_is_community() {
             .load(fixture.pool())
             .await
             .unwrap(),
-        None
+        Stored::Empty
     );
     assert_eq!(fixture.state().license().await, None);
     assert_eq!(fixture.state().edition().await, Edition::Community);
@@ -203,7 +220,7 @@ async fn a_team_key_gives_team_and_an_enterprise_key_replaces_it() {
         .set(fixture.pool(), team.text(), Utc::now())
         .await
         .unwrap();
-    assert_eq!(change.previous, None);
+    assert_eq!(change.previous, Stored::Empty);
     assert_eq!(change.current, team);
     assert_eq!(fixture.state().edition().await, Edition::Team);
 
@@ -211,12 +228,12 @@ async fn a_team_key_gives_team_and_an_enterprise_key_replaces_it() {
         .set(fixture.pool(), enterprise.text(), Utc::now())
         .await
         .unwrap();
-    assert_eq!(change.previous, Some(team));
+    assert_eq!(change.previous, Stored::Verified(team));
     assert_eq!(change.current, enterprise);
     assert_eq!(fixture.state().edition().await, Edition::Enterprise);
     assert_eq!(
         licenses.load(fixture.pool()).await.unwrap(),
-        Some(enterprise.clone())
+        Stored::Verified(enterprise.clone())
     );
     assert_eq!(fixture.rows().await, 1);
     fixture.cleanup().await;
@@ -289,6 +306,7 @@ async fn a_key_in_grace_is_stored_with_its_tier() {
             .load(fixture.pool())
             .await
             .unwrap()
+            .into_license()
             .expect("the key in grace was stored");
         assert_eq!(loaded, change.current);
         assert_eq!(loaded.status(Utc::now()), Status::Grace);
@@ -301,7 +319,7 @@ async fn a_key_in_grace_is_stored_with_its_tier() {
 async fn a_lapsed_key_stored_directly_keeps_its_tier() {
     let fixture = Fixture::new().await;
     let text = lapsed(Tier::Enterprise);
-    licenses::set(fixture.pool(), &text).await.unwrap();
+    licenses::replace(fixture.pool(), &text).await.unwrap();
 
     let license = fixture
         .state()
@@ -318,20 +336,18 @@ async fn a_lapsed_key_stored_directly_keeps_its_tier() {
 #[tokio::test]
 async fn a_stored_key_the_keyring_does_not_trust_loads_as_community() {
     let fixture = Fixture::new().await;
-    let unknown = sign(
-        &Payload {
-            key_id: UNTRUSTED.into(),
-            ..payload(Tier::Enterprise, Utc::now() + TimeDelta::days(365))
-        },
-        &untrusted(),
-    );
-    let forged = sign(
-        &payload(Tier::Enterprise, Utc::now() + TimeDelta::days(365)),
-        &untrusted(),
-    );
+    let cases = [
+        (
+            unknown(),
+            Error::UnknownKey {
+                id: UNTRUSTED.into(),
+            },
+        ),
+        (forged(), Error::Signature),
+    ];
 
-    for text in [unknown, forged] {
-        licenses::set(fixture.pool(), &text).await.unwrap();
+    for (text, error) in cases {
+        licenses::replace(fixture.pool(), &text).await.unwrap();
 
         assert_eq!(
             fixture
@@ -340,7 +356,7 @@ async fn a_stored_key_the_keyring_does_not_trust_loads_as_community() {
                 .load(fixture.pool())
                 .await
                 .unwrap(),
-            None
+            Stored::Unverified(error)
         );
         assert_eq!(fixture.state().edition().await, Edition::Community);
         assert_eq!(licenses::get(fixture.pool()).await.unwrap(), Some(text));
@@ -358,9 +374,15 @@ async fn removing_returns_the_license_and_leaves_community() {
         .await
         .unwrap();
 
-    assert_eq!(licenses.remove(fixture.pool()).await.unwrap(), Some(stored));
+    assert_eq!(
+        licenses.remove(fixture.pool()).await.unwrap(),
+        Stored::Verified(stored)
+    );
     assert_eq!(fixture.state().edition().await, Edition::Community);
-    assert_eq!(licenses.remove(fixture.pool()).await.unwrap(), None);
+    assert_eq!(
+        licenses.remove(fixture.pool()).await.unwrap(),
+        Stored::Empty
+    );
     assert_eq!(fixture.rows().await, 0);
     fixture.cleanup().await;
 }
@@ -371,7 +393,9 @@ async fn the_last_license_that_loaded_survives_a_database_failure() {
     let licenses = Licenses::with_reload_after(Duration::ZERO);
     licenses.install_keyring(keyring());
     let stored = verified(&active(Tier::Enterprise));
-    licenses::set(fixture.pool(), stored.text()).await.unwrap();
+    licenses::replace(fixture.pool(), stored.text())
+        .await
+        .unwrap();
     assert_eq!(licenses.current(fixture.pool()).await, Some(stored.clone()));
 
     fixture.pool().close().await;
@@ -393,12 +417,14 @@ async fn a_failed_reload_waits_an_interval_before_asking_again() {
     assert_eq!(licenses.current(&closed).await, None);
 
     let stored = verified(&active(Tier::Team));
-    licenses::set(fixture.pool(), stored.text()).await.unwrap();
+    licenses::replace(fixture.pool(), stored.text())
+        .await
+        .unwrap();
 
     assert_eq!(licenses.current(fixture.pool()).await, None);
     assert_eq!(
         licenses.load(fixture.pool()).await.unwrap(),
-        Some(stored.clone())
+        Stored::Verified(stored.clone())
     );
     assert_eq!(licenses.current(fixture.pool()).await, Some(stored));
     fixture.cleanup().await;
@@ -412,7 +438,9 @@ async fn a_reload_sees_a_key_another_instance_stored() {
     assert_eq!(licenses.current(fixture.pool()).await, None);
 
     let stored = verified(&active(Tier::Team));
-    licenses::set(fixture.pool(), stored.text()).await.unwrap();
+    licenses::replace(fixture.pool(), stored.text())
+        .await
+        .unwrap();
 
     assert_eq!(licenses.current(fixture.pool()).await, Some(stored));
     fixture.cleanup().await;
@@ -439,8 +467,82 @@ async fn a_fresh_cache_answers_without_the_database() {
             .load(fixture.pool())
             .await
             .unwrap(),
-        None
+        Stored::Empty
     );
     assert_eq!(fixture.state().edition().await, Edition::Community);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn removing_a_key_that_no_longer_verifies_reports_it() {
+    let fixture = Fixture::new().await;
+    licenses::replace(fixture.pool(), &unknown()).await.unwrap();
+
+    let removed = fixture
+        .state()
+        .licenses()
+        .remove(fixture.pool())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        removed,
+        Stored::Unverified(Error::UnknownKey {
+            id: UNTRUSTED.into()
+        })
+    );
+    assert_eq!(fixture.rows().await, 0);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn replacing_a_key_that_no_longer_verifies_reports_it() {
+    let fixture = Fixture::new().await;
+    licenses::replace(fixture.pool(), &forged()).await.unwrap();
+    let current = verified(&active(Tier::Team));
+
+    let change = fixture
+        .state()
+        .licenses()
+        .set(fixture.pool(), current.text(), Utc::now())
+        .await
+        .unwrap();
+
+    assert_eq!(change.previous, Stored::Unverified(Error::Signature));
+    assert_eq!(change.current, current);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn replacing_returns_the_key_it_replaced() {
+    let fixture = Fixture::new().await;
+
+    assert_eq!(
+        licenses::replace(fixture.pool(), "first").await.unwrap(),
+        None
+    );
+    assert_eq!(
+        licenses::replace(fixture.pool(), "second").await.unwrap(),
+        Some("first".into())
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn concurrent_first_keys_each_see_the_other_they_replaced() {
+    let fixture = Fixture::new().await;
+    let first = active(Tier::Team);
+    let second = active(Tier::Enterprise);
+
+    let (one, two) = tokio::join!(
+        licenses::replace(fixture.pool(), &first),
+        licenses::replace(fixture.pool(), &second),
+    );
+
+    let mut previous = [one.unwrap(), two.unwrap()];
+    previous.sort();
+    let stored = licenses::get(fixture.pool()).await.unwrap().unwrap();
+    let replaced = if stored == first { &second } else { &first };
+    assert_eq!(previous, [None, Some(replaced.clone())]);
     fixture.cleanup().await;
 }

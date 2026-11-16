@@ -1,6 +1,3 @@
-//! The server's license: a server-wide singleton only a server admin may read
-//! or change.
-
 use axum::{
     Json,
     extract::{State, rejection::JsonRejection},
@@ -15,12 +12,14 @@ use zone_enterprise::{Edition, License, Seats, Status, Tier, status};
 
 use super::common::{AuditEvent, ErrorResponse, audit};
 use crate::auth::ServerAdmin;
+use crate::db::DbResult;
 use crate::db::audit::{actions, resources};
 use crate::error::ServerError;
-use crate::services::license::SetError;
+use crate::services::license::{SetError, Stored};
 use crate::state::AppState;
 
 const STORE_FAILED: &str = "Could not store the license";
+const VERIFIED: &str = "verified";
 
 #[derive(Debug, Serialize)]
 pub struct LicenseResponse {
@@ -28,15 +27,18 @@ pub struct LicenseResponse {
     pub status: Status,
     pub license: Option<LicenseDetails>,
     pub seats: SeatsResponse,
+    pub unverified: Option<UnverifiedResponse>,
 }
 
 impl LicenseResponse {
-    pub fn new(license: Option<&License>, seats: Seats, now: DateTime<Utc>) -> Self {
+    pub fn new(stored: &Stored, seats: Seats, now: DateTime<Utc>) -> Self {
+        let license = stored.license();
         Self {
             edition: Edition::from(license),
             status: status(license, now),
             license: license.map(LicenseDetails::from),
             seats: SeatsResponse::from(seats),
+            unverified: stored.refusal().map(UnverifiedResponse::from),
         }
     }
 }
@@ -85,6 +87,17 @@ impl From<Seats> for SeatsResponse {
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct UnverifiedResponse {
+    pub code: &'static str,
+}
+
+impl From<&zone_enterprise::Error> for UnverifiedResponse {
+    fn from(error: &zone_enterprise::Error) -> Self {
+        Self { code: error.code() }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SetLicenseRequest {
     pub key: String,
@@ -101,6 +114,14 @@ fn recorded(license: &License) -> Value {
         "expires_at": license.expires_at(),
         "key_id": license.key_id(),
     })
+}
+
+fn former(stored: &Stored) -> Option<Value> {
+    match stored {
+        Stored::Empty => None,
+        Stored::Verified(license) => Some(recorded(license)),
+        Stored::Unverified(_) => Some(json!({ VERIFIED: false })),
+    }
 }
 
 fn invalid(message: String) -> Response {
@@ -121,36 +142,54 @@ fn rejection(error: SetError) -> Response {
     }
 }
 
-async fn respond(
-    state: &AppState,
-    license: Option<License>,
-) -> Result<Json<LicenseResponse>, ServerError> {
+fn counted(seats: DbResult<Seats>, license: Option<&License>) -> Seats {
+    seats.unwrap_or_else(|error| {
+        tracing::error!(%error, "Could not count seats after changing the license; reporting none in use");
+        Seats {
+            used: 0,
+            licensed: license.map(License::seats),
+        }
+    })
+}
+
+async fn respond(state: &AppState, stored: Stored) -> Result<Json<LicenseResponse>, ServerError> {
     let now = Utc::now();
     let seats = state
         .licenses()
-        .seats(state.db(), license.as_ref(), now)
+        .seats(state.db(), stored.license(), now)
         .await?;
-    Ok(Json(LicenseResponse::new(license.as_ref(), seats, now)))
+    Ok(Json(LicenseResponse::new(&stored, seats, now)))
 }
 
-/// GET /api/license
+async fn committed(state: &AppState, stored: Stored) -> Json<LicenseResponse> {
+    let now = Utc::now();
+    let seats = state
+        .licenses()
+        .seats(state.db(), stored.license(), now)
+        .await;
+    Json(LicenseResponse::new(
+        &stored,
+        counted(seats, stored.license()),
+        now,
+    ))
+}
+
 pub async fn get(
     State(state): State<AppState>,
     _admin: ServerAdmin,
 ) -> Result<Json<LicenseResponse>, ServerError> {
-    let license = state.licenses().load(state.db()).await?;
-    respond(&state, license).await
+    let stored = state.licenses().load(state.db()).await?;
+    respond(&state, stored).await
 }
 
-/// PUT /api/license
 pub async fn set(
     State(state): State<AppState>,
     ServerAdmin(admin): ServerAdmin,
     body: Result<Json<SetLicenseRequest>, JsonRejection>,
-) -> Result<Response, ServerError> {
+) -> Response {
     let Json(request) = match body {
         Ok(body) => body,
-        Err(error) => return Ok(invalid(error.body_text())),
+        Err(error) => return invalid(error.body_text()),
     };
     let change = match state
         .licenses()
@@ -158,7 +197,7 @@ pub async fn set(
         .await
     {
         Ok(change) => change,
-        Err(error) => return Ok(rejection(error)),
+        Err(error) => return rejection(error),
     };
     audit(
         state.db(),
@@ -170,20 +209,22 @@ pub async fn set(
             action: actions::LICENSE_SET,
             resource_type: resources::LICENSE,
             resource_id: Some(change.current.id()),
-            old_values: change.previous.as_ref().map(recorded),
+            old_values: former(&change.previous),
             new_values: Some(recorded(&change.current)),
         },
     )
     .await;
-    Ok(respond(&state, Some(change.current)).await?.into_response())
+    committed(&state, Stored::Verified(change.current))
+        .await
+        .into_response()
 }
 
-/// DELETE /api/license
 pub async fn remove(
     State(state): State<AppState>,
     ServerAdmin(admin): ServerAdmin,
 ) -> Result<Json<LicenseResponse>, ServerError> {
-    if let Some(removed) = state.licenses().remove(state.db()).await? {
+    let removed = state.licenses().remove(state.db()).await?;
+    if let Some(old_values) = former(&removed) {
         audit(
             state.db(),
             AuditEvent {
@@ -193,21 +234,23 @@ pub async fn remove(
                 actor_email: &admin.email,
                 action: actions::LICENSE_REMOVED,
                 resource_type: resources::LICENSE,
-                resource_id: Some(removed.id()),
-                old_values: Some(recorded(&removed)),
+                resource_id: removed.license().map(License::id),
+                old_values: Some(old_values),
                 new_values: None,
             },
         )
         .await;
     }
-    respond(&state, None).await
+    Ok(committed(&state, Stored::Empty).await)
 }
 
 #[cfg(test)]
 mod tests {
     use axum::body::to_bytes;
     use chrono::TimeDelta;
-    use zone_enterprise::{GRACE_DAYS, Keyring, MALFORMED, Payload, SigningKey, TrustedKey, sign};
+    use zone_enterprise::{
+        GRACE_DAYS, Keyring, MALFORMED, Payload, SigningKey, TrustedKey, UNKNOWN_KEY, sign,
+    };
 
     use super::*;
     use crate::services::license::LAPSED;
@@ -251,7 +294,7 @@ mod tests {
 
     #[test]
     fn community_sends_null_license_and_licensed_seats_rather_than_omitting_them() {
-        let response = LicenseResponse::new(None, seats(4, None), Utc::now());
+        let response = LicenseResponse::new(&Stored::Empty, seats(4, None), Utc::now());
 
         assert_eq!(
             serialized(&response),
@@ -260,6 +303,7 @@ mod tests {
                 "status": "community",
                 "license": null,
                 "seats": { "used": 4, "licensed": null, "over": false },
+                "unverified": null,
             })
         );
     }
@@ -267,8 +311,11 @@ mod tests {
     #[test]
     fn a_license_is_sent_with_every_detail_and_its_grace_end() {
         let license = license(Tier::Team);
-        let response =
-            LicenseResponse::new(Some(&license), seats(2, Some(SEATS)), license.issued_at());
+        let response = LicenseResponse::new(
+            &Stored::Verified(license.clone()),
+            seats(2, Some(SEATS)),
+            license.issued_at(),
+        );
 
         assert_eq!(
             serialized(&response),
@@ -286,6 +333,7 @@ mod tests {
                     "key_id": KEY_ID,
                 },
                 "seats": { "used": 2, "licensed": SEATS, "over": false },
+                "unverified": null,
             })
         );
     }
@@ -301,10 +349,36 @@ mod tests {
             ),
         ];
         for (now, expected) in moments {
-            let response = LicenseResponse::new(Some(&license), seats(1, Some(SEATS)), now);
+            let response = LicenseResponse::new(
+                &Stored::Verified(license.clone()),
+                seats(1, Some(SEATS)),
+                now,
+            );
             assert_eq!(response.status, expected);
             assert_eq!(response.edition, Edition::Enterprise, "while {expected:?}");
         }
+    }
+
+    #[test]
+    fn a_stored_key_that_no_longer_verifies_is_community_with_its_refusal_code() {
+        let response = LicenseResponse::new(
+            &Stored::Unverified(zone_enterprise::Error::UnknownKey {
+                id: "2031-4".into(),
+            }),
+            seats(4, None),
+            Utc::now(),
+        );
+
+        assert_eq!(
+            serialized(&response),
+            json!({
+                "edition": "community",
+                "status": "community",
+                "license": null,
+                "seats": { "used": 4, "licensed": null, "over": false },
+                "unverified": { "code": UNKNOWN_KEY },
+            })
+        );
     }
 
     #[test]
@@ -332,6 +406,36 @@ mod tests {
             })
         );
         assert!(!record.to_string().contains(license.text()));
+    }
+
+    #[test]
+    fn the_audit_keeps_what_a_change_replaced() {
+        let license = license(Tier::Team);
+
+        assert_eq!(former(&Stored::Empty), None);
+        assert_eq!(
+            former(&Stored::Verified(license.clone())),
+            Some(recorded(&license))
+        );
+        assert_eq!(
+            former(&Stored::Unverified(zone_enterprise::Error::Signature)),
+            Some(json!({ "verified": false }))
+        );
+    }
+
+    #[test]
+    fn seats_that_could_not_be_counted_after_a_change_are_reported_as_none_in_use() {
+        let license = license(Tier::Team);
+
+        assert_eq!(
+            counted(Err(sqlx::Error::PoolClosed), Some(&license)),
+            seats(0, Some(SEATS))
+        );
+        assert_eq!(counted(Err(sqlx::Error::PoolClosed), None), seats(0, None));
+        assert_eq!(
+            counted(Ok(seats(2, Some(SEATS))), Some(&license)),
+            seats(2, Some(SEATS))
+        );
     }
 
     #[tokio::test]

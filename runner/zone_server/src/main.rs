@@ -206,9 +206,9 @@ async fn main() {
         AppState::new_with_mail(config.clone(), db, Some(cache), mail)
     };
     match state.licenses().load(state.db()).await {
-        Ok(license) => tracing::info!(
-            edition = ?Edition::from(license.as_ref()),
-            status = ?status(license.as_ref(), Utc::now()),
+        Ok(stored) => tracing::info!(
+            edition = ?Edition::from(stored.license()),
+            status = ?status(stored.license(), Utc::now()),
             "License verified"
         ),
         Err(error) => {
