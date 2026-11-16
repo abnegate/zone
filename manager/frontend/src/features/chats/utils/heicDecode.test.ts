@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'bun:test';
-
-import { decodeHeic, type Spawn } from './heicDecode';
 import type { Pixels } from './heic';
+import { decodeHeic, type Spawn } from './heicDecode';
 
 /** A worker that answers however the test tells it to, and records the rest. */
 class FakeWorker {
