@@ -18,6 +18,9 @@ use zone_context::adapters::{
 use zone_context::context::ContextService;
 use zone_context::embeddings::EmbeddingService;
 use zone_core::llm::{LlmBackend, cli};
+#[cfg(any(test, feature = "testing"))]
+use zone_enterprise::Keyring;
+use zone_enterprise::{Edition, License};
 
 use crate::cache::Cache;
 #[cfg(test)]
@@ -27,6 +30,7 @@ use crate::pull::PullRegistry;
 use crate::services::chat::pull_request::StatusCache;
 use crate::services::github::snapshots::Snapshots;
 use crate::services::github_app::Provider;
+use crate::services::license::Licenses;
 use crate::services::mail::AccountMail;
 use crate::services::mcp_servers::hubs::Hubs;
 use crate::services::mcp_servers::status::Policy;
@@ -125,6 +129,7 @@ struct AppStateInner {
     pub mcp: Hubs,
     pub github: OnceLock<Provider>,
     pub network_denial: OnceCell<NetworkDenial>,
+    pub licenses: Licenses,
     /// Terminal frames for task runs, for sockets and waits to subscribe to.
     /// The process's one instance, which the writers that finish a run also
     /// publish to, so a state built per test observes the same runs.
@@ -254,6 +259,7 @@ impl AppState {
                 mcp,
                 github: OnceLock::new(),
                 network_denial: OnceCell::new(),
+                licenses: Licenses::new(),
                 task_progress: task_progress::progress(),
                 device_connections: DashMap::new(),
                 pull_request_statuses: StatusCache::default(),
@@ -446,6 +452,24 @@ impl AppState {
             "install_network_denial must run before the first network_denial() call"
         );
     }
+
+    pub fn licenses(&self) -> &Licenses {
+        &self.inner.licenses
+    }
+
+    pub async fn license(&self) -> Option<License> {
+        self.inner.licenses.current(&self.inner.db).await
+    }
+
+    pub async fn edition(&self) -> Edition {
+        Edition::from(self.license().await.as_ref())
+    }
+
+    /// Panics if a keyring is already in place.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn install_keyring(&self, keyring: Keyring) {
+        self.inner.licenses.install_keyring(keyring);
+    }
 }
 
 /// Decrements the live-connection count for a device when the socket ends.
@@ -607,6 +631,44 @@ mod tests {
                 Duration::from_millis(250)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn every_clone_shares_one_license_service() {
+        let state = AppState::for_tests();
+        let clone = state.clone();
+
+        assert!(std::ptr::eq(state.licenses(), clone.licenses()));
+        assert!(std::ptr::eq(
+            state.licenses().keyring(),
+            clone.licenses().keyring()
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_server_trusts_the_production_keyring() {
+        assert_eq!(
+            AppState::for_tests().licenses().keyring(),
+            &Keyring::production()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_installed_keyring_replaces_the_production_one() {
+        let state = AppState::for_tests();
+        let keyring = Keyring::new([]);
+        state.install_keyring(keyring.clone());
+
+        assert_eq!(state.licenses().keyring(), &keyring);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_database_with_no_license_loaded_is_community() {
+        let state = AppState::new(test_config(), unreachable_pool(), None);
+        state.disable_mcp();
+
+        assert_eq!(state.license().await, None);
+        assert_eq!(state.edition().await, Edition::Community);
     }
 
     #[tokio::test]

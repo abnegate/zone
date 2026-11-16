@@ -117,6 +117,7 @@ abnegate-secret = { workspace = true, features = ["derivation", "sqlx"] }
 abnegate-vcs = { workspace = true, features = ["github", "github-app"] }
 zone_core = { path = "../zone_core", features = ["sqlx"] }
 zone_context = { path = "../zone_context" }
+zone_enterprise = { path = "../zone_enterprise" }
 zone_routing = { path = "../zone_routing" }
 
 [dev-dependencies]
@@ -134,5 +135,6 @@ bytes = { workspace = true }
 tokio-tungstenite = "=0.30.0"
 futures-util = "=0.3.34"
 zone_context = { path = "../zone_context", features = ["test-utils"] }
+zone_enterprise = { path = "../zone_enterprise", features = ["signing"] }
 wiremock = "=0.6.5"
 tempfile = "=3.27.0"
