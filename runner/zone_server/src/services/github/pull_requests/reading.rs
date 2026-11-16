@@ -41,8 +41,7 @@ use crate::services::github::throttle::admitted;
 pub(super) const NOT_ACCEPTABLE: u16 = 406;
 pub(super) const MOVED_REPOSITORY: &str =
     "GitHub listed open pull requests of another repository part way through.";
-pub(super) const STALLED_CURSOR: &str =
-    "GitHub said more open pull requests follow a page that listed none it had not.";
+pub(super) const STALLED_CURSOR: &str = "GitHub said more open pull requests follow a page that listed none it had not, or pointed back to a page already read.";
 
 impl Github {
     pub(crate) async fn open_pulls(
@@ -89,6 +88,7 @@ impl Github {
         let mut listed = HashSet::new();
         let mut repository: Option<RepositoryId> = None;
         let mut after: Option<String> = None;
+        let mut cursors = HashSet::new();
         loop {
             let page = {
                 let _permit = admitted(permits).await?;
@@ -111,10 +111,13 @@ impl Github {
                     .filter(|row| listed.insert(row.node_id.clone())),
             );
             match page.next {
-                Some(_) if pulls.len() == read => {
+                Some(next) if pulls.len() == read || cursors.contains(&next) => {
                     return Err(Fault::upstream(STALLED_CURSOR));
                 }
-                Some(next) if pulls.len() < limit => after = Some(next),
+                Some(next) if pulls.len() < limit => {
+                    cursors.insert(next.clone());
+                    after = Some(next);
+                }
                 next => {
                     let complete = next.is_none() && pulls.len() <= limit;
                     pulls.truncate(limit);

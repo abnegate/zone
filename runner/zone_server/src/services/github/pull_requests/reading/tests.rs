@@ -11,6 +11,7 @@ use wiremock::matchers::path;
 
 use super::*;
 use crate::services::github::client::FOREIGN_JOB;
+use crate::services::github::client::UNEXPECTED_RESPONSE;
 use crate::services::github::diff::LineKind;
 use crate::services::github::diff::PER_FILE_DIFF;
 use crate::services::github::diff::Status;
@@ -516,10 +517,40 @@ async fn a_page_that_names_the_cursor_it_was_read_after_stops_the_listing() {
 
     let stalled = github.open_pull_requests(&Semaphore::new(1), 150).await;
 
-    let fault = stalled.expect_err("a cursor that never moves is never read after again");
-    assert!(
-        !fault.halts(),
-        "the listing is read through REST instead: {fault}"
+    assert_eq!(
+        stalled.err(),
+        Some(Fault::upstream(UNEXPECTED_RESPONSE)),
+        "the crate refuses a cursor that never moved, short of a halt"
     );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_page_that_points_back_to_a_cursor_already_read_after_stops_the_listing() {
+    let server = paged().await;
+    open_page(&server, REPOSITORY_ID, 100, None, 1..=100, Some(CURSOR)).await;
+    open_page(
+        &server,
+        REPOSITORY_ID,
+        100,
+        Some(CURSOR),
+        101..=200,
+        Some(LATER),
+    )
+    .await;
+    open_page(
+        &server,
+        REPOSITORY_ID,
+        50,
+        Some(LATER),
+        201..=210,
+        Some(CURSOR),
+    )
+    .await;
+    let github = mocked(&server);
+
+    let stalled = github.open_pull_requests(&Semaphore::new(1), 250).await;
+
+    assert_eq!(stalled.err(), Some(Fault::upstream(STALLED_CURSOR)));
     server.verify().await;
 }
