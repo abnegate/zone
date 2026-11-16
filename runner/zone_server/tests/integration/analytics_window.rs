@@ -150,13 +150,17 @@ async fn reaching_the_run_cap_exactly_is_not_passing_it() {
 async fn a_run_still_going_is_not_a_finished_run() {
     let pool = common::create_test_pool().await;
     let workspace_id = workspace_with_runs(&pool, 2).await;
-    let task_id: Uuid = sqlx::query_scalar("SELECT id FROM tasks WHERE workspace_id = $1")
-        .bind(workspace_id)
-        .fetch_one(&pool)
-        .await
-        .expect("the task exists");
     let now = Utc::now().naive_utc();
     for status in ["running", "waiting"] {
+        let task_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO tasks (workspace_id, title, description) VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(workspace_id)
+        .bind(format!("{status} task"))
+        .bind("a run that has not finished")
+        .fetch_one(&pool)
+        .await
+        .expect("task is created");
         sqlx::query("INSERT INTO task_runs (task_id, status, started_at) VALUES ($1, $2, $3)")
             .bind(task_id)
             .bind(status)
