@@ -69,17 +69,14 @@ mod tests {
     }
 
     fn assert_in_order(text: &str, names: &[&str]) {
-        let positions: Vec<usize> = names
-            .iter()
-            .map(|name| {
-                text.find(&format!("\"{name}\":"))
-                    .unwrap_or_else(|| panic!("{name} is missing from {text}"))
-            })
-            .collect();
-        assert!(
-            positions.windows(2).all(|pair| pair[0] < pair[1]),
-            "{names:?} must serialize in declaration order: {text}"
-        );
+        let mut cursor = 0;
+        for name in names {
+            let key = format!("\"{name}\":");
+            let position = text[cursor..].find(&key).unwrap_or_else(|| {
+                panic!("{name} is missing or out of declaration order in {names:?}: {text}")
+            });
+            cursor += position + key.len();
+        }
     }
 
     #[test]
