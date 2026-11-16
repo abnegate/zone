@@ -97,6 +97,7 @@ import {
   WorkspaceThemeResponseSchema,
 } from '../validation/schemas';
 import { ApiError } from './ApiError';
+import { AuthRequestError } from './auth';
 import { chatsApi } from './chats';
 import { deviceHeaders } from './device';
 import { knowledgeApi } from './knowledge';
@@ -728,15 +729,19 @@ class Client {
     });
     if (!response.ok) {
       const errorData = await this.parseErrorResponse(response);
-      throw new Error(errorData.message || `Failed to reset password: ${response.status}`);
+      const message = errorData.message || `Failed to reset password: ${response.status}`;
+      throw errorData.code ? new AuthRequestError(message, errorData.code) : new Error(message);
     }
     return parse(ResetPasswordResponseSchema, await response.json());
   }
 
-  private async parseErrorResponse(response: Response): Promise<{ message?: string }> {
+  private async parseErrorResponse(
+    response: Response
+  ): Promise<{ message?: string; code?: string }> {
     try {
       const data = await response.json();
-      return { message: data.message || data.error || data.detail };
+      const code = typeof data?.code === 'string' && data.code ? data.code : undefined;
+      return { message: data.message || data.error || data.detail, code };
     } catch {
       return {};
     }

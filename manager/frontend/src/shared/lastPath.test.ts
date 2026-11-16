@@ -84,6 +84,16 @@ describe('lastPath', () => {
     expect(pathAfterAuth({ pathname: '/login' }, storage)).toBe('/?id=chat-2');
   });
 
+  it('ignores the single sign-on callback, so its code and state are never saved or restored', () => {
+    persistLastPath('/chats?id=chat-1', storage);
+    persistLastPath('/sso/callback?code=secret&state=attempt', storage);
+    expect(storage.getItem(LAST_PATH_KEY)).toBe('/chats?id=chat-1');
+
+    storage.setItem(LAST_PATH_KEY, '/sso/callback?code=secret&state=attempt');
+    expect(lastPathToRestore('/', storage)).toBeNull();
+    expect(pathAfterAuth({ pathname: '/sso/callback', search: '?code=secret' }, storage)).toBe('/');
+  });
+
   it('does not let a boot at / erase a restored chat', () => {
     storage.setItem(LAST_PATH_KEY, '/chats?id=chat-9');
     const history = {

@@ -18,8 +18,16 @@ import {
   REFRESH_TOKEN_KEY,
   session,
 } from '../../../api/session';
+import * as ssoApi from '../../../api/sso';
 import { clearChatCaches } from '../../chats/utils/cache';
-import type { AuthResponse, JwtPayload, LoginRequest, RegisterRequest, User } from '../types';
+import type {
+  AuthResponse,
+  JwtPayload,
+  LoginRequest,
+  RegisterRequest,
+  SsoCallbackRequest,
+  User,
+} from '../types';
 
 interface AuthState {
   user: User | null;
@@ -34,6 +42,7 @@ interface AuthState {
 interface AuthContextType extends AuthState {
   login: (request: LoginRequest) => Promise<void>;
   register: (request: RegisterRequest) => Promise<void>;
+  completeSso: (request: SsoCallbackRequest) => Promise<void>;
   logout: () => Promise<void>;
   hasPermission: (permission: string) => boolean;
   hasAnyPermission: (permissions: string[]) => boolean;
@@ -43,7 +52,16 @@ interface AuthContextType extends AuthState {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-type AuthApi = Pick<typeof authApi, 'login' | 'register' | 'refreshToken' | 'logout'>;
+type AuthApi = Pick<typeof authApi, 'login' | 'register' | 'refreshToken' | 'logout'> &
+  Pick<typeof ssoApi, 'completeCallback'>;
+
+const DEFAULT_AUTH_API: AuthApi = {
+  login: authApi.login,
+  register: authApi.register,
+  refreshToken: authApi.refreshToken,
+  logout: authApi.logout,
+  completeCallback: ssoApi.completeCallback,
+};
 type ClientApi = Pick<typeof session, 'setAccessToken'>;
 type StorageApi = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
@@ -56,7 +74,6 @@ const LONGEST_TIMER_MILLISECONDS = 2_147_483_647;
 
 const USER_KEY = 'manager_user';
 
-// Decode JWT payload (without verification - that's done server-side)
 function decodeJwt(token: string): JwtPayload | null {
   try {
     const parts = token.split('.');
@@ -79,7 +96,6 @@ function storedUser(json: string | null): User | null {
   }
 }
 
-// Check if token is expired (with 30 second buffer)
 function isTokenExpired(token: string): boolean {
   const payload = decodeJwt(token);
   if (!payload) return true;
@@ -97,7 +113,7 @@ export function AuthProvider({
   clientOverride?: ClientApi;
   storageOverride?: StorageApi;
 }) {
-  const auth = authApiOverride ?? authApi;
+  const auth = authApiOverride ?? DEFAULT_AUTH_API;
   const apiClient = clientOverride ?? session;
   const storage = storageOverride ?? localStorage;
   const [state, setState] = useState<AuthState>(() => {
@@ -125,7 +141,6 @@ export function AuthProvider({
   const scheduleRefreshRef = useRef<((expiresIn: number) => void) | null>(null);
   const refreshInFlight = useRef<Promise<string | null> | null>(null);
 
-  // Update API client token whenever it changes
   useEffect(() => {
     apiClient.setAccessToken(state.accessToken);
   }, [apiClient, state.accessToken]);
@@ -217,7 +232,6 @@ export function AuthProvider({
     [auth, handleAuthResponse, handleLogout, storage]
   );
 
-  // Store scheduleRefresh in ref synchronously before effects run
   useLayoutEffect(() => {
     scheduleRefreshRef.current = scheduleRefresh;
   }, [scheduleRefresh]);
@@ -319,6 +333,14 @@ export function AuthProvider({
     [auth, handleAuthResponse]
   );
 
+  const completeSso = useCallback(
+    async (request: SsoCallbackRequest) => {
+      const response = await auth.completeCallback(request);
+      handleAuthResponse(response);
+    },
+    [auth, handleAuthResponse]
+  );
+
   const logout = useCallback(async () => {
     const refreshToken = storage.getItem(REFRESH_TOKEN_KEY);
     if (refreshToken) {
@@ -349,13 +371,24 @@ export function AuthProvider({
       ...state,
       login,
       register,
+      completeSso,
       logout,
       hasPermission,
       hasAnyPermission,
       hasAllPermissions,
       hasRole,
     }),
-    [state, login, register, logout, hasPermission, hasAnyPermission, hasAllPermissions, hasRole]
+    [
+      state,
+      login,
+      register,
+      completeSso,
+      logout,
+      hasPermission,
+      hasAnyPermission,
+      hasAllPermissions,
+      hasRole,
+    ]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

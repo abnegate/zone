@@ -183,6 +183,20 @@ describe('Client - Auth Methods', () => {
       expect(callArgs[1].headers.Authorization).toBeUndefined();
     });
 
+    it('carries the refusal code when single sign-on is required', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        json: async () => ({ error: 'This server requires single sign-on.', code: 'sso_required' }),
+      });
+
+      await expect(client.resetPassword('token', 'newpass')).rejects.toMatchObject({
+        name: 'AuthRequestError',
+        code: 'sso_required',
+        message: 'This server requires single sign-on.',
+      });
+    });
+
     it('throws error when password reset fails', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: false,

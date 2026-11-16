@@ -1,0 +1,71 @@
+import { describe, expect, it } from 'bun:test';
+import { AuthRequestError } from '../../api/auth';
+import { SsoCode } from './SsoCode';
+import { messageOf, SSO_INCOMPLETE, SSO_MESSAGES, ssoMessage } from './ssoMessages';
+
+const CALLBACK_CODES = [
+  'sso_state_invalid',
+  'sso_provider_not_found',
+  'sso_discovery_failed',
+  'sso_token_exchange_failed',
+  'sso_id_token_invalid',
+  'sso_email_missing',
+  'sso_email_unverified',
+  'sso_domain_not_allowed',
+  'sso_email_conflict',
+  'account_disabled',
+];
+
+describe('ssoMessages', () => {
+  it('covers every callback code plus sso_required and account_disabled', () => {
+    expect(Object.values(SsoCode).sort()).toEqual([...CALLBACK_CODES, 'sso_required'].sort());
+    for (const code of Object.values(SsoCode)) {
+      expect(SSO_MESSAGES[code].length).toBeGreaterThan(0);
+    }
+  });
+
+  it('gives each code its own message', () => {
+    const messages = Object.values(SSO_MESSAGES);
+    expect(new Set(messages).size).toBe(messages.length);
+  });
+
+  it('writes messages as plain sentences', () => {
+    for (const message of [...Object.values(SSO_MESSAGES), SSO_INCOMPLETE]) {
+      expect(message).toMatch(/^[A-Z].*\.$/);
+      expect(message).not.toMatch(/[<>\n]/);
+    }
+  });
+
+  it('pins the message shown when a callback cannot be trusted', () => {
+    expect(SSO_INCOMPLETE).toBe("Sign-in didn't complete. Start again from the sign-in page.");
+  });
+
+  it('looks up a known code and returns null for anything else', () => {
+    expect(ssoMessage('sso_required')).toBe(SSO_MESSAGES[SsoCode.Required]);
+    expect(ssoMessage('device_pending')).toBeNull();
+    expect(ssoMessage('constructor')).toBeNull();
+    expect(ssoMessage('')).toBeNull();
+  });
+
+  describe('messageOf', () => {
+    it('uses the message for a known refusal code', () => {
+      const error = new AuthRequestError('This server requires single sign-on.', 'sso_required');
+      expect(messageOf(error, 'Login failed')).toBe(SSO_MESSAGES[SsoCode.Required]);
+    });
+
+    it("keeps the server's message for a code it does not know", () => {
+      const error = new AuthRequestError('This device is waiting for an admin', 'device_pending');
+      expect(messageOf(error, 'Login failed')).toBe('This device is waiting for an admin');
+    });
+
+    it('uses the message of a plain error', () => {
+      expect(messageOf(new Error('Invalid credentials'), 'Login failed')).toBe(
+        'Invalid credentials'
+      );
+    });
+
+    it('falls back for anything that is not an error', () => {
+      expect(messageOf('boom', 'Login failed')).toBe('Login failed');
+    });
+  });
+});

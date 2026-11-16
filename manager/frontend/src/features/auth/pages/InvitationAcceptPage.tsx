@@ -4,6 +4,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import AuthCard from '../components/AuthCard';
 import AuthStatus from '../components/AuthStatus';
 import { useAuth } from '../context';
+import { useSsoProviders } from '../hooks/useSsoProviders';
 import type { InvitationDetails } from '../types';
 import './InvitationAcceptPage.css';
 
@@ -13,6 +14,7 @@ export default function InvitationAcceptPage() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const { isAuthenticated } = useAuth();
+  const sso = useSsoProviders();
 
   const token = searchParams.get('token');
   const [details, setDetails] = useState<InvitationDetails | null>(null);
@@ -34,7 +36,6 @@ export default function InvitationAcceptPage() {
       const invitationDetails = await client.getInvitationByToken(token);
       setDetails(invitationDetails);
 
-      // Check if expired
       if (new Date(invitationDetails.expires_at) < new Date()) {
         setError('This invitation has expired');
       }
@@ -186,9 +187,11 @@ export default function InvitationAcceptPage() {
                 <Button onClick={handleLoginRedirect} variant="primary" size="lg">
                   Sign In
                 </Button>
-                <Button onClick={handleRegisterRedirect} variant="secondary" size="lg">
-                  Create Account
-                </Button>
+                {!sso?.required && (
+                  <Button onClick={handleRegisterRedirect} variant="secondary" size="lg">
+                    Create Account
+                  </Button>
+                )}
               </div>
             </>
           ) : isExpired ? (

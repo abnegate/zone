@@ -2,7 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type React from 'react';
+import { AuthRequestError } from '../../../api/auth';
 import { client } from '../../../api/client';
+import { SsoCode } from '../SsoCode';
+import { SSO_MESSAGES } from '../ssoMessages';
 import ResetPasswordPage from './ResetPasswordPage';
 
 const validToken = 'valid-token-1234567890abcdef';
@@ -295,6 +298,25 @@ describe('ResetPasswordPage', () => {
       await userEvent.type(screen.getByLabelText(/confirm password/i), 'NewPassword123{enter}');
 
       expect(mockResetPassword).toHaveBeenCalled();
+    });
+  });
+
+  describe('Single sign-on', () => {
+    it('shows the sso_required message when the server refuses the reset', async () => {
+      mockResetPassword.mockRejectedValue(
+        new AuthRequestError('This server requires single sign-on.', SsoCode.Required)
+      );
+      renderPage(validToken);
+
+      await userEvent.type(screen.getByLabelText(/^new password$/i), 'Password123');
+      await userEvent.type(screen.getByLabelText(/confirm password/i), 'Password123');
+      await userEvent.click(screen.getByRole('button', { name: /reset password/i }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(SSO_MESSAGES[SsoCode.Required]);
+      expect(screen.getByRole('link', { name: /back to login/i })).toHaveAttribute(
+        'href',
+        '/login'
+      );
     });
   });
 });

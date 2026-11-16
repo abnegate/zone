@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { clientModule } from '../../../test/client';
+import { SSO_OFFERED, SSO_REQUIRED } from '../ssoFixtures';
 import type { InvitationDetails } from '../types';
 
 const mockNavigate = mock();
@@ -15,6 +16,14 @@ mock.module('../../../api/client', () =>
     acceptInvitation: mockAcceptInvitation,
   })
 );
+
+const mockListProviders = mock();
+
+mock.module('../../../api/sso', () => ({
+  authorize: mock(),
+  completeCallback: mock(),
+  listProviders: mockListProviders,
+}));
 
 mock.module('../context', () => ({
   useAuth: mockUseAuth,
@@ -58,6 +67,8 @@ describe('InvitationAcceptPage', () => {
     mockGetInvitationByToken.mockReset();
     mockAcceptInvitation.mockReset();
     mockGetInvitationByToken.mockResolvedValue(mockDetails);
+    mockListProviders.mockReset();
+    mockListProviders.mockRejectedValue(new Error('offline'));
   });
 
   const renderPage = () => {
@@ -308,5 +319,25 @@ describe('InvitationAcceptPage', () => {
 
     // Accept button should not be present for expired invitation
     expect(screen.queryByRole('button', { name: /accept invitation/i })).not.toBeInTheDocument();
+  });
+
+  it('hides Create Account but keeps Sign In when single sign-on is required', async () => {
+    mockListProviders.mockResolvedValue(SSO_REQUIRED);
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /sign in/i })).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /create account/i })).toBeNull();
+    });
+  });
+
+  it('keeps Create Account when single sign-on is offered but not required', async () => {
+    mockListProviders.mockResolvedValue(SSO_OFFERED);
+    renderPage();
+
+    await waitFor(() => expect(mockListProviders).toHaveBeenCalled());
+    expect(await screen.findByRole('button', { name: /create account/i })).toBeInTheDocument();
   });
 });
