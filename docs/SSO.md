@@ -528,4 +528,34 @@ Every change is checked against the license before anything else.
 
 ## SAML
 
-SAML status: pending research.
+Zone doesn't support SAML 2.0 in this release. Native SAML is planned for a
+later release.
+
+If your identity provider only speaks SAML, put an OIDC bridge in front of
+it. The bridge signs users in through your SAML provider and acts as an
+OIDC provider towards Zone, so you add it to Zone like any other OIDC
+provider.
+
+- **Keycloak** (recommended): add your SAML provider as a SAML identity
+  provider in a Keycloak realm, then register Zone as an OIDC client in
+  that realm.
+- **Authentik**: add your SAML provider as a SAML source, and register Zone
+  with an OIDC provider and application that use that source.
+- Dex also has a SAML connector, but Dex's own documentation marks it as
+  unmaintained, so we don't recommend it.
+
+Whichever bridge you use, set it up so that:
+
+- the `sub` claim comes from the SAML provider's persistent NameID, or
+  another attribute that never changes for a user. Zone links accounts by
+  provider and subject, so a `sub` that changes signs the same person in as
+  someone new.
+- `email` and `email_verified` are passed through to the ID token. Without
+  `email_verified`, turn **Require verified email** off and set allowed
+  domains, as described in [Verified email](#verified-email).
+- the bridge's OIDC client for Zone has Zone's redirect URI,
+  `{APP_BASE_URL}/sso/callback`, registered.
+
+Then add a provider in Zone with the bridge's issuer, such as
+`https://keycloak.acme.com/realms/acme` for Keycloak, and the client ID and
+secret of the bridge's OIDC client.
