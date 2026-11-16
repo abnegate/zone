@@ -70,7 +70,6 @@ use crate::services::route::Unusable;
 use crate::services::stages;
 use crate::state::AppState;
 use crate::workers::evaluation;
-use crate::workers::evaluation::EvaluationSettings;
 use crate::workers::evaluation::Evaluator;
 use crate::workers::evaluation::Verdict;
 use crate::workers::instructions;
@@ -1360,10 +1359,7 @@ async fn execute_in_checkout<'a>(
         tracing::warn!(%run_id, "Could not record the run's model; a reviewer is chosen without it");
     }
 
-    let evaluator = Evaluator::detect(
-        &workspace_path,
-        EvaluationSettings::from_process_environment(),
-    );
+    let evaluator = Evaluator::detect(&workspace_path, state.config().evaluation.clone());
     let baseline = if evaluator.is_active() {
         record_evaluation_log(
             state,

@@ -20,6 +20,7 @@ use zone_core::servers;
 
 use crate::services::hosts::Hosts;
 use crate::services::login::claude::ROOT_PATH;
+use crate::workers::evaluation::EvaluationSettings;
 
 mod environment;
 mod flag;
@@ -145,6 +146,8 @@ pub struct Config {
     pub mcp_enabled: bool,
     /// Whether the API may create stdio MCP servers (`ZONE_MCP_COMMANDS`).
     pub mcp_commands: bool,
+    /// Code quality evaluation around each task run (`ZONE_TASK_EVALUATION*`).
+    pub evaluation: EvaluationSettings,
 }
 
 /// The instance-wide default backend.
@@ -1466,6 +1469,7 @@ impl Config {
             connect_urls: connect_urls(env::var(CONNECT_URLS).ok())?,
             mcp_enabled: servers::flag(MCP_ENABLED, true),
             mcp_commands: servers::flag(MCP_COMMANDS, false),
+            evaluation: EvaluationSettings::from_process_environment(),
             chat: crate::services::chat::session::Settings::from_env().map_err(|_| {
                 ConfigError::Invalid(
                     "ZONE_CHAT_* settings must be positive integers within the supported range",
@@ -1518,6 +1522,7 @@ impl std::fmt::Debug for Config {
             .field("connect_urls", &self.connect_urls)
             .field("mcp_enabled", &self.mcp_enabled)
             .field("mcp_commands", &self.mcp_commands)
+            .field("evaluation", &self.evaluation)
             .finish()
     }
 }
@@ -1547,6 +1552,8 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::matchers::path;
     use zone_core::variables::Variables;
+
+    use crate::workers::evaluation::settings as evaluation;
 
     const ENVIRONMENT: &[&str] = &[
         "APP_BASE_URL",
@@ -1593,6 +1600,10 @@ mod tests {
         CLAUDE_API_URL,
         CODEX_API_URL,
         CODEX_SANDBOX,
+        evaluation::ENABLED_VARIABLE,
+        evaluation::CATEGORIES_VARIABLE,
+        evaluation::TOOL_TIMEOUT_VARIABLE,
+        evaluation::BUDGET_VARIABLE,
     ];
     const GITHUB_SETTINGS: [&str; 5] = [
         GITHUB_PULL_REQUEST_TTL,
@@ -1674,6 +1685,7 @@ mod tests {
             connect_urls: Vec::new(),
             mcp_enabled: true,
             mcp_commands: false,
+            evaluation: EvaluationSettings::default(),
         }
     }
 
@@ -2699,6 +2711,7 @@ mod tests {
             !defaults.mcp_commands,
             "API-created stdio MCP servers stay off until the operator opts in"
         );
+        assert_eq!(defaults.evaluation, EvaluationSettings::default());
 
         environment.set("HOST", "127.0.0.1");
         environment.set("PORT", "9001");
@@ -2729,6 +2742,8 @@ mod tests {
         environment.set("MONITORING_GRAFANA_ADMIN_PASSWORD", "password");
         environment.set("TRAIN_UPLOAD_LIMIT_MB", "1");
         environment.set("SEARCH_TIMEOUT_SECONDS", "42");
+        environment.set(evaluation::ENABLED_VARIABLE, "yes");
+        environment.set(evaluation::BUDGET_VARIABLE, "120");
 
         let configured = Config::from_env().expect("custom values are valid");
         assert_eq!(configured.web_search.timeout, Duration::from_secs(42));
@@ -2791,6 +2806,11 @@ mod tests {
             Some("password")
         );
         assert_eq!(configured.train_upload_limit_mb, 4);
+        assert!(
+            configured.evaluation.enabled,
+            "ZONE_TASK_EVALUATION=yes is resolved once, with the rest of the configuration"
+        );
+        assert_eq!(configured.evaluation.total_budget, Duration::from_secs(120));
         let monitoring = format!("{:?}", configured.monitoring);
         assert!(monitoring.contains("grafana_token: None"));
         assert!(monitoring.contains("grafana_secret: Some(\"[REDACTED]\")"));
