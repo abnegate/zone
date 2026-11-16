@@ -35,6 +35,12 @@ const screens = [
     tabs: true,
   },
   { path: '/releases', title: 'Releases', content: 'article.release-card' },
+  {
+    path: '/analytics',
+    title: 'Analytics',
+    content: '[data-testid="analytics-tile"]',
+    tabs: true,
+  },
 ];
 
 function nameOf(screen: (typeof screens)[number]): string {

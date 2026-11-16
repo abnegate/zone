@@ -48,6 +48,13 @@ const screens = [
     titleLeading: '20px',
   },
   {
+    path: 'analytics',
+    heading: 'Analytics',
+    content: '[data-testid="analytics-tile"]',
+    title: '.analytics-tile-label',
+    titleLeading: '20px',
+  },
+  {
     path: 'wiki',
     heading: 'Knowledge Base',
     content: '.knowledge-card',
