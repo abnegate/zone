@@ -469,12 +469,12 @@ describe('ChatsPage new chat dialog', () => {
     expect(optionLabels('Select Model')).toEqual(['Automatic', 'llama3.2']);
   });
 
-  it('says an offline chat reaches no network beyond its model', async () => {
+  it("says an offline chat still uses Zone's own model services and reaches no other network", async () => {
     await openNewChat();
 
     expect(
       screen.getByText(
-        'Reaches no network beyond the model: no web search, shell network access, MCP servers or GitHub tools.'
+        "Still uses Zone's own model services (the model, embeddings, ComfyUI), but reaches no other network: no web search, shell network access, MCP servers or GitHub tools."
       )
     ).toBeInTheDocument();
     expect(screen.queryByText(/Connected sources still work/)).not.toBeInTheDocument();

@@ -156,7 +156,7 @@ const PROVIDER_EFFORT_RESET_FAILED =
 const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
 const MODEL_CONTEXT_RESET_FAILED = 'Model changed, but its context size could not be fitted to it';
 const OFFLINE_HELP =
-  'Reaches no network beyond the model: no web search, shell network access, MCP servers or GitHub tools.';
+  "Still uses Zone's own model services (the model, embeddings, ComfyUI), but reaches no other network: no web search, shell network access, MCP servers or GitHub tools.";
 const OFFLINE_UNENFORCED =
   "This host can't keep commands off the network, so offline chats here can't run commands.";
 
