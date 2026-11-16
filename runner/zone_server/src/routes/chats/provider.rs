@@ -196,7 +196,7 @@ pub(super) async fn chosen(
         Some(choice.clone()),
     )
     .with_policy(loaded.ok().flatten());
-    if let Err(denial) = route.precheck(state, choice.model.as_deref()).await {
+    if let Err(denial) = route.precheck(choice.model.as_deref()).await {
         let detail = match denial {
             Denial::Model => choice.model.as_deref(),
             _ => Some(provider),

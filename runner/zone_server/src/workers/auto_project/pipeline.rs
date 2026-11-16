@@ -762,7 +762,7 @@ async fn awaiting_reviews(step: &Step<'_>) -> Result<(), String> {
             Ok(lineup) => lineup,
             Err(unavailable) => return step.pause(&unavailable.to_string()).await,
         };
-        let lineup = match venue.admitted(step.drive.state, lineup).await {
+        let lineup = match venue.admitted(lineup).await {
             Ok(lineup) => lineup,
             Err(denial) => {
                 background

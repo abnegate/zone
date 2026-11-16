@@ -388,7 +388,7 @@ pub async fn start_auto(
         .unwrap_or(crate::services::stages::AUTO)
         .to_string();
     let route = Route::for_workspace(&state, workspace_id).await;
-    if let Err(denial) = route.precheck(&state, Some(&model)).await {
+    if let Err(denial) = route.precheck(Some(&model)).await {
         let asked = Asked {
             workspace: workspace_id,
             actor: Some(user_id),

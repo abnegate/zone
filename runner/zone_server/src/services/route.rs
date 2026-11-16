@@ -145,7 +145,6 @@ impl fmt::Display for Unusable {
 }
 
 impl Unusable {
-    /// The policy denial that leaves the route unusable, when one does.
     pub fn denial(&self) -> Option<Denial> {
         match self.reason {
             Reason::Denied(denial) => Some(denial),
@@ -153,7 +152,6 @@ impl Unusable {
         }
     }
 
-    /// The code a client is told the denial by, when a policy denial leaves the route unusable.
     pub fn code(&self) -> Option<&'static str> {
         self.denial().map(|denial| denial.code())
     }
@@ -189,8 +187,6 @@ pub struct Route {
     windowed: bool,
     /// The agent the instance runs completions on, when it runs them on one.
     configured: Option<AgentKind>,
-    /// The policy the route runs under, none when no policy is enforced, or why it could not be
-    /// read.
     policy: Result<Option<Effective>, Denial>,
 }
 
@@ -393,12 +389,7 @@ impl Route {
 
     /// Whether the policy lets `model` run on `backend`, one this route resolved: see
     /// [`policy::admit`]. A route its policy leaves unusable admits nothing.
-    pub async fn admit(
-        &self,
-        state: &AppState,
-        backend: &LlmBackend,
-        model: &str,
-    ) -> Result<(), Denial> {
+    pub async fn admit(&self, backend: &LlmBackend, model: &str) -> Result<(), Denial> {
         if let Some(denial) = self.denial() {
             return Err(denial);
         }
@@ -407,7 +398,7 @@ impl Route {
         };
         match &self.endpoint {
             Ok(endpoint) => {
-                policy::admit(state, effective, endpoint, backend, self.provider(), model).await
+                policy::admit(effective, endpoint, backend, self.provider(), model).await
             }
             Err(_) => effective.model(model),
         }
@@ -417,7 +408,7 @@ impl Route {
     /// is resolved: why the route is unusable under it, else whether it admits `model` on the
     /// agent the route prefers, or over HTTP. No model, or [`stages::AUTO`], leaves the choice
     /// to the turn.
-    pub async fn precheck(&self, _state: &AppState, model: Option<&str>) -> Result<(), Denial> {
+    pub async fn precheck(&self, model: Option<&str>) -> Result<(), Denial> {
         if let Some(denial) = self.denial() {
             return Err(denial);
         }
@@ -436,7 +427,6 @@ impl Route {
         }
     }
 
-    /// Why the policy leaves this usable route unusable, when it does.
     fn denial(&self) -> Option<Denial> {
         match &self.policy {
             Err(denial) => Some(*denial),
@@ -473,7 +463,6 @@ impl Route {
         }
     }
 
-    /// The policy's denial as the reason this usable route can't be used.
     fn denied(&self) -> Option<Unusable> {
         self.endpoint
             .is_ok()
@@ -516,6 +505,15 @@ impl Route {
             chat.context_tokens = None;
         }
         chat
+    }
+
+    /// Who chose the endpoint completions go to, whatever the policy says of them, or why there
+    /// is none.
+    pub fn origin(&self) -> Result<Origin, Unusable> {
+        self.endpoint
+            .as_ref()
+            .map(Endpoint::origin)
+            .map_err(|unusable| *unusable)
     }
 
     /// The endpoint completions go to, or why there is none.
@@ -668,7 +666,7 @@ impl Route {
     /// The models these settings prefer for completions sent to this route's
     /// endpoint, choosing only models its policy lets run.
     pub fn preferences(&self, classifier: &str) -> Preferences {
-        match (self.settings(), self.endpoint()) {
+        match (self.settings(), &self.endpoint) {
             (Some(settings), Ok(endpoint)) => {
                 Preferences::for_endpoint(settings, classifier, endpoint)
             }
@@ -1809,7 +1807,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_precheck_judges_the_model_on_the_routes_own_agent() {
-        let state = AppState::for_tests();
         let config = instance_on(None);
         let route = routed(
             &config,
@@ -1820,21 +1817,14 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            route.precheck(&state, Some("gpt-5")).await,
-            Err(Denial::Model)
-        );
-        assert_eq!(
-            route.precheck(&state, Some("claude-opus-4-1")).await,
-            Ok(())
-        );
-        assert_eq!(route.precheck(&state, Some(AUTO)).await, Ok(()));
-        assert_eq!(route.precheck(&state, None).await, Ok(()));
+        assert_eq!(route.precheck(Some("gpt-5")).await, Err(Denial::Model));
+        assert_eq!(route.precheck(Some("claude-opus-4-1")).await, Ok(()));
+        assert_eq!(route.precheck(Some(AUTO)).await, Ok(()));
+        assert_eq!(route.precheck(None).await, Ok(()));
     }
 
     #[tokio::test]
     async fn a_precheck_names_why_the_route_is_denied_before_the_model() {
-        let state = AppState::for_tests();
         let route = routed(
             &instance_on(None),
             settings(PROVIDER_CLAUDE_CODE),
@@ -1846,13 +1836,12 @@ mod tests {
         );
 
         assert_eq!(
-            route.precheck(&state, Some("sonnet")).await,
+            route.precheck(Some("sonnet")).await,
             Err(Denial::Agent(policy::Agent::Claude))
         );
         assert_eq!(
             route
                 .admit(
-                    &state,
                     &LlmBackend::cli(AgentKind::Claude, Default::default()),
                     "sonnet"
                 )
@@ -1863,7 +1852,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_route_without_a_policy_admits_anything() {
-        let state = AppState::for_tests();
         let route = Route::of(
             &instance_on(None),
             Uuid::nil(),
@@ -1873,11 +1861,10 @@ mod tests {
         );
 
         assert!(route.policy().is_none());
-        assert_eq!(route.precheck(&state, Some("anything")).await, Ok(()));
+        assert_eq!(route.precheck(Some("anything")).await, Ok(()));
         assert_eq!(
             route
                 .admit(
-                    &state,
                     &LlmBackend::cli(AgentKind::Codex, Default::default()),
                     "anything"
                 )

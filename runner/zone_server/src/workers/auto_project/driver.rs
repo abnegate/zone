@@ -217,7 +217,7 @@ impl Drive<'_> {
             return Ok(false);
         };
         let route = Route::for_workspace(self.state, self.workspace_id).await;
-        let Err(denial) = route.precheck(self.state, task.model_name.as_deref()).await else {
+        let Err(denial) = route.precheck(task.model_name.as_deref()).await else {
             return Ok(false);
         };
         policy::record(

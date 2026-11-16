@@ -219,19 +219,11 @@ impl Venue {
 
     /// The reviewers of `lineup` the venue's policy lets run, in its order, or the denial of
     /// the first when it lets none of them run.
-    pub async fn admitted(
-        &self,
-        state: &AppState,
-        lineup: Vec<Reviewer>,
-    ) -> Result<Vec<Reviewer>, Denial> {
+    pub async fn admitted(&self, lineup: Vec<Reviewer>) -> Result<Vec<Reviewer>, Denial> {
         let mut admitted = Vec::with_capacity(lineup.len());
         let mut refusal = None;
         for reviewer in lineup {
-            match self
-                .route
-                .admit(state, &self.backend, &reviewer.model)
-                .await
-            {
+            match self.route.admit(&self.backend, &reviewer.model).await {
                 Ok(()) => admitted.push(reviewer),
                 Err(denial) => {
                     refusal.get_or_insert(denial);
@@ -783,19 +775,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_change_is_reviewed_only_on_models_the_policy_admits() {
-        let state = AppState::new(
-            crate::state::test_config(),
-            crate::state::unreachable_pool(),
-            None,
-        );
         let lineup = vec![
             reviewer("gpt-4o"),
             reviewer("qwen3:32b"),
             reviewer("qwen2.5:7b"),
         ];
 
-        let admitted = governed(&["qwen*"]).admitted(&state, lineup.clone()).await;
-        let refused = governed(&["mistral*"]).admitted(&state, lineup).await;
+        let admitted = governed(&["qwen*"]).admitted(lineup.clone()).await;
+        let refused = governed(&["mistral*"]).admitted(lineup).await;
 
         assert_eq!(
             admitted,

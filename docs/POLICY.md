@@ -35,6 +35,11 @@ Removing the license is different: the server runs as Community, and
 Community enforces no policy. Zone keeps the saved policies, and enforces them
 again as soon as a Team or Enterprise license is installed.
 
+A stored license key that no longer verifies, for example after an upgrade
+changes the keys Zone trusts, isn't treated as removed. The saved policies stay
+enforced, and every change is refused with `license_required` until an admin
+installs a key that verifies or removes the license.
+
 If Zone can't read the license or a policy when it needs it, it refuses
 instead of running unrestricted. The refusal is `policy_unreadable`; a task
 run retries it, and in a chat you can try again shortly.
@@ -120,6 +125,11 @@ route with no prefix, or a prefix that isn't in the table, counts as `other`.
 So does Google AI Studio (`gemini/`): only `vertex_ai` routes count as Vertex
 AI.
 
+Only the prefix counts, not where the route sends traffic. An `ollama_chat` or
+`hosted_vllm` route whose `api_base` names a server on another network still
+counts as `local`. Whoever edits LiteLLM's `config.yaml` decides what `local`
+means, so keep the `api_base` of those routes on hosts you run.
+
 Each provider in AI settings is checked this way:
 
 | Provider in AI settings | Checked against |
@@ -140,7 +150,7 @@ hosts those URLs may name.
 ### How Zone tells where a LiteLLM model runs
 
 When `providers` is set at either layer and a completion goes to a LiteLLM
-endpoint, Zone asks that endpoint for its routes with
+endpoint Zone trusts, Zone asks that endpoint for its routes with
 `GET {endpoint}/v2/model/info`, using the key Zone uses for the endpoint. It
 then finds the route for the model name it's about to ask for:
 
@@ -154,12 +164,30 @@ The route's `model` prefix gives the provider. With the stock
 `ollama_chat/*`, so all of them count as `local`.
 
 Zone caches each endpoint's routes for 60 seconds, so a change to LiteLLM's
-`config.yaml` can take up to a minute to reach policy decisions.
+`config.yaml` can take up to a minute to reach policy decisions. A lookup that
+fails is remembered for 5 seconds, and lookups that arrive while one is in
+flight wait for it rather than ask again.
+
+**Zone believes only the routes of an endpoint the organization controls.**
+The routes are the endpoint's own answer, so whoever chooses the endpoint
+chooses what it claims. Zone trusts:
+
+- the instance's own `LITELLM_HOST`, and a saved URL on the same host;
+- an endpoint saved in the organization's AI settings.
+
+An endpoint saved in a workspace's AI settings counts as `other` whatever its
+routes say. Without this, a workspace admin could save a proxy that reports
+every route as `ollama_chat/…` while forwarding to a hosted API, and satisfy an
+organization's `providers: ["local"]`; a workspace may only narrow the
+organization's policy, never get round it. To run a workspace on its own
+LiteLLM endpoint under a `providers` restriction, save the endpoint at the
+organization, or allow `other`.
 
 **An upstream Zone can't identify counts as `other`.** That covers a model
 with no route, an endpoint that isn't LiteLLM, an endpoint that doesn't answer
-`/v2/model/info` within 2 seconds, and a key that may not read it. `other` is
-denied unless the policy allows it, so a restricted policy fails closed.
+`/v2/model/info` within 2 seconds, a key that may not read it, and an endpoint
+a workspace saved. `other` is denied unless the policy allows it, so a
+restricted policy fails closed.
 
 When `providers` is unset, Zone doesn't look up routes at all.
 
@@ -273,6 +301,12 @@ Entries match the name Zone asks for, not where it runs:
 Combine `models` with `providers` when both matter: `models` alone can't tell
 two routes with the same name apart.
 
+**Automatic** asks a coding agent for no particular model, so the agent runs
+its own default. Zone sends it only while every layer that sets `models`
+lists the literal entry `auto`. A wildcard such as `*` or `a*` never allows
+it; otherwise Zone picks the first of the agent's models the policy allows,
+and refuses the turn when there's none.
+
 Choosing a denied model is refused in AI settings, when changing a chat's
 model, for a task's or an auto-project planner's model, and when a turn or
 task run starts. Model lists in the console show denied models disabled, with
@@ -287,9 +321,9 @@ Auto-project reviews and pull request repairs fail with the denial instead.
 
 ### What a policy can't govern
 
-- **An agent's own choice.** When Zone asks Claude Code or Codex for no
-  particular model, as with **Automatic**, the agent uses its own default,
-  which Zone doesn't see.
+- **An agent's own choice.** When the policy lists `auto` and Zone asks
+  Claude Code or Codex for no particular model, the agent uses its own
+  default, which Zone doesn't see.
 - **Subagents.** An agent can start subagents on models of its own choosing,
   inside its own process.
 
@@ -337,8 +371,9 @@ The ceiling also governs the tools coding agents ship with:
   `WebSearch` count as Outward, and every other built-in tool as Host.
 - **An agent that doesn't ask Zone before using its own tools,** such as Codex,
   or Claude Code on a turn without Zone's tools, has its own tools withheld
-  under any ceiling, as if **Zone tools only** were on. It keeps Zone's tools,
-  which go through the ceiling as usual.
+  under any ceiling, as if **Zone tools only** were on. This holds for every
+  agent a turn runs on, including one it hands over to partway through. The
+  agent keeps Zone's tools, which go through the ceiling as usual.
 
 ### Unattended runs
 
@@ -354,7 +389,8 @@ and Zone records `agent_policy.tool_denied` with the tool's name.
 **Settings → Organization → MCP servers**, and the instance's own servers. A
 name is 1 to 32 letters, digits, `-` and `_`; anything else is refused with
 `policy_mcp_server_invalid`. Servers not on the list are left out of every
-chat and task run, whether they belong to the organization or the instance.
+chat and task run, whether they belong to the organization or the instance,
+for the whole of each turn, including the rounds after a `wait_for` settles.
 
 A workspace's own **On** and **Off** settings for organization servers still
 apply on top of the policy.
@@ -410,7 +446,7 @@ right, as it always has.
 | Where | What happens |
 |---|---|
 | Chat | The turn doesn't start, and the chat shows the policy's message. Over the WebSocket this is `{"type": "denied", "message": "…", "code": "policy_…"}`. |
-| Provider, model and agent pickers | Denied options are disabled, with the reason. API responses carry it as `denial`. |
+| Provider, model and agent pickers | Denied options are disabled, with the reason. API responses carry it as `denial`. Listing a workspace's models never refuses: when the policy denies the workspace's provider or agent, or can't be read, every model carries that denial. |
 | REST requests | 403 with `{"error": "…", "code": "policy_…"}`. |
 | Task runs | The run fails with the policy's message. `policy_unreadable` is retried; every other denial is final. |
 | Tool calls | The tool trace shows the call as refused by policy. |

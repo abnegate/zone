@@ -225,6 +225,15 @@ agent egress and does not follow the rule: the chat's model provider, Zone's
 model infrastructure, its project clones and pull request calls to GitHub,
 and knowledge source sync.
 
+A policy's `providers` rule judges a LiteLLM endpoint by the routes it
+publishes at `/v2/model/info`. That answer is the endpoint's own, so Zone
+believes it only from the instance's `LITELLM_HOST` or an endpoint saved in the
+organization's AI settings. An endpoint saved in a workspace's AI settings
+counts as an unidentified provider, which a restricted policy denies, so a
+workspace admin cannot satisfy the organization's rule with a proxy that
+misreports its routes (see
+[docs/POLICY.md](docs/POLICY.md#how-zone-tells-where-a-litellm-model-runs)).
+
 ## Privacy Considerations
 
 ### Prompt Logging

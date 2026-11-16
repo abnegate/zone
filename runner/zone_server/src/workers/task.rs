@@ -1637,7 +1637,7 @@ async fn prepare(
     let model = resolve_model(state, task, &backend, &endpoint, &preferences)
         .await
         .map_err(Unprepared::Model)?;
-    let model = admitted(state, &route, &backend, model).await?;
+    let model = admitted(&route, &backend, model).await?;
     Ok(Prepared {
         backend,
         endpoint,
@@ -1680,12 +1680,11 @@ async fn routed(
 
 /// `model`, when the agent policy `route` runs under lets it run on `backend`.
 async fn admitted(
-    state: &AppState,
     route: &Route,
     backend: &LlmBackend,
     model: String,
 ) -> Result<String, Unprepared> {
-    match route.admit(state, backend, &model).await {
+    match route.admit(backend, &model).await {
         Ok(()) => Ok(model),
         Err(denial) => Err(Unprepared::Denied { denial, model }),
     }
@@ -9255,8 +9254,8 @@ mod cli_tests {
         );
         let backend = signed_in("first-access");
 
-        let allowed = admitted(&state, &route, &backend, "claude-opus-4-1".to_string()).await;
-        let refused = admitted(&state, &route, &backend, "sonnet".to_string())
+        let allowed = admitted(&route, &backend, "claude-opus-4-1".to_string()).await;
+        let refused = admitted(&route, &backend, "sonnet".to_string())
             .await
             .expect_err("a model the policy does not list");
 

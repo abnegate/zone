@@ -1,5 +1,6 @@
 const WILDCARD: char = '*';
 const MAXIMUM_LENGTH: usize = 128;
+const AUTOMATIC: &str = "auto";
 
 pub(super) fn valid(pattern: &str) -> bool {
     let length = pattern.chars().count();
@@ -8,7 +9,12 @@ pub(super) fn valid(pattern: &str) -> bool {
         && !stem(pattern).contains(WILDCARD)
 }
 
+/// A model left for the agent to choose matches only a pattern naming it: a wildcard would let
+/// the agent run whatever it likes.
 pub(super) fn matches(pattern: &str, model: &str) -> bool {
+    if automatic(model) {
+        return automatic(pattern);
+    }
     match pattern.strip_suffix(WILDCARD) {
         Some(prefix) => model.starts_with(prefix),
         None => model == pattern,
@@ -16,10 +22,18 @@ pub(super) fn matches(pattern: &str, model: &str) -> bool {
 }
 
 pub(super) fn covers(outer: &str, inner: &str) -> bool {
+    if automatic(inner) {
+        return automatic(outer);
+    }
     match outer.strip_suffix(WILDCARD) {
         Some(prefix) => stem(inner).starts_with(prefix),
         None => outer == inner,
     }
+}
+
+fn automatic(model: &str) -> bool {
+    let model = model.trim();
+    model.is_empty() || model.eq_ignore_ascii_case(AUTOMATIC)
 }
 
 fn stem(pattern: &str) -> &str {
@@ -70,6 +84,29 @@ mod tests {
         assert!(matches("claude-*", "claude-"));
         assert!(!matches("claude-*", "claude"));
         assert!(matches("*", "anything"));
+    }
+
+    #[test]
+    fn only_a_pattern_naming_auto_matches_it() {
+        for pattern in ["auto", "AUTO"] {
+            assert!(matches(pattern, "auto"), "{pattern}");
+            assert!(matches(pattern, "Auto"), "{pattern}");
+            assert!(matches(pattern, ""), "{pattern}");
+        }
+        for pattern in ["*", "a*", "au*", "auto*", "automatic"] {
+            assert!(!matches(pattern, "auto"), "{pattern}");
+            assert!(!matches(pattern, ""), "{pattern}");
+        }
+        assert!(matches("auto*", "automatic"));
+        assert!(!matches("auto", "automatic"));
+    }
+
+    #[test]
+    fn only_auto_covers_auto() {
+        assert!(covers("auto", "auto"));
+        assert!(!covers("*", "auto"));
+        assert!(!covers("a*", "auto"));
+        assert!(covers("*", "auto*"));
     }
 
     #[test]

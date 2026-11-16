@@ -283,6 +283,31 @@ mod tests {
     }
 
     #[test]
+    fn auto_is_admitted_only_where_models_are_unset_or_name_it() {
+        let models = |models: &[&str]| Rules {
+            models: Some(models.iter().map(|&model| model.to_owned()).collect()),
+            ..Rules::default()
+        };
+        assert_eq!(
+            Effective::new(Rules::default(), Rules::default()).model("auto"),
+            Ok(())
+        );
+        for wildcard in [&["*"][..], &["a*"], &["claude-*", "au*"]] {
+            let effective = Effective::new(models(wildcard), Rules::default());
+            assert_eq!(effective.model("auto"), Err(Denial::Model), "{wildcard:?}");
+            assert_eq!(effective.model(""), Err(Denial::Model), "{wildcard:?}");
+        }
+        let named = Effective::new(models(&["auto", "claude-*"]), Rules::default());
+        assert_eq!(named.model("auto"), Ok(()));
+        let narrowed = Effective::new(models(&["auto", "claude-*"]), models(&["claude-*"]));
+        assert_eq!(narrowed.model("auto"), Err(Denial::Model));
+        assert_eq!(narrowed.rules().models, Some(vec!["claude-*".to_owned()]));
+        let widened = Effective::new(models(&["*"]), models(&["auto"]));
+        assert_eq!(widened.model("auto"), Err(Denial::Model));
+        assert_eq!(widened.rules().models, Some(vec![]));
+    }
+
+    #[test]
     fn the_lower_ceiling_wins() {
         for (organization, workspace, expected) in [
             (Some(Tier::Host), Some(Tier::Write), Some(Tier::Write)),

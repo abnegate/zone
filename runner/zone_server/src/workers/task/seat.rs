@@ -83,7 +83,7 @@ impl Seat {
         };
         if agent(&resolved.backend) != agent(&self.backend) {
             self.model = self.model(state, task, &resolved.backend).await?;
-            admitted(state, &self.route, &resolved.backend, self.model.clone()).await?;
+            admitted(&self.route, &resolved.backend, self.model.clone()).await?;
             if !matches!(
                 tasks::record_run_model(state.db(), run, owner, &self.model).await,
                 Ok(true)
