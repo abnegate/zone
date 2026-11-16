@@ -290,6 +290,7 @@ describe('Sidebar', () => {
       expect(screen.getByText('Tasks')).toBeInTheDocument();
       expect(screen.getByText('Pull Requests')).toBeInTheDocument();
       expect(screen.getByText('Releases')).toBeInTheDocument();
+      expect(screen.getByText('Analytics')).toBeInTheDocument();
       expect(screen.getByText('Models')).toBeInTheDocument();
       expect(screen.getByText('Wiki')).toBeInTheDocument();
       expect(screen.getByText('Settings')).toBeInTheDocument();
@@ -306,6 +307,7 @@ describe('Sidebar', () => {
         'Tasks',
         'Pull Requests',
         'Releases',
+        'Analytics',
         'Models',
         'Wiki',
         'Settings',
@@ -370,6 +372,7 @@ describe('Sidebar', () => {
         '/pull-requests'
       );
       expect(screen.getByText('Releases').closest('a')).toHaveAttribute('href', '/releases');
+      expect(screen.getByText('Analytics').closest('a')).toHaveAttribute('href', '/analytics');
       expect(screen.getByText('Models').closest('a')).toHaveAttribute('href', '/models');
       expect(screen.getByText('Wiki').closest('a')).toHaveAttribute('href', '/wiki');
     });
