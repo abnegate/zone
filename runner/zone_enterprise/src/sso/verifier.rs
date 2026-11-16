@@ -1,34 +1,21 @@
+use crate::sso::algorithm;
+use crate::sso::claims::Claims;
+use crate::sso::client_id::ClientId;
+use crate::sso::encoded_header::EncodedHeader;
+use crate::sso::error::Error;
+use crate::sso::header::Header;
+use crate::sso::issuer::Issuer;
+use crate::sso::rejection::Rejection;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::jwk::Jwk;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-use serde::Deserialize;
-
-use crate::sso::algorithm;
-use crate::sso::claims::Claims;
-use crate::sso::client_id::ClientId;
-use crate::sso::error::Error;
-use crate::sso::issuer::Issuer;
-use crate::sso::rejection::Rejection;
 
 pub(crate) const LEEWAY_SECONDS: i64 = 60;
 
 const SEGMENT_SEPARATOR: char = '.';
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Header {
-    pub(crate) algorithm: Algorithm,
-    pub(crate) key_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct EncodedHeader {
-    alg: String,
-    #[serde(default)]
-    kid: Option<String>,
-}
 
 pub(crate) struct Verifier<'a> {
     pub(crate) issuer: &'a Issuer,

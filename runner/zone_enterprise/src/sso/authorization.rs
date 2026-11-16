@@ -1,9 +1,11 @@
+use std::fmt;
+
 use url::Url;
 use url::form_urlencoded::Serializer;
 
 use crate::sso::client_id::ClientId;
 use crate::sso::pkce::{self, Pkce};
-use crate::sso::random;
+use crate::sso::{REDACTED, random};
 
 pub const SCOPE: &str = "openid email profile";
 
@@ -11,7 +13,7 @@ const RESPONSE_TYPE: &str = "code";
 const FORM_SPACE: &str = "+";
 const PERCENT_SPACE: &str = "%20";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Authorization {
     pub url: Url,
     pub state: String,
@@ -43,6 +45,20 @@ impl Authorization {
             nonce,
             verifier: pkce.verifier,
         }
+    }
+}
+
+impl fmt::Debug for Authorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut endpoint = self.url.clone();
+        endpoint.set_query(None);
+        formatter
+            .debug_struct("Authorization")
+            .field("endpoint", &endpoint.as_str())
+            .field("state", &REDACTED)
+            .field("nonce", &REDACTED)
+            .field("verifier", &REDACTED)
+            .finish()
     }
 }
 
@@ -113,5 +129,19 @@ mod tests {
         assert_ne!(first.nonce, second.nonce);
         assert_ne!(first.verifier, second.verifier);
         assert_ne!(first.state, first.nonce);
+    }
+
+    #[test]
+    fn debug_never_shows_the_state_nonce_or_verifier() {
+        let authorization = authorization("https://idp.acme.test/authorize");
+        let shown = format!("{authorization:?}");
+        for secret in [
+            &authorization.state,
+            &authorization.nonce,
+            &authorization.verifier,
+        ] {
+            assert!(!shown.contains(secret.as_str()), "{shown}");
+        }
+        assert!(shown.contains("https://idp.acme.test/authorize"), "{shown}");
     }
 }

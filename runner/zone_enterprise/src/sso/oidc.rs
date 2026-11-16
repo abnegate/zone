@@ -14,6 +14,7 @@ use url::Url;
 use url::form_urlencoded::byte_serialize;
 
 use crate::sso::authorization::Authorization;
+use crate::sso::body;
 use crate::sso::cached::Cached;
 use crate::sso::claims::Claims;
 use crate::sso::client_authentication::ClientAuthentication;
@@ -21,6 +22,7 @@ use crate::sso::clock::{self, Clock};
 use crate::sso::discovery::Discovery;
 use crate::sso::error::Error;
 use crate::sso::grant::Grant;
+use crate::sso::header::Header;
 use crate::sso::identity::Identity;
 use crate::sso::issuer::Issuer;
 use crate::sso::keys::Keys;
@@ -29,7 +31,7 @@ use crate::sso::rejection::Rejection;
 use crate::sso::token_refusal::TokenRefusal;
 use crate::sso::token_response::TokenResponse;
 use crate::sso::userinfo::Userinfo;
-use crate::sso::verifier::{Header, Verifier};
+use crate::sso::verifier::Verifier;
 
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 pub const REFETCH_COOLDOWN: TimeDelta = TimeDelta::seconds(60);
@@ -170,10 +172,9 @@ impl Oidc {
                 status.as_u16()
             )));
         }
-        let body = response.bytes().await.map_err(|error| {
+        let body = body::read(response).await.map_err(|unread| {
             Error::TokenExchange(format!(
-                "the userinfo endpoint's response couldn't be read ({}).",
-                error.without_url()
+                "the userinfo endpoint's response couldn't be read ({unread})."
             ))
         })?;
         serde_json::from_slice(&body).map_err(|_| {
@@ -218,10 +219,9 @@ impl Oidc {
             ))
         })?;
         let status = response.status();
-        let body = response.bytes().await.map_err(|error| {
+        let body = body::read(response).await.map_err(|unread| {
             Error::TokenExchange(format!(
-                "the token endpoint's response couldn't be read ({}).",
-                error.without_url()
+                "the token endpoint's response couldn't be read ({unread})."
             ))
         })?;
         if !status.is_success() {
@@ -290,6 +290,12 @@ impl Oidc {
         Ok(keys)
     }
 
+    pub fn forget(&self, issuer: &str) {
+        self.documents.remove(issuer);
+        self.keys.remove(issuer);
+        self.refetched.remove(issuer);
+    }
+
     fn may_refetch(&self, issuer: &Issuer, now: DateTime<Utc>) -> bool {
         match self.refetched.entry(issuer.as_str().to_owned()) {
             Entry::Occupied(entry) if now - *entry.get() < REFETCH_COOLDOWN => false,
@@ -316,11 +322,9 @@ impl Oidc {
         if !status.is_success() {
             return Err(format!("{url} answered HTTP {}.", status.as_u16()));
         }
-        response
-            .bytes()
+        body::read(response)
             .await
-            .map(|body| body.to_vec())
-            .map_err(|error| format!("{url} couldn't be read ({}).", error.without_url()))
+            .map_err(|unread| format!("{url} couldn't be read ({unread})."))
     }
 }
 
@@ -558,6 +562,39 @@ mod tests {
         };
         assert!(message.contains("503"), "{message}");
         assert!(harness.oidc.discover(&issuer).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_oversized_discovery_document_is_refused() {
+        let harness = Harness::new().await;
+        Mock::given(method("GET"))
+            .and(path(DISCOVERY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b' '; 2 * 1024 * 1024]))
+            .mount(&harness.server)
+            .await;
+        let Err(Error::Discovery(message)) = harness
+            .oidc
+            .discover(&harness.default_provider().issuer)
+            .await
+        else {
+            panic!("an oversized document was accepted");
+        };
+        assert!(message.contains("larger than"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_issuer_is_discovered_again() {
+        let harness = Harness::new().await;
+        harness.serve_standard_discovery().await;
+        let issuer = harness.default_provider().issuer;
+        harness.oidc.discover(&issuer).await.unwrap();
+        harness.oidc.discover(&issuer).await.unwrap();
+        assert_eq!(harness.requests(DISCOVERY_PATH).await, 1);
+
+        harness.oidc.forget(issuer.as_str());
+
+        harness.oidc.discover(&issuer).await.unwrap();
+        assert_eq!(harness.requests(DISCOVERY_PATH).await, 2);
     }
 
     #[tokio::test]
