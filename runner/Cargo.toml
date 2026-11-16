@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["zone_runner", "zone_core", "zone_routing", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_desktop"]
-default-members = ["zone_runner", "zone_core", "zone_routing", "zone_server", "zone_cli", "zone_installer", "zone_context"]
+members = ["zone_runner", "zone_core", "zone_enterprise", "zone_routing", "zone_server", "zone_cli", "zone_installer", "zone_context", "zone_desktop"]
+default-members = ["zone_runner", "zone_core", "zone_enterprise", "zone_routing", "zone_server", "zone_cli", "zone_installer", "zone_context"]
 
 [workspace.package]
 version = "0.1.0"
@@ -23,6 +23,7 @@ futures = "=0.3.34"
 bytes = "=1.12.1"
 base64 = "=0.23.1"
 subtle = "=2.6.1"
+ed25519-dalek = "=3.0.0"
 dashmap = "=6.2.1"
 once_cell = "=1.21.4"
 tokio-stream = "=0.1.19"
