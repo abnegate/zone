@@ -1,10 +1,11 @@
-use super::Status;
 use crate::services::github::readiness::BlockerReport;
 
 pub const HEAD_MOVED: &str = "head_moved";
 pub const NOT_READY: &str = "not_ready";
 pub const CONFLICT: &str = "conflict";
 pub const PROTECTED: &str = "protected";
+pub const MERGED: &str = "merged";
+pub const CLOSED: &str = "closed";
 const HEAD_MOVED_MESSAGE: &str =
     "The pull request's head moved since it was read. Review the new head first.";
 const NOT_READY_MESSAGE: &str = "The pull request is not ready to merge.";
@@ -30,8 +31,8 @@ impl Refusal {
             Self::NotReady { .. } => NOT_READY,
             Self::Conflict => CONFLICT,
             Self::Protected => PROTECTED,
-            Self::Merged => Status::Merged.as_str(),
-            Self::Closed => Status::Closed.as_str(),
+            Self::Merged => MERGED,
+            Self::Closed => CLOSED,
         }
     }
 
