@@ -3,7 +3,7 @@ set -eu
 
 unset DOMAIN_HOST_WEBUI OLLAMA_BASE_URL COMPOSE_PROFILES ZONE_COMPOSE ZONE_ENV_FILE \
     LITELLM_STATUS LITELLM_HEALTH OLLAMA_HEALTH UNREACHABLE CONTAINERS PROFILES \
-    MANAGER_CONFIG_FILES CONSOLE_CONFIG_FILES
+    MANAGER_CONFIG_FILES CONSOLE_CONFIG_FILES MANAGER_EXEC_STATUS SECURITY_BASIC_AUTH_USERS_FILE
 
 directory=$(mktemp -d)
 trap 'rm -rf "$directory"' EXIT HUP INT TERM
@@ -14,6 +14,8 @@ script=$sandbox/scripts/smoke-test.sh
 mkdir -p "$directory/bin" "$sandbox/scripts"
 cp "$source" "$script"
 cp "$(dirname -- "$source")/env-file.sh" "$sandbox/scripts/env-file.sh"
+cp "$(dirname -- "$source")/auth-file.sh" "$sandbox/scripts/auth-file.sh"
+users_file=$sandbox/auth/users.htpasswd
 
 cat > "$directory/bin/curl" <<'CURL'
 #!/bin/sh
@@ -45,10 +47,20 @@ cat > "$directory/bin/docker" <<'DOCKER'
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 case "$1" in
     ps)
-        for container in ${CONTAINERS:-litellm}; do
-            printf '%s\n' "$container"
-        done
+        case "$*" in
+            *com.docker.compose.service=manager*)
+                case " ${CONTAINERS:-litellm} " in
+                    *' manager '*) printf '%s\n' manager-id ;;
+                esac
+                ;;
+            *)
+                for container in ${CONTAINERS:-litellm}; do
+                    printf '%s\n' "$container"
+                done
+                ;;
+        esac
         ;;
+    exec) exit "${MANAGER_EXEC_STATUS:-0}" ;;
     inspect)
         for argument do
             container=$argument
@@ -95,8 +107,18 @@ fail() {
     exit 1
 }
 
+write_users() {
+    rm -rf "$sandbox/auth"
+    mkdir -p "$sandbox/auth"
+    printf '%s\n' 'admin:hash' > "$users_file"
+}
+
 write_env() {
     printf '%s\n' "$@" > "$sandbox/.env"
+}
+
+docker_called() {
+    grep -qF -- "$1" "$directory/docker.log"
 }
 
 smoke() {
@@ -113,6 +135,7 @@ smoke() {
         "$@" \
         sh "$script" > "$directory/output" 2>&1 || status=$?
     rm -f "$sandbox/.env"
+    write_users
     return "$status"
 }
 
@@ -154,6 +177,7 @@ assert_install_probes() {
     assert_not_requested 'localhost:8000'
 }
 
+write_users
 smoke || fail 'Expected an install with LiteLLM answering 401 behind basic auth to pass'
 assert_requested '--resolve litellm.webui.localhost:443:127.0.0.1'
 assert_requested 'https://litellm.webui.localhost/health/readiness'
@@ -168,6 +192,8 @@ assert_output '✓ LiteLLM'
 assert_output '✓ Manager'
 assert_output '✓ Console'
 assert_output '✓ Ollama'
+assert_output '✓ Basic auth file'
+assert_output 'from the host: the manager container is not running'
 
 smoke LITELLM_STATUS=200 || fail 'Expected LiteLLM answering 200 to pass'
 
@@ -287,5 +313,58 @@ if smoke CONTAINERS='litellm ollama' OLLAMA_HEALTH=starting; then
     fail 'Expected a bundled Ollama that is not healthy to fail'
 fi
 assert_output '✗ Ollama container (starting)'
+
+smoke CONTAINERS='litellm manager' || fail 'Expected Ollama reachable from the manager container to pass'
+docker_called 'exec manager-id curl -sf --max-time 10 -o /dev/null http://host.docker.internal:11434/api/tags' \
+    || fail 'Expected Ollama to be probed at its configured URL from inside the manager container'
+assert_not_requested '11434'
+assert_output '✓ Ollama (http://host.docker.internal:11434/api/tags from the manager container)'
+
+if smoke CONTAINERS='litellm manager' MANAGER_EXEC_STATUS=7; then
+    fail 'Expected Ollama the host reaches but the manager container cannot to fail'
+fi
+assert_not_requested '11434'
+assert_output '✗ Ollama (http://host.docker.internal:11434/api/tags from the manager container)'
+assert_output 'OLLAMA_HOST=0.0.0.0:11434'
+
+smoke CONTAINERS='litellm manager' MANAGER_EXEC_STATUS=127 \
+    || fail 'Expected a manager image without curl to fall back to the host probe'
+assert_requested 'http://127.0.0.1:11434/api/tags'
+assert_output 'from the host: the manager image has no curl'
+
+write_env 'OLLAMA_BASE_URL=http://models.example:11434//'
+smoke CONTAINERS='litellm manager' || fail 'Expected an external Ollama reachable from the manager container to pass'
+docker_called 'http://models.example:11434/api/tags' || fail 'Expected the .env OLLAMA_BASE_URL to be probed from the container'
+
+rm -f "$users_file"
+if smoke; then
+    fail 'Expected an install without a basic auth file to fail'
+fi
+assert_output "Basic auth file $users_file is missing. Run 'make setup-auth' to create it."
+assert_output '✓ Manager'
+
+rm -f "$users_file"
+mkdir "$users_file"
+if smoke; then
+    fail 'Expected an install whose basic auth file is a directory to fail'
+fi
+assert_output "Basic auth file $users_file is a directory"
+assert_output "Run 'make setup-auth'"
+
+: > "$users_file"
+if smoke; then
+    fail 'Expected an install with an empty basic auth file to fail'
+fi
+assert_output "Basic auth file $users_file is empty"
+
+rm -f "$users_file"
+smoke PROFILES=dev || fail 'Expected the dev stack not to need the basic auth file'
+assert_dev_probes
+
+rm -f "$users_file"
+printf '%s\n' 'admin:hash' > "$directory/custom.htpasswd"
+write_env "SECURITY_BASIC_AUTH_USERS_FILE=$directory/custom.htpasswd"
+smoke || fail 'Expected the basic auth file named in .env to be checked'
+assert_output "✓ Basic auth file ($directory/custom.htpasswd)"
 
 printf '%s\n' 'Smoke test checks passed'

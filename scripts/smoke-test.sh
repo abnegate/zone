@@ -127,13 +127,41 @@ check_litellm() {
     check_container LiteLLM litellm
 }
 
+manager_container() {
+    docker ps -q --filter label=com.docker.compose.service=manager --filter 'name=^/?manager$' 2>/dev/null | head -n 1
+}
+
+check_ollama_from_host() {
+    url=$(printf '%s\n' "$1" | sed "s#host\.docker\.internal#$LOOPBACK#")
+    check "Ollama ($url from the host: $2)" "$url"
+}
+
 check_ollama() {
     if container_listed ollama; then
         check_container Ollama ollama
         return
     fi
-    base=$(printf '%s\n' "$1" | sed -e "s#host\.docker\.internal#$LOOPBACK#" -e 's#/*$##')
-    check "Ollama ($base/api/tags)" "$base/api/tags"
+    url="$(printf '%s\n' "$1" | sed 's#/*$##')/api/tags"
+    container=$(manager_container)
+    if [ -z "$container" ]; then
+        check_ollama_from_host "$url" 'the manager container is not running'
+        return
+    fi
+    status=0
+    docker exec "$container" curl -sf --max-time "$TIMEOUT_SECONDS" -o /dev/null "$url" || status=$?
+    case "$status" in
+        0) pass "Ollama ($url from the manager container)" ;;
+        126|127) check_ollama_from_host "$url" 'the manager image has no curl' ;;
+        *) fail "Ollama ($url from the manager container): containers cannot reach it. A host Ollama must listen beyond loopback (OLLAMA_HOST=0.0.0.0:11434), and with the VPN on, Gluetun's firewall must let the stack reach it." ;;
+    esac
+}
+
+check_basic_auth_file() {
+    if problem=$(sh "$root/scripts/auth-file.sh" check); then
+        pass "Basic auth file ($(sh "$root/scripts/auth-file.sh" path))"
+    else
+        fail "$problem"
+    fi
 }
 
 domain=$(setting DOMAIN_HOST_WEBUI webui.localhost)
@@ -152,6 +180,9 @@ else
 fi
 
 printf '%s\n' "${BLUE}Running smoke tests against the $mode stack...${RESET}"
+if [ "$mode" = install ]; then
+    check_basic_auth_file
+fi
 check_manager_and_console "$mode"
 check_litellm "$domain"
 check_ollama "$ollama_base_url"
