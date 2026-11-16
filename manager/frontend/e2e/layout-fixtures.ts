@@ -847,7 +847,7 @@ function outcomes(
   succeeded: number,
   failed: number,
   cancelled: number,
-  recentSuccessRate: number | null,
+  recentSuccessRate: number,
   categories: Outcomes['categories'] = []
 ): Outcomes {
   const total = succeeded + failed + cancelled;
@@ -856,7 +856,7 @@ function outcomes(
     succeeded,
     failed,
     cancelled,
-    success_rate: total === 0 ? null : Number((succeeded / total).toFixed(4)),
+    success_rate: total === 0 ? 0 : Number((succeeded / total).toFixed(4)),
     recent_success_rate: recentSuccessRate,
     categories,
   };
@@ -864,9 +864,9 @@ function outcomes(
 
 function completion(
   measured: number,
-  medianSeconds: number | null,
-  ninetiethSeconds: number | null,
-  meanSeconds: number | null
+  medianSeconds: number,
+  ninetiethSeconds: number,
+  meanSeconds: number
 ): Completion {
   return {
     measured,
@@ -970,14 +970,14 @@ function qualityTallies(
 }
 
 export const emptyAnalytics: Overview = analyticsOverview({
-  outcomes: outcomes(0, 0, 0, null),
-  completion: completion(0, null, null, null),
+  outcomes: outcomes(0, 0, 0, 0),
+  completion: completion(0, 0, 0, 0),
   series: Array.from({ length: DAYS_IN_WEEK }, (): DailyRuns => [0, 0, 0]),
   trend: {
     direction: 'steady',
     earlier_success_rate: null,
     later_success_rate: null,
-    change: null,
+    change: 0,
   },
   sources: [],
   models: [],
