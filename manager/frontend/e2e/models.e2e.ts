@@ -430,7 +430,7 @@ async function routeTrainResult(page: Page, result: TrainResult): Promise<void> 
   });
 }
 
-async function trainOnce(page: Page, panel: Locator, filename = 'portrait.png'): Promise<void> {
+async function trainOnce(panel: Locator, filename = 'portrait.png'): Promise<void> {
   await panel.getByLabel('Name', { exact: true }).fill('zoneface');
   await panel.getByLabel('Trigger word').fill('zne person');
   await panel.getByLabel('Target images').setInputFiles({
@@ -904,7 +904,7 @@ test.describe('Models Page', () => {
     });
 
     await page.getByRole('tab', { name: 'Train' }).click();
-    await trainOnce(page, panel);
+    await trainOnce(panel);
 
     const result = panel.locator('.train-result');
     await expect(result).toHaveAttribute('role', 'status');
@@ -929,7 +929,7 @@ test.describe('Models Page', () => {
     });
 
     await page.getByRole('tab', { name: 'Train' }).click();
-    await trainOnce(page, panel);
+    await trainOnce(panel);
 
     const result = panel.locator('.train-result');
     await expect(result).toContainText('No measurable learning');
@@ -943,7 +943,7 @@ test.describe('Models Page', () => {
     await routeTrainResult(page, { filename: 'zoneface.safetensors', quality: null });
 
     await page.getByRole('tab', { name: 'Train' }).click();
-    await trainOnce(page, panel);
+    await trainOnce(panel);
 
     const result = panel.locator('.train-result');
     await expect(result).toContainText('zoneface.safetensors');
@@ -976,7 +976,7 @@ test.describe('Models Page', () => {
     });
 
     await page.getByRole('tab', { name: 'Train' }).click();
-    await trainOnce(page, panel);
+    await trainOnce(panel);
 
     const advice = panel.locator('.train-advice');
     await expect(advice).toContainText('Images too alike');
@@ -987,7 +987,7 @@ test.describe('Models Page', () => {
     await expect(panel.locator('.error-placeholder')).toHaveCount(0);
     await expect(panel.getByRole('alert')).toHaveCount(0);
 
-    await trainOnce(page, panel, 'portrait-2.png');
+    await trainOnce(panel, 'portrait-2.png');
     await expect.poll(() => requests.length).toBe(2);
   });
 
@@ -1004,7 +1004,7 @@ test.describe('Models Page', () => {
     });
 
     await page.getByRole('tab', { name: 'Train' }).click();
-    await trainOnce(page, panel);
+    await trainOnce(panel);
 
     const result = panel.locator('.train-result');
     await expect(result).toContainText('Strong');
@@ -1021,7 +1021,7 @@ test.describe('Models Page', () => {
       },
       dataset: [],
     });
-    await trainOnce(page, panel, 'portrait-2.png');
+    await trainOnce(panel, 'portrait-2.png');
 
     await expect(result).toContainText('measured at step800');
     await expect(panel.locator('.train-advice')).toHaveCount(0);
@@ -1050,7 +1050,7 @@ test.describe('Models Page', () => {
     });
 
     await page.getByRole('tab', { name: 'Train' }).click();
-    await trainOnce(page, panel);
+    await trainOnce(panel);
 
     const screening = panel.locator('.train-screening');
     await expect(screening).toContainText('Screened before training');
@@ -1100,7 +1100,7 @@ test.describe('Models Page', () => {
     });
 
     await page.getByRole('tab', { name: 'Train' }).click();
-    await trainOnce(page, panel);
+    await trainOnce(panel);
 
     const screening = panel.locator('.train-screening');
     await expect(screening).toContainText('Image repairs');
@@ -1131,7 +1131,7 @@ test.describe('Models Page', () => {
     });
 
     await page.getByRole('tab', { name: 'Train' }).click();
-    await trainOnce(page, panel);
+    await trainOnce(panel);
 
     const result = panel.locator('.train-result');
     await expect(result).toContainText('Healthy');
@@ -1148,7 +1148,7 @@ test.describe('Models Page', () => {
       },
       screening: { kept: 12, dropped: [] },
     });
-    await trainOnce(page, panel, 'portrait-2.png');
+    await trainOnce(panel, 'portrait-2.png');
 
     await expect(result).toContainText('measured at step800');
     await expect(panel.locator('.train-screening')).toHaveCount(0);
@@ -1171,7 +1171,7 @@ test.describe('Models Page', () => {
     });
 
     await page.getByRole('tab', { name: 'Train' }).click();
-    await trainOnce(page, panel);
+    await trainOnce(panel);
 
     const advice = panel.locator('.train-advice');
     await expect(advice).toContainText('Cannot be prompted into new poses');

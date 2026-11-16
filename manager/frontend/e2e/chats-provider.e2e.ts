@@ -14,7 +14,6 @@ import { mockCommonEndpoints, setupAuth } from './helpers/auth';
 import { installChatSocketMock } from './helpers/chatSocket';
 import { blockServiceWorker, routeApi } from './test-utils';
 
-const WORKSPACE = '00000000-0000-0000-0000-000000000001';
 const TIMESTAMP = '2026-11-01T09:00:00Z';
 const HTTP_EFFORTS: ReasoningEffort[] = ['off', 'low', 'medium', 'high'];
 const CLAUDE_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];

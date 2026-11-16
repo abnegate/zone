@@ -82,7 +82,7 @@ async function capture(page: Page, information: TestInfo): Promise<void> {
 for (const width of [1440, 390]) {
   for (const motion of ['no-preference', 'reduce'] as const) {
     test.describe(`Dialog layout ${width}px ${motion}`, () => {
-      test.use({ viewport: { width, height: 1000 }, reducedMotion: motion });
+      test.use({ viewport: { width, height: 1000 }, contextOptions: { reducedMotion: motion } });
       test.beforeEach(async ({ page }) => {
         await page.emulateMedia({ reducedMotion: motion });
         await prepare(page);

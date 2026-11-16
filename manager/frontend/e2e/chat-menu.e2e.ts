@@ -120,7 +120,7 @@ test.describe('chat row menu', () => {
     page,
     browserName,
   }) => {
-    const calls = await openChats(page);
+    await openChats(page);
     await row(page, 'Garden plans').focus();
     await page.keyboard.press(browserName === 'webkit' ? 'Alt+Tab' : 'Tab');
     await expect(trigger(page, 'Garden plans')).toBeFocused();
@@ -151,7 +151,7 @@ test.describe('chat row menu', () => {
   });
 
   test('closes on an outside click and keeps a single menu open', async ({ page }) => {
-    const calls = await openChats(page);
+    await openChats(page);
     await row(page, 'Garden plans').hover();
     await trigger(page, 'Garden plans').click();
     await expect(page.getByRole('menu')).toHaveCount(1);
@@ -239,7 +239,7 @@ test.describe('chat row menu on a phone', () => {
     page,
     browserName,
   }) => {
-    const calls = await openChats(page);
+    await openChats(page);
     if (browserName === 'chromium') {
       expect(await opacity(page, 'Garden plans')).toBe('1');
     } else {
