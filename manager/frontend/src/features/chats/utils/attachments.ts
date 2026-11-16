@@ -1,7 +1,6 @@
 import { cancelled, isCancelled } from '../../../api/upload';
-
-import { decodeHeic } from './heicDecode';
 import type { Pixels } from './heic';
+import { decodeHeic } from './heicDecode';
 
 export interface Attachment {
   id: string;

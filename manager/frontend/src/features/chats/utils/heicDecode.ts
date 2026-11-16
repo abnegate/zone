@@ -4,7 +4,7 @@
  * without importing the code that starts workers.
  */
 
-import { decodeHeicPixels, type DecodeResponse, type Pixels } from './heic';
+import { type DecodeResponse, decodeHeicPixels, type Pixels } from './heic';
 
 /** Long enough for a large photo on a slow phone, short enough to give up on. */
 const DECODE_TIMEOUT_MS = 30_000;

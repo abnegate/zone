@@ -6,7 +6,7 @@
  * else. The pixel buffer is transferred rather than copied.
  */
 
-import { decodeHeicPixels, type DecodeRequest, type DecodeResponse } from './heic';
+import { type DecodeRequest, type DecodeResponse, decodeHeicPixels } from './heic';
 
 self.onmessage = async (event: MessageEvent<DecodeRequest>) => {
   try {
