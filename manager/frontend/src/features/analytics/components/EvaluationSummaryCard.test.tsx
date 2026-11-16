@@ -33,17 +33,20 @@ describe('EvaluationSummaryCard', () => {
     expect(parts.map((part) => part.style.flexGrow)).toEqual(['6', '8', '1', '3']);
   });
 
-  it('names the setting that turns evaluations on when nothing was evaluated', () => {
+  it('says nothing was evaluated and leaves turning it on to an operator', () => {
     render(
       <EvaluationSummaryCard
         evaluations={{ improved: 0, unchanged: 0, regressed: 0, not_measured: 0 }}
       />
     );
 
-    expect(screen.getByText(NO_EVALUATIONS_TITLE)).toBeDefined();
-    expect(screen.getByText(NO_EVALUATIONS_DESCRIPTION).textContent).toContain(
-      'ZONE_TASK_EVALUATION'
+    expect(screen.getByText(NO_EVALUATIONS_TITLE).textContent).toBe(
+      'No runs were evaluated in this period.'
     );
+    expect(screen.getByText(NO_EVALUATIONS_DESCRIPTION).textContent).toBe(
+      'Evaluation runs only when an operator turns on ZONE_TASK_EVALUATION.'
+    );
+    expect(document.body.textContent).not.toMatch(/\bSet ZONE_TASK_EVALUATION/);
     expect(screen.queryByRole('term')).toBeNull();
   });
 

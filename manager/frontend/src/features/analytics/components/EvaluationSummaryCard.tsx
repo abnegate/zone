@@ -6,10 +6,10 @@ import { SectionCard } from './SectionCard';
 
 export const EVALUATIONS_TITLE = 'Evaluations';
 
-export const NO_EVALUATIONS_TITLE = 'No evaluations yet';
+export const NO_EVALUATIONS_TITLE = 'No runs were evaluated in this period.';
 
 export const NO_EVALUATIONS_DESCRIPTION =
-  'Set ZONE_TASK_EVALUATION to measure whether each finished task improved, held or regressed the project.';
+  'Evaluation runs only when an operator turns on ZONE_TASK_EVALUATION.';
 
 interface Verdict {
   key: keyof EvaluationSummary;
