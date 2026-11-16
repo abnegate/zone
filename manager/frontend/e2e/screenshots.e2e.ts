@@ -94,7 +94,9 @@ async function capturePage(page: Page, options: Parameters<Page['screenshot']>[0
         .every(
           (animation) =>
             animation.playState !== 'running' ||
-            !Number.isFinite(animation.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY)
+            !Number.isFinite(
+              animation.effect?.getComputedTiming().endTime ?? Number.POSITIVE_INFINITY
+            )
         )
     );
   }
