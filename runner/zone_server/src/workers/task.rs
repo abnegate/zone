@@ -75,6 +75,7 @@ use crate::services::route::Reason;
 use crate::services::route::Route;
 use crate::services::route::Unusable;
 use crate::services::stages;
+use crate::services::task_progress::{self, ProgressMessage};
 use crate::state::AppState;
 use crate::workers::evaluation::EvaluationSettings;
 use crate::workers::evaluation::Evaluator;
@@ -1097,8 +1098,26 @@ async fn lose_lease(state: &AppState, run_id: Uuid, owner: Uuid) -> Lapse {
         return Lapse::Lost;
     }
     match tokio::time::timeout(HEARTBEAT_TIMEOUT, tasks::get_task_run(state.db(), run_id)).await {
-        Ok(Ok(Some(run))) if run.status == tasks::CANCELLED => Lapse::Stopped,
+        Ok(Ok(Some(run))) => {
+            announce_ending(&run);
+            match run.status == tasks::CANCELLED {
+                true => Lapse::Stopped,
+                false => Lapse::Lost,
+            }
+        }
         _ => Lapse::Lost,
+    }
+}
+
+/// Tells whoever still watches `run` how it ended when the writer that ended it never did: the
+/// heartbeat can see a run's own ending land and win the race against the pipeline that wrote
+/// it, which is then dropped before it announces the ending.
+fn announce_ending(run: &tasks::TaskRunRow) {
+    let error = run.error_message.as_deref();
+    if task_progress::progress().tracks(run.id)
+        && ProgressMessage::terminal(&run.status, error).is_some()
+    {
+        task_progress::publish_terminal(run.id, &run.status, error);
     }
 }
 
@@ -6818,6 +6837,29 @@ mod watchdog_tests {
             None,
             "a wait that never ends hung instead of failing"
         );
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_lease_announces_an_ending_its_pipeline_wrote_but_never_announced() {
+        let _execution = EXECUTION.lock().await;
+        let (pool, _observed, state, run, owner) = parked_fixture().await;
+        let mut progress = task_progress::progress().subscribe(run);
+        sqlx::query("UPDATE task_runs SET status = $2, error_message = $3 WHERE id = $1")
+            .bind(run)
+            .bind(RUN_FAILED)
+            .bind(LOST_LEASE)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let lapse = lose_lease(&state, run, owner).await;
+
+        assert_eq!(lapse, Lapse::Lost);
+        match progress.try_recv() {
+            Ok(ProgressMessage::Failed { error }) => assert_eq!(error, LOST_LEASE),
+            other => panic!("the run's watchers were never told it failed: {other:?}"),
+        }
+        assert!(!task_progress::progress().tracks(run));
     }
 
     /// Waiting for a run to park has to end when the run does. A run that
