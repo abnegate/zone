@@ -3,12 +3,15 @@ import {
   attachmentMetadata,
   audioAttachments,
   dataUrlBytes,
+  fitWithin,
   imageAttachments,
   isHeicFile,
+  isJpegDataUrl,
   isSendable,
   isStartingImage,
   jpegName,
   MAX_IMAGE_BYTES,
+  MAX_IMAGE_EDGE,
   MAX_SOURCE_IMAGE_BYTES,
   readAttachment,
   sourceAttachment,
@@ -211,15 +214,41 @@ describe('HEIC attachments', () => {
     ).toBe('over 16.0 MB');
   });
 
+  it('refuses a transcoder that hands back something other than a JPEG', async () => {
+    for (const url of ['not-a-data-url-at-all', 'data:image/png;base64,iVBORw0KGgo=']) {
+      const attachment = await readAttachment(heic('IMG_0001.heic', 'image/heic'), {
+        transcode: async () => url,
+      });
+      expect(attachment.rejected).toBe('could not be read');
+      expect(attachment.url).toBeUndefined();
+    }
+    expect(isJpegDataUrl(JPEG)).toBe(true);
+  });
+
   it('names the transcoded file even when the original had no extension', () => {
     expect(jpegName('IMG_0001.HEIC')).toBe('IMG_0001.jpg');
     expect(jpegName('photo')).toBe('photo.jpg');
+    expect(jpegName('photo.')).toBe('photo.jpg');
+    expect(jpegName('.heic')).toBe('.heic.jpg');
   });
 
   it('measures a data URL by its bytes, not its characters', () => {
     expect(dataUrlBytes('data:image/jpeg;base64,YWFh')).toBe(3);
     expect(dataUrlBytes('data:image/jpeg;base64,YWE=')).toBe(2);
     expect(dataUrlBytes('data:image/jpeg;base64,YQ==')).toBe(1);
+  });
+
+  it('measures nothing in a string that is not a data URL', () => {
+    expect(dataUrlBytes('not-a-data-url-at-all')).toBe(0);
+    expect(dataUrlBytes('')).toBe(0);
+  });
+
+  it('holds the canvas to the long edge and keeps the aspect ratio', () => {
+    expect(fitWithin(4032, 3024)).toEqual({ width: MAX_IMAGE_EDGE, height: 1176 });
+    expect(fitWithin(3024, 4032)).toEqual({ width: 1176, height: MAX_IMAGE_EDGE });
+    expect(fitWithin(800, 600)).toEqual({ width: 800, height: 600 });
+    expect(fitWithin(4000, 1)).toEqual({ width: MAX_IMAGE_EDGE, height: 1 });
+    expect(fitWithin(0, 0)).toEqual({ width: 1, height: 1 });
   });
 });
 

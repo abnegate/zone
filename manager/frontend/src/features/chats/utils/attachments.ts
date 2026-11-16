@@ -120,11 +120,30 @@ export function jpegName(name: string): string {
   return `${dot > 0 ? name.slice(0, dot) : name}.jpg`;
 }
 
-/** Bytes behind a base64 data URL, which is what the size cap is really about. */
+/** The transcode path stamps image/jpeg and a .jpg name on what it returns, so
+ * a base64 JPEG data URL is the only thing a transcoder may hand back. */
+export function isJpegDataUrl(url: string): boolean {
+  return url.startsWith('data:image/jpeg;base64,');
+}
+
+/** Bytes behind a base64 data URL, which is what the size cap is really about.
+ * A string that is not one has no payload to measure and counts as nothing. */
 export function dataUrlBytes(url: string): number {
-  const base64 = url.slice(url.indexOf(',') + 1);
+  const comma = url.indexOf(',');
+  if (comma < 0) return 0;
+  const base64 = url.slice(comma + 1);
   const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
   return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}
+
+/** Canvas size for a bitmap held to a long edge, never smaller than a pixel. */
+export function fitWithin(width: number, height: number, edge = MAX_IMAGE_EDGE) {
+  const longest = Math.max(width, height, 1);
+  const scale = Math.min(1, edge / longest);
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale)),
+  };
 }
 
 /** Decode-and-re-encode seam: null when this engine has no decoder for the file. */
@@ -134,22 +153,24 @@ export const toJpegDataUrl: Transcoder = async (file) => {
   if (typeof createImageBitmap !== 'function') return null;
   let bitmap: ImageBitmap;
   try {
-    bitmap = await createImageBitmap(file);
+    // A phone photo carries its rotation in EXIF. from-image is the spec's
+    // default, but WebKit is the engine that reaches this path, and it read
+    // the metadata only once the default changed, so say it rather than assume.
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
   } catch {
     return null;
   }
   try {
-    const longest = Math.max(bitmap.width, bitmap.height, 1);
-    const scale = Math.min(1, MAX_IMAGE_EDGE / longest);
+    const { width, height } = fitWithin(bitmap.width, bitmap.height);
     const canvas = document.createElement('canvas');
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.width = width;
+    canvas.height = height;
     const context = canvas.getContext('2d');
     if (!context) return null;
-    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    context.drawImage(bitmap, 0, 0, width, height);
     // A canvas with no JPEG encoder hands back the PNG it defaults to.
     const url = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
-    return url.startsWith('data:image/jpeg;base64,') ? url : null;
+    return isJpegDataUrl(url) ? url : null;
   } catch {
     return null;
   } finally {
@@ -249,7 +270,9 @@ export async function readAttachment(file: File, options: ReadOptions = {}): Pro
 }
 
 /** Re-encode an image the model and the browser cannot take as it came. The
- * file is decoded whole rather than streamed, so progress only has two points. */
+ * file is decoded whole rather than streamed, so progress only has two points,
+ * and a decode already under way runs to the end whatever the signal says:
+ * cancelling throws its result away rather than stopping the work. */
 async function readTranscoded(
   file: File,
   base: { id: string; name: string; size: number; type: string },
@@ -265,6 +288,9 @@ async function readTranscoded(
   if (signal?.aborted) throw cancelled();
   if (!url) {
     return { ...base, rejected: 'HEIC needs converting to JPEG' };
+  }
+  if (!isJpegDataUrl(url)) {
+    return { ...base, rejected: 'could not be read' };
   }
 
   const size = dataUrlBytes(url);
