@@ -3,10 +3,13 @@ import {
   allows,
   ceilingAllowed,
   changed,
+  covers,
   OPEN_RULES,
   parseEntries,
   patchFrom,
   toggled,
+  typed,
+  uncovered,
   withEntries,
   withoutEntry,
 } from './draft';
@@ -96,5 +99,56 @@ describe('ceilingAllowed', () => {
     expect(ceilingAllowed(PolicyTier.Write, PolicyTier.Host)).toBe(false);
     expect(ceilingAllowed(PolicyTier.Host, PolicyTier.Write)).toBe(true);
     expect(ceilingAllowed(PolicyTier.Host, null)).toBe(false);
+  });
+});
+
+describe('covers', () => {
+  it('lets a model prefix cover every name and narrower prefix it starts', () => {
+    expect(covers(PolicyField.Models, 'claude-*', 'claude-opus')).toBe(true);
+    expect(covers(PolicyField.Models, 'claude-*', 'claude-opus-*')).toBe(true);
+    expect(covers(PolicyField.Models, '*', 'gpt-*')).toBe(true);
+    expect(covers(PolicyField.Models, 'claude-opus', 'claude-*')).toBe(false);
+    expect(covers(PolicyField.Models, 'sonnet', 'sonnet-4')).toBe(false);
+  });
+
+  it('lets a domain cover its subdomains but never an IP literal', () => {
+    expect(covers(PolicyField.Domains, 'example.com', 'api.example.com')).toBe(true);
+    expect(covers(PolicyField.Domains, 'example.com', 'badexample.com')).toBe(false);
+    expect(covers(PolicyField.Domains, '0.0.1', '10.0.0.1')).toBe(false);
+    expect(covers(PolicyField.Domains, '10.0.0.1', '10.0.0.1')).toBe(true);
+  });
+
+  it('matches MCP servers by name', () => {
+    expect(covers(PolicyField.McpServers, 'github', 'github')).toBe(true);
+    expect(covers(PolicyField.McpServers, 'github', 'github-enterprise')).toBe(false);
+  });
+});
+
+describe('uncovered', () => {
+  it('names the entries no organization entry covers', () => {
+    expect(uncovered(PolicyField.Domains, ['github.com'], ['api.github.com', 'evil.com'])).toEqual([
+      'evil.com',
+    ]);
+  });
+
+  it('covers everything while the organization leaves the field open', () => {
+    expect(uncovered(PolicyField.Models, null, ['anything'])).toEqual([]);
+  });
+});
+
+describe('parseEntries for domains', () => {
+  it('lowercases and drops a leading wildcard and trailing dot, as the server does', () => {
+    expect(parseEntries('*.Example.com. GitHub.com', PolicyField.Domains)).toEqual([
+      'example.com',
+      'github.com',
+    ]);
+  });
+});
+
+describe('typed', () => {
+  it('is true only while an entry field holds text', () => {
+    expect(typed({})).toBe(false);
+    expect(typed({ [PolicyField.Models]: '  ' })).toBe(false);
+    expect(typed({ [PolicyField.Domains]: 'github.com' })).toBe(true);
   });
 });

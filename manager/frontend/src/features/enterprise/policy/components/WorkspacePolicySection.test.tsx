@@ -11,7 +11,7 @@ import {
   ORGANIZATION_RULES,
   WORKSPACE_ID,
 } from '../fixtures';
-import { NOT_ALLOWED, refusalMessage } from '../messages';
+import { NOT_ALLOWED } from '../messages';
 import { PolicyRefusal } from '../PolicyRefusal';
 import { PolicyCode, PolicyTier } from '../schemas';
 import type { WorkspacePolicyResponse } from '../types';
@@ -21,7 +21,8 @@ import { LAPSED_NOTICE } from './PolicyLapsedNotice';
 import { INHERIT_LABEL } from './PolicyListField';
 import { SOURCE_LABELS } from './PolicySourceBadge';
 import { UPGRADE_NOTICE } from './PolicyUpgradeNotice';
-import { ORGANIZATION_POLICY_LINK, WORKSPACE_READ_ONLY } from './WorkspacePolicySection';
+import { WORKSPACE_READ_ONLY } from './WorkspacePolicy';
+import { ORGANIZATION_POLICY_LINK } from './WorkspacePolicySection';
 
 const workspace = mock();
 const updateWorkspace = mock();
@@ -208,16 +209,18 @@ describe('WorkspacePolicySection', () => {
     );
   });
 
-  it('shows a widening refusal as a form alert', async () => {
+  it("shows a widening refusal as a form alert in the server's words", async () => {
+    const worded =
+      "This workspace's providers can't allow more than your organization's policy does.";
     updateWorkspace.mockRejectedValue(
-      new PolicyRefusal({ error: 'raw', code: PolicyCode.Wider }, 400)
+      new PolicyRefusal({ error: worded, code: PolicyCode.Wider }, 400)
     );
     await loaded(ACTIVE_WORKSPACE_OVERRIDDEN);
 
     fireEvent.click(within(field('Providers')).getByRole('checkbox', { name: 'Anthropic API' }));
     fireEvent.click(screen.getByRole('button', { name: SAVE_LABEL }));
 
-    expect(await screen.findByRole('alert')).toHaveTextContent(refusalMessage(PolicyCode.Wider));
+    expect(await screen.findByRole('alert')).toHaveTextContent(worded);
   });
 
   it('links organization admins to the organization policy', async () => {

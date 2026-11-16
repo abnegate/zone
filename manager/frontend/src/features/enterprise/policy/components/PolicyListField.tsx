@@ -1,11 +1,13 @@
 import { Button, Checkbox, Input } from '@zone/ui';
-import { type KeyboardEvent, useId, useState } from 'react';
-import { allows, parseEntries, toggled, withEntries, withoutEntry } from '../draft';
+import { type KeyboardEvent, useId } from 'react';
+import { allows, parseEntries, toggled, withoutEntry } from '../draft';
 import {
   fieldDescription,
   fieldLabel,
   NOT_ALLOWED,
   NOTHING_ALLOWED,
+  NOTHING_ALLOWED_WARNING,
+  pendingText,
   unrestrictedText,
 } from '../messages';
 import { layerSource, PolicyScope } from '../source';
@@ -39,6 +41,9 @@ interface PolicyListFieldProps {
   placeholder?: string;
   editable: boolean;
   error?: string;
+  text?: string;
+  onText?(text: string): void;
+  onAdd?(): void;
   onChange(value: string[] | null): void;
 }
 
@@ -52,13 +57,19 @@ export function PolicyListField({
   placeholder,
   editable,
   error,
+  text = '',
+  onText,
+  onAdd,
   onChange,
 }: PolicyListFieldProps) {
   const base = useId();
-  const [text, setText] = useState('');
+  const errorId = `${base}-error`;
+  const pendingId = `${base}-pending`;
   const label = fieldLabel(field);
   const workspace = scope === PolicyScope.Workspace;
   const limit = workspace ? organization : null;
+  const pending = parseEntries(text, field);
+  const announced = editable && pending.length > 0 && !error;
 
   const labelOf = (entry: string): string =>
     options?.find((option) => option.value === entry)?.label ?? entry;
@@ -77,19 +88,10 @@ export function PolicyListField({
     return options ? options.map((option) => option.value) : [];
   };
 
-  const add = () => {
-    const entries = parseEntries(text, field);
-    if (value === null || entries.length === 0) {
-      return;
-    }
-    onChange(withEntries(value, entries));
-    setText('');
-  };
-
   const submitOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === SUBMIT_KEY) {
       event.preventDefault();
-      add();
+      onAdd?.();
     }
   };
 
@@ -131,35 +133,45 @@ export function PolicyListField({
     );
   })();
 
+  const warning = (list: readonly string[]) =>
+    list.length === 0 && pending.length === 0 ? (
+      <p className="policy-field-warning">{editable ? NOTHING_ALLOWED_WARNING : NOTHING_ALLOWED}</p>
+    ) : null;
+
   const checkboxes = (list: readonly string[], choices: readonly PolicyOption[]) => (
-    <div className="policy-options">
-      {choices.map((option) => {
-        const checked = list.includes(option.value);
-        const allowed = allows(limit, option.value);
-        return (
-          <div
-            key={option.value}
-            className={allowed ? 'policy-option' : 'policy-option policy-option--denied'}
-          >
-            <Checkbox
-              id={`${base}-${option.value}`}
-              label={option.label}
-              helpText={allowed ? undefined : NOT_ALLOWED}
-              checked={checked}
-              disabled={!editable || (!allowed && !checked)}
-              onCheckedChange={(on) => onChange(toggled(list, option.value, on))}
-            />
-          </div>
-        );
-      })}
-    </div>
+    <>
+      <div className="policy-options">
+        {choices.map((option) => {
+          const checked = list.includes(option.value);
+          const allowed = allows(limit, option.value);
+          return (
+            <div
+              key={option.value}
+              className={allowed ? 'policy-option' : 'policy-option policy-option--denied'}
+            >
+              <Checkbox
+                id={`${base}-${option.value}`}
+                label={option.label}
+                helpText={allowed ? undefined : NOT_ALLOWED}
+                checked={checked}
+                disabled={!editable || (!allowed && !checked)}
+                onCheckedChange={(on) => onChange(toggled(list, option.value, on))}
+              />
+            </div>
+          );
+        })}
+      </div>
+      {warning(list)}
+    </>
   );
+
+  const described = [error ? errorId : null, announced ? pendingId : null]
+    .filter((id) => id !== null)
+    .join(' ');
 
   const chips = (list: readonly string[]) => (
     <>
-      {list.length === 0 ? (
-        <p className="policy-field-note">{NOTHING_ALLOWED}</p>
-      ) : (
+      {list.length > 0 && (
         <ul className="policy-chips" aria-label={label}>
           {list.map((entry) => (
             <li key={entry} className="policy-chip">
@@ -178,16 +190,19 @@ export function PolicyListField({
           ))}
         </ul>
       )}
+      {warning(list)}
       {editable && (
         <div className="policy-entry">
           <Input
             id={`${base}-entry`}
             aria-label={`Add to ${label}`}
+            aria-invalid={error ? true : undefined}
+            aria-describedby={described === '' ? undefined : described}
             value={text}
             autoComplete="off"
             spellCheck={false}
             placeholder={placeholder}
-            onChange={(event) => setText(event.target.value)}
+            onChange={(event) => onText?.(event.target.value)}
             onKeyDown={submitOnEnter}
           />
           <Button
@@ -195,12 +210,17 @@ export function PolicyListField({
             variant="secondary"
             size="sm"
             aria-label={`${ADD_LABEL} to ${label}`}
-            disabled={text.trim() === ''}
-            onClick={add}
+            disabled={pending.length === 0}
+            onClick={() => onAdd?.()}
           >
             {ADD_LABEL}
           </Button>
         </div>
+      )}
+      {announced && (
+        <p id={pendingId} className="policy-field-note">
+          {pendingText(pending)}
+        </p>
       )}
     </>
   );
@@ -221,6 +241,7 @@ export function PolicyListField({
       effective={workspace ? summary(effective) : undefined}
       control={control}
       error={error}
+      errorId={errorId}
     >
       {body()}
     </PolicyFieldFrame>

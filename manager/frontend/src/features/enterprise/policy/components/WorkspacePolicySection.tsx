@@ -1,56 +1,15 @@
-import { Button } from '@zone/ui';
+import { Button, buttonVariants } from '@zone/ui';
 import { useId } from 'react';
 import { Link } from 'react-router-dom';
-import { useUpdateWorkspacePolicy, useWorkspacePolicy } from '../hooks';
-import { community } from '../license';
-import { PolicyScope } from '../source';
-import type { WorkspacePolicyResponse } from '../types';
-import { PolicyEditor } from './PolicyEditor';
-import { PolicyStatus } from './PolicyStatus';
-import { PolicyUpgradeNotice } from './PolicyUpgradeNotice';
+import { useWorkspacePolicy } from '../hooks';
+import { WorkspacePolicy } from './WorkspacePolicy';
 import './PolicySection.css';
 
 export const WORKSPACE_TITLE = 'Agent policy';
 
 export const WORKSPACE_DESCRIPTION = "Narrow the organization's agent policy for this workspace.";
 
-export const WORKSPACE_READ_ONLY =
-  "Only workspace admins and organization admins can change this workspace's agent policy.";
-
 export const ORGANIZATION_POLICY_LINK = 'Edit organization policy';
-
-interface WorkspacePolicyProps {
-  organizationId: string;
-  workspaceId: string;
-  policy: WorkspacePolicyResponse;
-}
-
-function WorkspacePolicy({ organizationId, workspaceId, policy }: WorkspacePolicyProps) {
-  const update = useUpdateWorkspacePolicy(organizationId, workspaceId);
-
-  if (community(policy)) {
-    return <PolicyUpgradeNotice />;
-  }
-
-  return (
-    <>
-      <PolicyStatus policy={policy} readOnlyHint={WORKSPACE_READ_ONLY} />
-      <PolicyEditor
-        key={`${organizationId}/${workspaceId}`}
-        scope={PolicyScope.Workspace}
-        saved={policy.workspace}
-        organization={policy.organization}
-        effective={policy.effective}
-        editable={policy.editable}
-        pending={update.pending}
-        refusal={update.refusal}
-        error={update.error}
-        onSave={(request, onSaved) => update.update(request, onSaved)}
-        onReset={update.reset}
-      />
-    </>
-  );
-}
 
 interface WorkspacePolicySectionProps {
   organizationId: string;
@@ -81,7 +40,10 @@ export function WorkspacePolicySection({
         </div>
         {organizationPolicyPath && (
           <div className="section-row-actions">
-            <Link to={organizationPolicyPath} className="ui-btn ui-btn-ghost ui-btn-sm">
+            <Link
+              to={organizationPolicyPath}
+              className={buttonVariants({ variant: 'ghost', size: 'sm' })}
+            >
               {ORGANIZATION_POLICY_LINK}
             </Link>
           </div>
