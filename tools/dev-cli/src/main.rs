@@ -1826,7 +1826,8 @@ mod tests {
 
     #[test]
     fn biome_formats_and_lints_the_whole_console_directory() {
-        let root = std::env::temp_dir().join(format!("zone-dev-biome-{}", std::process::id()));
+        let directory = tempfile::TempDir::new().unwrap();
+        let root = directory.path();
         let console = root.join(Project::ManagerFrontend.relative_path());
         std::fs::create_dir_all(&console).unwrap();
         std::fs::write(console.join("biome.json"), "{}").unwrap();
@@ -1834,13 +1835,12 @@ mod tests {
         let mut tasks = Vec::new();
         for check in [true, false] {
             tasks.extend(create_format_tasks(
-                &root,
+                root,
                 &[Project::ManagerFrontend],
                 check,
             ));
-            tasks.extend(create_lint_tasks(&root, &[Project::ManagerFrontend], check));
+            tasks.extend(create_lint_tasks(root, &[Project::ManagerFrontend], check));
         }
-        std::fs::remove_dir_all(&root).unwrap();
 
         let biome: Vec<&TaskConfig> = tasks
             .iter()
