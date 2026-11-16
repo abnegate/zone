@@ -8,6 +8,7 @@ use crate::routes::common::ErrorResponse;
 const DEVICE_PENDING: &str = "This device is waiting for an admin to allow it";
 const DEVICE_BLOCKED: &str = "This device is blocked";
 const MISSING: &str = "User not found";
+const SUPERSEDED: &str = "Invalid email or password";
 const UNAVAILABLE: &str = "Internal server error";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +16,7 @@ pub enum Refusal {
     DevicePending,
     DeviceBlocked,
     Missing,
+    Superseded,
     Unavailable,
 }
 
@@ -22,6 +24,7 @@ impl Refusal {
     pub fn status(self) -> StatusCode {
         match self {
             Self::DevicePending | Self::DeviceBlocked => StatusCode::FORBIDDEN,
+            Self::Superseded => StatusCode::UNAUTHORIZED,
             Self::Missing | Self::Unavailable => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -31,6 +34,7 @@ impl Refusal {
             Self::DevicePending => ErrorResponse::with_code(DEVICE_PENDING, PENDING),
             Self::DeviceBlocked => ErrorResponse::with_code(DEVICE_BLOCKED, BLOCKED),
             Self::Missing => ErrorResponse::new(MISSING),
+            Self::Superseded => ErrorResponse::new(SUPERSEDED),
             Self::Unavailable => ErrorResponse::new(UNAVAILABLE),
         }
     }
@@ -73,6 +77,11 @@ mod tests {
                 Refusal::Missing,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 json!({"error": MISSING}),
+            ),
+            (
+                Refusal::Superseded,
+                StatusCode::UNAUTHORIZED,
+                json!({"error": SUPERSEDED}),
             ),
             (
                 Refusal::Unavailable,

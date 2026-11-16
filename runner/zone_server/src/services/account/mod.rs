@@ -1,5 +1,3 @@
-//! Accounts: creating a person's user and starting their signed-in session.
-
 pub mod auth_response;
 pub mod provision;
 pub mod refusal;

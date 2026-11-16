@@ -6,10 +6,10 @@ use serde::Serialize;
 use zone_enterprise::{Edition, Feature, Status, status};
 
 use super::providers::ProviderResponse;
-use super::sign_in::redirect_uri;
 use crate::auth::ServerAdmin;
 use crate::db::sso::{providers, settings};
 use crate::error::ServerError;
+use crate::services::sso::console::redirect_uri;
 use crate::state::AppState;
 
 const LOAD_FAILED: &str = "Could not load single sign-on";
@@ -31,7 +31,7 @@ pub async fn get(State(state): State<AppState>, _admin: ServerAdmin) -> Response
         Ok(required) => required,
         Err(error) => return unavailable(&error),
     };
-    let records = match providers::list(state.db(), state.master_key()).await {
+    let records = match providers::list(state.db()).await {
         Ok(records) => records,
         Err(error) => return unavailable(&error),
     };

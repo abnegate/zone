@@ -1,9 +1,11 @@
+use std::fmt;
+
+use abnegate_secret::{MasterKey, REDACTED, SecretValue};
 use zone_enterprise::sso::Fields;
 
-use crate::db::sso::ProviderRecord;
+use crate::db::sso::{ProviderRecord, ProviderResult};
 
-/// A sparse change to a provider: a field left out keeps its stored value.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct Revision<'a> {
     pub display_name: Option<&'a str>,
     pub issuer: Option<&'a str>,
@@ -15,7 +17,31 @@ pub struct Revision<'a> {
 }
 
 impl<'a> Revision<'a> {
-    pub fn fields<'b>(&self, record: &'b ProviderRecord) -> Fields<'b>
+    pub fn client_secret(
+        &self,
+        record: &ProviderRecord,
+        key: &MasterKey,
+    ) -> ProviderResult<SecretValue> {
+        match self.client_secret {
+            Some(revised) => Ok(SecretValue::new(revised)),
+            None => record.client_secret(key),
+        }
+    }
+
+    /// A stored secret that no longer opens counts as replaced by any secret the revision carries.
+    pub fn replaces_secret(&self, record: &ProviderRecord, key: &MasterKey) -> bool {
+        self.client_secret.is_some_and(|revised| {
+            record
+                .client_secret(key)
+                .map_or(true, |stored| stored.expose() != revised)
+        })
+    }
+
+    pub fn fields<'b>(
+        &self,
+        record: &'b ProviderRecord,
+        client_secret: &'b SecretValue,
+    ) -> Fields<'b>
     where
         'a: 'b,
     {
@@ -24,7 +50,7 @@ impl<'a> Revision<'a> {
             display_name: self.display_name.unwrap_or(&record.display_name),
             issuer: self.issuer.unwrap_or(&record.issuer),
             client_id: self.client_id.unwrap_or(&record.client_id),
-            client_secret: self.client_secret.unwrap_or(record.client_secret.expose()),
+            client_secret: client_secret.expose(),
             allowed_domains: self.allowed_domains.unwrap_or(&record.allowed_domains),
             require_verified_email: self
                 .require_verified_email
@@ -37,23 +63,44 @@ impl<'a> Revision<'a> {
     }
 }
 
+impl fmt::Debug for Revision<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Revision")
+            .field("display_name", &self.display_name)
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &self.client_secret.map(|_| REDACTED))
+            .field("allowed_domains", &self.allowed_domains)
+            .field("require_verified_email", &self.require_verified_email)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use abnegate_secret::SecretValue;
+    use abnegate_secret::encrypt_value;
     use chrono::Utc;
     use uuid::Uuid;
     use zone_enterprise::sso::Protocol;
 
     use super::*;
 
-    fn record() -> ProviderRecord {
+    const SECRET: &str = "s3cret";
+
+    fn key() -> MasterKey {
+        MasterKey::generate().expect("a key")
+    }
+
+    fn record(key: &MasterKey) -> ProviderRecord {
         ProviderRecord {
             id: Uuid::new_v4(),
             protocol: Protocol::Oidc,
             display_name: "Okta".into(),
             issuer: "https://acme.okta.com".into(),
             client_id: "0oa1".into(),
-            client_secret: SecretValue::new("s3cret"),
+            sealed_secret: encrypt_value(&SecretValue::new(SECRET), key).expect("a sealed secret"),
             allowed_domains: vec!["acme.com".into()],
             require_verified_email: true,
             enabled: true,
@@ -64,15 +111,20 @@ mod tests {
 
     #[test]
     fn an_empty_revision_keeps_every_stored_value() {
-        let record = record();
+        let key = key();
+        let record = record(&key);
         let revision = Revision::default();
-        assert_eq!(revision.fields(&record), record.fields());
+        let secret = revision.client_secret(&record, &key).unwrap();
+        assert_eq!(secret.expose(), SECRET);
+        assert_eq!(revision.fields(&record, &secret), record.fields(&secret));
         assert!(revision.enabled(&record));
+        assert!(!revision.replaces_secret(&record, &key));
     }
 
     #[test]
     fn each_present_field_replaces_its_stored_value() {
-        let record = record();
+        let key = key();
+        let record = record(&key);
         let domains = vec!["acme.io".to_owned()];
         let revision = Revision {
             display_name: Some("Entra"),
@@ -83,7 +135,8 @@ mod tests {
             require_verified_email: Some(false),
             enabled: Some(false),
         };
-        let fields = revision.fields(&record);
+        let secret = revision.client_secret(&record, &key).unwrap();
+        let fields = revision.fields(&record, &secret);
         assert_eq!(fields.display_name, "Entra");
         assert_eq!(fields.issuer, "https://login.microsoftonline.com/t/v2.0");
         assert_eq!(fields.client_id, "app");
@@ -91,5 +144,44 @@ mod tests {
         assert_eq!(fields.allowed_domains, ["acme.io"]);
         assert!(!fields.require_verified_email);
         assert!(!revision.enabled(&record));
+        assert!(revision.replaces_secret(&record, &key));
+    }
+
+    #[test]
+    fn a_revision_that_brings_a_secret_never_opens_the_stored_one() {
+        let record = record(&key());
+        let other = key();
+        let revision = Revision {
+            client_secret: Some("rotated"),
+            ..Revision::default()
+        };
+        assert!(Revision::default().client_secret(&record, &other).is_err());
+        assert_eq!(
+            revision.client_secret(&record, &other).unwrap().expose(),
+            "rotated"
+        );
+        assert!(revision.replaces_secret(&record, &other));
+    }
+
+    #[test]
+    fn the_same_secret_again_replaces_nothing() {
+        let key = key();
+        let record = record(&key);
+        let revision = Revision {
+            client_secret: Some(SECRET),
+            ..Revision::default()
+        };
+        assert!(!revision.replaces_secret(&record, &key));
+    }
+
+    #[test]
+    fn debug_never_shows_the_secret() {
+        let revision = Revision {
+            client_secret: Some(SECRET),
+            ..Revision::default()
+        };
+        let shown = format!("{revision:?}");
+        assert!(!shown.contains(SECRET), "{shown}");
+        assert!(shown.contains(REDACTED), "{shown}");
     }
 }

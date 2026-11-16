@@ -1,4 +1,4 @@
-use abnegate_secret::SecretValue;
+use abnegate_secret::{MasterKey, SecretValue};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 use zone_enterprise::sso::{Error, Fields, Provider};
@@ -6,12 +6,15 @@ use zone_enterprise::sso::{Error, Fields, Provider};
 use super::failure::Failure;
 use super::revision::Revision;
 use crate::db::audit::{actions, resources};
-use crate::db::sso::{NewProvider, ProviderChanges, ProviderRecord, providers, settings};
+use crate::db::sso::{
+    NewProvider, ProviderChanges, ProviderRecord, identities, providers, settings,
+};
 use crate::db::users::UserRow;
 use crate::routes::common::{AuditEvent, audit};
 use crate::state::AppState;
 
 const CLIENT_SECRET_CHANGED: &str = "client_secret_changed";
+const IDENTITIES_CLEARED: &str = "identities_cleared";
 
 pub async fn create(
     state: &AppState,
@@ -47,10 +50,11 @@ pub async fn update(
     id: Uuid,
     revision: &Revision<'_>,
 ) -> Result<ProviderRecord, Failure> {
-    let current = providers::get(state.db(), state.master_key(), id)
+    let key = state.master_key();
+    let current = providers::get(state.db(), id)
         .await?
         .ok_or(Error::ProviderNotFound)?;
-    let candidate = Provider::parse(&revision.fields(&current))?;
+    let candidate = revised(&current, revision, key)?;
     if rediscovers(&current, &candidate) {
         state.oidc().discover(&candidate.issuer).await?;
     }
@@ -59,11 +63,16 @@ pub async fn update(
     if revision.enabled == Some(false) {
         settings::lock(&mut transaction).await?;
     }
-    let locked = providers::lock(&mut transaction, state.master_key(), id)
+    let locked = providers::lock(&mut transaction, id)
         .await?
         .ok_or(Error::ProviderNotFound)?;
-    let provider = Provider::parse(&revision.fields(&locked))?;
-    let changes = changes(&locked, &provider, revision.enabled(&locked));
+    let provider = revised(&locked, revision, key)?;
+    let changes = changes(
+        &locked,
+        &provider,
+        revision.enabled(&locked),
+        revision.replaces_secret(&locked, key),
+    );
     if changes.is_empty() {
         transaction.rollback().await?;
         return Ok(locked);
@@ -71,14 +80,25 @@ pub async fn update(
     if changes.enabled == Some(false) && last_enabled(&mut transaction).await? {
         return Err(Error::ProviderRequired.into());
     }
-    let updated = providers::update(&mut *transaction, state.master_key(), id, &changes)
+    let updated = providers::update(&mut *transaction, key, id, &changes)
         .await?
         .ok_or(Error::ProviderNotFound)?;
+    let cleared = if changes.renames_subjects() {
+        Some(identities::clear(&mut *transaction, id).await?)
+    } else {
+        None
+    };
     transaction.commit().await?;
+    if changes.issuer.is_some() {
+        state.oidc().forget(&locked.issuer);
+    }
 
     let (before, mut after) = difference(recorded(&locked), recorded(&updated));
     if changes.client_secret.is_some() {
         after.insert(CLIENT_SECRET_CHANGED.into(), Value::Bool(true));
+    }
+    if let Some(cleared) = cleared {
+        after.insert(IDENTITIES_CLEARED.into(), Value::from(cleared));
     }
     record_change(
         state,
@@ -95,7 +115,7 @@ pub async fn update(
 pub async fn delete(state: &AppState, actor: &UserRow, id: Uuid) -> Result<(), Failure> {
     let mut transaction = state.db().begin().await?;
     settings::lock(&mut transaction).await?;
-    let locked = providers::lock(&mut transaction, state.master_key(), id)
+    let locked = providers::lock(&mut transaction, id)
         .await?
         .ok_or(Error::ProviderNotFound)?;
     if locked.enabled && last_enabled(&mut transaction).await? {
@@ -103,6 +123,7 @@ pub async fn delete(state: &AppState, actor: &UserRow, id: Uuid) -> Result<(), F
     }
     providers::delete(&mut *transaction, id).await?;
     transaction.commit().await?;
+    state.oidc().forget(&locked.issuer);
     record_change(
         state,
         actor,
@@ -113,6 +134,15 @@ pub async fn delete(state: &AppState, actor: &UserRow, id: Uuid) -> Result<(), F
     )
     .await;
     Ok(())
+}
+
+fn revised(
+    record: &ProviderRecord,
+    revision: &Revision<'_>,
+    key: &MasterKey,
+) -> Result<Provider, Failure> {
+    let client_secret = revision.client_secret(record, key)?;
+    Ok(Provider::parse(&revision.fields(record, &client_secret))?)
 }
 
 /// Whether removing one enabled provider would leave enforcement on with none. The caller holds
@@ -128,14 +158,18 @@ fn rediscovers(record: &ProviderRecord, provider: &Provider) -> bool {
     record.issuer != provider.issuer.as_str() || record.client_id != provider.client_id.as_str()
 }
 
-fn changes(record: &ProviderRecord, provider: &Provider, enabled: bool) -> ProviderChanges {
+fn changes(
+    record: &ProviderRecord,
+    provider: &Provider,
+    enabled: bool,
+    replaces_secret: bool,
+) -> ProviderChanges {
     let differs = |stored: &str, revised: &str| (stored != revised).then(|| revised.to_owned());
     ProviderChanges {
         display_name: differs(&record.display_name, provider.display_name.as_str()),
         issuer: differs(&record.issuer, provider.issuer.as_str()),
         client_id: differs(&record.client_id, provider.client_id.as_str()),
-        client_secret: (record.client_secret.expose() != provider.client_secret.expose())
-            .then(|| SecretValue::new(provider.client_secret.expose())),
+        client_secret: replaces_secret.then(|| SecretValue::new(provider.client_secret.expose())),
         allowed_domains: (record.allowed_domains != provider.policy.domains.as_slice())
             .then(|| provider.policy.domains.as_slice().to_vec()),
         require_verified_email: (record.require_verified_email
@@ -202,12 +236,17 @@ async fn record_change(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
+    use abnegate_secret::encrypt_value;
     use chrono::Utc;
     use zone_enterprise::sso::Protocol;
 
     use super::*;
 
     const SECRET: &str = "s3cret-client-value";
+
+    static KEY: LazyLock<MasterKey> = LazyLock::new(|| MasterKey::generate().expect("a key"));
 
     fn record() -> ProviderRecord {
         ProviderRecord {
@@ -216,7 +255,7 @@ mod tests {
             display_name: "Okta".into(),
             issuer: "https://acme.okta.com".into(),
             client_id: "0oa1".into(),
-            client_secret: SecretValue::new(SECRET),
+            sealed_secret: encrypt_value(&SecretValue::new(SECRET), &KEY).expect("a sealed secret"),
             allowed_domains: vec!["acme.com".into()],
             require_verified_email: true,
             enabled: true,
@@ -226,7 +265,16 @@ mod tests {
     }
 
     fn provider(revision: &Revision<'_>, record: &ProviderRecord) -> Provider {
-        Provider::parse(&revision.fields(record)).unwrap()
+        revised(record, revision, &KEY).unwrap()
+    }
+
+    fn changed(revision: &Revision<'_>, record: &ProviderRecord) -> ProviderChanges {
+        changes(
+            record,
+            &provider(revision, record),
+            revision.enabled(record),
+            revision.replaces_secret(record, &KEY),
+        )
     }
 
     #[test]
@@ -259,11 +307,7 @@ mod tests {
             enabled: Some(true),
             ..Revision::default()
         };
-        let changes = changes(
-            &record,
-            &provider(&revision, &record),
-            revision.enabled(&record),
-        );
+        let changes = changed(&revision, &record);
         assert!(changes.is_empty(), "{changes:?}");
         assert!(!rediscovers(&record, &provider(&revision, &record)));
     }
@@ -280,7 +324,7 @@ mod tests {
             ..Revision::default()
         };
         let revised = provider(&revision, &record);
-        let changes = changes(&record, &revised, revision.enabled(&record));
+        let changes = changed(&revision, &record);
         assert_eq!(changes.display_name, None);
         assert_eq!(changes.issuer, None);
         assert_eq!(changes.client_id.as_deref(), Some("0oa2"));

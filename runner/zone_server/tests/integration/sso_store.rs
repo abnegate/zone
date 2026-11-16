@@ -129,7 +129,10 @@ async fn a_provider_round_trips_with_its_secret_sealed_in_the_row() {
     assert_eq!(created.display_name, "Okta");
     assert_eq!(created.issuer, ISSUER);
     assert_eq!(created.client_id, "0oa1");
-    assert_eq!(created.client_secret.expose(), SECRET);
+    assert_eq!(
+        created.client_secret(&fixture.key).unwrap().expose(),
+        SECRET
+    );
     assert_eq!(created.allowed_domains, ["acme.com"]);
     assert!(created.require_verified_email);
     assert!(created.enabled);
@@ -141,16 +144,14 @@ async fn a_provider_round_trips_with_its_secret_sealed_in_the_row() {
         "the plaintext secret must never be stored"
     );
 
-    let fetched = providers::get(fixture.pool(), &fixture.key, created.id)
-        .await
-        .unwrap();
+    let fetched = providers::get(fixture.pool(), created.id).await.unwrap();
     assert_eq!(fetched.as_ref(), Some(&created));
     assert_eq!(
-        providers::list(fixture.pool(), &fixture.key).await.unwrap(),
+        providers::list(fixture.pool()).await.unwrap(),
         std::slice::from_ref(&created)
     );
     assert_eq!(
-        providers::get(fixture.pool(), &fixture.key, Uuid::new_v4())
+        providers::get(fixture.pool(), Uuid::new_v4())
             .await
             .unwrap(),
         None
@@ -158,7 +159,7 @@ async fn a_provider_round_trips_with_its_secret_sealed_in_the_row() {
 
     let other = MasterKey::generate().unwrap();
     assert!(matches!(
-        providers::get(fixture.pool(), &other, created.id).await,
+        created.client_secret(&other),
         Err(ProviderError::Unopenable(id, _)) if id == created.id
     ));
     assert!(!format!("{created:?}").contains(SECRET));
@@ -192,7 +193,8 @@ async fn a_stored_provider_parses_back_into_the_provider_it_was_saved_from() {
     assert_eq!(created.allowed_domains, ["acme.com"]);
     assert!(!created.require_verified_email);
     assert!(!created.enabled);
-    assert_eq!(Provider::parse(&created.fields()).unwrap(), provider);
+    let secret = created.client_secret(&fixture.key).unwrap();
+    assert_eq!(Provider::parse(&created.fields(&secret)).unwrap(), provider);
     fixture.cleanup().await;
 }
 
@@ -225,7 +227,10 @@ async fn a_sparse_update_keeps_every_field_it_leaves_out() {
         renamed.require_verified_email,
         created.require_verified_email
     );
-    assert_eq!(renamed.client_secret.expose(), SECRET);
+    assert_eq!(
+        renamed.client_secret(&fixture.key).unwrap().expose(),
+        SECRET
+    );
     assert_eq!(
         fixture.stored_secret(created.id).await,
         sealed,
@@ -259,7 +264,10 @@ async fn a_sparse_update_keeps_every_field_it_leaves_out() {
     .await
     .unwrap()
     .expect("the provider exists");
-    assert_eq!(replaced.client_secret.expose(), REPLACED_SECRET);
+    assert_eq!(
+        replaced.client_secret(&fixture.key).unwrap().expose(),
+        REPLACED_SECRET
+    );
     assert_eq!(replaced.issuer, OTHER_ISSUER);
     assert_eq!(replaced.client_id, "client-2");
     assert!(replaced.allowed_domains.is_empty());
@@ -345,13 +353,7 @@ async fn only_enabled_providers_are_listed_for_sign_in_and_counted() {
     );
     assert!(listed.iter().all(|listing| listing.display_name == "Okta"));
     assert_eq!(providers::count_enabled(fixture.pool()).await.unwrap(), 2);
-    assert_eq!(
-        providers::list(fixture.pool(), &fixture.key)
-            .await
-            .unwrap()
-            .len(),
-        3
-    );
+    assert_eq!(providers::list(fixture.pool()).await.unwrap().len(), 3);
     fixture.cleanup().await;
 }
 
@@ -856,10 +858,13 @@ async fn reclaiming_an_account_replaces_its_password_and_verifies_its_email() {
     let squatted = fixture.user("ada@acme.com").await;
     let bystander = fixture.user("grace@acme.com").await;
     let replacement = hash_password("Another-horse-2").unwrap();
+    let mut connection = fixture.pool().acquire().await.unwrap();
 
-    users::reclaim(fixture.pool(), squatted.id, &replacement)
-        .await
-        .unwrap();
+    assert!(
+        users::reclaim(&mut connection, squatted.id, &replacement)
+            .await
+            .unwrap()
+    );
 
     let stored = users::get_user_by_email(fixture.pool(), "ada@acme.com")
         .await
@@ -875,10 +880,48 @@ async fn reclaiming_an_account_replaces_its_password_and_verifies_its_email() {
     assert!(!untouched.email_verified);
     assert!(zone_server::auth::verify_password(PASSWORD, &untouched.password_hash).unwrap());
     assert_eq!(untouched.id, bystander.id);
-    assert!(matches!(
-        users::reclaim(fixture.pool(), Uuid::new_v4(), &replacement).await,
-        Err(sqlx::Error::RowNotFound)
-    ));
+    assert!(
+        !users::reclaim(&mut connection, Uuid::new_v4(), &replacement)
+            .await
+            .unwrap()
+    );
+    drop(connection);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn an_account_verified_or_promoted_after_it_was_resolved_is_not_reclaimed() {
+    let fixture = Fixture::new().await;
+    let verified = fixture.user("ada@acme.com").await;
+    let promoted = fixture.user("grace@acme.com").await;
+    sqlx::query("UPDATE users SET email_verified = TRUE WHERE id = $1")
+        .bind(verified.id)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET is_admin = TRUE WHERE id = $1")
+        .bind(promoted.id)
+        .execute(fixture.pool())
+        .await
+        .unwrap();
+    let replacement = hash_password("Another-horse-2").unwrap();
+    let mut connection = fixture.pool().acquire().await.unwrap();
+
+    for user in [&verified, &promoted] {
+        assert!(
+            !users::reclaim(&mut connection, user.id, &replacement)
+                .await
+                .unwrap(),
+            "{}",
+            user.email
+        );
+        let stored = users::get_user_by_email(fixture.pool(), &user.email)
+            .await
+            .unwrap()
+            .expect("still there");
+        assert!(zone_server::auth::verify_password(PASSWORD, &stored.password_hash).unwrap());
+    }
+    drop(connection);
     fixture.cleanup().await;
 }
 

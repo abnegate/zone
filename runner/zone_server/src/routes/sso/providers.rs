@@ -1,3 +1,6 @@
+use std::fmt;
+
+use abnegate_secret::REDACTED;
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
 use axum::extract::{Path, State};
@@ -49,7 +52,7 @@ impl From<&ProviderRecord> for ProviderResponse {
 
 /// A missing text field reads as empty, so it is refused with that field's own code rather than
 /// a generic body error.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct CreateProviderRequest {
     #[serde(default)]
     pub display_name: String,
@@ -81,7 +84,22 @@ impl CreateProviderRequest {
     }
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for CreateProviderRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreateProviderRequest")
+            .field("display_name", &self.display_name)
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &REDACTED)
+            .field("allowed_domains", &self.allowed_domains)
+            .field("require_verified_email", &self.require_verified_email)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub struct UpdateProviderRequest {
     pub display_name: Option<String>,
     pub issuer: Option<String>,
@@ -103,6 +121,24 @@ impl UpdateProviderRequest {
             require_verified_email: self.require_verified_email,
             enabled: self.enabled,
         }
+    }
+}
+
+impl fmt::Debug for UpdateProviderRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UpdateProviderRequest")
+            .field("display_name", &self.display_name)
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| REDACTED),
+            )
+            .field("allowed_domains", &self.allowed_domains)
+            .field("require_verified_email", &self.require_verified_email)
+            .field("enabled", &self.enabled)
+            .finish()
     }
 }
 
@@ -173,7 +209,6 @@ pub async fn delete(
 
 #[cfg(test)]
 mod tests {
-    use abnegate_secret::SecretValue;
     use serde_json::json;
 
     use super::*;
@@ -186,7 +221,7 @@ mod tests {
             display_name: "Okta".into(),
             issuer: "https://acme.okta.com".into(),
             client_id: "0oa1".into(),
-            client_secret: SecretValue::new("s3cret"),
+            sealed_secret: "ENC[v1:s3cret]".into(),
             allowed_domains: vec!["acme.com".into()],
             require_verified_email: true,
             enabled: false,
@@ -252,5 +287,20 @@ mod tests {
                 ..Revision::default()
             }
         );
+    }
+
+    #[test]
+    fn debug_never_shows_a_request_secret() {
+        let create: CreateProviderRequest = serde_json::from_value(json!({
+            "display_name": "Okta", "issuer": "https://acme.okta.com",
+            "client_id": "0oa1", "client_secret": "s3cret"
+        }))
+        .unwrap();
+        let update: UpdateProviderRequest =
+            serde_json::from_value(json!({ "client_secret": "s3cret" })).unwrap();
+        for shown in [format!("{create:?}"), format!("{update:?}")] {
+            assert!(!shown.contains("s3cret"), "{shown}");
+            assert!(shown.contains(REDACTED), "{shown}");
+        }
     }
 }

@@ -1,12 +1,14 @@
+use std::fmt;
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 
-use crate::sso::random;
+use crate::sso::{REDACTED, random};
 
 pub const METHOD: &str = "S256";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
@@ -23,6 +25,16 @@ impl Pkce {
             verifier,
             challenge,
         }
+    }
+}
+
+impl fmt::Debug for Pkce {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Pkce")
+            .field("verifier", &REDACTED)
+            .field("challenge", &self.challenge)
+            .finish()
     }
 }
 
@@ -50,6 +62,14 @@ mod tests {
         assert_ne!(first.verifier, second.verifier);
         assert!((43..=128).contains(&first.verifier.len()));
         assert_eq!(first.challenge, challenge(&first.verifier));
+    }
+
+    #[test]
+    fn debug_never_shows_the_verifier() {
+        let pkce = Pkce::generate();
+        let shown = format!("{pkce:?}");
+        assert!(!shown.contains(&pkce.verifier), "{shown}");
+        assert!(shown.contains(&pkce.challenge), "{shown}");
     }
 
     #[test]

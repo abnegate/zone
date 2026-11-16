@@ -11,10 +11,13 @@ use crate::db::{refresh_tokens, sessions, users};
 use crate::state::AppState;
 use crate::utils::crypto::hash_token;
 
+/// A password sign-in passes the hash it verified, so a reclaim that replaced the password since
+/// refuses the session instead of leaving the old owner signed in.
 pub async fn issue(
     state: &AppState,
     user_id: Uuid,
     headers: &HeaderMap,
+    password_hash: Option<&str>,
 ) -> Result<AuthResponse, Refusal> {
     let user = match users::get_user_with_permissions(state.db(), user_id).await {
         Ok(Some(user)) => user,
@@ -25,7 +28,7 @@ pub async fn issue(
         }
     };
     let device = admit_device(state, user_id, headers, None).await?;
-    let tokens = generate_tokens(state, &user, headers, &device, None).await?;
+    let tokens = generate_tokens(state, &user, headers, &device, None, password_hash).await?;
     Ok(AuthResponse::new(
         &user,
         tokens,
@@ -74,6 +77,7 @@ pub async fn generate_tokens(
     headers: &HeaderMap,
     device: &Device,
     session: Option<Uuid>,
+    password_hash: Option<&str>,
 ) -> Result<Tokens, Refusal> {
     let config = state.config();
     if let Some(zone) = crate::auth::time_zone::claim(headers)
@@ -99,8 +103,21 @@ pub async fn generate_tokens(
     let token_hash = hash_token(&refresh_token);
     let expires_at = Utc::now() + config.refresh_token_lifetime();
 
-    if let Err(error) = refresh_tokens::create_refresh_token(
-        state.db(),
+    let mut transaction = state
+        .db()
+        .begin()
+        .await
+        .map_err(unavailable("Failed to begin a session"))?;
+    if let Some(verified) = password_hash {
+        let current = users::lock_password_hash(&mut transaction, user.user.id)
+            .await
+            .map_err(unavailable("Failed to recheck the password"))?;
+        if current.as_deref() != Some(verified) {
+            return Err(Refusal::Superseded);
+        }
+    }
+    refresh_tokens::create_refresh_token(
+        &mut *transaction,
         user.user.id,
         &token_hash,
         expires_at.naive_utc(),
@@ -108,20 +125,19 @@ pub async fn generate_tokens(
         ip_address,
     )
     .await
-    {
-        tracing::error!(%error, "Failed to store refresh token");
-        return Err(Refusal::Unavailable);
-    }
-
+    .map_err(unavailable("Failed to store refresh token"))?;
     let session = match session {
-        Some(session_id) => {
-            sessions::rotate_session(state.db(), session_id, &token_hash, expires_at.naive_utc())
-                .await
-                .and_then(|rotated| rotated.ok_or(sqlx::Error::RowNotFound))
-        }
+        Some(session_id) => sessions::rotate_session(
+            &mut *transaction,
+            session_id,
+            &token_hash,
+            expires_at.naive_utc(),
+        )
+        .await
+        .and_then(|rotated| rotated.ok_or(sqlx::Error::RowNotFound)),
         None => {
             sessions::create_session(
-                state.db(),
+                &mut *transaction,
                 user.user.id,
                 &token_hash,
                 ip_address,
@@ -131,20 +147,15 @@ pub async fn generate_tokens(
             )
             .await
         }
-    };
-    let session = match session {
-        Ok(session) => session,
-        Err(error) => {
-            tracing::error!(%error, "Failed to bind session");
-            let _ = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await;
-            return Err(Refusal::Unavailable);
-        }
-    };
-    if let Err(error) = sessions::attach_device(state.db(), session.id, device.id).await {
-        tracing::error!(%error, "Failed to bind the session to its device");
-        let _ = refresh_tokens::revoke_refresh_token(state.db(), &token_hash).await;
-        return Err(Refusal::Unavailable);
     }
+    .map_err(unavailable("Failed to bind session"))?;
+    sessions::attach_device(&mut *transaction, session.id, device.id)
+        .await
+        .map_err(unavailable("Failed to bind the session to its device"))?;
+    transaction
+        .commit()
+        .await
+        .map_err(unavailable("Failed to commit the session"))?;
 
     let access_token = create_session_access_token(
         user.user.id,
@@ -165,4 +176,11 @@ pub async fn generate_tokens(
         access: access_token,
         refresh: refresh_token,
     })
+}
+
+fn unavailable(context: &'static str) -> impl FnOnce(sqlx::Error) -> Refusal {
+    move |error| {
+        tracing::error!(%error, "{context}");
+        Refusal::Unavailable
+    }
 }

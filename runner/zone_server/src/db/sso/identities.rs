@@ -69,3 +69,11 @@ pub async fn touch(executor: impl PgExecutor<'_>, id: Uuid, email: &str) -> DbRe
     }
     Ok(())
 }
+
+pub async fn clear(executor: impl PgExecutor<'_>, provider_id: Uuid) -> DbResult<u64> {
+    let result = sqlx::query("DELETE FROM sso_identities WHERE provider_id = $1")
+        .bind(provider_id)
+        .execute(executor)
+        .await?;
+    Ok(result.rows_affected())
+}

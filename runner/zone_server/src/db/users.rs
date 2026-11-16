@@ -1,7 +1,7 @@
 //! User database queries
 
 use chrono::NaiveDateTime;
-use sqlx::{PgExecutor, PgPool};
+use sqlx::{PgConnection, PgExecutor, PgPool};
 use uuid::Uuid;
 use zone_enterprise::sso::Account;
 
@@ -295,7 +295,6 @@ pub async fn assign_user_role(
     Ok(())
 }
 
-/// Every user whose email equals `email` ignoring case, oldest first.
 pub async fn find_by_email_ignoring_case(
     executor: impl PgExecutor<'_>,
     email: &str,
@@ -310,24 +309,45 @@ pub async fn find_by_email_ignoring_case(
     .await
 }
 
-/// Takes the account over for the person who proved the email elsewhere: the old password stops
-/// working and the email counts as verified.
+/// The row stays locked `FOR UPDATE` until the caller's transaction ends, so no session or
+/// refresh token can be inserted for the account meanwhile. `false` when the account is gone, or
+/// was verified or made an admin after the sign-in resolved it.
 pub async fn reclaim(
-    executor: impl PgExecutor<'_>,
+    connection: &mut PgConnection,
     user_id: Uuid,
     password_hash: &str,
-) -> DbResult<()> {
-    let result = sqlx::query(
+) -> DbResult<bool> {
+    let reclaimable: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM users \
+         WHERE id = $1 AND email_verified IS NOT TRUE AND is_admin IS NOT TRUE \
+         FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if reclaimable.is_none() {
+        return Ok(false);
+    }
+    sqlx::query(
         "UPDATE users SET password_hash = $1, email_verified = TRUE, updated_at = NOW() WHERE id = $2",
     )
     .bind(password_hash)
     .bind(user_id)
-    .execute(executor)
+    .execute(&mut *connection)
     .await?;
-    if result.rows_affected() == 0 {
-        return Err(sqlx::Error::RowNotFound);
-    }
-    Ok(())
+    Ok(true)
+}
+
+/// The account's password hash, share-locked until the caller's transaction ends so a reclaim
+/// can't replace it underneath a sign-in that verified it.
+pub async fn lock_password_hash(
+    connection: &mut PgConnection,
+    user_id: Uuid,
+) -> DbResult<Option<String>> {
+    sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1 FOR SHARE")
+        .bind(user_id)
+        .fetch_optional(connection)
+        .await
 }
 
 /// Set user active status

@@ -36,6 +36,14 @@ impl Settlement {
         }
     }
 
+    pub fn linkage(&self, provider_id: Uuid, subject: &str) -> Value {
+        json!({
+            "provider_id": provider_id,
+            "subject": subject,
+            "reclaimed": self.reclaimed,
+        })
+    }
+
     pub fn recorded(&self, provider_id: Uuid, subject: &str) -> Value {
         json!({
             "provider_id": provider_id,
@@ -70,6 +78,22 @@ mod tests {
                     "subject": "sub-1",
                     "provisioned": provisioned,
                     "linked": linked,
+                    "reclaimed": reclaimed,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn the_link_audit_names_whether_the_account_was_reclaimed() {
+        let user = Uuid::from_u128(1);
+        let provider = Uuid::from_u128(2);
+        for reclaimed in [false, true] {
+            assert_eq!(
+                Settlement::linked(user, reclaimed).linkage(provider, "sub-1"),
+                json!({
+                    "provider_id": provider,
+                    "subject": "sub-1",
                     "reclaimed": reclaimed,
                 })
             );

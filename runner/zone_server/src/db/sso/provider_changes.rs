@@ -21,11 +21,47 @@ impl ProviderChanges {
             && self.require_verified_email.is_none()
             && self.enabled.is_none()
     }
+
+    /// A subject is unique only within one issuer, and some providers give each client its own,
+    /// so a new issuer or client ID makes every stored subject meaningless.
+    pub fn renames_subjects(&self) -> bool {
+        self.issuer.is_some() || self.client_id.is_some()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_new_issuer_or_client_id_renames_subjects() {
+        assert!(!ProviderChanges::default().renames_subjects());
+        assert!(
+            ProviderChanges {
+                issuer: Some("https://other.example.com".into()),
+                ..ProviderChanges::default()
+            }
+            .renames_subjects()
+        );
+        assert!(
+            ProviderChanges {
+                client_id: Some("0oa2".into()),
+                ..ProviderChanges::default()
+            }
+            .renames_subjects()
+        );
+        assert!(
+            !ProviderChanges {
+                display_name: Some("Okta".into()),
+                client_secret: Some(SecretValue::new("rotated")),
+                allowed_domains: Some(vec!["acme.io".into()]),
+                require_verified_email: Some(false),
+                enabled: Some(false),
+                ..ProviderChanges::default()
+            }
+            .renames_subjects()
+        );
+    }
 
     #[test]
     fn only_the_default_is_empty() {

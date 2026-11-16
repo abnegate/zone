@@ -31,7 +31,7 @@ pub struct Session {
 /// Creates a session record for tracking user authentication across devices.
 /// Sessions are tied to refresh tokens and include metadata about the client.
 pub async fn create_session(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     user_id: Uuid,
     refresh_token_hash: &str,
     ip_address: Option<&str>,
@@ -70,18 +70,22 @@ pub async fn create_session(
     .bind(user_agent)
     .bind(device_info)
     .bind(expires_at)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(session)
 }
 
 /// Bind a session to the device that just signed in.
-pub async fn attach_device(pool: &PgPool, session_id: Uuid, device_id: Uuid) -> DbResult<()> {
+pub async fn attach_device(
+    executor: impl PgExecutor<'_>,
+    session_id: Uuid,
+    device_id: Uuid,
+) -> DbResult<()> {
     sqlx::query("UPDATE sessions SET device_id = $2 WHERE id = $1")
         .bind(session_id)
         .bind(device_id)
-        .execute(pool)
+        .execute(executor)
         .await?;
     Ok(())
 }
@@ -151,7 +155,7 @@ pub async fn update_last_active(pool: &PgPool, session_id: Uuid) -> DbResult<()>
 /// Bind a live session to a freshly issued refresh token, so a refresh keeps
 /// the same session instead of leaving the old row active beside a new one.
 pub async fn rotate_session(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     session_id: Uuid,
     refresh_token_hash: &str,
     expires_at: NaiveDateTime,
@@ -182,7 +186,7 @@ pub async fn rotate_session(
     .bind(session_id)
     .bind(refresh_token_hash)
     .bind(expires_at)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(session)

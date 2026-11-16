@@ -4,15 +4,16 @@ use uuid::Uuid;
 use zone_enterprise::sso::{Authorization, Error, Grant, Identity, Provider, Resolution, resolve};
 
 use super::callback::Callback;
+use super::console::redirect_uri;
 use super::settlement::Settlement;
 use super::sign_in_failure::SignInFailure;
 use crate::auth::hash_password;
+use crate::auth::password::PasswordError;
 use crate::db::audit::{actions, resources};
 use crate::db::sso::{attempts, identities, providers};
 use crate::db::users::{self, UserRow};
 use crate::db::{refresh_tokens, sessions};
 use crate::routes::common::{AuditEvent, audit};
-use crate::routes::sso::sign_in::redirect_uri;
 use crate::services::account::{AuthResponse, provision, session};
 use crate::state::AppState;
 use crate::utils::crypto::generate_token;
@@ -67,10 +68,20 @@ pub async fn complete(
         .await?;
 
     let settlement = settle(state, attempt.provider_id, &provider, &identity).await?;
+    if settlement.linked {
+        record(
+            state,
+            settlement.user,
+            &identity.email,
+            actions::USER_SSO_LINKED,
+            settlement.linkage(attempt.provider_id, &identity.subject),
+        )
+        .await;
+    }
     if let Err(error) = users::update_last_login(state.db(), settlement.user).await {
         tracing::warn!(user_id = %settlement.user, %error, "Failed to update last login");
     }
-    let response = session::issue(state, settlement.user, headers).await?;
+    let response = session::issue(state, settlement.user, headers, None).await?;
     record(
         state,
         settlement.user,
@@ -83,15 +94,17 @@ pub async fn complete(
 }
 
 async fn enabled(state: &AppState, provider_id: Uuid) -> Result<Provider, SignInFailure> {
-    let record = providers::get(state.db(), state.master_key(), provider_id)
+    let record = providers::get(state.db(), provider_id)
         .await?
         .filter(|record| record.enabled)
         .ok_or(Error::ProviderNotFound)?;
-    Ok(Provider::parse(&record.fields())?)
+    let client_secret = record.client_secret(state.master_key())?;
+    Ok(Provider::parse(&record.fields(&client_secret))?)
 }
 
-/// Two first sign-ins of one person can race to create the same user or identity. The loser
-/// rolls back and resolves once more, which finds what the winner created.
+/// Two first sign-ins of one person can race to create the same user or identity, and an account
+/// can change between resolving and linking it. The loser rolls back and resolves once more,
+/// which finds what the winner created or changed.
 async fn settle(
     state: &AppState,
     provider_id: Uuid,
@@ -163,8 +176,17 @@ async fn link(
     user: Uuid,
     reclaim: bool,
 ) -> Result<(), SignInFailure> {
-    let password_hash = if reclaim { Some(unusable()?) } else { None };
+    let password_hash = if reclaim {
+        Some(unusable().await?)
+    } else {
+        None
+    };
     let mut transaction = state.db().begin().await?;
+    if let Some(password_hash) = &password_hash
+        && !users::reclaim(&mut transaction, user, password_hash).await?
+    {
+        return Err(SignInFailure::Stale);
+    }
     identities::link(
         &mut *transaction,
         provider_id,
@@ -173,8 +195,7 @@ async fn link(
         &identity.email,
     )
     .await?;
-    if let Some(password_hash) = password_hash {
-        users::reclaim(&mut *transaction, user, &password_hash).await?;
+    if reclaim {
         refresh_tokens::revoke_all_user_tokens(&mut *transaction, user).await?;
         sessions::revoke_all_user_sessions(&mut *transaction, user).await?;
     }
@@ -189,7 +210,7 @@ async fn create(
     provider_id: Uuid,
     identity: &Identity,
 ) -> Result<Uuid, SignInFailure> {
-    let password_hash = unusable()?;
+    let password_hash = unusable().await?;
     let mut transaction = state.db().begin().await?;
     let user = provision::insert(
         &mut transaction,
@@ -223,8 +244,11 @@ async fn create(
 
 /// A password nobody knows: the users table needs a hash, and single sign-on accounts sign in
 /// without one.
-fn unusable() -> Result<String, SignInFailure> {
-    Ok(hash_password(&generate_token())?)
+async fn unusable() -> Result<String, SignInFailure> {
+    let hashed = tokio::task::spawn_blocking(|| hash_password(&generate_token()))
+        .await
+        .map_err(|_| PasswordError::HashingFailed)?;
+    Ok(hashed?)
 }
 
 async fn record(state: &AppState, user: Uuid, email: &str, action: &str, new_values: Value) {

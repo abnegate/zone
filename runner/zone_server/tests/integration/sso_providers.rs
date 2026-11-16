@@ -412,11 +412,14 @@ async fn a_sparse_update_keeps_every_field_it_leaves_out_and_the_secret() {
     assert_eq!(body["enabled"], true);
     assert_eq!(body["require_verified_email"], true);
     assert_eq!(identity_provider.requests(DISCOVERY_PATH), discoveries);
-    let stored = providers::get(fixture.pool(), fixture.state().master_key(), id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.client_secret.expose(), CLIENT_SECRET);
+    let stored = providers::get(fixture.pool(), id).await.unwrap().unwrap();
+    assert_eq!(
+        stored
+            .client_secret(fixture.state().master_key())
+            .unwrap()
+            .expose(),
+        CLIENT_SECRET
+    );
     fixture.cleanup().await;
 }
 
@@ -579,11 +582,14 @@ async fn every_change_is_audited_without_the_secret() {
         updated[1].new_values,
         Some(json!({ "client_secret_changed": true }))
     );
-    let stored = providers::get(fixture.pool(), fixture.state().master_key(), id)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.client_secret.expose(), REPLACED_SECRET);
+    let stored = providers::get(fixture.pool(), id).await.unwrap().unwrap();
+    assert_eq!(
+        stored
+            .client_secret(fixture.state().master_key())
+            .unwrap()
+            .expose(),
+        REPLACED_SECRET
+    );
 
     fixture
         .delete(&admin.token, id)

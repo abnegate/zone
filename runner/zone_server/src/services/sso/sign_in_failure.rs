@@ -16,13 +16,16 @@ pub enum SignInFailure {
     Provider(ProviderError),
     #[error(transparent)]
     Password(#[from] PasswordError),
+    #[error("The account changed while the sign-in was linking it")]
+    Stale,
 }
 
 impl SignInFailure {
-    /// Whether a concurrent sign-in created the same user or identity first. Resolving again
-    /// finds what it created.
+    /// Whether a concurrent change got there first: another sign-in created the same user or
+    /// identity, or the account changed after it was resolved. Resolving again finds what it did.
     pub fn raced(&self, constraints: &[&str]) -> bool {
         match self {
+            Self::Stale => true,
             Self::Storage(sqlx::Error::Database(database)) => {
                 database.is_unique_violation()
                     && database
@@ -58,6 +61,11 @@ mod tests {
         assert!(!SignInFailure::from(sqlx::Error::RowNotFound).raced(&["users_email_key"]));
         assert!(!SignInFailure::from(Error::EmailConflict).raced(&["users_email_key"]));
         assert!(!SignInFailure::from(Refusal::DeviceBlocked).raced(&["users_email_key"]));
+    }
+
+    #[test]
+    fn an_account_that_changed_before_it_was_linked_is_a_race() {
+        assert!(SignInFailure::Stale.raced(&[]));
     }
 
     #[test]

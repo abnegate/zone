@@ -1,18 +1,21 @@
 //! An OpenID Connect identity provider served in-process on loopback, for tests that configure a
 //! provider and sign in through it.
 //!
-//! It serves discovery, the signing keys, the token endpoint and userinfo over plain http on
-//! `127.0.0.1`, which Zone accepts because the host is loopback. The token endpoint checks what a
-//! real provider checks (the grant type, the client's credentials, the redirect URI and the PKCE
-//! verifier) against a code recorded beforehand with [`IdentityProvider::grant`], and answers
-//! with an ID token signed by the key in `zone_enterprise::sso::testing`.
+//! It serves discovery, authorization, the signing keys, the token endpoint and userinfo over plain
+//! http on `127.0.0.1`, which Zone accepts because the host is loopback. Authorization signs the
+//! test person straight in and redirects back with a code; [`IdentityProvider::grant`] records a
+//! code for any claims instead. The token endpoint checks what a real provider checks (the grant
+//! type, the client's credentials, that the code was granted to that client for that redirect URI,
+//! and the PKCE verifier), and answers with an ID token signed by the key in
+//! `zone_enterprise::sso::testing`. Like Entra ID, it gives each client its own subject for the
+//! same person.
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use axum::extract::{Form, State};
+use axum::extract::{Form, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -23,7 +26,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use zone_enterprise::sso::{Claims, challenge, testing};
+use zone_enterprise::sso::{Claims, METHOD, challenge, testing};
 
 pub const CLIENT_ID: &str = "zone-test-client";
 /// Carries the characters RFC 6749 makes clients form-encode inside HTTP basic credentials.
@@ -40,6 +43,7 @@ pub const USERINFO_PATH: &str = "/userinfo";
 pub const AUTHORIZE_PATH: &str = "/authorize";
 
 const GRANT_TYPE: &str = "authorization_code";
+const RESPONSE_TYPE: &str = "code";
 const BASIC: &str = "Basic ";
 const BEARER: &str = "Bearer ";
 const CLIENT_SECRET_BASIC: &str = "client_secret_basic";
@@ -48,6 +52,7 @@ const INVALID_CLIENT: &str = "invalid_client";
 const INVALID_GRANT: &str = "invalid_grant";
 const INVALID_REQUEST: &str = "invalid_request";
 const INVALID_TOKEN: &str = "invalid_token";
+const UNAUTHORIZED_CLIENT: &str = "unauthorized_client";
 const SERVER_ERROR: &str = "server_error";
 const UNSUPPORTED_GRANT_TYPE: &str = "unsupported_grant_type";
 
@@ -69,6 +74,8 @@ impl Authentication {
 }
 
 struct Grant {
+    client_id: String,
+    redirect_uri: String,
     challenge: String,
     claims: Claims,
 }
@@ -76,6 +83,7 @@ struct Grant {
 struct Inner {
     issuer: String,
     authentication: Authentication,
+    clients: Mutex<HashSet<String>>,
     grants: Mutex<HashMap<String, Grant>>,
     access_tokens: Mutex<HashSet<String>>,
     requests: Mutex<Vec<String>>,
@@ -88,6 +96,10 @@ struct Inner {
 impl Inner {
     fn record(&self, path: &str) {
         lock(&self.requests).push(path.to_owned());
+    }
+
+    fn registered(&self, client_id: &str) -> bool {
+        lock(&self.clients).contains(client_id)
     }
 }
 
@@ -109,6 +121,7 @@ impl IdentityProvider {
         let inner = Arc::new(Inner {
             issuer: format!("http://{address}"),
             authentication,
+            clients: Mutex::new(HashSet::from([CLIENT_ID.to_owned()])),
             grants: Mutex::default(),
             access_tokens: Mutex::default(),
             requests: Mutex::default(),
@@ -119,6 +132,7 @@ impl IdentityProvider {
         });
         let router = Router::new()
             .route(DISCOVERY_PATH, get(discovery))
+            .route(AUTHORIZE_PATH, get(authorize))
             .route(KEYS_PATH, get(keys))
             .route(TOKEN_PATH, post(token))
             .route(USERINFO_PATH, get(userinfo))
@@ -159,13 +173,26 @@ impl IdentityProvider {
         testing::claims(&self.inner.issuer, CLIENT_ID, nonce, Utc::now())
     }
 
-    /// Records an authorization code as the provider would after the person signs in: the token
-    /// endpoint redeems `code` once, for the PKCE verifier whose S256 challenge is `challenge`,
-    /// and answers with an ID token carrying `claims`.
+    /// Registers another application at the provider, with the same secret and redirect URI.
+    pub fn register(&self, client_id: &str) {
+        lock(&self.inner.clients).insert(client_id.to_owned());
+    }
+
+    /// The subject this provider gives the test person in `client_id`'s ID tokens.
+    pub fn subject(&self, client_id: &str) -> String {
+        subject(client_id)
+    }
+
+    /// Records an authorization code as the provider would after the person signs in to
+    /// [`CLIENT_ID`]: the token endpoint redeems `code` once, for that client at [`REDIRECT_URI`]
+    /// and the PKCE verifier whose S256 challenge is `challenge`, and answers with an ID token
+    /// carrying `claims`.
     pub fn grant(&self, code: &str, challenge: &str, claims: Claims) {
         lock(&self.inner.grants).insert(
             code.to_owned(),
             Grant {
+                client_id: CLIENT_ID.to_owned(),
+                redirect_uri: REDIRECT_URI.to_owned(),
                 challenge: challenge.to_owned(),
                 claims,
             },
@@ -220,6 +247,60 @@ fn refuse(status: StatusCode, error: &str) -> Response {
     (status, Json(json!({ "error": error }))).into_response()
 }
 
+fn subject(client_id: &str) -> String {
+    if client_id == CLIENT_ID {
+        testing::SUBJECT.to_owned()
+    } else {
+        format!("{}-{client_id}", testing::SUBJECT)
+    }
+}
+
+/// Signs the test person in at once, as if they had entered their credentials, and sends them
+/// back to the client with a code for its own subject.
+async fn authorize(
+    State(inner): State<Arc<Inner>>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    inner.record(AUTHORIZE_PATH);
+    let parameter = |name: &str| query.get(name).map(String::as_str);
+    let (Some(client_id), Some(redirect_uri), Some(state), Some(nonce), Some(code_challenge)) = (
+        parameter("client_id"),
+        parameter("redirect_uri"),
+        parameter("state"),
+        parameter("nonce"),
+        parameter("code_challenge"),
+    ) else {
+        return refuse(StatusCode::BAD_REQUEST, INVALID_REQUEST);
+    };
+    if !inner.registered(client_id) || redirect_uri != REDIRECT_URI {
+        return refuse(StatusCode::BAD_REQUEST, UNAUTHORIZED_CLIENT);
+    }
+    if parameter("response_type") != Some(RESPONSE_TYPE)
+        || parameter("code_challenge_method") != Some(METHOD)
+    {
+        return refuse(StatusCode::BAD_REQUEST, INVALID_REQUEST);
+    }
+    let claims = Claims {
+        subject: subject(client_id),
+        ..testing::claims(&inner.issuer, client_id, nonce, Utc::now())
+    };
+    let code = format!("code-{}", Uuid::new_v4().simple());
+    lock(&inner.grants).insert(
+        code.clone(),
+        Grant {
+            client_id: client_id.to_owned(),
+            redirect_uri: redirect_uri.to_owned(),
+            challenge: code_challenge.to_owned(),
+            claims,
+        },
+    );
+    let location = format!(
+        "{redirect_uri}?code={code}&state={}",
+        urlencoding::encode(state)
+    );
+    (StatusCode::FOUND, [(header::LOCATION, location)]).into_response()
+}
+
 async fn discovery(State(inner): State<Arc<Inner>>) -> Json<Value> {
     inner.record(DISCOVERY_PATH);
     let mut document = testing::discovery(&inner.issuer);
@@ -249,9 +330,9 @@ async fn token(
     if form.get("grant_type").map(String::as_str) != Some(GRANT_TYPE) {
         return refuse(StatusCode::BAD_REQUEST, UNSUPPORTED_GRANT_TYPE);
     }
-    if !authenticated(inner.authentication, &headers, &form) {
+    let Some(client_id) = authenticated(&inner, &headers, &form) else {
         return refuse(StatusCode::UNAUTHORIZED, INVALID_CLIENT);
-    }
+    };
     let (Some(code), Some(redirect_uri), Some(verifier)) = (
         form.get("code"),
         form.get("redirect_uri"),
@@ -262,7 +343,10 @@ async fn token(
     let Some(grant) = lock(&inner.grants).remove(code) else {
         return refuse(StatusCode::BAD_REQUEST, INVALID_GRANT);
     };
-    if redirect_uri != REDIRECT_URI || challenge(verifier) != grant.challenge {
+    if grant.client_id != client_id
+        || redirect_uri != &grant.redirect_uri
+        || challenge(verifier) != grant.challenge
+    {
         return refuse(StatusCode::BAD_REQUEST, INVALID_GRANT);
     }
     let access_token = format!("access-{}", Uuid::new_v4().simple());
@@ -292,28 +376,26 @@ fn forged(id_token: &str) -> String {
     format!("{signed}.{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// The registered client the request authenticates as, by the one method discovery advertised.
 fn authenticated(
-    authentication: Authentication,
+    inner: &Inner,
     headers: &HeaderMap,
     form: &HashMap<String, String>,
-) -> bool {
+) -> Option<String> {
     let header = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok());
-    match authentication {
-        Authentication::Basic => {
-            !form.contains_key("client_secret")
-                && header
-                    .and_then(|value| value.strip_prefix(BASIC))
-                    .and_then(basic_credentials)
-                    .is_some_and(|(id, secret)| id == CLIENT_ID && secret == CLIENT_SECRET)
-        }
-        Authentication::Post => {
-            header.is_none()
-                && form.get("client_id").map(String::as_str) == Some(CLIENT_ID)
-                && form.get("client_secret").map(String::as_str) == Some(CLIENT_SECRET)
-        }
-    }
+    let (id, secret) = match inner.authentication {
+        Authentication::Basic if !form.contains_key("client_secret") => header
+            .and_then(|value| value.strip_prefix(BASIC))
+            .and_then(basic_credentials)?,
+        Authentication::Post if header.is_none() => (
+            form.get("client_id")?.clone(),
+            form.get("client_secret")?.clone(),
+        ),
+        Authentication::Basic | Authentication::Post => return None,
+    };
+    (secret == CLIENT_SECRET && inner.registered(&id)).then_some(id)
 }
 
 /// RFC 6749 section 2.3.1: each half of the basic credentials is form-urlencoded before the pair
@@ -491,6 +573,154 @@ mod tests {
             redeem(&identity_provider, &pkce.verifier, REDIRECT_URI).await,
             Err(Error::IdTokenInvalid(_))
         ));
+    }
+
+    const OTHER_CLIENT: &str = "zone-other-client";
+
+    fn authorization_url(
+        identity_provider: &IdentityProvider,
+        client_id: &str,
+        redirect_uri: &str,
+        pkce: &Pkce,
+    ) -> String {
+        let mut url =
+            reqwest::Url::parse(&format!("{}{AUTHORIZE_PATH}", identity_provider.issuer()))
+                .unwrap();
+        url.query_pairs_mut()
+            .append_pair("response_type", RESPONSE_TYPE)
+            .append_pair("client_id", client_id)
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("state", "state-1")
+            .append_pair("nonce", NONCE)
+            .append_pair("code_challenge", &pkce.challenge)
+            .append_pair("code_challenge_method", METHOD);
+        url.into()
+    }
+
+    async fn visit(url: &str) -> reqwest::Response {
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap()
+            .get(url)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    fn client(identity_provider: &IdentityProvider, client_id: &str) -> Provider {
+        Provider::parse(&Fields {
+            protocol: Protocol::Oidc,
+            display_name: DISPLAY_NAME,
+            issuer: &identity_provider.issuer(),
+            client_id,
+            client_secret: CLIENT_SECRET,
+            allowed_domains: &[],
+            require_verified_email: true,
+        })
+        .unwrap()
+    }
+
+    async fn redeem_as(
+        identity_provider: &IdentityProvider,
+        client_id: &str,
+        code: &str,
+        verifier: &str,
+    ) -> Result<Identity, Error> {
+        Oidc::new()
+            .exchange(
+                &client(identity_provider, client_id),
+                &Redemption {
+                    code,
+                    verifier,
+                    nonce: NONCE,
+                    redirect_uri: REDIRECT_URI,
+                },
+            )
+            .await
+    }
+
+    fn code(response: &reqwest::Response) -> String {
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location =
+            reqwest::Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        assert!(location.as_str().starts_with(REDIRECT_URI), "{location}");
+        let parameters: HashMap<String, String> = location.query_pairs().into_owned().collect();
+        assert_eq!(parameters["state"], "state-1");
+        parameters["code"].clone()
+    }
+
+    #[tokio::test]
+    async fn authorization_redirects_back_with_a_code_for_the_clients_own_subject() {
+        let identity_provider = IdentityProvider::start().await;
+        identity_provider.register(OTHER_CLIENT);
+        for client_id in [CLIENT_ID, OTHER_CLIENT] {
+            let pkce = Pkce::generate();
+            let response = visit(&authorization_url(
+                &identity_provider,
+                client_id,
+                REDIRECT_URI,
+                &pkce,
+            ))
+            .await;
+            let code = code(&response);
+
+            let identity = redeem_as(&identity_provider, client_id, &code, &pkce.verifier)
+                .await
+                .unwrap();
+
+            assert_eq!(identity.subject, identity_provider.subject(client_id));
+        }
+        assert_ne!(
+            identity_provider.subject(CLIENT_ID),
+            identity_provider.subject(OTHER_CLIENT)
+        );
+        assert_eq!(identity_provider.requests(AUTHORIZE_PATH), 2);
+    }
+
+    #[tokio::test]
+    async fn authorization_refuses_an_unknown_client_or_redirect_uri() {
+        let identity_provider = IdentityProvider::start().await;
+        let pkce = Pkce::generate();
+        let unknown = visit(&authorization_url(
+            &identity_provider,
+            OTHER_CLIENT,
+            REDIRECT_URI,
+            &pkce,
+        ))
+        .await;
+        assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+
+        let elsewhere = authorization_url(
+            &identity_provider,
+            CLIENT_ID,
+            "http://localhost:3000/elsewhere",
+            &pkce,
+        );
+        assert_eq!(visit(&elsewhere).await.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_code_is_redeemed_only_by_the_client_it_was_granted_to() {
+        let identity_provider = IdentityProvider::start().await;
+        identity_provider.register(OTHER_CLIENT);
+        let pkce = Pkce::generate();
+        let code = code(
+            &visit(&authorization_url(
+                &identity_provider,
+                CLIENT_ID,
+                REDIRECT_URI,
+                &pkce,
+            ))
+            .await,
+        );
+
+        let Err(Error::TokenExchange(message)) =
+            redeem_as(&identity_provider, OTHER_CLIENT, &code, &pkce.verifier).await
+        else {
+            panic!("another client redeemed the code");
+        };
+        assert!(message.contains(INVALID_GRANT), "{message}");
     }
 
     #[test]

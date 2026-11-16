@@ -1,6 +1,3 @@
-//! Server-wide single sign-on: identity providers, the identities linked through them, pending
-//! sign-in attempts and the enforcement setting.
-
 pub mod attempt;
 pub mod attempts;
 pub mod identities;
