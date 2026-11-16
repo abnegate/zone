@@ -4,6 +4,7 @@ use uuid::Uuid;
 use zone_enterprise::sso::{Authorization, Error, Grant, Identity, Provider, Resolution, resolve};
 
 use super::callback::Callback;
+use super::console::redirect_uri;
 use super::settlement::Settlement;
 use super::sign_in_failure::SignInFailure;
 use crate::auth::hash_password;
@@ -12,7 +13,6 @@ use crate::db::sso::{attempts, identities, providers};
 use crate::db::users::{self, UserRow};
 use crate::db::{refresh_tokens, sessions};
 use crate::routes::common::{AuditEvent, audit};
-use crate::routes::sso::sign_in::redirect_uri;
 use crate::services::account::{AuthResponse, provision, session};
 use crate::state::AppState;
 use crate::utils::crypto::generate_token;

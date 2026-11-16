@@ -17,7 +17,7 @@ use zone_enterprise::sso::{
 use zone_enterprise::{Tier, period_start};
 use zone_server::db::audit::{actions, resources};
 use zone_server::db::seats;
-use zone_server::routes::sso::sign_in::CALLBACK_PATH;
+use zone_server::services::sso::console::CALLBACK_PATH;
 use zone_server::utils::crypto::hash_token;
 
 use crate::common::identity_provider::{AUTHORIZE_PATH, IdentityProvider, REDIRECT_URI};

@@ -295,7 +295,6 @@ pub async fn assign_user_role(
     Ok(())
 }
 
-/// Every user whose email equals `email` ignoring case, oldest first.
 pub async fn find_by_email_ignoring_case(
     executor: impl PgExecutor<'_>,
     email: &str,

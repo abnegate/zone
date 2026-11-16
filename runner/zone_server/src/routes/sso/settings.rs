@@ -6,10 +6,10 @@ use serde::Serialize;
 use zone_enterprise::{Edition, Feature, Status, status};
 
 use super::providers::ProviderResponse;
-use super::sign_in::redirect_uri;
 use crate::auth::ServerAdmin;
 use crate::db::sso::{providers, settings};
 use crate::error::ServerError;
+use crate::services::sso::console::redirect_uri;
 use crate::state::AppState;
 
 const LOAD_FAILED: &str = "Could not load single sign-on";

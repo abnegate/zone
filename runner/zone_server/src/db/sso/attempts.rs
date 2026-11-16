@@ -9,7 +9,6 @@ use crate::utils::crypto::hash_token;
 
 pub const LIFETIME: TimeDelta = TimeDelta::minutes(10);
 
-/// Only the SHA-256 of the state is stored. Expired attempts are pruned in the same statement.
 pub async fn issue(
     executor: impl PgExecutor<'_>,
     provider_id: Uuid,
@@ -30,7 +29,6 @@ pub async fn issue(
     .await
 }
 
-/// Deletes the matching live attempt, so a second callback with the same state finds nothing.
 pub async fn consume(executor: impl PgExecutor<'_>, state: &str) -> DbResult<Option<Attempt>> {
     sqlx::query_as(
         "DELETE FROM sso_attempts WHERE state_hash = $1 AND expires_at > now() \

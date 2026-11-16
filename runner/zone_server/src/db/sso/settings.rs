@@ -18,7 +18,6 @@ pub async fn lock(transaction: &mut Transaction<'_, Postgres>) -> DbResult<()> {
     Ok(())
 }
 
-/// Returns the previous value.
 pub async fn set_required(
     transaction: &mut Transaction<'_, Postgres>,
     required: bool,

@@ -1,8 +1,5 @@
-//! Server-wide single sign-on: provider configuration, enforcement and signing in. The protocol,
-//! validation and policy live in zone_enterprise; this wires them to storage, sessions and the
-//! audit log.
-
 pub mod callback;
+pub mod console;
 pub mod enforcement;
 pub mod failure;
 pub mod providers;
