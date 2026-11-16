@@ -263,7 +263,7 @@ impl Publication<'_> {
             &self.execution,
             url,
             branch.as_str(),
-            status.as_str(),
+            status,
         )
         .await
         {
@@ -654,9 +654,7 @@ pub async fn sync_reception(state: &AppState, run_id: Uuid, task_id: Uuid) -> Re
     match record_reception(state, run_id, &reception).await {
         Ok(true) => {
             let status = pr_status_from(&reception);
-            if let Err(error) =
-                tasks::update_task_pr_status(state.db(), task_id, status.as_str()).await
-            {
+            if let Err(error) = tasks::update_task_pr_status(state.db(), task_id, status).await {
                 tracing::warn!(
                     "Could not record pr_status {} for task {task_id}: {error}",
                     status.as_str()
@@ -1645,7 +1643,7 @@ mod tests {
                 &fixture.execution,
                 "late-url",
                 "late-branch",
-                Status::Open.as_str()
+                Status::Open
             )
             .await
             .unwrap()
