@@ -151,7 +151,10 @@ hosts those URLs may name.
 
 When `providers` is set at either layer and a completion goes to a LiteLLM
 endpoint Zone trusts, Zone asks that endpoint for its routes with
-`GET {endpoint}/v2/model/info`, using the key Zone uses for the endpoint. It
+`GET {endpoint}/v2/model/info`. On the instance's own `LITELLM_HOST` it always
+asks with the instance's `LITELLM_KEY`, even when a workspace saved its own key
+beside that host, since the instance publishes the same routes to everyone; on
+an endpoint the organization saved, it asks with the organization's key. It
 then finds the route for the model name it's about to ask for:
 
 1. a `model_name` that equals the model name exactly;
@@ -163,10 +166,13 @@ The route's `model` prefix gives the provider. With the stock
 `ollama_chat/…`, and the `"*"` route sends every other name to
 `ollama_chat/*`, so all of them count as `local`.
 
-Zone caches each endpoint's routes for 60 seconds, so a change to LiteLLM's
-`config.yaml` can take up to a minute to reach policy decisions. A lookup that
-fails is remembered for 5 seconds, and lookups that arrive while one is in
-flight wait for it rather than ask again.
+Zone caches the routes for each endpoint and key for 60 seconds, so a change
+to LiteLLM's `config.yaml` can take up to a minute to reach policy decisions.
+Routes read under one key are never used for another. A lookup that times out
+or gets an error or unreadable answer is remembered for 5 seconds; one the
+endpoint refuses with `401` or `403` isn't remembered. Lookups that arrive
+while one is in flight for the same endpoint and key wait for it rather than
+ask again.
 
 **Zone believes only the routes of an endpoint the organization controls.**
 The routes are the endpoint's own answer, so whoever chooses the endpoint

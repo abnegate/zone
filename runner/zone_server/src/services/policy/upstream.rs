@@ -1,17 +1,22 @@
 //! The upstream a LiteLLM endpoint sends a model to, read from the deployment
-//! routes it publishes at `/v2/model/info`.
+//! routes it publishes at `/v2/model/info` under the endpoint's
+//! [`Endpoint::credential`]. Routes are cached per endpoint and credential, so
+//! one tenant's key never decides what another's lookup sees.
 
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::services::endpoint::Endpoint;
 
+const DIGEST_BYTES: usize = 32;
 const INFORMATION_PATH: &str = "/v2/model/info";
+const REFUSALS: [StatusCode; 2] = [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN];
 const TIMEOUT: Duration = Duration::from_secs(2);
 const TTL: Duration = Duration::from_secs(60);
 const UNREAD_TTL: Duration = Duration::from_secs(5);
@@ -30,8 +35,31 @@ static TABLES: LazyLock<Tables> = LazyLock::new(Tables::default);
 
 #[derive(Default)]
 struct Tables {
-    read: DashMap<String, Table>,
-    reading: DashMap<String, Arc<Mutex<()>>>,
+    read: DashMap<Source, Table>,
+    reading: DashMap<Source, Arc<Mutex<()>>>,
+}
+
+/// An endpoint's URL and a digest of the credential its routes are read with.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Source {
+    url: String,
+    credential: [u8; DIGEST_BYTES],
+}
+
+impl Source {
+    fn of(endpoint: &Endpoint) -> Self {
+        Self {
+            url: endpoint.url().to_string(),
+            credential: Sha256::digest(endpoint.credential().expose().as_bytes()).into(),
+        }
+    }
+}
+
+/// Why no routes were read. A refused credential is the reader's own and never
+/// cached; any other failure is, briefly.
+enum Unread {
+    Refused,
+    Failed,
 }
 
 struct Table {
@@ -97,37 +125,49 @@ pub async fn route(endpoint: &Endpoint, model: &str) -> Option<String> {
 }
 
 async fn lookup(tables: &Tables, endpoint: &Endpoint, model: &str) -> Option<String> {
-    let url = endpoint.url();
-    if let Some(routes) = cached(&tables.read, url, Instant::now()) {
+    let source = Source::of(endpoint);
+    if let Some(routes) = cached(&tables.read, &source, Instant::now()) {
         return resolve(routes.as_deref()?, model);
     }
-    let reading = Arc::clone(tables.reading.entry(url.to_string()).or_default().value());
+    let reading = Arc::clone(tables.reading.entry(source.clone()).or_default().value());
     let _reading = reading.lock().await;
-    if let Some(routes) = cached(&tables.read, url, Instant::now()) {
+    if let Some(routes) = cached(&tables.read, &source, Instant::now()) {
         return resolve(routes.as_deref()?, model);
     }
-    let routes: Option<Arc<[Route]>> = fetch(endpoint).await.map(Into::into);
-    store(&tables.read, url, routes.clone(), Instant::now());
-    tables.reading.remove(url);
+    let routes: Option<Arc<[Route]>> = match fetch(endpoint).await {
+        Ok(routes) => Some(routes.into()),
+        Err(Unread::Failed) => None,
+        Err(Unread::Refused) => {
+            tables.reading.remove(&source);
+            return None;
+        }
+    };
+    store(&tables.read, &source, routes.clone(), Instant::now());
+    tables.reading.remove(&source);
     resolve(routes.as_deref()?, model)
 }
 
-/// The routes read from `url` within their TTL: none read when the last read failed.
+/// The routes read from `source` within their TTL: none read when the last read failed.
 fn cached(
-    tables: &DashMap<String, Table>,
-    url: &str,
+    tables: &DashMap<Source, Table>,
+    source: &Source,
     now: Instant,
 ) -> Option<Option<Arc<[Route]>>> {
     tables
-        .get(url)
+        .get(source)
         .filter(|table| table.fresh(now))
         .map(|table| table.routes.clone())
 }
 
-fn store(tables: &DashMap<String, Table>, url: &str, routes: Option<Arc<[Route]>>, now: Instant) {
+fn store(
+    tables: &DashMap<Source, Table>,
+    source: &Source,
+    routes: Option<Arc<[Route]>>,
+    now: Instant,
+) {
     tables.retain(|_, table| table.fresh(now));
     tables.insert(
-        url.to_string(),
+        source.clone(),
         Table {
             routes,
             fetched: now,
@@ -148,17 +188,20 @@ fn resolve(routes: &[Route], model: &str) -> Option<String> {
         .map(|(route, captured)| route.model.replace(WILDCARD, captured))
 }
 
-async fn fetch(endpoint: &Endpoint) -> Option<Vec<Route>> {
+async fn fetch(endpoint: &Endpoint) -> Result<Vec<Route>, Unread> {
     let url = information_url(endpoint.url());
     match tokio::time::timeout(TIMEOUT, pages(&url, endpoint)).await {
-        Ok(Ok(routes)) => Some(routes),
+        Ok(Ok(routes)) => Ok(routes),
         Ok(Err(error)) => {
             tracing::warn!(%error, url, "Could not read the endpoint's deployment routes");
-            None
+            match error.status() {
+                Some(status) if REFUSALS.contains(&status) => Err(Unread::Refused),
+                _ => Err(Unread::Failed),
+            }
         }
         Err(_) => {
             tracing::warn!(url, "Timed out reading the endpoint's deployment routes");
-            None
+            Err(Unread::Failed)
         }
     }
 }
@@ -169,7 +212,7 @@ async fn pages(url: &str, endpoint: &Endpoint) -> Result<Vec<Route>, reqwest::Er
     loop {
         let body = CLIENT
             .get(format!("{url}?page={page}"))
-            .bearer_auth(endpoint.key().expose())
+            .bearer_auth(endpoint.credential().expose())
             .send()
             .await?
             .error_for_status()?
@@ -193,14 +236,45 @@ fn information_url(endpoint: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use abnegate_secret::SecretValue;
     use serde_json::{Value, json};
     use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    use zone_context::embeddings::providers::PROVIDER_SELF_HOSTED;
 
     use super::*;
-    use crate::services::endpoint::testing::endpoint;
+    use crate::config::Config;
+    use crate::db::ai_settings::EffectiveAiSettings;
+    use crate::services::endpoint::Origin;
+    use crate::services::endpoint::testing::{endpoint, settings};
 
     const KEY: &str = "sk-upstream-key-0123456789";
+    const LIMITED_KEY: &str = "sk-limited-key-0123456789";
+    const JUNK_KEY: &str = "sk-junk-key-0123456789";
+
+    fn source(url: &str) -> Source {
+        Source::of(&endpoint(url, KEY))
+    }
+
+    fn bearer(key: &str) -> String {
+        format!("Bearer {key}")
+    }
+
+    async fn refusing_all_but(keys: &[(&str, Value)]) -> MockServer {
+        let server = MockServer::builder().start().await;
+        for (key, body) in keys {
+            Mock::given(path(INFORMATION_PATH))
+                .and(header("authorization", bearer(key).as_str()))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(path(INFORMATION_PATH))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        server
+    }
 
     fn deployments(routes: &[(&str, &str)]) -> Value {
         let data: Vec<Value> = routes
@@ -220,7 +294,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(INFORMATION_PATH))
-            .and(header("authorization", format!("Bearer {KEY}").as_str()))
+            .and(header("authorization", bearer(KEY).as_str()))
             .respond_with(ResponseTemplate::new(200).set_body_json(body))
             .mount(&server)
             .await;
@@ -433,31 +507,126 @@ mod tests {
         server.verify().await;
     }
 
+    #[tokio::test]
+    async fn a_refused_key_never_denies_another_key_its_routes() {
+        let server = refusing_all_but(&[(KEY, deployments(&[("*", "ollama_chat/*")]))]).await;
+        let tables = Tables::default();
+
+        assert_eq!(
+            lookup(&tables, &endpoint(&server.uri(), JUNK_KEY), "llama3:8b").await,
+            None
+        );
+        assert_eq!(
+            lookup(&tables, &endpoint(&server.uri(), KEY), "llama3:8b")
+                .await
+                .as_deref(),
+            Some("ollama_chat/llama3:8b")
+        );
+    }
+
+    #[tokio::test]
+    async fn each_key_is_given_only_the_routes_read_under_it() {
+        let server = refusing_all_but(&[
+            (LIMITED_KEY, deployments(&[("alias", "openai/remote")])),
+            (KEY, deployments(&[("*", "ollama_chat/*")])),
+        ])
+        .await;
+        let tables = Tables::default();
+
+        assert_eq!(
+            lookup(&tables, &endpoint(&server.uri(), LIMITED_KEY), "llama3:8b").await,
+            None
+        );
+        assert_eq!(
+            lookup(&tables, &endpoint(&server.uri(), KEY), "llama3:8b")
+                .await
+                .as_deref(),
+            Some("ollama_chat/llama3:8b")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_read_is_never_remembered() {
+        for status in REFUSALS {
+            let server = MockServer::builder().start().await;
+            Mock::given(path(INFORMATION_PATH))
+                .respond_with(ResponseTemplate::new(status.as_u16()))
+                .expect(2)
+                .mount(&server)
+                .await;
+            let tables = Tables::default();
+            let endpoint = endpoint(&server.uri(), KEY);
+
+            assert_eq!(lookup(&tables, &endpoint, "alias").await, None);
+            assert_eq!(lookup(&tables, &endpoint, "alias").await, None);
+            server.verify().await;
+            assert!(tables.read.is_empty(), "{status}");
+            assert!(tables.reading.is_empty(), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_instance_is_read_under_its_own_key_whatever_key_a_workspace_saved() {
+        const INSTANCE_KEY: &str = "sk-instance-key-0123456789";
+        let server =
+            refusing_all_but(&[(INSTANCE_KEY, deployments(&[("*", "ollama_chat/*")]))]).await;
+        let config = Config {
+            litellm_host: server.uri(),
+            litellm_key: INSTANCE_KEY.to_string(),
+            ..crate::state::test_config()
+        };
+        let saved = EffectiveAiSettings {
+            litellm_host: Some(server.uri()),
+            litellm_key: Some(SecretValue::new(JUNK_KEY)),
+            ..settings(PROVIDER_SELF_HOSTED)
+        };
+        let endpoint = Endpoint::resolve(&config, &saved);
+        assert_eq!(endpoint.origin(), Origin::Instance);
+        assert_eq!(endpoint.key().expose(), JUNK_KEY);
+
+        assert_eq!(
+            lookup(&Tables::default(), &endpoint, "llama3:8b")
+                .await
+                .as_deref(),
+            Some("ollama_chat/llama3:8b")
+        );
+    }
+
     #[test]
     fn a_table_expires_after_its_ttl() {
         let tables = DashMap::new();
         let now = Instant::now();
-        store(&tables, "http://first", Some(Arc::from([])), now);
+        store(&tables, &source("http://first"), Some(Arc::from([])), now);
 
-        assert!(cached(&tables, "http://first", now + TTL - Duration::from_secs(1)).is_some());
-        assert!(cached(&tables, "http://first", now + TTL).is_none());
+        assert!(
+            cached(
+                &tables,
+                &source("http://first"),
+                now + TTL - Duration::from_secs(1)
+            )
+            .is_some()
+        );
+        assert!(cached(&tables, &source("http://first"), now + TTL).is_none());
     }
 
     #[test]
     fn a_failed_read_expires_long_before_a_table() {
         let tables = DashMap::new();
         let now = Instant::now();
-        store(&tables, "http://unread", None, now);
+        store(&tables, &source("http://unread"), None, now);
 
         assert_eq!(
             cached(
                 &tables,
-                "http://unread",
+                &source("http://unread"),
                 now + UNREAD_TTL - Duration::from_secs(1)
             ),
             Some(None)
         );
-        assert_eq!(cached(&tables, "http://unread", now + UNREAD_TTL), None);
+        assert_eq!(
+            cached(&tables, &source("http://unread"), now + UNREAD_TTL),
+            None
+        );
         assert!(UNREAD_TTL < TTL);
     }
 
@@ -465,13 +634,23 @@ mod tests {
     fn storing_a_table_evicts_expired_ones() {
         let tables = DashMap::new();
         let now = Instant::now();
-        store(&tables, "http://first", Some(Arc::from([])), now);
-        store(&tables, "http://second", Some(Arc::from([])), now + TTL / 2);
+        store(&tables, &source("http://first"), Some(Arc::from([])), now);
+        store(
+            &tables,
+            &source("http://second"),
+            Some(Arc::from([])),
+            now + TTL / 2,
+        );
 
-        store(&tables, "http://third", Some(Arc::from([])), now + TTL);
+        store(
+            &tables,
+            &source("http://third"),
+            Some(Arc::from([])),
+            now + TTL,
+        );
 
-        assert!(!tables.contains_key("http://first"), "expired");
-        assert!(tables.contains_key("http://second"), "still fresh");
-        assert!(tables.contains_key("http://third"));
+        assert!(!tables.contains_key(&source("http://first")), "expired");
+        assert!(tables.contains_key(&source("http://second")), "still fresh");
+        assert!(tables.contains_key(&source("http://third")));
     }
 }
