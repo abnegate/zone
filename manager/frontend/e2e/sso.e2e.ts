@@ -239,13 +239,22 @@ async function expectNoSidewaysScroll(page: Page): Promise<void> {
 
 test.describe('Single sign-on settings', () => {
   test('adds a provider with the contract body and shows the redirect URI', async ({ page }) => {
-    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.addInitScript(() => {
+      const copied: string[] = [];
+      Object.defineProperty(window, 'copied', { value: copied });
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: async (text: string) => void copied.push(text) },
+      });
+    });
     const server = await openSso(page, ENTITLED_EMPTY);
 
     await expect(page.getByText(REDIRECT_URI, { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Copy redirect URI' }).click();
     await expect(page.getByRole('button', { name: 'Copied redirect URI' })).toBeVisible();
-    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(REDIRECT_URI);
+    expect(await page.evaluate(() => (window as unknown as { copied: string[] }).copied)).toEqual([
+      REDIRECT_URI,
+    ]);
 
     const enforcement = page.getByRole('switch', { name: 'Require single sign-on' });
     await expect(enforcement).toBeDisabled();
