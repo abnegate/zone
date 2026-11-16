@@ -551,7 +551,9 @@ keep them private. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) file for details.
+MIT, except `runner/zone_enterprise/` and
+`manager/frontend/src/features/enterprise/`, which are under the Zone Enterprise
+License in each directory's `LICENSE`. See [LICENSE](LICENSE) for details.
 
 ## Contributing
 

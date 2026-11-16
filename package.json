@@ -1,6 +1,7 @@
 {
   "name": "zone",
   "private": true,
+  "license": "MIT",
   "packageManager": "bun@1.4.0",
   "workspaces": [
     "packages/*",

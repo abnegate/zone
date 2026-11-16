@@ -35,6 +35,10 @@ policy again. In cargo-deny 0.20.2, `crate@version` selects an exact version.
 | quoted_printable 0.5.2                                 | 0BSD                         | lettre                                                              | Cargo.toml and LICENSE                                                                      |
 | webpki-root-certs 1.0.11, webpki-roots 0.26.11, 1.0.11 | CDLA-Permissive-2.0          | rustls-platform-verifier/reqwest, ureq/hf-hub and tokio-tungstenite | Cargo.toml and LICENSE                                                                      |
 | xxhash-rust 0.8.18                                     | BSL-1.0                      | redis                                                               | Cargo.toml and LICENSE                                                                      |
+| zone_enterprise (workspace member)                     | LicenseRef-Zone-Enterprise   | first-party; zone_server                                            | runner/zone_enterprise/Cargo.toml and LICENSE                                               |
+
+The first-party `zone_enterprise` exception is selected by name, not
+`crate@version`, because its version follows the workspace.
 
 The prior `copyleft = "warn"` expressed a warning policy for MPL dependencies.
 The NCSA, 0BSD, CDLA-Permissive-2.0 and BSL-1.0 entries are newly explicit,

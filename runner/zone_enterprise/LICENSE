@@ -1,0 +1,29 @@
+# Zone Enterprise License
+
+Stub. To be replaced by a counsel-reviewed version before the first paid customer.
+
+Applies to the source code in `runner/zone_enterprise` and `manager/frontend/src/features/enterprise` in `abnegate/zone`, and to the features a license key unlocks. The rest of `abnegate/zone` is MIT and is not governed by these terms.
+
+## Grant
+
+While a valid license is in force, the customer may run the Enterprise features on infrastructure it controls, for up to the licensed number of seats, for its own internal business use.
+
+## Source
+
+The customer may read, modify and patch the Enterprise source for its own use. It may not redistribute it, sell it, offer it as a hosted service to third parties, or remove or bypass the license check.
+
+## Seats and true-up
+
+A seat is an organization member who signed in during a calendar month of the term. Use above the licensed count is billed at renewal at the contracted per-seat price.
+
+## Term and expiry
+
+The license runs for the term on the order. After it expires there is a 30-day grace period. After the grace period the customer keeps its data, its users keep signing in, and existing security policies stay enforced. Configuring Enterprise features stops until the license is renewed.
+
+## Data
+
+Zone is self-hosted. The licensor receives no customer data and the license check does not contact the licensor.
+
+## Warranty and liability
+
+Provided as is, except for any support terms in the order. Liability is capped at the fees paid in the twelve months before the claim.
