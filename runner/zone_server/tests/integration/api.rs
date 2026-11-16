@@ -2360,7 +2360,7 @@ async fn a_kind_without_an_adapter_is_refused_naming_the_kinds_that_work() {
     let token = get_auth_token(&client).await;
     let (_org_id, workspace_id) = setup_test_workspace(&client, &token).await;
 
-    for kind in ["notion", "slack", "imap"] {
+    for kind in ["discord", "slack", "imap"] {
         let response = client
             .post_json_auth(
                 &format!("/api/workspaces/{}/sources", workspace_id),

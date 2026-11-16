@@ -92,12 +92,12 @@
       ]
     },
     {
-      "id": "notion_adapter",
-      "query": "Where is NotionAdapter implemented?",
-      "expect_identifiers": ["NotionAdapter"],
-      "expect_uri_contains": ["adapters/notion.rs"],
+      "id": "web_adapter",
+      "query": "Where is WebAdapter implemented?",
+      "expect_identifiers": ["WebAdapter"],
+      "expect_uri_contains": ["adapters/web.rs"],
       "judgments": [
-        {"uri_contains": "adapters/notion.rs", "grade": 3, "must_contain": ["NotionAdapter"]},
+        {"uri_contains": "adapters/web.rs", "grade": 3, "must_contain": ["WebAdapter"]},
         {"uri_contains": "adapters/mod.rs", "grade": 2}
       ]
     },
