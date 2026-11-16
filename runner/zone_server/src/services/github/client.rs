@@ -248,9 +248,6 @@ impl Github {
         }
     }
 
-    /// How many of a pull request's review threads are open, or `partial`,
-    /// what was counted of them already, when GitHub's GraphQL API is too slow
-    /// to count them. A refusal of the count is the fault it was.
     pub(crate) async fn thread_counts(
         &self,
         reference: &PullRequestReference,
@@ -461,9 +458,8 @@ impl Github {
         ))
     }
 
-    /// The readiness of the pull request `row` lists, judged from evidence
-    /// however it was gathered, so a listing read in one batch and a pull
-    /// request read on its own reach the same verdict on the same evidence.
+    /// Shared by batched and single reads so both reach the same verdict on
+    /// the same evidence.
     pub(crate) fn appraise(&self, row: &ListedPullRequest, gathered: Gathered) -> Assessed {
         let comments = gathered.comments.comments.clone();
         Assessed {
@@ -713,9 +709,8 @@ impl Github {
     }
 }
 
-/// A commit's CI rows, checked to be identified and of `commit`, with a
-/// workflow that ran more than once for one event and branch kept once, as
-/// GitHub lists the newest first, and whether that is every row.
+/// GitHub lists workflow runs newest first, so the run kept for each
+/// workflow, event and branch is its latest.
 pub(crate) fn vetted(
     commit: &Revision,
     workflows: Collected<WorkflowRun>,

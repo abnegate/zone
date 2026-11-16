@@ -31,8 +31,6 @@ type Verdict = (Origin, Result<PullRequest, Fault>);
 const LATE: &str = "GitHub was not read in time to assess this pull request again.";
 const LATE_LISTING: &str = "GitHub did not list this repository's open pull requests in time.";
 
-/// One read of a source's open pull requests, against the listing read
-/// before it.
 pub(super) struct Survey<'a> {
     github: Github,
     permits: &'a Semaphore,
@@ -44,8 +42,6 @@ pub(super) struct Survey<'a> {
 }
 
 impl<'a> Survey<'a> {
-    /// A listing that waits `patience` on each GraphQL read and starts no
-    /// assessment after `deadline`, nor finishes one begun before.
     pub(super) fn new(
         github: Github,
         permits: &'a Semaphore,
@@ -66,9 +62,6 @@ impl<'a> Survey<'a> {
         }
     }
 
-    /// Up to `limit` open pull requests, listed through GraphQL with the
-    /// evidence on each one not current read in batches, or through REST
-    /// when GitHub refuses the GraphQL listing short of a halt.
     pub(super) async fn listing(&self, limit: u32) -> Result<Listing, Fault> {
         let opened = timeout_at(
             self.deadline,
@@ -93,9 +86,8 @@ impl<'a> Survey<'a> {
         }
     }
 
-    /// Each batch of rows that are not current is assessed as soon as its
-    /// evidence is read, [`EVIDENCE_CONCURRENCY`] batches at a time, so one
-    /// slow batch holds up only its own rows.
+    /// Each batch is assessed as soon as its evidence arrives, so one slow
+    /// batch holds up only its own rows.
     async fn batched(
         &self,
         repository: &RepositoryId,
@@ -131,9 +123,6 @@ impl<'a> Survey<'a> {
         Ok(self.listed(paired, complete))
     }
 
-    /// The verdicts on one batch of rows. Its evidence is read under a
-    /// permit let go before any of them takes one to read what the batch
-    /// could not hold.
     async fn batch(
         &self,
         repository: &RepositoryId,
@@ -239,8 +228,6 @@ impl<'a> Survey<'a> {
         }
     }
 
-    /// The listing the verdicts on each row add up to: a pull request that
-    /// could not be assessed keeps the verdict the listing before held on it.
     fn listed<'r>(
         &self,
         verdicts: impl IntoIterator<Item = (&'r ListedPullRequest, Verdict)>,
