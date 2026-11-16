@@ -115,10 +115,11 @@ async fn write(
     let Ok(Path((organization, workspace))) = path else {
         return Err(Refusal::Missing(MISSING));
     };
+    let license = state.settled_license().await;
     let mut transaction = state.db().begin().await?;
     let access = access::workspace(&mut transaction, organization, workspace, user).await?;
     access.write(FORBIDDEN)?;
-    let standing = Standing::of(state.settled_license().await?.as_ref(), Utc::now());
+    let standing = Standing::of(license?.as_ref(), Utc::now());
     standing.require()?;
     let Json(patch) = body.map_err(Refusal::Body)?;
     let outer = rules(
