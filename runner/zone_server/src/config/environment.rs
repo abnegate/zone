@@ -1,4 +1,4 @@
-const ENABLED_SPELLINGS: [&str; 4] = ["1", "true", "yes", "on"];
+use super::flag::Flag;
 
 pub struct Environment<Lookup> {
     lookup: Lookup,
@@ -17,8 +17,11 @@ where
     }
 
     pub fn flag(&self, variable: &str) -> Option<bool> {
-        self.read(variable)
-            .map(|value| ENABLED_SPELLINGS.contains(&value.trim().to_ascii_lowercase().as_str()))
+        let flag = Flag::parse(&self.read(variable)?);
+        if let Some(warning) = flag.warning(variable) {
+            tracing::warn!(variable, "{warning}");
+        }
+        Some(flag.enabled())
     }
 }
 
@@ -59,7 +62,7 @@ mod tests {
     }
 
     #[test]
-    fn a_flag_is_on_only_for_the_usual_spellings_of_true() {
+    fn a_flag_is_on_only_for_an_accepted_spelling_of_on() {
         for on in ["1", "true", "TRUE", "yes", "Yes", " on "] {
             assert_eq!(
                 holding(on).flag(VARIABLE),
@@ -67,11 +70,11 @@ mod tests {
                 "{on:?} must turn on"
             );
         }
-        for off in ["0", "false", "no", "off", "maybe"] {
+        for off in ["0", "false", "no", "off", "ture", "maybe"] {
             assert_eq!(
                 holding(off).flag(VARIABLE),
                 Some(false),
-                "{off:?} must turn off"
+                "{off:?} must turn off, an unrecognised spelling included"
             );
         }
     }

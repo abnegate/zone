@@ -2440,7 +2440,7 @@ Off by default. When on, every task run runs the project's own tooling in its wo
 
 ### `ZONE_TASK_EVALUATION`
 - **Default**: `false`
-- **Description**: `true`, `1`, `yes` or `on` evaluates every task run. Running a project's test suite twice per run is expensive, so it is opt-in.
+- **Description**: `true`, `1`, `yes` or `on` evaluates every task run; `false`, `0`, `no` or `off` does not, and any other value is read as off with a warning in the server log. Running a project's test suite twice per run is expensive, so it is opt-in.
 
 ### `ZONE_TASK_EVALUATION_CATEGORIES`
 - **Default**: `test,lint,typecheck`
@@ -2490,7 +2490,7 @@ Digests are sent through the [notification](#-notifications) channels — Slack,
 
 ### `ZONE_REPORT_ENABLED`
 - **Default**: `false`
-- **Description**: `true`, `1`, `yes` or `on` sends scheduled digests.
+- **Description**: `true`, `1`, `yes` or `on` sends scheduled digests; `false`, `0`, `no` or `off` does not, and any other value is read as off with a warning in the server log.
 
 ### `ZONE_REPORT_CADENCE`
 - **Default**: `weekly`

@@ -22,6 +22,7 @@ use crate::services::hosts::Hosts;
 use crate::services::login::claude::ROOT_PATH;
 
 mod environment;
+mod flag;
 
 pub use abnegate_comfy::Config as ComfyUiConfig;
 pub use abnegate_llm::catalog::DEFAULT_GPT4ALL_MODELS_URL;
