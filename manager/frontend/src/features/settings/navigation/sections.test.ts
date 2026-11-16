@@ -18,11 +18,21 @@ import {
 const ALL_SECTIONS = [
   { group: SettingsGroup.Workspace, section: SettingsSection.General, label: 'General' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Ai, label: 'AI' },
+  {
+    group: SettingsGroup.Workspace,
+    section: SettingsSection.AgentPolicy,
+    label: 'Agent policy',
+  },
   { group: SettingsGroup.Workspace, section: SettingsSection.Folders, label: 'Folders' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Sources, label: 'Sources' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Workspace, section: SettingsSection.Mcp, label: 'MCP servers' },
   { group: SettingsGroup.Organization, section: SettingsSection.Ai, label: 'AI defaults' },
+  {
+    group: SettingsGroup.Organization,
+    section: SettingsSection.AgentPolicy,
+    label: 'Agent policy',
+  },
   { group: SettingsGroup.Organization, section: SettingsSection.Members, label: 'Members' },
   { group: SettingsGroup.Organization, section: SettingsSection.Devices, label: 'Devices' },
   { group: SettingsGroup.Organization, section: SettingsSection.Audit, label: 'Audit log' },
@@ -43,6 +53,11 @@ const pathsOf = (...groups: SettingsGroup[]): string[] =>
     settingsPath(group, section)
   );
 
+const WORKSPACE_AGENT_POLICY = settingsPath(SettingsGroup.Workspace, SettingsSection.AgentPolicy);
+const ORGANIZATION_AGENT_POLICY = settingsPath(
+  SettingsGroup.Organization,
+  SettingsSection.AgentPolicy
+);
 const ORGANIZATION_MEMBERS = settingsPath(SettingsGroup.Organization, SettingsSection.Members);
 const ORGANIZATION_GITHUB = settingsPath(SettingsGroup.Organization, SettingsSection.GitHub);
 const ORGANIZATION_MCP = settingsPath(SettingsGroup.Organization, SettingsSection.Mcp);
@@ -69,6 +84,7 @@ describe('settings constants', () => {
     expect(SettingsSection).toEqual({
       General: 'general',
       Ai: 'ai',
+      AgentPolicy: 'agent-policy',
       Folders: 'folders',
       Sources: 'sources',
       Members: 'members',
@@ -169,7 +185,7 @@ describe('findSection', () => {
 });
 
 describe('visibleSections', () => {
-  it('shows an organization member in a workspace as a viewer only the organization members list, GitHub and MCP servers', () => {
+  it('shows an organization member in a workspace as a viewer only the organization agent policy, members list, GitHub and MCP servers', () => {
     expect(
       paths({
         organization: true,
@@ -182,6 +198,7 @@ describe('visibleSections', () => {
       })
     ).toEqual([
       ...pathsOf(SettingsGroup.Workspace),
+      ORGANIZATION_AGENT_POLICY,
       ORGANIZATION_MEMBERS,
       ORGANIZATION_GITHUB,
       ORGANIZATION_MCP,
@@ -204,7 +221,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all seventeen sections to a server admin who owns the organization and administers the workspace', () => {
+  it('shows all nineteen sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -215,7 +232,7 @@ describe('visibleSections', () => {
       administersServer: true,
     });
 
-    expect(visible).toHaveLength(17);
+    expect(visible).toHaveLength(19);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -428,6 +445,53 @@ describe('visibleSections', () => {
       label: 'Single sign-on',
     });
     expect(settingsPath(SettingsGroup.Server, SettingsSection.Sso)).toBe('/settings/server/sso');
+  });
+
+  it('shows Agent policy to every organization member and in every workspace', () => {
+    for (const organizationRole of ['owner', 'admin', 'member', undefined] as const) {
+      for (const workspaceRole of ['viewer', 'member', 'admin', 'owner', undefined] as const) {
+        const visible = paths({
+          organization: true,
+          organizationRole,
+          workspace: true,
+          workspaceRole,
+          installsModels: false,
+          readsSources: false,
+          administersServer: false,
+        });
+        expect(visible, `${organizationRole}/${workspaceRole}`).toContain(
+          ORGANIZATION_AGENT_POLICY
+        );
+        expect(visible, `${organizationRole}/${workspaceRole}`).toContain(WORKSPACE_AGENT_POLICY);
+      }
+    }
+  });
+
+  it('hides Agent policy outside an organization and outside a workspace', () => {
+    const visible = paths({
+      organization: false,
+      organizationRole: undefined,
+      workspace: false,
+      workspaceRole: undefined,
+      installsModels: true,
+      readsSources: true,
+      administersServer: true,
+    });
+
+    expect(visible).not.toContain(ORGANIZATION_AGENT_POLICY);
+    expect(visible).not.toContain(WORKSPACE_AGENT_POLICY);
+  });
+
+  it('finds Agent policy in the organization and workspace groups at a kebab-case path', () => {
+    for (const group of [SettingsGroup.Organization, SettingsGroup.Workspace]) {
+      expect(findSection(group, 'agent-policy'), group).toMatchObject({
+        group,
+        section: SettingsSection.AgentPolicy,
+        label: 'Agent policy',
+      });
+    }
+    expect(ORGANIZATION_AGENT_POLICY).toBe('/settings/organization/agent-policy');
+    expect(WORKSPACE_AGENT_POLICY).toBe('/settings/workspace/agent-policy');
   });
 
   it('finds the Sources section in the workspace group', () => {

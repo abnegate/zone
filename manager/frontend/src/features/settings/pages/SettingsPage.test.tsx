@@ -203,11 +203,17 @@ describe('SettingsPage', () => {
       expect(linkLabels('Workspace')).toEqual([
         'General',
         'AI',
+        'Agent policy',
         'Folders',
         'Members',
         'MCP servers',
       ]);
-      expect(linkLabels('Organization')).toEqual(['Members', 'GitHub', 'MCP servers']);
+      expect(linkLabels('Organization')).toEqual([
+        'Agent policy',
+        'Members',
+        'GitHub',
+        'MCP servers',
+      ]);
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
       expect(linkLabels('You')).toEqual(['Sessions']);
     });
@@ -233,6 +239,7 @@ describe('SettingsPage', () => {
       expect(screen.queryByRole('group', { name: 'Workspace' })).not.toBeInTheDocument();
       expect(linkLabels('Organization')).toEqual([
         'AI defaults',
+        'Agent policy',
         'Members',
         'Devices',
         'Audit log',
@@ -262,7 +269,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('This server')).toEqual(['Features', 'Connect a device']);
     });
 
-    it('shows an organization owner and workspace admin all fourteen sections', () => {
+    it('shows an organization owner and workspace admin all sixteen sections', () => {
       signInAs('owner', 'admin');
 
       renderAt('/settings/workspace/general');
@@ -270,12 +277,14 @@ describe('SettingsPage', () => {
       expect(linkLabels('Workspace')).toEqual([
         'General',
         'AI',
+        'Agent policy',
         'Folders',
         'Members',
         'MCP servers',
       ]);
       expect(linkLabels('Organization')).toEqual([
         'AI defaults',
+        'Agent policy',
         'Members',
         'Devices',
         'Audit log',
@@ -294,6 +303,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('Workspace')).toEqual([
         'General',
         'AI',
+        'Agent policy',
         'Folders',
         'Sources',
         'Members',
@@ -313,6 +323,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('Workspace')).toEqual([
         'General',
         'AI',
+        'Agent policy',
         'Folders',
         'Members',
         'MCP servers',
@@ -657,6 +668,7 @@ describe('SettingsPage', () => {
       expect(linkLabels('Workspace')).toEqual([
         'General',
         'AI',
+        'Agent policy',
         'Folders',
         'Members',
         'MCP servers',

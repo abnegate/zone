@@ -1,6 +1,12 @@
 export { LicenseSection } from './components';
 export * from './hooks';
 export { LicenseRefusal } from './LicenseRefusal';
+export {
+  denialMessage,
+  OrganizationPolicySection,
+  providerDenial,
+  WorkspacePolicySection,
+} from './policy';
 export { licenseMutationKeys, licenseQueryKeys } from './queryKeys';
 export {
   EDITIONS,
