@@ -67,6 +67,16 @@ impl Background {
     }
 }
 
+/// The model a background stage runs on `catalog`: the one `preferences` choose under their
+/// policy, or, when it leaves them none to choose, the one they would choose without it, for
+/// [`Background::model`] to fall back from or refuse and audit.
+pub fn configured(preferences: &Preferences, catalog: &Catalog, chat: &str) -> Option<String> {
+    stages::summary_model(preferences, catalog, chat).or_else(|| {
+        let unrestricted = preferences.clone().under(None);
+        stages::summary_model(&unrestricted, catalog, chat)
+    })
+}
+
 /// The models a background stage may run on `catalog`, in the order it prefers them:
 /// `configured`, the model the stage chose, then the Fast, Reasoning and `chat` models, each
 /// once. An agent runs only names it knows, or [`stages::AUTO`] to choose its own; an endpoint
@@ -146,6 +156,25 @@ mod tests {
 
         assert_eq!(admitted.as_deref(), Some("qwen3:32b"));
         assert_eq!(skipped, None);
+    }
+
+    #[test]
+    fn a_stage_the_policy_leaves_no_choice_is_configured_as_it_would_be_without_the_policy() {
+        let rules = Rules {
+            models: Some(vec!["qwen*".to_string()]),
+            ..Rules::default()
+        };
+        let policy = Effective::new(rules, Rules::default());
+        let preferences = preferences("llama3.2:3b", "qwen3:32b", Scope::Open).under(Some(&policy));
+        let catalog = Catalog::default();
+
+        let chosen = stages::summary_model(&preferences, &catalog, "gpt-4");
+        let configured = configured(&preferences, &catalog, "gpt-4").expect("a configured model");
+        let names = candidates(&configured, &preferences, &catalog, "gpt-4");
+
+        assert_eq!(chosen, None);
+        assert_eq!(configured, "gpt-4");
+        assert!(names.iter().any(|name| name == "qwen3:32b"), "{names:?}");
     }
 
     #[test]

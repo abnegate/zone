@@ -62,7 +62,7 @@ async fn generate(
             return None;
         }
     };
-    let configured = stages::summary_model(&venue.preferences, &venue.catalog, requested)?;
+    let configured = background::configured(&venue.preferences, &venue.catalog, requested)?;
     let candidates =
         background::candidates(&configured, &venue.preferences, &venue.catalog, requested);
     let model = background

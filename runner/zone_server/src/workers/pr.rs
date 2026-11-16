@@ -930,7 +930,7 @@ async fn classify(state: &AppState, task: &tasks::TaskRow, report: &str) -> Opti
     let catalog = endpoint
         .catalog(&state.config().ollama_host, &backend)
         .await;
-    let configured = stages::summary_model(&preferences, &catalog, requested)?;
+    let configured = background::configured(&preferences, &catalog, requested)?;
     let candidates = background::candidates(&configured, &preferences, &catalog, requested);
     let model = background
         .model(state, &route, &backend, &candidates)
