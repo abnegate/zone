@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use super::category::EvalCategory;
+use crate::config::Environment;
 
 pub const ENABLED_VARIABLE: &str = "ZONE_TASK_EVALUATION";
 pub const CATEGORIES_VARIABLE: &str = "ZONE_TASK_EVALUATION_CATEGORIES";
@@ -133,18 +134,14 @@ impl EvaluationEnvironment {
     }
 
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let read = |variable: &str| present(lookup(variable));
+        let environment = Environment::new(lookup);
         Self {
-            enabled: read(ENABLED_VARIABLE),
-            categories: read(CATEGORIES_VARIABLE),
-            tool_timeout_seconds: read(TOOL_TIMEOUT_VARIABLE),
-            budget_seconds: read(BUDGET_VARIABLE),
+            enabled: environment.read(ENABLED_VARIABLE),
+            categories: environment.read(CATEGORIES_VARIABLE),
+            tool_timeout_seconds: environment.read(TOOL_TIMEOUT_VARIABLE),
+            budget_seconds: environment.read(BUDGET_VARIABLE),
         }
     }
-}
-
-fn present(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
 }
 
 impl EvaluationSettings {

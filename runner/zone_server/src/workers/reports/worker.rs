@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use super::digest::{Digest, generate};
 use super::schedule::{Cadence, Due, Schedule, due};
+use crate::config::Environment;
 use crate::db::DbResult;
 use crate::db::analytics::{self, ReportableWorkspace};
 use crate::state::AppState;
@@ -55,19 +56,15 @@ impl ReportEnvironment {
     }
 
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let read = |variable: &str| present(lookup(variable));
+        let environment = Environment::new(lookup);
         Self {
-            enabled: read(ENABLED_VARIABLE),
-            cadence: read(CADENCE_VARIABLE),
-            hour: read(HOUR_VARIABLE),
-            weekday: read(WEEKDAY_VARIABLE),
-            day_of_month: read(DAY_OF_MONTH_VARIABLE),
+            enabled: environment.read(ENABLED_VARIABLE),
+            cadence: environment.read(CADENCE_VARIABLE),
+            hour: environment.read(HOUR_VARIABLE),
+            weekday: environment.read(WEEKDAY_VARIABLE),
+            day_of_month: environment.read(DAY_OF_MONTH_VARIABLE),
         }
     }
-}
-
-fn present(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
 }
 
 /// When digests go out, and how much history each one reads.
