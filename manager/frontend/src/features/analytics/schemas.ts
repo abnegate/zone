@@ -18,6 +18,10 @@ export const ErrorCategorySchema = z.enum([
   'unknown',
 ]);
 
+export const OriginSchema = z.enum(['member', 'reminder', 'automation']);
+
+export const QualityBandSchema = z.enum(['poor', 'mixed', 'solid', 'exemplary']);
+
 const KnownErrorCategorySchema = ErrorCategorySchema.catch(ErrorCategorySchema.enum.unknown);
 
 const KnownTrendDirectionSchema = TrendDirectionSchema.catch(TrendDirectionSchema.enum.steady);
@@ -128,10 +132,16 @@ export const EvaluationSummarySchema = z.object({
   not_measured: CountSchema,
 });
 
+export const TruncationSchema = z.object({
+  runs: z.boolean(),
+  pull_requests: z.boolean(),
+});
+
 export const OverviewSchema = z.object({
   period: TimePeriodSchema,
   window: TimeWindowSchema,
-  truncated: z.boolean(),
+  measured_from: z.string().nullable(),
+  truncated: TruncationSchema,
   runs: AgentAnalyticsSchema,
   sources: z.array(SourceBreakdownSchema),
   models: z.array(ModelBreakdownSchema),

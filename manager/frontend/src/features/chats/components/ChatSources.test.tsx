@@ -23,4 +23,24 @@ describe('ChatSources', () => {
       )
     ).toBeInTheDocument();
   });
+
+  it('names each attached source kind the way the source registry does', () => {
+    render(
+      <ChatSources
+        attached={[
+          { id: 'source-1', name: 'notes', source_type: 'filesystem' },
+          { id: 'source-2', name: 'feed', source_type: 'carrier_pigeon' },
+        ]}
+        available={[]}
+        loading={false}
+        error={null}
+        onChange={async () => {}}
+      />
+    );
+
+    const kinds = screen
+      .getAllByTestId('chat-source-chip')
+      .map((chip) => chip.firstChild?.textContent);
+    expect(kinds).toEqual(['Filesystem', 'carrier_pigeon']);
+  });
 });

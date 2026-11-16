@@ -4,10 +4,11 @@ const WEST_OF_UTC = 'America/Los_Angeles';
 const zone = process.env.TZ;
 
 let RunSeriesAxis: typeof import('./RunSeriesAxis').RunSeriesAxis;
+let TickRank: typeof import('./RunSeriesAxis').TickRank;
 
 beforeAll(async () => {
   process.env.TZ = WEST_OF_UTC;
-  ({ RunSeriesAxis } = await import('./RunSeriesAxis'));
+  ({ RunSeriesAxis, TickRank } = await import('./RunSeriesAxis'));
 });
 
 afterAll(() => {
@@ -27,6 +28,48 @@ describe('RunSeriesAxis', () => {
     expect(RunSeriesAxis.ceiling(10)).toBe(10);
     expect(RunSeriesAxis.ceiling(11)).toBe(20);
     expect(RunSeriesAxis.ceiling(240)).toBe(500);
+  });
+
+  it('marks the axis only at whole numbers of runs', () => {
+    expect(RunSeriesAxis.gridlines(1)).toEqual([1, 0]);
+    expect(RunSeriesAxis.gridlines(2)).toEqual([2, 1, 0]);
+    expect(RunSeriesAxis.gridlines(5)).toEqual([5, 0]);
+    expect(RunSeriesAxis.gridlines(10)).toEqual([10, 5, 0]);
+    expect(RunSeriesAxis.gridlines(50)).toEqual([50, 25, 0]);
+    for (const ceiling of [1, 2, 5, 10, 20, 50, 100, 500]) {
+      expect(RunSeriesAxis.gridlines(ceiling).every(Number.isInteger)).toBe(true);
+    }
+  });
+
+  it('ranks every other labelled tick minor, whatever the label spacing', () => {
+    const ranks = (points: number, every: number) =>
+      Array.from({ length: points }, (_, index) => RunSeriesAxis.rank(index, every));
+
+    expect(ranks(5, 1)).toEqual([
+      TickRank.Major,
+      TickRank.Minor,
+      TickRank.Major,
+      TickRank.Minor,
+      TickRank.Major,
+    ]);
+    expect(ranks(9, 4)).toEqual([
+      TickRank.Major,
+      undefined,
+      undefined,
+      undefined,
+      TickRank.Minor,
+      undefined,
+      undefined,
+      undefined,
+      TickRank.Major,
+    ]);
+    expect(ranks(5, 2)).toEqual([
+      TickRank.Major,
+      undefined,
+      TickRank.Minor,
+      undefined,
+      TickRank.Major,
+    ]);
   });
 
   it('labels every point when they fit and thins them when they do not', () => {

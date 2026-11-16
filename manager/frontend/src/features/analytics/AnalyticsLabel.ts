@@ -1,8 +1,8 @@
 import { getSourceLabel } from '../sources/config';
-import { SourceTypeSchema } from '../sources/schemas';
 import { statusLabel, statusTint, TASK_STATUSES, type TaskStatus } from '../tasks/status';
+import { OriginSchema, QualityBandSchema } from './schemas';
 import { Tone } from './Tone';
-import type { ErrorCategory } from './types';
+import type { ErrorCategory, Origin, QualityBand } from './types';
 
 export const NO_SOURCE = 'No source';
 
@@ -22,20 +22,20 @@ const CATEGORIES: Record<ErrorCategory, string> = {
   unknown: 'Unclassified',
 };
 
-const ORIGINS: Readonly<Record<string, string>> = {
+const ORIGINS: Readonly<Record<Origin, string>> = {
   member: 'Members',
   reminder: 'Reminders',
   automation: 'Automations',
 };
 
-const QUALITIES: Readonly<Record<string, string>> = {
+const QUALITIES: Readonly<Record<QualityBand, string>> = {
   poor: 'Poor',
   mixed: 'Mixed',
   solid: 'Solid',
   exemplary: 'Exemplary',
 };
 
-const QUALITY_TONES: Readonly<Record<string, Tone>> = {
+const QUALITY_TONES: Readonly<Record<QualityBand, Tone>> = {
   poor: Tone.Destructive,
   mixed: Tone.Warning,
   solid: Tone.Info,
@@ -60,7 +60,8 @@ export const AnalyticsLabel = {
   },
 
   origin(name: string): string {
-    return ORIGINS[name] ?? name;
+    const parsed = OriginSchema.safeParse(name);
+    return parsed.success ? ORIGINS[parsed.data] : name;
   },
 
   originTone(): Tone {
@@ -68,15 +69,16 @@ export const AnalyticsLabel = {
   },
 
   quality(name: string): string {
-    return QUALITIES[name] ?? name;
+    const parsed = QualityBandSchema.safeParse(name);
+    return parsed.success ? QUALITIES[parsed.data] : name;
   },
 
   qualityTone(name: string): Tone {
-    return QUALITY_TONES[name] ?? Tone.Neutral;
+    const parsed = QualityBandSchema.safeParse(name);
+    return parsed.success ? QUALITY_TONES[parsed.data] : Tone.Neutral;
   },
 
   sourceType(name: string): string {
-    const parsed = SourceTypeSchema.safeParse(name);
-    return parsed.success ? getSourceLabel(parsed.data) : name;
+    return getSourceLabel(name);
   },
 } as const;

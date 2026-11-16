@@ -1,18 +1,30 @@
 import { utcInstant } from '../../../shared/utils/time';
+import { TIME_ZONE } from '../AnalyticsFormat';
 import { TimePeriodSchema } from '../schemas';
 import type { TimePeriod, TimeWindow } from '../types';
 
 const STEPS = [1, 2, 5, 10] as const;
 const BASE = 10;
-const UTC = 'UTC';
+const HALF = 2;
 
-const days = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', timeZone: UTC });
-const hours = new Intl.DateTimeFormat(undefined, { hour: 'numeric', timeZone: UTC });
+export const TickRank = {
+  Major: 'major',
+  Minor: 'minor',
+} as const;
+
+export type TickRank = (typeof TickRank)[keyof typeof TickRank];
+
+const days = new Intl.DateTimeFormat(undefined, {
+  month: 'short',
+  day: 'numeric',
+  timeZone: TIME_ZONE,
+});
+const hours = new Intl.DateTimeFormat(undefined, { hour: 'numeric', timeZone: TIME_ZONE });
 const moments = new Intl.DateTimeFormat(undefined, {
   month: 'short',
   day: 'numeric',
   hour: 'numeric',
-  timeZone: UTC,
+  timeZone: TIME_ZONE,
   timeZoneName: 'short',
 });
 
@@ -40,8 +52,18 @@ export const RunSeriesAxis = {
     return step * magnitude;
   },
 
+  gridlines(ceiling: number): number[] {
+    const middle = ceiling / HALF;
+    return Number.isInteger(middle) ? [ceiling, middle, 0] : [ceiling, 0];
+  },
+
   labelEvery(points: number, labels: number): number {
     return Math.max(1, Math.ceil(points / labels));
+  },
+
+  rank(index: number, every: number): TickRank | undefined {
+    if (index % every !== 0) return undefined;
+    return (index / every) % HALF === 0 ? TickRank.Major : TickRank.Minor;
   },
 
   tick(window: TimeWindow, period: TimePeriod): string {

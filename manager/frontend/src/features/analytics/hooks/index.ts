@@ -1,1 +1,1 @@
-export { type Analytics, NO_WORKSPACE, STALE_MS, useAnalytics } from './useAnalytics';
+export { type Analytics, NO_WORKSPACE, useAnalytics } from './useAnalytics';

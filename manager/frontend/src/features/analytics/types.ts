@@ -6,9 +6,11 @@ import type {
   ErrorCategorySchema,
   EvaluationSummarySchema,
   ModelBreakdownSchema,
+  OriginSchema,
   OutcomeStatisticsSchema,
   OverviewSchema,
   PullRequestSummarySchema,
+  QualityBandSchema,
   SeriesPointSchema,
   SourceBreakdownSchema,
   TallySchema,
@@ -17,6 +19,7 @@ import type {
   TimeWindowSchema,
   TrendDirectionSchema,
   TrendSchema,
+  TruncationSchema,
 } from './schemas';
 
 export type TimePeriod = z.infer<typeof TimePeriodSchema>;
@@ -36,3 +39,6 @@ export type TaskSummary = z.infer<typeof TaskSummarySchema>;
 export type PullRequestSummary = z.infer<typeof PullRequestSummarySchema>;
 export type EvaluationSummary = z.infer<typeof EvaluationSummarySchema>;
 export type Overview = z.infer<typeof OverviewSchema>;
+export type Origin = z.infer<typeof OriginSchema>;
+export type QualityBand = z.infer<typeof QualityBandSchema>;
+export type Truncation = z.infer<typeof TruncationSchema>;

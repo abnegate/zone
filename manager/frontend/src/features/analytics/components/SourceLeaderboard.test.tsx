@@ -12,8 +12,8 @@ function bodyRows(): HTMLElement[] {
 }
 
 describe('SourceLeaderboard', () => {
-  it('ranks the busiest source first with its rate and merged pull requests', () => {
-    render(<SourceLeaderboard sources={[...sources].reverse()} />);
+  it('lists each source with its rate and merged pull requests', () => {
+    render(<SourceLeaderboard sources={sources} />);
 
     const [first, second] = bodyRows();
     expect(within(first).getByText('acme/zone')).toBeDefined();
@@ -22,6 +22,14 @@ describe('SourceLeaderboard', () => {
     expect(within(first).getByText('79%')).toBeDefined();
     expect(within(first).getByText('9')).toBeDefined();
     expect(within(second).getByText(NO_SOURCE)).toBeDefined();
+  });
+
+  it('keeps the order the server ranked the sources in', () => {
+    render(<SourceLeaderboard sources={[...sources].reverse()} />);
+
+    const [first, second] = bodyRows();
+    expect(within(first).getByText(NO_SOURCE)).toBeDefined();
+    expect(within(second).getByText('acme/zone')).toBeDefined();
   });
 
   it('heads its columns', () => {

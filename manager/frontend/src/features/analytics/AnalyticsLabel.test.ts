@@ -20,6 +20,12 @@ describe('AnalyticsLabel', () => {
     expect(AnalyticsLabel.quality('stellar')).toBe('stellar');
   });
 
+  it('reads a name that shadows an object key as a name, not a lookup', () => {
+    expect(AnalyticsLabel.origin('toString')).toBe('toString');
+    expect(AnalyticsLabel.quality('constructor')).toBe('constructor');
+    expect(AnalyticsLabel.qualityTone('hasOwnProperty')).toBe(Tone.Neutral);
+  });
+
   it('labels the vocabularies it knows', () => {
     expect(AnalyticsLabel.category('merge_conflict')).toBe('Merge conflicts');
     expect(AnalyticsLabel.taskStatus('review')).toBe('In review');

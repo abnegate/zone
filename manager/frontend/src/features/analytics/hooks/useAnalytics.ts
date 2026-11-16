@@ -2,10 +2,11 @@ import { partialMatchKey, useQuery } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { analyticsApi, LOAD_FAILED } from '../../../api/analytics';
 import { useWorkspace } from '../../../shared/context/WorkspaceContext';
+import { ValidationError } from '../../../validation';
 import { analyticsKeys } from '../queryKeys';
 import type { Overview, TimePeriod } from '../types';
 
-export const STALE_MS = 60_000;
+const STALE_MS = 60_000;
 
 export const NO_WORKSPACE = 'No workspace selected';
 
@@ -20,6 +21,7 @@ export interface Analytics {
 
 function messageOf(error: unknown): string | null {
   if (!error) return null;
+  if (error instanceof ValidationError) return LOAD_FAILED;
   return error instanceof Error && error.message ? error.message : LOAD_FAILED;
 }
 

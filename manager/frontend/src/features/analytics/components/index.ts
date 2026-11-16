@@ -17,4 +17,5 @@ export { NO_SOURCES, SOURCES_LABEL, SourceLeaderboard } from './SourceLeaderboar
 export { StatTile } from './StatTile';
 export { TallyBars } from './TallyBars';
 export { TASKS_TITLE, TaskSummaryCard } from './TaskSummaryCard';
-export { NO_TREND, TrendIndicator, trendText } from './TrendIndicator';
+export { NO_TREND, TrendIndicator } from './TrendIndicator';
+export { TruncationNotice } from './TruncationNotice';
