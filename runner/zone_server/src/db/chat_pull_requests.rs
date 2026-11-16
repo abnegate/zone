@@ -383,32 +383,6 @@ pub async fn start_auto_fix(
     }))
 }
 
-/// Finishes the task behind a settled auto-fix run, because the pull request
-/// it was started for no longer has the problem it was started for.
-///
-/// A completed run leaves its task in `review`, which is where the runner
-/// stops: it asks a person to look, and nothing it can see says whether the
-/// fix worked. The pull request itself is that evidence, so the caller reads
-/// it and finishes the task here.
-///
-/// Fenced so only a task still waiting on that verdict moves. A run that
-/// failed left its task `blocked`, a person may have moved it on purpose, and
-/// a task with a run in flight is being worked on again — none of those are
-/// finished by a passing check.
-pub async fn complete_auto_fix_task(pool: &PgPool, run_id: Uuid) -> DbResult<bool> {
-    Ok(sqlx::query(
-        "UPDATE tasks SET status = 'complete', completed_at = NOW(), updated_at = NOW() \
-         FROM task_runs r \
-         WHERE tasks.id = r.task_id AND r.id = $1 AND r.status = 'completed' \
-           AND tasks.active_run_id IS NULL AND tasks.status = 'review'",
-    )
-    .bind(run_id)
-    .execute(pool)
-    .await?
-    .rows_affected()
-        == 1)
-}
-
 /// Says something in `chat_id` as the assistant, marked as auto-fix's own
 /// word rather than a turn somebody typed, and answers with the stored
 /// message for publishing.
@@ -448,6 +422,20 @@ where
     .execute(executor)
     .await?;
     Ok(())
+}
+
+pub async fn complete_auto_fix_task(pool: &PgPool, run_id: Uuid) -> DbResult<bool> {
+    Ok(sqlx::query(
+        "UPDATE tasks SET status = 'complete', completed_at = NOW(), updated_at = NOW() \
+         FROM task_runs run \
+         WHERE tasks.id = run.task_id AND run.id = $1 AND run.status = 'completed' \
+           AND tasks.active_run_id IS NULL AND tasks.status = 'review'",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 #[cfg(test)]
