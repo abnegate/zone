@@ -5,6 +5,7 @@ mod config;
 use std::sync::Arc;
 
 use abnegate_agent::ToolContext;
+use abnegate_agent::tool::Network;
 use zone_core::application::application;
 use zone_core::vpn::Offline;
 use zone_core::walk;
@@ -17,6 +18,7 @@ use super::environment;
 /// [`environment::policy`], routed through Zone's proxy and started at the
 /// configured niceness, its files are kept under `.zone/`, its walks have
 /// Zone's [`walk::BUDGET`], and `curl` and `wget` are held to the VPN gate.
+/// An offline chat's children are denied the network outright.
 pub fn build(config: Config) -> ToolContext {
     let mut context = ToolContext::default()
         .within(config.working_directory)
@@ -27,7 +29,12 @@ pub fn build(config: Config) -> ToolContext {
         .with_proxy(zone_routing::proxy())
         .with_public_web(Arc::new(Offline::new(config.chat_offline)))
         .with_search_timeout(walk::BUDGET)
-        .with_niceness(config.niceness);
+        .with_niceness(config.niceness)
+        .with_network(if config.chat_offline {
+            Network::Denied
+        } else {
+            Network::Open
+        });
     context.unrestricted = config.unrestricted;
     context.maximum_file_size = config.maximum_file_size;
     context.command_timeout = config.command_timeout;
@@ -40,6 +47,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
+    use abnegate_agent::testing::{Loopback, assert_network_denied};
     use abnegate_agent::tool::job::{JobCommand, Jobs};
     use abnegate_agent::tool::{
         OFF_LIMITS, ReadFileTool, RunCommandTool, RunShellTool, SearchCodeTool, Session,
@@ -376,6 +384,81 @@ mod tests {
             matches!(&live, Err(ToolError::Execution(message)) if message == OFFLINE),
             "{live:?}"
         );
+    }
+
+    async fn from_a_shell(chat_offline: bool) -> String {
+        let directory = tempdir().unwrap();
+        let loopback = Loopback::new().expect("a loopback listener");
+        let context = chat(directory.path(), Vec::new(), chat_offline);
+        let command = format!("bash '{}'", loopback.script().display());
+
+        let result = RunShellTool
+            .execute(json!({"command": command}), &context)
+            .await
+            .expect("the shell runs");
+
+        assert!(result.success, "{result:?}");
+        result.output.expect("the shell's report")
+    }
+
+    async fn from_a_job(chat_offline: bool) -> (Option<i32>, String) {
+        let directory = tempdir().unwrap();
+        let loopback = Loopback::new().expect("a loopback listener");
+        let context = chat(directory.path(), Vec::new(), chat_offline);
+        let script = loopback.script().display().to_string();
+
+        let started = Jobs::spawn(
+            &JobCommand::new("bash", vec![script]).within(directory.path()),
+            &context,
+        )
+        .await
+        .expect("a job starts");
+        let ended = Jobs::settled(context.session, &started.id)
+            .expect("its own session claims it")
+            .await;
+        let log = std::fs::read_to_string(&started.log_path).expect("the job's log");
+        Jobs::kill_session(context.session).await;
+
+        (ended.exit_code, log)
+    }
+
+    #[tokio::test]
+    async fn a_live_chats_shell_reaches_a_local_listener() {
+        let live = from_a_shell(false).await;
+
+        assert!(live.contains(Loopback::CONNECTED), "{live}");
+    }
+
+    #[tokio::test]
+    async fn an_offline_chats_shell_cannot_reach_a_local_listener() {
+        if !abnegate_exec::testing::network_denial_enforced().await {
+            return;
+        }
+
+        let offline = from_a_shell(true).await;
+
+        assert!(offline.starts_with("Exit code: 1"), "{offline}");
+        assert_network_denied(&offline);
+    }
+
+    #[tokio::test]
+    async fn a_live_chats_background_job_reaches_a_local_listener() {
+        let (code, live) = from_a_job(false).await;
+
+        assert_eq!(code, Some(0), "{live}");
+        assert!(live.contains(Loopback::CONNECTED), "{live}");
+    }
+
+    #[tokio::test]
+    async fn an_offline_chats_background_job_cannot_reach_a_local_listener() {
+        if !abnegate_exec::testing::network_denial_enforced().await {
+            return;
+        }
+
+        let (code, offline) = from_a_job(true).await;
+
+        assert!(code.is_some_and(|code| code != 0), "{code:?}: {offline}");
+        assert_network_denied(&offline);
     }
 
     /// Filling a tree past the cap is cheap on Linux and slow on APFS, so the

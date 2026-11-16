@@ -11,6 +11,7 @@ use axum::{
     extract::{Path, State},
 };
 use uuid::Uuid;
+use zone_core::vpn::CHAT_OFFLINE;
 
 use super::{check_workspace_write_access, get_chat_with_access};
 use crate::auth::AuthUser;
@@ -30,12 +31,20 @@ const PULL_REQUEST_NOT_FOUND: &str = "Pull request not found";
 const NOTHING_TO_CHANGE: &str = "Name at least one of dismissed, draft, auto_merge or auto_fix";
 
 /// GET /api/chats/{id}/pull-requests
+///
+/// An offline chat lists none: each one's status is read from GitHub, and an
+/// offline chat makes no request beyond its own model.
 pub async fn list(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PullRequestsResponse>, ServerError> {
     let (chat, workspace) = chat(&state, &auth, id).await?;
+    if chat.offline {
+        return Ok(Json(PullRequestsResponse {
+            pull_requests: Vec::new(),
+        }));
+    }
     let writable = writable(&state, &auth, workspace).await?;
     let tracked = pull_request::list(&state, workspace, chat.id).await?;
     Ok(Json(PullRequestsResponse {
@@ -57,6 +66,9 @@ pub async fn update(
         return Err(ServerError::BadRequest(NOTHING_TO_CHANGE.to_string()));
     }
     let (chat, workspace) = chat(&state, &auth, id).await?;
+    if chat.offline && request.reaches_github() {
+        return Err(ServerError::Conflict(CHAT_OFFLINE.to_string()));
+    }
     check_workspace_write_access(&state, &auth, workspace).await?;
     let mut row = owned(&state, chat.id, pull_request_id).await?;
     if let Some(draft) = request.draft {
@@ -150,7 +162,8 @@ fn refused(error: Error) -> ServerError {
         Error::Uncredentialed
         | Error::Disconnected
         | Error::Unauthenticated
-        | Error::Refused(_) => ServerError::Conflict(error.to_string()),
+        | Error::Refused(_)
+        | Error::Offline => ServerError::Conflict(error.to_string()),
         Error::Unreachable => ServerError::BadGateway(error.to_string()),
         Error::Storage | Error::Unsaved => ServerError::Internal(error.to_string()),
     }
@@ -159,6 +172,152 @@ fn refused(error: Error) -> ServerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::jwt::Claims;
+    use crate::services::github::testing::connected::Connected;
+
+    const ONLINE: i64 = 11;
+    const OFFLINE: i64 = 12;
+
+    fn reader(connected: &Connected) -> AuthUser {
+        AuthUser(Claims {
+            sub: connected.user.to_string(),
+            email: format!("{}@zone.test", connected.user),
+            roles: Vec::new(),
+            permissions: Vec::new(),
+            exp: i64::MAX,
+            iat: 0,
+            jti: String::new(),
+            is_admin: false,
+        })
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_lists_no_pull_request_and_asks_github_nothing() {
+        let connected = Connected::new().await;
+        connected.reads_only(Some(ONLINE)).await;
+        let online = connected.chat_pull_request(false, ONLINE).await;
+        let offline = connected.chat_pull_request(true, OFFLINE).await;
+
+        let Json(listed) = list(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path(offline.chat_id),
+        )
+        .await
+        .expect("an offline chat's pull requests");
+        assert!(
+            listed.pull_requests.is_empty(),
+            "an offline chat's pull request is only shown with what GitHub says of it"
+        );
+
+        let Json(listed) = list(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path(online.chat_id),
+        )
+        .await
+        .expect("an online chat's pull requests");
+        let ids: Vec<Uuid> = listed.pull_requests.iter().map(|one| one.id).collect();
+        assert_eq!(ids, [online.id], "an online chat still lists its own");
+
+        connected.github.verify().await;
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_neither_changes_diffs_nor_merges_a_pull_request() {
+        let connected = Connected::new().await;
+        connected.reads_only(None).await;
+        let offline = connected.chat_pull_request(true, OFFLINE).await;
+
+        for request in [
+            UpdateRequest {
+                draft: Some(true),
+                ..UpdateRequest::default()
+            },
+            UpdateRequest {
+                auto_merge: Some(true),
+                ..UpdateRequest::default()
+            },
+            UpdateRequest {
+                auto_fix: Some(true),
+                ..UpdateRequest::default()
+            },
+            UpdateRequest {
+                dismissed: Some(true),
+                draft: Some(true),
+                ..UpdateRequest::default()
+            },
+        ] {
+            let changed = update(
+                State(connected.state.clone()),
+                reader(&connected),
+                Path((offline.chat_id, offline.id)),
+                Json(request),
+            )
+            .await;
+            assert!(
+                matches!(&changed, Err(ServerError::Conflict(message)) if message == CHAT_OFFLINE),
+                "{changed:?}"
+            );
+        }
+        let kept = owned(&connected.state, offline.chat_id, offline.id)
+            .await
+            .expect("the pull request");
+        assert_eq!(
+            (kept.auto_fix, kept.dismissed_at),
+            (false, None),
+            "a refused change changes nothing"
+        );
+
+        let diffed = diff(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path((offline.chat_id, offline.id)),
+        )
+        .await;
+        assert!(
+            matches!(&diffed, Err(ServerError::Conflict(message)) if message == CHAT_OFFLINE),
+            "{diffed:?}"
+        );
+
+        let merged = merge(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path((offline.chat_id, offline.id)),
+        )
+        .await;
+        assert!(
+            matches!(&merged, Err(ServerError::Conflict(message)) if message == CHAT_OFFLINE),
+            "{merged:?}"
+        );
+
+        connected.github.verify().await;
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_dismisses_a_pull_request_without_asking_github() {
+        let connected = Connected::new().await;
+        connected.reads_only(None).await;
+        let offline = connected.chat_pull_request(true, OFFLINE).await;
+
+        let dismissed = update(
+            State(connected.state.clone()),
+            reader(&connected),
+            Path((offline.chat_id, offline.id)),
+            Json(UpdateRequest {
+                dismissed: Some(true),
+                ..UpdateRequest::default()
+            }),
+        )
+        .await;
+
+        assert!(dismissed.is_ok(), "{dismissed:?}");
+        let row = owned(&connected.state, offline.chat_id, offline.id)
+            .await
+            .expect("the pull request");
+        assert!(row.dismissed_at.is_some(), "{row:?}");
+        connected.github.verify().await;
+    }
 
     #[test]
     fn github_out_of_reach_is_a_bad_gateway() {
@@ -173,6 +332,7 @@ mod tests {
             Error::Disconnected,
             Error::Unauthenticated,
             Error::Refused("Resource not accessible by integration".to_string()),
+            Error::Offline,
         ] {
             assert!(matches!(refused(error), ServerError::Conflict(_)));
         }

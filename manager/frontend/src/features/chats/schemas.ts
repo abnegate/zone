@@ -414,6 +414,7 @@ export const WorkspaceChatProvidersSchema = z.object({
   default: ChatProviderOfferSchema,
   providers: tolerantArray(ChatProviderOfferSchema),
   recent: RecentChatSchema.nullish().catch(null),
+  offline_enforced: z.boolean().optional(),
 });
 
 export const SendMessageRequestSchema = z.object({

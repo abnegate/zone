@@ -469,6 +469,34 @@ describe('ChatsPage new chat dialog', () => {
     expect(optionLabels('Select Model')).toEqual(['Automatic', 'llama3.2']);
   });
 
+  it("says an offline chat still uses Zone's own model services and reaches no other network", async () => {
+    await openNewChat();
+
+    expect(
+      screen.getByText(
+        "Still uses Zone's own model services (the model, embeddings, ComfyUI), but reaches no other network: no web search, shell network access, MCP servers or GitHub tools."
+      )
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Connected sources still work/)).not.toBeInTheDocument();
+  });
+
+  it("warns that offline chats can't run commands on a host that can't enforce it", async () => {
+    workspaceProviders = { default: selfHosted, providers: offers, offline_enforced: false };
+    await openNewChat();
+
+    expect(
+      await screen.findByText(/so offline chats here can't run commands\.$/)
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing about commands on a host that keeps them off the network', async () => {
+    workspaceProviders = { default: selfHosted, providers: offers, offline_enforced: true };
+    await openNewChat();
+    await screen.findByRole('combobox', { name: 'Provider' });
+
+    expect(screen.queryByText(/can't run commands/)).not.toBeInTheDocument();
+  });
+
   it("starts from the settings of the workspace's most recent chat and sends them", async () => {
     workspaceProviders = { default: selfHosted, providers: offers, recent: recentCodex };
     await openNewChat();

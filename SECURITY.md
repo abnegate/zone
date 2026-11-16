@@ -182,10 +182,35 @@ No text of the answer or of the error is read to choose the sentence or copied
 into it, so a server pointed at an internal host does not read that host's
 answer back to a tenant.
 
-A chat's Offline switch keeps the chat off public web search, page fetch and
-`curl` / `wget`. It does not remove MCP tools. An HTTP MCP server on a public
-host, or any MCP server that reaches the internet itself, is egress the switch
-does not close: turn the server off for the workspace, or disable it.
+A chat's Offline switch keeps the chat's agent off every host beyond the
+chat's own model provider and Zone's own model infrastructure (embeddings, the
+title and classifier models, Ollama, ComfyUI, LiteLLM). An offline chat is
+offered only the tools on one allow-list (`agent::offline::TOOLS`): Zone's file
+and shell tools, its own workspace, memory and document tools, and the image,
+audio and model tools that go through that infrastructure. Every other tool,
+including any added later, is withheld: web search and page fetch, MCP servers,
+GitHub tools, starting task runs, monitoring and model installs among them. The
+tools on the list that could reach further refuse those calls: remote model
+catalogues, remote training compute, and waits on pull request checks. An
+offline chat clones no project, and Zone never reads or changes its pull
+requests on GitHub, so the watcher and auto-fix leave them alone.
+`run_command` refuses `curl` and `wget`; any other network access from a shell
+command, such as a script, a package manager or a raw socket, is not closed by
+the tool gates and relies on the operating-system network deny Zone places on
+an offline chat's child processes.
+
+That deny needs seccomp and Landlock on Linux, or the sandbox library on macOS.
+A host without them cannot start a network-denied command, so an offline chat's
+commands fail closed there instead of running with a network. Zone starts a
+trivial denied command at startup and logs a warning when it does not run, and
+the new-chat dialog's Offline option says that offline chats on that host
+cannot run commands (`offline_enforced` in
+`GET /api/workspaces/{id}/chat-providers`).
+
+A coding agent such as Claude Code or Codex is never left its own built-in
+tools in an offline chat, even when the chat turns Zone tools only off: those
+tools reach the network without Zone seeing them, so offline overrides
+unsandboxed and the agent gets Zone's tools alone.
 
 ## Privacy Considerations
 

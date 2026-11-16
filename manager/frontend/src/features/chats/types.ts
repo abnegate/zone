@@ -393,7 +393,7 @@ export interface Chat {
    */
   auto_approve?: boolean;
   /**
-   * When true, this chat never uses public web search, page fetch, or curl/wget.
+   * When true, this chat reaches no network beyond its model.
    * Older servers omit this; treat those chats as online.
    */
   offline?: boolean;
@@ -561,6 +561,7 @@ export const PULL_REQUEST_CONNECTIONS = [
   'uncredentialed',
   'disconnected',
   'unavailable',
+  'offline',
 ] as const;
 export type PullRequestConnection = (typeof PULL_REQUEST_CONNECTIONS)[number];
 

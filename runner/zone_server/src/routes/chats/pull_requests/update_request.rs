@@ -23,4 +23,40 @@ impl UpdateRequest {
             && self.auto_merge.is_none()
             && self.auto_fix.is_none()
     }
+
+    /// Whether this changes anything on GitHub, or starts runs that do.
+    /// Dismissing only hides the pull request in zone.
+    pub fn reaches_github(&self) -> bool {
+        self.draft.is_some() || self.auto_merge.is_some() || self.auto_fix.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_dismissal_stays_off_github() {
+        let dismissal = UpdateRequest {
+            dismissed: Some(true),
+            ..UpdateRequest::default()
+        };
+        assert!(!dismissal.reaches_github());
+        for change in [
+            UpdateRequest {
+                draft: Some(false),
+                ..dismissal
+            },
+            UpdateRequest {
+                auto_merge: Some(false),
+                ..dismissal
+            },
+            UpdateRequest {
+                auto_fix: Some(false),
+                ..dismissal
+            },
+        ] {
+            assert!(change.reaches_github(), "{change:?}");
+        }
+    }
 }

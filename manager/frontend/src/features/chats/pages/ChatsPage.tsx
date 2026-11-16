@@ -155,6 +155,10 @@ const PROVIDER_EFFORT_RESET_FAILED =
   'AI provider changed, but its reasoning effort could not be reset';
 const MODEL_EFFORT_RESET_FAILED = 'Model changed, but its reasoning effort could not be reset';
 const MODEL_CONTEXT_RESET_FAILED = 'Model changed, but its context size could not be fitted to it';
+const OFFLINE_HELP =
+  "Still uses Zone's own model services (the model, embeddings, ComfyUI), but reaches no other network: no web search, shell network access, MCP servers or GitHub tools.";
+const OFFLINE_UNENFORCED =
+  "This host can't keep commands off the network, so offline chats here can't run commands.";
 
 const failure = (prefix: string, error: unknown): string =>
   error instanceof Error ? `${prefix}: ${error.message}` : prefix;
@@ -511,16 +515,21 @@ export default function ChatsPage() {
   const chatSettingsSummary = [providerName, modelName, chatEffortName].filter(Boolean).join(' · ');
   const autoApproved = Boolean(displayedChat?.auto_approve);
   const sandboxed = displayedChat?.agent_sandboxed !== false;
+  const offline = Boolean(displayedChat?.offline);
   const cliStale = Boolean(providersError) || changingProvider || (streaming && providersLoading);
   const cli = cliStale && chatProviders?.cli === false ? undefined : chatProviders?.cli;
   const showSandbox = Boolean(
     displayedChat?.agent_enabled && (cli === undefined ? !sandboxed : cli)
   );
+  const hostTools = showSandbox && !sandboxed && !offline;
+  const sandboxSummary = sandboxed
+    ? 'Zone tools only on'
+    : offline
+      ? 'Host tools withheld offline (Zone tools only off)'
+      : 'Host tools on (Zone tools only off)';
   const permissionSummary = [
     `auto-approve ${autoApproved ? 'on' : 'off'}`,
-    ...(showSandbox
-      ? [sandboxed ? 'Zone tools only on' : 'Host tools on (Zone tools only off)']
-      : []),
+    ...(showSandbox ? [sandboxSummary] : []),
   ].join(', ');
   const meterCapacity = showChatContext
     ? selectedContextTokens(displayedChat?.context_tokens, chatNative)
@@ -1649,7 +1658,7 @@ export default function ChatsPage() {
                         trigger={
                           <AgentPermissionSummary
                             autoApproved={autoApproved}
-                            hostTools={showSandbox && !sandboxed}
+                            hostTools={hostTools}
                           />
                         }
                       >
@@ -1675,15 +1684,19 @@ export default function ChatsPage() {
                             hint={
                               sandboxed
                                 ? 'The agent can call only the tools Zone gives it'
-                                : 'The agent can also use its own tools on this host, which Zone never sees'
+                                : offline
+                                  ? "This chat is offline, so the agent's own tools are withheld regardless"
+                                  : 'The agent can also use its own tools on this host, which Zone never sees'
                             }
                             title={
                               sandboxed
                                 ? 'Zone tools only on: the agent can call nothing but the tools Zone gives it, so Zone sees and gates every call'
-                                : 'Zone tools only off: the agent can also read, write and run commands on this host with its own tools, which Zone never sees and cannot gate'
+                                : offline
+                                  ? "Zone tools only off, but this chat is offline, so the agent's own tools are withheld regardless"
+                                  : 'Zone tools only off: the agent can also read, write and run commands on this host with its own tools, which Zone never sees and cannot gate'
                             }
                             enabled={sandboxed}
-                            warning={!sandboxed}
+                            warning={hostTools}
                             testId="agent-sandbox-toggle"
                             onToggle={handleToggleAgentSandboxed}
                           />
@@ -2253,7 +2266,11 @@ export default function ChatsPage() {
           )}
           <Checkbox
             label="Offline"
-            helpText="Never use web search, page fetch, or curl/wget. Connected sources still work."
+            helpText={
+              workspaceProviders?.offline_enforced === false
+                ? `${OFFLINE_HELP} ${OFFLINE_UNENFORCED}`
+                : OFFLINE_HELP
+            }
             checked={newChatOffline}
             onCheckedChange={(checked) => {
               editNewChat();

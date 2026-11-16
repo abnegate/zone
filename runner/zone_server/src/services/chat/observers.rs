@@ -11,16 +11,21 @@ use super::subagent::Tracker;
 /// A turn's agent takes one observer, so the pull requests it opens and the
 /// subagents it starts are watched through this one.
 pub struct Observers {
-    pull_requests: Recorder,
+    pull_requests: Option<Recorder>,
     subagents: Tracker,
 }
 
 impl Observers {
-    pub fn new(pull_requests: Recorder, subagents: Tracker) -> Self {
+    pub fn new(pull_requests: Option<Recorder>, subagents: Tracker) -> Self {
         Self {
             pull_requests,
             subagents,
         }
+    }
+
+    #[cfg(test)]
+    pub fn records_pull_requests(&self) -> bool {
+        self.pull_requests.is_some()
     }
 }
 
@@ -36,7 +41,9 @@ impl fmt::Debug for Observers {
 
 impl Observer for Observers {
     fn observe(&self, output: &Output) {
-        self.pull_requests.observe(output);
+        if let Some(recorder) = &self.pull_requests {
+            recorder.observe(output);
+        }
     }
 
     fn track(&self, subagent: &Subagent) {
@@ -156,7 +163,7 @@ mod tests {
                 self.message_id,
                 Arc::new(announce),
             );
-            (Observers::new(self.recorder(), tracker), announced)
+            (Observers::new(Some(self.recorder()), tracker), announced)
         }
 
         /// The pull requests recorded for the chat, once there are any.
@@ -264,7 +271,7 @@ mod tests {
     async fn outputs_go_to_the_pull_requests_and_subagents_to_the_tracker() {
         let turn = Turn::new().await;
         let (tracker, mut tracked) = Tracker::listening();
-        let observers = Observers::new(turn.recorder(), tracker);
+        let observers = Observers::new(Some(turn.recorder()), tracker);
 
         observers.track(&Subagent::new("toolu_01Agent"));
         observers.observe(&Output::new(
