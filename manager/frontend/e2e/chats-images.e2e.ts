@@ -6,6 +6,7 @@ import {
   MOCK_PNG_DATA_URL,
   generatedAttachment,
   installChatSocketMock,
+  type ChatSendPayload,
   type ChatSocketController,
 } from './helpers/chatSocket';
 import { RESPONDING } from '../src/features/chats/components/Generation';
@@ -327,7 +328,7 @@ test.describe('Chat images', () => {
   });
 
   test('sends an attached image as the image-to-image source', async ({ page }) => {
-    let sent: { content?: string; metadata?: { attachments?: { url?: string }[] } } | undefined;
+    let sent: ChatSendPayload | undefined;
     socket.setOnSend((payload) => {
       sent = payload;
     });

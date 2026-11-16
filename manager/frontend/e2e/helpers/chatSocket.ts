@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import type { SendMessageRequest } from '../../src/features/chats/types';
 
 /** 1x1 PNG so image tests need no fixture files. */
 const PNG_1X1 =
@@ -17,7 +18,7 @@ export const generatedAttachment = (url = MOCK_PNG_DATA_URL) => ({
 });
 
 export type ChatSocketFrame = Record<string, unknown>;
-export type ChatSendPayload = { type: 'send'; id?: string; content: string; metadata?: unknown };
+export type ChatSendPayload = SendMessageRequest & { type: 'send'; id?: string };
 
 export type ChatSocketController = {
   setOnSend: (handler: (payload: ChatSendPayload) => Promise<void> | void) => void;
@@ -49,7 +50,7 @@ export async function installChatSocketMock(page: Page): Promise<ChatSocketContr
   });
 
   await page.addInitScript(() => {
-    const w = window as typeof window & {
+    const w = window as Omit<typeof window, 'WebSocket'> & {
       __chatSockets?: unknown[];
       __forwardChatSocketMessage?: (raw: string) => void;
       WebSocket: unknown;

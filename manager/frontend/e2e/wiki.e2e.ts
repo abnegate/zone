@@ -2,8 +2,6 @@ import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { blockServiceWorker, routeApi } from './test-utils';
 
-const SUBPIXEL = 0.05;
-
 test.describe('Wiki Page', () => {
   test.beforeEach(async ({ context, page }) => {
     // Block service worker first

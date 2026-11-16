@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import type { ActionReceipt, Message, MessageRole } from '../src/features/chats/types';
 import { test, expect } from './fixtures';
 import { setupAuth, mockCommonEndpoints } from './helpers/auth';
 import { blockServiceWorker, routeApi, CHAT_PROVIDERS } from './test-utils';
@@ -21,7 +22,12 @@ const generateMockChat = (
   ...(options.purpose ? { purpose: options.purpose, project_id: options.project_id ?? null } : {}),
 });
 
-const generateMockMessage = (id: string, chatId: string, role: string, content: string) => ({
+const generateMockMessage = (
+  id: string,
+  chatId: string,
+  role: MessageRole,
+  content: string
+): Message => ({
   id,
   chat_id: chatId,
   role,
@@ -683,7 +689,7 @@ test.describe('Chats Page', () => {
     const mockChatRoutes = async (
       page: Page,
       chat: ReturnType<typeof generateMockChat>,
-      messages: ReturnType<typeof generateMockMessage>[] = []
+      messages: Message[] = []
     ) => {
       await page.unroute(/\/api\/chats/);
       await routeApi(page, /\/api\/chats($|\?|\/)/i, (route) => {
@@ -1087,7 +1093,7 @@ test.describe('Chats Page', () => {
     test('shows a durable receipt for a workspace write and keeps it after reload', async ({
       page,
     }) => {
-      const receipt = {
+      const receipt: ActionReceipt = {
         id: 'call_1',
         action: 'create_task',
         target_type: 'task',
