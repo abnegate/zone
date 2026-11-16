@@ -9,9 +9,11 @@ pub mod comfy;
 pub mod context;
 pub mod database;
 pub mod github_app;
+pub mod identity_provider;
 pub mod logs;
 pub mod mail;
 pub mod mcp;
+pub mod sso;
 pub mod stand_in;
 pub mod transcript;
 

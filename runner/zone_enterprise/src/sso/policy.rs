@@ -33,6 +33,15 @@ impl Policy {
         })
     }
 
+    /// Whether the claims leave out something this policy decides on, which OpenID Connect Core
+    /// 5.3 lets a provider such as Okta answer from its userinfo endpoint instead.
+    pub fn incomplete(&self, claims: &Claims) -> bool {
+        claims.email.is_none()
+            || (self.require_verified_email
+                && claims.email_verified.is_none()
+                && claims.email_domain_owner_verified.is_none())
+    }
+
     fn hosted_domain_allowed(&self, issuer: &Issuer, claims: &Claims) -> bool {
         if self.domains.is_empty() {
             return true;
@@ -91,6 +100,35 @@ mod tests {
             domains: Domains::parse(domains).unwrap(),
             require_verified_email,
         }
+    }
+
+    #[test]
+    fn claims_are_incomplete_without_an_email_or_a_required_verification() {
+        let required = policy(&[], true);
+        let trusting = policy(&[], false);
+        assert!(!required.incomplete(&claims()));
+        let no_email = Claims {
+            email: None,
+            ..claims()
+        };
+        assert!(required.incomplete(&no_email));
+        assert!(trusting.incomplete(&no_email));
+        let unstated = Claims {
+            email_verified: None,
+            ..claims()
+        };
+        assert!(required.incomplete(&unstated));
+        assert!(!trusting.incomplete(&unstated));
+        let owner_verified = Claims {
+            email_domain_owner_verified: Some(true),
+            ..unstated.clone()
+        };
+        assert!(!required.incomplete(&owner_verified));
+        let refused = Claims {
+            email_verified: Some(false),
+            ..claims()
+        };
+        assert!(!required.incomplete(&refused));
     }
 
     #[test]

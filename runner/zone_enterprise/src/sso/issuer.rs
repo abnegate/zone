@@ -6,6 +6,7 @@ use url::{Host, Url};
 use crate::sso::error::Error;
 
 pub const GOOGLE: &str = "https://accounts.google.com";
+pub const GOOGLE_HOST: &str = "accounts.google.com";
 
 const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
 const SECURE_SCHEME: &str = "https";
@@ -35,6 +36,12 @@ impl Issuer {
 
     pub fn is_google(&self) -> bool {
         self.0 == GOOGLE
+    }
+
+    /// Google documents that its ID tokens carry `iss` as either `https://accounts.google.com`
+    /// or the bare `accounts.google.com`; every other issuer must match exactly.
+    pub fn accepts(&self, claimed: &str) -> bool {
+        claimed == self.0 || (self.is_google() && claimed == GOOGLE_HOST)
     }
 
     pub fn discovery_url(&self) -> Url {
@@ -164,6 +171,25 @@ mod tests {
     fn recognises_google() {
         assert!(Issuer::parse(GOOGLE).unwrap().is_google());
         assert!(!Issuer::parse("https://acme.okta.com").unwrap().is_google());
+    }
+
+    #[test]
+    fn google_accepts_both_documented_forms_of_its_issuer_claim() {
+        let google = Issuer::parse(GOOGLE).unwrap();
+        assert!(google.accepts(GOOGLE));
+        assert!(google.accepts(GOOGLE_HOST));
+        assert!(!google.accepts("http://accounts.google.com"));
+        assert!(!google.accepts("https://accounts.google.com/"));
+        assert!(!google.accepts("accounts.google.com/"));
+    }
+
+    #[test]
+    fn every_other_issuer_must_match_exactly() {
+        let okta = Issuer::parse("https://acme.okta.com").unwrap();
+        assert!(okta.accepts("https://acme.okta.com"));
+        assert!(!okta.accepts("acme.okta.com"));
+        assert!(!okta.accepts(GOOGLE_HOST));
+        assert!(!okta.accepts("https://acme.okta.com/"));
     }
 
     #[test]

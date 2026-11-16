@@ -30,6 +30,7 @@ mod resolution;
 pub mod testing;
 mod token_refusal;
 mod token_response;
+mod userinfo;
 mod verifier;
 
 pub use account::{ACCOUNT_DISABLED, Account};
@@ -52,7 +53,7 @@ pub use error::{
 pub use fields::Fields;
 pub use grant::Grant;
 pub use identity::Identity;
-pub use issuer::{GOOGLE, Issuer, endpoint_allowed};
+pub use issuer::{GOOGLE, GOOGLE_HOST, Issuer, endpoint_allowed};
 pub use oidc::{Oidc, REFETCH_COOLDOWN, TIMEOUT};
 pub use password_access::{PasswordAccess, password_access};
 pub use pkce::{METHOD, Pkce, challenge};

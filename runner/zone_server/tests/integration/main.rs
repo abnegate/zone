@@ -113,6 +113,8 @@ mod seal_secrets;
 mod seats;
 mod sessions;
 mod skills_store;
+mod sso_enforcement;
+mod sso_providers;
 mod sso_store;
 mod sync;
 mod task_authorization;

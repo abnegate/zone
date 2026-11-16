@@ -22,4 +22,6 @@ pub enum Rejection {
     IssuedInFuture,
     #[error("its nonce doesn't match this sign-in")]
     Nonce,
+    #[error("its subject doesn't match the identity provider's userinfo")]
+    Subject,
 }

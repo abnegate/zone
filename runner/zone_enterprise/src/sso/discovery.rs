@@ -11,6 +11,7 @@ pub struct Discovery {
     pub authorization_endpoint: Url,
     pub token_endpoint: Url,
     pub keys_endpoint: Url,
+    pub userinfo_endpoint: Option<Url>,
     pub signing_algorithms: Option<Vec<String>>,
     pub authentication_methods: Option<Vec<String>>,
 }
@@ -21,6 +22,8 @@ struct Document {
     authorization_endpoint: String,
     token_endpoint: String,
     jwks_uri: String,
+    #[serde(default)]
+    userinfo_endpoint: Option<String>,
     #[serde(default)]
     id_token_signing_alg_values_supported: Option<Vec<String>>,
     #[serde(default)]
@@ -47,6 +50,11 @@ impl Discovery {
             )?,
             token_endpoint: endpoint("token endpoint", &document.token_endpoint)?,
             keys_endpoint: endpoint("JWKS URI", &document.jwks_uri)?,
+            userinfo_endpoint: document
+                .userinfo_endpoint
+                .as_deref()
+                .map(|value| endpoint("userinfo endpoint", value))
+                .transpose()?,
             issuer: document.issuer,
             signing_algorithms: document.id_token_signing_alg_values_supported,
             authentication_methods: document.token_endpoint_auth_methods_supported,
@@ -110,8 +118,36 @@ mod tests {
             discovery.keys_endpoint.as_str(),
             "https://acme.okta.com/oauth2/v1/keys"
         );
+        assert_eq!(discovery.userinfo_endpoint, None);
         assert_eq!(discovery.signing_algorithms, None);
         assert_eq!(discovery.authentication(), ClientAuthentication::Basic);
+    }
+
+    #[test]
+    fn reads_the_optional_userinfo_endpoint() {
+        let mut document = document();
+        document["userinfo_endpoint"] = json!("https://acme.okta.com/oauth2/v1/userinfo");
+        assert_eq!(
+            parse(&document)
+                .unwrap()
+                .userinfo_endpoint
+                .map(String::from),
+            Some("https://acme.okta.com/oauth2/v1/userinfo".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_userinfo_endpoint_follows_the_https_rule() {
+        let mut document = document();
+        document["userinfo_endpoint"] = json!("http://acme.okta.com/oauth2/v1/userinfo");
+        let Err(Error::Discovery(message)) = parse(&document) else {
+            panic!("a plain http userinfo endpoint was accepted");
+        };
+        assert!(message.contains("userinfo endpoint"), "{message}");
+        document["userinfo_endpoint"] = json!("http://127.0.0.1:9000/userinfo");
+        assert!(parse(&document).unwrap().userinfo_endpoint.is_some());
+        document["userinfo_endpoint"] = json!("/userinfo");
+        assert!(matches!(parse(&document), Err(Error::Discovery(_))));
     }
 
     #[test]

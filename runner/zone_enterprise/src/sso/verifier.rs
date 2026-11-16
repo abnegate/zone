@@ -104,7 +104,7 @@ impl Verifier<'_> {
         if claims.subject.is_empty() {
             return Err(refuse(Rejection::Malformed));
         }
-        if claims.issuer != self.issuer.as_str() {
+        if !self.issuer.accepts(&claims.issuer) {
             return Err(refuse(Rejection::Issuer));
         }
         if !claims.audience.contains(client_id) {
@@ -142,6 +142,7 @@ mod tests {
 
     use super::*;
     use crate::sso::audience::Audience;
+    use crate::sso::issuer::{GOOGLE, GOOGLE_HOST};
     use crate::sso::testing;
 
     const ISSUER: &str = "https://acme.okta.com";
@@ -262,6 +263,46 @@ mod tests {
                 "{issuer}"
             );
         }
+    }
+
+    #[test]
+    fn a_google_token_may_name_its_issuer_without_the_scheme() {
+        let fixture = Fixture {
+            issuer: Issuer::parse(GOOGLE).unwrap(),
+            ..Fixture::new()
+        };
+        for issuer in [GOOGLE, GOOGLE_HOST] {
+            let claims = Claims {
+                issuer: issuer.into(),
+                ..fixture.claims()
+            };
+            assert_eq!(
+                fixture.verify(&testing::id_token(&claims)),
+                Ok(claims),
+                "{issuer}"
+            );
+        }
+        let claims = Claims {
+            issuer: "https://evil.test".into(),
+            ..fixture.claims()
+        };
+        assert_eq!(
+            fixture.verify(&testing::id_token(&claims)),
+            Err(Error::IdTokenInvalid(Rejection::Issuer))
+        );
+    }
+
+    #[test]
+    fn any_other_issuer_without_its_scheme_is_refused() {
+        let fixture = Fixture::new();
+        let claims = Claims {
+            issuer: "acme.okta.com".into(),
+            ..fixture.claims()
+        };
+        assert_eq!(
+            fixture.verify(&testing::id_token(&claims)),
+            Err(Error::IdTokenInvalid(Rejection::Issuer))
+        );
     }
 
     #[test]

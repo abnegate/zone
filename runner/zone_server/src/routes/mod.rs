@@ -27,6 +27,7 @@ pub mod refresh_query;
 pub mod releases;
 pub mod sessions;
 pub mod sources;
+pub mod sso;
 pub mod sync;
 pub mod tasks;
 pub mod webhooks;
@@ -255,6 +256,13 @@ pub fn create_router(state: AppState) -> Router {
             "/api/license",
             get(license::get).put(license::set).delete(license::remove),
         )
+        .route("/api/sso", get(sso::settings::get))
+        .route("/api/sso/providers", post(sso::providers::create))
+        .route(
+            "/api/sso/providers/{provider_id}",
+            patch(sso::providers::update).delete(sso::providers::delete),
+        )
+        .route("/api/sso/enforcement", put(sso::enforcement::put))
         .route("/api/host-mounts", get(host_mounts::instance))
         .route(
             "/api/workspaces/{workspace_id}/host-directories",

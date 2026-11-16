@@ -14,3 +14,29 @@ impl Mail for Silent {
         std::future::pending().await
     }
 }
+
+/// A relay that accepts every message at once and keeps who it was for.
+#[derive(Default)]
+pub struct Recording {
+    recipients: std::sync::Mutex<Vec<String>>,
+}
+
+impl Recording {
+    pub fn recipients(&self) -> Vec<String> {
+        self.recipients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl Mail for Recording {
+    async fn send(&self, recipient: &str, _subject: &str, _body: &str) -> Result<(), Error> {
+        self.recipients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(recipient.to_owned());
+        Ok(())
+    }
+}

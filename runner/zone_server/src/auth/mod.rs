@@ -6,10 +6,12 @@
 //! - Authentication middleware for axum
 //! - Organization and workspace membership guards
 //! - The server admin guard for server-wide settings
+//! - The license gate for paid features
 
 pub mod account;
 pub mod admin_guard;
 pub mod device;
+pub mod entitlement;
 pub mod github_guard;
 pub mod jwt;
 pub mod middleware;
