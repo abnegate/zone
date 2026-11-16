@@ -4,8 +4,9 @@ version = 4
 
 [[package]]
 name = "abnegate-agent"
-version = "0.2.5"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bb61bef20e869f2c99e0481e498ae9552a40c55e0e71b4d2b16698f0d450e394"
 dependencies = [
  "abnegate-agent-cli",
  "abnegate-config",
@@ -39,8 +40,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-agent-cli"
-version = "0.2.4"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28f9bf50f74a94c30ac209e67ccf4352da2181d610ec6e3af1ec7478037bac6e"
 dependencies = [
  "abnegate-exec",
  "abnegate-http",
@@ -68,8 +70,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-comfy"
-version = "0.3.4"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+version = "0.3.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68c2a3f45852eca31473b6de6c4419c287e2cfbbca172fce7402ce60de58a2b0"
 dependencies = [
  "abnegate-exec",
  "abnegate-llm",
@@ -95,7 +98,8 @@ dependencies = [
 [[package]]
 name = "abnegate-config"
 version = "0.2.0"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9ce20c0773aa76b52d3d3205453fe63c25cec7f10143223d80dd43639ee1c35"
 dependencies = [
  "abnegate-secret",
  "chrono",
@@ -111,8 +115,9 @@ dependencies = [
 
 [[package]]
 name = "abnegate-exec"
-version = "0.2.4"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "678fb6a6307f90e00250d4bd71f64e2ee26a20cb2a5e520025330d01201ffac0"
 dependencies = [
  "abnegate-secret",
  "base64 0.23.1",
@@ -130,7 +135,8 @@ dependencies = [
 [[package]]
 name = "abnegate-http"
 version = "0.1.5"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "528c5a149eda5cc0c9b410db3ebf405d73822a6e4cba746838c5f3188f18d65d"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -146,7 +152,8 @@ dependencies = [
 [[package]]
 name = "abnegate-index"
 version = "0.1.1"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06973145bbb902b65faac64b485bf647110c61d2ed58872dc08cb2fc38c903ff"
 dependencies = [
  "hex",
  "regex",
@@ -173,7 +180,8 @@ dependencies = [
 [[package]]
 name = "abnegate-learn"
 version = "0.1.3"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0704ed8aaa302060b9358c366e8fded28f974ef41a20617f39484a23ab21f2a2"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -182,7 +190,8 @@ dependencies = [
 [[package]]
 name = "abnegate-llm"
 version = "0.2.0"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcf36afb6b6e3bec97aa58a1be6a96a0d0b504ad2b85c9d43b4aad075b5fd2e6"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
@@ -206,7 +215,8 @@ dependencies = [
 [[package]]
 name = "abnegate-notify"
 version = "0.2.0"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36730041d5d878509cd9b4ea9e847c3ae205c5f91dab9c197ace1d8a4c73c190"
 dependencies = [
  "abnegate-secret",
  "async-trait",
@@ -226,7 +236,8 @@ dependencies = [
 [[package]]
 name = "abnegate-recurrence"
 version = "0.1.0"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c9a75cf93bfc1fe297b68d4cd61346ce88f1029aab4dd8ef494b082403d306ff"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -236,7 +247,8 @@ dependencies = [
 [[package]]
 name = "abnegate-search"
 version = "0.2.0"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa43ebbb518596c66d72345d471f806bb65a0bab5dbaf9fa34f96b36db1ef53e"
 dependencies = [
  "abnegate-secret",
  "reqwest 0.13.5",
@@ -249,7 +261,8 @@ dependencies = [
 [[package]]
 name = "abnegate-secret"
 version = "0.2.0"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a210653c2d3bbcb6efd40f2f940038e176241a3e04816a784578912fefd75f9"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -269,7 +282,8 @@ dependencies = [
 [[package]]
 name = "abnegate-vcs"
 version = "0.2.2"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71fef80ae8f29d321358b878535c0e5b1d8a72e29644e24414f57a218d048f09"
 dependencies = [
  "abnegate-http",
  "abnegate-secret",
@@ -294,7 +308,8 @@ dependencies = [
 [[package]]
 name = "abnegate-vision"
 version = "0.1.4"
-source = "git+https://github.com/abnegate/crates?branch=feat%2Fexec-offline-network#be824eee41c85822caee97945909bee6b270a95d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00aff324e63b4c89c117ff4ed8381b3720dae0cc4cda258bb64b6f6d9919699c"
 dependencies = [
  "fast_image_resize",
  "image",
@@ -2014,7 +2029,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2281,7 +2296,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4438,7 +4453,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4567,7 +4582,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 1.3.1",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5462,7 +5477,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5939,7 +5954,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5998,7 +6013,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7410,7 +7425,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8760,7 +8775,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
