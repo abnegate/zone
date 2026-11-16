@@ -207,7 +207,7 @@ macro_rules! totals_query {
              COALESCE(sum(total_tokens), 0)::bigint AS total_tokens, \
              COALESCE(sum(rounds), 0)::bigint AS rounds, \
              COALESCE(sum(tool_calls), 0)::bigint AS tool_calls, \
-             COALESCE(max(context_tokens), 0)::bigint AS peak_context_tokens, \
+             COALESCE(max(u.context_tokens), 0)::bigint AS peak_context_tokens, \
              COALESCE(sum(instructions_tokens), 0)::bigint AS instructions_tokens, \
              COALESCE(sum(conversation_tokens), 0)::bigint AS conversation_tokens, \
              COALESCE(sum(tools_tokens), 0)::bigint AS tools_tokens, \
@@ -228,7 +228,7 @@ macro_rules! totals_query {
 pub async fn chat_totals(pool: &PgPool, chat: Uuid) -> DbResult<Totals> {
     sqlx::query_as(totals_query!(
         "",
-        "FROM chat_token_usage WHERE chat_id = $1"
+        "FROM chat_token_usage u WHERE u.chat_id = $1"
     ))
     .bind(chat)
     .fetch_one(pool)
@@ -299,8 +299,8 @@ pub async fn workspace_models(
 ) -> DbResult<Vec<ModelTotals>> {
     sqlx::query_as(totals_query!(
         "model, ",
-        "FROM chat_token_usage \
-         WHERE workspace_id = $1 AND recorded_at >= $2 \
+        "FROM chat_token_usage u \
+         WHERE u.workspace_id = $1 AND u.recorded_at >= $2 \
          GROUP BY model \
          ORDER BY total_tokens DESC, turns DESC, model"
     ))
