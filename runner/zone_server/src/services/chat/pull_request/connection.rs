@@ -17,6 +17,8 @@ pub enum Connection {
     /// GitHub, or the store holding the source's connection, could not be
     /// reached, so whether a source can read it is not known yet.
     Unavailable,
+    /// Its chat is offline, so nothing asks GitHub about it.
+    Offline,
 }
 
 impl Connection {
@@ -30,6 +32,7 @@ impl From<github_app::Error> for Connection {
         match Error::from(error) {
             Error::Disconnected => Self::Disconnected,
             Error::Unreachable | Error::Storage => Self::Unavailable,
+            Error::Offline => Self::Offline,
             Error::Uncredentialed | Error::Unauthenticated | Error::Refused(_) | Error::Unsaved => {
                 Self::Uncredentialed
             }

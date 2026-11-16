@@ -18,7 +18,6 @@ import {
 } from '../navigation/sections';
 import {
   AuditLogsSection,
-  BillingSection,
   DevicesSection,
   GitHubSection,
   OrganizationAiSection,
@@ -123,8 +122,6 @@ function organizationContent(
       );
     case SettingsSection.Devices:
       return <DevicesSection orgId={organizationId} />;
-    case SettingsSection.Billing:
-      return <BillingSection orgId={organizationId} />;
     case SettingsSection.Audit:
       return <AuditLogsSection orgId={organizationId} />;
     default:

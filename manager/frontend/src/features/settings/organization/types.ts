@@ -117,67 +117,6 @@ export interface InvitationsResponse {
   invitations: Invitation[];
 }
 
-// Billing & Usage Types
-export interface Plan {
-  id: string;
-  name: string;
-  description: string | null;
-  price_monthly: number;
-  price_yearly: number;
-  features: string[];
-  limits: PlanLimits;
-  is_public: boolean;
-}
-
-export interface PlanLimits {
-  max_users: number | null;
-  max_workspaces: number | null;
-  max_projects: number | null;
-  max_storage_gb: number | null;
-  max_api_calls_monthly: number | null;
-}
-
-export interface Subscription {
-  id: string;
-  organization_id: string;
-  plan_id: string;
-  plan_name: string;
-  status: 'active' | 'canceled' | 'past_due' | 'trialing';
-  current_period_start: string;
-  current_period_end: string;
-  cancel_at_period_end: boolean;
-}
-
-export interface Usage {
-  members: number;
-  workspaces: number;
-  chat_messages: number;
-  period_start: string;
-  period_end: string;
-}
-
-export interface Limits {
-  max_members: number | null;
-  max_workspaces: number | null;
-  max_chats_per_month: number | null;
-}
-
-export interface PlansResponse {
-  plans: Plan[];
-}
-
-export interface PlanResponse {
-  plan: Plan;
-}
-
-export interface SubscriptionResponse {
-  subscription: Subscription;
-}
-
-export interface UsageResponse extends Usage {}
-
-export interface LimitsResponse extends Limits {}
-
 // Audit Log Types
 // The server names actions and resources with dotted strings (member.added,
 // settings.reset); the console filters by the ones it knows and shows the rest.

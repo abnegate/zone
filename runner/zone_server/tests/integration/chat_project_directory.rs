@@ -19,7 +19,7 @@ use zone_core::llm::LlmBackend;
 use zone_server::db::projects::{self, NewProject};
 use zone_server::db::{chats, organizations, sources, workspace_host_directories, workspaces};
 use zone_server::services::chat::session::{self, Mode, Preparation};
-use zone_server::services::project_directory::{Missing, Start, locate};
+use zone_server::services::project_directory::{Access, Missing, Start, locate};
 use zone_server::services::route::Route;
 use zone_server::state::AppState;
 
@@ -170,13 +170,32 @@ impl Fixture {
             .await
     }
 
+    /// The clone of `url`, made with `token` as a GitHub source of this workspace would hold it.
     fn missing(&self, url: RepositoryUrl, token: Option<&str>) -> Missing {
-        Missing::new(
-            self.clones.path(),
-            self.workspace,
-            url,
-            token.map(SecretValue::new),
-        )
+        Missing::new(self.clones.path(), self.workspace, url, self.access(token))
+    }
+
+    /// A GitHub source of this workspace holding `token`, or no credential at all.
+    fn access(&self, token: Option<&str>) -> Access {
+        Access::Source(Box::new(sources::SourceRow {
+            id: Uuid::new_v4(),
+            name: "Repository".to_string(),
+            source_type: sources::GITHUB.to_string(),
+            config: json!({"owner": "owner", "repo": "repository"}),
+            credentials_encrypted: token.map(|token| {
+                abnegate_secret::encrypt_value(&SecretValue::new(token), self.state.master_key())
+                    .expect("a token")
+            }),
+            description: None,
+            url: None,
+            is_active: Some(true),
+            last_verified_at: None,
+            last_error: None,
+            created_at: None,
+            updated_at: None,
+            workspace_id: Some(self.workspace),
+            github_installation_id: None,
+        }))
     }
 }
 
@@ -535,7 +554,7 @@ async fn a_repository_is_cloned_once_and_reused_by_later_chats() {
 
     let cloned = fixture
         .missing(url.clone(), None)
-        .clone_repository()
+        .clone_repository(&fixture.state)
         .await
         .expect("a clone");
     assert_eq!(fs::read_to_string(cloned.join("cloned")).unwrap(), "cloned");
@@ -549,7 +568,7 @@ async fn a_repository_is_cloned_once_and_reused_by_later_chats() {
     let later = fixture.missing(url.clone(), None);
     assert!(later.present(), "a finished clone is found again");
     let reused = later
-        .clone_repository()
+        .clone_repository(&fixture.state)
         .await
         .expect("a clone needs no remote once it is there");
     fixture.remove().await;
@@ -587,8 +606,8 @@ async fn one_workspaces_clone_is_not_anothers() {
     let (_holder, url) = remote();
     let root = fixture.clones.path();
 
-    let one = Missing::new(root, fixture.workspace, url.clone(), None);
-    let two = Missing::new(root, other.workspace, url, None);
+    let one = Missing::new(root, fixture.workspace, url.clone(), fixture.access(None));
+    let two = Missing::new(root, other.workspace, url, other.access(None));
     fixture.remove().await;
     other.remove().await;
 
@@ -603,11 +622,14 @@ async fn a_clone_that_fails_says_why_without_its_token_and_a_later_one_can_succe
 
     let failed = fixture
         .missing(absent.clone(), Some(TOKEN))
-        .clone_repository()
+        .clone_repository(&fixture.state)
         .await;
     let retried = fixture.missing(absent, Some(TOKEN));
     let present = retried.present();
-    let working = fixture.missing(url, Some(TOKEN)).clone_repository().await;
+    let working = fixture
+        .missing(url, Some(TOKEN))
+        .clone_repository(&fixture.state)
+        .await;
     fixture.remove().await;
 
     let reason = failed.expect_err("a repository that isn't there cannot be cloned");
@@ -631,7 +653,10 @@ async fn chats_starting_together_all_get_one_clone() {
     let mut starting = Vec::new();
     for _ in 0..8 {
         let missing = fixture.missing(url.clone(), None);
-        starting.push(tokio::spawn(missing.clone_repository()));
+        let state = fixture.state.clone();
+        starting.push(tokio::spawn(async move {
+            missing.clone_repository(&state).await
+        }));
     }
     let mut cloned = Vec::new();
     for start in starting {
@@ -666,7 +691,8 @@ async fn a_chat_waiting_on_another_chats_clone_uses_it_and_never_clones() {
     let missing = fixture.missing(url.clone(), None);
     let destination = missing.destination().to_path_buf();
     let lock = locked(&destination);
-    let waiting = tokio::spawn(missing.clone_repository());
+    let state = fixture.state.clone();
+    let waiting = tokio::spawn(async move { missing.clone_repository(&state).await });
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!waiting.is_finished(), "the lock is held by another chat");
 
@@ -698,8 +724,11 @@ async fn stopping_a_chat_that_is_waiting_on_a_clone_ends_it_at_once() {
     let lock = locked(&destination);
 
     let started = Instant::now();
-    let stopped =
-        tokio::time::timeout(Duration::from_millis(100), missing.clone_repository()).await;
+    let stopped = tokio::time::timeout(
+        Duration::from_millis(100),
+        missing.clone_repository(&fixture.state),
+    )
+    .await;
     assert!(stopped.is_err(), "the lock is held by another chat");
     assert!(
         started.elapsed() < Duration::from_secs(5),
@@ -707,7 +736,10 @@ async fn stopping_a_chat_that_is_waiting_on_a_clone_ends_it_at_once() {
     );
     drop(lock);
 
-    let cloned = fixture.missing(url, None).clone_repository().await;
+    let cloned = fixture
+        .missing(url, None)
+        .clone_repository(&fixture.state)
+        .await;
     fixture.remove().await;
     assert_eq!(cloned.as_deref(), Ok(destination.as_path()));
 }
@@ -727,7 +759,10 @@ async fn a_partial_clone_left_behind_does_not_count_and_is_replaced() {
     .unwrap();
 
     assert!(!missing.present(), "a stopped clone must not count");
-    let cloned = missing.clone_repository().await.expect("a clone");
+    let cloned = missing
+        .clone_repository(&fixture.state)
+        .await
+        .expect("a clone");
     fixture.remove().await;
 
     assert!(cloned.join("cloned").is_file());
@@ -749,7 +784,7 @@ async fn something_else_where_the_clone_goes_is_never_replaced() {
     .unwrap();
     fs::write(destination.join("work"), "someone's work").unwrap();
 
-    let failed = missing.clone_repository().await;
+    let failed = missing.clone_repository(&fixture.state).await;
     fixture.remove().await;
 
     assert!(failed.unwrap_err().contains("move it aside"));
@@ -985,7 +1020,7 @@ async fn a_workspace_directory_something_else_opened_is_made_private_again() {
     )
     .unwrap();
 
-    let cloned = missing.clone_repository().await;
+    let cloned = missing.clone_repository(&fixture.state).await;
     fixture.remove().await;
 
     assert!(cloned.is_ok(), "{cloned:?}");
@@ -1000,7 +1035,10 @@ async fn an_empty_token_does_not_garble_a_failure() {
     let (holder, _url) = remote();
     let absent = RepositoryUrl::local(&holder.path().join("absent.git")).expect("a local path");
 
-    let failed = fixture.missing(absent, Some("")).clone_repository().await;
+    let failed = fixture
+        .missing(absent, Some(""))
+        .clone_repository(&fixture.state)
+        .await;
     fixture.remove().await;
 
     let reason = failed.expect_err("a repository that isn't there cannot be cloned");

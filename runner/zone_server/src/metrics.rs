@@ -653,10 +653,10 @@ mod tests {
     #[test]
     fn uuids_and_numeric_ids_collapse() {
         assert_eq!(
-            normalize_path("/api/organizations/550e8400-e29b-41d4-a716-446655440000/usage"),
-            "/api/organizations/{id}/usage"
+            normalize_path("/api/organizations/550e8400-e29b-41d4-a716-446655440000/audit-logs"),
+            "/api/organizations/{id}/audit-logs"
         );
-        assert_eq!(normalize_path("/api/plans/42"), "/api/plans/{id}");
+        assert_eq!(normalize_path("/api/chats/42"), "/api/chats/{id}");
     }
 
     #[test]

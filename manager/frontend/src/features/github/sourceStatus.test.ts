@@ -12,9 +12,12 @@ const source = {
 };
 
 describe('source status', () => {
-  it.each(['cached', 'refreshed', 'floored', 'stale'])('keeps freshness %s', (freshness) => {
-    expect(SourceStatusSchema.parse({ ...source, freshness }).freshness).toBe(freshness);
-  });
+  it.each(['cached', 'revalidating', 'refreshed', 'floored', 'stale'])(
+    'keeps freshness %s',
+    (freshness) => {
+      expect(SourceStatusSchema.parse({ ...source, freshness }).freshness).toBe(freshness);
+    }
+  );
 
   it('reads an unknown freshness as stale', () => {
     expect(SourceStatusSchema.parse({ ...source, freshness: 'warming' }).freshness).toBe('stale');

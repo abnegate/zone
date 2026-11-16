@@ -8,6 +8,7 @@
 pub mod comfy;
 pub mod context;
 pub mod database;
+pub mod eventually;
 pub mod github_app;
 pub mod logs;
 pub mod mail;

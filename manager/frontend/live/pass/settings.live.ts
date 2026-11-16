@@ -20,7 +20,7 @@ import {
 
 /**
  * Rows 8 to 13: organization settings (members, AI provider and models,
- * LiteLLM, billing) and workspace settings (theme, AI override).
+ * LiteLLM) and workspace settings (theme, AI override).
  *
  * Which model answered an "Automatic" chat is read from Ollama's own list of
  * loaded models right after the turn, because the server writes no line that
@@ -38,7 +38,6 @@ const SELF_HOSTED = 'self_hosted';
 const AUTOMATIC = 'Automatic';
 const ORGANIZATION_AI = '/settings/organization/ai';
 const ORGANIZATION_MEMBERS = '/settings/organization/members';
-const ORGANIZATION_BILLING = '/settings/organization/billing';
 const ORGANIZATION_AUDIT = '/settings/organization/audit';
 const WORKSPACE_GENERAL = '/settings/workspace/general';
 const WORKSPACE_AI = '/settings/workspace/ai';
@@ -274,49 +273,6 @@ test.describe('organization and workspace settings', () => {
       true
     );
     expect(fastAfterReset).toBe(AUTOMATIC);
-  });
-
-  test('11: the billing page shows something true about the organization', async ({ page }) => {
-    await signIn(page);
-    await page.goto(ORGANIZATION_BILLING);
-    await page.waitForTimeout(3_000);
-    const panel = page.locator('main, .page').first();
-    const text = await panel.innerText();
-    await shot(page, '11-billing');
-    const users = sql(
-      `select count(*) from organization_members where organization_id = '${state.owner.organization.id}' and is_active`
-    ).join(',');
-    const workspaces = sql(
-      `select count(*) from workspaces where organization_id = '${state.owner.organization.id}'`
-    ).join(',');
-    const projects = sql(
-      `select count(*) from projects where workspace_id in (select id from workspaces where organization_id = '${state.owner.organization.id}')`
-    ).join(',');
-    const userMetric = await page
-      .locator('.metric-card', { hasText: /Members|Users/ })
-      .locator('.current-value')
-      .innerText()
-      .catch(() => 'no metric');
-    const workspaceMetric = await page
-      .locator('.metric-card', { hasText: 'Workspaces' })
-      .locator('.current-value')
-      .innerText()
-      .catch(() => 'no metric');
-    const truthful = userMetric.trim() === users && workspaceMetric.trim() === workspaces;
-    record(11, {
-      result: truthful ? 'WORKS' : 'FAILS',
-      page_text: text.slice(0, 400),
-      users_metric: userMetric,
-      users_in_db: users,
-      workspaces_metric: workspaceMetric,
-      workspaces_in_db: workspaces,
-      projects_in_db: projects,
-      screenshots: ['11-billing.png'],
-    });
-    expect(
-      truthful,
-      `billing counts users=${userMetric} (db ${users}) workspaces=${workspaceMetric} (db ${workspaces})`
-    ).toBe(true);
   });
 
   test('12: the workspace theme previews, saves, survives a reload and dresses every page', async ({

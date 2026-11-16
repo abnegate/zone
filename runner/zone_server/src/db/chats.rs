@@ -51,7 +51,8 @@ pub struct ChatRow {
     pub agent_sandboxed: bool,
     /// When true, mutating file and shell tools run without a confirmation.
     pub auto_approve: bool,
-    /// When true, this chat never uses public web search, page fetch, or curl/wget.
+    /// When true, this chat reaches no host beyond its model provider and
+    /// Zone's own model infrastructure.
     pub offline: bool,
     /// Operator-chosen context window in tokens. Absent means the deployment's resolved capacity.
     pub context_tokens: Option<i64>,

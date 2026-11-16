@@ -22,6 +22,7 @@ pub mod learned;
 pub mod memory;
 pub mod models;
 pub mod monitoring;
+pub mod offline;
 pub mod plan;
 pub mod planner;
 pub mod prompt;

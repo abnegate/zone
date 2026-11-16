@@ -462,6 +462,7 @@ mod tests {
             auto_fix_by: None,
             auto_fix_head: None,
             auto_fixing: false,
+            offline: false,
         }
     }
 

@@ -121,6 +121,8 @@ zone_routing = { path = "../zone_routing" }
 
 [dev-dependencies]
 zone_server = { path = ".", default-features = false, features = ["testing"] }
+abnegate-agent = { workspace = true, features = ["mcp", "testing"] }
+abnegate-exec = { workspace = true, features = ["testing"] }
 abnegate-llm = { workspace = true, features = ["catalog", "download", "testing"] }
 abnegate-notify = { workspace = true, features = ["testing"] }
 abnegate-vcs = { workspace = true, features = ["github", "github-app", "testing"] }

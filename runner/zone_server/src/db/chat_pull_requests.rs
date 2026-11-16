@@ -19,7 +19,11 @@ macro_rules! columns {
          EXISTS (
              SELECT 1 FROM task_runs
              WHERE task_runs.id = chat_pull_requests.auto_fix_run_id AND task_runs.completed_at IS NULL
-         ) AS auto_fixing"
+         ) AS auto_fixing,
+         EXISTS (
+             SELECT 1 FROM chats
+             WHERE chats.id = chat_pull_requests.chat_id AND chats.offline
+         ) AS offline"
     };
 }
 
@@ -46,6 +50,9 @@ pub struct PullRequestRow {
     pub auto_fix_head: Option<String>,
     /// Whether that run is still working.
     pub auto_fixing: bool,
+    /// Whether the chat that opened it is offline, so nothing reads or
+    /// changes it on GitHub.
+    pub offline: bool,
 }
 
 /// What a run claiming a pull request for auto-fix starts from.
@@ -140,7 +147,8 @@ pub struct Watching {
 /// check or a new conflict reaches zone only when somebody opens the chat
 /// that owns the pull request, because GitHub pushes nothing to a deployment
 /// it cannot reach. A row whose run is still working is left in: deciding
-/// that is `consider`'s job, not this query's.
+/// that is `consider`'s job, not this query's. An offline chat's pull
+/// requests are left out, since reading one asks GitHub on the chat's behalf.
 pub async fn watching<'e, E>(executor: E) -> DbResult<Vec<Watching>>
 where
     E: Executor<'e, Database = Postgres>,
@@ -153,7 +161,7 @@ where
              WHERE dismissed_at IS NULL AND auto_fix AND auto_fix_by IS NOT NULL
          ) AS pull_requests
          JOIN chats ON chats.id = pull_requests.chat_id
-         WHERE chats.workspace_id IS NOT NULL
+         WHERE chats.workspace_id IS NOT NULL AND NOT chats.offline
          ORDER BY pull_requests.created_at, pull_requests.id"
     ))
     .fetch_all(executor)
@@ -968,6 +976,39 @@ mod tests {
         assert_eq!(
             found.workspace_id, workspace,
             "the sweep is told which workspace to read as"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_leaves_an_offline_chats_pull_requests_alone() {
+        let pool = pool().await;
+        let (workspace, user) = member(&pool).await;
+        let online = create_chat(&pool, Some(workspace), "Changes", "qwen3:8b", false, true)
+            .await
+            .expect("a chat")
+            .id;
+        let offline = create_chat(&pool, Some(workspace), "Changes", "qwen3:8b", false, true)
+            .await
+            .expect("a chat")
+            .id;
+        sqlx::query("UPDATE chats SET offline = TRUE WHERE id = $1")
+            .bind(offline)
+            .execute(&pool)
+            .await
+            .expect("an offline chat");
+        let watched = numbered(&pool, online, 11, Some(user)).await;
+        let withheld = numbered(&pool, offline, 12, Some(user)).await;
+
+        let read = watching(&pool).await.expect("the watched pull requests");
+
+        let ids: Vec<Uuid> = read.iter().map(|one| one.row.id).collect();
+        assert!(
+            ids.contains(&watched),
+            "an online chat's pull request is still swept"
+        );
+        assert!(
+            !ids.contains(&withheld),
+            "an offline chat makes no request to GitHub, so the sweep never reads its pull requests"
         );
     }
 }

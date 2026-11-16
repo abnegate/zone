@@ -15,9 +15,9 @@ import type { ReactNode } from 'react';
 import { createElement } from 'react';
 import { ApiError } from '../../../api/ApiError';
 import { HttpStatus } from '../../../api/HttpStatus';
-import { wirePullRequests } from '../../../test/pullRequests';
+import { wirePullRequests, wireSourceStatus } from '../../../test/pullRequests';
 import { fakeTimers } from '../../../test/timers';
-import { GATEWAY_BACKOFF_MS } from '../../github';
+import { GATEWAY_BACKOFF_MS, REVALIDATION_REFETCH_MS } from '../../github';
 import { PullRequestsResponseSchema } from '../schemas';
 import type { PullRequestsResponse } from '../types';
 
@@ -107,7 +107,7 @@ describe('usePullRequests', () => {
     const { result } = renderHook(() => usePullRequests(), { wrapper: provider() });
 
     await waitFor(() => expect(result.current.pullRequests).toEqual(listed.pull_requests));
-    expect(mockList).toHaveBeenCalledWith('workspace-1', false, expect.any(AbortSignal));
+    expect(mockList).toHaveBeenCalledWith('workspace-1', false);
     expect(result.current.sources).toEqual(listed.sources);
     expect(result.current.warnings).toEqual(['acme/api: rate limited']);
     expect(result.current.generatedAt).toBe(LONG_AGO);
@@ -262,6 +262,50 @@ describe('usePullRequests', () => {
     expect(mockList).toHaveBeenCalledTimes(2);
 
     await advance(LIST_POLL_MS);
+    expect(mockList).toHaveBeenCalledTimes(3);
+    unmount();
+  });
+
+  it('reads the list again soon after a source answered while it was read again', async () => {
+    await fake();
+    const revalidating = listing({
+      sources: [{ ...wireSourceStatus, freshness: 'revalidating' }],
+    });
+    mockList.mockResolvedValueOnce(revalidating).mockResolvedValue(listing());
+    const { unmount } = renderHook(() => usePullRequests(), { wrapper: provider() });
+    await advance(0);
+    expect(mockList).toHaveBeenCalledTimes(1);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+    await advance(LIST_POLL_MS - REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(3);
+    unmount();
+  });
+
+  it('reads the list at the usual pace once a read fails after a source was read again', async () => {
+    await fake();
+    const revalidating = listing({
+      sources: [{ ...wireSourceStatus, freshness: 'revalidating' }],
+    });
+    mockList
+      .mockResolvedValueOnce(revalidating)
+      .mockRejectedValue(new ApiError('Not found', HttpStatus.NotFound));
+    const { unmount } = renderHook(() => usePullRequests(), { wrapper: provider() });
+    await advance(0);
+    expect(mockList).toHaveBeenCalledTimes(1);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+
+    await advance(REVALIDATION_REFETCH_MS);
+    expect(mockList).toHaveBeenCalledTimes(2);
+    await advance(LIST_POLL_MS - REVALIDATION_REFETCH_MS * 2);
+    expect(mockList).toHaveBeenCalledTimes(2);
+    await advance(REVALIDATION_REFETCH_MS);
     expect(mockList).toHaveBeenCalledTimes(3);
     unmount();
   });

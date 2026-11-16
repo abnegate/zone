@@ -67,7 +67,7 @@ use tokio::sync::watch;
 use training::Training;
 
 const MAX_MODEL_NAME_LENGTH: usize = 256;
-const COMFY_SOURCE: &str = "comfy";
+pub(crate) const COMFY_SOURCE: &str = "comfy";
 pub(crate) const TRAIN_RUNNING: &str = "a training job is already running";
 const UNREADABLE_CATALOG: &str = "recipe catalog is not readable";
 
@@ -491,51 +491,66 @@ pub(crate) async fn show_model(
     if let Err(error) = validate_model_name(name) {
         return Err(CatalogError::InvalidName(error));
     }
+    let fallback_reason = match request_show(state, name).await {
+        Ok(response) => match read_show(response, name).await {
+            Err(missing @ CatalogError::NotFound(_)) => missing,
+            answered => return answered,
+        },
+        Err(error) => unreachable_ollama(error),
+    };
+    match providers::huggingface_details(state, name).await {
+        Some(info) => {
+            serde_json::to_value(info).map_err(|error| CatalogError::Parse(error.to_string()))
+        }
+        None => Err(fallback_reason),
+    }
+}
 
-    let ollama_host = &state.config().ollama_host;
-    let url = format!("{}/api/show", ollama_host);
+pub(crate) async fn show_installed(
+    state: &AppState,
+    name: &str,
+) -> Result<serde_json::Value, CatalogError> {
+    if let Err(error) = validate_model_name(name) {
+        return Err(CatalogError::InvalidName(error));
+    }
+    match request_show(state, name).await {
+        Ok(response) => read_show(response, name).await,
+        Err(error) => Err(unreachable_ollama(error)),
+    }
+}
 
+async fn request_show(state: &AppState, name: &str) -> reqwest::Result<reqwest::Response> {
     #[derive(Serialize)]
-    struct ShowRequest {
-        name: String,
+    struct ShowRequest<'a> {
+        name: &'a str,
     }
 
-    match OLLAMA_HTTP_CLIENT
-        .post(&url)
-        .json(&ShowRequest {
-            name: name.to_string(),
-        })
+    OLLAMA_HTTP_CLIENT
+        .post(format!("{}/api/show", state.config().ollama_host))
+        .json(&ShowRequest { name })
         .send()
         .await
-    {
-        Ok(response) => {
-            if response.status().is_success() {
-                match response.json::<serde_json::Value>().await {
-                    Ok(info) => Ok(info),
-                    Err(error) => Err(CatalogError::Parse(format!(
-                        "Failed to parse response: {error}"
-                    ))),
-                }
-            } else if response.status() == StatusCode::NOT_FOUND {
-                if let Some(info) = providers::huggingface_details(state, name).await {
-                    return serde_json::to_value(info)
-                        .map_err(|error| CatalogError::Parse(error.to_string()));
-                }
-                Err(CatalogError::NotFound(name.to_string()))
-            } else {
-                Err(CatalogError::Unavailable("Ollama service error".into()))
-            }
-        }
-        Err(error) => {
-            if let Some(info) = providers::huggingface_details(state, name).await {
-                return serde_json::to_value(info)
-                    .map_err(|error| CatalogError::Parse(error.to_string()));
-            }
-            Err(CatalogError::Unavailable(format!(
-                "Failed to connect to Ollama: {error}"
-            )))
-        }
+}
+
+async fn read_show(
+    response: reqwest::Response,
+    name: &str,
+) -> Result<serde_json::Value, CatalogError> {
+    let status = response.status();
+    if status.is_success() {
+        response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| CatalogError::Parse(format!("Failed to parse response: {error}")))
+    } else if status == StatusCode::NOT_FOUND {
+        Err(CatalogError::NotFound(name.to_string()))
+    } else {
+        Err(CatalogError::Unavailable("Ollama service error".into()))
     }
+}
+
+fn unreachable_ollama(error: reqwest::Error) -> CatalogError {
+    CatalogError::Unavailable(format!("Failed to connect to Ollama: {error}"))
 }
 
 /// DELETE /api/models/:name
@@ -1416,5 +1431,92 @@ mod chat_train_base_tests {
         assert!(chat_finetune("qwen2.5:7b", Some("7B")));
         assert!(!chat_finetune("llama3.1:8b", Some("8B")));
         assert!(!chat_finetune("qwen3.8:27b", Some("27.3B")));
+    }
+}
+
+#[cfg(test)]
+mod show_tests {
+    use super::{CatalogError, show_installed, show_model};
+    use crate::state::{AppState, lazy_pool, test_config};
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const PULLED: &str = "hf.co/owner/repository:Q4_K_M";
+    const UNREACHABLE: &str = "http://127.0.0.1:1";
+
+    async fn ollama(status: u16) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/show"))
+            .respond_with(ResponseTemplate::new(status))
+            .expect(1)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn hugging_face(expected: u64) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models/owner/repository"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "owner/repository",
+                "gguf": {"totalFileSize": 4096},
+                "siblings": [{"rfilename": "model-Q4_K_M.gguf", "size": 4096}],
+            })))
+            .expect(expected)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn state(ollama: &str, hugging_face: &MockServer) -> AppState {
+        let mut config = test_config();
+        config.ollama_host = ollama.to_string();
+        config.huggingface_models_url = format!("{}/api/models", hugging_face.uri());
+        AppState::new(config, lazy_pool(), None)
+    }
+
+    #[tokio::test]
+    async fn a_model_ollama_does_not_have_falls_back_to_hugging_face() {
+        let ollama = ollama(404).await;
+        let hugging_face = hugging_face(1).await;
+        let shown = show_model(&state(&ollama.uri(), &hugging_face), PULLED).await;
+        assert!(
+            shown.is_ok(),
+            "{:?}",
+            shown.err().map(|error| error.message())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_ollama_falls_back_to_hugging_face() {
+        let hugging_face = hugging_face(1).await;
+        let shown = show_model(&state(UNREACHABLE, &hugging_face), PULLED).await;
+        assert!(
+            shown.is_ok(),
+            "{:?}",
+            shown.err().map(|error| error.message())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ollama_service_error_does_not_fall_back() {
+        let ollama = ollama(500).await;
+        let hugging_face = hugging_face(0).await;
+        let shown = show_model(&state(&ollama.uri(), &hugging_face), PULLED).await;
+        assert!(matches!(shown, Err(CatalogError::Unavailable(_))));
+    }
+
+    #[tokio::test]
+    async fn installed_details_never_ask_hugging_face() {
+        let ollama = ollama(404).await;
+        let hugging_face = hugging_face(0).await;
+        let shown = show_installed(&state(&ollama.uri(), &hugging_face), PULLED).await;
+        assert!(matches!(shown, Err(CatalogError::NotFound(name)) if name == PULLED));
+
+        let unreachable = show_installed(&state(UNREACHABLE, &hugging_face), PULLED).await;
+        assert!(matches!(unreachable, Err(CatalogError::Unavailable(_))));
     }
 }

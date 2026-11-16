@@ -19,7 +19,6 @@ export { VirtualBrowseList } from '../features/models/components';
 // App-specific components - now re-exported from features/settings
 export {
   AuditLogsSection,
-  BillingSection,
   InvitationsSection,
   OrgMembersSection,
 } from '../features/settings/organization/components';

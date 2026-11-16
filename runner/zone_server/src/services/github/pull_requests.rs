@@ -78,6 +78,7 @@ use super::readiness::CheckState;
 use super::readiness::CommitSha;
 use super::snapshot::Snapshot;
 use super::source_status::SourceStatus;
+use super::throttle::CREDENTIAL_PERMITS;
 use super::throttle::admitted;
 use crate::state::AppState;
 
@@ -89,7 +90,6 @@ pub const UNRANKED: u32 = 0;
 pub const FOREIGN_COMMIT: &str = "That commit is not on this pull request.";
 pub const UNRENDERED_COMMIT: &str = "GitHub would not render this commit's diff.";
 pub const INVALID_SOURCE: &str = "has a GitHub configuration Zone cannot read.";
-const ASSESSMENT_CONCURRENCY: usize = 4;
 const PARENT: &str = "~1";
 const MERGE_MESSAGE: &str = "";
 
@@ -408,8 +408,9 @@ async fn read<'a>(
     let read = state
         .github_snapshots()
         .pull_requests
-        .read(source.source.id, refresh, now, |previous| {
-            fetch(state, source, previous, now)
+        .serve(source.source.id, refresh, now, |previous| {
+            let (state, source) = (state.clone(), source.clone());
+            async move { fetch(&state, &source, previous, now).await }
         })
         .await;
     (source, read)
@@ -438,7 +439,7 @@ async fn fetch(
                 .map(|(row, kept)| reassess(&github, permits, repository, row, kept, now))
                 .collect();
             let mut assessed = stream::iter(pending)
-                .buffered(ASSESSMENT_CONCURRENCY)
+                .buffered(CREDENTIAL_PERMITS)
                 .zip(stream::iter(&rows));
             let mut listing = Listing {
                 pull_requests: Vec::with_capacity(rows.len()),

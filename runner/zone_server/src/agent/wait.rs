@@ -43,6 +43,7 @@ use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
 use uuid::Uuid;
+use zone_core::vpn::CHAT_OFFLINE;
 
 use super::tools::WorkspaceScope;
 use crate::db::sources::SourceRow;
@@ -301,11 +302,53 @@ fn short(sha: &str) -> &str {
     sha.get(..SHA_CHARS).unwrap_or(sha)
 }
 
+/// What a wait can be for. An offline chat cannot ask GitHub for a commit's
+/// checks.
+fn kinds(offline: bool) -> &'static [&'static str] {
+    if offline {
+        &[KIND_JOB, KIND_TASK_RUN]
+    } else {
+        &[KIND_JOB, KIND_TASK_RUN, KIND_CHECK]
+    }
+}
+
+/// What a wait of `kind` waits for, in the description's words.
+fn awaited(kind: &str) -> &'static str {
+    match kind {
+        KIND_JOB => "a background job",
+        KIND_TASK_RUN => "another task run",
+        _ => "the checks on a commit",
+    }
+}
+
+/// What a wait of `kind` takes as its id.
+fn identifier(kind: &str) -> &'static str {
+    match kind {
+        KIND_JOB => "Job id",
+        KIND_TASK_RUN => "run id",
+        _ => "source id",
+    }
+}
+
+/// `items` as one choice: "a", "a or b", "a, b or c".
+fn alternatives(items: &[&str]) -> String {
+    match items.split_last() {
+        Some((last, [])) => (*last).to_string(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
 /// What `wait_for` tells the model it is for.
-const DESCRIPTION: &str = "Wait for something outside this loop to finish: a background job, \
-    another task run, or the checks on a commit. Your turn ends the moment you call this and \
-    resumes with the outcome, so call it alone, size the timeout to what you are waiting for, \
-    and do not use it to re-read something that has not changed.";
+fn description(offline: bool) -> String {
+    let awaited: Vec<&str> = kinds(offline).iter().map(|kind| awaited(kind)).collect();
+    format!(
+        "Wait for something outside this loop to finish: {}. Your turn ends the moment you call \
+         this and resumes with the outcome, so call it alone, size the timeout to what you are \
+         waiting for, and do not use it to re-read something that has not changed.",
+        alternatives(&awaited)
+    )
+}
 
 /// The two statuses a run that has not finished can hold.
 const RUN_RUNNING: &str = "running";
@@ -340,8 +383,11 @@ const WORKSPACE_UNREADABLE: &str = "You cannot read this workspace.";
 /// rather than as anything having happened.
 const LOST_SUBJECT: &str = "This wait";
 
-fn unknown_kind(kind: &str) -> String {
-    format!("kind must be {KIND_JOB}, {KIND_TASK_RUN} or {KIND_CHECK}, not {kind:?}.")
+fn unknown_kind(offline: bool, kind: &str) -> String {
+    format!(
+        "kind must be {}, not {kind:?}.",
+        alternatives(kinds(offline))
+    )
 }
 
 /// The call that waited, and what it waited for.
@@ -762,9 +808,7 @@ pub fn resume_with_outcome(
 }
 
 pub fn register(registry: &mut ToolRegistry, scope: Option<&WorkspaceScope>) {
-    registry.register(Arc::new(WaitForTool {
-        scope: scope.cloned(),
-    }));
+    registry.register(Arc::new(WaitForTool::new(scope.cloned())));
 }
 
 #[derive(Debug, Deserialize)]
@@ -778,6 +822,7 @@ struct Request {
 
 struct WaitForTool {
     scope: Option<WorkspaceScope>,
+    description: String,
 }
 
 #[async_trait]
@@ -787,38 +832,43 @@ impl Tool for WaitForTool {
     }
 
     fn description(&self) -> &str {
-        DESCRIPTION
+        &self.description
     }
 
     fn parameters_schema(&self) -> Value {
+        let mut properties = json!({
+            "timeout_secs": {
+                "type": "integer",
+                "minimum": MIN_WAIT_SECS,
+                "maximum": MAX_WAIT_SECS,
+                "description": format!(
+                    "How long to wait. Default {DEFAULT_WAIT_SECS}. Size it to what you are \
+                     waiting for."
+                )
+            }
+        });
+        let kinds = kinds(self.offline());
+        let identifiers: Vec<String> = kinds
+            .iter()
+            .map(|kind| format!("{} for kind={kind}", identifier(kind)))
+            .collect();
+        properties["kind"] = json!({"type": "string", "enum": kinds});
+        properties["id"] = json!({
+            "type": "string",
+            "description": format!("{}.", identifiers.join(", "))
+        });
+        if kinds.contains(&KIND_CHECK) {
+            properties["ref"] = json!({
+                "type": "string",
+                "description": format!(
+                    "kind={KIND_CHECK} only: branch, tag or commit. Defaults to the source \
+                     branch."
+                )
+            });
+        }
         json!({
             "type": "object",
-            "properties": {
-                "kind": {"type": "string", "enum": [KIND_JOB, KIND_TASK_RUN, KIND_CHECK]},
-                "id": {
-                    "type": "string",
-                    "description": format!(
-                        "Job id for kind={KIND_JOB}, run id for kind={KIND_TASK_RUN}, \
-                         source id for kind={KIND_CHECK}."
-                    )
-                },
-                "ref": {
-                    "type": "string",
-                    "description": format!(
-                        "kind={KIND_CHECK} only: branch, tag or commit. Defaults to the source \
-                         branch."
-                    )
-                },
-                "timeout_secs": {
-                    "type": "integer",
-                    "minimum": MIN_WAIT_SECS,
-                    "maximum": MAX_WAIT_SECS,
-                    "description": format!(
-                        "How long to wait. Default {DEFAULT_WAIT_SECS}. Size it to what you are \
-                         waiting for."
-                    )
-                }
-            },
+            "properties": properties,
             "required": ["kind", "id"],
             "additionalProperties": false
         })
@@ -847,6 +897,18 @@ impl Tool for WaitForTool {
 }
 
 impl WaitForTool {
+    fn new(scope: Option<WorkspaceScope>) -> Self {
+        let offline = scope.as_ref().is_some_and(|scope| scope.offline);
+        Self {
+            scope,
+            description: description(offline),
+        }
+    }
+
+    fn offline(&self) -> bool {
+        self.scope.as_ref().is_some_and(|scope| scope.offline)
+    }
+
     async fn open(&self, params: Value, context: &ToolContext) -> Result<String, String> {
         let request: Request =
             serde_json::from_value(params).map_err(|_| INVALID_ARGUMENTS.to_string())?;
@@ -860,7 +922,7 @@ impl WaitForTool {
             KIND_JOB => self.job(&request, context)?,
             KIND_TASK_RUN => self.run(&request, context).await?,
             KIND_CHECK => self.commit(&request).await?,
-            other => return Err(unknown_kind(other)),
+            other => return Err(unknown_kind(self.offline(), other)),
         };
 
         let waiting = Waiting {
@@ -953,6 +1015,9 @@ impl WaitForTool {
         request: &Request,
     ) -> Result<(String, Option<String>, Subscription), String> {
         let scope = self.scope.as_ref().ok_or(WORKSPACE_REQUIRED)?;
+        if scope.offline {
+            return Err(CHAT_OFFLINE.to_string());
+        }
         let source = Uuid::parse_str(&request.id).map_err(|_| SOURCE_ID_INVALID.to_string())?;
         let watched = self.watched(scope, source).await?;
         let (reference, sha, assessment) = watched.settled(request.reference.as_deref()).await?;
@@ -1007,6 +1072,7 @@ mod tests {
     use crate::services::github_app::testing::issuing;
     use crate::services::github_app::testing::uninstalled;
     use crate::state::AppState;
+    use crate::state::lazy_pool;
     use crate::state::test_config;
     use abnegate_agent::context;
     use abnegate_agent::tool::EnvironmentPolicy;
@@ -1039,20 +1105,26 @@ mod tests {
     }
 
     fn tool() -> WaitForTool {
-        WaitForTool { scope: None }
+        WaitForTool::new(None)
     }
 
     fn scoped(state: AppState, workspace: Uuid, user: Uuid) -> WaitForTool {
-        WaitForTool {
-            scope: Some(WorkspaceScope {
-                state,
-                workspace_id: workspace,
-                chat_id: Some(Uuid::new_v4()),
-                user_id: user,
-                offline: false,
-                origin: crate::db::tasks::Origin::Member,
-            }),
-        }
+        scoped_as(state, workspace, user, false)
+    }
+
+    fn offline(state: AppState) -> WaitForTool {
+        scoped_as(state, Uuid::new_v4(), Uuid::new_v4(), true)
+    }
+
+    fn scoped_as(state: AppState, workspace: Uuid, user: Uuid, offline: bool) -> WaitForTool {
+        WaitForTool::new(Some(WorkspaceScope {
+            state,
+            workspace_id: workspace,
+            chat_id: Some(Uuid::new_v4()),
+            user_id: user,
+            offline,
+            origin: crate::db::tasks::Origin::Member,
+        }))
     }
 
     fn context(session: Session) -> ToolContext {
@@ -1582,6 +1654,95 @@ mod tests {
         );
         reset_session(session);
         Jobs::kill_session(session).await;
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_cannot_wait_on_checks() {
+        let github = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&github)
+            .await;
+        let mut config = test_config();
+        config.github_api_url = github.uri();
+        config.github_api_allows_http = true;
+        let tool = offline(AppState::new(config, lazy_pool(), None));
+
+        let (result, _) = opened(
+            &tool,
+            chat(),
+            json!({"kind": KIND_CHECK, "id": Uuid::new_v4().to_string()}),
+        )
+        .await;
+        assert_eq!(refused(&result), CHAT_OFFLINE);
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_is_not_offered_checks() {
+        let online = scoped(AppState::for_tests(), Uuid::new_v4(), Uuid::new_v4());
+        let schema = online.parameters_schema();
+        assert_eq!(
+            schema["properties"]["kind"]["enum"],
+            json!([KIND_JOB, KIND_TASK_RUN, KIND_CHECK]),
+            "{schema}"
+        );
+        assert!(schema["properties"]["ref"].is_object(), "{schema}");
+
+        let offline = offline(AppState::for_tests());
+        let schema = offline.parameters_schema();
+        assert_eq!(
+            schema["properties"]["kind"]["enum"],
+            json!([KIND_JOB, KIND_TASK_RUN]),
+            "{schema}"
+        );
+        assert!(schema["properties"]["ref"].is_null(), "{schema}");
+        let mentioned = format!("kind={KIND_CHECK}");
+        assert!(!schema.to_string().contains(&mentioned), "{schema}");
+        assert!(
+            !offline.description().contains("checks"),
+            "{}",
+            offline.description()
+        );
+        assert_eq!(
+            unknown_kind(true, "build"),
+            format!("kind must be {KIND_JOB} or {KIND_TASK_RUN}, not \"build\".")
+        );
+        assert_eq!(
+            unknown_kind(false, "build"),
+            format!("kind must be {KIND_JOB}, {KIND_TASK_RUN} or {KIND_CHECK}, not \"build\".")
+        );
+        assert!(
+            online
+                .description()
+                .contains("a background job, another task run or the checks on a commit."),
+            "{}",
+            online.description()
+        );
+        assert!(
+            offline
+                .description()
+                .contains("a background job or another task run."),
+            "{}",
+            offline.description()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offline_chat_still_waits_on_its_jobs() {
+        let directory = TempDir::new().expect("a temporary working directory");
+        let session = chat();
+        let job = spawned(session, "exit 0", directory.path()).await;
+        let tool = offline(AppState::for_tests());
+
+        let (result, waiting) =
+            opened(&tool, session, json!({"kind": KIND_JOB, "id": &job.id})).await;
+        let deadline = waiting.expect("a receipt means a bound wait").deadline;
+        assert_eq!(
+            receipted(&result),
+            receipt(&job_subject(&job.id), &deadline)
+        );
+        reset_session(session);
     }
 
     #[tokio::test]
