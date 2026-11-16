@@ -7,6 +7,7 @@
 //! - Organization and workspace membership guards
 //! - The server admin guard for server-wide settings
 
+pub mod account;
 pub mod admin_guard;
 pub mod device;
 pub mod github_guard;

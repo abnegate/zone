@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::common::mail::Silent;
 use crate::common::{TestClient, test_email, test_password};
-use zone_server::db::{email_verification, password_reset};
+use zone_server::db::{email_verification, password_reset, users};
 use zone_server::services::mail::AccountMail;
 
 /// Far longer than a handler takes without mail, far shorter than a stalled
@@ -221,4 +221,113 @@ async fn revoking_the_other_sessions_keeps_the_caller_and_kills_their_refresh_to
         "a refresh keeps the session instead of adding one: {sessions}"
     );
     assert_eq!(sessions["sessions"][0]["is_current"], json!(true));
+}
+
+#[tokio::test]
+async fn a_disabled_account_is_refused_with_its_code() {
+    let client = TestClient::with_db().await;
+    let email = test_email();
+    let account = register(&client, &email).await;
+    users::set_user_active(client.state().db(), account.user, false)
+        .await
+        .unwrap();
+
+    let response = client
+        .post_json(
+            "/api/auth/login",
+            &json!({ "email": email, "password": test_password() }),
+        )
+        .await;
+
+    response.assert_status(StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.json_value(),
+        json!({ "error": "Account is disabled", "code": "account_disabled" })
+    );
+}
+
+/// Registration, login and refresh each answer with the same session shape.
+#[tokio::test]
+async fn register_login_and_refresh_answer_one_session_shape() {
+    let client = TestClient::with_db().await;
+    let email = test_email();
+    let registered = client
+        .post_json(
+            "/api/auth/register",
+            &json!({ "email": email, "password": test_password(), "display_name": "Console" }),
+        )
+        .await;
+    registered.assert_status(StatusCode::CREATED);
+    let logged_in = client
+        .post_json(
+            "/api/auth/login",
+            &json!({ "email": email, "password": test_password() }),
+        )
+        .await;
+    logged_in.assert_status(StatusCode::OK);
+    let refresh_token = logged_in.json_value()["refresh_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let refreshed = client
+        .post_json(
+            "/api/auth/refresh",
+            &json!({ "refresh_token": refresh_token }),
+        )
+        .await;
+    refreshed.assert_status(StatusCode::OK);
+
+    for body in [
+        registered.json_value(),
+        logged_in.json_value(),
+        refreshed.json_value(),
+    ] {
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "access_token",
+                "expires_in",
+                "permissions",
+                "refresh_token",
+                "roles",
+                "token_type",
+                "user"
+            ],
+            "{body}"
+        );
+        assert_eq!(body["token_type"], json!("Bearer"), "{body}");
+        assert_eq!(body["user"]["email"], json!(email), "{body}");
+        assert_eq!(body["user"]["display_name"], json!("Console"), "{body}");
+        assert!(body["roles"].is_array(), "{body}");
+        let mut user: Vec<&str> = body["user"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        user.sort_unstable();
+        assert_eq!(
+            user,
+            [
+                "created_at",
+                "deleted_at",
+                "display_name",
+                "email",
+                "email_verified",
+                "id",
+                "is_active",
+                "is_admin",
+                "last_login_at",
+                "updated_at"
+            ],
+            "{body}"
+        );
+    }
 }

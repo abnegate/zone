@@ -50,11 +50,13 @@ const SNAPSHOT_TABLES: &[&str] = &[
     "organization_ai_settings",
     "projects",
     "sources",
+    "sso_providers",
     "sync_configs",
     "workspace_ai_settings",
 ];
 const GITHUB: &str = "github";
 const MCP_SECRETS: &str = "{\"environment\":{\"GITHUB_TOKEN\":\"ghp_mcp\"},\"headers\":{}}";
+const SSO_CLIENT_SECRET: &str = "sso-client-secret";
 const LINEAR: &str = "linear";
 const PASSPHRASE: &str = "a-sealing-test-passphrase-of-at-least-32-bytes";
 const MISTAKEN_PASSPHRASE: &str = "a-mistaken-sealing-passphrase-of-at-least-32-bytes";
@@ -290,6 +292,20 @@ impl Scratch {
         id
     }
 
+    /// A single sign-on provider holding `client_secret` in its client secret column.
+    async fn sso_provider(&self, client_secret: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO sso_providers(id,display_name,issuer,client_id,client_secret) VALUES($1,'Okta','https://acme.okta.com',$1::text,$2)",
+        )
+        .bind(id)
+        .bind(client_secret)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
+    }
+
     async fn ai_settings(&self, tenant: &Tenant, scope: AiScope, value: &str) {
         let table = scope.table();
         let (owner, id) = match scope {
@@ -469,6 +485,7 @@ async fn a_dry_run_counts_every_column_and_class_and_writes_nothing() {
     scratch
         .mcp_server(&tenant, &legacy(MCP_SECRETS, &key))
         .await;
+    scratch.sso_provider(&legacy(SSO_CLIENT_SECRET, &key)).await;
     scratch
         .ai_settings(&tenant, AiScope::Organization, "sk-organization")
         .await;
@@ -532,6 +549,7 @@ async fn a_dry_run_counts_every_column_and_class_and_writes_nothing() {
             1,
             Outcome::Resealed,
         ),
+        (Column::SsoClientSecret, Class::Legacy, 1, Outcome::Resealed),
         (Column::LinearApiKey, Class::Plaintext, 1, Outcome::Reported),
     ];
     for (column, class, count, outcome) in expected {
@@ -560,6 +578,7 @@ async fn a_dry_run_counts_every_column_and_class_and_writes_nothing() {
     }
     assert!(!printed.contains("ghp_plaintext_project"), "{printed}");
     assert!(!printed.contains("sk-organization"), "{printed}");
+    assert!(!printed.contains(SSO_CLIENT_SECRET), "{printed}");
     scratch.cleanup().await;
 }
 
@@ -588,6 +607,7 @@ async fn legacy_values_are_resealed_in_every_sealed_column() {
     let server = scratch
         .mcp_server(&tenant, &legacy(MCP_SECRETS, &key))
         .await;
+    let provider = scratch.sso_provider(&legacy(SSO_CLIENT_SECRET, &key)).await;
     let backup = scratch.backup(&[]).await;
 
     let report = scratch.run(&key, false, backup.path()).await;
@@ -603,13 +623,14 @@ async fn legacy_values_are_resealed_in_every_sealed_column() {
             "{\"access\":\"token\"}",
         ),
         (Column::McpServerSecrets, server, MCP_SECRETS),
+        (Column::SsoClientSecret, provider, SSO_CLIENT_SECRET),
     ];
     for (column, id, credential) in expected {
         let stored = scratch.text(column, id).await.expect("a value");
         assert_eq!(opened(&stored, &key), credential, "{column}");
         assert_eq!(report.outcome(column, Outcome::Resealed), 1, "{column}");
     }
-    assert_eq!(report.written(), 6);
+    assert_eq!(report.written(), 7);
     assert!(report.is_clean());
     scratch.cleanup().await;
 }
@@ -663,6 +684,7 @@ async fn plaintext_in_strict_and_mixed_columns_is_reported_and_unchanged() {
         .agent_login(&tenant, "{\"access\":\"plaintext\"}")
         .await;
     let server = scratch.mcp_server(&tenant, MCP_SECRETS).await;
+    let provider = scratch.sso_provider(SSO_CLIENT_SECRET).await;
     let sync = scratch
         .sync_config(
             &tenant,
@@ -702,11 +724,19 @@ async fn plaintext_in_strict_and_mixed_columns_is_reported_and_unchanged() {
             .as_deref(),
         Some(MCP_SECRETS)
     );
+    assert_eq!(
+        scratch
+            .text(Column::SsoClientSecret, provider)
+            .await
+            .as_deref(),
+        Some(SSO_CLIENT_SECRET)
+    );
     for column in [
         Column::SourceCredentials,
         Column::AgentLoginCredential,
         Column::WebhookSecret,
         Column::McpServerSecrets,
+        Column::SsoClientSecret,
     ] {
         assert_eq!(report.count(column, Class::Plaintext), 1, "{column}");
         assert_eq!(report.outcome(column, Outcome::Reported), 1, "{column}");
@@ -779,6 +809,9 @@ async fn envelopes_are_skipped_byte_for_byte() {
     scratch
         .mcp_server(&tenant, &envelope(MCP_SECRETS, &key))
         .await;
+    scratch
+        .sso_provider(&envelope(SSO_CLIENT_SECRET, &key))
+        .await;
     let backup = scratch.backup(&[]).await;
     let before = scratch.snapshot().await;
 
@@ -792,6 +825,7 @@ async fn envelopes_are_skipped_byte_for_byte() {
         Column::GithubSyncToken,
         Column::AgentLoginCredential,
         Column::McpServerSecrets,
+        Column::SsoClientSecret,
     ] {
         assert_eq!(report.count(column, Class::Envelope), 1, "{column}");
         assert_eq!(report.outcome(column, Outcome::Skipped), 1, "{column}");

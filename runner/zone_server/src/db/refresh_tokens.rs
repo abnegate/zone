@@ -1,7 +1,7 @@
 //! Refresh token database queries
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
 
 use super::DbResult;
@@ -81,7 +81,7 @@ pub async fn revoke_refresh_token(pool: &PgPool, token_hash: &str) -> DbResult<b
 }
 
 /// Revoke all refresh tokens for a user
-pub async fn revoke_all_user_tokens(pool: &PgPool, user_id: Uuid) -> DbResult<u64> {
+pub async fn revoke_all_user_tokens(executor: impl PgExecutor<'_>, user_id: Uuid) -> DbResult<u64> {
     let result = sqlx::query(
         r#"
         UPDATE refresh_tokens
@@ -90,7 +90,7 @@ pub async fn revoke_all_user_tokens(pool: &PgPool, user_id: Uuid) -> DbResult<u6
         "#,
     )
     .bind(user_id)
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(result.rows_affected())

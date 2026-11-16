@@ -1,11 +1,14 @@
 //! User database queries
 
 use chrono::NaiveDateTime;
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 use uuid::Uuid;
+use zone_enterprise::sso::Account;
 
 use super::DbResult;
 use crate::services::time_zone::{self, TimeZone};
+
+pub const EMAIL_KEY: &str = "users_email_key";
 
 const ADMINISTRATOR_ROLE: &str = "admin";
 
@@ -53,7 +56,7 @@ const ADMINISTRATOR_PERMISSIONS: [&str; 40] = [
 ];
 
 /// User row from database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct UserRow {
     pub id: Uuid,
     pub email: String,
@@ -64,6 +67,17 @@ pub struct UserRow {
     pub created_at: Option<NaiveDateTime>,
     pub updated_at: Option<NaiveDateTime>,
     pub last_login_at: Option<NaiveDateTime>,
+}
+
+impl UserRow {
+    pub fn account(&self) -> Account {
+        Account {
+            id: self.id,
+            active: self.is_active.unwrap_or(true),
+            email_verified: self.email_verified,
+            admin: self.is_admin.unwrap_or(false),
+        }
+    }
 }
 
 /// User with password hash (for authentication)
@@ -100,7 +114,7 @@ pub async fn count_users(pool: &PgPool) -> DbResult<i64> {
 
 /// Create a new user
 pub async fn create_user(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     email: &str,
     password_hash: &str,
     display_name: Option<&str>,
@@ -118,7 +132,7 @@ pub async fn create_user(
         display_name,
         is_admin
     )
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     Ok(UserRow {
@@ -261,7 +275,11 @@ pub async fn get_user_with_permissions(
 }
 
 /// Assign a role to a user
-pub async fn assign_user_role(pool: &PgPool, user_id: Uuid, role_name: &str) -> DbResult<()> {
+pub async fn assign_user_role(
+    executor: impl PgExecutor<'_>,
+    user_id: Uuid,
+    role_name: &str,
+) -> DbResult<()> {
     sqlx::query!(
         r#"
         INSERT INTO user_roles (user_id, role_id)
@@ -271,9 +289,44 @@ pub async fn assign_user_role(pool: &PgPool, user_id: Uuid, role_name: &str) -> 
         user_id,
         role_name
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
+    Ok(())
+}
+
+/// Every user whose email equals `email` ignoring case, oldest first.
+pub async fn find_by_email_ignoring_case(
+    executor: impl PgExecutor<'_>,
+    email: &str,
+) -> DbResult<Vec<UserRow>> {
+    sqlx::query_as(
+        "SELECT id, email, display_name, is_active, is_admin, email_verified, \
+                created_at, updated_at, last_login_at \
+         FROM users WHERE lower(email) = lower($1) ORDER BY created_at, id",
+    )
+    .bind(email)
+    .fetch_all(executor)
+    .await
+}
+
+/// Takes the account over for the person who proved the email elsewhere: the old password stops
+/// working and the email counts as verified.
+pub async fn reclaim(
+    executor: impl PgExecutor<'_>,
+    user_id: Uuid,
+    password_hash: &str,
+) -> DbResult<()> {
+    let result = sqlx::query(
+        "UPDATE users SET password_hash = $1, email_verified = TRUE, updated_at = NOW() WHERE id = $2",
+    )
+    .bind(password_hash)
+    .bind(user_id)
+    .execute(executor)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(sqlx::Error::RowNotFound);
+    }
     Ok(())
 }
 
@@ -305,10 +358,7 @@ pub async fn delete_user(pool: &PgPool, user_id: Uuid) -> DbResult<()> {
 
 /// The zone the person's console last reported, or `None` when it never has
 /// or what it reported is no longer a zone this build knows.
-pub async fn time_zone(
-    executor: impl sqlx::PgExecutor<'_>,
-    user_id: Uuid,
-) -> DbResult<Option<TimeZone>> {
+pub async fn time_zone(executor: impl PgExecutor<'_>, user_id: Uuid) -> DbResult<Option<TimeZone>> {
     let stored: Option<String> = sqlx::query_scalar("SELECT time_zone FROM users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(executor)
