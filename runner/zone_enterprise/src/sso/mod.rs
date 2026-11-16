@@ -30,6 +30,7 @@ mod resolution;
 pub mod testing;
 mod token_refusal;
 mod token_response;
+mod userinfo;
 mod verifier;
 
 pub use account::{ACCOUNT_DISABLED, Account};

@@ -150,17 +150,17 @@ with `sso_token_exchange_failed`.
 
 ### Okta and verified email
 
-Zone reads the user's email from the ID token only. It doesn't call Okta's
-userinfo endpoint. Okta's documentation says that an ID token returned
-alongside an access token may not carry every claim for the requested
-scopes, and Okta's support articles say that `email_verified` in particular
-may only be available from userinfo.
+Okta's documentation says that an ID token returned alongside an access
+token may not carry every claim for the requested scopes, and Okta's
+support articles say that `email_verified` in particular may only be
+available from userinfo. Zone handles this as OpenID Connect Core section
+5.3 describes: when the ID token has no `email`, or has no
+`email_verified` while **Require verified email** is on, Zone asks Okta's
+userinfo endpoint for the missing claims. See
+[Claims from userinfo](#claims-from-userinfo).
 
-Sign in once with a test user before you roll out. If the sign-in fails
-because the email isn't verified (`sso_email_unverified`), turn off
-**Require verified email** and set **Allowed domains**. Only do this if
-your Okta org controls which email addresses its users have, and read
-[Verified email](#verified-email) first.
+You don't need to turn off **Require verified email** for Okta. Sign in
+once with a test user before you roll out.
 
 ## Microsoft Entra ID
 
@@ -207,7 +207,8 @@ can sign in.
 
 Entra ID doesn't send the `email_verified` claim. Its `email` claim comes
 from the user's mail attribute, which Microsoft says isn't guaranteed to be
-correct. Without `email_verified`, Zone treats the email as unverified, so
+correct. Without `email_verified`, Zone asks Entra's userinfo endpoint,
+which doesn't send it either, and then treats the email as unverified, so
 sign-in fails with `sso_email_unverified` while **Require verified email**
 is on. There are two ways to handle this:
 
@@ -251,6 +252,11 @@ A user with no mail attribute gets no `email` claim and can't sign in
   them, for the reason explained below.
 - **Require verified email**: leave it on. Google sends `email_verified`.
 
+Google's ID tokens name their issuer as either `https://accounts.google.com`
+or `accounts.google.com`, and Google documents both. For the issuer
+`https://accounts.google.com`, Zone accepts either form. Every other
+issuer must match the ID token's `iss` exactly.
+
 ### Google and the `hd` claim
 
 Google puts the domain of the user's Google Workspace or Cloud organization
@@ -283,9 +289,33 @@ limits that to your organization, but set allowed domains anyway.
    - its issuer and audience
    - its expiry and issue time, with 60 seconds of leeway
    - its nonce
-5. Zone applies the provider's policy (email present, verified, in an
+5. If the ID token leaves out a claim the policy needs, and the provider
+   publishes a userinfo endpoint, Zone fills it in from there. See
+   [Claims from userinfo](#claims-from-userinfo).
+6. Zone applies the provider's policy (email present, verified, in an
    allowed domain), finds or creates the Zone account as described below,
    and signs the user in.
+
+### Claims from userinfo
+
+Some providers, Okta among them, may leave `email` or `email_verified` out
+of the ID token. When the ID token has no `email`, or has no
+`email_verified` while **Require verified email** is on, and the discovery
+document lists a `userinfo_endpoint`, Zone calls that endpoint with the
+access token from the same sign-in. Then:
+
+- The userinfo `sub` must equal the ID token's `sub`. Otherwise the
+  sign-in is refused with `sso_id_token_invalid`.
+- Userinfo only fills claims the ID token left out. A claim the ID token
+  has, even `email_verified: false`, is never replaced.
+- `email_verified` from userinfo counts only when userinfo's `email` is the
+  address the sign-in uses.
+- If the userinfo endpoint can't be reached or refuses the access token,
+  the sign-in fails with `sso_token_exchange_failed`.
+
+Entra's `xms_edov` already answers whether the email is verified, so a
+token that carries it doesn't trigger a userinfo call. The userinfo
+endpoint follows the same `https` rule as the provider's other endpoints.
 
 Device approval and disabled accounts work in the same way as for password
 sign-in. A disabled account is refused with `account_disabled`, and a
@@ -383,10 +413,11 @@ For Google, always set them, so that `hd` is checked.
 
 ## Verified email
 
-**Require verified email** is on by default. While it's on, the ID token
-must say the email is verified: `email_verified` must be `true`, or, when
-`email_verified` is missing, Entra's `xms_edov` must be `true`. Otherwise
-the sign-in is refused with `sso_email_unverified`.
+**Require verified email** is on by default. While it's on, the ID token,
+or userinfo when the ID token leaves the claim out, must say the email is
+verified: `email_verified` must be `true`, or, when `email_verified` is
+missing, Entra's `xms_edov` must be `true`. Otherwise the sign-in is
+refused with `sso_email_unverified`.
 
 When you turn it off, Zone trusts whatever email the provider sends, both
 for creating accounts and for linking to existing ones. Anyone who can set
@@ -478,9 +509,9 @@ each one.
 | `sso_provider_duplicate` | A provider with that issuer and client ID already exists. | Edit the existing provider instead. |
 | `sso_provider_not_found` | The provider doesn't exist or is disabled. | The provider is enabled. |
 | `sso_state_invalid` | The sign-in attempt is unknown, was already used, or is more than 10 minutes old. | Start again from the sign-in page. |
-| `sso_token_exchange_failed` | The provider's token endpoint refused the code. | The client secret is correct and hasn't expired. The redirect URI registered at the provider is exactly `{APP_BASE_URL}/sso/callback`. |
-| `sso_id_token_invalid` | The ID token failed verification: signature, algorithm, issuer, audience, expiry or nonce. | The Zone server's clock is correct. The client ID matches the provider's application. |
-| `sso_email_missing` | The ID token has no `email` claim. | The provider puts `email` in the ID token. For Entra, add the `email` optional claim. |
+| `sso_token_exchange_failed` | The provider's token endpoint refused the code, or its userinfo endpoint failed. | The client secret is correct and hasn't expired. The redirect URI registered at the provider is exactly `{APP_BASE_URL}/sso/callback`. |
+| `sso_id_token_invalid` | The ID token failed verification: signature, algorithm, issuer, audience, expiry or nonce, or the userinfo `sub` differed from it. | The Zone server's clock is correct. The client ID matches the provider's application. |
+| `sso_email_missing` | Neither the ID token nor userinfo has an `email` claim. | The provider puts `email` in the ID token. For Entra, add the `email` optional claim. |
 | `sso_email_unverified` | The email isn't marked verified while Require verified email is on. | See [Verified email](#verified-email). |
 | `sso_domain_not_allowed` | The email's domain, or the `hd` claim, isn't in the allowed domains. | The provider's allowed domains. |
 | `sso_email_conflict` | The account can't be matched safely. | See [Accounts](#accounts-matching-linking-and-jit-provisioning). |
@@ -509,7 +540,8 @@ Any OIDC provider can be used if it:
 - signs ID tokens with one of the algorithms above, and publishes its keys
   at its `jwks_uri`
 - puts `email` in the ID token, and `email_verified` too if you keep
-  **Require verified email** on
+  **Require verified email** on, or serves the missing claims from a
+  `userinfo_endpoint` listed in its discovery document
 
 ## API
 

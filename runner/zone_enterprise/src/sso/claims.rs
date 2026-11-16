@@ -48,7 +48,9 @@ enum LenientBoolean {
     Text(String),
 }
 
-fn lenient_boolean<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+pub(crate) fn lenient_boolean<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<bool>, D::Error> {
     Ok(
         Option::<LenientBoolean>::deserialize(deserializer)?.map(|value| match value {
             LenientBoolean::Boolean(value) => value,

@@ -15,6 +15,7 @@ use url::form_urlencoded::byte_serialize;
 
 use crate::sso::authorization::Authorization;
 use crate::sso::cached::Cached;
+use crate::sso::claims::Claims;
 use crate::sso::client_authentication::ClientAuthentication;
 use crate::sso::clock::{self, Clock};
 use crate::sso::discovery::Discovery;
@@ -27,12 +28,14 @@ use crate::sso::provider::Provider;
 use crate::sso::rejection::Rejection;
 use crate::sso::token_refusal::TokenRefusal;
 use crate::sso::token_response::TokenResponse;
+use crate::sso::userinfo::Userinfo;
 use crate::sso::verifier::{Header, Verifier};
 
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 pub const REFETCH_COOLDOWN: TimeDelta = TimeDelta::seconds(60);
 
 const JSON: &str = "application/json";
+const BEARER: &str = "Bearer";
 const GRANT_TYPE: &str = "authorization_code";
 
 #[derive(Clone)]
@@ -107,7 +110,7 @@ impl Oidc {
         grant: &Grant<'_>,
     ) -> Result<Identity, Error> {
         let discovery = self.discover(&provider.issuer).await?;
-        let token = self.token(provider, &discovery, grant).await?;
+        let tokens = self.token(provider, &discovery, grant).await?;
         let verifier = Verifier {
             issuer: &provider.issuer,
             client_id: &provider.client_id,
@@ -115,10 +118,69 @@ impl Oidc {
             now: (self.clock)(),
             advertised: discovery.signing_algorithms.as_deref(),
         };
-        let header = verifier.header(&token)?;
+        let header = verifier.header(&tokens.id_token)?;
         let key = self.key(&provider.issuer, &discovery, &header).await?;
-        let claims = verifier.verify(&token, &header, &key)?;
+        let claims = verifier.verify(&tokens.id_token, &header, &key)?;
+        let claims = self.complete(provider, &discovery, &tokens, claims).await?;
         provider.policy.admit(&provider.issuer, &claims)
+    }
+
+    async fn complete(
+        &self,
+        provider: &Provider,
+        discovery: &Discovery,
+        tokens: &TokenResponse,
+        claims: Claims,
+    ) -> Result<Claims, Error> {
+        let Some(endpoint) = &discovery.userinfo_endpoint else {
+            return Ok(claims);
+        };
+        if !provider.policy.incomplete(&claims) {
+            return Ok(claims);
+        }
+        let access_token = tokens.access_token.as_deref().ok_or_else(|| {
+            Error::TokenExchange(
+                "the token endpoint's response had no access token for the userinfo endpoint."
+                    .to_owned(),
+            )
+        })?;
+        self.userinfo(endpoint, access_token)
+            .await?
+            .complete(claims)
+    }
+
+    async fn userinfo(&self, endpoint: &Url, access_token: &str) -> Result<Userinfo, Error> {
+        let response = self
+            .client
+            .get(endpoint.clone())
+            .header(ACCEPT, JSON)
+            .header(AUTHORIZATION, format!("{BEARER} {access_token}"))
+            .send()
+            .await
+            .map_err(|error| {
+                Error::TokenExchange(format!(
+                    "the userinfo endpoint couldn't be reached ({}).",
+                    error.without_url()
+                ))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Error::TokenExchange(format!(
+                "the userinfo endpoint answered HTTP {}.",
+                status.as_u16()
+            )));
+        }
+        let body = response.bytes().await.map_err(|error| {
+            Error::TokenExchange(format!(
+                "the userinfo endpoint's response couldn't be read ({}).",
+                error.without_url()
+            ))
+        })?;
+        serde_json::from_slice(&body).map_err(|_| {
+            Error::TokenExchange(
+                "the userinfo endpoint's response isn't valid userinfo.".to_owned(),
+            )
+        })
     }
 
     async fn token(
@@ -126,7 +188,7 @@ impl Oidc {
         provider: &Provider,
         discovery: &Discovery,
         grant: &Grant<'_>,
-    ) -> Result<String, Error> {
+    ) -> Result<TokenResponse, Error> {
         let mut form = vec![
             ("grant_type", GRANT_TYPE),
             ("code", grant.code),
@@ -174,11 +236,9 @@ impl Oidc {
                 },
             ));
         }
-        serde_json::from_slice::<TokenResponse>(&body)
-            .map(|response| response.id_token)
-            .map_err(|_| {
-                Error::TokenExchange("the token endpoint's response had no ID token.".to_owned())
-            })
+        serde_json::from_slice::<TokenResponse>(&body).map_err(|_| {
+            Error::TokenExchange("the token endpoint's response had no ID token.".to_owned())
+        })
     }
 
     async fn key(
@@ -299,7 +359,6 @@ mod tests {
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     use super::*;
-    use crate::sso::claims::Claims;
     use crate::sso::fields::Fields;
     use crate::sso::protocol::Protocol;
     use crate::sso::testing;
@@ -814,6 +873,324 @@ mod tests {
             harness.exchange(&harness.default_provider()).await,
             Err(Error::Discovery(_))
         ));
+    }
+
+    const ACCESS_TOKEN: &str = "access-1";
+
+    impl Harness {
+        async fn serve_userinfo_discovery(&self) {
+            let mut document = testing::discovery(&self.issuer());
+            document["userinfo_endpoint"] = json!(format!("{}/userinfo", self.issuer()));
+            self.serve_discovery(document).await;
+        }
+
+        async fn serve_tokens(&self, claims: &Claims) {
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "access_token": ACCESS_TOKEN,
+                    "token_type": "Bearer",
+                    "id_token": testing::id_token(claims),
+                })))
+                .mount(&self.server)
+                .await;
+        }
+
+        async fn serve_userinfo(&self, response: ResponseTemplate, expected: u64) {
+            Mock::given(method("GET"))
+                .and(path("/userinfo"))
+                .and(header("authorization", "Bearer access-1"))
+                .respond_with(response)
+                .expect(expected)
+                .mount(&self.server)
+                .await;
+        }
+
+        fn trusting_provider(&self) -> Provider {
+            Provider::parse(&Fields {
+                protocol: Protocol::Oidc,
+                display_name: "Test IdP",
+                issuer: &self.issuer(),
+                client_id: CLIENT_ID,
+                client_secret: CLIENT_SECRET,
+                allowed_domains: &[],
+                require_verified_email: false,
+            })
+            .unwrap()
+        }
+    }
+
+    fn userinfo(body: Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+
+    #[tokio::test]
+    async fn userinfo_fills_a_missing_email() {
+        let harness = Harness::new().await;
+        harness.serve_userinfo_discovery().await;
+        harness.serve_keys().await;
+        harness
+            .serve_tokens(&Claims {
+                email: None,
+                email_verified: None,
+                ..harness.claims()
+            })
+            .await;
+        harness
+            .serve_userinfo(
+                userinfo(json!({
+                    "sub": testing::SUBJECT, "email": "Jane@Acme.com", "email_verified": true
+                })),
+                1,
+            )
+            .await;
+        let identity = harness.exchange(&harness.default_provider()).await.unwrap();
+        assert_eq!(identity.email, "jane@acme.com");
+        assert_eq!(identity.subject, testing::SUBJECT);
+    }
+
+    #[tokio::test]
+    async fn userinfo_fills_a_missing_verification_the_policy_requires() {
+        let harness = Harness::new().await;
+        harness.serve_userinfo_discovery().await;
+        harness.serve_keys().await;
+        harness
+            .serve_tokens(&Claims {
+                email_verified: None,
+                ..harness.claims()
+            })
+            .await;
+        harness
+            .serve_userinfo(
+                userinfo(json!({
+                    "sub": testing::SUBJECT, "email": testing::EMAIL, "email_verified": "true"
+                })),
+                1,
+            )
+            .await;
+        assert_eq!(
+            harness
+                .exchange(&harness.default_provider())
+                .await
+                .unwrap()
+                .email,
+            testing::EMAIL
+        );
+    }
+
+    #[tokio::test]
+    async fn userinfo_for_another_subject_is_refused() {
+        let harness = Harness::new().await;
+        harness.serve_userinfo_discovery().await;
+        harness.serve_keys().await;
+        harness
+            .serve_tokens(&Claims {
+                email: None,
+                ..harness.claims()
+            })
+            .await;
+        harness
+            .serve_userinfo(
+                userinfo(json!({
+                    "sub": "someone-else", "email": testing::EMAIL, "email_verified": true
+                })),
+                1,
+            )
+            .await;
+        assert_eq!(
+            harness.exchange(&harness.default_provider()).await,
+            Err(Error::IdTokenInvalid(Rejection::Subject))
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_userinfo_endpoint_the_id_token_decides_alone() {
+        let harness = Harness::new().await;
+        harness.serve_standard_discovery().await;
+        harness.serve_keys().await;
+        harness
+            .serve_tokens(&Claims {
+                email: None,
+                ..harness.claims()
+            })
+            .await;
+        harness
+            .serve_userinfo(userinfo(json!({"sub": testing::SUBJECT})), 0)
+            .await;
+        assert_eq!(
+            harness.exchange(&harness.default_provider()).await,
+            Err(Error::EmailMissing)
+        );
+        assert_eq!(harness.requests("/userinfo").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failing_userinfo_endpoint_is_a_token_exchange_failure() {
+        let harness = Harness::new().await;
+        harness.serve_userinfo_discovery().await;
+        harness.serve_keys().await;
+        harness
+            .serve_tokens(&Claims {
+                email: None,
+                ..harness.claims()
+            })
+            .await;
+        harness.serve_userinfo(ResponseTemplate::new(401), 1).await;
+        let error = harness
+            .exchange(&harness.default_provider())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), crate::sso::error::TOKEN_EXCHANGE_FAILED);
+        assert!(
+            error
+                .to_string()
+                .contains("userinfo endpoint answered HTTP 401"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn userinfo_that_is_not_json_is_a_token_exchange_failure() {
+        let harness = Harness::new().await;
+        harness.serve_userinfo_discovery().await;
+        harness.serve_keys().await;
+        harness
+            .serve_tokens(&Claims {
+                email: None,
+                ..harness.claims()
+            })
+            .await;
+        harness
+            .serve_userinfo(
+                ResponseTemplate::new(200).set_body_string("eyJ.signed.jwt"),
+                1,
+            )
+            .await;
+        assert!(matches!(
+            harness.exchange(&harness.default_provider()).await,
+            Err(Error::TokenExchange(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_missing_access_token_is_a_token_exchange_failure() {
+        let harness = Harness::new().await;
+        harness.serve_userinfo_discovery().await;
+        harness.serve_keys().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id_token": testing::id_token(&Claims { email: None, ..harness.claims() })
+            })))
+            .mount(&harness.server)
+            .await;
+        let error = harness
+            .exchange(&harness.default_provider())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("no access token"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn userinfo_never_overrides_the_id_token() {
+        let harness = Harness::new().await;
+        harness.serve_userinfo_discovery().await;
+        harness.serve_keys().await;
+        harness
+            .serve_tokens(&Claims {
+                email_verified: None,
+                ..harness.claims()
+            })
+            .await;
+        harness
+            .serve_userinfo(
+                userinfo(json!({
+                    "sub": testing::SUBJECT, "email": "mallory@acme.com",
+                    "email_verified": true, "name": "Mallory"
+                })),
+                1,
+            )
+            .await;
+        assert_eq!(
+            harness.exchange(&harness.default_provider()).await,
+            Err(Error::EmailUnverified)
+        );
+    }
+
+    #[tokio::test]
+    async fn userinfo_keeps_the_id_token_name_and_email() {
+        let harness = Harness::new().await;
+        harness.serve_userinfo_discovery().await;
+        harness.serve_keys().await;
+        harness
+            .serve_tokens(&Claims {
+                email_verified: None,
+                ..harness.claims()
+            })
+            .await;
+        harness
+            .serve_userinfo(
+                userinfo(json!({
+                    "sub": testing::SUBJECT, "email": "JANE@acme.com",
+                    "email_verified": true, "name": "Someone Else"
+                })),
+                1,
+            )
+            .await;
+        assert_eq!(
+            harness.exchange(&harness.default_provider()).await,
+            Ok(Identity {
+                subject: testing::SUBJECT.into(),
+                email: testing::EMAIL.into(),
+                name: Some(testing::NAME.into()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_claims_skip_userinfo() {
+        let harness = Harness::new().await;
+        harness.serve_userinfo_discovery().await;
+        harness.serve_keys().await;
+        harness.serve_tokens(&harness.claims()).await;
+        harness
+            .serve_userinfo(userinfo(json!({"sub": testing::SUBJECT})), 0)
+            .await;
+        assert!(harness.exchange(&harness.default_provider()).await.is_ok());
+        let explicit = Harness::new().await;
+        explicit.serve_userinfo_discovery().await;
+        explicit.serve_keys().await;
+        explicit
+            .serve_tokens(&Claims {
+                email_verified: Some(false),
+                ..explicit.claims()
+            })
+            .await;
+        explicit
+            .serve_userinfo(userinfo(json!({"sub": testing::SUBJECT})), 0)
+            .await;
+        assert_eq!(
+            explicit.exchange(&explicit.default_provider()).await,
+            Err(Error::EmailUnverified)
+        );
+        let trusting = Harness::new().await;
+        trusting.serve_userinfo_discovery().await;
+        trusting.serve_keys().await;
+        trusting
+            .serve_tokens(&Claims {
+                email_verified: None,
+                ..trusting.claims()
+            })
+            .await;
+        trusting
+            .serve_userinfo(userinfo(json!({"sub": testing::SUBJECT})), 0)
+            .await;
+        assert!(
+            trusting
+                .exchange(&trusting.trusting_provider())
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
