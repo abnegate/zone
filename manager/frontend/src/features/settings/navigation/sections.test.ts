@@ -31,6 +31,7 @@ const ALL_SECTIONS = [
   { group: SettingsGroup.Server, section: SettingsSection.Features, label: 'Features' },
   { group: SettingsGroup.Server, section: SettingsSection.Connect, label: 'Connect a device' },
   { group: SettingsGroup.Server, section: SettingsSection.License, label: 'License' },
+  { group: SettingsGroup.Server, section: SettingsSection.Sso, label: 'Single sign-on' },
   { group: SettingsGroup.You, section: SettingsSection.Sessions, label: 'Sessions' },
 ] as const;
 
@@ -48,6 +49,7 @@ const ORGANIZATION_MCP = settingsPath(SettingsGroup.Organization, SettingsSectio
 const FEATURES = settingsPath(SettingsGroup.Server, SettingsSection.Features);
 const CONNECT = settingsPath(SettingsGroup.Server, SettingsSection.Connect);
 const LICENSE = settingsPath(SettingsGroup.Server, SettingsSection.License);
+const SSO = settingsPath(SettingsGroup.Server, SettingsSection.Sso);
 const SESSIONS = settingsPath(SettingsGroup.You, SettingsSection.Sessions);
 const SOURCES = settingsPath(SettingsGroup.Workspace, SettingsSection.Sources);
 
@@ -77,6 +79,7 @@ describe('settings constants', () => {
       Features: 'features',
       Connect: 'connect',
       License: 'license',
+      Sso: 'sso',
       Sessions: 'sessions',
     });
   });
@@ -201,7 +204,7 @@ describe('visibleSections', () => {
     ).toEqual(pathsOf(SettingsGroup.Organization, SettingsGroup.Server, SettingsGroup.You));
   });
 
-  it('shows all sixteen sections to a server admin who owns the organization and administers the workspace', () => {
+  it('shows all seventeen sections to a server admin who owns the organization and administers the workspace', () => {
     const visible = paths({
       organization: true,
       organizationRole: 'owner',
@@ -212,7 +215,7 @@ describe('visibleSections', () => {
       administersServer: true,
     });
 
-    expect(visible).toHaveLength(16);
+    expect(visible).toHaveLength(17);
     expect(visible).toEqual(pathsOf(...Object.values(SettingsGroup)));
   });
 
@@ -377,7 +380,23 @@ describe('visibleSections', () => {
     expect(license(false)).toBe(false);
   });
 
-  it('shows License to a server admin outside any organization, after Connect a device', () => {
+  it('shows Single sign-on under This server only to a server admin', () => {
+    const sso = (administersServer: boolean) =>
+      paths({
+        organization: true,
+        organizationRole: 'owner',
+        workspace: true,
+        workspaceRole: 'admin',
+        installsModels: true,
+        readsSources: true,
+        administersServer,
+      }).includes(SSO);
+
+    expect(sso(true)).toBe(true);
+    expect(sso(false)).toBe(false);
+  });
+
+  it('shows License and Single sign-on to a server admin outside any organization, after Connect a device', () => {
     expect(
       paths({
         organization: false,
@@ -388,7 +407,7 @@ describe('visibleSections', () => {
         readsSources: false,
         administersServer: true,
       })
-    ).toEqual([CONNECT, LICENSE, SESSIONS]);
+    ).toEqual([CONNECT, LICENSE, SSO, SESSIONS]);
   });
 
   it('finds the License section in the server group', () => {
@@ -400,6 +419,15 @@ describe('visibleSections', () => {
     expect(settingsPath(SettingsGroup.Server, SettingsSection.License)).toBe(
       '/settings/server/license'
     );
+  });
+
+  it('finds the Single sign-on section in the server group', () => {
+    expect(findSection(SettingsGroup.Server, SettingsSection.Sso)).toMatchObject({
+      group: SettingsGroup.Server,
+      section: SettingsSection.Sso,
+      label: 'Single sign-on',
+    });
+    expect(settingsPath(SettingsGroup.Server, SettingsSection.Sso)).toBe('/settings/server/sso');
   });
 
   it('finds the Sources section in the workspace group', () => {
