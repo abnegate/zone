@@ -123,6 +123,8 @@ fn refuse(rejection: Rejection) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::LazyLock;
+
     use chrono::TimeDelta;
     use jsonwebtoken::jwk::JwkSet;
     use serde_json::json;
@@ -134,7 +136,7 @@ mod tests {
 
     const ISSUER: &str = "https://acme.okta.com";
     const CLIENT: &str = "zone";
-    const NONCE: &str = "nonce-1";
+    static NONCE: LazyLock<String> = LazyLock::new(testing::nonce);
 
     struct Fixture {
         issuer: Issuer,
@@ -155,14 +157,14 @@ mod tests {
             Verifier {
                 issuer: &self.issuer,
                 client_id: &self.client_id,
-                nonce: NONCE,
+                nonce: &NONCE,
                 now: self.now,
                 advertised,
             }
         }
 
         fn claims(&self) -> Claims {
-            testing::claims(ISSUER, CLIENT, NONCE, self.now)
+            testing::claims(ISSUER, CLIENT, &NONCE, self.now)
         }
 
         fn verify(&self, token: &str) -> Result<Claims, Error> {
@@ -400,9 +402,9 @@ mod tests {
     #[test]
     fn refuses_a_wrong_or_missing_nonce() {
         let fixture = Fixture::new();
-        for nonce in [Some("nonce-2"), None] {
+        for nonce in [Some(testing::nonce()), None] {
             let claims = Claims {
-                nonce: nonce.map(str::to_owned),
+                nonce: nonce.clone(),
                 ..fixture.claims()
             };
             assert_eq!(

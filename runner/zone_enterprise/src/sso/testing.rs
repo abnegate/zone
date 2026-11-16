@@ -76,6 +76,10 @@ pub fn discovery(issuer: &str) -> Value {
     })
 }
 
+pub fn nonce() -> String {
+    uuid::Uuid::new_v4().simple().to_string()
+}
+
 pub fn claims(issuer: &str, client_id: &str, nonce: &str, now: DateTime<Utc>) -> Claims {
     Claims {
         issuer: issuer.to_owned(),
@@ -115,7 +119,7 @@ mod tests {
     #[test]
     fn the_published_key_verifies_the_signed_token() {
         let now = Utc::now();
-        let claims = claims("https://idp.test", "zone", "n", now);
+        let claims = claims("https://idp.test", "zone", &nonce(), now);
         let token = id_token(&claims);
         let set: JwkSet = serde_json::from_value(key_set()).unwrap();
         let key = DecodingKey::from_jwk(set.find(KEY_ID).unwrap()).unwrap();
@@ -140,7 +144,7 @@ mod tests {
     fn signs_with_the_requested_key_id() {
         let token = id_token_with(
             "rotated",
-            &claims("https://idp.test", "zone", "n", Utc::now()),
+            &claims("https://idp.test", "zone", &nonce(), Utc::now()),
         );
         assert_eq!(
             jsonwebtoken::decode_header(&token).unwrap().kid.as_deref(),
